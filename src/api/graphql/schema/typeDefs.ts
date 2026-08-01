@@ -4157,6 +4157,29 @@ export const typeDefs = `#graphql
     """
     nextNode(parentRef: ID!, currentRef: ID, raw: Boolean): Node
 
+    """
+    Render a run/action node WITHOUT executing it (#818) — the GraphQL twin of
+    hadron_run_action, which despite its name executes nothing: it loads the
+    node, resolves its dependency edges, and renders with args.
+
+    runTask covers the EXECUTE half. This is the render half, for previewing a
+    task before running it (a task run --dry-run), for reading an action's
+    assembled instructions when the CALLER is the executor, and for debugging
+    template/dependency resolution without side effects.
+
+    A Query because it is side-effect-free, and unlike the MCP tool it records
+    NO action-run UsageEvent — metering a preview would inflate the ledger with
+    actions nobody took.
+
+    Uses the SAME renderer the MCP run tools call, so a preview cannot disagree
+    with what runTask actually executes. Referenced nodes the caller cannot
+    read are omitted from the bundle rather than inlined.
+
+    nodeRef is a node PK or a fully-qualified URN (cor:api:140). Denied and
+    missing both raise NODE_NOT_FOUND - no existence oracle.
+    """
+    renderRunNode(nodeRef: String!, args: JSON): String!
+
     "One run (cor:agt:010:02). ref is an AppRun ID or an hrn:apprun:<root>:<app>:<run-id> URN (#696)."
     appRun(ref: ID!): AppRun
     "The latest run of an App resolved to a concrete run (#696) — 'current/latest/previous' are queries, never magic run-ids in URN space (cor:urn:010:02). previous: true returns the run before the latest."

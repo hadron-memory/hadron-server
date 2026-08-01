@@ -87,6 +87,7 @@ import { decryptNodeFieldsWithKey, encryptNodeFieldsWithKey } from '../lib/nodeC
 import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
+import { renderRunNodeBundle } from '../lib/runNodeRender.js';
 import {
   NodeNotFoundError,
   NodeAbstractTooLongError,
@@ -4019,25 +4020,27 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // {{arg}} substitution + inlined edge-linked node content + one action-run
   // usage event. Returns the rendered markdown bundle.
+  //
+  // #818: the SUBSTITUTION + INLINING is now `renderRunNodeBundle` in
+  // src/lib/runNodeRender.ts, shared with the GraphQL `renderRunNode` query so
+  // a preview cannot disagree with what actually executes. The `action-run`
+  // UsageEvent stays HERE — it meters a tool invocation, and the read-only
+  // GraphQL preview must not inflate the ledger with one.
   async function renderRunNode(
     node: RunNode,
     loc: string,
     args?: Record<string, string>,
   ): Promise<string> {
-    let actionContent = node.content || '';
-    if (args) {
-      for (const [key, value] of Object.entries(args)) {
-        actionContent = actionContent.replaceAll(`{{${key}}}`, value);
+    const rendered = await renderRunNodeBundle(node, args, async (memoryId) => {
+      // Reuse the tool surface's own memoized memory-urn lookup.
+      let memUrn = memoryUrnCache.get(memoryId);
+      if (!memUrn) {
+        const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+        memUrn = mem?.urn ?? memoryId;
+        memoryUrnCache.set(memoryId, memUrn);
       }
-    }
-    const topicSections: string[] = [];
-    for (const edge of node.outgoingEdges) {
-      const target = edge.target;
-      if (target.content) {
-        const targetUrn = await nodeUrn(target.loc, target.memoryId);
-        topicSections.push(`## Node: ${target.name} (${targetUrn})\n\n${target.content}`);
-      }
-    }
+      return memUrn;
+    });
     db.usageEvent
       .create({
         data: {
@@ -4055,11 +4058,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         },
       })
       .catch(() => {});
-    const parts = [`# Node: ${node.name}\n\n${actionContent}`];
-    if (topicSections.length > 0) {
-      parts.push('---\n\n# Referenced Nodes\n\n' + topicSections.join('\n\n---\n\n'));
-    }
-    return parts.join('\n\n');
+    return rendered;
   }
 
   // ── hadron_run_task name resolution (spec cor:api:060) ─────────────────────────

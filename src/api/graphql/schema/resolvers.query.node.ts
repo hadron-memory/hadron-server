@@ -30,6 +30,7 @@ import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retri
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
+import { renderRunNodeBundle } from '../../../lib/runNodeRender.js';
 import {
   parseUrnInput,
   validateUrnType,
@@ -60,6 +61,7 @@ import {
   getAccessibleMemoryIds,
   memoryAccessFilter,
   isMemoryReadableCached,
+  loadMemoryUrn,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 
@@ -155,6 +157,81 @@ export const nodeQueries = {
       // identical treatment — access filter, decryption, Mustache compilation,
       // edge includes — and cannot drift from the canonical single-node read.
       return nodeQueries.node(_, { ref: nextId, raw }, ctx);
+    },
+
+    /**
+     * #818 — render a run node WITHOUT executing it: the GraphQL twin of
+     * `hadron_run_action`, which despite the name executes nothing. It loads
+     * the node, resolves its dependency edges, and renders with `args`.
+     *
+     * `runTask` covers the EXECUTE half; nothing exposed the render half, so
+     * there was no way to ask "what would this render to?" — needed for a
+     * `task run --dry-run`, for reading an action's assembled instructions
+     * when the CALLER is the executor, and for debugging template/dependency
+     * resolution without side effects.
+     *
+     * A QUERY, not a mutation (the issue left this open): it is
+     * side-effect-free. Unlike the MCP tool it records NO `action-run`
+     * UsageEvent — metering a preview would inflate the ledger with actions
+     * nobody took.
+     *
+     * The substitution + inlining come from the SHARED `renderRunNodeBundle`
+     * that the MCP tools call, so a preview cannot disagree with what
+     * `runTask` actually executes — which is the failure mode that makes a
+     * preview worse than none.
+     */
+    renderRunNode: async (
+      _: unknown,
+      { nodeRef, args }: { nodeRef: string; args?: Record<string, unknown> | null },
+      ctx: Context,
+    ) => {
+      let nodeId: string;
+      try {
+        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+      } catch (e) {
+        // Genuine miss → NOT_FOUND; a malformed ref propagates as itself.
+        if (e instanceof NodeNotFoundError) {
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND' },
+          });
+        }
+        throw e;
+      }
+      const node = await ctx.db.node.findFirst({
+        where: { id: nodeId, deletedAt: null },
+        include: { outgoingEdges: { include: { target: true } } },
+      });
+      // Denied and missing share one message — no existence oracle.
+      const denied = () =>
+        new GraphQLError(`Node not found: "${nodeRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+      if (!node) throw denied();
+      if (!(await isMemoryReadableCached(ctx, node.memoryId))) throw denied();
+
+      // Decrypt the node AND its referenced targets — an encrypted memory
+      // would otherwise render ciphertext into the bundle.
+      const targets = node.outgoingEdges.map((e) => e.target);
+      await decryptNodesBatch(ctx.db, [node, ...targets] as never);
+
+      // Only inline a referenced node the caller may actually READ. An edge
+      // can point across memories (#781), and the bundle must not become a
+      // way to read a foreign node's content through a dependency link.
+      const visibleEdges = [];
+      for (const edge of node.outgoingEdges) {
+        if (await isMemoryReadableCached(ctx, edge.target.memoryId)) visibleEdges.push(edge);
+      }
+
+      // Args are typed JSON on the wire; the renderer substitutes strings.
+      const stringArgs = args
+        ? Object.fromEntries(
+            Object.entries(args).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
+          )
+        : undefined;
+
+      return renderRunNodeBundle(
+        { ...node, outgoingEdges: visibleEdges } as never,
+        stringArgs,
+        (memoryId: string) => loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
+      );
     },
 
     // Spec: cor:api:180 — cross-entity URN resolution

@@ -1,0 +1,174 @@
+/**
+ * #818 — `renderRunNode`, the GraphQL twin of `hadron_run_action` (which,
+ * despite the name, executes nothing — it loads, resolves dependency edges,
+ * and renders).
+ *
+ * The property that matters most is the LAST describe: the preview must be
+ * byte-identical to what the MCP run tools produce. A preview that disagrees
+ * with the run is worse than no preview, which is why both surfaces now call
+ * one shared `renderRunNodeBundle`.
+ */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb, createDbNode } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { resolvers, type Context } from './resolvers.js';
+import { renderRunNodeBundle } from '../../../lib/runNodeRender.js';
+
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
+
+const Q = resolvers.Query as any;
+
+const ctx = (userId?: string, roles: Context['roles'] = ['READER']): Context =>
+  ({ db, userId, roles });
+
+let org: { id: string; urn: string };
+let member: { id: string };
+let stranger: { id: string };
+let mem: { id: string; urn: string };
+let action: { id: string; loc: string };
+let dep: { id: string; loc: string };
+
+beforeEach(async () => {
+  await cleanDb(db);
+  org = await db.organization.create({ data: { id: generateId(), name: 'rr', urn: `rr-${generateId()}` } });
+  member = await db.user.create({ data: { id: generateId(), githubId: 51101, githubUsername: 'rr-member' } });
+  stranger = await db.user.create({ data: { id: generateId(), githubId: 51102, githubUsername: 'rr-stranger' } });
+  await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: member.id, role: 'READER' } });
+  mem = await db.memory.create({
+    data: {
+      id: generateId(), organizationId: org.id, urn: `${org.urn}:mem`,
+      name: 'rr mem', class: 'knowledge', visibility: 'ORGANIZATION',
+    },
+  });
+  action = await createDbNode(db, {
+    loc: 'actions:review', memoryId: mem.id, name: 'Review',
+    content: 'Review the {{subject}} carefully.',
+  });
+  dep = await createDbNode(db, {
+    loc: 'reference:playbook', memoryId: mem.id, name: 'Playbook',
+    content: 'PLAYBOOK BODY',
+  });
+  await db.edge.create({
+    data: {
+      id: generateId(), memoryId: mem.id, sourceId: action.id, targetId: dep.id,
+      name: 'documents', loc: 'actions:review:documents:reference:playbook',
+    },
+  });
+});
+
+const render = (nodeRef: string, args?: Record<string, unknown>, c: Context = ctx(member.id)) =>
+  Q.renderRunNode(null, { nodeRef, args }, c);
+
+describe('renderRunNode — the render half of the run pipeline (#818)', () => {
+  it('substitutes args and inlines referenced-node content', async () => {
+    const out = await render(action.id, { subject: 'incident report' });
+    expect(out).toContain('# Node: Review');
+    expect(out).toContain('Review the incident report carefully.');
+    expect(out).toContain('# Referenced Nodes');
+    expect(out).toContain('PLAYBOOK BODY');
+  });
+
+  it('leaves an unsubstituted placeholder alone when no arg is supplied', async () => {
+    const out = await render(action.id);
+    expect(out).toContain('Review the {{subject}} carefully.');
+  });
+
+  it('omits the Referenced Nodes section when nothing is linked', async () => {
+    const solo = await createDbNode(db, {
+      loc: 'actions:solo', memoryId: mem.id, name: 'Solo', content: 'Just this.',
+    });
+    const out = await render(solo.id);
+    expect(out).toContain('Just this.');
+    expect(out).not.toContain('# Referenced Nodes');
+  });
+
+  it('accepts a fully-qualified URN as well as a PK (cor:api:140)', async () => {
+    const urn = `${mem.urn.replace(':', '::')}::${action.loc}`;
+    expect(await render(urn, { subject: 'x' })).toContain('# Node: Review');
+  });
+
+  it('coerces non-string args rather than rendering [object Object]', async () => {
+    const numbered = await createDbNode(db, {
+      loc: 'actions:n', memoryId: mem.id, name: 'N', content: 'count={{count}} flag={{flag}}',
+    });
+    const out = await render(numbered.id, { count: 3, flag: true });
+    expect(out).toContain('count=3');
+    expect(out).toContain('flag=true');
+  });
+});
+
+describe('renderRunNode — it is a READ (#818)', () => {
+  it('records NO action-run UsageEvent, unlike the MCP tool', async () => {
+    const before = await db.usageEvent.count();
+    await render(action.id, { subject: 'x' });
+    // Metering a preview would inflate the ledger with actions nobody took.
+    expect(await db.usageEvent.count({ where: { type: 'action-run' } })).toBe(0);
+    expect(await db.usageEvent.count()).toBe(before);
+  });
+
+  it('writes nothing to the node', async () => {
+    const before = await db.node.findUniqueOrThrow({ where: { id: action.id } });
+    await render(action.id, { subject: 'x' });
+    const after = await db.node.findUniqueOrThrow({ where: { id: action.id } });
+    expect(after.content).toBe(before.content);
+    expect(after.updatedAt).toEqual(before.updatedAt);
+  });
+});
+
+describe('renderRunNode — access (#818)', () => {
+  it('a non-member is refused, indistinguishably from a miss', async () => {
+    await expect(render(action.id, {}, ctx(stranger.id))).rejects.toThrow(/Node not found/);
+    await expect(render(generateId())).rejects.toThrow(/Node not found/);
+  });
+
+  it('an anonymous caller is refused', async () => {
+    await expect(render(action.id, {}, ctx())).rejects.toThrow(/Node not found/);
+  });
+
+  it('a referenced node in an UNREADABLE memory is omitted, not inlined', async () => {
+    // An edge can cross memories (#781) — the bundle must not become a way to
+    // read a foreign node's content through a dependency link.
+    const otherOrg = await db.organization.create({
+      data: { id: generateId(), name: 'rr-o', urn: `rr-o-${generateId()}` },
+    });
+    const foreignMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: otherOrg.id, urn: `${otherOrg.urn}:secret`,
+        name: 'secret', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    const foreignNode = await createDbNode(db, {
+      loc: 'crown', memoryId: foreignMem.id, name: 'Crown', content: 'CROSS-TENANT-SECRET',
+    });
+    await db.edge.create({
+      data: {
+        id: generateId(), memoryId: mem.id, sourceId: action.id, targetId: foreignNode.id,
+        name: 'leak', loc: 'actions:review:leak:crown',
+      },
+    });
+    const out = await render(action.id, { subject: 'x' });
+    expect(out).not.toContain('CROSS-TENANT-SECRET');
+    // The readable dependency is still inlined.
+    expect(out).toContain('PLAYBOOK BODY');
+  });
+});
+
+describe('renderRunNode matches the MCP bundle exactly (#818)', () => {
+  it('produces byte-identical output to the shared renderer the run tools use', async () => {
+    const node = await db.node.findUniqueOrThrow({
+      where: { id: action.id },
+      include: { outgoingEdges: { include: { target: true } } },
+    });
+    const memoryUrnOf = async (memoryId: string) =>
+      (await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn;
+
+    const viaShared = await renderRunNodeBundle(node as never, { subject: 'incident report' }, memoryUrnOf);
+    const viaGraphql = await render(action.id, { subject: 'incident report' });
+    // If these ever diverge, a dry-run stops predicting the real run.
+    expect(viaGraphql).toBe(viaShared);
+  });
+});
