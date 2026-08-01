@@ -863,7 +863,7 @@ export const typeDefs = `#graphql
     """
     Google account subject id (#837). Opaque provider identifier, never an
     address. Withheld (null) from a viewer who is not the user themselves, a
-    platform admin, or a co-member of one of their orgs - the same #384 gate
+    platform admin, or a co-member of one of their orgs — the same #384 gate that
     name/email use.
 
     Load-bearing for duplicate-account triage: mergeUsers adopts a source
