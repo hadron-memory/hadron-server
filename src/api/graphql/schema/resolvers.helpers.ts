@@ -16,6 +16,7 @@ import {
 } from '../../../lib/aiConfig.js';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
   getPrimaryAgent,
   isAgentInstalled,
@@ -1366,11 +1367,28 @@ export async function installAgentIntoAppCore(
   // install an Agent.
   await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR');
   const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-  // #551: a foreign Agent may be installed cross-org WHEN it is PUBLIC (the
-  // marketplace / AgentOrgGrant path — the grant is auto-provisioned below).
-  // A non-PUBLIC agent still must belong to the App's own org (pre-023
-  // behavior — you can't reach into another org's private agents).
-  if (agent.organizationId !== app.organizationId && agent.visibility !== 'PUBLIC') {
+  // #756: an org-owned App and a user-owned App have DIFFERENT accessibility
+  // rules, and the org comparison alone cannot express the second one. Both
+  // `organizationId` columns are null for a user-owned App + a user-owned
+  // Agent, so a bare `agent.organizationId !== app.organizationId` reads
+  // `null !== null` ⇒ false and waves through another USER's non-PUBLIC agent
+  // (leaking its systemPrompt via the returned AGENT_INCLUDE). Branch on the
+  // App's ownership class instead, mirroring createApp's personal path.
+  if (app.organizationId === null) {
+    // spec 047 personal install: no org ⇒ no AgentOrgGrant. A user-owned App
+    // may install ONLY a PUBLIC (marketplace) agent or its OWNER's own agent —
+    // never another user's or another org's private agent.
+    const isOwnAgent = agent.ownerUserId !== null && agent.ownerUserId === app.ownerUserId;
+    if (agent.visibility !== 'PUBLIC' && !isOwnAgent) {
+      throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
+        extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
+      });
+    }
+  } else if (agent.organizationId !== app.organizationId && agent.visibility !== 'PUBLIC') {
+    // #551: a foreign Agent may be installed cross-org WHEN it is PUBLIC (the
+    // marketplace / AgentOrgGrant path — the grant is auto-provisioned below).
+    // A non-PUBLIC agent still must belong to the App's own org (pre-023
+    // behavior — you can't reach into another org's private agents).
     throw new GraphQLError('Agent must belong to the same organization as the App, or be PUBLIC.', {
       extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
     });
@@ -1388,7 +1406,14 @@ export async function installAgentIntoAppCore(
   // Auto-provision AgentOrgGrant (cross-org gate symmetry). spec 047: an
   // AgentOrgGrant is org-scoped — a user-owned App has no org, so a personal
   // install rides the owner's AgentSubscription instead (no grant needed).
-  if (app.organizationId) await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
+  if (app.organizationId) {
+    await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
+  } else if (app.ownerUserId && agent.ownerUserId !== app.ownerUserId) {
+    // #756: license the personal install the same way createApp does, so a
+    // marketplace agent added through THIS path is subscribed rather than run
+    // unlicensed. Skipped for the owner's own agent — ownership licenses it.
+    await ensureAgentSubscription(ctx.db, app.ownerUserId, resolvedAgentId);
+  }
   // Wrap the App trainingMode update + the AppAgent create in a single
   // transaction. The App update goes FIRST so a subsequent re-fetch of
   // `appAgent.app` in the same response reflects the new trainingMode
