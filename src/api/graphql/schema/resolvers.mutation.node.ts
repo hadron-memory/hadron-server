@@ -81,6 +81,7 @@ import {
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
   requireMemoryWriteAccess,
+  isMemoryReadableCached,
   type NodeInput,
   type NodeEdgeInput,
   type CreateNodeInput,
@@ -312,10 +313,22 @@ export async function writeNodeCore(
             // create a personal memory, add an edge to a victim node, then
             // read it back through Edge.target.
             //
-            // Mirror createEdge: write on the source memory, at least read on
-            // the target's. The denial reuses the not-found wording so it
-            // can't be used as a cross-memory existence oracle.
-            if (!tgt || !(await canReadMemory(ctx.db, ctx, tgt.memoryId))) {
+            // Gate on the NODE-CONTENT read set (`isMemoryReadableCached` ->
+            // getAccessibleMemoryIds) — the SAME predicate #781's
+            // Edge.source/Edge.target hydration uses. That makes write and read
+            // exactly symmetric: you may link precisely what you could read
+            // back, no more and no less.
+            //
+            // Deliberately NOT the MCP `canReadMemory` that createEdge calls:
+            // its personal-memory branch tests `memory.userId` only and never
+            // consults MemoryShare, so a `writer` share-grantee adding an inline
+            // edge into that same shared memory would be refused NODE_NOT_FOUND
+            // (PR #844 review, Codex P2). createEdge has the same gap
+            // pre-existing — tracked separately rather than widened here.
+            //
+            // The denial reuses the not-found wording so it can't be used as a
+            // cross-memory existence oracle.
+            if (!tgt || !(await isMemoryReadableCached(ctx, tgt.memoryId))) {
               throw new GraphQLError(`Edge target not found: "${e.targetId}"`, {
                 extensions: { code: 'NODE_NOT_FOUND', ref: e.targetId },
               });
