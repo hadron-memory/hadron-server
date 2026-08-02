@@ -18,6 +18,7 @@ import {
   getAccessibleMemoryIds,
   granteeShareAccess,
   canReadMemoryRecord,
+  isMemoryReadableCached,
   resolveOrgScope,
   MEMORY_INCLUDE,
 } from './resolvers.helpers.js';
@@ -185,22 +186,31 @@ export const memoryQueries = {
       ctx: Context,
     ) => {
       const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-      // Same record-level gate as the rest of the memory reads. Denied ≡
-      // not-found so this is not an existence oracle.
       const memory = await ctx.db.memory.findFirst({
         where: { id: memoryId, deletedAt: null },
-        select: { id: true, class: true, userId: true, ownerUserId: true, organizationId: true, urn: true },
+        select: { id: true, urn: true },
       });
-      if (!memory || !(await canReadMemoryRecord(ctx, memory))) {
+      // #859 review (Codex P1): the NODE-CONTENT gate, not the record-level
+      // one. This query returns node ids, locs, counts and operational error
+      // details — node-level data. `canReadMemoryRecord` keeps an org-member
+      // fast path that admits app/system-class memories which
+      // getAccessibleMemoryIds deliberately excludes from node access, so
+      // gating on it would let an ordinary org member enumerate App-internal
+      // nodes. (This is the SAME record-vs-node-content distinction as #846,
+      // and the opposite answer: there the payload was Memory scalars, here it
+      // is node data.) Denied ≡ not-found — no existence oracle.
+      if (!memory || !(await isMemoryReadableCached(ctx, memory.id))) {
         throw new GraphQLError(`Memory not found: "${memoryRef}"`, {
           extensions: { code: 'NOT_FOUND' },
         });
       }
 
-      const report = await validateMemoryNodes(ctx.db, memory.id);
       const cap = Math.min(Math.max(limit ?? 200, 0), 1000);
-      const page = report.findings.slice(0, cap);
-      const findings = page.map((f) => ({
+      // The cap is pushed DOWN so findings past it are counted but never
+      // retained — building the whole array to slice it defeats the bound
+      // (#859 review, Copilot).
+      const report = await validateMemoryNodes(ctx.db, memory.id, cap);
+      const findings = report.findings.map((f) => ({
         kind: f.kind,
         nodeId: f.nodeId,
         nodeLoc: f.nodeLoc,
@@ -211,12 +221,12 @@ export const memoryQueries = {
         memoryId: memory.id,
         nodesChecked: report.nodesChecked,
         findings,
-        totalFindings: report.findings.length,
-        truncated: report.findings.length > page.length,
+        totalFindings: report.totalFindings,
+        truncated: report.totalFindings > findings.length,
         skippedChecks: report.skippedChecks,
         // A skipped check makes `ok` false even with zero findings — you
         // cannot claim health for a check you did not run.
-        ok: report.findings.length === 0 && report.skippedChecks.length === 0,
+        ok: report.totalFindings === 0 && report.skippedChecks.length === 0,
       };
     },
 

@@ -41,7 +41,10 @@ export interface SkippedCheck {
 
 export interface ValidationReport {
   nodesChecked: number;
+  /** Findings, capped at `maxFindings`. */
   findings: ValidationFinding[];
+  /** The TRUE count, even when `findings` was capped. */
+  totalFindings: number;
   /**
    * A check that could NOT run. Reported explicitly rather than silently
    * omitted: a clean bill of health that quietly skipped a check is worse than
@@ -60,6 +63,18 @@ export interface ValidationReport {
 export async function validateMemoryNodes(
   db: PrismaClient,
   memoryId: string,
+  /**
+   * Cap on RETAINED findings (#859 review, Copilot). A large, badly broken
+   * memory can produce thousands, and building the whole array only to slice
+   * it defeats the point of bounding the response — the detail strings alone
+   * are a memory and latency risk. Findings past the cap are COUNTED but not
+   * kept, so `totalFindings` stays truthful.
+   *
+   * The node SCAN is deliberately not bounded: the checks are
+   * cross-referential, so a partial scan produces false positives rather than
+   * fewer findings.
+   */
+  maxFindings = 1000,
 ): Promise<ValidationReport> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
@@ -83,9 +98,18 @@ export async function validateMemoryNodes(
 
   const nodes = await db.node.findMany({
     where: { memoryId },
-    include: { outgoingEdges: true },
+    // #859 review (Codex P2): exclude soft-deleted EDGE rows. Revision-restore
+    // paths can leave them behind and every normal edge surface excludes them,
+    // so counting one as a broken reference would fail CI for a relation that
+    // no longer exists.
+    include: { outgoingEdges: { where: { deletedAt: null } } },
   });
   const findings: ValidationFinding[] = [];
+  let totalFindings = 0;
+  const record = (f: ValidationFinding) => {
+    totalFindings += 1;
+    if (findings.length < maxFindings) findings.push(f);
+  };
 
   // BROKEN_REF, corrected in #819. The pre-#819 check compared every edge
   // target against THIS memory's node ids, which was wrong in both directions:
@@ -123,7 +147,7 @@ export async function validateMemoryNodes(
   for (const node of nodes) {
     for (const edge of node.outgoingEdges) {
       if (!targetIsLive(edge.targetId)) {
-        findings.push({
+        record({
           kind: 'BROKEN_REF',
           nodeId: node.id,
           nodeLoc: node.loc,
@@ -134,7 +158,7 @@ export async function validateMemoryNodes(
     // Spec 031 FR-011: an abstract counts as legitimate content, so a node
     // carrying only an abstract is NOT sparse.
     if (!node.description && !node.content && !node.abstract) {
-      findings.push({
+      record({
         kind: 'SPARSE',
         nodeId: node.id,
         nodeLoc: node.loc,
@@ -150,7 +174,7 @@ export async function validateMemoryNodes(
       node.abstractOriginHash != null &&
       node.abstractOriginHash !== computeContentHash(node.content)
     ) {
-      findings.push({
+      record({
         kind: 'STALE_ABSTRACT',
         nodeId: node.id,
         nodeLoc: node.loc,
@@ -163,7 +187,7 @@ export async function validateMemoryNodes(
     // from outside this audit an empty vector index is indistinguishable from
     // "no hits matched".
     if (node.embeddingFailedAt) {
-      findings.push({
+      record({
         kind: 'EMBED_FAILED',
         nodeId: node.id,
         nodeLoc: node.loc,
@@ -185,7 +209,7 @@ export async function validateMemoryNodes(
         );
       } catch (e) {
         if (e instanceof NodeSchemaViolation) {
-          findings.push({
+          record({
             kind: 'SCHEMA',
             nodeId: node.id,
             nodeLoc: node.loc,
@@ -196,7 +220,7 @@ export async function validateMemoryNodes(
     }
   }
 
-  return { nodesChecked: nodes.length, findings, skippedChecks };
+  return { nodesChecked: nodes.length, findings, totalFindings, skippedChecks };
 }
 
 /** The MCP prose line for one finding — the pre-#819 wording, preserved. */

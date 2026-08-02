@@ -2426,7 +2426,7 @@ export const typeDefs = `#graphql
 
   "One health check the validator runs (#819)."
   enum MemoryValidationCheck {
-    "An edge pointing at a node id that no longer exists."
+    "An edge whose target node is missing OR soft-deleted. A hard-deleted target cannot occur - Edge.target is FK-enforced with onDelete: Cascade - so in practice this means a dangling edge to a tombstone."
     BROKEN_REF
     "A node with no description, content, or abstract."
     SPARSE
@@ -2438,7 +2438,7 @@ export const typeDefs = `#graphql
     SCHEMA
   }
 
-  "One finding (#819). nodeUrn is null only if the memory URN could not be composed."
+  "One finding (#819). nodeUrn is null when the URN could not be composed - a memory URN the flat v2 shape cannot express, or an unexpected/legacy loc - in which case nodeId and nodeLoc still identify the node."
   type MemoryValidationFinding {
     kind: MemoryValidationCheck!
     nodeId: ID!

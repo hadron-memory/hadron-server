@@ -15,6 +15,7 @@ import { cleanDb, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { resolvers, type Context } from './resolvers.js';
+import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -238,5 +239,59 @@ describe('validateMemory — shape and access (#819)', () => {
 
   it('an anonymous caller is refused', async () => {
     await expect(validate(mem.id, undefined, ctx())).rejects.toThrow(/Memory not found/);
+  });
+
+  // PR #859 review (Codex P1). This query returns node ids, locs, counts and
+  // operational error details — NODE-level data. The record-level gate keeps
+  // an org-member fast path that admits app/system-class memories which
+  // getAccessibleMemoryIds deliberately excludes from node access, so gating
+  // on it let an ordinary org member enumerate App-internal nodes.
+  it('an org member cannot validate an APP-SCOPED memory of their own org', async () => {
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app`, name: 'App' },
+    });
+    const appMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:app-internal`,
+        name: 'App Internal', class: 'knowledge', visibility: 'ORGANIZATION', appId: app.id,
+      },
+    });
+    await createDbNode(db, { loc: 'internal:secret', memoryId: appMem.id, name: 'S' });
+    // The member CAN open the memory record (Query.memory admits them)…
+    expect(await Q.memory(null, { ref: appMem.id }, ctx(member.id))).not.toBeNull();
+    // …but must NOT be able to enumerate its nodes through the validator.
+    await expect(validate(appMem.id, undefined, ctx(member.id))).rejects.toThrow(/Memory not found/);
+  });
+
+  it('an org member CAN validate an ordinary org memory (no over-tightening)', async () => {
+    await createDbNode(db, { loc: 'a', memoryId: mem.id, name: 'A', content: 'x' });
+    expect((await validate(mem.id, undefined, ctx(member.id))).nodesChecked).toBe(1);
+  });
+});
+
+describe('validateMemory — findings are capped at the SOURCE (#859 review)', () => {
+  it('never retains more than the cap, while still counting the rest', async () => {
+    for (let i = 0; i < 12; i++) {
+      await createDbNode(db, { loc: `s-${i}`, memoryId: mem.id, name: `S${i}` });
+    }
+    // The cap is pushed into validateMemoryNodes, so the big array is never
+    // built in the first place.
+    const report = await validateMemoryNodes(db, mem.id, 3);
+    expect(report.findings.length).toBe(3);
+    expect(report.totalFindings).toBe(12);
+  });
+
+  it('BROKEN_REF ignores a soft-deleted EDGE row', async () => {
+    const a = await createDbNode(db, { loc: 'ea', memoryId: mem.id, name: 'A', content: 'x' });
+    const b = await createDbNode(db, { loc: 'eb', memoryId: mem.id, name: 'B', content: 'y' });
+    const edge = await db.edge.create({
+      data: { id: generateId(), memoryId: mem.id, sourceId: a.id, targetId: b.id, name: 'rel', loc: 'ea:rel:eb' },
+    });
+    // Both the edge AND its target are gone — every normal edge surface
+    // excludes a soft-deleted edge, so this is not a broken reference.
+    await db.edge.update({ where: { id: edge.id }, data: { deletedAt: new Date() } });
+    await db.node.update({ where: { id: b.id }, data: { deletedAt: new Date() } });
+    const r = await validate();
+    expect(r.findings.map((f: { kind: string }) => f.kind)).not.toContain('BROKEN_REF');
   });
 });
