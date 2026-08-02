@@ -138,8 +138,8 @@ describe('US1 Step (b): Org-X installs Mealplan via createApp (T032)', () => {
     const app = await resolvers.Mutation.createApp(
       {},
       {
-        orgId: orgX.id,
-        agentId: mealplan.id,
+        orgRef: orgX.id,
+        agentRef: mealplan.id,
         name: 'Mealplan @ Org X',
       },
       adminCtx(mike.id),
@@ -178,7 +178,7 @@ describe('US1 Step (c): ensureAppMember adds Mike as a cook (FR-004)', () => {
     });
     const app = await resolvers.Mutation.createApp(
       {},
-      { orgId: orgX.id, agentId: mealplan.id, name: 'Mealplan @ Org X' },
+      { orgRef: orgX.id, agentRef: mealplan.id, name: 'Mealplan @ Org X' },
       adminCtx(mike.id),
     );
 
@@ -229,8 +229,8 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
     const app = await resolvers.Mutation.createApp(
       {},
       {
-        orgId: orgX.id,
-        agentId: mealplan.id,
+        orgRef: orgX.id,
+        agentRef: mealplan.id,
         name: 'Mealplan @ Org X',
         aiProvider: 'anthropic',
         aiModel: 'claude-sonnet-4-6',
@@ -279,7 +279,7 @@ describe('US1 Step (e): installationPolicy.maxMembers=2 rejects the third member
     });
     const app = await resolvers.Mutation.createApp(
       {},
-      { orgId: orgX.id, agentId: knowYourself.id, name: 'KY @ Org X' },
+      { orgRef: orgX.id, agentRef: knowYourself.id, name: 'KY @ Org X' },
       adminCtx(mike.id),
     );
 

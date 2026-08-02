@@ -1300,14 +1300,14 @@ export const memoryMutations = {
 
     addMemoryToAgent: async (
       _: unknown,
-      { agentId, memoryId, role }: { agentId: string; memoryId: string; role?: string },
+      { agentRef, memoryRef, role }: { agentRef: string; memoryRef: string; role?: string },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId and memoryId may be IDs, bare URNs,
       // or prefixed URNs. Resolve both to definite IDs before any
       // subsequent checks.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // System-class memories can only be linked via Agent.systemMemoryId.
@@ -1349,11 +1349,11 @@ export const memoryMutations = {
 
     updateAgentMemoryRole: async (
       _: unknown,
-      { agentId, memoryId, role }: { agentId: string; memoryId: string; role: string },
+      { agentRef, memoryRef, role }: { agentRef: string; memoryRef: string; role: string },
       ctx: Context,
     ) => {
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // #501: only a LIVE grant is updatable — updateMany + deletedAt:null
@@ -1377,11 +1377,11 @@ export const memoryMutations = {
 
     removeMemoryFromAgent: async (
       _: unknown,
-      { agentId, memoryId }: { agentId: string; memoryId: string },
+      { agentRef, memoryRef }: { agentRef: string; memoryRef: string },
       ctx: Context,
     ) => {
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       await ctx.db.agentMemoryItem.delete({

@@ -103,7 +103,7 @@ describe('createAgent — user-owned (no orgId)', () => {
     await expect(
       resolvers.Mutation.updateAgent(
         {},
-        { id: agent.id, visibility: 'PUBLIC' },
+        { ref: agent.id, visibility: 'PUBLIC' },
         ctx({ userId: ownerId, roles: ['READER'] }),
       ),
     ).rejects.toThrow(/PERSONAL|not supported/i);

@@ -687,14 +687,14 @@ describe('legacy surface shims (US3)', () => {
     await expect(
       resolvers.Mutation.updateApp(
         {},
-        { id: app.id, aiProvider: 'anthropic' },
+        { ref: app.id, aiProvider: 'anthropic' },
         { db, roles: ['ADMIN'], userId: admin.id },
       ),
     ).rejects.toMatchObject({ extensions: { code: 'AiConfigValidationError' } });
     // Key-only CLEAR on a config-less App stays a tolerated no-op.
     const updated = await resolvers.Mutation.updateApp(
       {},
-      { id: app.id, aiApiKey: '' },
+      { ref: app.id, aiApiKey: '' },
       { db, roles: ['ADMIN'], userId: admin.id },
     );
     expect(updated.id).toBe(app.id);

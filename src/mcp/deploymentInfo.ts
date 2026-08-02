@@ -42,7 +42,18 @@
 // hadron_update_edge / hadron_delete_edge (#835); new AppRun relation and
 // spend fields (#831/#832); appRuns sortBy/sortDir + statuses (#833/#836);
 // User.googleId/appleId (#837). All caller-detectable additions.
-export const HADRON_SERVER_VERSION = '0.11.0';
+// 0.12.0: #789 — BREAKING. Entity-identifying arguments on the agent/app WRITE
+// surface moved onto cor:api:140 (`<entity>Ref`, PK-or-URN via resolve*Ref), a
+// hard rename per epic #775's decision (no deprecated aliases):
+//   updateAgent/deleteAgent(id -> ref, and now actually accept a URN),
+//   addMemoryToAgent/updateAgentMemoryRole/removeMemoryFromAgent(agentId,
+//   memoryId -> agentRef, memoryRef), updateApp/deleteApp(id -> ref),
+//   regenerateAppKey(id -> appRef), createAppKey(appId -> appRef),
+//   createApp(orgId, agentId -> orgRef, agentRef), installAgentIntoApp /
+//   uninstallAgentFromApp / addAgentToApp / removeAgentFromApp(appId, agentId
+//   -> appRef, agentRef), publishAgentImport / removeAgentImport(parentAgentId,
+//   importedAgentId -> parentAgentRef, importedAgentRef).
+export const HADRON_SERVER_VERSION = '0.12.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"

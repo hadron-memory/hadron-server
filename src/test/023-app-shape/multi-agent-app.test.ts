@@ -115,7 +115,7 @@ describe('US1: install Agents into an App via AppAgent', () => {
   it('installAgentIntoApp creates an AppAgent row (US1 step 1)', async () => {
     const payload = await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     expect(payload.appAgent).toBeDefined();
@@ -139,17 +139,17 @@ describe('US1: install Agents into an App via AppAgent', () => {
 
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentBId },
+      { appRef: fx.appId, agentRef: fx.agentBId },
       adminCtx(fx.adminUserId),
     );
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentCId },
+      { appRef: fx.appId, agentRef: fx.agentCId },
       adminCtx(fx.adminUserId),
     );
 
@@ -172,14 +172,14 @@ describe('US1: install Agents into an App via AppAgent', () => {
   it('rejects duplicate install with DUPLICATE_APP_AGENT (US1 step 3)', async () => {
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     let caught: unknown;
     try {
       await resolvers.Mutation.installAgentIntoApp(
         {},
-        { appId: fx.appId, agentId: fx.agentAId },
+        { appRef: fx.appId, agentRef: fx.agentAId },
         adminCtx(fx.adminUserId),
       );
     } catch (err) {
@@ -193,12 +193,12 @@ describe('US1: install Agents into an App via AppAgent', () => {
     // Install A + B.
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentBId },
+      { appRef: fx.appId, agentRef: fx.agentBId },
       adminCtx(fx.adminUserId),
     );
 
@@ -235,7 +235,7 @@ describe('US1: install Agents into an App via AppAgent', () => {
     // Uninstall A.
     const payload = await resolvers.Mutation.uninstallAgentFromApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     expect(payload.appId).toBe(fx.appId);
@@ -261,7 +261,7 @@ describe('US1: install Agents into an App via AppAgent', () => {
   it('reinstalling an Agent makes orphan memories reachable again (US1 step 13)', async () => {
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     const memory = await db.memory.create({
@@ -279,14 +279,14 @@ describe('US1: install Agents into an App via AppAgent', () => {
     });
     await resolvers.Mutation.uninstallAgentFromApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     // Now reinstall — the new install creates a fresh AppAgent row but
     // the memory survives.
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     const stillThere = await db.memory.findUnique({ where: { id: memory.id } });
@@ -299,7 +299,7 @@ describe('US1: install Agents into an App via AppAgent', () => {
     // Uninstall a never-installed Agent → succeeds.
     const payload = await resolvers.Mutation.uninstallAgentFromApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     expect(payload.appId).toBe(fx.appId);
@@ -309,7 +309,7 @@ describe('US1: install Agents into an App via AppAgent', () => {
   it('trainingMode arg on installAgentIntoApp updates App.trainingMode (per-App, not per-AppAgent)', async () => {
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId, trainingMode: true },
+      { appRef: fx.appId, agentRef: fx.agentAId, trainingMode: true },
       adminCtx(fx.adminUserId),
     );
     const app = await db.app.findUniqueOrThrow({ where: { id: fx.appId } });
@@ -319,12 +319,12 @@ describe('US1: install Agents into an App via AppAgent', () => {
   it('App.appAgents resolver returns installed Agents in install order', async () => {
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentBId },
+      { appRef: fx.appId, agentRef: fx.agentBId },
       adminCtx(fx.adminUserId),
     );
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     const appAgents = await (resolvers.App as Record<string, Function>).appAgents(
@@ -341,12 +341,12 @@ describe('US1: install Agents into an App via AppAgent', () => {
   it('App.agents resolver returns the full set, not just the primary', async () => {
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentBId },
+      { appRef: fx.appId, agentRef: fx.agentBId },
       adminCtx(fx.adminUserId),
     );
     const agents = await (resolvers.App as Record<string, Function>).agents(
@@ -361,7 +361,7 @@ describe('US1: install Agents into an App via AppAgent', () => {
   it('Agent.appAgents resolver returns installation rows for org admins', async () => {
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     const rows = await (resolvers.Agent as Record<string, Function>).appAgents(
@@ -375,7 +375,7 @@ describe('US1: install Agents into an App via AppAgent', () => {
   it('deprecated addAgentToApp still works and returns the App', async () => {
     const app = await resolvers.Mutation.addAgentToApp(
       {},
-      { appId: fx.appId, agentId: fx.agentAId },
+      { appRef: fx.appId, agentRef: fx.agentAId },
       adminCtx(fx.adminUserId),
     );
     expect((app as { id: string }).id).toBe(fx.appId);

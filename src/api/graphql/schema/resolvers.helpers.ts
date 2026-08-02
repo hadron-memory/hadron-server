@@ -1430,7 +1430,9 @@ export class DuplicateAppAgentError extends GraphQLError {
 
 export async function installAgentIntoAppCore(
   ctx: Context,
-  args: { appId: string; agentId: string; trainingMode?: boolean },
+  // #789 / cor:api:140 — these are REFS (PK or URN), resolved below. Named
+  // `*Ref` so the param name stops advertising a PK it never required.
+  args: { appRef: string; agentRef: string; trainingMode?: boolean },
 ): Promise<{
   appId: string;
   agentId: string;
@@ -1447,8 +1449,8 @@ export async function installAgentIntoAppCore(
 }> {
   // 007-entity-id-or-urn: appId + agentId may each be ID, bare URN, or
   // prefixed URN.
-  const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appId);
-  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentId);
+  const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appRef);
+  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
   // `resolveAppRef` already filters `deletedAt`. The `uninstalledAt`
   // case (spec 021 FR-026 — soft-uninstall) is a separate lifecycle
@@ -1557,10 +1559,11 @@ export async function installAgentIntoAppCore(
 
 export async function uninstallAgentFromAppCore(
   ctx: Context,
-  args: { appId: string; agentId: string },
+  // #789 / cor:api:140 — refs, not PKs (resolved below).
+  args: { appRef: string; agentRef: string },
 ): Promise<{ appId: string; agentId: string }> {
-  const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appId);
-  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentId);
+  const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appRef);
+  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
   // #551: symmetric with install — a CONTRIBUTOR+ member of the App's org can
   // uninstall an Agent (was ADMIN-only).

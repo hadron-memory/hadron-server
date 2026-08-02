@@ -96,7 +96,7 @@ describe('mergeUsers — owner-namespaced URN re-own (#695)', () => {
     // A PUBLIC org agent to install into a personal App.
     const org = await db.organization.create({ data: { id: generateId(), name: 'pub-org', urn: `pub-org-${generateId()}` } });
     const pub = await db.agent.create({ data: { id: generateId(), name: 'Pub', urn: `${org.urn}:pub`, organizationId: org.id, visibility: 'PUBLIC' } });
-    const app = await resolvers.Mutation.createApp({}, { agentId: pub.id, name: 'My App' }, ctxFor(source.id));
+    const app = await resolvers.Mutation.createApp({}, { agentRef: pub.id, name: 'My App' }, ctxFor(source.id));
     expect(app.urn).toBe('merge-source:my-app');
 
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
