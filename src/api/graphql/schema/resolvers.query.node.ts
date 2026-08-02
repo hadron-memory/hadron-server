@@ -29,6 +29,7 @@ import {
 import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retrieval/provider.js';
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { sortSiblings } from '../../../lib/siblingOrder.js';
 import {
   parseUrnInput,
   validateUrnType,
@@ -58,10 +59,104 @@ import {
   isOwnerOrOrgMember,
   getAccessibleMemoryIds,
   memoryAccessFilter,
+  isMemoryReadableCached,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 
 export const nodeQueries = {
+    /**
+     * #817 — the next sibling under a parent, by `seq`. The GraphQL twin of
+     * `hadron_get_next_node`, which was MCP-only, locking the CLI and portal
+     * out of ordered traversal.
+     *
+     * A client cannot compose this today: `NodeFilter` has no parent
+     * predicate, so a caller must fetch the parent's whole SUBTREE, filter to
+     * DIRECT children itself, and find the successor of `current` by seq — and
+     * repeat all of it on every step, so walking N siblings costs N subtree
+     * reads.
+     *
+     * ORDER (matching the MCP tool exactly, so guided reading order can't
+     * diverge between surfaces — the two questions the issue asked to settle):
+     *   - `seq` ascending;
+     *   - a NULL `seq` sorts LAST, after every explicitly ordered sibling;
+     *   - ties (equal seq, or two nulls) break on `loc` ascending.
+     *
+     * NOT a cursor and not session-backed — it holds no state; `currentRef`
+     * omitted means "the first child".
+     */
+    nextNode: async (
+      _: unknown,
+      { parentRef, currentRef, raw }: { parentRef: string; currentRef?: string | null; raw?: boolean | null },
+      ctx: Context,
+    ) => {
+      // Resolve the parent. A genuine miss is null; a MALFORMED ref still
+      // throws (UrnNotQualifiedError from assertFullyQualifiedUrn) — a shape
+      // error discloses nothing about what exists, while a not-found must not
+      // become an existence oracle.
+      let parentId: string;
+      try {
+        ({ id: parentId } = await resolveNodeRef(ctx.db, parentRef));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) return null;
+        throw e;
+      }
+      const parent = await ctx.db.node.findFirst({
+        where: { id: parentId, deletedAt: null },
+        select: { loc: true, memoryId: true },
+      });
+      if (!parent) return null;
+      // Node-CONTENT gate, the same predicate node(ref:) authorizes through.
+      // Denied ≡ not-found.
+      if (!(await isMemoryReadableCached(ctx, parent.memoryId))) return null;
+
+      const prefix = `${parent.loc}:`;
+      // Project only what picking a winner needs; the chosen node is fetched in
+      // full through node(ref:) below.
+      const descendants = await ctx.db.node.findMany({
+        where: { memoryId: parent.memoryId, loc: { startsWith: prefix }, deletedAt: null },
+        select: { id: true, loc: true, seq: true },
+      });
+      // DIRECT children only — no further ':' beyond the prefix. Prisma can't
+      // express that, so the subtree is narrowed here (the same shape the MCP
+      // tool uses); the projection above keeps it cheap.
+      //
+      // Ordering is done with the SHARED comparator rather than in SQL. PR #857
+      // review (Codex P2): SQL ties fall to the database collation while the
+      // MCP tool uses localeCompare, and locs may contain either case
+      // (SEGMENT_RE permits [a-zA-Z0-9]) — so a C-collation Postgres would
+      // order `A` before `a` where MCP orders `a` before `A`, and the traversal
+      // chain would change with the surface. One comparator, no divergence.
+      const children = sortSiblings(
+        descendants.filter((n) => !n.loc.slice(prefix.length).includes(':')),
+      );
+      if (children.length === 0) return null;
+
+      let nextId: string | null = null;
+      if (!currentRef) {
+        nextId = children[0].id;
+      } else {
+        let currentId: string;
+        try {
+          ({ id: currentId } = await resolveNodeRef(ctx.db, currentRef));
+        } catch (e) {
+          // Same posture as the parent: miss → null, malformed → throw.
+          if (e instanceof NodeNotFoundError) return null;
+          throw e;
+        }
+        const idx = children.findIndex((n) => n.id === currentId);
+        // `current` not among these children (wrong memory, not a sibling, or
+        // deleted) is indistinguishable from "no more siblings" — deliberately,
+        // so this can't probe for a node's parentage.
+        if (idx === -1 || idx + 1 >= children.length) return null;
+        nextId = children[idx + 1].id;
+      }
+
+      // Delegate the actual read to node(ref:) so the returned Node gets the
+      // identical treatment — access filter, decryption, Mustache compilation,
+      // edge includes — and cannot drift from the canonical single-node read.
+      return nodeQueries.node(_, { ref: nextId, raw }, ctx);
+    },
+
     // Spec: cor:api:180 — cross-entity URN resolution
     // (:00 surface & result shape, :01 resolution semantics).
     resolveUrn: async (_: unknown, { urn }: { urn: string }, ctx: Context) => {

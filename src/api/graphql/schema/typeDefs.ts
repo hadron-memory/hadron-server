@@ -4136,6 +4136,27 @@ export const typeDefs = `#graphql
     serverInfo: ServerInfo!
 
     # Spec 040 — the run audit surface (what ran, why, what it cost).
+    """
+    The next sibling node under a parent, ordered by seq (#817) — the GraphQL
+    twin of hadron_get_next_node, so guided reading order is no longer MCP-only.
+
+    parentRef / currentRef take a node PK or a fully-qualified URN
+    (cor:api:140). Omit currentRef to get the FIRST child.
+
+    Order: seq ascending; a NULL seq sorts LAST, after every explicitly ordered
+    sibling; ties break on loc ascending. Identical to the MCP tool, so the two
+    surfaces cannot present different reading orders.
+
+    Returns null at the end of the sibling chain, and for a parent that does
+    not exist or the caller cannot read — denied and missing are indistinguishable. A
+    currentRef that is not among the parent's direct children is likewise null
+    rather than an error, so it cannot probe a node's parentage. A MALFORMED
+    ref still throws: a shape error discloses nothing about what exists.
+
+    Stateless — this is a next-sibling read, not a session-backed cursor.
+    """
+    nextNode(parentRef: ID!, currentRef: ID, raw: Boolean): Node
+
     "One run (cor:agt:010:02). ref is an AppRun ID or an hrn:apprun:<root>:<app>:<run-id> URN (#696)."
     appRun(ref: ID!): AppRun
     "The latest run of an App resolved to a concrete run (#696) — 'current/latest/previous' are queries, never magic run-ids in URN space (cor:urn:010:02). previous: true returns the run before the latest."
