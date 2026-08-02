@@ -2424,6 +2424,58 @@ export const typeDefs = `#graphql
     entryNode: Node
   }
 
+  "One health check the validator runs (#819)."
+  enum MemoryValidationCheck {
+    "An edge whose target node is missing OR soft-deleted. A hard-deleted target cannot occur - Edge.target is FK-enforced with onDelete: Cascade - so in practice this means a dangling edge to a tombstone."
+    BROKEN_REF
+    "A node with no description, content, or abstract."
+    SPARSE
+    "The abstract no longer reflects current content (spec 032 FR-011)."
+    STALE_ABSTRACT
+    "embedding_failed_at is set - transient-awaiting-retry, cap-exhausted, or the #206 permanent class (spec 033). Such a node is absent from vector search, which from outside looks identical to no hits matching."
+    EMBED_FAILED
+    "objectType/properties violate the memory declared schema (#725)."
+    SCHEMA
+  }
+
+  "One finding (#819). nodeUrn is null when the URN could not be composed - a memory URN the flat v2 shape cannot express, or an unexpected/legacy loc - in which case nodeId and nodeLoc still identify the node."
+  type MemoryValidationFinding {
+    kind: MemoryValidationCheck!
+    nodeId: ID!
+    nodeLoc: String!
+    nodeUrn: String
+    detail: String!
+  }
+
+  """
+  A check that could NOT run (#819). Reported explicitly rather than silently
+  omitted: a clean bill of health that quietly skipped a check is worse than no
+  report at all.
+  """
+  type MemoryValidationSkippedCheck {
+    check: MemoryValidationCheck!
+    reason: String!
+  }
+
+  type MemoryValidationResult {
+    memoryId: ID!
+    "Nodes scanned. The whole memory in one pass - the checks are cross-referential, so a partial scan would produce false positives rather than fewer findings."
+    nodesChecked: Int!
+    "Findings, capped by the limit argument."
+    findings: [MemoryValidationFinding!]!
+    "The TRUE finding count, before any truncation - gate CI on this, not on findings.length."
+    totalFindings: Int!
+    "True when findings was capped and totalFindings is larger."
+    truncated: Boolean!
+    skippedChecks: [MemoryValidationSkippedCheck!]!
+    """
+    True only when EVERY check ran and none found anything. A skipped check
+    makes this false even with zero findings - you cannot claim health for a
+    check you did not run.
+    """
+    ok: Boolean!
+  }
+
   type AppRunsPage {
     items: [AppRun!]!
     total: Int!
@@ -4188,6 +4240,23 @@ export const typeDefs = `#graphql
     missing both raise NODE_NOT_FOUND - no existence oracle.
     """
     renderRunNode(nodeRef: String!, args: JSON): String!
+
+    """
+    Memory health audit (#819) — the GraphQL twin of hadron_validate, which was
+    MCP-only, so the CLI, the portal and CI had no way to answer "is this
+    memory healthy?".
+
+    Every check is over server-owned state a client cannot compute:
+    abstractOriginHash vs current content, embedding_failed_at (not projected
+    on Node at all), and property-schema conformance. So unlike other gaps
+    there is no slow client-side fallback.
+
+    Returns TYPED findings so a caller can branch and CI can gate on
+    totalFindings. findings is capped by limit (default 200, max 1000) while
+    totalFindings reports the true count - so a gate is never fooled by
+    truncation. Read gate as the rest of the memory reads.
+    """
+    validateMemory(memoryRef: ID!, limit: Int): MemoryValidationResult!
 
     "One run (cor:agt:010:02). ref is an AppRun ID or an hrn:apprun:<root>:<app>:<run-id> URN (#696)."
     appRun(ref: ID!): AppRun

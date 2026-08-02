@@ -78,6 +78,7 @@ import {
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash } from '../lib/contentHash.js';
+import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
 import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
@@ -4643,122 +4644,27 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return textResult('Access denied for this memory.');
       }
 
-      // Spec 032 FR-011 — encryption gate for the stale-abstract check.
-      // hadron_validate does NOT call decryptNodesBatch, so on encrypted
-      // memories `node.content` is ciphertext and
-      // `computeContentHash(ciphertext)` would compare unequal to every
-      // plaintext-derived abstractOriginHash (false-positive on every
-      // node). v1 skips the check; the #206 encryption-parity follow-up
-      // adds a decrypt step before this loop. Symmetric with the
-      // hadron_get_node gate (US2). Riding the existing nodes findMany
-      // (memory column auto-projected via separate findUnique) keeps
-      // the wider blast radius of changing resolveMemoryByUrn contained.
-      const memEnc = await db.memory.findUnique({
-        where: { id: memory.id },
-        select: { isEncrypted: true, schema: true },
-      });
-      const checkStale = !memEnc?.isEncrypted;
-      // #725 — property-schema conformance audit. Unlike write enforcement (which
-      // only governs new writes), this catches nodes that reached a
-      // non-conforming state some other way: written before the schema was
-      // defined/tightened, or via a path outside the write seam. Non-destructive.
-      const conformanceSchema = memEnc?.schema as unknown as MemorySchema | null;
-
-      const nodes = await db.node.findMany({
-        where: { memoryId: memory.id },
-        include: { outgoingEdges: true },
-      });
-      const nodeIds = new Set(nodes.map((n) => n.id));
+      // #819 — the checks themselves now live in src/lib/memoryValidation.ts,
+      // shared with the GraphQL `validateMemory` query so the two surfaces
+      // cannot drift on what "healthy" means. This handler keeps the prose
+      // rendering (and its historical wording); the query returns the same
+      // findings typed.
+      const report = await validateMemoryNodes(db, memory.id);
       const issues: string[] = [];
-
-      for (const node of nodes) {
-        const nUrn = await nodeUrn(node.loc, node.memoryId);
-        for (const edge of node.outgoingEdges) {
-          if (!nodeIds.has(edge.targetId)) {
-            issues.push(`[broken-ref] ${nUrn} → id:${edge.targetId} (${edge.name ?? edge.loc})`);
-          }
-        }
-        // Spec 031 FR-011 — abstract counts as legitimate content for the
-        // validator's "this node has zero text" intent. A node carrying
-        // only an abstract (e.g., a nodeType='abstract' archive whose
-        // source is gone) is NOT sparse.
-        if (!node.description && !node.content && !node.abstract) {
-          issues.push(`[sparse] ${nUrn} — no description, content, or abstract`);
-        }
-        // Spec 032 FR-011 — stale-abstract warning. Mirrors the
-        // hadron_get_node predicate (US2). The explicit `abstractOriginHash
-        // != null` guard short-circuits legacy pre-spec-032 rows so the
-        // validator stays quiet by design on data that pre-dates the
-        // signal (PR-207 review item 5).
-        if (
-          checkStale &&
-          node.abstract != null && node.abstract.length > 0 &&
-          node.content != null && node.content.length > 0 &&
-          node.abstractOriginHash != null &&
-          node.abstractOriginHash !== computeContentHash(node.content)
-        ) {
-          issues.push(`[stale-abstract] ${nUrn} — abstract may not reflect current content`);
-        }
-        // Spec 033 T058 — surface embedding-failure diagnosability.
-        // `embedding_failed_at` is stamped on EVERY failed attempt:
-        //   - transient failures awaiting retry → both pendingAt AND
-        //     failedAt are set (markTransientFailure)
-        //   - transient failures that hit the attempts cap → pendingAt
-        //     cleared, failedAt stays (giveUp branch)
-        //   - permanent encrypted-no-plaintext (#206) → same shape as
-        //     the cap (markPermanentFailure)
-        // hadron_validate surfaces ALL of these because each is operator-
-        // useful: in-flight retries say "this node has failed at least
-        // once but the sweep will retry"; terminal failures say "this
-        // node will never embed without intervention." PR-226 review
-        // (Copilot) corrected an earlier comment that described only
-        // the terminal cases.
-        //
-        // Why this matters: an empty vector index from outside
-        // hadron_validate looks identical to "no hits matched". Surfacing
-        // the failure flag here gives operators (and the agents who
-        // proactively run hadron_validate before debugging an empty index)
-        // a single-tool diagnostic surface. Default Prisma findMany
-        // without a select includes every scalar column, so
-        // embeddingFailedAt + embeddingError are already on `node`
-        // without a select change.
-        if (node.embeddingFailedAt) {
-          // PR-226 review (Gemini): `??` only catches null/undefined, so an
-          // empty or whitespace-only error message would render as a blank
-          // reason. `?.trim() || 'unknown'` handles all three cases.
-          const reason = node.embeddingError?.trim() || 'unknown';
-          issues.push(`[embed-failed] ${nUrn} — ${reason}`);
-        }
-        // #725 — schema conformance: a collection member must satisfy its
-        // memory's declared schema. Reports (never mutates) — this is the audit
-        // backstop for pre-existing / non-write-seam non-conformance.
-        //
-        // normalizeObjectType so the audit matches write-seam semantics: a
-        // legacy blank/whitespace objectType is "no collection" (an ordinary
-        // node), not an undeclared collection — validating it raw would emit a
-        // false [schema] violation. Skip soft-deleted tombstones; a
-        // non-conforming row that's already deleted isn't actionable (the other
-        // checks retain their historical include-tombstones scope on purpose).
-        const auditObjectType = normalizeObjectType(node.objectType);
-        if (conformanceSchema != null && auditObjectType != null && node.deletedAt == null) {
-          try {
-            validateNodeAgainstSchema(
-              conformanceSchema,
-              auditObjectType,
-              (node.properties ?? null) as Record<string, unknown> | null,
-            );
-          } catch (e) {
-            if (e instanceof NodeSchemaViolation) issues.push(`[schema] ${nUrn} — ${e.message}`);
-            else throw e;
-          }
-        }
+      for (const f of report.findings) {
+        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id)));
       }
+      // A skipped check is stated rather than silently omitted — a clean bill
+      // of health that quietly skipped a check is worse than no report.
+      const skippedNote = report.skippedChecks.length
+        ? `\n\nSkipped checks:\n${report.skippedChecks.map((c) => `- ${c.check}: ${c.reason}`).join('\n')}`
+        : '';
 
       if (issues.length === 0) {
-        return textResult(`Validated ${nodes.length} nodes. No issues found.`);
+        return textResult(`Validated ${report.nodesChecked} nodes. No issues found.${skippedNote}`);
       }
       return textResult(
-        `Found ${issues.length} issue(s) in ${nodes.length} nodes:\n\n${issues.join('\n')}`,
+        `Found ${issues.length} issue(s) in ${report.nodesChecked} nodes:\n\n${issues.join('\n')}${skippedNote}`,
       );
     },
   );

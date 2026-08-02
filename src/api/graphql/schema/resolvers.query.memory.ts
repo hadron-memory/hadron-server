@@ -18,10 +18,22 @@ import {
   getAccessibleMemoryIds,
   granteeShareAccess,
   canReadMemoryRecord,
+  isMemoryReadableCached,
   resolveOrgScope,
   MEMORY_INCLUDE,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+
+/** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
+function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
+  try {
+    return emitNodeUrnV2(memoryUrn, loc);
+  } catch {
+    return null;
+  }
+}
 
 // Graph-view fetch (issue #466): default page size + hard cap for the slim
 // memoryNodes / memoryEdges lists. Large enough to fill the graph in a few
@@ -152,6 +164,70 @@ export const memoryQueries = {
       // "own activity" to report — empty, not an error (as dashboardWidgets).
       if (!ctx.userId) return [];
       return getUsageActivity(ctx.db, { ...scope, userId: ctx.userId });
+    },
+
+    /**
+     * #819 — the memory health audit, previously MCP-only. Runs the SAME
+     * checks as `hadron_validate` via the shared `validateMemoryNodes`, so the
+     * two surfaces cannot drift on what "healthy" means.
+     *
+     * Typed findings rather than the tool's prose: a caller has to be able to
+     * branch, and `hadron memory validate` has to be able to gate CI on a
+     * count.
+     *
+     * Findings are CAPPED (default 200, max 1000) because a large memory can
+     * produce thousands, but `totalFindings` always reports the true count —
+     * so a gate is never fooled by truncation, and `truncated` says plainly
+     * that there is more.
+     */
+    validateMemory: async (
+      _: unknown,
+      { memoryRef, limit }: { memoryRef: string; limit?: number | null },
+      ctx: Context,
+    ) => {
+      const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+      const memory = await ctx.db.memory.findFirst({
+        where: { id: memoryId, deletedAt: null },
+        select: { id: true, urn: true },
+      });
+      // #859 review (Codex P1): the NODE-CONTENT gate, not the record-level
+      // one. This query returns node ids, locs, counts and operational error
+      // details — node-level data. `canReadMemoryRecord` keeps an org-member
+      // fast path that admits app/system-class memories which
+      // getAccessibleMemoryIds deliberately excludes from node access, so
+      // gating on it would let an ordinary org member enumerate App-internal
+      // nodes. (This is the SAME record-vs-node-content distinction as #846,
+      // and the opposite answer: there the payload was Memory scalars, here it
+      // is node data.) Denied ≡ not-found — no existence oracle.
+      if (!memory || !(await isMemoryReadableCached(ctx, memory.id))) {
+        throw new GraphQLError(`Memory not found: "${memoryRef}"`, {
+          extensions: { code: 'NOT_FOUND' },
+        });
+      }
+
+      const cap = Math.min(Math.max(limit ?? 200, 0), 1000);
+      // The cap is pushed DOWN so findings past it are counted but never
+      // retained — building the whole array to slice it defeats the bound
+      // (#859 review, Copilot).
+      const report = await validateMemoryNodes(ctx.db, memory.id, cap);
+      const findings = report.findings.map((f) => ({
+        kind: f.kind,
+        nodeId: f.nodeId,
+        nodeLoc: f.nodeLoc,
+        nodeUrn: safeCanonicalNodeUrn(memory.urn, f.nodeLoc),
+        detail: f.detail,
+      }));
+      return {
+        memoryId: memory.id,
+        nodesChecked: report.nodesChecked,
+        findings,
+        totalFindings: report.totalFindings,
+        truncated: report.totalFindings > findings.length,
+        skippedChecks: report.skippedChecks,
+        // A skipped check makes `ok` false even with zero findings — you
+        // cannot claim health for a check you did not run.
+        ok: report.totalFindings === 0 && report.skippedChecks.length === 0,
+      };
     },
 
     memoryUsageSummary: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
