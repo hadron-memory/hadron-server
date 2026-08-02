@@ -5501,7 +5501,7 @@ export const typeDefs = `#graphql
       affordance to Agents owned by the caller org. A hard server-side
       cross-org gate is reserved for the marketplace spec.
       """
-      agentId: ID!
+      agentRef: ID!
       name: String!
       urn: String
       appType: AppType
