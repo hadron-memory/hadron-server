@@ -121,6 +121,75 @@ describe('hadron_update_edge — the single-edge intent (#835)', () => {
     expect(out).toMatch(/not found/i);
     expect((await edgesOf()).length).toBe(3);
   });
+
+  // PR #861 review (Codex P2): `z.string().optional()` rejected null, so a
+  // caller could replace name/description but never restore them to unset —
+  // even though Mutation.updateEdge uses explicit null to clear.
+  it('an explicit null CLEARS a nullable field', async () => {
+    const target = (await edgesOf()).find((e) => e.name === 'documented-by')!;
+    await call('hadron_update_edge', { edgeRef: target.id, description: 'temporary' });
+    expect((await db.edge.findUniqueOrThrow({ where: { id: target.id } })).description).toBe('temporary');
+    await call('hadron_update_edge', { edgeRef: target.id, description: null });
+    expect((await db.edge.findUniqueOrThrow({ where: { id: target.id } })).description).toBeNull();
+  });
+
+  // PR #861 review (Codex P2): updateEdge has always supported these; the
+  // wrapper neither accepted nor forwarded them, leaving routing conditions
+  // uneditable over MCP entirely (hadron_update_node(edges:) has no such field).
+  it('sets and clears a JSONLogic routing condition', async () => {
+    const target = (await edgesOf()).find((e) => e.name === 'applies-when')!;
+    // `var` is an allowed operator and the path must carry a valid scope
+    // (memory./chat./agent./message.data.) — the validator rejects anything
+    // else with INVALID_EDGE_CONDITION, which the wrapper surfaces as tool
+    // text rather than crashing (covered below).
+    await call('hadron_update_edge', { edgeRef: target.id, condition: { var: 'message.data.stage' } });
+    expect((await db.edge.findUniqueOrThrow({ where: { id: target.id } })).condition)
+      .toEqual({ var: 'message.data.stage' });
+    await call('hadron_update_edge', { edgeRef: target.id, condition: null });
+    expect((await db.edge.findUniqueOrThrow({ where: { id: target.id } })).condition).toBeNull();
+  });
+
+  it('surfaces an INVALID_EDGE_CONDITION as tool text, leaving the edge alone', async () => {
+    const target = (await edgesOf()).find((e) => e.name === 'applies-when')!;
+    const out = await call('hadron_update_edge', { edgeRef: target.id, condition: { var: 'nope.stage' } });
+    expect(out).toMatch(/valid scope/i);
+    expect((await db.edge.findUniqueOrThrow({ where: { id: target.id } })).condition).toBeNull();
+  });
+
+  it('sets edge data', async () => {
+    const target = (await edgesOf()).find((e) => e.name === 'relates-to')!;
+    await call('hadron_update_edge', { edgeRef: target.id, data: { weight: 3 } });
+    expect((await db.edge.findUniqueOrThrow({ where: { id: target.id } })).data).toEqual({ weight: 3 });
+  });
+
+  // PR #861 review (Copilot): priority is an Int in GraphQL and an integer
+  // column, so a float must be rejected at the tool boundary rather than
+  // reaching Prisma/PG.
+  //
+  // Asserted on the SCHEMA, not by calling: createTestableMcpServer invokes
+  // the handler directly and never runs the zod parse the MCP transport does,
+  // so a runtime-rejection test here would pass vacuously.
+  it('declares priority as an INTEGER so a float is rejected by the transport', () => {
+    const src = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+    const desc = src.slice(src.indexOf("'hadron_update_edge'"), src.indexOf("'hadron_delete_edge'"));
+    expect(desc).toMatch(/priority: z\.number\(\)\.int\(\)/);
+  });
+
+  it('declares the clearable fields as NULLABLE so null reaches the resolver', () => {
+    const src = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+    const desc = src.slice(src.indexOf("'hadron_update_edge'"), src.indexOf("'hadron_delete_edge'"));
+    expect(desc).toMatch(/name: z\.string\(\)\.nullable\(\)\.optional\(\)/);
+    expect(desc).toMatch(/description: z\.string\(\)\.nullable\(\)\.optional\(\)/);
+  });
+
+  // PR #861 review (Codex P2 / Copilot): the description used to advertise
+  // "retarget", which the schema cannot express and the resolver cannot do.
+  it('does not advertise retargeting, which it cannot do', () => {
+    const src = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+    const desc = src.slice(src.indexOf("'hadron_update_edge'"), src.indexOf("'hadron_delete_edge'"));
+    expect(desc).not.toMatch(/relabel or retarget/);
+    expect(desc).toMatch(/canNOT move an edge to a different source or target/);
+  });
 });
 
 describe('hadron_delete_edge — removing one relationship (#835)', () => {

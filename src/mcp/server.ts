@@ -3532,20 +3532,25 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_update_edge',
-    'Change ONE existing edge in place — its name, loc, description, runnability, or routing priority. Non-destructive: every other edge on the source node is left alone. This is the tool to reach for when you want to relabel or retarget a single relationship; do NOT use hadron_update_node(edges:) for that, as it replaces the node\'s entire outgoing edge set and silently deletes the edges you did not re-supply. Only the fields you pass are changed. The edge may be given as an ID-shape PK or a fully-qualified edge URN (hrn:edge:<org>::<memory>::<loc>).',
+    'Change ONE existing edge\'s METADATA in place — its name, loc, description, runnability, routing priority, routing condition, or data. Non-destructive: every other edge on the source node is left alone. This is the tool to reach for when you want to relabel a single relationship; do NOT use hadron_update_node(edges:) for that, as it replaces the node\'s entire outgoing edge set and silently deletes the edges you did not re-supply. Only the fields you pass are changed; pass null to CLEAR a nullable field. This tool canNOT move an edge to a different source or target — endpoints are fixed at creation, so re-point a relationship by deleting the edge and creating a new one. The edge may be given as an ID-shape PK or a fully-qualified edge URN (hrn:edge:<org>::<memory>::<loc>).',
     {
       edgeRef: z.string().describe('Edge to update, as an ID-shape PK (preferred — immutable) OR a fully-qualified edge URN.'),
-      name: z.string().optional().describe('New relationship name, e.g. "depends-on".'),
+      name: z.string().nullable().optional().describe('New relationship name, e.g. "depends-on". Pass null to clear it.'),
       loc: z.string().optional().describe('New edge loc (its identity + URN suffix). Changing this changes the edge URN.'),
-      description: z.string().optional().describe('New human-readable description.'),
+      description: z.string().nullable().optional().describe('New human-readable description. Pass null to clear it.'),
       isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed.'),
-      priority: z.number().optional().describe('Routing priority among sibling edges.'),
+      priority: z.number().int().optional().describe('Routing priority among sibling edges. Must be an integer.'),
+      condition: z.record(z.string(), z.unknown()).nullable().optional().describe('JSONLogic routing condition evaluated when the walker picks an outgoing edge. Pass null to clear it (an unconditional edge).'),
+      data: z.record(z.string(), z.unknown()).nullable().optional().describe('Structured data carried on the edge. REPLACES the stored object; pass null to clear it.'),
     },
-    async ({ edgeRef, name, loc, description, isRunnable, priority }) => {
+    async ({ edgeRef, name, loc, description, isRunnable, priority, condition, data }) => {
       try {
         const edge = await resolvers.Mutation.updateEdge(
           {},
-          { edgeRef, name, loc, description, isRunnable, priority },
+          // Spread through as-is: `undefined` means "leave alone" and an
+          // explicit `null` means "clear", which is exactly the contract
+          // Mutation.updateEdge implements (`name !== undefined ? name ?? null`).
+          { edgeRef, name, loc, description, isRunnable, priority, condition, data },
           objectCtx(),
         );
         const e = edge as { loc: string; name: string | null; memoryId: string };
