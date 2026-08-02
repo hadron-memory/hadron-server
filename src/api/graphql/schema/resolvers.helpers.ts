@@ -78,6 +78,15 @@ export interface Context {
   // often shares one App across many runs, so the app-urn lookup is memoized per
   // request (lazily created; see loadAppUrn).
   appUrnCache?: Map<string, Promise<string | null>>;
+  // Request-scoped memo for AppRun.app (#831) — same rationale as appUrnCache,
+  // for the full row rather than just the urn (lazily created; see loadApp).
+  appRowCache?: Map<string, Promise<AppRow | null>>;
+  // #853 — AppRun.agent / AppRun.entryNode memos. A run page repeats the same
+  // agent and entry node across rows; without these the two relations cost a
+  // membership query + a row lookup EACH (see loadReadableAgent/loadEntryNode).
+  readableAgentFilterCache?: Promise<Record<string, unknown>>;
+  readableAgentCache?: Map<string, Promise<unknown | null>>;
+  entryNodeCache?: Map<string, Promise<{ memoryId: string } | null>>;
   // Request-scoped memo for NodeRevision.editedByUser / approvedByUser
   // candidate lookups (#620) — a node's history repeats the same few editor
   // strings, so each distinct candidate (including misses) is resolved once
@@ -217,6 +226,33 @@ export function loadAppUrn(ctx: Context, appId: string): Promise<string | null> 
   }
   return pending;
 }
+
+/**
+ * Fetch a full App row by id, memoized per request (#831). Sibling of
+ * `loadAppUrn` with the same rationale — a run-audit page shares one App across
+ * many rows, so `AppRun.app` must not become one findUnique per row.
+ *
+ * Returns the raw row INCLUDING soft-deleted (the caller decides): an audit
+ * list legitimately shows runs of an App that was deleted afterwards, and the
+ * run's `appId` is the durable record either way.
+ */
+export function loadApp(ctx: Context, appId: string): Promise<AppRow | null> {
+  const cache = (ctx.appRowCache ??= new Map<string, Promise<AppRow | null>>());
+  let pending = cache.get(appId);
+  if (!pending) {
+    pending = ctx.db.app.findUnique({ where: { id: appId } }) as Promise<AppRow | null>;
+    cache.set(appId, pending);
+  }
+  return pending;
+}
+
+/** The App fields the AppRun relation gate needs. */
+export type AppRow = {
+  id: string;
+  organizationId: string | null;
+  ownerUserId: string | null;
+  deletedAt: Date | null;
+} & Record<string, unknown>;
 
 /**
  * Fetch an edge endpoint node by id, memoized per request (#381). Edges in a

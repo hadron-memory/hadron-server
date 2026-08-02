@@ -2364,6 +2364,27 @@ export const typeDefs = `#graphql
     finishedAt: DateTime
     createdAt: DateTime!
     createdBy: String
+
+    # --- Relations (#831). All NULLABLE and independently gated: the appRuns
+    # org-READER gate authorizes the RUN, not everything hanging off it, and a
+    # nested object inherits its own type's field resolvers (App.keys /
+    # App.members do not re-check — the #552 class). Denied and deleted both
+    # read as null; the FK scalars above stay the durable audit record.
+    """
+    The App this run activated. Null when the caller may not read that App, or
+    when the App row was hard-deleted. appId remains the audit record.
+    """
+    app: App
+    "The agent that ran, when the run resolved one and the caller may read it."
+    agent: Agent
+    "On-behalf-of user (cor:agt:010:01). Null = pure App service identity. Personal fields on the returned User carry their own #384 gate."
+    user: User
+    """
+    The resolved entry node. NULLABLE by design — entryNodeUrn is the immutable
+    audit record and the node may have been deleted, moved, or be unreadable to
+    this caller since the run. A null here is a normal, expected state.
+    """
+    entryNode: Node
   }
 
   type AppRunsPage {
