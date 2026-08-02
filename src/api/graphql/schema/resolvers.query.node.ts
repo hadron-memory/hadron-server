@@ -35,6 +35,7 @@ import {
   validateUrnType,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
@@ -60,6 +61,7 @@ import {
   getAccessibleMemoryIds,
   memoryAccessFilter,
   isMemoryReadableCached,
+  loadMemoryUrn,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 
@@ -155,6 +157,104 @@ export const nodeQueries = {
       // identical treatment — access filter, decryption, Mustache compilation,
       // edge includes — and cannot drift from the canonical single-node read.
       return nodeQueries.node(_, { ref: nextId, raw }, ctx);
+    },
+
+    /**
+     * #818 — render a run node WITHOUT executing it: the GraphQL twin of
+     * `hadron_run_action`, which despite the name executes nothing. It loads
+     * the node, resolves its dependency edges, and renders with `args`.
+     *
+     * `runTask` covers the EXECUTE half; nothing exposed the render half, so
+     * there was no way to ask "what would this render to?" — needed for a
+     * `task run --dry-run`, for reading an action's assembled instructions
+     * when the CALLER is the executor, and for debugging template/dependency
+     * resolution without side effects.
+     *
+     * A QUERY, not a mutation (the issue left this open): it is
+     * side-effect-free. Unlike the MCP tool it records NO `action-run`
+     * UsageEvent — metering a preview would inflate the ledger with actions
+     * nobody took.
+     *
+     * Assembles with `assembleRunNodePrompt` — the SAME function `runTask`
+     * executes (Mustache via compileTemplate; flow-routing edges skipped) —
+     * NOT the legacy `renderRunNodeBundle` the MCP tools call, which does a
+     * literal replaceAll and inlines every edge. A preview that disagrees with
+     * the run is worse than none (#858 review, Codex P1).
+     */
+    renderRunNode: async (
+      _: unknown,
+      { nodeRef, args }: { nodeRef: string; args?: Record<string, unknown> | null },
+      ctx: Context,
+    ) => {
+      let nodeId: string;
+      try {
+        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+      } catch (e) {
+        // Genuine miss → NOT_FOUND; a malformed ref propagates as itself.
+        if (e instanceof NodeNotFoundError) {
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND' },
+          });
+        }
+        throw e;
+      }
+      const node = await ctx.db.node.findFirst({
+        where: { id: nodeId, deletedAt: null },
+        include: {
+          // #858 review (Codex P2): exclude edges whose TARGET is a tombstone.
+          // deleteNode soft-deletes and promises the row drops out of every
+          // read surface, but it leaves the edges intact — so an unfiltered
+          // include would let a preview resurrect removed instructions. Also
+          // skips soft-deleted EDGE rows, which revision-restore can leave
+          // behind and every other edge surface excludes.
+          outgoingEdges: {
+            where: { deletedAt: null, target: { deletedAt: null } },
+            include: { target: true },
+          },
+        },
+      });
+      // Denied and missing share one message — no existence oracle.
+      const denied = () =>
+        new GraphQLError(`Node not found: "${nodeRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+      if (!node) throw denied();
+      if (!(await isMemoryReadableCached(ctx, node.memoryId))) throw denied();
+
+      // Decrypt the node AND its referenced targets — an encrypted memory
+      // would otherwise render ciphertext into the bundle. A dangling edge can
+      // still carry a null target defensively (PR #858 review, Copilot).
+      type RunEdge = (typeof node.outgoingEdges)[number];
+      const liveEdges: RunEdge[] = node.outgoingEdges.filter((e) => e.target != null);
+      await decryptNodesBatch(ctx.db, [node, ...liveEdges.map((e) => e.target)] as never);
+
+      // Only inline a referenced node the caller may actually READ. An edge
+      // can point across memories (#781), and the bundle must not become a
+      // way to read a foreign node's content through a dependency link.
+      const visibleEdges: RunEdge[] = [];
+      for (const edge of liveEdges) {
+        if (await isMemoryReadableCached(ctx, edge.target!.memoryId)) visibleEdges.push(edge);
+      }
+
+      // Args are typed JSON on the wire; the assembler substitutes strings.
+      const stringArgs = args
+        ? Object.fromEntries(
+            Object.entries(args).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
+          )
+        : undefined;
+
+      // #858 review (Codex P1): assemble with the SAME function runTask
+      // executes — Mustache via compileTemplate, routing edges skipped — not
+      // the legacy MCP bundle, which does a literal replaceAll and inlines
+      // every edge. A preview that disagrees with the run is worse than none.
+      return assembleRunNodePrompt(
+        { ...node, outgoingEdges: visibleEdges } as never,
+        stringArgs,
+        {
+          memoryUrnOf: (memoryId: string) =>
+            loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
+          compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
+            compileTemplate(content, data, memoryId, ctx.db, {}),
+        },
+      );
     },
 
     // Spec: cor:api:180 — cross-entity URN resolution
