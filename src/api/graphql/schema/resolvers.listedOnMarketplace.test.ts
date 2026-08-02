@@ -68,11 +68,11 @@ describe('listedOnMarketplace — Memory (cor:acl:080:04)', () => {
 describe('listedOnMarketplace — Agent (cor:acl:080:04)', () => {
   it('defaults false; set/read-back; omit and null both preserve', async () => {
     expect((await db.agent.findUnique({ where: { id: agent.id } }))?.listedOnMarketplace).toBe(false);
-    const updated = await M.updateAgent({}, { id: agent.id, listedOnMarketplace: true }, ctx());
+    const updated = await M.updateAgent({}, { ref: agent.id, listedOnMarketplace: true }, ctx());
     expect(updated.listedOnMarketplace).toBe(true);
-    await M.updateAgent({}, { id: agent.id, description: 'unchanged-flag' }, ctx());
+    await M.updateAgent({}, { ref: agent.id, description: 'unchanged-flag' }, ctx());
     expect((await db.agent.findUnique({ where: { id: agent.id } }))?.listedOnMarketplace).toBe(true);
-    await M.updateAgent({}, { id: agent.id, listedOnMarketplace: null }, ctx());
+    await M.updateAgent({}, { ref: agent.id, listedOnMarketplace: null }, ctx());
     expect((await db.agent.findUnique({ where: { id: agent.id } }))?.listedOnMarketplace).toBe(true);
   });
 });

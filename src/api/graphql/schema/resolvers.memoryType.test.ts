@@ -225,7 +225,7 @@ describe('updateAgent syncs the derived system-memory URN on rename', () => {
 
     await resolvers.Mutation.updateAgent(
       {},
-      { id: agent.id, urn: 'renamed' },
+      { ref: agent.id, urn: 'renamed' },
       adminCtx(),
     );
 
@@ -237,7 +237,7 @@ describe('updateAgent syncs the derived system-memory URN on rename', () => {
     const { agent } = await createAgentWithSystem('reuse-me');
     await resolvers.Mutation.updateAgent(
       {},
-      { id: agent.id, urn: 'moved-away' },
+      { ref: agent.id, urn: 'moved-away' },
       adminCtx(),
     );
 
@@ -266,7 +266,7 @@ describe('updateAgent syncs the derived system-memory URN on rename', () => {
     );
     await resolvers.Mutation.updateAgent(
       {},
-      { id: agent.id, urn: 'wiz-renamed' },
+      { ref: agent.id, urn: 'wiz-renamed' },
       adminCtx(),
     );
     const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
@@ -292,7 +292,7 @@ describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
 
     await resolvers.Mutation.updateAgent(
       {},
-      { id: agent.id, systemMemoryId: mem.id },
+      { ref: agent.id, systemMemoryId: mem.id },
       adminCtx(),
     );
 
@@ -323,7 +323,7 @@ describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
     await expect(
       resolvers.Mutation.updateAgent(
         {},
-        { id: agent.id, systemMemoryId: foreign.id },
+        { ref: agent.id, systemMemoryId: foreign.id },
         adminCtx(),
       ),
     ).rejects.toThrow(/same organization/);
@@ -339,13 +339,13 @@ describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
     );
     await resolvers.Mutation.updateAgent(
       {},
-      { id: agent1.id, systemMemoryId: mem.id },
+      { ref: agent1.id, systemMemoryId: mem.id },
       adminCtx(),
     );
     await expect(
       resolvers.Mutation.updateAgent(
         {},
-        { id: agent2.id, systemMemoryId: mem.id },
+        { ref: agent2.id, systemMemoryId: mem.id },
         adminCtx(),
       ),
     ).rejects.toThrow(/another agent/);
@@ -369,7 +369,7 @@ describe('updateAgent lock on existing systemMemoryId', () => {
     await expect(
       resolvers.Mutation.updateAgent(
         {},
-        { id: agent.id, systemMemoryId: '' },
+        { ref: agent.id, systemMemoryId: '' },
         adminCtx(),
       ),
     ).rejects.toThrow(/unset or change/);
@@ -385,7 +385,7 @@ describe('updateAgent lock on existing systemMemoryId', () => {
     await expect(
       resolvers.Mutation.updateAgent(
         {},
-        { id: agent.id, systemMemoryId: other.id },
+        { ref: agent.id, systemMemoryId: other.id },
         adminCtx(),
       ),
     ).rejects.toThrow(/unset or change/);
@@ -402,7 +402,7 @@ describe('agent → system memory sync', () => {
 
     await resolvers.Mutation.updateAgent(
       {},
-      { id: agent.id, name: 'juno2' },
+      { ref: agent.id, name: 'juno2' },
       adminCtx(),
     );
 
@@ -418,7 +418,7 @@ describe('agent → system memory sync', () => {
 
     await resolvers.Mutation.updateAgent(
       {},
-      { id: agent.id, visibility: 'ORGANIZATION' },
+      { ref: agent.id, visibility: 'ORGANIZATION' },
       adminCtx(),
     );
 
@@ -446,7 +446,7 @@ describe('AGENT_SYSTEM memory guards', () => {
     await expect(
       resolvers.Mutation.addMemoryToAgent(
         {},
-        { agentId: other.id, memoryId: mem.id, role: 'read' },
+        { agentRef: other.id, memoryRef: mem.id, role: 'read' },
         adminCtx(),
       ),
     ).rejects.toThrow(/systemMemoryId/);
@@ -477,7 +477,7 @@ describe('AGENT_SYSTEM memory guards', () => {
     );
     await resolvers.Mutation.addMemoryToAgent(
       {},
-      { agentId: agent.urn, memoryId: mem.urn, role: 'read' },
+      { agentRef: agent.urn, memoryRef: mem.urn, role: 'read' },
       adminCtx(),
     );
     const items = await db.agentMemoryItem.findMany({
@@ -500,13 +500,13 @@ describe('AGENT_SYSTEM memory guards', () => {
     );
     await resolvers.Mutation.addMemoryToAgent(
       {},
-      { agentId: agent.id, memoryId: mem.id, role: 'read' },
+      { agentRef: agent.id, memoryRef: mem.id, role: 'read' },
       adminCtx(),
     );
     // Update by URN.
     await resolvers.Mutation.updateAgentMemoryRole(
       {},
-      { agentId: agent.urn, memoryId: mem.urn, role: 'read-write' },
+      { agentRef: agent.urn, memoryRef: mem.urn, role: 'read-write' },
       adminCtx(),
     );
     const item = await db.agentMemoryItem.findUniqueOrThrow({
@@ -528,12 +528,12 @@ describe('AGENT_SYSTEM memory guards', () => {
     );
     await resolvers.Mutation.addMemoryToAgent(
       {},
-      { agentId: agent.id, memoryId: mem.id, role: 'read' },
+      { agentRef: agent.id, memoryRef: mem.id, role: 'read' },
       adminCtx(),
     );
     await resolvers.Mutation.removeMemoryFromAgent(
       {},
-      { agentId: agent.urn, memoryId: mem.urn },
+      { agentRef: agent.urn, memoryRef: mem.urn },
       adminCtx(),
     );
     const items = await db.agentMemoryItem.findMany({
@@ -545,7 +545,7 @@ describe('AGENT_SYSTEM memory guards', () => {
   it('cascades system memory deletion when the agent is deleted', async () => {
     const { agent, sys: mem } = await createAgentWithSystem('juno');
 
-    await resolvers.Mutation.deleteAgent({}, { id: agent.id }, adminCtx());
+    await resolvers.Mutation.deleteAgent({}, { ref: agent.id }, adminCtx());
 
     const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
     expect(after.deletedAt).not.toBeNull();

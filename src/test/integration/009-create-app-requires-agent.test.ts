@@ -76,7 +76,7 @@ describe('009 createApp install path (same-org)', () => {
 
     const app = await resolvers.Mutation.createApp(
       {},
-      { orgId: beaOrg.id, agentId: mealplan.id, name: 'Mealplan @ Bea' },
+      { orgRef: beaOrg.id, agentRef: mealplan.id, name: 'Mealplan @ Bea' },
       adminCtx(bea.id),
     );
 
@@ -106,12 +106,12 @@ describe('009 createApp install path (same-org)', () => {
 
     const appA = await resolvers.Mutation.createApp(
       {},
-      { orgId: beaOrg.id, agentId: mealplan.id, name: 'Mealplan A' },
+      { orgRef: beaOrg.id, agentRef: mealplan.id, name: 'Mealplan A' },
       adminCtx(bea.id),
     );
     const appB = await resolvers.Mutation.createApp(
       {},
-      { orgId: beaOrg.id, agentId: mealplan.id, name: 'Mealplan B' },
+      { orgRef: beaOrg.id, agentRef: mealplan.id, name: 'Mealplan B' },
       adminCtx(bea.id),
     );
 
@@ -147,7 +147,7 @@ describe('009 createApp install path (rejection cases)', () => {
     await expect(
       resolvers.Mutation.createApp(
         {},
-        { orgId: beaOrg.id, agentId: mealplan.id, name: 'Should Fail' },
+        { orgRef: beaOrg.id, agentRef: mealplan.id, name: 'Should Fail' },
         adminCtx(bea.id),
       ),
     ).rejects.toBeInstanceOf(AgentNotFoundError);
@@ -167,7 +167,7 @@ describe('009 createApp install path (rejection cases)', () => {
     await expect(
       resolvers.Mutation.createApp(
         {},
-        { orgId: beaOrg.id, agentId: mealplan.id, name: 'Outsider App' },
+        { orgRef: beaOrg.id, agentRef: mealplan.id, name: 'Outsider App' },
         // Outsider is not a member of beaOrg, and userCtx has no global
         // ADMIN role bypass — requireOrgRole reaches the OrgMember query.
         userCtx(outsider.id),

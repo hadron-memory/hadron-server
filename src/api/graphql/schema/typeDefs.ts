@@ -4647,7 +4647,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    regenerateAppKey(id: ID!): AppCreated!
+    regenerateAppKey(appRef: ID!): AppCreated!
 
     # User management
     updateMyProfile(name: String, handle: String, email: String): User!
@@ -4981,35 +4981,35 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(id: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!]): Agent!
 
     """
     Soft-delete an Agent.
 
     Accepts the entity's ID or URN.
     """
-    deleteAgent(id: ID!): Boolean!
+    deleteAgent(ref: ID!): Boolean!
 
     """
     Attach a Memory to an Agent.
 
     Accepts the entity's ID or URN.
     """
-    addMemoryToAgent(agentId: ID!, memoryId: ID!, role: String): Agent!
+    addMemoryToAgent(agentRef: ID!, memoryRef: ID!, role: String): Agent!
 
     """
     Update an Agent's role on an attached Memory.
 
     Accepts the entity's ID or URN.
     """
-    updateAgentMemoryRole(agentId: ID!, memoryId: ID!, role: String!): Agent!
+    updateAgentMemoryRole(agentRef: ID!, memoryRef: ID!, role: String!): Agent!
 
     """
     Detach a Memory from an Agent.
 
     Accepts the entity's ID or URN.
     """
-    removeMemoryFromAgent(agentId: ID!, memoryId: ID!): Agent!
+    removeMemoryFromAgent(agentRef: ID!, memoryRef: ID!): Agent!
 
     # Memory subscriptions (cross-org)
     """
@@ -5492,7 +5492,7 @@ export const typeDefs = `#graphql
       USER-OWNED App owned by the caller (spec 047) — namespaced under the
       caller's @handle, owner-only in v1. Accepts the org's ID or URN.
       """
-      orgId: ID
+      orgRef: ID
       """
       The Agent this App deploys. Required as of 009-install-agent-flow:
       every App must reference an Agent. The server itself accepts any
@@ -5536,7 +5536,7 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     updateApp(
-      id: ID!
+      ref: ID!
       name: String
       urn: String
       appType: AppType
@@ -5561,7 +5561,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    deleteApp(id: ID!): Boolean!
+    deleteApp(ref: ID!): Boolean!
 
     """
     Install an Agent into an App (023-app-shape US1). Creates an AppAgent
@@ -5577,8 +5577,8 @@ export const typeDefs = `#graphql
     per spec 023 FR-001).
     """
     installAgentIntoApp(
-      appId: ID!
-      agentId: ID!
+      appRef: ID!
+      agentRef: ID!
       trainingMode: Boolean
     ): InstallAgentIntoAppPayload!
 
@@ -5593,8 +5593,8 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     uninstallAgentFromApp(
-      appId: ID!
-      agentId: ID!
+      appRef: ID!
+      agentRef: ID!
     ): UninstallAgentFromAppPayload!
 
     """
@@ -5604,8 +5604,8 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     addAgentToApp(
-      appId: ID!
-      agentId: ID!
+      appRef: ID!
+      agentRef: ID!
       trainingMode: Boolean
     ): App! @deprecated(reason: "Use installAgentIntoApp (spec 023-app-shape US1). Returns Payload type with the AppAgent row.")
 
@@ -5615,7 +5615,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    removeAgentFromApp(appId: ID!, agentId: ID!): App! @deprecated(reason: "Use uninstallAgentFromApp (spec 023-app-shape US1).")
+    removeAgentFromApp(appRef: ID!, agentRef: ID!): App! @deprecated(reason: "Use uninstallAgentFromApp (spec 023-app-shape US1).")
 
     """
     Idempotent UPSERT of an AppMember row. Per spec 008-agent-installation
@@ -5894,8 +5894,8 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN for both Agent ids.
     """
     publishAgentImport(
-      parentAgentId: ID!
-      importedAgentId: ID!
+      parentAgentRef: ID!
+      importedAgentRef: ID!
       position: Int!
       required: Boolean = true
     ): AgentImport!
@@ -5908,14 +5908,14 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    removeAgentImport(parentAgentId: ID!, importedAgentId: ID!): Boolean!
+    removeAgentImport(parentAgentRef: ID!, importedAgentRef: ID!): Boolean!
 
     """
     Mint a new AppKey for an App.
 
     Accepts the entity's ID or URN.
     """
-    createAppKey(appId: ID!, label: String): AppKeyCreated!
+    createAppKey(appRef: ID!, label: String): AppKeyCreated!
     # AppKey is keyed by raw ID — no urn column. Stays ID-only.
     revokeAppKey(id: ID!): Boolean!
 

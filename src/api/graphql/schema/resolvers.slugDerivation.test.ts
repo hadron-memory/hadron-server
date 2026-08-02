@@ -50,7 +50,7 @@ describe('#574 — display name → slug at create', () => {
 
   it('createApp still slugifies (shared helper, dots now preserved)', async () => {
     const app = await resolvers.Mutation.createApp(
-      {}, { orgId: org.id, name: 'My Cool App', agentId: (await resolvers.Mutation.createAgent(
+      {}, { orgRef: org.id, name: 'My Cool App', agentRef: (await resolvers.Mutation.createAgent(
         {}, { orgId: org.id, name: 'helper agent' }, ctx,
       )).id }, ctx,
     );
@@ -70,7 +70,7 @@ describe('#574 — display name → slug at rename', () => {
   it('updateAgent slugifies an explicit rename slug', async () => {
     const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'start-agent' }, ctx);
     const renamed = await resolvers.Mutation.updateAgent(
-      {}, { id: agent.id, urn: 'Renamed Agent' }, ctx,
+      {}, { ref: agent.id, urn: 'Renamed Agent' }, ctx,
     );
     expect(renamed.urn).toBe('slug-org:renamed-agent');
   });

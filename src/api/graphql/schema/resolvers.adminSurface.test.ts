@@ -200,7 +200,7 @@ describe('policy links + effectiveActionPolicy (#510, cor:acl:040:02)', () => {
       adminCtx(),
     );
     await expect(
-      resolvers.Mutation.updateApp({}, { id: app.id, policy: { allow: 'oops' } }, adminCtx()),
+      resolvers.Mutation.updateApp({}, { ref: app.id, policy: { allow: 'oops' } }, adminCtx()),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     const orgRow = await db.organization.findUniqueOrThrow({ where: { id: org.id } });
     expect(orgRow.policy).toEqual({ allow: ['run.execute', 'llm.invoke', 'memory.*'] });
@@ -214,7 +214,7 @@ describe('policy links + effectiveActionPolicy (#510, cor:acl:040:02)', () => {
     );
     await resolvers.Mutation.updateApp(
       {},
-      { id: app.id, policy: { allow: ['run.execute', 'memory.read'] } },
+      { ref: app.id, policy: { allow: ['run.execute', 'memory.read'] } },
       adminCtx(),
     );
     const verdict = await resolvers.Query.effectiveActionPolicy(
@@ -279,10 +279,10 @@ describe('agent-memory grants (#501)', () => {
   });
 
   it('addMemoryToAgent is an idempotent upsert (re-attach updates the role)', async () => {
-    await resolvers.Mutation.addMemoryToAgent({}, { agentId, memoryId, role: 'read' }, adminCtx());
+    await resolvers.Mutation.addMemoryToAgent({}, { agentRef: agentId, memoryRef: memoryId, role: 'read' }, adminCtx());
     await resolvers.Mutation.addMemoryToAgent(
       {},
-      { agentId, memoryId, role: 'read-write' },
+      { agentRef: agentId, memoryRef: memoryId, role: 'read-write' },
       adminCtx(),
     );
     const grant = await db.agentMemoryItem.findUniqueOrThrow({
@@ -296,7 +296,7 @@ describe('agent-memory grants (#501)', () => {
     await db.agentMemoryItem.create({
       data: { agentId, memoryId, role: 'read', deletedAt: new Date(), deletedBy: 'someone' },
     });
-    await resolvers.Mutation.addMemoryToAgent({}, { agentId, memoryId, role: 'read' }, adminCtx());
+    await resolvers.Mutation.addMemoryToAgent({}, { agentRef: agentId, memoryRef: memoryId, role: 'read' }, adminCtx());
     const grant = await db.agentMemoryItem.findUniqueOrThrow({
       where: { agentId_memoryId: { agentId, memoryId } },
     });
@@ -308,7 +308,7 @@ describe('agent-memory grants (#501)', () => {
     await expect(
       resolvers.Mutation.updateAgentMemoryRole(
         {},
-        { agentId, memoryId, role: 'read-write' },
+        { agentRef: agentId, memoryRef: memoryId, role: 'read-write' },
         adminCtx(),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
@@ -321,7 +321,7 @@ describe('agent-memory grants (#501)', () => {
     await expect(
       resolvers.Mutation.updateAgentMemoryRole(
         {},
-        { agentId, memoryId, role: 'read-write' },
+        { agentRef: agentId, memoryRef: memoryId, role: 'read-write' },
         adminCtx(),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });

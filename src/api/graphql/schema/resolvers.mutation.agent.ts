@@ -209,9 +209,14 @@ export const agentMutations = {
 
     updateAgent: async (
       _: unknown,
-      { id, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces }: { id: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
       ctx: Context,
     ) => {
+      // #789 / cor:api:140 — was a PK-only findUniqueOrThrow, so a caller
+      // holding a URN or handle had to pre-resolve it. resolveAgentRef is a
+      // pure lookup and does NOT authorize (#554): the resource-scoped
+      // requireOwnerOrOrgRole below still runs on the RESOLVED agent.
+      const { id } = await resolveAgentRef(ctx.db, ref);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // spec 047 (codex review, #682): a user-owned agent is owner-only in v1 —
@@ -348,7 +353,9 @@ export const agentMutations = {
       });
     },
 
-    deleteAgent: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    deleteAgent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      // #789 / cor:api:140 — see updateAgent: resolution is not authorization.
+      const { id } = await resolveAgentRef(ctx.db, ref);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // Soft-delete the agent and its owned system memory (if any) in the
@@ -452,20 +459,20 @@ export const agentMutations = {
     publishAgentImport: async (
       _: unknown,
       {
-        parentAgentId,
-        importedAgentId,
+        parentAgentRef,
+        importedAgentRef,
         position,
         required,
       }: {
-        parentAgentId: string;
-        importedAgentId: string;
+        parentAgentRef: string;
+        importedAgentRef: string;
         position: number;
         required?: boolean;
       },
       ctx: Context,
     ) => {
-      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentId);
-      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentId);
+      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentRef);
+      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
       const parent = await ctx.db.agent.findUniqueOrThrow({
         where: { id: resolvedParentId },
       });
@@ -497,11 +504,11 @@ export const agentMutations = {
 
     removeAgentImport: async (
       _: unknown,
-      { parentAgentId, importedAgentId }: { parentAgentId: string; importedAgentId: string },
+      { parentAgentRef, importedAgentRef }: { parentAgentRef: string; importedAgentRef: string },
       ctx: Context,
     ) => {
-      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentId);
-      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentId);
+      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentRef);
+      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
       const parent = await ctx.db.agent.findUniqueOrThrow({
         where: { id: resolvedParentId },
       });

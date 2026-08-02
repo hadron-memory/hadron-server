@@ -460,7 +460,7 @@ describe('Mutation.createMemory / createAgent / createApp (007-entity-id-or-urn)
     );
     const app = await resolvers.Mutation.createApp(
       {},
-      { orgId: org.urn, agentId: agent.id, name: 'urn-app' },
+      { orgRef: org.urn, agentRef: agent.id, name: 'urn-app' },
       adminCtx(),
     );
     expect(app.organizationId).toBe(org.id);

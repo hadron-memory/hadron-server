@@ -115,7 +115,7 @@ describe('T062: cascade install — required deps cascade; optional deps gate on
     // Org X installs Suite without opting into Notes.
     const suiteApp = await resolvers.Mutation.createApp(
       {},
-      { orgId: orgX.id, agentId: suite.id, name: 'Suite @ X' },
+      { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X' },
       adminCtx(bea.id),
     );
     expect((await getPrimaryAgentId(db, suiteApp.id))).toBe(suite.id);
@@ -149,8 +149,8 @@ describe('T062: cascade install — required deps cascade; optional deps gate on
     await resolvers.Mutation.createApp(
       {},
       {
-        orgId: orgX.id,
-        agentId: suite.id,
+        orgRef: orgX.id,
+        agentRef: suite.id,
         name: 'Suite @ X',
         installOptional: [notes.id],
       },
@@ -175,7 +175,7 @@ describe('T062: cascade install — required deps cascade; optional deps gate on
 
     await resolvers.Mutation.createApp(
       {},
-      { orgId: orgX.id, agentId: suite.id, name: 'Suite @ X' },
+      { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X' },
       adminCtx(bea.id),
     );
 
@@ -206,7 +206,7 @@ describe('T063: cascade reuses an existing App in the same org for the same dep'
     // Org X already has a standalone Calendar install.
     const standaloneCalendar = await resolvers.Mutation.createApp(
       {},
-      { orgId: orgX.id, agentId: calendar.id, name: 'Calendar (standalone)' },
+      { orgRef: orgX.id, agentRef: calendar.id, name: 'Calendar (standalone)' },
       adminCtx(bea.id),
     );
 
@@ -214,7 +214,7 @@ describe('T063: cascade reuses an existing App in the same org for the same dep'
     // rather than creating a second one.
     await resolvers.Mutation.createApp(
       {},
-      { orgId: orgX.id, agentId: suite.id, name: 'Suite @ X' },
+      { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X' },
       adminCtx(bea.id),
     );
 
@@ -241,7 +241,7 @@ describe('T064: removeAgentImport leaves existing Apps in place; future installs
     // First install (in Org X) cascades Calendar.
     await resolvers.Mutation.createApp(
       {},
-      { orgId: orgX.id, agentId: suite.id, name: 'Suite @ X' },
+      { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X' },
       adminCtx(bea.id),
     );
     expect(
@@ -268,7 +268,7 @@ describe('T064: removeAgentImport leaves existing Apps in place; future installs
     // is gone).
     await resolvers.Mutation.createApp(
       {},
-      { orgId: orgY.id, agentId: suite.id, name: 'Suite @ Y' },
+      { orgRef: orgY.id, agentRef: suite.id, name: 'Suite @ Y' },
       adminCtx(bea.id),
     );
     const yCalendarApps = await db.app.findMany({
@@ -323,8 +323,8 @@ describe('T065: integration — full Suite/Calendar/Notes scenario (SC-006)', ()
     await resolvers.Mutation.createApp(
       {},
       {
-        orgId: orgX.id,
-        agentId: suite.id,
+        orgRef: orgX.id,
+        agentRef: suite.id,
         name: 'Suite @ X',
         installOptional: [notes.id],
       },
@@ -350,7 +350,7 @@ describe('T065: integration — full Suite/Calendar/Notes scenario (SC-006)', ()
     // Org Y installs Suite without opting into Notes — only Suite + Calendar.
     await resolvers.Mutation.createApp(
       {},
-      { orgId: orgY.id, agentId: suite.id, name: 'Suite @ Y' },
+      { orgRef: orgY.id, agentRef: suite.id, name: 'Suite @ Y' },
       adminCtx(bea.id),
     );
     const yApps = await db.app.findMany({

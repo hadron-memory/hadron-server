@@ -65,7 +65,7 @@ describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () =>
   it('creates a user-owned App under the bare handle root, licensed by a subscription (no org grant)', async () => {
     const app = await resolvers.Mutation.createApp(
       {},
-      { agentId: publicAgentId, name: 'My Gmail' },
+      { agentRef: publicAgentId, name: 'My Gmail' },
       ctx({ userId: ownerId, roles: ['READER'] }),
     );
     expect(app.organizationId).toBeNull();
@@ -99,13 +99,13 @@ describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () =>
 
   it('rejects an empty-string orgId', async () => {
     await expect(
-      resolvers.Mutation.createApp({}, { orgId: '', agentId: publicAgentId, name: 'X' }, ctx({ userId: ownerId })),
+      resolvers.Mutation.createApp({}, { orgRef: '', agentRef: publicAgentId, name: 'X' }, ctx({ userId: ownerId })),
     ).rejects.toThrow(/non-empty organization/i);
   });
 
   it('requires an authenticated user', async () => {
     await expect(
-      resolvers.Mutation.createApp({}, { agentId: publicAgentId, name: 'X' }, ctx({})),
+      resolvers.Mutation.createApp({}, { agentRef: publicAgentId, name: 'X' }, ctx({})),
     ).rejects.toThrow(/authenticated/i);
   });
 
@@ -115,7 +115,7 @@ describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () =>
       data: { id: generateId(), name: 'Private', urn: `${privateOrg.urn}:private-agent`, organizationId: privateOrg.id, visibility: 'ORGANIZATION' },
     });
     await expect(
-      resolvers.Mutation.createApp({}, { agentId: privAgent.id, name: 'Sneaky' }, ctx({ userId: ownerId, roles: ['READER'] })),
+      resolvers.Mutation.createApp({}, { agentRef: privAgent.id, name: 'Sneaky' }, ctx({ userId: ownerId, roles: ['READER'] })),
     ).rejects.toThrow(/PUBLIC agent or your own/i);
   });
 });
@@ -123,7 +123,7 @@ describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () =>
 describe('Query.apps — user-owned App listing', () => {
   it('the owner sees their user-owned App; another user + admin-unscoped do not', async () => {
     const app = await resolvers.Mutation.createApp(
-      {}, { agentId: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
+      {}, { agentRef: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
     );
     const ownerList = await resolvers.Query.apps(null, {}, ctx({ userId: ownerId, roles: ['READER'] }));
     expect(ownerList.items.map((a: { id: string }) => a.id)).toContain(app.id);
@@ -141,7 +141,7 @@ describe('Query.apps — user-owned App listing', () => {
   // cross-tenant reach).
   it('Query.apps(ownedByMe): returns only the caller’s own org-less Apps, admin included', async () => {
     const mine = await resolvers.Mutation.createApp(
-      {}, { agentId: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
+      {}, { agentRef: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
     );
     // An org-owned App the admin would otherwise see in the unscoped list.
     const orgApp = await db.app.create({
@@ -149,7 +149,7 @@ describe('Query.apps — user-owned App listing', () => {
     });
     // Another user's user-owned App.
     const othersApp = await resolvers.Mutation.createApp(
-      {}, { agentId: publicAgentId, name: 'Others' }, ctx({ userId: otherId, roles: ['READER'] }),
+      {}, { agentRef: publicAgentId, name: 'Others' }, ctx({ userId: otherId, roles: ['READER'] }),
     );
 
     // Owner: sees only their own.
@@ -172,7 +172,7 @@ describe('Query.apps — user-owned App listing', () => {
 
   it('Query.apps(ownedByMe): App-key caller (no user) gets an empty page', async () => {
     await resolvers.Mutation.createApp(
-      {}, { agentId: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
+      {}, { agentRef: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
     );
     const res = await resolvers.Query.apps(
       null, { filter: { ownedByMe: true } }, ctx({ appId: 'some-app', roles: ['READER'] }),
@@ -185,7 +185,7 @@ describe('Query.apps — user-owned App listing', () => {
 describe('user-owned App is owner-only (blocker 3 — no platform-admin bypass)', () => {
   async function makeApp() {
     return resolvers.Mutation.createApp(
-      {}, { agentId: publicAgentId, name: 'Private App' }, ctx({ userId: ownerId, roles: ['READER'] }),
+      {}, { agentRef: publicAgentId, name: 'Private App' }, ctx({ userId: ownerId, roles: ['READER'] }),
     );
   }
 
@@ -199,7 +199,7 @@ describe('user-owned App is owner-only (blocker 3 — no platform-admin bypass)'
   it('regenerateAppKey + ensureAppMember deny a non-owner platform admin', async () => {
     const app = await makeApp();
     const adminCtx = ctx({ userId: otherId, roles: ['ADMIN'] });
-    await expect(resolvers.Mutation.regenerateAppKey(null, { id: app.id }, adminCtx)).rejects.toThrow('Forbidden');
+    await expect(resolvers.Mutation.regenerateAppKey(null, { appRef: app.id }, adminCtx)).rejects.toThrow('Forbidden');
     await expect(
       resolvers.Mutation.ensureAppMember(null, { appId: app.id, userId: otherId, role: 'owner' }, adminCtx),
     ).rejects.toThrow('Forbidden');
@@ -311,7 +311,7 @@ describe('createApp — personal-App dependency rejection leaves no orphan (code
     await createDbAgentOrgGrant(db, pubOrgId, depAgent.id);
     await createDbAgentImport(db, publicAgentId, depAgent.id, { required: true, position: 0 });
     await expect(
-      resolvers.Mutation.createApp({}, { agentId: publicAgentId, name: 'Has Deps' }, ctx({ userId: ownerId, roles: ['READER'] })),
+      resolvers.Mutation.createApp({}, { agentRef: publicAgentId, name: 'Has Deps' }, ctx({ userId: ownerId, roles: ['READER'] })),
     ).rejects.toThrow(/required dependencies/i);
     // No orphan App and no subscription were written.
     expect(await db.app.count({ where: { ownerUserId: ownerId } })).toBe(0);
@@ -326,7 +326,7 @@ describe('installAgentIntoApp — personal-App accessibility gate (#756)', () =>
   async function seedPersonalApp() {
     return resolvers.Mutation.createApp(
       {},
-      { agentId: publicAgentId, name: 'My Gmail' },
+      { agentRef: publicAgentId, name: 'My Gmail' },
       ctx({ userId: ownerId, roles: ['READER'] }),
     );
   }
@@ -347,7 +347,7 @@ describe('installAgentIntoApp — personal-App accessibility gate (#756)', () =>
     await expect(
       resolvers.Mutation.installAgentIntoApp(
         {},
-        { appId: app.id, agentId: victimAgent.id },
+        { appRef: app.id, agentRef: victimAgent.id },
         ctx({ userId: ownerId, roles: ['READER'] }),
       ),
     ).rejects.toThrow(/PUBLIC agent or your own/i);
@@ -368,7 +368,7 @@ describe('installAgentIntoApp — personal-App accessibility gate (#756)', () =>
     await expect(
       resolvers.Mutation.installAgentIntoApp(
         {},
-        { appId: app.id, agentId: privAgent.id },
+        { appRef: app.id, agentRef: privAgent.id },
         ctx({ userId: ownerId, roles: ['READER'] }),
       ),
     ).rejects.toThrow(/PUBLIC agent or your own/i);
@@ -383,7 +383,7 @@ describe('installAgentIntoApp — personal-App accessibility gate (#756)', () =>
     const app = await seedPersonalApp();
     const res = await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: app.id, agentId: ownAgent.id },
+      { appRef: app.id, agentRef: ownAgent.id },
       ctx({ userId: ownerId, roles: ['READER'] }),
     );
     expect(res.appAgent.agentId).toBe(ownAgent.id);
@@ -401,7 +401,7 @@ describe('installAgentIntoApp — personal-App accessibility gate (#756)', () =>
     const app = await seedPersonalApp();
     await resolvers.Mutation.installAgentIntoApp(
       {},
-      { appId: app.id, agentId: otherPublic.id },
+      { appRef: app.id, agentRef: otherPublic.id },
       ctx({ userId: ownerId, roles: ['READER'] }),
     );
     // #756: previously the install linked the agent but provisioned no license.

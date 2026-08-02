@@ -109,7 +109,7 @@ describe('App CRUD', () => {
   it('creates an app with defaults', async () => {
     const result = await resolvers.Mutation.createApp(
       {},
-      { orgId: orgA.id, agentId: agent.id, name: 'Wizard App' },
+      { orgRef: orgA.id, agentRef: agent.id, name: 'Wizard App' },
       adminCtx(),
     );
     expect(result.name).toBe('Wizard App');
@@ -123,7 +123,7 @@ describe('App CRUD', () => {
   it('accepts an explicit URN slug', async () => {
     const result = await resolvers.Mutation.createApp(
       {},
-      { orgId: orgA.id, agentId: agent.id, name: 'Custom', urn: 'my-custom-slug' },
+      { orgRef: orgA.id, agentRef: agent.id, name: 'Custom', urn: 'my-custom-slug' },
       adminCtx(),
     );
     expect(result.urn).toBe('org-a:my-custom-slug');
@@ -132,13 +132,13 @@ describe('App CRUD', () => {
   it('rejects duplicate URNs', async () => {
     await resolvers.Mutation.createApp(
       {},
-      { orgId: orgA.id, agentId: agent.id, name: 'Dup' },
+      { orgRef: orgA.id, agentRef: agent.id, name: 'Dup' },
       adminCtx(),
     );
     await expect(
       resolvers.Mutation.createApp(
         {},
-        { orgId: orgA.id, agentId: agent.id, name: 'Dup' },
+        { orgRef: orgA.id, agentRef: agent.id, name: 'Dup' },
         adminCtx(),
       ),
     ).rejects.toThrow(/already exists/);
@@ -148,7 +148,7 @@ describe('App CRUD', () => {
     await expect(
       resolvers.Mutation.createApp(
         {},
-        { orgId: orgA.id, agentId: agent.id, name: 'Noob App' },
+        { orgRef: orgA.id, agentRef: agent.id, name: 'Noob App' },
         ctx({ userId: 'random-user' }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -157,7 +157,7 @@ describe('App CRUD', () => {
   it('generates an App Key with the hdr_app_ prefix', async () => {
     const { rawKey, key } = await resolvers.Mutation.createAppKey(
       {},
-      { appId: app.id, label: 'test-key' },
+      { appRef: app.id, label: 'test-key' },
       adminCtx(),
     );
     expect(rawKey).toMatch(/^hdr_app_[0-9a-f]{64}$/);
@@ -170,7 +170,7 @@ describe('App CRUD', () => {
   it('revokes an App Key', async () => {
     const { key } = await resolvers.Mutation.createAppKey(
       {},
-      { appId: app.id },
+      { appRef: app.id },
       adminCtx(),
     );
     await resolvers.Mutation.revokeAppKey({}, { id: key.id }, adminCtx());
@@ -182,7 +182,7 @@ describe('App CRUD', () => {
     // Remove existing, then re-add
     await resolvers.Mutation.removeAgentFromApp(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       adminCtx(),
     );
     // 023-app-shape Phase 2b: App→Agent is N:M via AppAgent; "removed"
@@ -191,7 +191,7 @@ describe('App CRUD', () => {
 
     await resolvers.Mutation.addAgentToApp(
       {},
-      { appId: app.id, agentId: agent.id },
+      { appRef: app.id, agentRef: agent.id },
       adminCtx(),
     );
     expect(await getPrimaryAgentId(db, app.id)).toBe(agent.id);
@@ -209,7 +209,7 @@ describe('App CRUD', () => {
     await expect(
       resolvers.Mutation.addAgentToApp(
         {},
-        { appId: app.id, agentId: otherAgent.id },
+        { appRef: app.id, agentRef: otherAgent.id },
         adminCtx(),
       ),
     ).rejects.toThrow(/same organization/);

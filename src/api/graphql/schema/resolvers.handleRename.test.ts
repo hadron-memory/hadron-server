@@ -50,7 +50,7 @@ describe('updateMyProfile — handle rename URN propagation', () => {
   it('re-namespaces user-owned Agent + its system memory, and App', async () => {
     const c = ctx({ userId, roles: ['READER'] });
     const agent = await resolvers.Mutation.createAgent({}, { name: 'My Agent' }, c);
-    const app = await resolvers.Mutation.createApp({}, { agentId: publicAgentId, name: 'My App' }, c);
+    const app = await resolvers.Mutation.createApp({}, { agentRef: publicAgentId, name: 'My App' }, c);
 
     expect(agent.urn).toBe('old-handle:my-agent');
     expect(app.urn).toBe('old-handle:my-app');

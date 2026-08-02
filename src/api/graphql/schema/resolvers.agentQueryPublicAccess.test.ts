@@ -231,18 +231,18 @@ describe('installAgentIntoApp — CONTRIBUTOR floor + cross-org PUBLIC (issue #5
   });
 
   it('a CONTRIBUTOR of the App org can install a same-org agent (was ADMIN-only)', async () => {
-    const res = await M.installAgentIntoApp(null, { appId: app.id, agentId: pubAgentA.id }, ctx(contributor.id));
+    const res = await M.installAgentIntoApp(null, { appRef: app.id, agentRef: pubAgentA.id }, ctx(contributor.id));
     expect(res.appAgent.agentId).toBe(pubAgentA.id);
   });
 
   it('a READER of the App org cannot install (CONTRIBUTOR floor)', async () => {
     await expect(
-      M.installAgentIntoApp(null, { appId: app.id, agentId: pubAgentA.id }, asMember()),
+      M.installAgentIntoApp(null, { appRef: app.id, agentRef: pubAgentA.id }, asMember()),
     ).rejects.toThrow('Forbidden');
   });
 
   it('a foreign PUBLIC agent installs cross-org and auto-provisions the AgentOrgGrant', async () => {
-    const res = await M.installAgentIntoApp(null, { appId: app.id, agentId: foreignPub.id }, ctx(contributor.id));
+    const res = await M.installAgentIntoApp(null, { appRef: app.id, agentRef: foreignPub.id }, ctx(contributor.id));
     expect(res.appAgent.agentId).toBe(foreignPub.id);
     const grant = await db.agentOrgGrant.findFirst({ where: { orgId: orgA.id, agentId: foreignPub.id } });
     expect(grant).not.toBeNull();
@@ -250,7 +250,7 @@ describe('installAgentIntoApp — CONTRIBUTOR floor + cross-org PUBLIC (issue #5
 
   it('a foreign NON-PUBLIC agent is still rejected (ORGANIZATION_MISMATCH)', async () => {
     await expect(
-      M.installAgentIntoApp(null, { appId: app.id, agentId: foreignPriv.id }, ctx(contributor.id)),
+      M.installAgentIntoApp(null, { appRef: app.id, agentRef: foreignPriv.id }, ctx(contributor.id)),
     ).rejects.toThrow(/organization/i);
   });
 });

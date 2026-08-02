@@ -94,9 +94,9 @@ async function callerManagesAppMembers(
 }
 
 export const appMutations = {
-    regenerateAppKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, id);
+    regenerateAppKey: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveAppRef(ctx.db, appRef);
       const existing = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       // spec 047 (blocker 3): route unconditionally through the shared gate. It
       // grants a platform admin on an ORG-owned App (its own admin branch) but
@@ -131,8 +131,8 @@ export const appMutations = {
     createApp: async (
       _: unknown,
       {
-        orgId,
-        agentId,
+        orgRef,
+        agentRef,
         name,
         urn,
         appType,
@@ -153,8 +153,8 @@ export const appMutations = {
         sessionTimeoutSeconds,
         anonymousTtlDays,
       }: {
-        orgId?: string | null;
-        agentId: string;
+        orgRef?: string | null;
+        agentRef: string;
         name: string;
         urn?: string;
         appType?: AppType;
@@ -181,15 +181,15 @@ export const appMutations = {
       // caller, namespaced under their `@<handle>`. An EMPTY-STRING orgId is a
       // malformed request, not a personal-create signal — reject it so a client
       // bug can't silently bypass org resolution + the ADMIN gate.
-      if (orgId !== undefined && orgId !== null && orgId.trim() === '') {
-        throw new GraphQLError('orgId must be a non-empty organization ID or URN — omit it entirely to create a personal App.', { extensions: { code: 'BAD_USER_INPUT' } });
+      if (orgRef !== undefined && orgRef !== null && orgRef.trim() === '') {
+        throw new GraphQLError('orgRef must be a non-empty organization ID or URN — omit it entirely to create a personal App.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       let resolvedOrgId: string | null = null;
       let ownerUserId: string | null = null;
       let namespace: string;
-      if (orgId) {
-        // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-        const { id } = await resolveOrgRef(ctx.db, orgId);
+      if (orgRef) {
+        // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+        const { id } = await resolveOrgRef(ctx.db, orgRef);
         await requireOrgRole(ctx, id, 'ADMIN');
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id }, select: { urn: true } });
         resolvedOrgId = id;
@@ -214,9 +214,9 @@ export const appMutations = {
       // #574: shared slugify.
       const appUrn = `${namespace}:${deriveSlugFromName(urn ?? name)}`;
 
-      // 009-install-agent-flow: agentId is required (typeDef gate). Resolve the
+      // 009-install-agent-flow: agentRef is required (typeDef gate). Resolve the
       // Agent (resolveAgentRef rejects soft-deleted Agents).
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       if (resolvedOrgId) {
         // Org path: auto-provision the AgentOrgGrant (008 behavior; portal hides
         // the cross-org Install affordance — a hard server gate is the
@@ -457,7 +457,7 @@ export const appMutations = {
     updateApp: async (
       _: unknown,
       {
-        id,
+        ref,
         name,
         urn,
         appType,
@@ -478,7 +478,7 @@ export const appMutations = {
         anonymousTtlDays,
         policy,
       }: {
-        id: string; name?: string; urn?: string;
+        ref: string; name?: string; urn?: string;
         appType?: AppType;
         role?: AppMembershipRole;
         description?: string;
@@ -502,8 +502,8 @@ export const appMutations = {
       },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, id);
+      // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       // #510: the app-layer action-policy link (cor:acl:040:02) — validate
@@ -600,9 +600,9 @@ export const appMutations = {
       });
     },
 
-    deleteApp: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, id);
+    deleteApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
+      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       // Soft-delete the App. Secrets are org/user-owned only (#696), so there
@@ -618,15 +618,15 @@ export const appMutations = {
     installAgentIntoApp: async (
       _: unknown,
       {
-        appId,
-        agentId,
+        appRef,
+        agentRef,
         trainingMode,
-      }: { appId: string; agentId: string; trainingMode?: boolean },
+      }: { appRef: string; agentRef: string; trainingMode?: boolean },
       ctx: Context,
     ) => {
       const { appAgent } = await installAgentIntoAppCore(ctx, {
-        appId,
-        agentId,
+        appRef,
+        agentRef,
         trainingMode,
       });
       return { appAgent };
@@ -634,10 +634,10 @@ export const appMutations = {
 
     uninstallAgentFromApp: async (
       _: unknown,
-      { appId, agentId }: { appId: string; agentId: string },
+      { appRef, agentRef }: { appRef: string; agentRef: string },
       ctx: Context,
     ) => {
-      const result = await uninstallAgentFromAppCore(ctx, { appId, agentId });
+      const result = await uninstallAgentFromAppCore(ctx, { appRef, agentRef });
       return { appId: result.appId, agentId: result.agentId };
     },
 
@@ -646,15 +646,15 @@ export const appMutations = {
     addAgentToApp: async (
       _: unknown,
       {
-        appId,
-        agentId,
+        appRef,
+        agentRef,
         trainingMode,
-      }: { appId: string; agentId: string; trainingMode?: boolean },
+      }: { appRef: string; agentRef: string; trainingMode?: boolean },
       ctx: Context,
     ) => {
       const { appId: resolvedAppId } = await installAgentIntoAppCore(ctx, {
-        appId,
-        agentId,
+        appRef,
+        agentRef,
         trainingMode,
       });
       return ctx.db.app.findUniqueOrThrow({
@@ -667,10 +667,10 @@ export const appMutations = {
     // and returns the App for source-compat.
     removeAgentFromApp: async (
       _: unknown,
-      { appId, agentId }: { appId: string; agentId: string },
+      { appRef, agentRef }: { appRef: string; agentRef: string },
       ctx: Context,
     ) => {
-      const { appId: resolvedAppId } = await uninstallAgentFromAppCore(ctx, { appId, agentId });
+      const { appId: resolvedAppId } = await uninstallAgentFromAppCore(ctx, { appRef, agentRef });
       return ctx.db.app.findUniqueOrThrow({
         where: { id: resolvedAppId },
         include: APP_INCLUDE,
@@ -857,11 +857,11 @@ export const appMutations = {
     // (memory.userId) in v1; the Agent-mediated path is deferred.
     createAppKey: async (
       _: unknown,
-      { appId, label }: { appId: string; label?: string },
+      { appRef, label }: { appRef: string; label?: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: appId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
