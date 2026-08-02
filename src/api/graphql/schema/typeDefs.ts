@@ -2354,6 +2354,43 @@ export const typeDefs = `#graphql
     budgetTokens: Int
     "Remaining action budget — live-decremented per write/tool action."
     budgetActions: Int
+    """
+    Total LLM tokens consumed by this run (#832). Unclamped, so it stays
+    truthful when a hop overshoots the remaining budget — unlike
+    budgetTokensInitial minus budgetTokens, whose decrement is clamped.
+
+    Counts every hop whose LLM call COMPLETED, including hops whose run later
+    failed — strictly more than a sum over the hops trail, which has no element
+    for a hop that did not complete.
+
+    KNOWN GAP: a hop aborted by the TOOL LOOP (a tool denied by policy, or a
+    tool handler that threw) is NOT counted. The provider has already billed
+    that call, but the tool-loop helper discards the accumulated usage when a
+    tool throws, so the number is not available at the failure site. Such a run
+    under-reports. Do not treat this as a billing figure.
+
+    NULL means UNKNOWN: a run minted before the counter existed, with no hop
+    trail to back-fill from. 0 means it genuinely spent nothing.
+    """
+    tokensSpent: Int
+    """
+    Total budgeted actions consumed (#832) — only actions actually admitted by
+    the budget guard; a denied action counts nothing.
+
+    NULL means UNKNOWN, not zero: runs minted before the counter existed have
+    no recorded action spend and, unlike tokens, no hop-trail signal to
+    reconstruct one from. Reporting 0 would contradict their already-decremented
+    budgetActions.
+    """
+    actionsSpent: Int
+    """
+    The token budget this run was MINTED with — budgetTokens is what REMAINS.
+    NULL for runs minted before this was recorded, which is deliberate: 0 would
+    render as 'no budget' rather than 'unknown'.
+    """
+    budgetTokensInitial: Int
+    "The action budget this run was minted with (#832). NULL for pre-existing runs."
+    budgetActionsInitial: Int
     status: AppRunStatus!
     curNodeUrn: String
     parentRunId: ID

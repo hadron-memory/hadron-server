@@ -471,3 +471,117 @@ describe('3-node flow through production deps (§10)', () => {
     expect(DEFER).toBe(`${ORG_URN}::flowmem::flow:defer`); // fixture shape pin
   });
 });
+
+/**
+ * #832 — "tokens spent vs budget" on the run audit surface.
+ *
+ * The two derivations a client could attempt are both wrong, which is the
+ * whole reason these are stored counters:
+ *   - summing `hops[].tokensSpent` misses hops that FAILED mid-execution;
+ *   - `initial - remaining` is clamped, because the budget decrement is
+ *     `Math.min(spent, budget)` so the remainder never goes negative.
+ */
+describe('AppRun spend counters (#832)', () => {
+  it('mint records the initial budgets alongside the live remainders', async () => {
+    const run = await mintFlow();
+    const row = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(row.budgetTokensInitial).toBe(row.budgetTokens);
+    expect(row.budgetActionsInitial).toBe(row.budgetActions);
+    expect(row.budgetTokensInitial).toBeGreaterThan(0);
+    expect(row.tokensSpent).toBe(0);
+    expect(row.actionsSpent).toBe(0);
+  });
+
+  it('tokensSpent accumulates across hops and matches initial - remaining', async () => {
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    expect(await executeAppRun(db, run.id, deps)).toBe('completed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    // Two hops: llmObject (80+20) then llm (100+50).
+    expect(after.tokensSpent).toBe(250);
+    // In the normal (non-overage) case the clamped derivation agrees — this
+    // pins that the counter isn't double-counting.
+    expect(after.budgetTokensInitial! - after.budgetTokens!).toBe(after.tokensSpent);
+  });
+
+  it('tokensSpent stays TRUTHFUL in overage, where initial - remaining cannot', async () => {
+    const run = await mintFlow();
+    // A run MINTED with a budget smaller than one hop's cost — set both the
+    // remainder and the initial so the derivation under test is the real one a
+    // client would compute, not an artefact of the fixture. The decrement
+    // clamps at the remainder (budgetTokens floors at 0), but the counter must
+    // record what was actually spent at the provider.
+    await db.appRun.update({
+      where: { id: run.id },
+      data: { budgetTokens: 10, budgetTokensInitial: 10 },
+    });
+    const { deps } = flowDeps(0.92);
+    await executeAppRun(db, run.id, deps);
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.budgetTokens).toBe(0);            // clamped, as designed
+    expect(after.tokensSpent).toBeGreaterThan(10); // unclamped, the real cost
+    // The derivation a client would have had to use under-reports here: it
+    // can never exceed the initial budget (10), while the true spend is 100.
+    expect(after.budgetTokensInitial! - after.budgetTokens!).toBe(10);
+    expect(after.tokensSpent).toBe(100);
+  });
+
+  // PR #854 review (Copilot): this used to be LABELLED as covering a run that
+  // "later failed" while executing a normal one — the label promised a
+  // scenario the body never exercised. Renamed to what it actually asserts.
+  it('tokensSpent is never LESS than the hop-trail sum', async () => {
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    await executeAppRun(db, run.id, deps);
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    const hopSum = Array.isArray(after.hops)
+      ? (after.hops as Array<{ tokensSpent?: number }>).reduce((n, h) => n + (h.tokensSpent ?? 0), 0)
+      : 0;
+    // On a fully-successful run the two agree; the counter can only ever
+    // exceed the trail, never trail it.
+    expect(after.tokensSpent).toBeGreaterThanOrEqual(hopSum);
+  });
+
+  it('a hop whose LLM completed but whose run then FAILED is still counted', async () => {
+    // The real failed-hop case the counter beats the trail on: the LLM call
+    // returns (tokens billed), and the run fails afterwards.
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    // Make the SECOND hop's text call fail after the first hop's extraction
+    // already completed and was counted.
+    (deps as { llm: unknown }).llm = vi.fn(async () => {
+      throw new Error('provider exploded after hop 1');
+    });
+    await executeAppRun(db, run.id, deps);
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe('FAILED');
+    // Hop 1 (llmObject: 80 + 20) completed and IS counted, even though the run
+    // as a whole failed.
+    expect(after.tokensSpent).toBe(100);
+  });
+
+  it('DOCUMENTS the known gap: a TOOL-LOOP abort is not counted', async () => {
+    // generateWithTools discards accumulated usage when a tool throws, so the
+    // provider's already-billed tokens are unavailable at the failure site.
+    // Pinned so the gap is visible and a future fix has a target to flip.
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    (deps as { llmObject: unknown }).llmObject = vi.fn(async () => {
+      throw new ToolDeniedError('hadron_create_node');
+    });
+    await executeAppRun(db, run.id, deps);
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe('FAILED');
+    // Under-reports by construction — see AppRun.tokensSpent's KNOWN GAP note.
+    expect(after.tokensSpent).toBe(0);
+  });
+
+  it('actionsSpent counts admitted actions only', async () => {
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    await executeAppRun(db, run.id, deps);
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.actionsSpent).toBeGreaterThan(0);
+    expect(after.budgetActionsInitial! - after.budgetActions!).toBe(after.actionsSpent);
+  });
+});
