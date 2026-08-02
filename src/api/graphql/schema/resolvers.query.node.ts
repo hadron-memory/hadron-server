@@ -30,7 +30,6 @@ import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retri
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
-import { renderRunNodeBundle } from '../../../lib/runNodeRender.js';
 import {
   parseUrnInput,
   validateUrnType,
@@ -176,10 +175,11 @@ export const nodeQueries = {
      * UsageEvent — metering a preview would inflate the ledger with actions
      * nobody took.
      *
-     * The substitution + inlining come from the SHARED `renderRunNodeBundle`
-     * that the MCP tools call, so a preview cannot disagree with what
-     * `runTask` actually executes — which is the failure mode that makes a
-     * preview worse than none.
+     * Assembles with `assembleRunNodePrompt` — the SAME function `runTask`
+     * executes (Mustache via compileTemplate; flow-routing edges skipped) —
+     * NOT the legacy `renderRunNodeBundle` the MCP tools call, which does a
+     * literal replaceAll and inlines every edge. A preview that disagrees with
+     * the run is worse than none (#858 review, Codex P1).
      */
     renderRunNode: async (
       _: unknown,
