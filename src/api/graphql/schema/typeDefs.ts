@@ -4968,9 +4968,10 @@ export const typeDefs = `#graphql
     # Agent management
     """
     Create an agent. Provide orgId to create an ORG-owned agent (requires org
-    ADMIN); OMIT orgId to create a USER-OWNED agent owned by the caller (spec
-    047) — its URN is namespaced under the caller's @handle and its system
-    memory is user-owned too. Exactly one owner (org XOR user).
+    ADMIN); OMIT orgId to create a USER-OWNED agent owned by the caller — its
+    URN is rooted on the caller's bare handle (hrn:agent:<handle>:<slug>, grammar
+    v2 — no @ sigil) and its system memory is user-owned too. Exactly one owner
+    (org XOR user).
 
     orgId accepts the org's ID or URN.
     """
@@ -5489,8 +5490,9 @@ export const typeDefs = `#graphql
     createApp(
       """
       Provide to create an ORG-owned App (requires org ADMIN). OMIT to create a
-      USER-OWNED App owned by the caller (spec 047) — namespaced under the
-      caller's @handle, owner-only in v1. Accepts the org's ID or URN.
+      USER-OWNED App owned by the caller — rooted on the caller's bare handle
+      (hrn:app:<handle>:<slug>, grammar v2 — no @ sigil), owner-only. Accepts the
+      org's ID or URN.
       """
       orgRef: ID
       """
