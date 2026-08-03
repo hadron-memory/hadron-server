@@ -23,7 +23,7 @@ import type { RunToolDef, RunToolContext } from './types.js';
 const WRITE_ARG_PROPERTIES = {
   urn: {
     type: 'string',
-    description: 'Fully-qualified node URN (org::memory::loc). Same-org only.',
+    description: 'Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Same-org only.',
   },
   name: { type: 'string', description: 'Node display name.' },
   content: { type: 'string', description: 'Markdown content.' },
@@ -68,7 +68,7 @@ function principalAuth(ctx: RunToolContext): AuthContext {
 export const hadronReadNode: RunToolDef = {
   name: 'hadron_read_node',
   description:
-    'Read a Hadron node by fully-qualified URN (org::memory::loc). Returns its name, ' +
+    'Read a Hadron node by fully-qualified URN (hrn:node:<root>:<memory>:<loc>). Returns its name, ' +
     'content, and data. Same-organization nodes only.',
   inputSchema: {
     type: 'object',
@@ -98,7 +98,7 @@ export const hadronReadNode: RunToolDef = {
 export const hadronCreateNode: RunToolDef = {
   name: 'hadron_create_node',
   description:
-    'Create a new Hadron node at the given fully-qualified URN (org::memory::loc). ' +
+    'Create a new Hadron node at the given fully-qualified URN (hrn:node:<root>:<memory>:<loc>). ' +
     'Fails if a node already exists there — use hadron_update_node to change one. ' +
     'Set seq when appending ordered items (e.g. chat messages).',
   inputSchema: {
