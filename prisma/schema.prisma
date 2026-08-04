@@ -1156,7 +1156,7 @@ model NodeEmbedding {
 /// "abstract-of". An edge whose target is not yet synced lives in
 /// PendingEdge until the target arrives.
 /// A directed Node→Node relation, upgraded to a first-class, addressable
-/// entity (it has its own URN `hrn:edge:<org>::<memory>::<loc>`). Edges
+/// entity (it has its own URN `hrn:edge:<root>:<memory>:<loc>`). Edges
 /// drive task execution/automation and the chatbot/conversation platform,
 /// not just describe graph relationships.
 model Edge {
@@ -1168,7 +1168,7 @@ model Edge {
   sourceId    String    @map("source_id")
   targetId    String    @map("target_id")
   /// Colon-delimited path within the memory — the edge's identity and
-  /// the suffix of its URN (`hrn:edge:<org>::<memory>::<loc>`). Required;
+  /// the suffix of its URN (`hrn:edge:<root>:<memory>:<loc>`). Required;
   /// derived from the endpoints + name when not authored (see
   /// `src/lib/edgeLoc.ts`). Mirrors `Node.loc`.
   loc         String
