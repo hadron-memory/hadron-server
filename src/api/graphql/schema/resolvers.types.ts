@@ -6,7 +6,6 @@ import {
   getPrimaryAgentId,
 } from '../../../lib/appAgent.js';
 import {
-  legacyMemoryUrnToCanonical,
 } from '../../../lib/urn.js';
 import {
   emitNodeUrnV2,
@@ -713,26 +712,27 @@ export const typeResolvers = {
         orderBy: { createdAt: 'asc' },
       });
     },
-    // 298/318/352: Canonicalize URN on read. Converts legacy single-colon
-    // hierarchy (e.g. `org:slug`) to canonical spec-021 double-colon form
-    // (`org::slug`) for both legacy and migrated rows. For install-shape
-    // memories with role markers (system, app-mem, app-user, group-mem, priv,
-    // anon), `legacyMemoryUrnToCanonical` preserves the marker:id boundary so
-    // the canonical form round-trips through `parseUrn`
-    // (e.g. `org:agent:app-user:id` → `org::agent::app-user:id`, NOT
-    // `…::app-user::id`). #352: the marker set is now the single source of
-    // truth in urn.ts — `user` (a reserved type word) and `anon` used to
-    // bypass the inline list here and serve non-canonical.
+    // Emit the stored urn as canonical grammar v2 (`hrn:mem:<root>:<slug>`),
+    // whatever shape it is stored in. `safeCanonicalUrn` routes root entity
+    // types to `emitEntityUrnV2` (#697 Stage 2), which collapses `::` and
+    // strips an `@` sigil itself — so a v1 chain, a legacy single-colon row and
+    // an already-v2 row all land on the same output, and no pre-normalization
+    // is needed here.
+    //
+    // This used to promote single-colon rows to the spec-021 `::` form via
+    // `legacyMemoryUrnToCanonical` first, guarded by an `includes('::')` branch.
+    // Both are now redundant: the emitter re-collapses whatever the promotion
+    // produced. The branch was NOT dead, though — it was load-bearing FOR the
+    // promotion, because `legacyMemoryUrnToCanonical` assumes single-colon
+    // input and turns `acme.com::dev` into an empty atom. Removing the
+    // promotion is what makes the branch removable. Pinned by
+    // `resolvers.memoryUrnEmission.test.ts`. This also matches the sibling
+    // Agent/App/Org resolvers, which have always called `safeCanonicalUrn`
+    // directly.
     urn: (g: { urn?: string | null }) => {
       const urn = g.urn;
       if (!urn) throw new Error('Memory URN is required but not found (partial query?)');
-
-      // Already canonical (contains `::`) — pass through
-      if (urn.includes('::')) return safeCanonicalUrn('memory', urn);
-
-      // Legacy single-colon form — promote hierarchy to `::` while preserving
-      // any role-marker:id boundary.
-      return safeCanonicalUrn('memory', legacyMemoryUrnToCanonical(urn));
+      return safeCanonicalUrn('memory', urn);
     },
   },
   App: {
