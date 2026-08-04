@@ -1029,7 +1029,10 @@ export function createMcpServerInstance(
       memoryUrn: z.string().describe('Memory URN, e.g. hrn:mem:hadronmemory.com:dev (bare hadronmemory.com:dev also accepted). Legacy hrn:memory: and :: forms still resolve.'),
     },
     async ({ memoryUrn }) => {
-      // #100 #3: Memory.urn is stored bare ('hadronmemory.com:dev'). Storing
+      // #100 #3: Memory.urn is stored bare — 'hadronmemory.com:dev' in
+      // grammar v2, though pre-flip rows may still hold the v1
+      // 'hadronmemory.com::dev' form, which is why resolveMemoryByUrn above
+      // matches BOTH separators rather than assuming a normalized DB. Storing
       // the caller-supplied string verbatim makes every downstream
       // findFirst({urn:activeMemoryUrn}) silently miss when the caller passed
       // the canonical 'urn:memory:' form. Writes have fallback paths
@@ -2180,7 +2183,7 @@ export function createMcpServerInstance(
     'hadron_get_next_node',
     'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
     {
-      parent: z.string().describe('Fully-qualified parent node URN, e.g. "acme.com:mmdata:sections"'),
+      parent: z.string().describe('Fully-qualified parent node URN, e.g. "hrn:node:acme.com:mmdata:sections"'),
       current: z.string().optional().describe('Fully-qualified current child node URN (must be in the same memory as `parent`)'),
     },
     async ({ parent: rawParent, current: rawCurrent }) => {
