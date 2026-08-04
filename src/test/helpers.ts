@@ -66,6 +66,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.agent.deleteMany();
   await db.memorySubscription.deleteMany();
   await db.memoryLicense.deleteMany();
+  // Admin impersonation audit rows cascade from both User and Organization;
+  // cleared explicitly before their parents to keep cleanup order predictable.
+  await db.impersonationSession.deleteMany();
   await db.orgMember.deleteMany();
   await db.memory.deleteMany();
   await db.organization.deleteMany();

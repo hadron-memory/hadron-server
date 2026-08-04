@@ -38,6 +38,10 @@ export interface OrgActionCaller {
   db: PrismaClient;
   userId?: string | null;
   roles?: string[] | null;
+  // Admin impersonation (read-only session): management actions are all
+  // mutations and already blocked by the read-only plugin; the guard below is
+  // belt-and-braces so a future non-mutation caller of this gate stays scoped.
+  impersonation?: { orgId: string };
 }
 
 /**
@@ -54,6 +58,9 @@ export async function requireOrgAction(
   orgId: string,
   action: PolicyAction,
 ): Promise<void> {
+  // Impersonation: only the session's shared org is in scope (mirrors
+  // requireOrgRole; checked before the platform bypass).
+  if (ctx.impersonation && orgId !== ctx.impersonation.orgId) throw new Error('Forbidden');
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
   if (!ctx.userId) throw new Error('Forbidden');
 

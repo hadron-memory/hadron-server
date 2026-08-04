@@ -371,6 +371,9 @@ export const memoryQueries = {
       // (ctx.appId, no ctx.userId) get an empty page — sharing is user-to-user.
       if (f.sharedWithMe) {
         if (!ctx.userId) return empty;
+        // Impersonation: personal shares are identity-scoped — invisible to
+        // the shared-org-only session even though the TARGET is the grantee.
+        if (ctx.impersonation) return empty;
         const memberOrgIds = await getMemberOrgIds(ctx.db, ctx.userId);
         return page({
           deletedAt: null,
@@ -473,7 +476,12 @@ export const memoryQueries = {
           OR: [
             { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
             { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
-            { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
+            // Admin impersonation: the personal clause is identity-scoped and
+            // dropped — the shared-org session never lists the target's
+            // personal/private memories (matches getAccessibleMemoryIds).
+            ...(ctx.impersonation
+              ? []
+              : [{ class: { in: ['personal', 'private'] as any }, userId: ctx.userId }]),
           ],
         });
       }

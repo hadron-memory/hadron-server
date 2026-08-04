@@ -70,6 +70,12 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     let roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined;
     try {
       const payload = await verifyJwt(authHeader.slice(7));
+      // Admin impersonation: read-only sessions cannot start a mailbox
+      // connection (a state-changing OAuth flow as the target).
+      if (payload.imp) {
+        res.status(401).json({ error: 'Impersonation tokens are not accepted here' });
+        return;
+      }
       userId = payload.sub;
       roles = payload.roles;
     } catch {

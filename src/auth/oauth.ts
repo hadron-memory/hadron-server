@@ -616,6 +616,10 @@ async function getUserIdFromCookie(req: Request): Promise<string | null> {
   if (typeof token !== 'string' || token.length === 0) return null;
   try {
     const payload = await verifyJwt(token);
+    // Admin impersonation: an impersonation token must never authenticate the
+    // OAuth consent screen (it could mint long-lived credentials as the
+    // target). Treat it as anonymous.
+    if (payload.imp) return null;
     return typeof payload.sub === 'string' ? payload.sub : null;
   } catch {
     return null;

@@ -20,14 +20,27 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 
-export async function getMemberOrgIds(db: PrismaClient, userId: string): Promise<string[]> {
+export async function getMemberOrgIds(
+  db: PrismaClient,
+  userId: string,
+  // Admin impersonation: the impersonated session may only see into its ONE
+  // shared org, so callers with a request Context pass
+  // `ctx.impersonation?.orgId` and the membership set collapses to that org
+  // (or [] if the target isn't a member). Undefined = no narrowing. Any new
+  // org-scope helper should copy this pattern.
+  restrictToOrgId?: string,
+): Promise<string[]> {
   // Defensive: Prisma silently DROPS an `undefined` where-filter, so a
   // `userId === undefined` slipping through would turn `where: { userId }`
   // into "all memberships" — a catastrophic cross-org read. Fail closed.
   if (!userId) return [];
 
   const memberships = await db.orgMember.findMany({
-    where: { userId, deletedAt: null },
+    where: {
+      userId,
+      deletedAt: null,
+      ...(restrictToOrgId ? { organizationId: restrictToOrgId } : {}),
+    },
     select: { organizationId: true },
   });
   return memberships.map((m: { organizationId: string }) => m.organizationId);

@@ -35,6 +35,11 @@ export interface UserVisibilityCtx {
   db: PrismaClient;
   userId?: string;
   roles?: readonly string[];
+  // Admin impersonation: when set, the viewer is a read-only impersonated
+  // session scoped to ONE org — visibility derives only from co-membership in
+  // that org (the GraphQL Context carries the full ImpersonationContext and
+  // satisfies this structurally; ad-hoc adapter objects must copy it over).
+  impersonation?: { orgId: string };
 }
 
 const ELEVATED = new Set(['ADMIN', 'OWNER']);
@@ -66,7 +71,15 @@ function viewerOrgIds(ctx: UserVisibilityCtx, viewerId: string): Promise<string[
   const memo = memoFor(ctx);
   if (!memo.viewerOrgIds) {
     memo.viewerOrgIds = ctx.db.orgMember
-      .findMany({ where: { userId: viewerId, deletedAt: null }, select: { organizationId: true } })
+      .findMany({
+        where: {
+          userId: viewerId,
+          deletedAt: null,
+          // Impersonation: co-membership counts only within the shared org.
+          ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
+        },
+        select: { organizationId: true },
+      })
       .then((rows) => rows.map((r) => r.organizationId));
   }
   return memo.viewerOrgIds;
@@ -91,6 +104,8 @@ function sharesOrgWith(ctx: UserVisibilityCtx, viewerId: string, targetUserId: s
 }
 
 function viewerRoleInOrg(ctx: UserVisibilityCtx, viewerId: string, orgId: string): Promise<string | null> {
+  // Impersonation: the viewer has no role anywhere outside the shared org.
+  if (ctx.impersonation && orgId !== ctx.impersonation.orgId) return Promise.resolve(null);
   const memo = memoFor(ctx);
   let p = memo.roleInOrg.get(orgId);
   if (!p) {

@@ -557,6 +557,10 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     db: ctx.db,
     userId: principal.viewerUserId ?? undefined,
     roles: principal.isPlatformAdmin ? ['ADMIN'] : undefined,
+    // Impersonation: judge name/email co-membership within the shared org only.
+    impersonation: principal.impersonationOrgId
+      ? { orgId: principal.impersonationOrgId }
+      : undefined,
   };
 
   // Resolve visibility for all candidate rows concurrently (each may hit the DB

@@ -76,10 +76,11 @@ async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, u
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return live;
   const or: Record<string, unknown>[] = [{ visibility: 'PUBLIC' }];
   if (ctx.userId) {
-    const orgIds = await getMemberOrgIds(ctx.db, ctx.userId);
+    const orgIds = await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId);
     if (orgIds.length > 0) or.push({ organizationId: { in: orgIds } });
-    // spec 047: the caller's own org-less agents.
-    or.push({ ownerUserId: ctx.userId });
+    // spec 047: the caller's own org-less agents. Identity-scoped, so dropped
+    // under impersonation (the shared-org session never sees user-owned rows).
+    if (!ctx.impersonation) or.push({ ownerUserId: ctx.userId });
   }
   // App-key principal (ctx.appId, no ctx.userId): the App is already authorized
   // for the agents installed in it via `myApp.agents`, so dropping those parents
@@ -1277,7 +1278,9 @@ export const typeResolvers = {
         deletedAt: null,
       };
       if (!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) {
-        const orgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+        const orgIds = ctx.userId
+          ? await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId)
+          : [];
         if (orgIds.length === 0) return [];
         where.organizationId = { in: orgIds };
       }
@@ -1296,7 +1299,9 @@ export const typeResolvers = {
     appAgents: async (a: { id: string }, _: unknown, ctx: Context) => {
       const appWhere: Record<string, unknown> = { deletedAt: null };
       if (!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) {
-        const orgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+        const orgIds = ctx.userId
+          ? await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId)
+          : [];
         if (orgIds.length === 0) return [];
         appWhere.organizationId = { in: orgIds };
       }

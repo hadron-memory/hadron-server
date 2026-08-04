@@ -5432,6 +5432,15 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // authenticate; user-credential MCP arrives via OAuth or portal-minted
   // hdr_user_<…> bearer tokens.
   const auth = await resolveAuthContext(req, db);
+  // Admin impersonation: impersonation tokens are not accepted on /mcp (v1).
+  // MCP binds auth ONCE at session init and never re-checks it, so the
+  // per-request session-row revalidation (stop/expiry/demotion) that makes
+  // impersonation safe on /graphql cannot hold here. Rejecting at init is
+  // sufficient — an established session was never minted from one.
+  if (auth.impersonation) {
+    res.status(401).json({ error: 'Impersonation tokens are not accepted on /mcp' });
+    return;
+  }
   if (!auth.appId && !auth.userId && !auth.clientId) {
     // Advertise the protected-resource metadata URL per RFC 9728 §5.1 so
     // MCP-spec-compliant clients (Claude Desktop, MCP Inspector) can
