@@ -5,7 +5,6 @@
  * never traverses to members / private data / credentials.
  */
 import { safeCanonicalUrn } from './resolvers.helpers.js';
-import { legacyMemoryUrnToCanonical } from '../../../lib/urn.js';
 
 export interface PublicRef {
   id: string;
@@ -29,9 +28,10 @@ export function memoryRowToRef(m: {
   return {
     id: m.id,
     name: m.name,
-    urn: m.urn.includes('::')
-      ? safeCanonicalUrn('memory', m.urn)
-      : safeCanonicalUrn('memory', legacyMemoryUrnToCanonical(m.urn)),
+    // Same as the Memory.urn field resolver: safeCanonicalUrn → emitEntityUrnV2
+    // already collapses `::`, so the promote-then-collapse round-trip and its
+    // guard branch are redundant.
+    urn: safeCanonicalUrn('memory', m.urn),
     description: m.shortDescription ?? null,
   };
 }
