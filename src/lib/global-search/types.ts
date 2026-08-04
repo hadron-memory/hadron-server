@@ -101,6 +101,13 @@ export interface SearchPrincipal {
    * before this is set — the engine trusts it as an already-authorized scope.
    */
   orgScopeId?: string | null;
+  /**
+   * Admin impersonation: the single org the impersonated (read-only) session
+   * may see into. Threaded into the User slice's visibility context so
+   * name/email co-membership is judged within this org only — the caller's
+   * orgIds/accessibleMemoryIds are already narrowed upstream. Unset ⇒ normal.
+   */
+  impersonationOrgId?: string | null;
 }
 
 /** Keep only valid `SearchEntityType` values (defensive: MCP bypasses zod). */

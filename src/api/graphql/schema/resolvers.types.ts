@@ -73,10 +73,11 @@ async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, u
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return live;
   const or: Record<string, unknown>[] = [{ visibility: 'PUBLIC' }];
   if (ctx.userId) {
-    const orgIds = await getMemberOrgIds(ctx.db, ctx.userId);
+    const orgIds = await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId);
     if (orgIds.length > 0) or.push({ organizationId: { in: orgIds } });
-    // spec 047: the caller's own org-less agents.
-    or.push({ ownerUserId: ctx.userId });
+    // spec 047: the caller's own org-less agents. Identity-scoped, so dropped
+    // under impersonation (the shared-org session never sees user-owned rows).
+    if (!ctx.impersonation) or.push({ ownerUserId: ctx.userId });
   }
   // App-key principal (ctx.appId, no ctx.userId): the App is already authorized
   // for the agents installed in it via `myApp.agents`, so dropping those parents
@@ -1044,7 +1045,10 @@ export const typeResolvers = {
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).
     appMemberships: async (u: { id: string }, _: unknown, ctx: Context) => {
-      if (ctx.userId !== u.id) return [];
+      // #876 class sweep: self-only by identity, and the rows carry no org
+      // filter — under impersonation `me { appMemberships }` enumerated the
+      // target's App memberships in EVERY org (cross-org disclosure).
+      if (ctx.userId !== u.id || ctx.impersonation) return [];
       return ctx.db.appMember.findMany({
         where: { userId: u.id },
         orderBy: { createdAt: 'asc' },
@@ -1070,10 +1074,15 @@ export const typeResolvers = {
         // PERSONAL: only creator; ORGANIZATION + PUBLIC: all org members.
         // 035-visibility-enum-cleanup: agents use AgentVisibility now; the
         // creator-only draft value is PERSONAL (was PRIVATE).
-        where.OR = [
-          { visibility: { not: 'PERSONAL' as AgentVisibility } },
-          { visibility: 'PERSONAL' as AgentVisibility, createdBy: ctx.userId },
-        ];
+        // #876 class sweep: the PERSONAL branch is creator-keyed, so under
+        // impersonation the target's private DRAFT agents surfaced inside the
+        // shared org. The org is right; the predicate is identity-derived.
+        where.OR = ctx.impersonation
+          ? [{ visibility: { not: 'PERSONAL' as AgentVisibility } }]
+          : [
+              { visibility: { not: 'PERSONAL' as AgentVisibility } },
+              { visibility: 'PERSONAL' as AgentVisibility, createdBy: ctx.userId },
+            ];
       } else {
         // No user (App Key / unauthenticated): never expose PERSONAL
         // (creator-only draft) agents.
@@ -1275,7 +1284,9 @@ export const typeResolvers = {
         deletedAt: null,
       };
       if (!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) {
-        const orgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+        const orgIds = ctx.userId
+          ? await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId)
+          : [];
         if (orgIds.length === 0) return [];
         where.organizationId = { in: orgIds };
       }
@@ -1294,7 +1305,9 @@ export const typeResolvers = {
     appAgents: async (a: { id: string }, _: unknown, ctx: Context) => {
       const appWhere: Record<string, unknown> = { deletedAt: null };
       if (!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) {
-        const orgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+        const orgIds = ctx.userId
+          ? await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId)
+          : [];
         if (orgIds.length === 0) return [];
         appWhere.organizationId = { in: orgIds };
       }

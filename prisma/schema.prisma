@@ -423,6 +423,10 @@ model User {
   dashboardWidgets          DashboardWidget[]
   // #806: the user's SAVED widget configurations (a palette, not a placement).
   dashboardWidgetPresets    DashboardWidgetPreset[]
+  // Admin impersonation (read-only support sessions): sessions this user
+  // started as the admin actor / was the target of.
+  impersonationSessionsAsAdmin  ImpersonationSession[] @relation("ImpersonationSessionsAsAdmin")
+  impersonationSessionsAsTarget ImpersonationSession[] @relation("ImpersonationSessionsAsTarget")
   // #692 — the user's root principal in the unified pool (handle is the
   // denormalized read source-of-truth, kept in sync at mint).
   principalId               String?                    @unique @map("principal_id")
@@ -551,6 +555,8 @@ model Organization {
   apps                   App[]
   agentOrgGrants         AgentOrgGrant[]
   aiServiceConfigs       AiServiceConfig[]
+  // Admin impersonation (read-only support sessions) scoped to this org.
+  impersonationSessions  ImpersonationSession[]
   // #692 — the org's root principal in the unified pool (urn is the denormalized
   // read source-of-truth, kept in sync at mint).
   principalId            String?                 @unique @map("principal_id")
@@ -3085,6 +3091,46 @@ model UserApiKey {
 
   @@index([userId])
   @@map("user_api_keys")
+}
+
+/// Admin-impersonation audit record AND revocation source of truth. One row
+/// per impersonation session: an org ADMIN/OWNER (or platform admin) viewing
+/// the platform read-only as `targetUserId`, scoped to `organizationId` — the
+/// single org shared by admin and target (other orgs and all personal-class
+/// resources stay invisible; see src/lib/auth/impersonation.ts).
+///
+/// A session is LIVE iff `endedAt IS NULL AND expiresAt > now()`. Expiry is
+/// derived from `expiresAt` at read time and never written back; `endedAt` is
+/// set only by an explicit stop. Rows are never deleted by the stop path —
+/// the table is the durable audit trail (who impersonated whom, where, when).
+model ImpersonationSession {
+  id             String    @id @default(cuid())
+  /// Actor (the admin). Schema-wide audit-actor convention: `User.id`.
+  adminUserId    String    @map("admin_user_id")
+  /// The member being impersonated.
+  targetUserId   String    @map("target_user_id")
+  /// The shared org that scopes the impersonated session's reads.
+  organizationId String    @map("organization_id")
+  /// Optional support/diagnostic reason supplied at start. Capped at the
+  /// resolver (USER_API_KEY_LABEL_MAX_LEN precedent).
+  reason         String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  expiresAt      DateTime  @map("expires_at")
+  /// Explicit-stop timestamp. NULL while live or when the session merely
+  /// lapsed by TTL.
+  endedAt        DateTime? @map("ended_at")
+  /// `User.id` of whoever stopped it early (the admin in v1 — never the
+  /// target: the impersonated context's self-stop records the actor).
+  endedBy        String?   @map("ended_by")
+
+  adminUser    User         @relation("ImpersonationSessionsAsAdmin", fields: [adminUserId], references: [id], onDelete: Cascade)
+  targetUser   User         @relation("ImpersonationSessionsAsTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId])
+  @@index([targetUserId])
+  @@index([organizationId, createdAt])
+  @@map("impersonation_sessions")
 }
 
 /// OAuth 2.1 client registry (spec 025-oauth-for-mcp; D-2026-05-17-002).

@@ -46,7 +46,12 @@ export const appQueries = {
         // admin-bypass surface (mirrors the owner-only personal/private
         // memories slice). Org-less by definition, so orgId is not consulted;
         // App-key callers (no ctx.userId) get an empty page.
-        if (!ctx.userId) return { items: [], total: 0 };
+        // #876: identical to the agents list — user-owned Apps are
+        // identity-scoped and invisible under impersonation. These carry the
+        // sharper payload: App.keys / App.members are ungated field resolvers,
+        // so a leaked App handed over key previews, labels, last-used stamps,
+        // and the member roster that appKeys(appRef:) gates at org-ADMIN.
+        if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
         where = { deletedAt: null, organizationId: null, ownerUserId: ctx.userId };
       } else {
         const scope = await resolveOrgScope(ctx, orgId);
@@ -71,7 +76,11 @@ export const appQueries = {
           const ownerClauses: Record<string, unknown>[] = [
             { organizationId: { in: scope.memberOrgIds } },
           ];
-          if (!scopedToOrg && ctx.userId) ownerClauses.push({ ownerUserId: ctx.userId });
+          // #876: as with agents, the DEFAULT view folded user-owned Apps in,
+          // so the leak did not depend on filter.ownedByMe.
+          if (!scopedToOrg && ctx.userId && !ctx.impersonation) {
+            ownerClauses.push({ ownerUserId: ctx.userId });
+          }
           where = { deletedAt: null, OR: ownerClauses };
         }
       }
@@ -172,6 +181,10 @@ export const appQueries = {
           { extensions: { code: 'UNAUTHENTICATED' } },
         );
       }
+      // #876 class sweep: the target's personal API-credential inventory
+      // (previews, labels, last-used stamps, active AND revoked) is
+      // identity-scoped — never part of a shared-org support view.
+      if (ctx.impersonation) throw new Error('Forbidden');
       return ctx.db.userApiKey.findMany({
         where: { userId: ctx.userId },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],

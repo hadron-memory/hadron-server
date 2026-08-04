@@ -6,6 +6,17 @@ export interface HadronJwtPayload extends JWTPayload {
   githubUsername?: string; // GitHub username (GitHub users)
   githubId?: number;       // GitHub numeric ID (GitHub users)
   email?: string;          // email address (email users)
+  /// Admin-impersonation claim (read-only support sessions). When present,
+  /// `sub` is the TARGET user and `roles` MUST be `[]` (no platform-role
+  /// inheritance). The claim only names the session — the ImpersonationSession
+  /// row is the source of truth, re-validated on every request by
+  /// `resolveJwt` (src/middleware/auth.ts), so an ended/expired session or a
+  /// demoted admin kills the token immediately, mid-TTL.
+  imp?: {
+    sid: string; // ImpersonationSession.id
+    act: string; // actor (admin) User.id
+    org: string; // the single org scoping the session's reads
+  };
 }
 
 const JWT_ISSUER = 'hadron-server';
@@ -18,15 +29,21 @@ function getSecret(): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
+/**
+ * Sign a Hadron JWT. `opts.expiresIn` (jose duration string or epoch seconds)
+ * overrides the default `JWT_EXPIRY` — used by impersonation tokens, whose
+ * lifetime is the (much shorter) session TTL rather than the login expiry.
+ */
 export async function signJwt(
   payload: Omit<HadronJwtPayload, 'iss' | 'aud' | 'iat' | 'exp'>,
+  opts?: { expiresIn?: string | number },
 ): Promise<string> {
   return new SignJWT(payload as unknown as Record<string, unknown>)
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setIssuer(JWT_ISSUER)
     .setAudience(JWT_AUDIENCE)
-    .setExpirationTime(JWT_EXPIRY)
+    .setExpirationTime(opts?.expiresIn ?? JWT_EXPIRY)
     .sign(getSecret());
 }
 

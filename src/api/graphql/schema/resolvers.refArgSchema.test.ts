@@ -38,6 +38,7 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   removeAgentFromApp: ['appRef', 'agentRef'],
   publishAgentImport: ['parentAgentRef', 'importedAgentRef'],
   removeAgentImport: ['parentAgentRef', 'importedAgentRef'],
+  startImpersonation: ['orgRef', 'userRef'],
 };
 
 /**

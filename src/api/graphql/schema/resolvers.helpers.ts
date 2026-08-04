@@ -46,6 +46,7 @@ import {
   AgentNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
 import {
   Prisma,
@@ -61,6 +62,12 @@ export interface Context {
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
+  // Admin impersonation: set when the request authenticated with an
+  // impersonation JWT — userId is the TARGET, roles is [], and reads must be
+  // scoped to impersonation.orgId with all personal-class access dropped (the
+  // org-scope chokepoints in this file + src/lib/auth consult it). Mutations
+  // are blocked wholesale by the read-only Apollo plugin.
+  impersonation?: ImpersonationContext;
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
@@ -336,19 +343,29 @@ export async function canReadMemoryRecord(
   },
 ): Promise<boolean> {
   if (memory.class === 'personal' || memory.class === 'private') {
+    // Impersonation: personal-class records are invisible even though the
+    // TARGET owns them — the shared-org scope excludes all identity-scoped
+    // resources (the target-as-owner check below would otherwise admit them).
+    if (ctx.impersonation) return false;
     if (ctx.userId && memory.userId === ctx.userId) return true;
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory as never))) return true;
     return false;
   }
   if (memory.ownerUserId != null) {
+    // Impersonation: user-owned (spec 047) records are identity-scoped —
+    // invisible for the same reason as personal/private above.
+    if (ctx.impersonation) return false;
     return !!ctx.userId && memory.ownerUserId === ctx.userId;
   }
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
   // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no longer
   // grants access. A user-owned memory (org NULL) has no membership fast-path
-  // and was already returned above.
+  // and was already returned above. Under impersonation the fast-path only
+  // applies inside the session's shared org.
   const member =
-    ctx.userId && memory.organizationId
+    ctx.userId &&
+    memory.organizationId &&
+    (!ctx.impersonation || ctx.impersonation.orgId === memory.organizationId)
       ? await ctx.db.orgMember.findFirst({
           where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
         })
@@ -408,6 +425,13 @@ export async function requireOrgRole(
   orgId: string,
   required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER',
 ): Promise<void> {
+  // Impersonation: the session may only see into its ONE shared org. Without
+  // this, a read resolver gating on a NAMED org (dashboard, usage, org detail)
+  // would honor the target's memberships in their OTHER orgs. Checked before
+  // the platform short-circuit (inert under impersonation anyway — roles: []).
+  if (ctx.impersonation && orgId !== ctx.impersonation.orgId) {
+    throw new Error('Forbidden');
+  }
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
   if (!ctx.userId) throw new Error('Forbidden');
   // findFirst (not findUnique on the composite PK) so a REVOKED (soft-deleted)
@@ -456,6 +480,9 @@ export async function requireOwnerOrOrgRole(
   // NO platform-admin bypass, consistent with personal/private strict ownership
   // (cor:acl:010:02). The owner check runs BEFORE the admin/org path.
   if (entity.ownerUserId !== null) {
+    // Impersonation: user-owned entities are identity-scoped — the target
+    // owning it does NOT admit the impersonated (shared-org-only) session.
+    if (ctx.impersonation) throw new Error('Forbidden');
     if (ctx.userId && ctx.userId === entity.ownerUserId) return;
     throw new Error('Forbidden');
   }
@@ -478,7 +505,10 @@ export async function isOwnerOrOrgMember(
   ctx: Context,
   entity: { organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
-  if (entity.ownerUserId !== null) return !!ctx.userId && ctx.userId === entity.ownerUserId;
+  // Impersonation: user-owned entities are identity-scoped and invisible.
+  if (entity.ownerUserId !== null) {
+    return !ctx.impersonation && !!ctx.userId && ctx.userId === entity.ownerUserId;
+  }
   if (isPlatformAdmin(ctx)) return true;
   if (entity.organizationId !== null) return isOrgMemberOrAdmin(ctx, entity.organizationId);
   return false;
@@ -494,6 +524,8 @@ export async function isOwnerOrOrgMember(
  * (matches `requireOrgRole`).
  */
 export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<boolean> {
+  // Impersonation: only the session's shared org can admit (see requireOrgRole).
+  if (ctx.impersonation && orgId !== ctx.impersonation.orgId) return false;
   if (isPlatformAdmin(ctx)) return true;
   if (!ctx.userId) return false;
   const member = await ctx.db.orgMember.findFirst({
@@ -690,7 +722,12 @@ export async function resolveOrgScope(
   let memberOrgIds: string[] = [];
   if (ctx.userId) {
     const memberships = await ctx.db.orgMember.findMany({
-      where: { userId: ctx.userId, deletedAt: null },
+      where: {
+        userId: ctx.userId,
+        deletedAt: null,
+        // Impersonation: only the session's shared org counts as "member".
+        ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
+      },
       select: { organizationId: true },
     });
     memberOrgIds = memberships.map((m) => m.organizationId);
@@ -842,7 +879,16 @@ export async function getAccessibleMemoryIds(
     // 035-visibility-enum-cleanup rationale for `class IN (knowledge, group)`
     // (app/system reached via AppMember/the agent surface, not this node
     // query) now lives in that helper's header.
-    const orgPublicIds = await getOrgReadableMemoryIds(ctx.db, ctx.userId, onlyMemoryId);
+    const orgPublicIds = await getOrgReadableMemoryIds(
+      ctx.db,
+      ctx.userId,
+      onlyMemoryId,
+      ctx.impersonation?.orgId,
+    );
+    // Impersonation: the identity-scoped clauses below (personal/private,
+    // per-user holdings, user-owned, shares) are all dropped — the shared-org
+    // scope admits ONLY the org/public/subscription set computed above.
+    if (ctx.impersonation) return orgPublicIds;
     // Identity-scoped clauses stay local — owner-only, not org-wide:
     //   - 034: owner-owned personal/private memories (only the owner).
     //   - the caller's own per-user "holding" memories (userMemoryOfAgentId
@@ -907,7 +953,12 @@ export async function sessionScopeFilter(ctx: Context): Promise<Record<string, u
   // JWT user — sessions for Apps in any org the user is a member of.
   if (ctx.userId) {
     const memberships = await ctx.db.orgMember.findMany({
-      where: { userId: ctx.userId, deletedAt: null },
+      where: {
+        userId: ctx.userId,
+        deletedAt: null,
+        // Impersonation: sessions of the shared org's Apps only.
+        ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
+      },
       select: { organizationId: true },
     });
     const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
@@ -1638,6 +1689,18 @@ export async function requireEmailConnection(
   userId: string;
   mailboxEmail: string;
 }> {
+  // #876 (HIGH): an ExchangeConnection is ALWAYS identity-scoped — a mailbox,
+  // calendar, or Drive belonging to one person. The interactive-owner branch
+  // below authorizes on `ctx.userId === connection.userId`, and its own
+  // comment records the intended boundary: "org admins included → denied".
+  // Under impersonation ctx.userId IS the owner, which would inverted that
+  // denial into permission across nine read surfaces (exchangeMessages,
+  // exchangeFolders, calendars, calendarEvents, calendarEvent,
+  // calendarSchedule, driveFiles, driveFile, driveFileExport) — an org admin
+  // reading an employee's private mail, calendar, and Drive exports. A
+  // blanket deny is correct: no impersonated operation on this surface is
+  // in-scope, so there is no per-operation carve-out to make.
+  if (ctx.impersonation) throw new Error('Forbidden');
   // findFirst (not findUnique) so deletedAt filters in the query — the
   // revoked-membership pattern (PR #475). The `select` is load-bearing: it
   // keeps the legacy encrypted-token column out of the returned object, so

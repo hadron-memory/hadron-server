@@ -30,6 +30,11 @@ import { mcpQueries } from './resolvers.query.mcp.js';
 import { homeAssistantQueries } from './resolvers.query.homeAssistant.js';
 import { resendSenderQueries } from './resolvers.query.resendSender.js';
 import { secretMutations, secretQueries } from './resolvers.secret.js';
+import {
+  impersonationMutations,
+  impersonationQueries,
+  impersonationTypeResolvers,
+} from './resolvers.impersonation.js';
 import { dashboardQueries, dashboardMutations } from './resolvers.dashboard.js';
 
 import { nodeMutations } from './resolvers.mutation.node.js';
@@ -57,6 +62,7 @@ export const resolvers = {
   // property of the schema rather than something each type has to remember.
   DateTime: dateTimeScalar,
   ...typeResolvers,
+  ...impersonationTypeResolvers,
   Query: {
     ...nodeQueries,
     ...objectQueries,
@@ -78,6 +84,7 @@ export const resolvers = {
     ...connectionGrantQueries,
     ...principalGrantQueries,
     ...meteringQueries,
+    ...impersonationQueries,
   },
   Mutation: {
     ...nodeMutations,
@@ -101,5 +108,6 @@ export const resolvers = {
     ...homeAssistantMutations,
     ...resendSenderMutations,
     ...secretMutations,
+    ...impersonationMutations,
   },
 };

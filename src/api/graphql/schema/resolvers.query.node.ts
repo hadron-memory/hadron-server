@@ -266,6 +266,8 @@ export const nodeQueries = {
       // gate, but returning a boolean instead of throwing so we can collapse
       // no-access to null.
       const isOrgMember = async (orgId: string): Promise<boolean> => {
+        // Impersonation: only the session's shared org can admit.
+        if (ctx.impersonation && orgId !== ctx.impersonation.orgId) return false;
         if (isGlobalAdmin) return true;
         if (!ctx.userId) return false;
         const member = await ctx.db.orgMember.findFirst({
@@ -408,6 +410,8 @@ export const nodeQueries = {
               where: {
                 userId: ctx.userId,
                 deletedAt: null,
+                // Impersonation: co-membership counts only in the shared org.
+                ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
                 organization: { members: { some: { userId: id, deletedAt: null } } },
               },
               select: { organizationId: true },
@@ -795,7 +799,7 @@ export const nodeQueries = {
         }
         let authorized = false;
         if (ctx.userId) {
-          const memberOrgIds = await getMemberOrgIds(ctx.db, ctx.userId);
+          const memberOrgIds = await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId);
           authorized = memberOrgIds.includes(resolvedOrgId);
         } else if (ctx.appId) {
           // App-key: its access is already confined to its App's org via the

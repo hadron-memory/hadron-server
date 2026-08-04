@@ -441,6 +441,10 @@ async function agentGrants(
   db: PrismaClient,
   subject: Subject,
   agent: { id: string; organizationId: string | null; ownerUserId: string | null },
+  // Admin impersonation: narrow the subject's membership enumeration to the
+  // session's shared org so an AgentOrgGrant reached via ANOTHER org of the
+  // subject can't leak that org's URN/membership into the audit result.
+  restrictOrgId?: string,
 ): Promise<InternalGrant[]> {
   const grants: InternalGrant[] = [];
 
@@ -486,7 +490,11 @@ async function agentGrants(
 
   // Org-level grants the subject inherits as an org member.
   const memberships = await db.orgMember.findMany({
-    where: { userId: subject.id, deletedAt: null },
+    where: {
+      userId: subject.id,
+      deletedAt: null,
+      ...(restrictOrgId ? { organizationId: restrictOrgId } : {}),
+    },
     select: { organizationId: true },
   });
   const orgIds = memberships.map((m) => m.organizationId);
@@ -664,6 +672,10 @@ export async function computeEffectiveAccess(
   db: PrismaClient,
   subject: Subject,
   resolved: ResolvedResource,
+  // Admin impersonation: the caller is a read-only session scoped to ONE org
+  // (the resolver has already refused resources outside it); this narrows the
+  // remaining cross-org enumeration (agent org-grants) to that org.
+  opts?: { restrictOrgId?: string },
 ): Promise<EffectiveAccessResult> {
   switch (resolved.kind) {
     case 'memory': {
@@ -698,7 +710,7 @@ export async function computeEffectiveAccess(
       return assemble(subject.id, resolved.app.urn, 'app', grants);
     }
     case 'agent': {
-      const grants = await agentGrants(db, subject, resolved.agent);
+      const grants = await agentGrants(db, subject, resolved.agent, opts?.restrictOrgId);
       return assemble(subject.id, resolved.agent.urn, 'agent', grants);
     }
     case 'aiServiceConfig': {

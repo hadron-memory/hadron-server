@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'crypto';
 import type { Request } from 'express';
 import type { PrismaClient, UserApiKey } from '../generated/prisma/index.js';
 import { verifyJwt } from '../auth/jwt.js';
+import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
 
 export interface AuthContext {
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
@@ -11,6 +12,14 @@ export interface AuthContext {
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (not JWTs)
+  /**
+   * Set when the request authenticated with an impersonation JWT: `userId` is
+   * the TARGET user, `roles` is `[]`, and this carries the session + the
+   * admin actor + the single org the session may see into. Read surfaces
+   * consult it to narrow scope; mutations are blocked wholesale (Apollo
+   * plugin); /mcp rejects it at session init.
+   */
+  impersonation?: ImpersonationContext;
 }
 
 // App Keys use a distinct prefix so the middleware can route them without
@@ -275,6 +284,9 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
       select: { id: true },
     });
     if (!user) return {};
+    if (payload.imp) {
+      return resolveImpersonationJwt(payload, db);
+    }
     const clientId = payload.githubUsername
       ? `github:${payload.githubUsername}`
       : `email:${payload.email}`;
@@ -286,4 +298,83 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
   } catch {
     return {}; // invalid or expired JWT
   }
+}
+
+/**
+ * Resolve an impersonation JWT (payload carries `imp`) to a scoped
+ * AuthContext, or `{}`. The signed claim only NAMES the session — the
+ * ImpersonationSession row is authoritative and every condition is re-checked
+ * from the DB per request, so ending the session, TTL lapse, demoting or
+ * removing the admin, or removing the target from the org each kills the
+ * token immediately. Every failure mode returns `{}` indistinguishably from
+ * a bad token (no reason-leak, matching the credential-resolution posture).
+ *
+ * A resolved context has `userId` = target, `roles: []` (never the target's
+ * platform roles — no privilege inheritance), and `impersonation` set.
+ */
+async function resolveImpersonationJwt(
+  payload: Awaited<ReturnType<typeof verifyJwt>>,
+  db: PrismaClient,
+): Promise<AuthContext> {
+  const imp = payload.imp;
+  if (!imp?.sid || !imp.act || !imp.org) return {};
+
+  // Live session row: not ended, not expired.
+  const session = await db.impersonationSession.findFirst({
+    where: { id: imp.sid, endedAt: null, expiresAt: { gt: new Date() } },
+  });
+  if (!session) return {};
+
+  // Claims must match the row exactly — a token can never repoint a session
+  // at a different target/org than the one audited at mint.
+  if (
+    session.adminUserId !== imp.act ||
+    session.targetUserId !== payload.sub ||
+    session.organizationId !== imp.org
+  ) {
+    return {};
+  }
+
+  // Re-derive BOTH live org roles and re-apply the full peer-or-below rule on
+  // every request — not just that the memberships still exist. A role change
+  // after mint (target promoted to OWNER, or an OWNER actor demoted to ADMIN)
+  // must invalidate the token immediately, exactly as an explicit stop does.
+  const admin = await db.user.findFirst({
+    where: { id: session.adminUserId, deletedAt: null },
+    select: { id: true, roles: true },
+  });
+  if (!admin) return {};
+
+  const [targetMembership, adminMembership] = await Promise.all([
+    db.orgMember.findFirst({
+      where: { organizationId: imp.org, userId: session.targetUserId, deletedAt: null },
+      select: { role: true },
+    }),
+    db.orgMember.findFirst({
+      where: { organizationId: imp.org, userId: session.adminUserId, deletedAt: null },
+      select: { role: true },
+    }),
+  ]);
+
+  const authorized = canImpersonate({
+    actorIsPlatformAdmin: admin.roles.includes('ADMIN') || admin.roles.includes('OWNER'),
+    actorOrgRole: adminMembership?.role ?? null,
+    targetOrgRole: targetMembership?.role ?? null,
+  });
+  if (!authorized) return {};
+
+  return {
+    clientId: `impersonation:${session.adminUserId}`,
+    userId: session.targetUserId,
+    // Never the target's platform roles: the impersonated context must not
+    // inherit platform-admin reach, and `roles: []` also keeps every
+    // isPlatformAdmin/requireRole branch inert.
+    roles: [],
+    impersonation: {
+      sessionId: session.id,
+      actorUserId: session.adminUserId,
+      orgId: session.organizationId,
+      expiresAt: session.expiresAt,
+    },
+  };
 }

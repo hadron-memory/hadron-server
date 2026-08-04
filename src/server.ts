@@ -35,6 +35,7 @@ import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { resolvers } from './api/graphql/schema/resolvers.js';
+import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
 import { UrnNotQualifiedError, UrnParseError } from './lib/urn.js';
@@ -963,7 +964,19 @@ export async function createServer(): Promise<Express> {
     }
     try {
       const payload = await verifyJwt(authHeader.slice(7));
-      const user = await db.user.findUnique({ where: { id: payload.sub } });
+      // Admin impersonation: this endpoint bypasses resolveAuthContext (and so
+      // the session-row re-validation), so an impersonation token is rejected
+      // outright rather than echoing the target's profile.
+      if (payload.imp) {
+        res.status(401).json({ error: 'Impersonation tokens are not accepted here' });
+        return;
+      }
+      // findFirst + deletedAt so a soft-deleted user's still-unexpired JWT
+      // stops returning their profile here too. `resolveJwt` has had this
+      // liveness check since #662 ("deleteUser must cut off ALL credentials
+      // immediately"); this endpoint verifies the JWT directly and had been
+      // missing it, so the two disagreed for up to a token lifetime.
+      const user = await db.user.findFirst({ where: { id: payload.sub, deletedAt: null } });
       if (!user) {
         res.status(404).json({ error: 'User not found' });
         return;
@@ -990,7 +1003,7 @@ export async function createServer(): Promise<Express> {
   const apollo = new ApolloServer({
     typeDefs,
     resolvers,
-    plugins: [sentryApolloPlugin],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],
     formatError: (formattedError, error) => {
       // Spec 022: surface UrnNotQualifiedError with a stable error code so
       // external callers can branch on it programmatically. The unwrap

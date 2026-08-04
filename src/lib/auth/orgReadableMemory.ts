@@ -40,6 +40,10 @@ export async function getOrgReadableMemoryIds(
   // enumerating the whole org-readable set. The predicate is unchanged, just
   // narrowed — the result is `[onlyMemoryId]` or `[]`.
   onlyMemoryId?: string,
+  // Admin impersonation: narrow the membership set to the session's ONE
+  // shared org (see getMemberOrgIds — same pattern). The PUBLIC clause is
+  // membership-independent and deliberately unchanged: public stays public.
+  restrictToOrgId?: string,
 ): Promise<string[]> {
   // Defensive: Prisma silently DROPS an `undefined` where-filter, so a
   // `userId === undefined` slipping through (upstream widening, a bad call
@@ -48,7 +52,11 @@ export async function getOrgReadableMemoryIds(
   if (!userId) return [];
 
   const memberships = await db.orgMember.findMany({
-    where: { userId, deletedAt: null },
+    where: {
+      userId,
+      deletedAt: null,
+      ...(restrictToOrgId ? { organizationId: restrictToOrgId } : {}),
+    },
     select: { organizationId: true },
   });
   const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);

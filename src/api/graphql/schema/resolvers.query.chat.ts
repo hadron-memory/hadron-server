@@ -17,6 +17,15 @@ export const chatQueries = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
+      // #876 (HIGH): the chat surface authorizes on raw caller identity and
+      // deliberately bypasses memoryAccessFilter (see src/lib/chatLoc.ts), so
+      // neither the org narrowing nor the personal-class carve-out reaches it.
+      // Under impersonation this returned the TARGET's private per-user agent
+      // chats (createdBy) plus App chats from their OTHER orgs (the AppMember
+      // lookups carry no organizationId filter) — decrypted transcripts, the
+      // highest-sensitivity per-user data on the platform. No support case in
+      // v1 justifies reading someone's private AI conversations.
+      if (ctx.impersonation) throw new Error('Forbidden');
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
 
@@ -143,6 +152,11 @@ export const chatQueries = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
+      // #876 (HIGH): same identity-scoped bypass as myChats above — chatLoc's
+      // filter is keyed on createdBy / the caller's AppMember rows with no org
+      // constraint, and the site gate admits on `mem.createdBy === ctx.userId`.
+      // Impersonated sessions do not read chat transcripts.
+      if (ctx.impersonation) throw new Error('Forbidden');
       // #829: narrow to chats this caller is entitled to BEFORE picking one.
       // `loc` is unique per memory, so an attacker who learns a chat id could
       // plant a node at that loc; filtering by entitlement first means it can

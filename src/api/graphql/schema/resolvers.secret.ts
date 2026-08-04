@@ -128,7 +128,10 @@ async function canSeeSecretOwner(
 ): Promise<boolean> {
   switch (ownerType) {
     case 'user':
-      return !!ctx.userId && ctx.userId === ownerId;
+      // #876 class sweep: a user-scoped secret is identity-scoped — the
+      // target owning it does not admit an impersonated session. (Org-scoped
+      // secrets stay reachable via isOrgMemberOrAdmin, which is narrowed.)
+      return !!ctx.userId && ctx.userId === ownerId && !ctx.impersonation;
     case 'org':
       return isOrgMemberOrAdmin(ctx, ownerId);
   }

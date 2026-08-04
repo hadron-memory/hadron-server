@@ -72,6 +72,38 @@ export const orgQueries = {
         throw new GraphQLError('Resource not found', { extensions: { code: 'NOT_FOUND' } });
       }
 
+      // Admin impersonation: the read-only session may audit ONLY resources
+      // owned by its shared org — never identity-scoped resources (user-owned,
+      // personal/private — even the target's own) and never other orgs'. This
+      // runs before the self-audit shortcut below, which would otherwise let
+      // the impersonated context (userId = target) self-audit out of scope.
+      if (ctx.impersonation) {
+        const impOrgId = ctx.impersonation.orgId;
+        const resourceOrgId =
+          resolved.kind === 'memory' || resolved.kind === 'node'
+            ? resolved.memory.ownerUserId === null &&
+              resolved.memory.class !== 'personal' &&
+              resolved.memory.class !== 'private'
+              ? resolved.memory.organizationId
+              : null
+            : resolved.kind === 'app'
+              ? resolved.app.ownerUserId === null
+                ? resolved.app.organizationId
+                : null
+              : resolved.kind === 'agent'
+                ? resolved.agent.ownerUserId === null
+                  ? resolved.agent.organizationId
+                  : null
+                : resolved.kind === 'organization'
+                  ? resolved.org.id
+                  : resolved.kind === 'aiServiceConfig'
+                    ? resolved.config.organizationId
+                    : null;
+        if (resourceOrgId !== impOrgId) {
+          throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+        }
+      }
+
       // Who may CALL this — the same visibility bar as the underlying grant
       // tables. A non-privileged caller gets FORBIDDEN, never a silent empty
       // result, so the audit command can't probe access it isn't allowed to.
@@ -92,6 +124,7 @@ export const orgQueries = {
         ctx.db,
         { id: subjectUser.id, roles: subjectUser.roles },
         resolved,
+        ctx.impersonation ? { restrictOrgId: ctx.impersonation.orgId } : undefined,
       );
       // Attach the loaded User row so the User field resolvers work off it.
       return { ...result, user: subjectUser };
@@ -121,6 +154,8 @@ export const orgQueries = {
           where: {
             userId: ctx.userId,
             deletedAt: null,
+            // Impersonation: co-membership counts only in the shared org.
+            ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
             organization: { members: { some: { userId: id, deletedAt: null } } },
           },
           select: { organizationId: true },
@@ -180,7 +215,9 @@ export const orgQueries = {
       // the enumeration path #384 closes — return an empty page instead.
       if (q === '') return { items: [], total: 0 };
 
-      const viewerOrgIds = isPlatformAdmin ? [] : await getMemberOrgIds(ctx.db, ctx.userId!);
+      const viewerOrgIds = isPlatformAdmin
+        ? []
+        : await getMemberOrgIds(ctx.db, ctx.userId!, ctx.impersonation?.orgId);
       const nameMatch = isPlatformAdmin
         ? searchContains('name', q)
         : {
@@ -229,7 +266,9 @@ export const orgQueries = {
       const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
       // The caller's member orgs (admin included) — both the default org scope
       // for non-admins and the membership gate for orgId. Computed once.
-      const callerOrgIds = ctx.userId ? await getMemberOrgIds(ctx.db, ctx.userId) : [];
+      const callerOrgIds = ctx.userId
+        ? await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId)
+        : [];
       let orgIds: string[] | null = isPlatformAdmin ? null : callerOrgIds;
 
       // #463: optional single-org narrowing. orgScopeId AND-constrains the
@@ -262,6 +301,7 @@ export const orgQueries = {
         // so an admin still finds a hidden org they belong to.
         viewerOrgIds: callerOrgIds,
         orgScopeId,
+        impersonationOrgId: ctx.impersonation?.orgId ?? null,
       };
       return runGlobalSearch(ctx.db, { query, entityTypes, fields, limit, offset }, principal);
     },
@@ -286,6 +326,17 @@ export const orgQueries = {
         appId: ctx.appId ?? null,
         agentId: null, // reserved — no agent-credential principal today
         apiKeyId: ctx.apiKeyId ?? null,
+        // Admin impersonation: the acting-as facts of this credential (the
+        // ImpersonationInfo field resolvers hydrate actorUser lazily).
+        impersonation: ctx.impersonation
+          ? {
+              sessionId: ctx.impersonation.sessionId,
+              actorUserId: ctx.impersonation.actorUserId,
+              organizationId: ctx.impersonation.orgId,
+              expiresAt: ctx.impersonation.expiresAt,
+              readOnly: true,
+            }
+          : null,
       };
     },
 
@@ -351,11 +402,12 @@ export const orgQueries = {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveOrgRef(ctx.db, ref);
       const isAdmin = !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
-      const isMember = ctx.userId
-        ? !!(await ctx.db.orgMember.findFirst({
-            where: { organizationId: resolvedId, userId: ctx.userId, deletedAt: null },
-          }))
-        : false;
+      const isMember =
+        ctx.userId && (!ctx.impersonation || ctx.impersonation.orgId === resolvedId)
+          ? !!(await ctx.db.orgMember.findFirst({
+              where: { organizationId: resolvedId, userId: ctx.userId, deletedAt: null },
+            }))
+          : false;
       if (!isMember) {
         // Spec 048: `isVisible` was dropped with the auto-personal org. Every org
         // is now listable, so a platform admin may resolve any org by ref; a

@@ -1331,6 +1331,62 @@ export const typeDefs = `#graphql
     # authenticated via an hdr_user_ key (its id, label, keyPreview,
     # createdAt, lastUsedAt, revokedAt). Null for JWT sessions and App keys.
     apiKey: UserApiKey
+    # Set when the credential is an impersonation token: this request runs
+    # READ-ONLY as the target user, scoped to one org. Null for every other
+    # credential. Portal and CLI read this to render the acting-as state.
+    impersonation: ImpersonationInfo
+  }
+
+  # Admin impersonation (read-only support sessions): the acting-as facts of
+  # THIS request's credential, surfaced on AuthContext so whoami-style
+  # consumers can name the real actor, the scope org, and the expiry.
+  type ImpersonationInfo {
+    sessionId: ID!
+    # The admin behind the curtain (visibility per the normal User field
+    # rules — the actor is a co-member of the scope org).
+    actorUser: User
+    organizationId: ID!
+    expiresAt: DateTime!
+    # Always true in v1 — impersonated sessions cannot mutate.
+    readOnly: Boolean!
+  }
+
+  # One admin-impersonation session: the durable audit record (who
+  # impersonated whom, in which org, when) AND the revocation source of
+  # truth (stopImpersonation writes endedAt; rows are never deleted).
+  type ImpersonationSession {
+    id: ID!
+    adminUser: User!
+    targetUser: User!
+    organization: Organization!
+    reason: String
+    createdAt: DateTime!
+    expiresAt: DateTime!
+    # Explicit-stop timestamp; null while live or when the session merely
+    # lapsed by TTL.
+    endedAt: DateTime
+    # User.id of whoever stopped it early (the admin actor for a self-stop
+    # from the impersonated context). Null while live / TTL-lapse.
+    endedBy: ID
+    # Derived: endedAt is null AND expiresAt is in the future.
+    isActive: Boolean!
+  }
+
+  type ImpersonationSessionList {
+    items: [ImpersonationSession!]!
+    total: Int!
+  }
+
+  # Returned exactly once by startImpersonation — the token is never stored
+  # or shown again (UserApiKey rawKey precedent).
+  type StartImpersonationResult {
+    session: ImpersonationSession!
+    token: String!
+  }
+
+  input ImpersonationSessionFilter {
+    # Only sessions that are live right now (endedAt null, unexpired).
+    activeOnly: Boolean
   }
 
   # Returned once at App creation / regenerateAppKey — the raw key is never stored
@@ -3632,6 +3688,21 @@ export const typeDefs = `#graphql
     authContext: AuthContext
 
     """
+    One admin-impersonation audit record by id. Resolvable to the session's
+    admin, an org ADMIN/OWNER of its org, or a platform admin; anyone else
+    gets null (denied and missing are indistinguishable).
+    """
+    impersonationSession(ref: ID!): ImpersonationSession
+
+    """
+    Uniform paginated admin-impersonation audit list (createdAt-desc).
+    Platform admins may omit orgId (unscoped); everyone else must name an
+    org they are a live ADMIN/OWNER of. filter.activeOnly keeps only
+    currently-live sessions. limit default 50 / cap 200.
+    """
+    impersonationSessions(orgId: String, filter: ImpersonationSessionFilter, limit: Int, offset: Int): ImpersonationSessionList!
+
+    """
     Uniform paginated organization list (#473) — replaces organizations +
     myOrganizations. Scope: the caller's memberships; platform ADMIN/OWNER
     get every live org (the established admin unscoped reach) unless
@@ -4330,6 +4401,29 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    """
+    Start impersonating another member of orgRef (admin support/diagnostics).
+    Caller must be a live ADMIN/OWNER of the org (platform ADMIN/OWNER is
+    OWNER-equivalent), the target a live member, PEER-OR-BELOW (an org ADMIN
+    may not impersonate an org OWNER), never self. Returns the audit session
+    and a short-TTL token (returned exactly once) whose requests run
+    READ-ONLY as the target, scoped to this one org: other orgs and all
+    personal-class resources stay invisible, and every mutation except
+    stopImpersonation is rejected. Every request re-validates the session
+    row, so stopping it (or demoting the admin) kills the token immediately.
+    """
+    startImpersonation(orgRef: String!, userRef: String!, reason: String): StartImpersonationResult!
+
+    """
+    Stop an impersonation session (writes endedAt; the audit row is never
+    deleted). With an impersonation token, id may be omitted (ends the
+    token's own session — the one mutation an impersonated context may
+    call). With a normal token, id is required and the caller must be the
+    session's admin, an org ADMIN/OWNER of its org, or a platform admin.
+    Idempotent on an already-ended session.
+    """
+    stopImpersonation(id: ID): ImpersonationSession!
+
     """
     #772 — replace the caller's entire dashboard widget selection. Grid position
     is the array order; each widget's span (1-12) and rowSpan (1-4) are required

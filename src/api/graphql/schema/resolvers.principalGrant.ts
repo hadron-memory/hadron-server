@@ -61,7 +61,10 @@ function projectGrant(g: GrantRow) {
  * (the ConnectionGrant self-bootstrap lesson, PR-599 review).
  */
 function isInteractiveUser(ctx: Context): boolean {
-  return !!ctx.userId && !ctx.appId;
+  // #876 class sweep: the list defaults `principalId` to ctx.userId and
+  // applies NO org filter when orgRef is omitted, so under impersonation it
+  // returned the target's action grants in every org. Identity-scoped.
+  return !!ctx.userId && !ctx.appId && !ctx.impersonation;
 }
 
 /** Caller is a live ADMIN/OWNER of the org, or a platform admin. */
