@@ -312,12 +312,25 @@ describe('impersonation token resolution (middleware)', () => {
       expect(active.items.map((s) => s.id)).not.toContain(session.id);
 
       const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      expect(row).not.toBeNull(); // fail here, not inside isActive, if it vanished
       const isActiveField = (
         resolvers as unknown as {
           ImpersonationSession: { isActive: (s: unknown) => boolean };
         }
       ).ImpersonationSession.isActive;
       expect(isActiveField(row)).toBe(false);
+    });
+
+    // PR #879 review: `payload.sub` is the TARGET on this path, so the generic
+    // liveness check in resolveJwt used to short-circuit before the stamp ran.
+    it('a deleted TARGET account ends the session (not just the token)', async () => {
+      const { session, token } = await startAsAdmin();
+      await db.user.update({ where: { id: mike.id }, data: { deletedAt: new Date() } });
+      expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
+      await settle();
+      const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      expect(row?.endedAt).not.toBeNull();
+      expect(row?.endedBy).toBeNull();
     });
 
     it('a deleted admin account ends the session too', async () => {

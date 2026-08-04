@@ -275,6 +275,15 @@ export async function mintUserApiKey(
 async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext> {
   try {
     const payload = await verifyJwt(token);
+    // Impersonation tokens branch FIRST and own every liveness check they
+    // need, including the target's. Ordering is load-bearing: `payload.sub`
+    // is the TARGET on this path, so running the generic check below first
+    // would return early when the target's account is deleted — killing the
+    // token correctly, but skipping the revocation stamp and leaving the
+    // audit trail reporting the session live until TTL (#878, PR #879 review).
+    if (payload.imp) {
+      return resolveImpersonationJwt(payload, db);
+    }
     // Liveness check: a JWT is self-contained, so without this a deleted
     // user's token would keep authenticating until it expires (deleteUser
     // #662 must cut off ALL credentials immediately — the API-key paths
@@ -284,9 +293,6 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
       select: { id: true },
     });
     if (!user) return {};
-    if (payload.imp) {
-      return resolveImpersonationJwt(payload, db);
-    }
     const clientId = payload.githubUsername
       ? `github:${payload.githubUsername}`
       : `email:${payload.email}`;
@@ -373,18 +379,26 @@ async function resolveImpersonationJwt(
     return {};
   }
 
+  // Both accounts must still be live. The TARGET check lives here rather than
+  // in resolveJwt's generic path so it runs AFTER the claims check above and
+  // can stamp the row (PR #879 review) — deleting the impersonated account
+  // ends the session, it doesn't just silently stop working.
+  const [target, admin] = await Promise.all([
+    db.user.findFirst({ where: { id: session.targetUserId, deletedAt: null }, select: { id: true } }),
+    db.user.findFirst({
+      where: { id: session.adminUserId, deletedAt: null },
+      select: { id: true, roles: true },
+    }),
+  ]);
+  if (!target || !admin) {
+    markImpersonationRevoked(db, session.id); // #878 — one of the parties is gone
+    return {};
+  }
+
   // Re-derive BOTH live org roles and re-apply the full peer-or-below rule on
   // every request — not just that the memberships still exist. A role change
   // after mint (target promoted to OWNER, or an OWNER actor demoted to ADMIN)
   // must invalidate the token immediately, exactly as an explicit stop does.
-  const admin = await db.user.findFirst({
-    where: { id: session.adminUserId, deletedAt: null },
-    select: { id: true, roles: true },
-  });
-  if (!admin) {
-    markImpersonationRevoked(db, session.id); // #878 — the actor is gone
-    return {};
-  }
 
   const [targetMembership, adminMembership] = await Promise.all([
     db.orgMember.findFirst({
