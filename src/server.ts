@@ -971,7 +971,12 @@ export async function createServer(): Promise<Express> {
         res.status(401).json({ error: 'Impersonation tokens are not accepted here' });
         return;
       }
-      const user = await db.user.findUnique({ where: { id: payload.sub } });
+      // findFirst + deletedAt so a soft-deleted user's still-unexpired JWT
+      // stops returning their profile here too. `resolveJwt` has had this
+      // liveness check since #662 ("deleteUser must cut off ALL credentials
+      // immediately"); this endpoint verifies the JWT directly and had been
+      // missing it, so the two disagreed for up to a token lifetime.
+      const user = await db.user.findFirst({ where: { id: payload.sub, deletedAt: null } });
       if (!user) {
         res.status(404).json({ error: 'User not found' });
         return;

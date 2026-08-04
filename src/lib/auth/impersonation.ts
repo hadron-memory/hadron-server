@@ -17,6 +17,37 @@
  *     revocation source of truth.
  */
 
+/**
+ * THE peer-or-below authorization rule, shared by `startImpersonation` (mint
+ * time) and `resolveJwt` (every request) so the two cannot drift.
+ *
+ * Both must apply it: re-checking only at mint leaves a live token valid
+ * across a role change — promote the target to OWNER, or demote an OWNER
+ * actor to ADMIN, and an org ADMIN would be impersonating an org OWNER until
+ * expiry (both PR #875 reviewers flagged this independently).
+ *
+ * @param actorIsPlatformAdmin platform ADMIN/OWNER — OWNER-equivalent, and
+ *   needs no membership in the org.
+ * @param actorOrgRole the actor's LIVE OrgMember role in the session's org,
+ *   or null when they hold none.
+ * @param targetOrgRole the target's LIVE OrgMember role, or null when the
+ *   target is not (or is no longer) a member.
+ */
+export function canImpersonate(args: {
+  actorIsPlatformAdmin: boolean;
+  actorOrgRole: string | null;
+  targetOrgRole: string | null;
+}): boolean {
+  const { actorIsPlatformAdmin, actorOrgRole, targetOrgRole } = args;
+  // The target must be a live member of the shared org.
+  if (targetOrgRole === null) return false;
+  // The actor must administer that org (or be a platform admin).
+  if (!actorIsPlatformAdmin && actorOrgRole !== 'ADMIN' && actorOrgRole !== 'OWNER') return false;
+  // Peer-or-below: only an OWNER-equivalent may impersonate an org OWNER.
+  if (targetOrgRole === 'OWNER' && !actorIsPlatformAdmin && actorOrgRole !== 'OWNER') return false;
+  return true;
+}
+
 /** Request-context shape attached to `AuthContext.impersonation`. */
 export interface ImpersonationContext {
   /** ImpersonationSession.id — the audit row backing this token. */

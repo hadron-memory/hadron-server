@@ -242,6 +242,39 @@ describe('impersonation token resolution (middleware)', () => {
     expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
   });
 
+  // PR #875 review (both reviewers): peer-or-below was checked only at mint,
+  // so a role change mid-session left the token valid in a combination the
+  // start-time rule forbids. The rule is now re-applied per request.
+  it('promoting the target to OWNER kills an ADMIN-started token', async () => {
+    const { token } = await startAsAdmin(); // admin (org ADMIN) impersonating mike (CONTRIBUTOR)
+    expect((await resolveAuthContext(makeReq(token), db)).userId).toBe(mike.id);
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: orgA.id, userId: mike.id } },
+      data: { role: 'OWNER' },
+    });
+    expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
+  });
+
+  it('demoting an OWNER actor to ADMIN kills a token that targets an OWNER', async () => {
+    const secondOwner = await db.user.create({ data: { id: generateId(), handle: 'impowner3' } });
+    await db.orgMember.create({
+      data: { organizationId: orgA.id, userId: secondOwner.id, role: 'OWNER' },
+    });
+    // ownerA (OWNER) may impersonate another OWNER.
+    const { token } = await startImpersonation(
+      {},
+      { orgRef: orgA.id, userRef: secondOwner.id },
+      userCtx(ownerA),
+    ).then(async (r) => ({ token: r.token }));
+    expect((await resolveAuthContext(makeReq(token), db)).userId).toBe(secondOwner.id);
+    // Demote the actor to ADMIN — an ADMIN may not impersonate an OWNER.
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: orgA.id, userId: ownerA.id } },
+      data: { role: 'ADMIN' },
+    });
+    expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
+  });
+
   it('a claim/row mismatch resolves empty (token cannot repoint a session)', async () => {
     const { session, token } = await startAsAdmin();
     // Repoint the ROW at a different target; the signed claim still names mike.
@@ -325,6 +358,32 @@ describe('read-only plugin', () => {
     expect(await runPlugin(parse('mutation { stopImpersonation { id } }'), true)).toBeNull();
     expect(await runPlugin(parse('query { me { id } }'), true)).toBeNull();
     expect(await runPlugin(parse('mutation { createMemory(name: "x") { id } }'), false)).toBeNull();
+  });
+
+  // PR #875 review (both reviewers, independently): the depth guard returned
+  // an EMPTY list past the limit, which the caller read as "zero blocked
+  // fields" — so a mutation hidden behind deep nesting executed. Traversal
+  // must fail CLOSED.
+  it('blocks a mutation hidden behind nesting deeper than the traversal limit', async () => {
+    // 80 nested inline fragments — legal GraphQL, past MAX_SELECTION_DEPTH (64).
+    const depth = 80;
+    const doc = parse(
+      `mutation { ${'... on Mutation { '.repeat(depth)}createMemory(name: "x") { id }${' }'.repeat(depth)} }`,
+    );
+    const err = await runPlugin(doc, true);
+    expect(err?.message).toMatch(/read-only impersonation/);
+  });
+
+  it('blocks when a fragment spread names an unknown fragment', async () => {
+    // Can't enumerate what the spread selects ⇒ cannot prove it is safe.
+    expect(await runPlugin(parse('mutation { ...missingFragment }'), true)).not.toBeNull();
+  });
+
+  it('still allows two sibling spreads of the same fragment (not a cycle)', async () => {
+    const doc = parse(
+      'mutation { ...s ...s } fragment s on Mutation { stopImpersonation { id } }',
+    );
+    expect(await runPlugin(doc, true)).toBeNull();
   });
 });
 

@@ -30,25 +30,60 @@ import type { ImpersonationContext } from '../../lib/auth/impersonation.js';
 const ALLOWED_MUTATION_FIELDS = new Set(['stopImpersonation', '__typename']);
 
 /**
+ * Bound on fragment/inline-fragment nesting we will walk. Generous — the one
+ * allowed mutation is a single unnested field — and exceeding it FAILS CLOSED
+ * rather than being treated as "nothing to block".
+ */
+const MAX_SELECTION_DEPTH = 64;
+
+/**
  * Collect the top-level field names of a mutation selection set, expanding
- * fragment spreads / inline fragments (depth-bounded — fragments cannot
- * legally cycle, but a malformed document must not loop us).
+ * fragment spreads and inline fragments.
+ *
+ * Returns `null` when the selection set could NOT be fully resolved — depth
+ * limit exceeded, a fragment spread naming an unknown fragment, or a spread
+ * cycle. **The caller MUST treat `null` as "block the operation"**, never as
+ * "no fields found": an incomplete traversal cannot prove the absence of a
+ * disallowed field.
+ *
+ * This is the fail-closed direction, and it is load-bearing. An earlier
+ * version returned `[]` at the depth limit, which the caller read as "zero
+ * blocked fields" — so a mutation hidden behind 11 nested inline fragments
+ * (legal GraphQL) executed on a supposedly read-only session. Both PR #875
+ * reviewers flagged it independently.
  */
 function topLevelFieldNames(
   selectionSet: SelectionSetNode,
   fragments: Map<string, FragmentDefinitionNode>,
+  // Fragment names on the CURRENT path, for cycle detection. Copied on
+  // descent so two sibling spreads of the same fragment stay legal (only an
+  // ancestor repeat is a cycle). GraphQL validation rejects cycles before we
+  // run, so this is defense in depth.
+  ancestorSpreads: ReadonlySet<string> = new Set(),
   depth = 0,
-): string[] {
-  if (depth > 10) return [];
+): string[] | null {
+  if (depth > MAX_SELECTION_DEPTH) return null;
   const names: string[] = [];
   for (const sel of selectionSet.selections) {
     if (sel.kind === 'Field') {
       names.push(sel.name.value);
     } else if (sel.kind === 'InlineFragment') {
-      names.push(...topLevelFieldNames(sel.selectionSet, fragments, depth + 1));
+      const inner = topLevelFieldNames(sel.selectionSet, fragments, ancestorSpreads, depth + 1);
+      if (inner === null) return null;
+      names.push(...inner);
     } else if (sel.kind === 'FragmentSpread') {
-      const frag = fragments.get(sel.name.value);
-      if (frag) names.push(...topLevelFieldNames(frag.selectionSet, fragments, depth + 1));
+      const name = sel.name.value;
+      const frag = fragments.get(name);
+      // Unknown fragment or a cycle: we cannot enumerate what it selects.
+      if (!frag || ancestorSpreads.has(name)) return null;
+      const inner = topLevelFieldNames(
+        frag.selectionSet,
+        fragments,
+        new Set(ancestorSpreads).add(name),
+        depth + 1,
+      );
+      if (inner === null) return null;
+      names.push(...inner);
     }
   }
   return names;
@@ -72,7 +107,9 @@ export const impersonationReadOnlyPlugin: ApolloServerPlugin<{
         const op = operation as OperationDefinitionNode | undefined;
         if (!op || op.operation !== 'mutation') return;
         const fields = topLevelFieldNames(op.selectionSet, fragmentMap(document));
-        const blocked = fields.filter((f) => !ALLOWED_MUTATION_FIELDS.has(f));
+        // null = the selection set could not be fully enumerated. Block: an
+        // incomplete traversal cannot prove no disallowed field is present.
+        const blocked = fields === null ? ['<unresolvable selection set>'] : fields.filter((f) => !ALLOWED_MUTATION_FIELDS.has(f));
         if (blocked.length > 0) {
           throw new GraphQLError(
             'This is a read-only impersonation session; mutations are disabled.',

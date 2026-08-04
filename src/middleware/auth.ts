@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'crypto';
 import type { Request } from 'express';
 import type { PrismaClient, UserApiKey } from '../generated/prisma/index.js';
 import { verifyJwt } from '../auth/jwt.js';
-import type { ImpersonationContext } from '../lib/auth/impersonation.js';
+import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
 
 export interface AuthContext {
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
@@ -335,35 +335,33 @@ async function resolveImpersonationJwt(
     return {};
   }
 
-  // Target must still be a live member of the shared org (the outer resolveJwt
-  // already verified the target User row itself is live).
-  const targetMembership = await db.orgMember.findFirst({
-    where: { organizationId: imp.org, userId: session.targetUserId, deletedAt: null },
-    select: { userId: true },
-  });
-  if (!targetMembership) return {};
-
-  // Admin must still be live AND still authorized: a live ADMIN/OWNER member
-  // of the org, or a platform ADMIN/OWNER (roles from the DB, never claims).
+  // Re-derive BOTH live org roles and re-apply the full peer-or-below rule on
+  // every request — not just that the memberships still exist. A role change
+  // after mint (target promoted to OWNER, or an OWNER actor demoted to ADMIN)
+  // must invalidate the token immediately, exactly as an explicit stop does.
   const admin = await db.user.findFirst({
     where: { id: session.adminUserId, deletedAt: null },
     select: { id: true, roles: true },
   });
   if (!admin) return {};
-  const adminIsPlatformAdmin =
-    admin.roles.includes('ADMIN') || admin.roles.includes('OWNER');
-  if (!adminIsPlatformAdmin) {
-    const adminMembership = await db.orgMember.findFirst({
-      where: {
-        organizationId: imp.org,
-        userId: session.adminUserId,
-        deletedAt: null,
-        role: { in: ['ADMIN', 'OWNER'] },
-      },
-      select: { userId: true },
-    });
-    if (!adminMembership) return {};
-  }
+
+  const [targetMembership, adminMembership] = await Promise.all([
+    db.orgMember.findFirst({
+      where: { organizationId: imp.org, userId: session.targetUserId, deletedAt: null },
+      select: { role: true },
+    }),
+    db.orgMember.findFirst({
+      where: { organizationId: imp.org, userId: session.adminUserId, deletedAt: null },
+      select: { role: true },
+    }),
+  ]);
+
+  const authorized = canImpersonate({
+    actorIsPlatformAdmin: admin.roles.includes('ADMIN') || admin.roles.includes('OWNER'),
+    actorOrgRole: adminMembership?.role ?? null,
+    targetOrgRole: targetMembership?.role ?? null,
+  });
+  if (!authorized) return {};
 
   return {
     clientId: `impersonation:${session.adminUserId}`,

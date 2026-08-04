@@ -19,7 +19,7 @@
 
 import { GraphQLError } from 'graphql';
 import { signJwt } from '../../../auth/jwt.js';
-import { impersonationTtlSeconds } from '../../../lib/auth/impersonation.js';
+import { canImpersonate, impersonationTtlSeconds } from '../../../lib/auth/impersonation.js';
 import { USER_API_KEY_LABEL_MAX_LEN } from '../../../middleware/auth.js';
 import {
   type Context,
@@ -113,12 +113,14 @@ export const impersonationMutations = {
       throw badInput('The target user is not an active member of the organization.');
     }
 
-    // Peer-or-below: an org ADMIN may not impersonate an org OWNER. Platform
-    // ADMIN/OWNER and org OWNER callers may impersonate anyone.
+    // Peer-or-below, via the SHARED predicate that `resolveJwt` re-applies on
+    // every request — one rule, two enforcement points, no drift.
     if (
-      targetMembership.role === 'OWNER' &&
-      !platformAdmin &&
-      callerOrgRole !== 'OWNER'
+      !canImpersonate({
+        actorIsPlatformAdmin: platformAdmin,
+        actorOrgRole: callerOrgRole,
+        targetOrgRole: targetMembership.role,
+      })
     ) {
       throw forbidden();
     }
