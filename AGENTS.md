@@ -22,8 +22,8 @@ the project introduction (what Hadron is, URN grammar, the specs corpus
 (3) At the start of **every change** — before drafting a plan — call `hadron_get_node` with
 `urn: "hrn:node:hadronmemory.com:dev:preflight"`. It's a symptom-to-pattern routing
 index into the findings, conventions, and ops branches (portal-specific patterns live in
-the `hrn:mem:hadronmemory.com:hadron-portal` memory). Search both `:dev` and
-`:hadron-server`.
+the `hrn:mem:hadronmemory.com:hadron-portal` memory). Search both
+`hrn:mem:hadronmemory.com:dev` and `hrn:mem:hadronmemory.com:hadron-server`.
 
 (4) When a non-obvious finding emerges — a convention you discovered, a gotcha you hit, a
 node that turned out to be wrong — capture, fix, or delete it immediately via
