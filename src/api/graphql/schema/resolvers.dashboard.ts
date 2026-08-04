@@ -275,7 +275,8 @@ async function requireOwnPreset(ctx: Context, userId: string, presetRef: string)
 export const dashboardQueries = {
   /** The caller's placed widgets, ordered by position. Empty for a non-user caller. */
   dashboardWidgets: async (_: unknown, __: unknown, ctx: Context) => {
-    if (!ctx.userId) return [];
+    // #876 class sweep: the target's own dashboard layout is identity-scoped.
+    if (!ctx.userId || ctx.impersonation) return [];
     return ctx.db.dashboardWidget.findMany({
       where: { userId: ctx.userId },
       orderBy: [{ position: 'asc' }, { id: 'asc' }],
@@ -288,7 +289,8 @@ export const dashboardQueries = {
    * A placement whose type has no registered provider is skipped, not an error.
    */
   dashboardWidgetData: async (_: unknown, __: unknown, ctx: Context) => {
-    if (!ctx.userId) return [];
+    // #876 class sweep: keyed off the caller's own placements (see above).
+    if (!ctx.userId || ctx.impersonation) return [];
     const widgets = await ctx.db.dashboardWidget.findMany({
       where: { userId: ctx.userId },
       orderBy: [{ position: 'asc' }, { id: 'asc' }],
@@ -328,7 +330,8 @@ export const dashboardQueries = {
     { type }: { type?: string | null },
     ctx: Context,
   ) => {
-    if (!ctx.userId) return [];
+    // #876 class sweep: the target's saved presets are identity-scoped.
+    if (!ctx.userId || ctx.impersonation) return [];
     return ctx.db.dashboardWidgetPreset.findMany({
       where: { userId: ctx.userId, ...(type ? { type: type as never } : {}) },
       orderBy: [{ name: 'asc' }, { id: 'asc' }],

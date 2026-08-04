@@ -48,6 +48,13 @@ async function canAdministerSession(
   ctx: Context,
   session: { adminUserId: string; organizationId: string },
 ): Promise<boolean> {
+  // #876 class sweep: the audit surface is administrative, not part of the
+  // impersonated (read-only, shared-org) view. Both the self branch below
+  // (`adminUserId === ctx.userId`) and the inline membership query bypass the
+  // narrowed requireOrgRole, so an impersonated session could have read this
+  // org's audit trail — and, if the target administers another org, that
+  // org's too. Deny the whole surface to impersonated callers.
+  if (ctx.impersonation) return false;
   if (isPlatformAdmin(ctx)) return true;
   if (!ctx.userId) return false;
   if (session.adminUserId === ctx.userId) return true;
@@ -232,6 +239,9 @@ export const impersonationQueries = {
     },
     ctx: Context,
   ) => {
+    // #876: administrative surface — never reachable from an impersonated
+    // session (see canAdministerSession).
+    if (ctx.impersonation) throw forbidden();
     const platformAdmin = isPlatformAdmin(ctx);
     let scopedOrgId: string | null = null;
     if (orgId != null) {

@@ -67,7 +67,10 @@ export const sessionQueries = {
         });
         if (app?.ownerUserId) {
           // User-owned App: the owner themself can see its sessions.
-          if (app.ownerUserId === ctx.userId) return session;
+          // #876 class sweep: identity-scoped, so not via impersonation —
+          // sessionScopeFilter (the LIST path) was narrowed already; this
+          // single-read path has its own inline predicate.
+          if (app.ownerUserId === ctx.userId && !ctx.impersonation) return session;
         } else if (app?.organizationId) {
           const member = await ctx.db.orgMember.findUnique({
             where: {

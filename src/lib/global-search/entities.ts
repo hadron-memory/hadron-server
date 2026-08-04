@@ -380,7 +380,9 @@ async function searchAgents(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   // Exclude other users' PERSONAL (creator-only draft) agents — mirrors the
   // Organization.agents resolver, which applies this carve-out by viewer
   // identity REGARDLESS of admin, so admin global search doesn't leak drafts.
-  if (principal.viewerUserId) {
+  // #876 class sweep: same creator-keyed clause as Organization.agents — an
+  // impersonated principal must not match the target's PERSONAL drafts.
+  if (principal.viewerUserId && !principal.impersonationOrgId) {
     scope.push({ OR: [{ visibility: { not: 'PERSONAL' } }, { createdBy: principal.viewerUserId }] });
   } else {
     scope.push({ visibility: { not: 'PERSONAL' } });

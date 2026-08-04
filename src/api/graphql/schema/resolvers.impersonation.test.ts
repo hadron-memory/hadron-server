@@ -23,7 +23,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolveAuthContext, type AuthContext } from '../../../middleware/auth.js';
 import { resolvers } from './resolvers.js';
-import { type Context, requireOrgRole } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, requireEmailConnection } from './resolvers.helpers.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { impersonationReadOnlyPlugin } from '../impersonationReadOnlyPlugin.js';
 
@@ -495,6 +495,108 @@ describe('org-scope: the impersonated context sees only the shared org', () => {
     await expect(
       effectiveAccess({}, { user: mike.id, resource: 'hrn:mem:imp-org-a:ka' }, impCtx),
     ).resolves.toBeTruthy();
+  });
+});
+
+// #876 — the four read-surface bypasses found by the security review, plus
+// the class sweep. Each of these resolvers authorizes on ctx.userId as an
+// identity/owner and was never reached by the org-scope narrowing; because
+// the read-only plugin only inspects MUTATIONS, none were intercepted.
+describe('#876 — identity-scoped read surfaces are denied under impersonation', () => {
+  let impCtx: Context;
+
+  beforeEach(async () => {
+    ({ impCtx } = await startAsAdmin());
+  });
+
+  const q = (name: string) =>
+    resolvers.Query[name as keyof typeof resolvers.Query] as never as (
+      p: unknown,
+      a: Record<string, unknown>,
+      c: Context,
+    ) => Promise<unknown>;
+
+  it('1. mail/calendar/Drive: requireEmailConnection refuses (nine query fields)', async () => {
+    const conn = await db.exchangeConnection.create({
+      data: {
+        id: generateId(),
+        organizationId: orgA.id,
+        userId: mike.id, // the TARGET owns this mailbox
+        provider: 'gmail',
+        mailboxEmail: 'mike@x.io',
+        toolConnectionId: 'tool-conn-1',
+      },
+    });
+    // The owner branch would otherwise admit: ctx.userId IS conn.userId.
+    await expect(requireEmailConnection(impCtx, conn.id, 'list-messages')).rejects.toThrow(
+      /Forbidden/,
+    );
+    // ...and the same call as mike himself still works (no collateral damage).
+    await expect(
+      requireEmailConnection(userCtx(mike), conn.id, 'list-messages'),
+    ).resolves.toMatchObject({ id: conn.id });
+  });
+
+  it('2. chats: myChats and chatHistory refuse', async () => {
+    await expect(q('myChats')({}, { agentRef: 'whatever' }, impCtx)).rejects.toThrow(/Forbidden/);
+    await expect(q('chatHistory')({}, { chatId: 'whatever' }, impCtx)).rejects.toThrow(/Forbidden/);
+  });
+
+  it('3. assets: listing and the presigned download URL refuse', async () => {
+    await expect(q('memoryAssets')({}, { memoryId: 'whatever' }, impCtx)).rejects.toThrow(
+      /Forbidden/,
+    );
+    await expect(
+      q('assetDownloadUrl')({}, { assetId: 'whatever', ttlSeconds: 3600 }, impCtx),
+    ).rejects.toThrow(/Forbidden/);
+    await expect(q('agentAssets')({}, { agentId: 'whatever' }, impCtx)).rejects.toThrow(
+      /Forbidden/,
+    );
+  });
+
+  it('4. agents/apps lists omit the target user-owned rows — default view AND ownedByMe', async () => {
+    const ownedAgent = await db.agent.create({
+      data: { id: generateId(), name: 'mike-private', ownerUserId: mike.id, urn: 'imp-mike:agent' },
+    });
+    const ownedApp = await db.app.create({
+      data: { id: generateId(), name: 'mike-app', ownerUserId: mike.id, urn: 'imp-mike:app' },
+    });
+    // Baseline: mike sees his own in BOTH views.
+    const mineAgents = (await q('agents')({}, {}, userCtx(mike))) as { items: { id: string }[] };
+    expect(mineAgents.items.map((a) => a.id)).toContain(ownedAgent.id);
+    const mineApps = (await q('apps')({}, {}, userCtx(mike))) as { items: { id: string }[] };
+    expect(mineApps.items.map((a) => a.id)).toContain(ownedApp.id);
+
+    // Impersonated: absent from the default view (the leak did NOT need the
+    // ownedByMe filter — an unfiltered list is what the portal issues)...
+    for (const [field, id] of [
+      ['agents', ownedAgent.id],
+      ['apps', ownedApp.id],
+    ] as const) {
+      const def = (await q(field)({}, {}, impCtx)) as { items: { id: string }[] };
+      expect(def.items.map((r) => r.id)).not.toContain(id);
+      const owned = (await q(field)({}, { filter: { ownedByMe: true } }, impCtx)) as {
+        items: { id: string }[];
+        total: number;
+      };
+      expect(owned.total).toBe(0);
+    }
+  });
+
+  it('class sweep: other identity-scoped surfaces are denied or empty', async () => {
+    // Cross-org / personal inventories.
+    await expect(q('myUserApiKeys')({}, {}, impCtx)).rejects.toThrow(/Forbidden/);
+    await expect(q('myAgentSubscriptions')({}, {}, impCtx)).resolves.toEqual([]);
+    await expect(q('usageActivity')({}, {}, impCtx)).resolves.toEqual([]);
+    await expect(q('dashboardWidgets')({}, {}, impCtx)).resolves.toEqual([]);
+    await expect(q('dashboardWidgetPresets')({}, {}, impCtx)).resolves.toEqual([]);
+    // Delegated-access inventories (org-unconstrained, identity-keyed).
+    await expect(q('connectionGrants')({}, {}, impCtx)).resolves.toMatchObject({ total: 0 });
+    await expect(q('principalGrants')({}, {}, impCtx)).resolves.toMatchObject({ total: 0 });
+    // The audit surface is administrative, not part of the impersonated view.
+    await expect(q('impersonationSessions')({}, { orgId: orgA.id }, impCtx)).rejects.toThrow(
+      /Forbidden/,
+    );
   });
 });
 

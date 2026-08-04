@@ -1047,7 +1047,10 @@ export const typeResolvers = {
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).
     appMemberships: async (u: { id: string }, _: unknown, ctx: Context) => {
-      if (ctx.userId !== u.id) return [];
+      // #876 class sweep: self-only by identity, and the rows carry no org
+      // filter — under impersonation `me { appMemberships }` enumerated the
+      // target's App memberships in EVERY org (cross-org disclosure).
+      if (ctx.userId !== u.id || ctx.impersonation) return [];
       return ctx.db.appMember.findMany({
         where: { userId: u.id },
         orderBy: { createdAt: 'asc' },
@@ -1073,10 +1076,15 @@ export const typeResolvers = {
         // PERSONAL: only creator; ORGANIZATION + PUBLIC: all org members.
         // 035-visibility-enum-cleanup: agents use AgentVisibility now; the
         // creator-only draft value is PERSONAL (was PRIVATE).
-        where.OR = [
-          { visibility: { not: 'PERSONAL' as AgentVisibility } },
-          { visibility: 'PERSONAL' as AgentVisibility, createdBy: ctx.userId },
-        ];
+        // #876 class sweep: the PERSONAL branch is creator-keyed, so under
+        // impersonation the target's private DRAFT agents surfaced inside the
+        // shared org. The org is right; the predicate is identity-derived.
+        where.OR = ctx.impersonation
+          ? [{ visibility: { not: 'PERSONAL' as AgentVisibility } }]
+          : [
+              { visibility: { not: 'PERSONAL' as AgentVisibility } },
+              { visibility: 'PERSONAL' as AgentVisibility, createdBy: ctx.userId },
+            ];
       } else {
         // No user (App Key / unauthenticated): never expose PERSONAL
         // (creator-only draft) agents.

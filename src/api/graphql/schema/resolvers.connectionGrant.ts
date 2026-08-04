@@ -82,7 +82,12 @@ async function loadOwnedConnection(
 /** True for an interactive user principal — the only context allowed to MANAGE
  * grants (create/list/revoke). An App-key / on-behalf-of context is excluded. */
 function isInteractiveUser(ctx: Context): boolean {
-  return !!ctx.userId && !ctx.appId;
+  // #876 class sweep: every surface behind this predicate is keyed on
+  // `grantedByUserId: ctx.userId` with no org constraint, so under
+  // impersonation it disclosed which Apps hold delegated scopes on the
+  // TARGET's personal mailbox — cross-org, and identity-scoped by definition.
+  // An impersonated session is not an interactive user.
+  return !!ctx.userId && !ctx.appId && !ctx.impersonation;
 }
 
 export const connectionGrantQueries = {

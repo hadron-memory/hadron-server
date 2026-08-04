@@ -162,7 +162,11 @@ export const memoryQueries = {
 
       // Own-activity scope. An App-key caller has no userId, so there is no
       // "own activity" to report — empty, not an error (as dashboardWidgets).
-      if (!ctx.userId) return [];
+      // #876 class sweep: this fallback aggregates the target's activity
+      // across ALL memories and orgs, so it is identity-scoped too. (The
+      // memory-scoped branch above is gated by resolveReadableMemoryId and
+      // stays available.)
+      if (!ctx.userId || ctx.impersonation) return [];
       return getUsageActivity(ctx.db, { ...scope, userId: ctx.userId });
     },
 

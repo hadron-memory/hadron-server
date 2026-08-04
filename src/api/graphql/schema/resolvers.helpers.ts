@@ -1689,6 +1689,18 @@ export async function requireEmailConnection(
   userId: string;
   mailboxEmail: string;
 }> {
+  // #876 (HIGH): an ExchangeConnection is ALWAYS identity-scoped — a mailbox,
+  // calendar, or Drive belonging to one person. The interactive-owner branch
+  // below authorizes on `ctx.userId === connection.userId`, and its own
+  // comment records the intended boundary: "org admins included → denied".
+  // Under impersonation ctx.userId IS the owner, which would inverted that
+  // denial into permission across nine read surfaces (exchangeMessages,
+  // exchangeFolders, calendars, calendarEvents, calendarEvent,
+  // calendarSchedule, driveFiles, driveFile, driveFileExport) — an org admin
+  // reading an employee's private mail, calendar, and Drive exports. A
+  // blanket deny is correct: no impersonated operation on this surface is
+  // in-scope, so there is no per-operation carve-out to make.
+  if (ctx.impersonation) throw new Error('Forbidden');
   // findFirst (not findUnique) so deletedAt filters in the query — the
   // revoked-membership pattern (PR #475). The `select` is load-bearing: it
   // keeps the legacy encrypted-token column out of the returned object, so

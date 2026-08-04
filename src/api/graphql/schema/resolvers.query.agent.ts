@@ -145,7 +145,12 @@ export const agentQueries = {
         // admin-bypass surface (mirrors the owner-only personal/private
         // memories slice). Org-less by definition, so orgId is not consulted;
         // App-key callers (no ctx.userId) get an empty page.
-        if (!ctx.userId) return { items: [], total: 0 };
+        // #876: user-owned agents are identity-scoped, so an impersonated
+        // session sees none — matching callerReadableAgentFilter, which drops
+        // its ownerUserId clause the same way. Without this the list returned
+        // the target's private agents (definitions AND systemPrompt) while
+        // Query.agent(ref:) correctly refused them via requireOwnerOrOrgRole.
+        if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
         where = { ...filters, organizationId: null, ownerUserId: ctx.userId };
       } else {
         const scope = await resolveOrgScope(ctx, orgId);
@@ -172,7 +177,13 @@ export const agentQueries = {
           const ownerClauses: Record<string, unknown>[] = [
             { organizationId: { in: scope.memberOrgIds } },
           ];
-          if (!scopedToOrg && ctx.userId) ownerClauses.push({ ownerUserId: ctx.userId });
+          // #876: the DEFAULT view (no orgId) folded the caller's user-owned
+          // agents in too, so the leak did not require filter.ownedByMe —
+          // an unfiltered `agents { items }`, which is what the portal issues,
+          // exposed them. Identity-scoped ⇒ dropped under impersonation.
+          if (!scopedToOrg && ctx.userId && !ctx.impersonation) {
+            ownerClauses.push({ ownerUserId: ctx.userId });
+          }
           where = { ...filters, OR: ownerClauses };
         }
       }
@@ -360,7 +371,9 @@ export const agentQueries = {
     },
 
     myAgentSubscriptions: async (_: unknown, __: unknown, ctx: Context) => {
-      if (!ctx.userId) return [];
+      // #876 class sweep: identity-scoped and org-unconstrained — this listed
+      // the target's subscriptions across every org.
+      if (!ctx.userId || ctx.impersonation) return [];
       return ctx.db.agentSubscription.findMany({
         where: { userId: ctx.userId },
         orderBy: { createdAt: 'desc' },
