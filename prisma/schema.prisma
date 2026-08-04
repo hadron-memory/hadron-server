@@ -3095,14 +3095,19 @@ model UserApiKey {
 
 /// Admin-impersonation audit record AND revocation source of truth. One row
 /// per impersonation session: an org ADMIN/OWNER (or platform admin) viewing
-/// the platform read-only as `targetUserId`, scoped to `organizationId` — the
-/// single org shared by admin and target (other orgs and all personal-class
-/// resources stay invisible; see src/lib/auth/impersonation.ts).
+/// the platform read-only as the target user, scoped to the single
+/// organization shared by admin and target. The target's other organizations
+/// and all personal-class resources (personal/private memories, chats,
+/// mailbox, assets, personal credentials) stay invisible.
 ///
 /// A session is LIVE iff `endedAt IS NULL AND expiresAt > now()`. Expiry is
 /// derived from `expiresAt` at read time and never written back; `endedAt` is
-/// set only by an explicit stop. Rows are never deleted by the stop path —
-/// the table is the durable audit trail (who impersonated whom, where, when).
+/// set only by an explicit stop. A session can also stop authorizing WITHOUT
+/// being ended — every request re-derives both parties' current org roles, so
+/// losing the admin role (or a role change that breaches peer-or-below)
+/// revokes access immediately while leaving the row live-looking until
+/// expiry. Rows are never deleted by the stop path — the table is the durable
+/// audit trail (who impersonated whom, where, when).
 model ImpersonationSession {
   id             String    @id @default(cuid())
   /// Actor (the admin). Schema-wide audit-actor convention: `User.id`.
