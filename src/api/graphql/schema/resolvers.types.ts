@@ -6,8 +6,6 @@ import {
   getPrimaryAgentId,
 } from '../../../lib/appAgent.js';
 import {
-} from '../../../lib/urn.js';
-import {
   emitNodeUrnV2,
   emitEdgeUrnV2,
   emitAssetUrnV2,

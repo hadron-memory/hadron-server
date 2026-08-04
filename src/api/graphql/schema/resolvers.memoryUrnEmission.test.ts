@@ -26,8 +26,12 @@ const urnOf = (stored: string) =>
   (resolvers.Memory as { urn: (g: { urn: string }) => string }).urn({ urn: stored });
 
 describe('Memory.urn — canonical v2 emission (#872)', () => {
+  // Column 1 describes the STORED shape, column 3 the EMITTED URN. `Memory.urn`
+  // is stored BARE — no `hrn:` scheme prefix — so no stored row is ever
+  // "already v2" in the emitted sense; the emitter always has work to do.
+  // Keeping the two straight is the whole point of this resolver.
   it.each([
-    ['already v2', 'acme.com:dev', 'hrn:mem:acme.com:dev'],
+    ['flat single-colon (v2-shaped)', 'acme.com:dev', 'hrn:mem:acme.com:dev'],
     ['v1 `::` hierarchy', 'acme.com::dev', 'hrn:mem:acme.com:dev'],
     ['legacy `@` user sigil', '@holger:notes', 'hrn:mem:holger:notes'],
     ['user-rooted, no sigil', 'holger:notes', 'hrn:mem:holger:notes'],
