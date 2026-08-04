@@ -3101,13 +3101,18 @@ model UserApiKey {
 /// mailbox, assets, personal credentials) stay invisible.
 ///
 /// A session is LIVE iff `endedAt IS NULL AND expiresAt > now()`. Expiry is
-/// derived from `expiresAt` at read time and never written back; `endedAt` is
-/// set only by an explicit stop. A session can also stop authorizing WITHOUT
-/// being ended — every request re-derives both parties' current org roles, so
-/// losing the admin role (or a role change that breaches peer-or-below)
-/// revokes access immediately while leaving the row live-looking until
-/// expiry. Rows are never deleted by the stop path — the table is the durable
-/// audit trail (who impersonated whom, where, when).
+/// derived from `expiresAt` at read time and never written back.
+///
+/// `endedAt` and `endedBy` together distinguish how a session finished:
+///   - `endedAt` set, `endedBy` set  — a person explicitly stopped it.
+///   - `endedAt` set, `endedBy` NULL — the system REVOKED it (#878). Every
+///     request re-derives both parties' current org roles, so losing the
+///     admin role, a promotion that breaches peer-or-below, the target
+///     leaving the org, or the admin's account being deleted ends it at once.
+///   - `endedAt` NULL, past `expiresAt` — it simply lapsed.
+///
+/// Rows are never deleted by the stop path — the table is the durable audit
+/// trail (who impersonated whom, where, when).
 model ImpersonationSession {
   id             String    @id @default(cuid())
   /// Actor (the admin). Schema-wide audit-actor convention: `User.id`.
