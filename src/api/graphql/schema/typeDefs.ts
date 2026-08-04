@@ -554,7 +554,7 @@ export const typeDefs = `#graphql
     "#725 — collection discriminator (which domain object this node is, e.g. \\"competitor\\"). NULL for an ordinary node."
     objectType: String
     loc: String!
-    "Fully-qualified node URN (hrn:node:<org>::<memory>::<loc>), composed server-side from the node's memory URN + loc (#481). Carried by every Node-returning surface (findNodes, node, appNodes, nodeBatch, mutation returns)."
+    "Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>), composed server-side from the node's memory URN + loc (#481). Carried by every Node-returning surface (findNodes, node, appNodes, nodeBatch, mutation returns)."
     urn: String!
     isLink: Boolean!
     name: String!
@@ -619,10 +619,10 @@ export const typeDefs = `#graphql
     source: Node
     "The target node. NULLABLE (#781): null when the caller cannot read the target node's memory (a cross-memory edge's far endpoint). For a same-memory edge, always present."
     target: Node
-    "Fully-qualified edge URN (hrn:edge:<org>::<memory>::<loc>), composed server-side from the edge's (source-side) memory URN + loc (#481 parity — edges are loc-addressed peers of nodes, spec 037)."
+    "Fully-qualified edge URN (hrn:edge:<root>:<memory>:<loc>), composed server-side from the edge's (source-side) memory URN + loc (#481 parity — edges are loc-addressed peers of nodes, spec 037)."
     urn: String!
     # Colon-delimited path within the (source node's) memory — the edge's
-    # identity and the suffix of its URN hrn:edge:<org>::<memory>::<loc>.
+    # identity and the suffix of its URN hrn:edge:<root>:<memory>:<loc>.
     loc: String!
     # Free-form relationship name (e.g. imports, depends_on). Optional since
     # spec 037 — loc is the identity. (Was the required 'label'.)
@@ -904,13 +904,15 @@ export const typeDefs = `#graphql
     agentId: ID
     agent: Agent
     """
-    Spec 021 US1: the R2 canonical install URN combining the App's
-    identity with its installed Agent's author-org and slug. Format is
-    hrn:agent:<installing-org>::<app-slug>::<author-org>:<agent-slug>.
-    Two orgs installing same-slug agents from different authors produce
-    distinct URNs that differ at the author-org segment, enabling
-    audit-log entries to identify each install unambiguously without a
-    PK disambiguator. Returns null when the App has no agent attached
+    The installed Agent's canonical URN. An installed agent stays
+    AUTHOR-ROOTED forever, so this is simply the Agent's own URN:
+    hrn:agent:<author-org>:<agent-slug>. Two orgs installing same-slug
+    agents from different authors therefore still produce distinct URNs
+    (they differ at the author root), enabling audit-log entries to
+    identify each install unambiguously without a PK disambiguator.
+    The v1 spec-021 R2 install chain
+    (hrn:agent:<installing-org>::<app-slug>::<author-org>:<agent-slug>)
+    is RETIRED — see #697 Stage 2 / D10 and emitInstalledAgentUrnV2. Returns null when the App has no agent attached
     (orphan apps from the 008 cutover; new apps require an agentId per
     009).
     """
@@ -2127,7 +2129,7 @@ export const typeDefs = `#graphql
   input NodeEdgeInput {
     """
     Reference to the target node. Accepts a node ID, a full URN
-    (hrn:node:<memory-urn>::<loc>), a memory-prefixed loc
+    (hrn:node:<memory-urn>:<loc>), a memory-prefixed loc
     (<memory-urn>:<loc>), or a short loc resolved within the source
     node's memory.
     """
@@ -2234,7 +2236,7 @@ export const typeDefs = `#graphql
   Every content field is optional: omitted = preserved (D4).
   """
   input UpdateNodeInput {
-    "The node to change: PK (CUID / 32-char hex) or fully-qualified node URN (org::memory::loc). XOR with memoryId+loc."
+    "The node to change: PK (CUID / 32-char hex) or fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). XOR with memoryId+loc."
     id: String
     "Selector, with 'loc': the target's memory (ID or fully-qualified URN). XOR with 'id'."
     memoryId: String
@@ -2594,7 +2596,7 @@ export const typeDefs = `#graphql
     connectionId: ID!
     "The App install this grant delegates to."
     granteeAppId: ID!
-    "Canonical URN of the grantee App (hrn:app:<org>::<slug>), or null if unresolvable."
+    "Canonical URN of the grantee App (hrn:app:<root>:<slug>), or null if unresolvable."
     granteeAppUrn: String
     granteeAppName: String
     "Covered scopes: mail.read, mail.send, calendar.freebusy, calendar.read."
@@ -3276,7 +3278,7 @@ export const typeDefs = `#graphql
 
     The \`hrn:<type>:\` prefix (legacy \`urn:<type>:\` also accepted) is the
     dispatch key — bare URNs without a type prefix are ambiguous across kinds
-    (\`org::slug\` could be a memory or an agent) and resolve to null.
+    (\`root:slug\` could be a memory or an agent) and resolve to null.
     """
     resolveUrn(urn: String!): UrnResolution
 
@@ -3311,7 +3313,7 @@ export const typeDefs = `#graphql
     and node(loc:, memory:) split. 'ref' accepts, in dispatch order:
 
       1. a primary key (the unambiguous read — the old nodeById),
-      2. a fully-qualified node URN (\`hrn:node:<org>::<memory>::<loc>\`,
+      2. a fully-qualified node URN (\`hrn:node:<root>:<memory>:<loc>\`,
          legacy \`urn:\` scheme accepted),
       3. a bare loc — scoped by 'memoryRef' (an ID or URN) when given; unscoped,
          it resolves across every readable memory and a cross-memory loc
@@ -3447,7 +3449,7 @@ export const typeDefs = `#graphql
     """
     The uniform single-edge read (#473) — edges are first-class, loc-addressed
     peers of nodes (spec 037). 'ref' accepts a primary key or a
-    fully-qualified edge URN (\`hrn:edge:<org>::<memory>::<loc>\`; the edge's
+    fully-qualified edge URN (\`hrn:edge:<root>:<memory>:<loc>\`; the edge's
     memory is its SOURCE node's memory). Access: the edge's memory must be in
     the caller's readable set; denied and missing are both null.
     """
@@ -4555,7 +4557,7 @@ export const typeDefs = `#graphql
     deleteEdge(edgeRef: ID!): Boolean!
 
     # Run a task — a runnable node (isRunnable=true) — identified by a single
-    # nodeRef (a node PK or a fully-qualified node URN, org::memory::loc),
+    # nodeRef (a node PK or a fully-qualified node URN, hrn:node:<root>:<memory>:<loc>),
     # resolved by the shared resolveNodeRef (#542). A bare loc without a memory
     # is rejected — pass a full URN or an ID. For loose-name matching and
     # interactive task selection use the MCP hadron_run_task tool, which
@@ -4898,7 +4900,7 @@ export const typeDefs = `#graphql
     Clone a Memory into a new Memory at \`targetUrn\`.
 
     \`ref\` accepts the source's ID or URN. \`targetUrn\` is a fully-qualified
-    "org::slug" memory URN naming the clone; its org segment MAY differ from
+    "root:slug" memory URN naming the clone; its org segment MAY differ from
     the source's, cloning the memory into another organization. The clone's
     display name is derived from the target slug.
 
@@ -4932,7 +4934,7 @@ export const typeDefs = `#graphql
     boundary-crossing edges and PendingEdges are dropped.
 
     'parentRef' is the parent node's ID or fully-qualified URN. 'targetUrn' is
-    a fully-qualified '<org>::<slug>' URN naming the new memory (it may land in
+    a fully-qualified '<root>:<slug>' URN naming the new memory (it may land in
     a DIFFERENT org). 'move' = false (default) COPIES the subtree, leaving the
     source intact; 'move' = true relocates it, soft-deleting the source subtree
     (its nodes, the source memory's touching edges, and its pending edges).

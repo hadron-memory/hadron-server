@@ -114,7 +114,7 @@ function startsPred(column: string, q: string): AnyWhere {
 
 /**
  * The loc portion of a node-URN query — everything after the leading org +
- * memory hierarchy atoms. A full node URN is `org::memory::loc`, but the Node
+ * memory hierarchy atoms. A full node URN is `root:memory:loc` (v1: `org::memory::loc`), but the Node
  * row stores only `loc`, so matching the whole query against `loc` never hits;
  * we recover the loc here to build a PRECISE loc predicate.
  *
@@ -124,8 +124,8 @@ function startsPred(column: string, q: string): AnyWhere {
  * the org + memory atoms keeps the fallback precise.
  *
  * Separator-agnostic: collapse `::`/`:` runs to single-colon atoms (like
- * match.ts `singleColon`) before stripping, so canonical (`org::memory::loc`),
- * legacy (`org:memory:loc`), and mixed (`org::memory:loc`) forms all yield the
+ * match.ts `singleColon`) before stripping, so v1 (`org::memory::loc`),
+ * canonical v2 (`org:memory:loc`), and mixed (`org::memory:loc`) forms all yield the
  * loc. The Node row stores its loc single-colon, so rejoining with `:` matches.
  * Returns '' when there is no loc portion (≤ 2 atoms — an org/memory URN, not a
  * node URN).
@@ -144,7 +144,7 @@ function locSuffix(urnTerm: string): string {
 
 /**
  * Compute a node's full + bare canonical URN. `full` (hrn:node:…) is for
- * display; `bare` (org::mem::loc) is what we tier-match the urnTerm against, so
+ * display; `bare` (root:mem:loc) is what we tier-match the urnTerm against, so
  * a node-URN query is anchored on the WHOLE URN — not just the loc, which would
  * false-match the same loc tail in unrelated memories. Returns null on a
  * malformed memory URN rather than crashing the whole search.
@@ -276,7 +276,7 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     // Node URN is computed (memory.urn + loc), so match the stored `loc`:
     //   1. CONTAINS the whole query — covers bare- and partial-loc searches
     //      (`cor:brd:010:01`, `brd:010:01`), the common case.
-    //   2. STARTS WITH the loc portion of a full `org::memory::loc` query —
+    //   2. STARTS WITH the loc portion of a full node-URN query —
     //      covers pasting a complete node URN, whose loc the row stores without
     //      the org/memory prefix.
     // The suffix uses startsWith, not contains: locSuffix is a heuristic strip

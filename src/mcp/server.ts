@@ -838,7 +838,7 @@ export function createMcpServerInstance(
     {
       query: z
         .string()
-        .describe('Search text: a PK/id, a URN (hrn:/urn: or bare org::slug), or free-text name.'),
+        .describe('Search text: a PK/id, a URN (hrn:/urn: or bare root:slug), or free-text name.'),
       entityTypes: z
         .array(
           z.enum(['organization', 'memory', 'node', 'agent', 'app', 'aiServiceConfig', 'user']),
@@ -1026,10 +1026,13 @@ export function createMcpServerInstance(
     'hadron_set_active_memory',
     'Set the active memory for this session. Subsequent tree tools will use this as the default scope.',
     {
-      memoryUrn: z.string().describe('Memory URN, e.g. hadronmemory.com::dev or hrn:memory:hadronmemory.com::dev'),
+      memoryUrn: z.string().describe('Memory URN, e.g. hrn:mem:hadronmemory.com:dev (bare hadronmemory.com:dev also accepted). Legacy hrn:memory: and :: forms still resolve.'),
     },
     async ({ memoryUrn }) => {
-      // #100 #3: Memory.urn is stored bare ('hadronmemory.com::dev'). Storing
+      // #100 #3: Memory.urn is stored bare — 'hadronmemory.com:dev' in
+      // grammar v2, though pre-flip rows may still hold the v1
+      // 'hadronmemory.com::dev' form, which is why resolveMemoryByUrn above
+      // matches BOTH separators rather than assuming a normalized DB. Storing
       // the caller-supplied string verbatim makes every downstream
       // findFirst({urn:activeMemoryUrn}) silently miss when the caller passed
       // the canonical 'urn:memory:' form. Writes have fallback paths
@@ -1041,7 +1044,7 @@ export function createMcpServerInstance(
       if (parsed.type !== 'memory' && parsed.type !== 'unknown') {
         const prefix = parsed.type === 'loc' ? 'loc:' : `hrn:${parsed.type}:`;
         return textResult(
-          `Expected a memory URN, got '${prefix}'. Pass 'hadronmemory.com::dev' or 'hrn:memory:hadronmemory.com::dev'.`,
+          `Expected a memory URN, got '${prefix}'. Pass 'hadronmemory.com:dev' or 'hrn:mem:hadronmemory.com:dev'.`,
         );
       }
 
@@ -1173,7 +1176,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_set_active_app',
-    "Set the active Hadron App for this session. Subsequent tools (hadron_find_nodes, hadron_create_node, etc.) will use this as the App scope. Pass the App URN (e.g. 'hrn:app:acme-corp::notes') or an App name that matches exactly one App you have access to. Use hadron_list_apps to see options.",
+    "Set the active Hadron App for this session. Subsequent tools (hadron_find_nodes, hadron_create_node, etc.) will use this as the App scope. Pass the App URN (e.g. 'hrn:app:acme-corp:notes') or an App name that matches exactly one App you have access to. Use hadron_list_apps to see options.",
     {
       app: z
         .string()
@@ -1261,9 +1264,9 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_parent_node',
-    'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes. The URN MUST be fully qualified (org::memory::loc).',
+    'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
     {
-      urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "acme.com::mmdata::services" or "acme.com::mmdata::services:db-helpers"'),
+      urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "hrn:node:acme.com:mmdata:services" or "hrn:node:acme.com:mmdata:services:db-helpers"'),
       name: z.string().optional().describe('Display name (defaults to the last loc atom)'),
       description: z.string().optional().describe('What this section contains'),
       tags: tagsInputSchema.optional(),
@@ -1347,7 +1350,7 @@ export function createMcpServerInstance(
       mode: z.enum(['keyword', 'vector', 'hybrid', 'regex']).optional().describe('keyword (default): full-text search — stemmed, relevance-ranked, boolean operators, body + abstract indexed. vector: semantic search over the memory\'s vector index (requires vectorIndexEnabled). hybrid: keyword + vector fused by reciprocal-rank fusion (RRF, k=60). regex: POSIX regular-expression match over node text. On a non-indexed memory, mode:hybrid degrades to keyword-only and emits a [degraded:no_vector_index] note. Spec 033 + cor:api:090.'),
       parentRel: z.string().optional().describe('Scope search to this subtree'),
       memoryUrn: z.string().optional().describe('Scope search to a single memory (fully-qualified URN). Omit to search all memories you can read — see allMemories.'),
-      memoryUrns: z.array(z.string()).min(1).optional().describe('Scope search to this SET of memories (each a fully-qualified memory URN, org::memory) — a targeted multi-memory search. Must be non-empty (for "everything", use allMemories). Mutually exclusive with memoryUrn and allMemories.'),
+      memoryUrns: z.array(z.string()).min(1).optional().describe('Scope search to this SET of memories (each a fully-qualified memory URN, hrn:mem:<root>:<slug>) — a targeted multi-memory search. Must be non-empty (for "everything", use allMemories). Mutually exclusive with memoryUrn and allMemories.'),
       allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
       isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
       objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
@@ -1783,9 +1786,9 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_get_node',
-    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (org::memory::loc). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). Spec 031 + 032.",
+    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). Spec 031 + 032.",
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::architecture" or "hrn:node:acme.com::mmdata::architecture"'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:architecture" (legacy :: forms still accepted)'),
       contentScope: z
         .enum(['content', 'abstract', 'all'])
         .optional()
@@ -1894,7 +1897,7 @@ export function createMcpServerInstance(
       refs: z
         .array(z.string())
         .optional()
-        .describe('Explicit-set form: node references, each a primary key OR a fully-qualified node URN (org::memory::loc). Returned in input order. Mutually exclusive with memoryUrn/locPrefix.'),
+        .describe('Explicit-set form: node references, each a primary key OR a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Returned in input order. Mutually exclusive with memoryUrn/locPrefix.'),
       memoryUrn: z
         .string()
         .optional()
@@ -2008,7 +2011,7 @@ export function createMcpServerInstance(
             urnRefs.push({ raw, memoryUrn: mu, loc });
           } catch {
             return textResult(
-              `hadron_get_nodes: "${raw}" is neither a node id nor a fully-qualified node URN (org::memory::loc). A relative or malformed ref is a caller error, not an access outcome, so it is reported here rather than in the Unavailable list.`,
+              `hadron_get_nodes: "${raw}" is neither a node id nor a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). A relative or malformed ref is a caller error, not an access outcome, so it is reported here rather than in the Unavailable list.`,
             );
           }
         }
@@ -2178,9 +2181,9 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_get_next_node',
-    'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted. The URN MUST be fully qualified (org::memory::loc).',
+    'Read the next sibling node under a parent, ordered by `seq`. Returns the first child if current is omitted. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
     {
-      parent: z.string().describe('Fully-qualified parent node URN, e.g. "acme.com:mmdata:sections"'),
+      parent: z.string().describe('Fully-qualified parent node URN, e.g. "hrn:node:acme.com:mmdata:sections"'),
       current: z.string().optional().describe('Fully-qualified current child node URN (must be in the same memory as `parent`)'),
     },
     async ({ parent: rawParent, current: rawCurrent }) => {
@@ -2638,9 +2641,9 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_node',
-    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (org::memory::loc). Requires write access to the memory.',
+    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory.',
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports" or "hrn:node:acme.com::mmdata::review:sort-imports". Both bare and prefixed forms accepted. Relative-form URNs (no memory) are rejected.'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports". Both bare and prefixed forms accepted, in either URN grammar. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
@@ -2960,9 +2963,9 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_update_node',
-    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (org::memory::loc).',
+    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports"'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
@@ -3257,7 +3260,7 @@ export function createMcpServerInstance(
     'hadron_update_node_data',
     "Merge a JSON object into a node's `data` bag, preserving keys you don't mention. The patch's top-level keys are written over the node's existing data (the patch wins on collision); other keys stay as they were; a node with no data yet takes the patch as-is. The merge is SHALLOW — a nested object value is replaced wholesale, not deep-merged. Use this for partial data edits; to REPLACE the whole `data` bag instead, use hadron_update_node's `data` argument. Honors write permissions, revision history, and encryption.",
     {
-      nodeUrn: z.string().describe('Node to update — a fully-qualified node URN (org::memory::loc) or an ID-shape PK.'),
+      nodeUrn: z.string().describe('Node to update — a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>) or an ID-shape PK.'),
       data: z.record(z.string(), z.unknown()).describe('JSON object to merge into the node\'s `data`. Must be an object (not an array or scalar). Its top-level keys overwrite existing ones; unmentioned keys are preserved.'),
     },
     async ({ nodeUrn: rawNodeUrn, data }) => {
@@ -3312,7 +3315,7 @@ export function createMcpServerInstance(
     'hadron_create_object',
     'Create a structured object (record) in a collection — the object store\'s legible surface over structured storage. `type` is the collection (e.g. "competitor"); `fields` are the flat, typed properties. On a memory with a declared schema for the collection, the fields are validated against it (an error is returned on a violation). The node loc/name are auto-derived and hidden; pass `key` for a human-meaningful id. Returns the flat object { id, type, ...fields }. "id" and "type" are reserved and cannot be field names.',
     {
-      memoryUrn: z.string().describe('Memory to create the object in — a fully-qualified URN (org::memory) or an ID.'),
+      memoryUrn: z.string().describe('Memory to create the object in — a fully-qualified URN (hrn:mem:<root>:<slug>) or an ID.'),
       type: z.string().describe('The collection this object belongs to (e.g. "competitor"). A single segment (no ":").'),
       fields: z.record(z.string(), z.unknown()).describe('The object\'s flat fields (typed properties). "id"/"type" are reserved.'),
       key: z.string().optional().describe('Optional natural id → a human-meaningful loc (<type>:<key>); a single segment (no ":"). Omit for an auto-generated id.'),
@@ -3387,7 +3390,7 @@ export function createMcpServerInstance(
     'hadron_find_objects',
     'Query a collection in a memory. Returns { objects, total } — objects of `type` as flat records, plus the full match count for paging with limit/offset. `match` is an equality shorthand ({ field: value }) with each field\'s cast inferred from the memory schema; `where` is the full #719 structured predicate (ANDed with match; same grammar as hadron_find_nodes\' where); `sort` is a single-field shorthand ({ field: "asc" | "desc" }).',
     {
-      memoryUrn: z.string().describe('Memory to query — a fully-qualified URN (org::memory) or an ID.'),
+      memoryUrn: z.string().describe('Memory to query — a fully-qualified URN (hrn:mem:<root>:<slug>) or an ID.'),
       type: z.string().describe('The collection to query (e.g. "competitor").'),
       match: z.record(z.string(), z.unknown()).optional().describe('Equality shorthand: { field: value, ... } → an AND of eq predicates (cast inferred from the schema).'),
       where: z.record(z.string(), z.unknown()).optional().describe('Full #719 structured predicate over the object\'s fields (ANDed with match).'),
@@ -3425,8 +3428,8 @@ export function createMcpServerInstance(
     {
       oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
       newText: z.string().describe('Replacement text. May be empty to delete the matched text. In regex mode, $1/$<name>/$& are honored.'),
-      nodeUrns: z.array(z.string()).optional().describe('Explicit nodes to edit — fully-qualified node URNs (org::memory::loc) or ID-shape values.'),
-      memoryUrns: z.array(z.string()).optional().describe('Edit every live node in these memories — fully-qualified memory URNs (org::memory) or ID-shape values. At least one of nodeUrns / memoryUrns is required.'),
+      nodeUrns: z.array(z.string()).optional().describe('Explicit nodes to edit — fully-qualified node URNs (hrn:node:<root>:<memory>:<loc>) or ID-shape values.'),
+      memoryUrns: z.array(z.string()).optional().describe('Edit every live node in these memories — fully-qualified memory URNs (hrn:mem:<root>:<slug>) or ID-shape values. At least one of nodeUrns / memoryUrns is required.'),
       prefix: z.string().optional().describe("Restrict the memoryUrns selection to a subtree: the node at this loc plus its descendants. Requires memoryUrns (loc is only unique within a memory)."),
       fields: z.array(z.enum(['content', 'name', 'alias', 'description', 'abstract', 'tags']))
         .describe('Which text fields to search. At least one required.'),
@@ -3501,12 +3504,12 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_edge',
-    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike hadron_update_node, which replaces the full edge set). Idempotent: re-running with the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). Both endpoints may be given as an ID-shape PK OR a fully-qualified node URN (org::memory::loc). Prefer the PK: it is immutable, so an edge created against it survives a later move/rename of the node, whereas a URN does not (#322). Both endpoints must already exist — use hadron_create_node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
+    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike hadron_update_node, which replaces the full edge set). Idempotent: re-running with the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). Both endpoints may be given as an ID-shape PK OR a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Prefer the PK: it is immutable, so an edge created against it survives a later move/rename of the node, whereas a URN does not (#322). Both endpoints must already exist — use hadron_create_node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
     {
-      sourceUrn: z.string().describe('Source node, as an ID-shape PK (preferred — immutable across move/rename) OR a fully-qualified URN, e.g. "acme.com::mmdata::services:db-helper". The source node must already exist; this tool will not create it.'),
+      sourceUrn: z.string().describe('Source node, as an ID-shape PK (preferred — immutable across move/rename) OR a fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper". The source node must already exist; this tool will not create it.'),
       targetUrn: z.string().describe('Target node, as an ID-shape PK (preferred) OR a fully-qualified URN. The target must already exist; use hadron_create_node first if it does not.'),
       name: z.string().optional().describe('Relationship name (was "label"), e.g. "depends-on", "documents", "supersedes". Optional — loc is the identity.'),
-      loc: z.string().optional().describe('Explicit edge loc (its identity + URN suffix hrn:edge:<org>::<memory>::<loc>). Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
+      loc: z.string().optional().describe('Explicit edge loc (its identity + URN suffix hrn:edge:<root>:<memory>:<loc>). Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
       description: z.string().optional().describe('Human-readable description of the edge.'),
       isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task automation, conversation transitions).'),
     },
@@ -3534,7 +3537,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_update_edge',
-    'Change ONE existing edge\'s METADATA in place — its name, loc, description, runnability, routing priority, routing condition, or data. Non-destructive: every other edge on the source node is left alone. This is the tool to reach for when you want to relabel a single relationship; do NOT use hadron_update_node(edges:) for that, as it replaces the node\'s entire outgoing edge set and silently deletes the edges you did not re-supply. Only the fields you pass are changed; pass null to CLEAR a nullable field. This tool canNOT move an edge to a different source or target — endpoints are fixed at creation, so re-point a relationship by deleting the edge and creating a new one. The edge may be given as an ID-shape PK or a fully-qualified edge URN (hrn:edge:<org>::<memory>::<loc>).',
+    'Change ONE existing edge\'s METADATA in place — its name, loc, description, runnability, routing priority, routing condition, or data. Non-destructive: every other edge on the source node is left alone. This is the tool to reach for when you want to relabel a single relationship; do NOT use hadron_update_node(edges:) for that, as it replaces the node\'s entire outgoing edge set and silently deletes the edges you did not re-supply. Only the fields you pass are changed; pass null to CLEAR a nullable field. This tool canNOT move an edge to a different source or target — endpoints are fixed at creation, so re-point a relationship by deleting the edge and creating a new one. The edge may be given as an ID-shape PK or a fully-qualified edge URN (hrn:edge:<root>:<memory>:<loc>).',
     {
       edgeRef: z.string().describe('Edge to update, as an ID-shape PK (preferred — immutable) OR a fully-qualified edge URN.'),
       name: z.string().nullable().optional().describe('New relationship name, e.g. "depends-on". Pass null to clear it.'),
@@ -3625,9 +3628,9 @@ export function createMcpServerInstance(
 
 Hard-delete cascades to Edge (both directions) and NodeRevision via FK. PendingEdge source-side rows also cascade via FK, but the target-side column is intentionally not a foreign key — those rows are deleted explicitly inside the same transaction. UsageEvent.nodeId is SetNull so audit history is preserved.
 
-Refuses if the node has descendants under its URN prefix unless \`recursive: true\`. Hard-delete additionally refuses if any edge bridges this memory to another (the caller doesn't necessarily own the other memory) unless \`cascadeCrossMemoryEdges: true\`. The URN MUST be fully qualified (org::memory::loc).`,
+Refuses if the node has descendants under its URN prefix unless \`recursive: true\`. Hard-delete additionally refuses if any edge bridges this memory to another (the caller doesn't necessarily own the other memory) unless \`cascadeCrossMemoryEdges: true\`. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).`,
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::review:sort-imports".'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports".'),
       hard: z.boolean().optional().describe('Default false (soft-delete). Pass true to delete the row entirely; cascades to Edge and NodeRevision via FK and explicitly cleans up PendingEdge target-side rows. Irreversible.'),
       recursive: z.boolean().optional().describe('Default false (refuses with descendants). Pass true to apply the same soft/hard mode to every descendant under the node\'s URN prefix.'),
       cascadeCrossMemoryEdges: z.boolean().optional().describe('Hard-delete only; default false. Pass true to acknowledge that hard-deleting will remove edges whose other endpoint lives in a different memory (the other memory\'s view loses them silently).'),
@@ -3780,7 +3783,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
   server.tool(
     'hadron_move_node',
-    `Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid. Both URNs MUST be fully qualified (org::memory::loc).
+    `Move or rename a node, optionally across memories. The node keeps its stable ID so all edge references remain valid. Both URNs MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).
 
 Collision policy: if a live node already occupies \`targetUrn\`, the call refuses with a URN_ALREADY_EXISTS error. Pass \`overwrite: true\` to soft-delete the existing target first; the evicted row is re-stamped to \`<loc>__deleted-<full-id>\` so the unique \`(loc, memoryId)\` constraint doesn't block. Hard-overwrite isn't supported — call hadron_delete_node (hard: true) on the target first if you need that.
 
@@ -3790,7 +3793,7 @@ Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move a
 
 On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted).`,
     {
-      urn: z.string().describe('Current node fully-qualified URN, e.g. "acme.com::mmdata::services:db-helper"'),
+      urn: z.string().describe('Current node fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper"'),
       targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
       overwrite: z.boolean().optional().describe('Default false (refuses on collision). Pass true to soft-delete an existing live target node before moving; the move then proceeds into the freed URN slot.'),
     },
@@ -4031,9 +4034,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (org::memory::loc).',
+    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
     {
-      urn: z.string().describe('Fully-qualified node URN, e.g. "acme.com::mmdata::actions:review"'),
+      urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:actions:review"'),
       args: z.record(z.string(), z.string()).optional().describe('Action arguments as key-value pairs'),
     },
     async ({ urn: rawUrn, args }) => {

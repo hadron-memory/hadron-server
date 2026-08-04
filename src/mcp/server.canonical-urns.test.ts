@@ -4,7 +4,8 @@
  *
  * This file enforces spec-027's invariants on the MCP surface:
  *
- *   - SC-001: zero single-colon URN literals in non-test src/mcp/server.ts
+ *   - SC-001: zero v1 `::` URN literals in non-test src/mcp/server.ts
+ *     (INVERTED in #865 — see the note on that describe block)
  *   - SC-005: zero formatUrn() callsites under src/mcp/
  *   - FR-008: R2 install URNs round-trip through formatCanonicalUrn
  *     without corrupting the author-segment `:`
@@ -55,56 +56,124 @@ function stripComments(source: string): string {
   return out;
 }
 
+/**
+ * Find every v1 (`::`) URN literal in `source`.
+ *
+ * Matches any `hrn:`/`urn:`-scheme `<type>:…` literal with one or more
+ * hierarchy segments in EITHER separator, then flags the ones containing `::`.
+ * `<>` is in the segment charset so placeholder templates
+ * (`hrn:node:<org>::<memory>::<loc>`) are caught alongside concrete examples —
+ * the templates are what a caller copies.
+ *
+ * The quantifier is `+`, not `{3,}`: a two-segment entity URN
+ * (`hrn:mem:acme.com::dev`, `hrn:app:acme::notes`) is just as much a v1
+ * literal as a node URN, and the narrower quantifier exempted all of them.
+ *
+ * Extracted so the audit's own regex is testable — an audit nobody tests is an
+ * audit that quietly stops catching things.
+ */
+export function findV1UrnLiterals(
+  source: string,
+): Array<{ lineNumber: number; text: string }> {
+  const offenders: Array<{ lineNumber: number; text: string }> = [];
+  const lines = source.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const urnLiteralRegex =
+      /(?:urn|hrn):(?:org|app|agent|mem|memory|node|edge)(?:::?[a-zA-Z0-9._<>-]+)+/g;
+    let match: RegExpExecArray | null;
+    while ((match = urnLiteralRegex.exec(lines[i])) !== null) {
+      if (match[0].includes('::')) {
+        offenders.push({ lineNumber: i + 1, text: match[0] });
+      }
+    }
+  }
+  return offenders;
+}
+
 describe('spec 027: MCP surface URN canonical-form audit', () => {
   const rawSource = readFileSync(SERVER_TS, 'utf8');
   const nonCommentSource = stripComments(rawSource);
 
-  describe('SC-001: zero single-colon URN literals in src/mcp/server.ts', () => {
-    it('no URN string literal uses single-colon hierarchy form', () => {
-      // Regex B from contracts/canonical-urn-output.md §3:
-      // A URN literal with a legacy type prefix and 3+ `:`-separated
-      // segments and NO `::` anywhere is the forbidden shape.
-      //
-      // Match form: `urn:<type>:<seg1>:<seg2>:<seg3>...` where the URN
-      // string contains no `::`. The lookahead `(?!.*::)` ensures we
-      // only flag URNs that are pure single-colon hierarchy.
-      const lines = nonCommentSource.split('\n');
-      const offenders: Array<{ lineNumber: number; text: string }> = [];
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        // For each line, find any URN-literal that has 3+ colons total
-        // AND no `::` substring. We use a simple two-pass approach:
-        // 1) Find all `hrn:`/`urn:`-scheme `<type>:...` substrings up to a
-        //    closing quote (both schemes are matched).
-        // 2) For each, count colons; if 4+ and no `::`, it's a violation.
-        const urnLiteralRegex = /(?:urn|hrn):(?:org|app|agent|memory|node)(?::[a-zA-Z0-9._-]+){3,}/g;
-        let match: RegExpExecArray | null;
-        while ((match = urnLiteralRegex.exec(line)) !== null) {
-          const urn = match[0];
-          if (!urn.includes('::')) {
-            offenders.push({ lineNumber: i + 1, text: urn });
-          }
-        }
-      }
-
+  // ── INVERTED IN #865 ──────────────────────────────────────────────────
+  // This audit originally enforced the OPPOSITE rule: it failed any
+  // single-colon URN literal and demanded spec-021's `::` hierarchy form.
+  // cor:urn:010:01 then made grammar v2 — flat, single colon — canonical, and
+  // the platform emits it (#697/#720). That left this audit as the mechanical
+  // reason the MCP tool descriptions stayed on the superseded grammar: every
+  // attempt to write the correct form tripped a red test quoting spec 021 at
+  // you. Same guard, same value, pointing at the grammar we actually emit.
+  //
+  // Scope note: this is about what the descriptions TEACH. v1 stays accepted
+  // on input forever (stored alias map), and the parser comments that describe
+  // v1 matching are stripped as comments before the audit runs.
+  describe('SC-001: zero v1 `::` URN literals in src/mcp/server.ts', () => {
+    it('no URN string literal uses the v1 `::` hierarchy form', () => {
+      const offenders = findV1UrnLiterals(nonCommentSource);
       if (offenders.length > 0) {
         const details = offenders
           .map((o) => `  line ${o.lineNumber}: ${o.text}`)
           .join('\n');
         throw new Error(
-          `spec 027 SC-001 violation: ${offenders.length} single-colon URN literal(s) found in src/mcp/server.ts:\n${details}\n` +
-            `All URN string literals MUST use canonical "::" hierarchy form per spec 021.`,
+          `SC-001 violation: ${offenders.length} v1 "::" URN literal(s) found in src/mcp/server.ts:\n${details}\n` +
+            `URN literals in tool descriptions MUST use grammar v2 — flat, single colon — per cor:urn:010:01. ` +
+            `v1 stays accepted on INPUT forever; this audit governs what we TEACH the caller to write.`,
         );
       }
     });
 
-    it('bare URN templates (org:memory:loc) use canonical "::"', () => {
-      // The schema-template string `org:memory:loc` (and similar
-      // placeholder-style references) appears in tool description
-      // text. Per spec 027 it MUST use `::` to teach the canonical
-      // shape.
-      expect(nonCommentSource).not.toMatch(/\borg:memory:loc\b/);
+    // The audit is only worth what its regex catches, so pin the detector
+    // itself. The original `{3,}` quantifier (inherited from the pre-#865
+    // version, which only ever looked at 3+-segment NODE URNs) silently
+    // exempted every TWO-segment entity URN — `hrn:mem:acme.com::dev`,
+    // `hrn:app:acme::notes` — so v1 could be reintroduced for memories, apps,
+    // orgs and agents without tripping the ratchet at all. Caught in PR #870
+    // review by both Codex and Copilot independently.
+    describe('the detector itself', () => {
+      it.each([
+        ['2-segment memory URN', 'hrn:mem:acme.com::dev'],
+        ['2-segment legacy memory URN', 'hrn:memory:acme.com::dev'],
+        ['2-segment app URN', 'hrn:app:acme::notes'],
+        ['2-segment agent URN', 'hrn:agent:acme.com::helper'],
+        ['3-segment node URN', 'hrn:node:acme.com::mmdata::architecture'],
+        ['edge URN', 'hrn:edge:acme.com::mmdata::a:b'],
+        ['legacy urn: scheme', 'urn:node:acme.com::mmdata::architecture'],
+        ['placeholder template', 'hrn:node:<org>::<memory>::<loc>'],
+        ['install chain', 'hrn:agent:acme.com::app::author.com:slug'],
+      ])('flags a v1 %s', (_label, urn) => {
+        expect(findV1UrnLiterals(`  .describe('${urn}'),`)).toHaveLength(1);
+      });
+
+      it.each([
+        ['2-segment memory URN', 'hrn:mem:acme.com:dev'],
+        ['3-segment node URN', 'hrn:node:acme.com:mmdata:architecture'],
+        ['multi-atom loc', 'hrn:node:acme.com:mmdata:review:sort-imports'],
+        ['placeholder template', 'hrn:node:<root>:<memory>:<loc>'],
+        ['org URN', 'hrn:org:acme.com'],
+      ])('accepts a v2 %s', (_label, urn) => {
+        expect(findV1UrnLiterals(`  .describe('${urn}'),`)).toHaveLength(0);
+      });
+
+      it('does not flag a bare "::" that is not part of a URN literal', () => {
+        // e.g. prose saying "legacy :: forms still resolve", and the internal
+        // `${memId}::${loc}` dedup key — neither teaches a URN shape.
+        expect(findV1UrnLiterals('Legacy hrn:memory: and :: forms still resolve.')).toHaveLength(0);
+        expect(findV1UrnLiterals('const k = `${memId}::${loc}`;')).toHaveLength(0);
+      });
+
+      it('reports the line number of each offender', () => {
+        const src = ['ok', "x('hrn:mem:acme.com::dev')", 'ok'].join('\n');
+        expect(findV1UrnLiterals(src)).toEqual([
+          { lineNumber: 2, text: 'hrn:mem:acme.com::dev' },
+        ]);
+      });
+    });
+
+    it('shape templates do not teach the v1 "::" form', () => {
+      // The placeholder templates in tool description text (e.g.
+      // "fully qualified (hrn:node:<root>:<memory>:<loc>)") are what a caller
+      // copies, so they must teach v2. `org::memory::loc` was the v1 template.
+      expect(nonCommentSource).not.toMatch(/\borg::memory(::loc)?\b/);
+      expect(nonCommentSource).not.toMatch(/<org>::<memory>/);
     });
   });
 
@@ -349,18 +418,33 @@ describe('spec 027 US3: error messages quote canonical-form recovery templates',
     expect(thrown!.message).toContain('<org>::<memory>[::path]');
   });
 
-  it('wrong-prefix error in hadron_set_active_memory quotes canonical examples', () => {
-    // The error template at src/mcp/server.ts:367 (`Pass
-    // 'hadronmemory.com::dev' or 'urn:memory:hadronmemory.com::dev'.`)
-    // is a free-form string constructed at runtime; verify by reading
-    // server.ts and asserting the canonical form is present in the
-    // error-template region.
-    const serverTs = readFileSync(SERVER_TS, 'utf8');
-    expect(serverTs).toContain("'hadronmemory.com::dev'");
-    expect(serverTs).toContain("'hrn:memory:hadronmemory.com::dev'");
-    // Negative: the legacy single-colon form should NOT appear in any
-    // error template anymore.
-    expect(serverTs).not.toContain("'hadronmemory.com:dev'");
-    expect(serverTs).not.toContain("'urn:memory:hadronmemory.com:dev'");
+  it('wrong-prefix error in hadron_set_active_memory quotes grammar-v2 examples', () => {
+    // The error template in hadron_set_active_memory (`Pass
+    // 'hadronmemory.com:dev' or 'hrn:mem:hadronmemory.com:dev'.`) is a
+    // free-form string built at runtime, so verify it by reading server.ts.
+    //
+    // This assertion USED TO BE INVERTED, and that is the point. Written when
+    // spec-021 made `::` canonical, it required the `::` form and explicitly
+    // forbade single-colon as "legacy". cor:urn:010:01 then made grammar v2 —
+    // flat, single colon — canonical and the platform's emitted form
+    // (#697/#720), which turned this test into a ratchet holding the
+    // superseded grammar in place: anyone updating the tool descriptions hit a
+    // red test telling them the correct form was the wrong one. Flipped in #865.
+    //
+    // Keep the negative. A grammar ratchet is worth having — it just has to
+    // point at the grammar the platform actually emits.
+    //
+    // Scan COMMENT-STRIPPED source, per this file's existing convention: a
+    // comment may legitimately name the v1 form (the migration-window note on
+    // Memory.urn storage has to say pre-flip rows can still hold
+    // 'hadronmemory.com::dev'). Only what ships in an error template counts.
+    const serverTs = stripComments(readFileSync(SERVER_TS, 'utf8'));
+    expect(serverTs).toContain("'hadronmemory.com:dev'");
+    expect(serverTs).toContain("'hrn:mem:hadronmemory.com:dev'");
+    // Negative: the v1 `::` form must not come back in an error template.
+    // (v1 stays accepted on INPUT forever — this is about what we tell the
+    // caller to write, not what we parse.)
+    expect(serverTs).not.toContain("'hadronmemory.com::dev'");
+    expect(serverTs).not.toContain("'hrn:memory:hadronmemory.com::dev'");
   });
 });

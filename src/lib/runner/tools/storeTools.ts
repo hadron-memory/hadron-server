@@ -103,7 +103,7 @@ export const hadronStoreFile: RunToolDef = {
       urn: {
         type: 'string',
         description:
-          'Fully-qualified node URN (org::memory::loc) for the reference node that will ' +
+          'Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>) for the reference node that will ' +
           'point at the stored file. The file is stored in that memory. Same-org only.',
       },
       filename: {
