@@ -275,6 +275,15 @@ export async function mintUserApiKey(
 async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext> {
   try {
     const payload = await verifyJwt(token);
+    // Impersonation tokens branch FIRST and own every liveness check they
+    // need, including the target's. Ordering is load-bearing: `payload.sub`
+    // is the TARGET on this path, so running the generic check below first
+    // would return early when the target's account is deleted — killing the
+    // token correctly, but skipping the revocation stamp and leaving the
+    // audit trail reporting the session live until TTL (#878, PR #879 review).
+    if (payload.imp) {
+      return resolveImpersonationJwt(payload, db);
+    }
     // Liveness check: a JWT is self-contained, so without this a deleted
     // user's token would keep authenticating until it expires (deleteUser
     // #662 must cut off ALL credentials immediately — the API-key paths
@@ -284,9 +293,6 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
       select: { id: true },
     });
     if (!user) return {};
-    if (payload.imp) {
-      return resolveImpersonationJwt(payload, db);
-    }
     const clientId = payload.githubUsername
       ? `github:${payload.githubUsername}`
       : `email:${payload.email}`;
@@ -312,6 +318,36 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
  * A resolved context has `userId` = target, `roles: []` (never the target's
  * platform roles — no privilege inheritance), and `impersonation` set.
  */
+/**
+ * Mark a session ended because its authorization was REVOKED (issue #878) —
+ * the admin lost their role, the target was promoted past peer-or-below, the
+ * target left the org, or the admin's account was deleted.
+ *
+ * Without this the row keeps looking live until its TTL: `isActive` and the
+ * `activeOnly` filter are derived from `endedAt IS NULL AND expiresAt > now`,
+ * so an operator checking "which sessions are live right now?" — typically
+ * right after revoking someone's role, precisely because they no longer trust
+ * them — was told one still was. The token was already dead; only the audit
+ * trail disagreed.
+ *
+ * `endedBy` is deliberately left NULL. Combined with `endedAt` that encodes
+ * the three end states distinguishably, with no extra column:
+ *   - endedAt set + endedBy set   → a person explicitly stopped it
+ *   - endedAt set + endedBy NULL  → the system revoked it (this path)
+ *   - endedAt NULL + past expiry  → it simply lapsed
+ *
+ * Fire-and-forget, matching the `lastUsedAt` writes above: the request is
+ * being rejected regardless, so this must not add latency to it, and a failed
+ * write self-heals because the next request re-evaluates the same session.
+ * `updateMany` guarded on `endedAt: null` so a racing explicit stop keeps its
+ * `endedBy` rather than being clobbered by this one.
+ */
+function markImpersonationRevoked(db: PrismaClient, sessionId: string): void {
+  db.impersonationSession
+    .updateMany({ where: { id: sessionId, endedAt: null }, data: { endedAt: new Date() } })
+    .catch(() => {});
+}
+
 async function resolveImpersonationJwt(
   payload: Awaited<ReturnType<typeof verifyJwt>>,
   db: PrismaClient,
@@ -327,6 +363,14 @@ async function resolveImpersonationJwt(
 
   // Claims must match the row exactly — a token can never repoint a session
   // at a different target/org than the one audited at mint.
+  //
+  // #878: deliberately does NOT stamp the row ended. A token whose claims
+  // disagree with the session it names has not been shown to belong to that
+  // session, and a credential we are rejecting must never mutate state —
+  // otherwise presenting a mismatched token would be a way to kill someone
+  // else's legitimate session. (Claims are signed, so this is defence in
+  // depth rather than a reachable path today.) Revocation stamping below is
+  // reached only after the token is proven to belong to this session.
   if (
     session.adminUserId !== imp.act ||
     session.targetUserId !== payload.sub ||
@@ -335,15 +379,26 @@ async function resolveImpersonationJwt(
     return {};
   }
 
+  // Both accounts must still be live. The TARGET check lives here rather than
+  // in resolveJwt's generic path so it runs AFTER the claims check above and
+  // can stamp the row (PR #879 review) — deleting the impersonated account
+  // ends the session, it doesn't just silently stop working.
+  const [target, admin] = await Promise.all([
+    db.user.findFirst({ where: { id: session.targetUserId, deletedAt: null }, select: { id: true } }),
+    db.user.findFirst({
+      where: { id: session.adminUserId, deletedAt: null },
+      select: { id: true, roles: true },
+    }),
+  ]);
+  if (!target || !admin) {
+    markImpersonationRevoked(db, session.id); // #878 — one of the parties is gone
+    return {};
+  }
+
   // Re-derive BOTH live org roles and re-apply the full peer-or-below rule on
   // every request — not just that the memberships still exist. A role change
   // after mint (target promoted to OWNER, or an OWNER actor demoted to ADMIN)
   // must invalidate the token immediately, exactly as an explicit stop does.
-  const admin = await db.user.findFirst({
-    where: { id: session.adminUserId, deletedAt: null },
-    select: { id: true, roles: true },
-  });
-  if (!admin) return {};
 
   const [targetMembership, adminMembership] = await Promise.all([
     db.orgMember.findFirst({
@@ -361,7 +416,12 @@ async function resolveImpersonationJwt(
     actorOrgRole: adminMembership?.role ?? null,
     targetOrgRole: targetMembership?.role ?? null,
   });
-  if (!authorized) return {};
+  if (!authorized) {
+    // #878 — role change or lost membership: the session is over, not merely
+    // failing this one request, so the audit trail should say so immediately.
+    markImpersonationRevoked(db, session.id);
+    return {};
+  }
 
   return {
     clientId: `impersonation:${session.adminUserId}`,

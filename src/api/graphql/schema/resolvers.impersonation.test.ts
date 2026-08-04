@@ -275,6 +275,103 @@ describe('impersonation token resolution (middleware)', () => {
     expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
   });
 
+  // #878 — a revoked session must be stamped ended so the audit surface stops
+  // reporting it live. `endedBy` stays NULL, which is what distinguishes a
+  // system revocation from a person's explicit stop.
+  describe('#878 — revocation stamps the audit row', () => {
+    /** The stamp is fire-and-forget; give the microtask + write a moment. */
+    const settle = () => new Promise((r) => setTimeout(r, 100));
+
+    it('demoting the admin ends the session, with endedBy null', async () => {
+      const { session, token } = await startAsAdmin();
+      await db.orgMember.update({
+        where: { organizationId_userId: { organizationId: orgA.id, userId: admin.id } },
+        data: { role: 'READER' },
+      });
+      expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
+      await settle();
+      const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      expect(row?.endedAt).not.toBeNull();
+      expect(row?.endedBy).toBeNull(); // system revocation, not a person
+    });
+
+    it('the revoked session drops out of isActive and the activeOnly filter', async () => {
+      const { session, token } = await startAsAdmin();
+      await db.orgMember.update({
+        where: { organizationId_userId: { organizationId: orgA.id, userId: mike.id } },
+        data: { role: 'OWNER' }, // promotion breaches peer-or-below for an ADMIN
+      });
+      await resolveAuthContext(makeReq(token), db);
+      await settle();
+
+      const active = await impersonationSessions(
+        {},
+        { orgId: orgA.id, filter: { activeOnly: true } },
+        userCtx(admin),
+      );
+      expect(active.items.map((s) => s.id)).not.toContain(session.id);
+
+      const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      expect(row).not.toBeNull(); // fail here, not inside isActive, if it vanished
+      const isActiveField = (
+        resolvers as unknown as {
+          ImpersonationSession: { isActive: (s: unknown) => boolean };
+        }
+      ).ImpersonationSession.isActive;
+      expect(isActiveField(row)).toBe(false);
+    });
+
+    // PR #879 review: `payload.sub` is the TARGET on this path, so the generic
+    // liveness check in resolveJwt used to short-circuit before the stamp ran.
+    it('a deleted TARGET account ends the session (not just the token)', async () => {
+      const { session, token } = await startAsAdmin();
+      await db.user.update({ where: { id: mike.id }, data: { deletedAt: new Date() } });
+      expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
+      await settle();
+      const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      expect(row?.endedAt).not.toBeNull();
+      expect(row?.endedBy).toBeNull();
+    });
+
+    it('a deleted admin account ends the session too', async () => {
+      const { session, token } = await startAsAdmin();
+      await db.user.update({ where: { id: admin.id }, data: { deletedAt: new Date() } });
+      expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
+      await settle();
+      const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      expect(row?.endedAt).not.toBeNull();
+    });
+
+    // The security carve-out: a token whose claims disagree with the row has
+    // NOT been shown to belong to it, so presenting one must not be a way to
+    // kill somebody else's live session.
+    it('a claim/row mismatch does NOT stamp the row', async () => {
+      const { session, token } = await startAsAdmin();
+      await db.impersonationSession.update({
+        where: { id: session.id },
+        data: { targetUserId: reader.id }, // row now disagrees with the signed claim
+      });
+      expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
+      await settle();
+      const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      expect(row?.endedAt).toBeNull(); // still live — untouched by the rejected token
+    });
+
+    it('does not clobber an explicit stop: endedBy survives a later request', async () => {
+      const { session, token, impCtx } = await startAsAdmin();
+      await stopImpersonation({}, {}, impCtx);
+      const stopped = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      expect(stopped?.endedBy).toBe(admin.id);
+      // A late request bearing the now-dead token must not overwrite endedAt
+      // or blank the actor that the explicit stop recorded.
+      await resolveAuthContext(makeReq(token), db);
+      await settle();
+      const after = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      expect(after?.endedAt).toEqual(stopped?.endedAt);
+      expect(after?.endedBy).toBe(admin.id);
+    });
+  });
+
   it('a claim/row mismatch resolves empty (token cannot repoint a session)', async () => {
     const { session, token } = await startAsAdmin();
     // Repoint the ROW at a different target; the signed claim still names mike.
