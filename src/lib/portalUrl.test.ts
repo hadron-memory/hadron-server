@@ -48,12 +48,23 @@ describe('getPortalBaseUrl', () => {
     expect(getPortalBaseUrl()).toBeNull();
   });
 
+  it('keeps an IPv6 host with a port', () => {
+    setBase('http://[::1]:4000');
+    expect(getPortalBaseUrl()).toBe('http://[::1]:4000');
+  });
+
   it.each([
     ['no scheme', 'hadronmemory.com'],
     ['non-http scheme', 'ftp://hadronmemory.com'],
     ['carries a query', 'https://hadronmemory.com/?a=1'],
     ['carries a fragment', 'https://hadronmemory.com/#x'],
     ['embedded whitespace', 'https://hadron memory.com'],
+    // PR #886 review (Codex P2): a shape regex that only bans delimiters
+    // accepts these and emits an unusable href. Parsing rejects them.
+    ['unparseable authority', 'https://%'],
+    ['non-numeric port', 'https://hadronmemory.com:abc'],
+    ['no host at all', 'https://'],
+    ['embedded credentials', 'https://user:pw@hadronmemory.com'],
   ])('returns null for a malformed base URL (%s)', (_label, value) => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     setBase(value);

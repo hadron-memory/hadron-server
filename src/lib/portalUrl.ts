@@ -38,36 +38,50 @@
  * emit a link to `localhost` from a deployed server.
  */
 
-/**
- * `<scheme>://<host>[:<port>][/<path>]` — an http(s) origin with an optional
- * path prefix (a portal mounted under a subpath). No query, fragment, or
- * whitespace: those never belong in a base URL and signal a misconfiguration.
- */
-const BASE_URL_RE = /^https?:\/\/[^\s/?#]+(?:\/[^\s?#]*)?$/i;
-
 /** Warn once per process — this is a static misconfiguration, not per-request news. */
 let warnedMalformed = false;
+
+function rejectMalformed(raw: string): null {
+  if (!warnedMalformed) {
+    warnedMalformed = true;
+    console.warn(
+      `[portalUrl] FRONTEND_URL is not a usable base URL ("${raw}") — ` +
+        'portal links will be omitted from node reads. Expected <scheme>://<host>[:<port>][/<path>], ' +
+        'http(s) only, no credentials, query or fragment.',
+    );
+  }
+  return null;
+}
 
 /**
  * The portal origin to build user-facing links against, trailing slashes
  * stripped, or `null` when it isn't configured (or isn't a usable base URL).
  * `null` means "emit no link" — see the module docstring.
+ *
+ * Validated by PARSING (`new URL`), not by a shape regex: a regex that merely
+ * bans delimiters still accepts an unusable authority — `https://%`,
+ * `https://host:abc` — and would emit a broken href, which is exactly the
+ * outcome this contract exists to prevent (PR #886 review, Codex P2). The
+ * returned value is rebuilt from the parsed origin + path, so nothing that
+ * survives parsing can smuggle an odd form into an emitted link.
  */
 export function getPortalBaseUrl(): string | null {
   const raw = process.env.FRONTEND_URL?.trim();
   if (!raw) return null;
-  const base = raw.replace(/\/+$/, '');
-  if (!BASE_URL_RE.test(base)) {
-    if (!warnedMalformed) {
-      warnedMalformed = true;
-      console.warn(
-        `[portalUrl] FRONTEND_URL is not a usable base URL ("${raw}") — ` +
-          'portal links will be omitted from node reads. Expected <scheme>://<host>[:<port>][/<path>].',
-      );
-    }
-    return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return rejectMalformed(raw);
   }
-  return base;
+  // http(s) only (a `file:`/`ftp:` base is never a portal); no credentials
+  // (they'd be copied into every emitted link); no query or fragment (a base
+  // URL carrying either is a misconfiguration, and appending a path to it
+  // would produce nonsense).
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return rejectMalformed(raw);
+  if (parsed.username || parsed.password) return rejectMalformed(raw);
+  if (parsed.search || parsed.hash) return rejectMalformed(raw);
+  return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
 }
 
 /**
