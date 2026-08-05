@@ -76,6 +76,34 @@ describe('validateMemory — the five checks (#819)', () => {
     expect(r.findings.map((f: { kind: string }) => f.kind)).not.toContain('SPARSE');
   });
 
+  it('a soft-deleted node produces NO findings and is not counted (#884)', async () => {
+    // The prod case that motivated #884: a tombstone carrying a stale
+    // embeddingFailedAt and a stale abstract from before its deletion. Its
+    // findings are unactionable — no read surface resolves it,
+    // retryFailedEmbeddings and the embed worker both skip it — so it must
+    // not pollute the audit or any CI gate on the count.
+    await createDbNode(db, { loc: 'live', memoryId: mem.id, name: 'Live', content: 'x' });
+    const dead = await createDbNode(db, { loc: 'dead', memoryId: mem.id, name: 'Dead' });
+    await db.node.update({
+      where: { id: dead.id },
+      data: {
+        deletedAt: new Date(),
+        // EMBED_FAILED and STALE_ABSTRACT would both fire on this row if it
+        // were scanned:
+        embeddingFailedAt: new Date(),
+        embeddingError: 'EMBEDDING_REQUEST_FAILED: fetch failed',
+        abstract: 'stale abstract',
+        content: 'body since rewritten',
+        abstractOriginHash: 'deadbeef',
+      },
+    });
+    const r = await validate();
+    expect(r.totalFindings).toBe(0);
+    expect(r.findings).toEqual([]);
+    expect(r.nodesChecked).toBe(1); // the live node only
+    expect(r.ok).toBe(true);
+  });
+
   it('BROKEN_REF: an edge whose target is a soft-deleted tombstone', async () => {
     // A hard-deleted target is impossible — Edge.target is FK-enforced with
     // onDelete: Cascade, so deleting the node takes the edge with it. The

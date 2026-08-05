@@ -97,7 +97,14 @@ export async function validateMemoryNodes(
   const conformanceSchema = memory?.schema as unknown as MemorySchema | null;
 
   const nodes = await db.node.findMany({
-    where: { memoryId },
+    // #884: LIVE nodes only. A soft-deleted node's findings are unactionable —
+    // no read surface resolves it, retryFailedEmbeddings and the embed worker
+    // both skip it — so a tombstone carrying a stale marker (e.g.
+    // embeddingFailedAt from before its deletion) would pollute the audit
+    // forever and never clear. Tombstone rows contribute nothing the checks
+    // need: target liveness for BROKEN_REF is resolved against the DB below,
+    // not against this fetch.
+    where: { memoryId, deletedAt: null },
     // #859 review (Codex P2): exclude soft-deleted EDGE rows. Revision-restore
     // paths can leave them behind and every normal edge surface excludes them,
     // so counting one as a broken reference would fail CI for a relation that
@@ -124,8 +131,9 @@ export async function validateMemoryNodes(
   //     with onDelete: Cascade, so deleting a node takes its edges with it.
   //
   // So the real question is "is this target LIVE anywhere?", which needs one
-  // extra lookup for the targets not live in this memory.
-  const liveLocalIds = new Set(nodes.filter((n) => !n.deletedAt).map((n) => n.id));
+  // extra lookup for the targets not live in this memory. (Since #884 the
+  // fetch above is already live-only, so no further filtering here.)
+  const liveLocalIds = new Set(nodes.map((n) => n.id));
   const suspectTargetIds = new Set<string>();
   for (const node of nodes) {
     for (const edge of node.outgoingEdges) {
@@ -197,10 +205,10 @@ export async function validateMemoryNodes(
     }
     // #725: normalizeObjectType so the audit matches write-seam semantics — a
     // legacy blank objectType means "no collection", not an undeclared one.
-    // Soft-deleted tombstones are skipped: a non-conforming deleted row is not
-    // actionable.
+    // (Tombstone exclusion moved to the fetch itself in #884 — every check
+    // now sees live nodes only.)
     const auditObjectType = normalizeObjectType(node.objectType);
-    if (conformanceSchema != null && auditObjectType != null && node.deletedAt == null) {
+    if (conformanceSchema != null && auditObjectType != null) {
       try {
         validateNodeAgainstSchema(
           conformanceSchema,
