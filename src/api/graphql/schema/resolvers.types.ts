@@ -12,6 +12,7 @@ import {
   emitInstalledAgentUrnV2,
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
+import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
@@ -67,6 +68,39 @@ import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
  * Use this to scope any field that returns OTHER tenants' Agent objects, where
  * the outer gate authorized a different agent than the one being hydrated.
  */
+/**
+ * #481 — the fully-qualified node URN, composed server-side so every
+ * Node-returning surface carries it (the extension's URN chip + run-via-URN
+ * light up without a client release). Uses the preloaded relation's urn when a
+ * resolver already included it (guarding against partial selects that omit
+ * urn), else the request-memoized memory-urn loader.
+ *
+ * Shared by `Node.urn` and `Node.portalUrl` (#881) so a node's URN and the link
+ * that opens it are always the same string.
+ */
+async function resolveNodeUrnField(
+  n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
+  ctx: Context,
+): Promise<string> {
+  const memUrn =
+    (typeof n.memory?.urn === 'string' ? n.memory.urn : null) ??
+    (await loadMemoryUrn(ctx, n.memoryId));
+  // The field is String! — never null it. A missing memory row is corrupt
+  // data; a canonicalization failure falls back to a raw compose (same
+  // serve-and-log posture as safeCanonicalUrn).
+  if (!memUrn) return `hrn:node:unknown:${n.loc}`;
+  try {
+    return emitNodeUrnV2(memUrn, n.loc);
+  } catch (err) {
+    console.warn(`[Node.urn] failed to emit v2 node urn for memory "${memUrn}":`, err);
+    // Best-effort flat-v2 fallback (single colon, never throws). Do NOT run
+    // the stored urn back through a canonicalizer here — it can itself throw
+    // on the same malformed value, defeating the serve-and-log posture of
+    // this non-null field.
+    return bestEffortFlatNodeUrn('node', memUrn, n.loc);
+  }
+}
+
 async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, unknown>> {
   const live = { deletedAt: null };
   // Platform ADMIN/OWNER: unscoped EXCEPT soft-deleted rows.
@@ -289,34 +323,22 @@ export const typeResolvers = {
     // included it (e.g. appNodes). Same pattern as MemoryShare.memory.
     memory: async (n: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
       n.memory ?? ctx.db.memory.findUnique({ where: { id: n.memoryId } }),
-    // #481 — the fully-qualified node URN, composed server-side so every
-    // Node-returning surface carries it (the extension's URN chip + run-via-
-    // URN light up without a client release). Uses the preloaded relation's
-    // urn when a resolver already included it (guarding against partial
-    // selects that omit urn), else the request-memoized memory-urn loader.
-    urn: async (
+    // #481 — see resolveNodeUrnField.
+    urn: (
       n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
       _: unknown,
       ctx: Context,
-    ) => {
-      const memUrn =
-        (typeof n.memory?.urn === 'string' ? n.memory.urn : null) ??
-        (await loadMemoryUrn(ctx, n.memoryId));
-      // The field is String! — never null it. A missing memory row is corrupt
-      // data; a canonicalization failure falls back to a raw compose (same
-      // serve-and-log posture as safeCanonicalUrn).
-      if (!memUrn) return `hrn:node:unknown:${n.loc}`;
-      try {
-        return emitNodeUrnV2(memUrn, n.loc);
-      } catch (err) {
-        console.warn(`[Node.urn] failed to emit v2 node urn for memory "${memUrn}":`, err);
-        // Best-effort flat-v2 fallback (single colon, never throws). Do NOT run
-        // the stored urn back through a canonicalizer here — it can itself throw
-        // on the same malformed value, defeating the serve-and-log posture of
-        // this non-null field.
-        return bestEffortFlatNodeUrn('node', memUrn, n.loc);
-      }
-    },
+    ) => resolveNodeUrnField(n, ctx),
+    // #881 — the portal link for this node, so a client (the CLI's `node get`,
+    // an agent citing a source to a human) hands over a URL instead of
+    // assembling one out of a URN spelling the /app/u route may not resolve.
+    // Nullable: no configured portal origin ⇒ no link (see lib/portalUrl.ts).
+    // Built from the SAME URN the `urn` field returns, so the two can't diverge.
+    portalUrl: async (
+      n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
+      _: unknown,
+      ctx: Context,
+    ) => portalUrlForUrn(await resolveNodeUrnField(n, ctx)),
   },
   Edge: {
     // `Edge.source` / `Edge.target` are NULLABLE (`Node`) in the schema, for two
