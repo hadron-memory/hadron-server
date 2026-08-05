@@ -36,6 +36,10 @@ export default defineConfig({
       // embeddingError landed as [embed-failed] noise in later assertions.
       // Pin the outbound-service vars OFF ('' is falsy for every configured-
       // predicate); tests that need one set it explicitly.
+      // #881 — the portal origin is a FORMATTING input now (node reads carry a
+      // portal URL), so a dev machine's .env would make projections differ from
+      // CI's. Pinned off; tests that assert the link set it explicitly.
+      FRONTEND_URL: '',
       EMBEDDING_API_URL: '',
       EMBEDDING_SAGEMAKER_ENDPOINT_NAME: '',
       NATS_URL: '',

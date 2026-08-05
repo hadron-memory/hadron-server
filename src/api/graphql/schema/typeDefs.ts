@@ -556,6 +556,16 @@ export const typeDefs = `#graphql
     loc: String!
     "Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>), composed server-side from the node's memory URN + loc (#481). Carried by every Node-returning surface (findNodes, node, appNodes, nodeBatch, mutation returns)."
     urn: String!
+    """
+    #881 — the portal URL that opens this node, built server-side so no client
+    ever has to construct one (constructing means guessing which URN spelling
+    the /app/u/<urn> route resolves, and the legacy '::' forms in circulation
+    make that guess wrong). Form: <portal-origin>/app/u/<urn>, the portal's
+    stable URN-alias route. NULL when the deployment has no portal origin
+    configured (FRONTEND_URL) — a link to the wrong host is worse than none, so
+    clients render the field only when present.
+    """
+    portalUrl: String
     isLink: Boolean!
     name: String!
     alias: String
