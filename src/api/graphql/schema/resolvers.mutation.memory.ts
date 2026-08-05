@@ -9,7 +9,10 @@ import {
   assertMemoryVisibilityChangeAllowed,
   assertLinkAllowedForPublicAgent,
 } from '../../../lib/agentPublicCongruence.js';
-import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
+import {
+  backfillMemoryEmbeddings,
+  restampFailedEmbeddings,
+} from '../../../services/embedding/enqueue.js';
 import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';
 import {
   createMemoryShare,
@@ -842,6 +845,25 @@ export const memoryMutations = {
         });
       }
       return updated;
+    },
+
+    /**
+     * #882 — re-drive every failed embed in a memory (the operator recovery
+     * surface; previously a hand-written SQL re-stamp). Same gate as
+     * updateMemory: memory owner or org-ADMIN. Returns the count re-stamped;
+     * 0 (without stamping) when the memory isn't vector-indexed, so the
+     * mutation can't queue work the worker would only discard.
+     */
+    retryFailedEmbeddings: async (
+      _: unknown,
+      { memoryRef }: { memoryRef: string },
+      ctx: Context,
+    ) => {
+      const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+      if (!memory.vectorIndexEnabled) return 0;
+      return restampFailedEmbeddings(ctx.db, memory.id);
     },
 
     deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {

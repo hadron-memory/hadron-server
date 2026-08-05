@@ -70,12 +70,76 @@ export class EmbeddingDimensionMismatchError extends Error {
   }
 }
 
-/** Thrown when the endpoint errors or returns an unparseable body. */
+/**
+ * Thrown when the endpoint errors or returns an unparseable body.
+ *
+ * `retryable` classifies the failure for the worker (#882): `true` (the
+ * default) means retrying can plausibly succeed — timeouts, 5xx, network
+ * errors, throttling; `false` means the request is deterministically
+ * rejected (a 4xx contract violation) and re-sending the same payload will
+ * fail identically forever. The worker gives up immediately on
+ * non-retryable failures and backs off + retries indefinitely on retryable
+ * ones, so the safe default for an ambiguous error is `true`.
+ */
 export class EmbeddingRequestError extends Error {
-  constructor(message: string) {
+  readonly retryable: boolean;
+
+  constructor(message: string, opts: { retryable?: boolean } = {}) {
     super(`EMBEDDING_REQUEST_FAILED: ${message}`);
     this.name = 'EmbeddingRequestError';
+    this.retryable = opts.retryable ?? true;
   }
+}
+
+/**
+ * Classify an arbitrary error thrown during an embed attempt (#882).
+ *
+ * - `permanent` — retrying the same payload against the same config will
+ *   fail identically: a dimension mismatch (EMBEDDING_DIM vs endpoint
+ *   config) or a request the endpoint deterministically rejects (4xx).
+ *   The worker records it and stops retrying; recovery is an operator fix
+ *   plus `retryFailedEmbeddings`.
+ * - `retryable` — everything else (timeouts, 5xx, network errors, DB blips,
+ *   unknown errors). The worker retries with exponential backoff and never
+ *   permanently drops the node — misclassifying a permanent error as
+ *   retryable costs a bounded background retry loop, while the reverse
+ *   silently removes the node from the vector index, so unknown ⇒ retryable.
+ */
+export function classifyEmbedError(err: unknown): 'retryable' | 'permanent' {
+  if (err instanceof EmbeddingDimensionMismatchError) return 'permanent';
+  if (err instanceof EmbeddingRequestError) {
+    return err.retryable ? 'retryable' : 'permanent';
+  }
+  return 'retryable';
+}
+
+/**
+ * Wrap a client so no single upstream request carries more than `maxBatch`
+ * inputs (#882 bug 1). The served endpoint has a hard batch ceiling (TEI's
+ * max_client_batch_size, 32 on the production SageMaker endpoint) that
+ * neither backend enforced, so any node chunking to more inputs than the
+ * ceiling could NEVER embed — a permanent 413 on every retry. This splits
+ * the input into sub-batches, embeds them sequentially, and concatenates
+ * the results in order, preserving the caller's 1:1 input→vector contract.
+ */
+export function withMaxBatch(client: EmbeddingClient, maxBatch: number): EmbeddingClient {
+  if (!Number.isInteger(maxBatch) || maxBatch <= 0) {
+    throw new Error(`withMaxBatch: maxBatch must be a positive integer, got ${maxBatch}`);
+  }
+  return {
+    provider: client.provider,
+    model: client.model,
+    dim: client.dim,
+    async embed(texts: string[], purpose: EmbedPurpose): Promise<number[][]> {
+      if (texts.length <= maxBatch) return client.embed(texts, purpose);
+      const out: number[][] = [];
+      for (let i = 0; i < texts.length; i += maxBatch) {
+        const vectors = await client.embed(texts.slice(i, i + maxBatch), purpose);
+        out.push(...vectors);
+      }
+      return out;
+    },
+  };
 }
 
 /**
@@ -120,7 +184,14 @@ export class HttpEmbeddingClient implements EmbeddingClient {
     }
 
     if (!res.ok) {
-      throw new EmbeddingRequestError(`HTTP ${res.status} from ${this.url}`);
+      // 4xx (minus the timeout/throttle/dependency statuses) is a
+      // deterministic rejection of this request — retrying identically
+      // can't succeed (#882). 5xx / 408 / 429 are the transient class;
+      // 424 stays retryable for parity with the SageMaker backend, where
+      // it is the ModelError pass-through carrying container timeouts.
+      const retryable =
+        res.status >= 500 || res.status === 408 || res.status === 424 || res.status === 429;
+      throw new EmbeddingRequestError(`HTTP ${res.status} from ${this.url}`, { retryable });
     }
 
     let body: unknown;

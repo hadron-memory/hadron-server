@@ -10,9 +10,12 @@ import {
   getEmbeddingClient,
   resetEmbeddingClientForTests,
   isEmbeddingConfigured,
-  HttpEmbeddingClient,
-  SageMakerEmbeddingClient,
 } from './index.js';
+
+// #882: the factory wraps every client in withMaxBatch, so instanceof checks
+// against the concrete backend classes no longer hold. Backend dispatch is
+// asserted via the per-backend default `provider` label instead ("local" for
+// http, "aws-sagemaker" for sagemaker) — the same value stored per vector.
 
 afterEach(() => {
   resetEmbeddingClientForTests();
@@ -46,32 +49,32 @@ describe('getEmbeddingClient — http backend (default)', () => {
     expect(() => getEmbeddingClient()).toThrow(/EMBEDDING_API_URL/);
   });
 
-  it('returns an HttpEmbeddingClient when EMBEDDING_BACKEND is unset', () => {
+  it('dispatches to the http backend when EMBEDDING_BACKEND is unset', () => {
     vi.stubEnv('EMBEDDING_BACKEND', undefined);
     vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
-    expect(getEmbeddingClient()).toBeInstanceOf(HttpEmbeddingClient);
+    expect(getEmbeddingClient().provider).toBe('local');
   });
 
-  it('returns an HttpEmbeddingClient when EMBEDDING_BACKEND=http', () => {
+  it('dispatches to the http backend when EMBEDDING_BACKEND=http', () => {
     vi.stubEnv('EMBEDDING_BACKEND', 'http');
     vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
-    expect(getEmbeddingClient()).toBeInstanceOf(HttpEmbeddingClient);
+    expect(getEmbeddingClient().provider).toBe('local');
   });
 });
 
 describe('getEmbeddingClient — sagemaker backend', () => {
-  it('returns a SageMakerEmbeddingClient when EMBEDDING_BACKEND=sagemaker', () => {
+  it('dispatches to the sagemaker backend when EMBEDDING_BACKEND=sagemaker', () => {
     vi.stubEnv('EMBEDDING_BACKEND', 'sagemaker');
     vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
     vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
-    expect(getEmbeddingClient()).toBeInstanceOf(SageMakerEmbeddingClient);
+    expect(getEmbeddingClient().provider).toBe('aws-sagemaker');
   });
 
   it('accepts case-insensitive backend names', () => {
     vi.stubEnv('EMBEDDING_BACKEND', '  SageMaker  ');
     vi.stubEnv('EMBEDDING_SAGEMAKER_ENDPOINT_NAME', 'hadron-embed-nomic-v1');
     vi.stubEnv('EMBEDDING_SAGEMAKER_REGION', 'us-east-1');
-    expect(getEmbeddingClient()).toBeInstanceOf(SageMakerEmbeddingClient);
+    expect(getEmbeddingClient().provider).toBe('aws-sagemaker');
   });
 
   it('throws when EMBEDDING_SAGEMAKER_ENDPOINT_NAME is unset', () => {
@@ -126,14 +129,14 @@ describe('getEmbeddingClient — sagemaker dedicated credentials', () => {
       'EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY',
       'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
     );
-    expect(getEmbeddingClient()).toBeInstanceOf(SageMakerEmbeddingClient);
+    expect(getEmbeddingClient().provider).toBe('aws-sagemaker');
   });
 
   it('builds a SageMaker client when neither is set (falls through to default chain)', () => {
     setSageMakerBase();
     vi.stubEnv('EMBEDDING_SAGEMAKER_ACCESS_KEY_ID', undefined);
     vi.stubEnv('EMBEDDING_SAGEMAKER_SECRET_ACCESS_KEY', undefined);
-    expect(getEmbeddingClient()).toBeInstanceOf(SageMakerEmbeddingClient);
+    expect(getEmbeddingClient().provider).toBe('aws-sagemaker');
   });
 
   it('throws when only ACCESS_KEY_ID is set (half-configured pair is ambiguous)', () => {
@@ -155,6 +158,26 @@ describe('getEmbeddingClient — sagemaker dedicated credentials', () => {
     expect(() => getEmbeddingClient()).toThrow(
       /EMBEDDING_SAGEMAKER_ACCESS_KEY_ID.*SECRET_ACCESS_KEY.*together/s,
     );
+  });
+});
+
+describe('getEmbeddingClient — EMBEDDING_MAX_BATCH validation (#882)', () => {
+  it('throws on a non-numeric EMBEDDING_MAX_BATCH', () => {
+    vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
+    vi.stubEnv('EMBEDDING_MAX_BATCH', 'lots');
+    expect(() => getEmbeddingClient()).toThrow(/EMBEDDING_MAX_BATCH/);
+  });
+
+  it('throws on a non-positive EMBEDDING_MAX_BATCH', () => {
+    vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
+    vi.stubEnv('EMBEDDING_MAX_BATCH', '0');
+    expect(() => getEmbeddingClient()).toThrow(/EMBEDDING_MAX_BATCH/);
+  });
+
+  it('accepts a valid override', () => {
+    vi.stubEnv('EMBEDDING_API_URL', 'http://embed.test/api/embed');
+    vi.stubEnv('EMBEDDING_MAX_BATCH', '16');
+    expect(getEmbeddingClient().provider).toBe('local');
   });
 });
 

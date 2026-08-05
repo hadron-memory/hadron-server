@@ -567,19 +567,24 @@ export const typeDefs = `#graphql
     """
     Spec 033 FR-006/FR-007 — set when this node needs (re-)embedding;
     cleared on success. The single work signal the embedding worker
-    drains. Operational state (never versioned on NodeRevision). The
-    portal renders this as a subtle "embedding…" badge so a user who
-    just edited isn't confused that their change "didn't take" in
-    search yet. System-managed.
+    drains. A FUTURE-dated value is a backed-off retry not yet due
+    (#882) — the worker only selects stamps at or before now.
+    Operational state (never versioned on NodeRevision). The portal
+    renders this as a subtle "embedding…" badge so a user who just
+    edited isn't confused that their change "didn't take" in search
+    yet. System-managed.
     """
     embeddingPendingAt: DateTime
     """
     Spec 033 FR-009 — set when an embed attempt failed (record, not a
-    work signal). Transient failures keep embeddingPendingAt set for
-    retry; permanent failures clear it. The portal renders this as a
-    red badge with the embeddingError message inline so users with an
-    empty index can distinguish "nothing matched" from "every embed
-    failed". System-managed.
+    work signal). Retryable failures (timeouts, 5xx) reschedule with
+    exponential backoff and never give up (#882); permanent failures
+    (deterministic 4xx, dimension mismatch, encrypted-no-plaintext)
+    clear embeddingPendingAt — recovery is the retryFailedEmbeddings
+    mutation. The portal renders this as a red badge with the
+    embeddingError message inline so users with an empty index can
+    distinguish "nothing matched" from "every embed failed".
+    System-managed.
     """
     embeddingFailedAt: DateTime
     """
@@ -591,9 +596,11 @@ export const typeDefs = `#graphql
     """
     embeddingError: String
     """
-    Spec 033 — attempt counter for backoff / give-up. Resets to 0 on
-    success or revoke. Surfaced for ops diagnostics (a node stuck at a
-    high attempt count likely needs operator attention). System-managed.
+    Spec 033 — attempt counter feeding the exponential-backoff schedule
+    (#882 — no terminal give-up; a retryable failure never removes the
+    node from the queue). Resets to 0 on success or revoke. Surfaced for
+    ops diagnostics (a node at a high attempt count is retrying at the
+    backoff ceiling and likely needs operator attention). System-managed.
     """
     embeddingAttempts: Int!
     content: String
@@ -2490,7 +2497,7 @@ export const typeDefs = `#graphql
     SPARSE
     "The abstract no longer reflects current content (spec 032 FR-011)."
     STALE_ABSTRACT
-    "embedding_failed_at is set - transient-awaiting-retry, cap-exhausted, or the #206 permanent class (spec 033). Such a node is absent from vector search, which from outside looks identical to no hits matching."
+    "embedding_failed_at is set - a retryable failure awaiting its backoff, or the permanent class (deterministic 4xx, dimension mismatch, #206 encrypted-no-plaintext) recoverable via retryFailedEmbeddings (spec 033 / #882). Such a node is absent from vector search, which from outside looks identical to no hits matching."
     EMBED_FAILED
     "objectType/properties violate the memory declared schema (#725)."
     SCHEMA
@@ -4982,6 +4989,18 @@ export const typeDefs = `#graphql
     non-encrypted memory the flag is a no-op.
     """
     updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, listedOnMarketplace: Boolean, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int, schema: JSON): Memory!
+
+    """
+    #882 — re-drive every FAILED embed in a memory (the operator recovery
+    surface; previously hand-written SQL). Re-stamps each live node whose
+    \`embeddingFailedAt\` is set — permanent-class failures whose pending
+    marker was cleared, and backed-off retryable failures (made immediately
+    eligible) — resetting the failure state exactly like a fresh write, then
+    wakes the embedding worker. Returns the count re-stamped; 0 when the
+    memory is not vector-indexed. \`memoryRef\` accepts the memory's ID or
+    URN. Requires memory-owner or org-ADMIN (same gate as updateMemory).
+    """
+    retryFailedEmbeddings(memoryRef: ID!): Int!
 
     """
     Soft-delete a Memory.

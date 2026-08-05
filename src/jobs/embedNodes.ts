@@ -12,7 +12,11 @@
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { EmbeddingClient } from '../lib/embedding/index.js';
-import { getEmbeddingClient, isEmbeddingConfigured } from '../lib/embedding/index.js';
+import {
+  classifyEmbedError,
+  getEmbeddingClient,
+  isEmbeddingConfigured,
+} from '../lib/embedding/index.js';
 import { isCiphertext } from '../lib/crypto.js';
 import {
   upsertAbstractVector,
@@ -34,20 +38,44 @@ export type EmbedOutcome =
   | 'failed-permanent'
   | 'failed-transient';
 
-const DEFAULT_MAX_ATTEMPTS = 5;
+/**
+ * Retry-backoff dials for retryable failures (#882). A failed attempt
+ * reschedules the node by future-dating `embeddingPendingAt` (the drain only
+ * selects rows whose stamp is due): delay = base * 2^(attempts-1), capped at
+ * `retryMaxMs`. There is NO terminal give-up for the retryable class — a
+ * transient infrastructure blip must never permanently remove a node from
+ * the vector index. The pre-#882 design capped attempts at 5 (all ~2.5
+ * minutes apart), which is exactly how 65 nodes of the specs corpus fell
+ * out of the index for good.
+ */
+export interface EmbedRetryOpts {
+  /** First-retry delay in ms (default 60s). Tests pass 0 for immediacy. */
+  retryBaseMs?: number;
+  /** Backoff ceiling in ms (default 6h). */
+  retryMaxMs?: number;
+}
+
+const DEFAULT_RETRY_BASE_MS = 60_000;
+const DEFAULT_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
 
 /**
  * (Re-)embed one node. Idempotent. When `plaintext` is supplied (prompt-drain),
  * it is used as the source — works for encrypted memories too. When omitted
  * (sweep), the stored row is used; an encrypted-at-rest value (`enc:v1:` marker)
  * cannot be embedded and is a PERMANENT failure pending #206.
+ *
+ * Failure handling (#882): errors are classified via `classifyEmbedError`.
+ * Permanent-class errors (deterministic 4xx, dimension mismatch, encrypted-
+ * no-plaintext) clear the pending marker immediately — retrying cannot help;
+ * recovery is an operator fix + `retryFailedEmbeddings`. Retryable-class
+ * errors reschedule with exponential backoff and never give up.
  */
 export async function embedNode(
   db: PrismaClient,
   nodeId: string,
   plaintext?: EmbedPlaintext,
   client?: EmbeddingClient,
-  maxAttempts = DEFAULT_MAX_ATTEMPTS,
+  retryOpts: EmbedRetryOpts = {},
 ): Promise<EmbedOutcome> {
   const node = await db.node.findUnique({
     where: { id: nodeId },
@@ -104,7 +132,7 @@ export async function embedNode(
 
       if (memory.isEncrypted && abstractText != null && isCiphertext(abstractText)) {
         // Sweep on a GraphQL-encrypted node: no plaintext, no session key (#206).
-        await markPermanentFailure(db, nodeId, 'encrypted-no-plaintext (#206)');
+        await markPermanentFailure(db, nodeId, 'encrypted-no-plaintext (#206)', capturedPendingAt);
         return 'failed-permanent';
       }
 
@@ -162,7 +190,7 @@ export async function embedNode(
         plaintext?.content !== undefined ? plaintext.content : node.content;
 
       if (memory.isEncrypted && contentText != null && isCiphertext(contentText)) {
-        await markPermanentFailure(db, nodeId, 'encrypted-no-plaintext (#206)');
+        await markPermanentFailure(db, nodeId, 'encrypted-no-plaintext (#206)', capturedPendingAt);
         return 'failed-permanent';
       }
 
@@ -244,12 +272,19 @@ export async function embedNode(
     // Same latest-wins guard on the failure path (PR-219 review, Gemini high):
     // if a newer write has re-stamped embeddingPendingAt, this failure record
     // would mask a fresh attempt that's already in flight or queued.
-    await markTransientFailure(
+    if (classifyEmbedError(err) === 'permanent') {
+      // Deterministic rejection (4xx, dimension mismatch): retrying the same
+      // payload fails identically, so stop immediately (#882). Recovery is an
+      // operator/config fix + retryFailedEmbeddings.
+      await markPermanentFailure(db, node.id, String(err), capturedPendingAt);
+      return 'failed-permanent';
+    }
+    await markRetryableFailure(
       db,
       node.id,
       capturedPendingAt,
       node.embeddingAttempts,
-      maxAttempts,
+      retryOpts,
       String(err),
     );
     return 'failed-transient';
@@ -274,48 +309,61 @@ async function clearMarkers(
   return res.count > 0;
 }
 
+/**
+ * Record a permanent-class failure: clear pending so the sweep never
+ * re-selects it; keep failedAt/error as the record. Recovery is the
+ * `retryFailedEmbeddings` mutation (or a fresh write, which re-stamps via
+ * enqueueNodeEmbedding). Guarded by the captured `embeddingPendingAt`
+ * (latest-wins) — a newer write's re-stamp means a fresh attempt owns the
+ * markers and this stale failure must not clobber it.
+ */
 async function markPermanentFailure(
   db: PrismaClient,
   nodeId: string,
   error: string,
+  capturedPendingAt: Date | null,
 ): Promise<void> {
-  // Permanent: clear pending so the sweep never re-selects it; keep failedAt as a record.
-  await db.node.update({
-    where: { id: nodeId },
+  await db.node.updateMany({
+    where: { id: nodeId, embeddingPendingAt: capturedPendingAt },
     data: { embeddingPendingAt: null, embeddingFailedAt: new Date(), embeddingError: error },
   });
 }
 
-async function markTransientFailure(
+/**
+ * Record a retryable-class failure and reschedule with exponential backoff
+ * (#882): `embeddingPendingAt` is future-dated by base * 2^(attempts-1)
+ * (capped at retryMaxMs), and the drain only selects rows whose stamp is
+ * due. There is deliberately NO give-up: `embeddingAttempts` keeps counting
+ * for observability and backoff computation, but a retryable failure never
+ * removes the node from the queue — the pre-#882 5-attempt cap is how a
+ * transient endpoint blip silently dropped 65 spec nodes from the index.
+ *
+ * Optimistic guard: only stamp if embeddingPendingAt is still the value
+ * captured at the start of this attempt. A newer write that re-stamped it
+ * has either already retried successfully or has its own attempt in flight;
+ * either way this stale failure shouldn't clobber it. updateMany returns
+ * count=0 silently when the WHERE doesn't match.
+ */
+async function markRetryableFailure(
   db: PrismaClient,
   nodeId: string,
   capturedPendingAt: Date | null,
   priorAttempts: number,
-  maxAttempts: number,
+  retryOpts: EmbedRetryOpts,
   error: string,
 ): Promise<void> {
   const attempts = priorAttempts + 1;
-  const giveUp = attempts >= maxAttempts;
-  // Optimistic guard: only stamp the failure if embeddingPendingAt is still
-  // the value we captured at the start of this attempt. A newer write that
-  // re-stamped it has either already retried successfully or has its own
-  // attempt in flight; either way our stale failure shouldn't clobber it.
-  // updateMany returns count=0 silently when the WHERE doesn't match.
-  //
-  // On giveUp we clear embeddingPendingAt but leave embeddingAttempts at
-  // the cap value. A future operator-driven retry (manual SQL re-stamp,
-  // not via enqueueNodeEmbedding which resets attempts to 0) would be
-  // silently excluded by drainEmbeddingQueue's `attempts < maxAttempts`
-  // filter. Manual interventions MUST reset attempts to 0 too — the
-  // documented contract.
+  const baseMs = retryOpts.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
+  const maxMs = retryOpts.retryMaxMs ?? DEFAULT_RETRY_MAX_MS;
+  // Exponent clamped so a long-failing node can't overflow the arithmetic.
+  const delayMs = Math.min(baseMs * 2 ** Math.min(attempts - 1, 20), maxMs);
   await db.node.updateMany({
     where: { id: nodeId, embeddingPendingAt: capturedPendingAt },
     data: {
       embeddingFailedAt: new Date(),
       embeddingAttempts: attempts,
       embeddingError: error,
-      // On give-up, clear pending so it's no longer retried (failedAt remains).
-      ...(giveUp ? { embeddingPendingAt: null } : {}),
+      embeddingPendingAt: new Date(Date.now() + delayMs),
     },
   });
 }
@@ -328,19 +376,20 @@ export interface DrainResult {
 
 /**
  * Drain a batch of marked nodes (the sweep). `embeddingPendingAt` is the work
- * signal; nodes that have exhausted the attempts cap are excluded.
+ * signal; a row whose stamp is future-dated is a backed-off retry that is not
+ * yet due (#882) — the `lte: now` filter excludes it (and, being a comparison,
+ * never matches NULL).
  */
 export async function drainEmbeddingQueue(
   db: PrismaClient,
-  opts: { batchSize?: number; maxAttempts?: number; client?: EmbeddingClient } = {},
+  opts: { batchSize?: number; client?: EmbeddingClient } & EmbedRetryOpts = {},
 ): Promise<DrainResult> {
   if (!isEmbeddingConfigured()) return { embedded: 0, failed: 0, skipped: 0 };
   const batchSize = opts.batchSize ?? 25;
-  const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const client = opts.client ?? getEmbeddingClient();
 
   const pending = await db.node.findMany({
-    where: { embeddingPendingAt: { not: null }, embeddingAttempts: { lt: maxAttempts } },
+    where: { embeddingPendingAt: { lte: new Date() } },
     orderBy: { embeddingPendingAt: 'asc' },
     take: batchSize,
     select: { id: true },
@@ -348,7 +397,10 @@ export async function drainEmbeddingQueue(
 
   const result: DrainResult = { embedded: 0, failed: 0, skipped: 0 };
   for (const n of pending) {
-    const outcome = await embedNode(db, n.id, undefined, client, maxAttempts);
+    const outcome = await embedNode(db, n.id, undefined, client, {
+      retryBaseMs: opts.retryBaseMs,
+      retryMaxMs: opts.retryMaxMs,
+    });
     if (outcome === 'embedded') result.embedded += 1;
     else if (outcome === 'failed-permanent' || outcome === 'failed-transient') result.failed += 1;
     else result.skipped += 1;
@@ -447,6 +499,13 @@ export async function handleEmbedWake(
       select: { embeddingPendingAt: true, memory: { select: { isEncrypted: true } } },
     });
     if (!row?.embeddingPendingAt) return;
+    // A FUTURE-dated stamp is a backed-off retry that is not yet due (#882).
+    // Bus naks redeliver after ~15s while the first backoff step is 60s and
+    // grows — without this check a redelivery would bypass the backoff the
+    // failure just scheduled and burn immediate attempts against an
+    // unhealthy endpoint (PR-883 review, Codex P2). Ack and leave it to the
+    // sweep's due-stamp filter, which owns backed-off work.
+    if (row.embeddingPendingAt.getTime() > Date.now()) return;
     // Encrypted memory: PUNT (PR-489 review, Codex P2). The wake arrives
     // within milliseconds of the write — while the prompt-drain (which holds
     // the plaintext this bus message cannot carry) may still be in flight.
@@ -468,13 +527,15 @@ export async function handleEmbedWake(
     const r = await drainEmbeddingQueue(db, { batchSize, ...(client ? { client } : {}) });
     const processed = r.embedded + r.failed + r.skipped;
     if (r.failed > 0) {
-      // Failed rows RETAIN their marker with an old pendingAt, so the next
-      // batch would re-select exactly them and burn the attempts cap within
-      // milliseconds (PR-489 review, Gemini). Stop the tight loop instead:
-      // on a full batch, THROW so the bus redelivers this ping after the
-      // nak delay (spaced retries, max_deliver-capped); on a short batch
-      // the queue is nearly done — return and let the sweep's cadence
-      // handle the stragglers.
+      // Failed rows are rescheduled with a future-dated pendingAt (#882
+      // backoff), so the next batch can no longer tight-loop on exactly
+      // them — but a batch full of failures still means the endpoint is
+      // most likely unhealthy, and marching on would burn one doomed
+      // attempt (and one backoff step) per remaining queued node. Keep the
+      // PR-489 posture: on a full batch, THROW so the bus redelivers this
+      // ping after the nak delay (spaced continuation, max_deliver-capped);
+      // on a short batch the queue is nearly done — return and let the
+      // sweep's cadence handle the stragglers.
       if (processed === batchSize) {
         throw new Error('embed drain paused after failures — nak for spaced continuation');
       }

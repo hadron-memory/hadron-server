@@ -126,3 +126,30 @@ export async function backfillMemoryEmbeddings(
   void publishEmbedWake({});
   return res.count;
 }
+
+/**
+ * Re-drive every FAILED embed in a memory (#882 — the operator recovery
+ * surface behind the retryFailedEmbeddings mutation). Targets nodes with
+ * `embeddingFailedAt` set, which covers both shapes: permanent-class
+ * failures whose pending marker was cleared (previously recoverable only by
+ * hand-written SQL) and retryable-class failures sitting out a backoff
+ * (made immediately eligible). Resets the failure state exactly like a
+ * fresh write would, then pings the bus so recovery doesn't wait for sweep
+ * ticks. Returns the count re-stamped.
+ */
+export async function restampFailedEmbeddings(
+  db: PrismaClient,
+  memoryId: string,
+): Promise<number> {
+  const res = await db.node.updateMany({
+    where: { memoryId, deletedAt: null, embeddingFailedAt: { not: null } },
+    data: {
+      embeddingPendingAt: new Date(),
+      embeddingFailedAt: null,
+      embeddingError: null,
+      embeddingAttempts: 0,
+    },
+  });
+  if (res.count > 0) void publishEmbedWake({});
+  return res.count;
+}
