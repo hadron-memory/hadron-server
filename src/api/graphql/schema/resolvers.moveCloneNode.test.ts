@@ -187,8 +187,9 @@ describe('moveNode subtree cascade (#768)', () => {
     await db.nodeEmbedding.create({
       data: { nodeId: child.id, memoryId: memA.id, kind: 'abstract', provider: 'local', model: 'test', dim: 768 },
     });
-    // The child previously EXHAUSTED its embedding retries — a bare pending stamp
-    // wouldn't reschedule it (drainEmbeddingQueue filters max-attempts rows).
+    // The child previously accumulated failed embedding retries — a bare
+    // pending stamp would inherit the stale failure state (and, pre-#882,
+    // would have been excluded by the drain's max-attempts filter).
     await db.node.update({
       where: { id: child.id },
       data: { embeddingAttempts: 9, embeddingFailedAt: new Date(), embeddingError: 'boom' },

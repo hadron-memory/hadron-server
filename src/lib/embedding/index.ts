@@ -19,6 +19,7 @@
 
 import {
   HttpEmbeddingClient,
+  withMaxBatch,
   type EmbeddingClient,
 } from './client.js';
 import { SageMakerEmbeddingClient } from './client-sagemaker.js';
@@ -32,6 +33,11 @@ export { SageMakerEmbeddingClient } from './client-sagemaker.js';
 export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
 export const DEFAULT_EMBEDDING_DIM = 768;
 export const DEFAULT_EMBEDDING_PROVIDER = 'local';
+// #882 — the served endpoint's batch ceiling. The production TEI container
+// runs max_client_batch_size=32; a request carrying more inputs 413s
+// deterministically, so the factory wraps every client in withMaxBatch.
+// Override via EMBEDDING_MAX_BATCH when the served endpoint differs.
+export const DEFAULT_EMBEDDING_MAX_BATCH = 32;
 
 export type EmbeddingBackend = 'http' | 'sagemaker';
 
@@ -144,18 +150,21 @@ export function getEmbeddingClient(): EmbeddingClient {
       );
     }
 
-    cached = new SageMakerEmbeddingClient({
-      endpointName,
-      region,
-      model,
-      dim,
-      provider,
-      inferenceComponentName:
-        process.env.EMBEDDING_SAGEMAKER_INFERENCE_COMPONENT,
-      accessKeyId,
-      secretAccessKey,
-      sessionToken,
-    });
+    cached = withMaxBatch(
+      new SageMakerEmbeddingClient({
+        endpointName,
+        region,
+        model,
+        dim,
+        provider,
+        inferenceComponentName:
+          process.env.EMBEDDING_SAGEMAKER_INFERENCE_COMPONENT,
+        accessKeyId,
+        secretAccessKey,
+        sessionToken,
+      }),
+      readMaxBatch(),
+    );
     return cached;
   }
 
@@ -168,14 +177,36 @@ export function getEmbeddingClient(): EmbeddingClient {
         'or set EMBEDDING_BACKEND=sagemaker for the SageMaker path.',
     );
   }
-  cached = new HttpEmbeddingClient({
-    url,
-    model,
-    dim,
-    provider: provider ?? DEFAULT_EMBEDDING_PROVIDER,
-    apiKey: process.env.EMBEDDING_API_KEY,
-  });
+  cached = withMaxBatch(
+    new HttpEmbeddingClient({
+      url,
+      model,
+      dim,
+      provider: provider ?? DEFAULT_EMBEDDING_PROVIDER,
+      apiKey: process.env.EMBEDDING_API_KEY,
+    }),
+    readMaxBatch(),
+  );
   return cached;
+}
+
+/**
+ * Read EMBEDDING_MAX_BATCH (#882) — the largest number of inputs any single
+ * upstream embed request may carry, a property of the SERVED endpoint (TEI's
+ * max_client_batch_size; 32 on the production SageMaker endpoint). The
+ * factory wraps every client in {@link withMaxBatch} with this value, so an
+ * over-long node sub-batches instead of 413ing forever.
+ */
+function readMaxBatch(): number {
+  const raw = process.env.EMBEDDING_MAX_BATCH;
+  const max = raw ? Number(raw) : DEFAULT_EMBEDDING_MAX_BATCH;
+  if (!Number.isInteger(max) || max <= 0) {
+    throw new Error(
+      `Invalid EMBEDDING_MAX_BATCH: ${JSON.stringify(raw)} — must be a positive integer ` +
+        `matching the served endpoint's batch ceiling (default ${DEFAULT_EMBEDDING_MAX_BATCH}).`,
+    );
+  }
+  return max;
 }
 
 function readDim(): number {

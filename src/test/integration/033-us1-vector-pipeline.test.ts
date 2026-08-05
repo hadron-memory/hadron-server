@@ -17,6 +17,7 @@ import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import type { EmbeddingClient } from '../../lib/embedding/index.js';
 import {
+  EmbeddingRequestError,
   setEmbeddingClientForTests,
   resetEmbeddingClientForTests,
 } from '../../lib/embedding/index.js';
@@ -147,9 +148,10 @@ describe('SC-003 — embedding failure is durable and recoverable', () => {
     const id = await makeNode(memId, 'n', text);
     await db.node.update({ where: { id }, data: { embeddingPendingAt: new Date() } });
 
-    // First drain fails (stub throws once).
+    // First drain fails (stub throws once). retryBaseMs 0 ⇒ the backoff
+    // reschedule is immediately due, so the second drain picks it up.
     setEmbeddingClientForTests(stubClient({ [text]: oneHot(5) }, { failTimes: 1 }));
-    await drainEmbeddingQueue(db, { batchSize: 10 });
+    await drainEmbeddingQueue(db, { batchSize: 10, retryBaseMs: 0 });
     let node = await db.node.findUniqueOrThrow({ where: { id } });
     expect(node.embeddingFailedAt).not.toBeNull();
     expect(node.embeddingAttempts).toBe(1);
@@ -163,6 +165,72 @@ describe('SC-003 — embedding failure is durable and recoverable', () => {
     expect(node.embeddingFailedAt).toBeNull();
     const hits = await vectorSearchNodes(db, { memoryIds: [memId], queryEmbedding: oneHot(5), limit: 5 });
     expect(hits[0]?.nodeId).toBe(id);
+  });
+
+  it('a retryable failure reschedules with a FUTURE pendingAt (backoff) instead of burning sweep ticks (#882)', async () => {
+    const id = await makeNode(memId, 'n-backoff', 'abstract');
+    await db.node.update({ where: { id }, data: { embeddingPendingAt: new Date() } });
+
+    setEmbeddingClientForTests(stubClient({}, { failTimes: 1 }));
+    const before = Date.now();
+    await drainEmbeddingQueue(db, { batchSize: 10 }); // default retryBaseMs (60s)
+    const node = await db.node.findUniqueOrThrow({ where: { id } });
+    expect(node.embeddingPendingAt).not.toBeNull();
+    // Future-dated by roughly the base delay — not immediately re-eligible.
+    expect(node.embeddingPendingAt!.getTime()).toBeGreaterThan(before + 30_000);
+
+    // The next drain must NOT re-select it (its stamp isn't due yet).
+    setEmbeddingClientForTests(stubClient({}));
+    const r = await drainEmbeddingQueue(db, { batchSize: 10 });
+    expect(r.embedded + r.failed + r.skipped).toBe(0);
+  });
+
+  it('retryable failures never give up — a node past the old 5-attempt cap still retries and recovers (#882)', async () => {
+    const text = 'blip survivor';
+    const id = await makeNode(memId, 'n-survivor', text);
+    // Simulate a node that has already failed many times (the pre-#882 cap
+    // was 5, after which the node was permanently excluded).
+    await db.node.update({
+      where: { id },
+      data: { embeddingPendingAt: new Date(), embeddingAttempts: 9, embeddingFailedAt: new Date(), embeddingError: 'old timeout' },
+    });
+
+    // Still fails once more → attempts keeps counting, node stays queued.
+    setEmbeddingClientForTests(stubClient({ [text]: oneHot(9) }, { failTimes: 1 }));
+    await drainEmbeddingQueue(db, { batchSize: 10, retryBaseMs: 0 });
+    let node = await db.node.findUniqueOrThrow({ where: { id } });
+    expect(node.embeddingAttempts).toBe(10);
+    expect(node.embeddingPendingAt).not.toBeNull(); // NOT dropped from the queue
+
+    // Endpoint recovers → the node embeds.
+    setEmbeddingClientForTests(stubClient({ [text]: oneHot(9) }));
+    await drainEmbeddingQueue(db, { batchSize: 10 });
+    node = await db.node.findUniqueOrThrow({ where: { id } });
+    expect(node.embeddingPendingAt).toBeNull();
+    expect(node.embeddingFailedAt).toBeNull();
+    expect(node.embeddingAttempts).toBe(0);
+    const hits = await vectorSearchNodes(db, { memoryIds: [memId], queryEmbedding: oneHot(9), limit: 5 });
+    expect(hits[0]?.nodeId).toBe(id);
+  });
+
+  it('a permanent-class failure (deterministic 4xx) clears pendingAt immediately — no doomed retries (#882)', async () => {
+    const id = await makeNode(memId, 'n-perm', 'abstract');
+    await db.node.update({ where: { id }, data: { embeddingPendingAt: new Date() } });
+
+    setEmbeddingClientForTests({
+      provider: 'test',
+      model: 'stub-model',
+      dim: DIM,
+      async embed() {
+        throw new EmbeddingRequestError('HTTP 413 from stub', { retryable: false });
+      },
+    });
+    const r = await drainEmbeddingQueue(db, { batchSize: 10 });
+    expect(r.failed).toBe(1);
+    const node = await db.node.findUniqueOrThrow({ where: { id } });
+    expect(node.embeddingPendingAt).toBeNull(); // out of the queue
+    expect(node.embeddingFailedAt).not.toBeNull(); // but the record stays
+    expect(node.embeddingError).toContain('413');
   });
 });
 

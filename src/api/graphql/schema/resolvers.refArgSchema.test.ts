@@ -39,6 +39,7 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   publishAgentImport: ['parentAgentRef', 'importedAgentRef'],
   removeAgentImport: ['parentAgentRef', 'importedAgentRef'],
   startImpersonation: ['orgRef', 'userRef'],
+  retryFailedEmbeddings: ['memoryRef'],
 };
 
 /**

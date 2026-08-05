@@ -129,11 +129,13 @@ export class SageMakerEmbeddingClient implements EmbeddingClient {
       // AWS SDK errors carry a `name` (e.g. "ValidationException",
       // "ModelError", "ServiceUnavailable"). Including it in the
       // wrapped message keeps diagnostic info available on
-      // `embeddingError` and leaves room for a future worker-side
-      // classifier to act on it. Handle three shapes: real Error,
-      // plain object with a message (common when errors cross VM
-      // contexts or are deserialized), and unknown.
-      throw new EmbeddingRequestError(formatAwsError(err));
+      // `embeddingError`. Handle three shapes: real Error, plain
+      // object with a message (common when errors cross VM contexts
+      // or are deserialized), and unknown. `retryable` feeds the
+      // worker's give-up-vs-backoff decision (#882).
+      throw new EmbeddingRequestError(formatAwsError(err), {
+        retryable: isAwsErrorRetryable(err),
+      });
     }
 
     if (!response.Body) {
@@ -215,6 +217,28 @@ function concatToString(chunks: Uint8Array[], total: number): string {
     offset += c.length;
   }
   return new TextDecoder().decode(merged);
+}
+
+/**
+ * Classify an AWS SDK error for the worker's retry decision (#882).
+ *
+ * A 4xx `httpStatusCode` on `$metadata` means SageMaker deterministically
+ * rejected the request (ValidationException, AccessDenied, …) — retrying
+ * identically cannot succeed, so it is NOT retryable. Three 4xx statuses
+ * stay retryable: 408 (timeout), 429 (throttling), and 424 (ModelError —
+ * SageMaker's pass-through for container-side failures, which is where
+ * invocation timeouts like the 65 observed in #882 land; a container
+ * failure is content- or load-dependent, not a deterministic contract
+ * violation). Anything without a parseable status (network errors,
+ * 5xx, unknown shapes) defaults to retryable.
+ */
+function isAwsErrorRetryable(err: unknown): boolean {
+  const status = (err as { $metadata?: { httpStatusCode?: unknown } } | null)?.$metadata
+    ?.httpStatusCode;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    return status === 408 || status === 424 || status === 429;
+  }
+  return true;
 }
 
 /**

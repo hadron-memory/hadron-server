@@ -246,3 +246,47 @@ describe('SageMakerEmbeddingClient — error wrapping', () => {
     });
   });
 });
+
+describe('SageMakerEmbeddingClient — retryable classification (#882)', () => {
+  /** AWS SDK errors carry the HTTP status on `$metadata.httpStatusCode`. */
+  function awsError(name: string, message: string, httpStatusCode?: number): Error {
+    const err = new Error(message) as Error & { $metadata?: { httpStatusCode?: number } };
+    err.name = name;
+    if (httpStatusCode !== undefined) err.$metadata = { httpStatusCode };
+    return err;
+  }
+
+  async function retryableOf(sdkErr: Error): Promise<boolean> {
+    const { sdk } = fakeSdk(undefined, { throwError: sdkErr });
+    const err = (await client(sdk)
+      .embed(['x'], 'document')
+      .catch((e) => e)) as EmbeddingRequestError;
+    expect(err).toBeInstanceOf(EmbeddingRequestError);
+    return err.retryable;
+  }
+
+  it('a 4xx ValidationException is NOT retryable (deterministic rejection)', async () => {
+    expect(await retryableOf(awsError('ValidationException', 'bad request', 400))).toBe(false);
+  });
+
+  it('a 424 ModelError IS retryable — the container-timeout class from #882', async () => {
+    expect(
+      await retryableOf(
+        awsError(
+          'ModelError',
+          'Your invocation timed out while waiting for a response from container primary',
+          424,
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('throttling (429) and 5xx are retryable', async () => {
+    expect(await retryableOf(awsError('ThrottlingException', 'slow down', 429))).toBe(true);
+    expect(await retryableOf(awsError('ServiceUnavailable', 'try later', 503))).toBe(true);
+  });
+
+  it('an error without $metadata defaults to retryable', async () => {
+    expect(await retryableOf(awsError('NetworkingError', 'socket hang up'))).toBe(true);
+  });
+});

@@ -11,6 +11,9 @@ import {
   HttpEmbeddingClient,
   EmbeddingDimensionMismatchError,
   EmbeddingRequestError,
+  classifyEmbedError,
+  withMaxBatch,
+  type EmbeddingClient,
 } from './client.js';
 
 function fakeFetch(body: unknown, init: { ok?: boolean; status?: number } = {}) {
@@ -128,5 +131,104 @@ describe('HttpEmbeddingClient guards', () => {
     await expect(client(impl).embed(['x'], 'document')).rejects.toBeInstanceOf(
       EmbeddingRequestError,
     );
+  });
+});
+
+describe('#882 — error classification (classifyEmbedError)', () => {
+  async function thrownBy(status: number): Promise<unknown> {
+    const { impl } = fakeFetch({}, { ok: false, status });
+    return client(impl)
+      .embed(['x'], 'document')
+      .then(() => null)
+      .catch((e) => e);
+  }
+
+  it('HTTP 5xx is retryable', async () => {
+    expect(classifyEmbedError(await thrownBy(500))).toBe('retryable');
+    expect(classifyEmbedError(await thrownBy(503))).toBe('retryable');
+  });
+
+  it('HTTP 408 / 429 are retryable (timeout / throttle)', async () => {
+    expect(classifyEmbedError(await thrownBy(408))).toBe('retryable');
+    expect(classifyEmbedError(await thrownBy(429))).toBe('retryable');
+  });
+
+  it('other HTTP 4xx are permanent (deterministic rejection, e.g. the 413 batch overflow)', async () => {
+    expect(classifyEmbedError(await thrownBy(413))).toBe('permanent');
+    expect(classifyEmbedError(await thrownBy(400))).toBe('permanent');
+  });
+
+  it('a dimension mismatch is permanent', () => {
+    expect(classifyEmbedError(new EmbeddingDimensionMismatchError(768, 384))).toBe('permanent');
+  });
+
+  it('a network error (fetch throws) is retryable', async () => {
+    const impl = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    const err = await client(impl)
+      .embed(['x'], 'document')
+      .catch((e) => e);
+    expect(classifyEmbedError(err)).toBe('retryable');
+  });
+
+  it('an unknown error defaults to retryable (never silently drop a node)', () => {
+    expect(classifyEmbedError(new Error('who knows'))).toBe('retryable');
+    expect(classifyEmbedError('a string')).toBe('retryable');
+  });
+});
+
+describe('#882 — withMaxBatch', () => {
+  /** Stub that records each upstream call's batch size and returns i-indexed vectors. */
+  function countingClient(dim = 4): { client: EmbeddingClient; batches: number[] } {
+    const batches: number[] = [];
+    let counter = 0;
+    return {
+      batches,
+      client: {
+        provider: 'test',
+        model: 'stub',
+        dim,
+        async embed(texts: string[]) {
+          batches.push(texts.length);
+          return texts.map(() => {
+            const v = new Array(dim).fill(0);
+            v[0] = counter++;
+            return v;
+          });
+        },
+      },
+    };
+  }
+
+  it('passes a within-limit batch through in one call', async () => {
+    const { client: inner, batches } = countingClient();
+    const out = await withMaxBatch(inner, 32).embed(['a', 'b', 'c'], 'document');
+    expect(batches).toEqual([3]);
+    expect(out).toHaveLength(3);
+  });
+
+  it('splits an over-limit batch and concatenates results in order', async () => {
+    const { client: inner, batches } = countingClient();
+    const texts = Array.from({ length: 70 }, (_, i) => `t${i}`);
+    const out = await withMaxBatch(inner, 32).embed(texts, 'document');
+    expect(batches).toEqual([32, 32, 6]);
+    expect(out).toHaveLength(70);
+    // Order preserved: the counter stamped 0..69 into position 0.
+    expect(out.map((v) => v[0])).toEqual(Array.from({ length: 70 }, (_, i) => i));
+  });
+
+  it('preserves provider/model/dim metadata', () => {
+    const { client: inner } = countingClient();
+    const wrapped = withMaxBatch(inner, 8);
+    expect(wrapped.provider).toBe('test');
+    expect(wrapped.model).toBe('stub');
+    expect(wrapped.dim).toBe(4);
+  });
+
+  it('rejects a non-positive or non-integer maxBatch', () => {
+    const { client: inner } = countingClient();
+    expect(() => withMaxBatch(inner, 0)).toThrow(/positive integer/);
+    expect(() => withMaxBatch(inner, 1.5)).toThrow(/positive integer/);
   });
 });
