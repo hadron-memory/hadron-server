@@ -499,6 +499,13 @@ export async function handleEmbedWake(
       select: { embeddingPendingAt: true, memory: { select: { isEncrypted: true } } },
     });
     if (!row?.embeddingPendingAt) return;
+    // A FUTURE-dated stamp is a backed-off retry that is not yet due (#882).
+    // Bus naks redeliver after ~15s while the first backoff step is 60s and
+    // grows — without this check a redelivery would bypass the backoff the
+    // failure just scheduled and burn immediate attempts against an
+    // unhealthy endpoint (PR-883 review, Codex P2). Ack and leave it to the
+    // sweep's due-stamp filter, which owns backed-off work.
+    if (row.embeddingPendingAt.getTime() > Date.now()) return;
     // Encrypted memory: PUNT (PR-489 review, Codex P2). The wake arrives
     // within milliseconds of the write — while the prompt-drain (which holds
     // the plaintext this bus message cannot carry) may still be in flight.

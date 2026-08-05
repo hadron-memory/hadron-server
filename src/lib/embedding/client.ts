@@ -184,10 +184,13 @@ export class HttpEmbeddingClient implements EmbeddingClient {
     }
 
     if (!res.ok) {
-      // 4xx (minus the timeout/throttle statuses) is a deterministic
-      // rejection of this request — retrying identically can't succeed
-      // (#882). 5xx / 408 / 429 are the transient class.
-      const retryable = res.status >= 500 || res.status === 408 || res.status === 429;
+      // 4xx (minus the timeout/throttle/dependency statuses) is a
+      // deterministic rejection of this request — retrying identically
+      // can't succeed (#882). 5xx / 408 / 429 are the transient class;
+      // 424 stays retryable for parity with the SageMaker backend, where
+      // it is the ModelError pass-through carrying container timeouts.
+      const retryable =
+        res.status >= 500 || res.status === 408 || res.status === 424 || res.status === 429;
       throw new EmbeddingRequestError(`HTTP ${res.status} from ${this.url}`, { retryable });
     }
 

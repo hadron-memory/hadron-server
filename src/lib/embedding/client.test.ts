@@ -148,8 +148,9 @@ describe('#882 — error classification (classifyEmbedError)', () => {
     expect(classifyEmbedError(await thrownBy(503))).toBe('retryable');
   });
 
-  it('HTTP 408 / 429 are retryable (timeout / throttle)', async () => {
+  it('HTTP 408 / 424 / 429 are retryable (timeout / model-error pass-through / throttle)', async () => {
     expect(classifyEmbedError(await thrownBy(408))).toBe('retryable');
+    expect(classifyEmbedError(await thrownBy(424))).toBe('retryable');
     expect(classifyEmbedError(await thrownBy(429))).toBe('retryable');
   });
 

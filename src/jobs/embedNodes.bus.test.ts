@@ -158,6 +158,22 @@ describe('handleEmbedWake', () => {
     expect(client.embed).not.toHaveBeenCalled();
   });
 
+  it('honors backoff: a FUTURE-dated pending stamp is skipped, not embedded (#882)', async () => {
+    // A retryable failure future-dates embeddingPendingAt; bus naks redeliver
+    // after ~15s while the first backoff step is 60s — the wake must not let
+    // the redelivery bypass the schedule (PR-883 review, Codex P2).
+    const node = await createNodeRow('w-backoff', false);
+    await db.node.update({
+      where: { id: node.id },
+      data: { embeddingPendingAt: new Date(Date.now() + 60_000) },
+    });
+    const client = fakeClient();
+    await handleEmbedWake(db, { nodeId: node.id }, client); // resolves (ack), no throw
+    expect(client.embed).not.toHaveBeenCalled();
+    const row = await db.node.findUnique({ where: { id: node.id } });
+    expect(row?.embeddingPendingAt).not.toBeNull(); // schedule untouched
+  });
+
   it('THROWS on a transient failure so the bus naks/redelivers', async () => {
     const node = await createNodeRow('w3');
     const client = fakeClient({
