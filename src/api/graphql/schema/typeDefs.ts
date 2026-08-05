@@ -2524,7 +2524,7 @@ export const typeDefs = `#graphql
 
   type MemoryValidationResult {
     memoryId: ID!
-    "Nodes scanned. The whole memory in one pass - the checks are cross-referential, so a partial scan would produce false positives rather than fewer findings."
+    "Live (non-deleted) nodes scanned - soft-deleted tombstones are excluded, since their findings would be unactionable (#884). The whole memory in one pass - the checks are cross-referential, so a partial scan would produce false positives rather than fewer findings."
     nodesChecked: Int!
     "Findings, capped by the limit argument."
     findings: [MemoryValidationFinding!]!
