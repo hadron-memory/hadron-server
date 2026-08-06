@@ -71,7 +71,29 @@ export async function pruneWebFetchEventReceipts(olderThan: Date): Promise<numbe
   return count;
 }
 
+/**
+ * Fire-and-forget receipt prune, on a small fraction of dispatches.
+ *
+ * **Never runs under test.** This is an UNAWAITED delete issued from
+ * inside a request path, so in a test run it lands at an arbitrary later
+ * moment — potentially inside an unrelated test — and silently removes
+ * rows that test just wrote. That is exactly what it did: the
+ * receipt-maintenance test backdates a receipt and then asserts its own
+ * prune removes it, and roughly one CI run in some tens saw this
+ * background delete get there first, failing with `expected +0 to be 1`.
+ *
+ * The rot was time-delayed, which is why it surfaced long after the test
+ * was written: the cutoff here is `now - 45 days`, so the test's fixed
+ * backdate only entered this window once wall-clock `now` passed it. It
+ * would have looked stable for weeks and then started flaking on its own.
+ *
+ * Skipping in test loses no coverage — the prune's actual behaviour is
+ * asserted directly against `pruneWebFetchEventReceipts`; only the random
+ * background trigger is suppressed. Same posture as the janitor and
+ * worker loops, which are all `NODE_ENV !== 'test'` guarded in server.ts.
+ */
 function pruneReceiptsOpportunistically(): void {
+  if (process.env.NODE_ENV === 'test') return;
   if (Math.random() >= RECEIPT_PRUNE_PROBABILITY) return;
   pruneWebFetchEventReceipts(new Date(Date.now() - RECEIPT_TTL_MS))
     .then((count) => {
