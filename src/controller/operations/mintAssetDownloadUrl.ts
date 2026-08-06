@@ -106,8 +106,16 @@ export async function mintAssetDownloadUrl(
   // spec 001's pattern when the session key is missing.
   const memory = await db.memory.findUniqueOrThrow({
     where: { id: asset.memoryId },
-    select: { id: true, isEncrypted: true },
+    select: { id: true, isEncrypted: true, deletedAt: true },
   });
+  // A soft-deleted memory is terminal (there is no restore mutation) and
+  // its contents are gone from every normal read surface — so its assets
+  // are not downloadable either. canReadMemory does not itself filter
+  // deletedAt, so this has to be explicit. Same rule the public hotlink
+  // route applies (PR #888 review, Codex P1).
+  if (memory.deletedAt) {
+    throw new AssetUploadError('NOT_FOUND', 'asset not found');
+  }
   const sessionKey = memory.isEncrypted
     ? sessionKeyCache.getByMemoryId(memory.id)
     : null;

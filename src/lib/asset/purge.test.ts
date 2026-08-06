@@ -23,6 +23,7 @@ import {
   collectAssetKeysForMemories,
   purgeCollectedAssetObjects,
 } from './purge.js';
+import { deleteUserAccount } from '../../controller/operations/deleteUser.js';
 
 const deleteObjectMock = vi.hoisted(() => vi.fn());
 
@@ -186,5 +187,86 @@ describe('purgeCollectedAssetObjects', () => {
       'test',
     );
     expect(deleteObjectMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleteUserAccount purges the target’s asset objects', () => {
+  it('purges assets in APP-scoped memories, deleted via the App cascade', async () => {
+    // Regression: Memory.app is onDelete: Cascade, so `tx.app.deleteMany`
+    // takes app-scoped memories and their Asset rows with it. Collecting
+    // keys after that point missed them entirely and the bytes were
+    // orphaned forever (PR #888 review, Codex P1).
+    const user = await db.user.create({
+      data: {
+        id: generateId(),
+        handle: `purge-app-${generateId()}`,
+        email: `purge-app-${generateId()}@example.com`,
+        roles: ['READER'],
+      },
+    });
+    const app = await db.app.create({
+      data: {
+        id: generateId(),
+        name: 'purge-app',
+        urn: `${org.urn}:purge-app`,
+        // chk_app_owner_xor: organizationId XOR ownerUserId.
+        organizationId: null,
+        ownerUserId: user.id,
+      } as never,
+    });
+    const appMemory = await db.memory.create({
+      data: {
+        class: 'app',
+        id: generateId(),
+        organizationId: org.id,
+        appId: app.id,
+        urn: `${org.urn}:purge-app-mem`,
+        name: 'app-mem',
+        // chk_memory_visibility_class: visibility is NULL unless the
+        // class is knowledge/group.
+      },
+    });
+    await seedAsset(appMemory.id, 'org/app-mem/inapp.pdf');
+
+    await deleteUserAccount(db, {
+      targetUserId: user.id,
+      actorUserId: user.id,
+    });
+    // The purge is post-commit and fire-and-forget; let it drain.
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(await db.memory.findUnique({ where: { id: appMemory.id } })).toBeNull();
+    expect(deleteObjectMock).toHaveBeenCalledWith('org/app-mem/inapp.pdf');
+  });
+
+  it('purges assets in the target’s own memories', async () => {
+    const user = await db.user.create({
+      data: {
+        id: generateId(),
+        handle: `purge-own-${generateId()}`,
+        email: `purge-own-${generateId()}@example.com`,
+        roles: ['READER'],
+      },
+    });
+    const owned = await db.memory.create({
+      data: {
+        class: 'knowledge',
+        id: generateId(),
+        organizationId: null,
+        ownerUserId: user.id,
+        urn: `${org.urn}:purge-own-mem`,
+        name: 'own-mem',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    await seedAsset(owned.id, 'org/own-mem/mine.pdf');
+
+    await deleteUserAccount(db, {
+      targetUserId: user.id,
+      actorUserId: user.id,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(deleteObjectMock).toHaveBeenCalledWith('org/own-mem/mine.pdf');
   });
 });

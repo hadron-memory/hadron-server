@@ -306,6 +306,18 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
+      // #876: never resolve an asset under impersonation. Every other
+      // asset surface denies impersonation outright, and this field
+      // would otherwise route around them — the ad-hoc auth object
+      // below cannot carry ctx.impersonation, so canReadMemory would
+      // evaluate the TARGET's ordinary access across all their orgs,
+      // not the session's org scope.
+      //
+      // The stakes here are higher than a normal metadata read: asset
+      // ids are the credential for the unauthenticated GET /assets/:id
+      // hotlink, so disclosing an id effectively grants the bytes.
+      if (ctx.impersonation) return null;
+
       const data = n.data as { asset?: { id?: unknown } } | null | undefined;
       const assetId = data?.asset?.id;
       if (typeof assetId !== 'string' || !assetId) return null;
@@ -562,9 +574,11 @@ export const typeResolvers = {
       if (a.deletedAt || !a.memoryId || a.scanStatus !== 'CLEAN') return null;
       const memory = await ctx.db.memory.findUnique({
         where: { id: a.memoryId },
-        select: { isEncrypted: true },
+        select: { isEncrypted: true, deletedAt: true },
       });
-      if (!memory || memory.isEncrypted) return null;
+      // Soft-deleted memory: the route 404s these, so offering the link
+      // would be offering a dead one.
+      if (!memory || memory.deletedAt || memory.isEncrypted) return null;
       return publicAssetUrl(a.id);
     },
   },

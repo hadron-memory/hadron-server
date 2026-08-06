@@ -59,12 +59,18 @@ export interface CreateAssetReferenceNodeInput {
  * Extract an asset id from an id or a `…:assets:<id>` URN. Anything
  * without the `assets` marker is treated as a raw id — the caller's
  * lookup fails loudly if it is neither.
+ *
+ * Takes the atom immediately AFTER the marker rather than the last atom
+ * of the ref. For a canonical `…:assets:<id>` the two coincide, but
+ * keying on the marker means a ref with anything trailing resolves the
+ * id or nothing — never some unrelated trailing atom that would look up
+ * the wrong asset (PR #888 review, Copilot).
  */
 export function assetIdFromRef(ref: string): string {
   const atoms = ref.split(':');
   const marker = atoms.lastIndexOf('assets');
   if (marker >= 0 && marker < atoms.length - 1) {
-    return atoms[atoms.length - 1]!;
+    return atoms[marker + 1]!;
   }
   return ref;
 }

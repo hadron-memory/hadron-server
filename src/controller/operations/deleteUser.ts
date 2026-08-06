@@ -62,6 +62,10 @@ const SERIALIZATION_RETRIES = 3;
  *    import edges onto the target's agents are removed first; Apps go before
  *    Memories so app-scoped memories fall to the App cascade; Agents go before
  *    Memories so their system memories (owned rows, no FK) delete cleanly.
+ *    Asset object-store keys for EVERY doomed memory (app-scoped and
+ *    user-owned alike) are collected before the first of those deletes —
+ *    a key exists only on its Asset row, so any cascade that fires first
+ *    strands the bytes permanently.
  * 3. **Credentials + linked accounts:** UserApiKeys are REVOKED (audit rows
  *    kept, `revokedAt` — auth already rejects revoked keys and deleted users);
  *    Sessions, AuthCodes, AuthHandoffCodes, ExchangeConnections (provider
@@ -196,6 +200,39 @@ async function runDeletionTxn(
       });
 
       // ── 2. Hard-erase owned data (FK-safe order) ────────────────────
+      //
+      // FIRST, before anything is deleted: collect the object-store keys of
+      // every asset about to be cascaded away. A storage key exists ONLY on
+      // its Asset row, so once any cascade fires the bytes are unreachable
+      // forever — no reverse index, and for encrypted memories no way to
+      // recover the plaintext key at all.
+      //
+      // This must precede the App delete below, not just the Memory delete:
+      // `Memory.app` is onDelete: Cascade, so `tx.app.deleteMany` silently
+      // takes every app-scoped memory and its assets with it. Collecting
+      // after that point missed them entirely (PR #888 review, Codex P1).
+      //
+      // Both doomed sets, in one pass:
+      //   - app-scoped   — Memory.appId in the target's owned Apps
+      //   - user-owned   — Memory.userId (personal/private, spec 034) or
+      //                    Memory.ownerUserId (tenant memories, spec 047)
+      // The keys are purged from the object store after this transaction
+      // commits (see deleteUserAccount).
+      const doomedMemories = await tx.memory.findMany({
+        where: {
+          OR: [
+            { app: { ownerUserId: targetUserId } },
+            { userId: targetUserId },
+            { ownerUserId: targetUserId },
+          ],
+        },
+        select: { id: true },
+      });
+      const assetKeys = await collectAssetKeysForMemories(
+        tx as unknown as PrismaClient,
+        doomedMemories.map((m) => m.id),
+      );
+
       // AgentImport.importedAgent is ON DELETE RESTRICT — drop import edges
       // onto the target's agents first (the parent-side FK cascades).
       await tx.agentImport.deleteMany({
@@ -211,21 +248,8 @@ async function runDeletionTxn(
       // free-standing rows included) AND user-owned tenant memories (spec 047
       // Memory.ownerUserId). The memory cascade removes nodes, edges,
       // embeddings, revisions, assets, subscriptions, licenses, log entries,
-      // shares and members of these memories.
-      //
-      // The cascade takes the Asset ROWS but not the OBJECTS behind
-      // them, and a storage key exists only on its row — so collect the
-      // keys HERE, ahead of the delete, or the bytes are unreachable
-      // forever. They are purged from the object store after this
-      // transaction commits (see deleteUserAccount).
-      const doomedMemories = await tx.memory.findMany({
-        where: { OR: [{ userId: targetUserId }, { ownerUserId: targetUserId }] },
-        select: { id: true },
-      });
-      const assetKeys = await collectAssetKeysForMemories(
-        tx as unknown as PrismaClient,
-        doomedMemories.map((m) => m.id),
-      );
+      // shares and members of these memories. Their asset keys were
+      // collected at the top of this section, before any cascade fired.
       await tx.memory.deleteMany({
         where: { OR: [{ userId: targetUserId }, { ownerUserId: targetUserId }] },
       });

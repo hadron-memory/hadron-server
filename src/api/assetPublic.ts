@@ -65,61 +65,100 @@ export function publicAssetUrl(assetId: string): string | null {
   }
 }
 
+/**
+ * Sanitize a filename for use inside a quoted HTTP header parameter.
+ *
+ * Filenames are user-supplied at upload time and this value is handed to
+ * the object store, which reflects it back as a `Content-Disposition`
+ * response header — so CR/LF would be a header-injection vector, not
+ * merely cosmetic. Strip quotes, CR/LF, and every other control
+ * character rather than just the quote.
+ */
+export function sanitizeFilenameForHeader(filename: string): string {
+  // eslint-disable-next-line no-control-regex
+  return filename.replace(/["\\]/g, '').replace(/[\u0000-\u001f\u007f]/g, '');
+}
+
 /** Mount the unauthenticated asset hotlink route. */
 export function mountPublicAssetRoutes(app: Express, db: PrismaClient): void {
-  app.get('/assets/:id', async (req, res) => {
-    const assetId = String(req.params.id ?? '');
-
-    const asset = await db.asset.findUnique({ where: { id: assetId } });
-
-    // Every rejection below answers an identical bare 404. The route is
-    // anonymous, so a descriptive error would let a stranger probe for
-    // which asset ids exist, which are pending a scan, and which sit in
-    // encrypted memories.
-    const notFound = () => res.status(404).json({ error: 'not found' });
-
-    if (!asset || asset.deletedAt || !asset.memoryId) return notFound();
-    if (asset.scanStatus !== 'CLEAN') return notFound();
-
-    const memory = await db.memory.findUnique({
-      where: { id: asset.memoryId },
-      select: { isEncrypted: true },
-    });
-    if (!memory) return notFound();
-    // Anonymous requests hold no session key, so an encrypted memory's
-    // storage key can never be decrypted here.
-    if (memory.isEncrypted) return notFound();
-
-    let plainStorageKey: string;
+  app.get('/assets/:id', async (req, res, next) => {
+    // Express 4 does not forward an async handler's rejection to the
+    // error middleware, so an unhandled Prisma failure would hang the
+    // request and surface as an unhandled rejection instead of a 5xx.
+    // Everything below runs inside this try; genuine faults go to next().
     try {
-      plainStorageKey = decryptStorageKey(asset.storageKey, null);
-    } catch {
-      return notFound();
-    }
+      const assetId = String(req.params.id ?? '');
 
-    let url: string;
-    try {
-      url = await mintGetUrl({
-        key: plainStorageKey,
-        ttlSeconds: REDIRECT_TTL_SECONDS,
-        responseContentDisposition: `inline; filename="${asset.filename.replace(/"/g, '')}"`,
-        responseContentType: asset.mimeType,
+      const asset = await db.asset.findUnique({ where: { id: assetId } });
+
+      // Every rejection below answers an identical bare 404 — including
+      // the object-store failure at the end. The route is anonymous, so
+      // any distinguishable response lets a stranger probe for which
+      // asset ids exist, which are pending a scan, and which sit in
+      // encrypted memories. A 503 would have been such a tell: it is
+      // only reachable for an asset that passed every gate, so during an
+      // outage it would confirm "this id exists and is clean".
+      const notFound = () => res.status(404).json({ error: 'not found' });
+
+      if (!asset || asset.deletedAt || !asset.memoryId) return notFound();
+      if (asset.scanStatus !== 'CLEAN') return notFound();
+
+      const memory = await db.memory.findUnique({
+        where: { id: asset.memoryId },
+        select: { isEncrypted: true, deletedAt: true },
       });
-    } catch {
-      return res.status(503).json({ error: 'object storage unavailable' });
+      if (!memory) return notFound();
+      // A soft-deleted memory is terminal — there is no restore
+      // mutation, and its assets are excluded from every normal read
+      // surface. Without this check a public URL kept serving the file
+      // indefinitely after the owner deleted the memory holding it
+      // (PR #888 review, Codex P1).
+      if (memory.deletedAt) return notFound();
+      // Anonymous requests hold no session key, so an encrypted memory's
+      // storage key can never be decrypted here.
+      if (memory.isEncrypted) return notFound();
+
+      let plainStorageKey: string;
+      try {
+        plainStorageKey = decryptStorageKey(asset.storageKey, null);
+      } catch {
+        return notFound();
+      }
+
+      let url: string;
+      try {
+        url = await mintGetUrl({
+          key: plainStorageKey,
+          ttlSeconds: REDIRECT_TTL_SECONDS,
+          responseContentDisposition: `inline; filename="${sanitizeFilenameForHeader(asset.filename)}"`,
+          responseContentType: asset.mimeType,
+        });
+      } catch (err) {
+        // Logged, not surfaced: the operator signal belongs in the logs,
+        // not in a response that would otherwise become an oracle.
+        logAssetEvent({
+          operation: 'download-url-issued',
+          assetId: asset.id,
+          memoryId: asset.memoryId,
+          error: `public hotlink presign failed: ${String(err)}`,
+        });
+        return notFound();
+      }
+
+      logAssetEvent({
+        operation: 'download-url-issued',
+        assetId: asset.id,
+        memoryId: asset.memoryId,
+        userId: null,
+        ttlSeconds: REDIRECT_TTL_SECONDS,
+        reason: 'public hotlink (unauthenticated)',
+      });
+
+      // 302, not 301: the target is a short-lived presigned URL and must
+      // never be cached as this asset's permanent location.
+      return res.redirect(302, url);
+    } catch (err) {
+      return next(err);
     }
-
-    logAssetEvent({
-      operation: 'download-url-issued',
-      assetId: asset.id,
-      memoryId: asset.memoryId,
-      userId: null,
-      ttlSeconds: REDIRECT_TTL_SECONDS,
-      reason: 'public hotlink (unauthenticated)',
-    });
-
-    // 302, not 301: the target is a short-lived presigned URL and must
-    // never be cached as this asset's permanent location.
-    res.redirect(302, url);
   });
 }

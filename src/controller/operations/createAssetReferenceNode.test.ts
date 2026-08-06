@@ -96,6 +96,16 @@ describe('assetIdFromRef', () => {
   it('extracts the id from a bare asset URN', () => {
     expect(assetIdFromRef('acme.com:docs:assets:abc123')).toBe('abc123');
   });
+
+  it('keys on the marker, not the last atom', () => {
+    // Anything trailing must not be mistaken for the id — that would
+    // look up an unrelated asset rather than fail.
+    expect(assetIdFromRef('acme.com:docs:assets:abc123:extra')).toBe('abc123');
+  });
+
+  it('handles a memory literally named "assets"', () => {
+    expect(assetIdFromRef('acme.com:assets:assets:abc123')).toBe('abc123');
+  });
 });
 
 describe('createAssetReferenceNode', () => {

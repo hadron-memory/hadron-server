@@ -162,6 +162,66 @@ describe('GET /assets/:id', () => {
     expect((await get('/assets/nope')).status).toBe(404);
   });
 
+  it('404s once the holding memory is soft-deleted', async () => {
+    // Memory soft-delete is terminal (no restore mutation), so a public
+    // URL must stop working — it previously kept serving the file
+    // indefinitely after the owner deleted the memory.
+    const id = await seedAsset();
+    expect((await get(`/assets/${id}`)).status).toBe(302);
+
+    await db.memory.update({
+      where: { id: memory.id },
+      data: { deletedAt: new Date() },
+    });
+    expect((await get(`/assets/${id}`)).status).toBe(404);
+  });
+
+  it('404s (not 503) when the object store fails, and never leaks the fault', async () => {
+    // A 503 is only reachable for an asset that passed every gate, so
+    // during an outage it would confirm "this id exists and is clean".
+    const id = await seedAsset();
+    mintGetUrlMock.mockRejectedValue(new Error('store down'));
+    const real = await get(`/assets/${id}`);
+    const unknown = await get('/assets/nope');
+    expect(real.status).toBe(404);
+    expect(`${real.status}:${await real.text()}`).toBe(
+      `${unknown.status}:${await unknown.text()}`,
+    );
+  });
+
+  it('strips CR/LF from the filename (header injection)', async () => {
+    const id = await seedAsset();
+    await db.asset.update({
+      where: { id },
+      data: { filename: 'evil\r\nX-Injected: yes.pdf' },
+    });
+    await get(`/assets/${id}`);
+    const disposition = mintGetUrlMock.mock.calls[0]![0]
+      .responseContentDisposition as string;
+    expect(disposition).not.toMatch(/[\r\n]/);
+    expect(disposition).toBe('inline; filename="evilX-Injected: yes.pdf"');
+  });
+
+  it('surfaces a database fault as a 5xx rather than hanging', async () => {
+    // Express 4 does not forward an async handler's rejection, so an
+    // unwrapped Prisma failure would hang the request.
+    const broken = express();
+    mountPublicAssetRoutes(broken, {
+      asset: { findUnique: () => Promise.reject(new Error('db down')) },
+    } as never);
+    const srv = broken.listen(0);
+    try {
+      const addr = srv.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      const res = await fetch(`http://127.0.0.1:${port}/assets/anything`, {
+        redirect: 'manual',
+      });
+      expect(res.status).toBeGreaterThanOrEqual(500);
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+
   it('answers every rejection with an identical body (no state oracle)', async () => {
     const pending = await seedAsset({ scanStatus: 'PENDING' });
     const encrypted = await seedAsset({ memoryId: encryptedMemory.id });
