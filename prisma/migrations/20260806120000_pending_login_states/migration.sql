@@ -18,3 +18,8 @@ CREATE TABLE "pending_login_states" (
 
     CONSTRAINT "pending_login_states_pkey" PRIMARY KEY ("state")
 );
+
+-- CreateIndex — the start routes' lazy expiry sweep (DELETE WHERE
+-- expires_at < now()) must not seq-scan as the table grows under a
+-- burst of abandoned logins.
+CREATE INDEX "pending_login_states_expires_at_idx" ON "pending_login_states"("expires_at");

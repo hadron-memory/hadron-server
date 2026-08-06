@@ -79,26 +79,37 @@ export type ClaimResult =
 
 /**
  * Atomically claim (and thereby consume) a pending login state. The
- * delete-by-PK IS the single-use lock: exactly one concurrent callback
- * gets the row; every other caller sees P2025 (not found) → invalid.
- * Expiry is checked AFTER the claim so an expired state is also burned.
- * A provider mismatch reports `state_unknown` (indistinguishable from a
- * never-issued state — no cross-provider oracle).
+ * provider-scoped conditional delete IS the single-use lock: exactly one
+ * concurrent callback deletes the row; every other caller (including a
+ * WRONG provider's callback) affects zero rows → invalid. Scoping the
+ * delete on provider means a cross-provider submission does NOT burn the
+ * rightful provider's in-flight login (PR-894 Codex P2), while the
+ * response stays indistinguishable from a never-issued state — no
+ * cross-provider oracle. Expiry is checked AFTER the claim so an expired
+ * state is also burned.
  */
 export async function claimPendingLoginState(
   state: string,
   provider: LoginProvider,
 ): Promise<ClaimResult> {
-  let row;
-  try {
-    row = await db.pendingLoginState.delete({ where: { state } });
-  } catch (err: unknown) {
-    if ((err as { code?: string })?.code === 'P2025') {
-      return { ok: false, reason: 'state_unknown' };
-    }
-    throw err;
-  }
-  if (row.provider !== provider) return { ok: false, reason: 'state_unknown' };
+  // Read-then-conditionally-delete would be a TOCTOU; instead delete
+  // WHERE state AND provider in one statement, then re-read the payload
+  // from the returned row. Prisma's `delete` only takes unique filters,
+  // so use the raw equivalent: DELETE .. RETURNING.
+  const rows = await db.$queryRaw<
+    { redirect: string | null; return_to: string | null; client_state: string | null; expires_at: Date }[]
+  >`
+    DELETE FROM pending_login_states
+    WHERE state = ${state} AND provider = ${provider}
+    RETURNING redirect, return_to, client_state, expires_at
+  `;
+  if (rows.length === 0) return { ok: false, reason: 'state_unknown' };
+  const row = {
+    redirect: rows[0].redirect,
+    returnTo: rows[0].return_to,
+    clientState: rows[0].client_state,
+    expiresAt: rows[0].expires_at,
+  };
   if (row.expiresAt.getTime() < Date.now()) return { ok: false, reason: 'state_expired' };
   return {
     ok: true,

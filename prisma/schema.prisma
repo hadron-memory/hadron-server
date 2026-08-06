@@ -3303,6 +3303,9 @@ model PendingLoginState {
   expiresAt   DateTime @map("expires_at")
   createdAt   DateTime @default(now()) @map("created_at")
 
+  // The lazy expiry sweep deletes WHERE expires_at < now() on every
+  // unauthenticated start-route hit — keep it index-backed.
+  @@index([expiresAt])
   @@map("pending_login_states")
 }
 

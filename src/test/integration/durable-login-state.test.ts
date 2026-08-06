@@ -141,6 +141,18 @@ describe('durable pending login state', () => {
     expect(claim).toEqual({ ok: false, reason: 'state_unknown' });
   });
 
+  it('a wrong-provider attempt does NOT burn the rightful login (PR-894 Codex P2)', async () => {
+    const state = await startGithubLogin();
+    // The provider-scoped conditional delete affects zero rows here...
+    expect(await claimPendingLoginState(state, 'apple')).toEqual({
+      ok: false,
+      reason: 'state_unknown',
+    });
+    // ...so the in-flight GitHub login still completes.
+    const claim = await claimPendingLoginState(state, 'github');
+    expect(claim.ok).toBe(true);
+  });
+
   it('answers an EXPIRED state with the friendly 400 HTML page and burns the row', async () => {
     const state = 'e'.repeat(32);
     await db.pendingLoginState.create({
