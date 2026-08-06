@@ -3276,6 +3276,36 @@ model AuthHandoffCode {
   @@map("auth_handoff_codes")
 }
 
+/// Durable pending login state for the first-party auth flows (GitHub /
+/// Google / Apple, `src/auth/pendingLoginState.ts`). Carries the OAuth
+/// state-CSRF token minted at the start route until the provider callback
+/// claims it (atomic delete-by-PK — single use). Replaces the three
+/// in-process `pendingStates` Maps in server.ts, which died on every
+/// deploy/restart: the provider callback then 400d mid-login — the failure
+/// mode behind the Apple App Review "the app failed to login with Apple"
+/// rejection (Apple's callback is a cross-site form POST after a flow that
+/// can involve slow 2FA). DB-backed rows survive restarts and multi-worker
+/// deploys. No user FK: the row exists BEFORE we know who is logging in.
+model PendingLoginState {
+  /// The OAuth `state` CSRF token (random hex) — handed to the IdP at the
+  /// start route and echoed back on the callback.
+  state       String   @id
+  /// 'github' | 'google' | 'apple' — a state minted for one provider can
+  /// never be claimed by another provider's callback.
+  provider    String
+  /// Portal-local path to land on after login (portal-handoff flow).
+  redirect    String?
+  /// Spec 025 FR-007 Option-C server-local return path (cookie flow).
+  returnTo    String?  @map("return_to")
+  /// #477 session-fixation binding — the portal's browser nonce, stamped
+  /// onto the login handoff code at the callback.
+  clientState String?  @map("client_state")
+  expiresAt   DateTime @map("expires_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("pending_login_states")
+}
+
 // ─── Spec 040 — headless agent runs ─────────────────────────────────────────
 // Plan: specs/040-headless-runs/plan.md (D-2026-07-04 A–F over the 2026-05/06
 // design corpus). Spec: cor:agt:010 (+ cor:acl:040/:050).

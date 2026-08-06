@@ -20,7 +20,8 @@
 // The raw code is handed out once; only its SHA-256 hash is stored. Single use
 // is an atomic `updateMany({ redeemedAt: null })` claim (the conditional WHERE
 // is the lock — mirrors the AuthCode /token redemption). DB-backed so it holds
-// across multi-worker deploys, unlike the legacy in-memory pendingStates maps.
+// across multi-worker deploys and restarts, like the pending login states
+// (src/auth/pendingLoginState.ts) that feed it.
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { db } from '../integrations/db/client.js';

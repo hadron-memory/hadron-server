@@ -22,6 +22,8 @@ export function buildAppKey(suffix?: string): string {
  * Call in beforeEach for DB tests.
  */
 export async function cleanDb(db: PrismaClient): Promise<void> {
+  // Pending first-party login states (FK-free; keyed on the OAuth state).
+  await db.pendingLoginState.deleteMany();
   // 036-ai-service-config: configs FK every owner level (incl.
   // hadron_server, which nothing below deletes) — clear them first.
   await db.aiServiceConfig.deleteMany();
