@@ -14,6 +14,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { listAssets } from './listAssets.js';
+import { MAX_MEMORY_SCOPE_REFS } from '../../lib/usageActivity.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 let orgA: { id: string; urn: string };
@@ -192,6 +193,33 @@ describe('listAssets — filters', () => {
     // default scope here would relabel one principal's data as the
     // resource's.
     const page = await listAssets(userCtx(uploader.id), { filter: { memoryRefs: [] } });
+    expect(page).toEqual({ items: [], total: 0 });
+  });
+
+  it('rejects an over-long memoryRefs list rather than resolving it', async () => {
+    // One DB round trip per ref (two on a miss), so an unbounded list is
+    // a cheap way to tie up a worker. Loud on the query path.
+    const refs = Array.from({ length: MAX_MEMORY_SCOPE_REFS + 1 }, () => memA.id);
+    await expect(
+      listAssets(userCtx(uploader.id), { filter: { memoryRefs: refs } }),
+    ).rejects.toThrow(/Too many memoryRefs/);
+  });
+
+  it('propagates a malformed ref instead of silently dropping it', async () => {
+    // Only "names nothing" is droppable. A structurally invalid ref is
+    // caller error — swallowing it would return a partial page that
+    // looks complete.
+    await expect(
+      listAssets(userCtx(uploader.id), { filter: { memoryRefs: ['not-a-valid-urn'] } }),
+    ).rejects.toThrow();
+  });
+
+  it('drops an unknown-but-well-formed ref without erroring', async () => {
+    // The other side of the same rule: a syntactically fine URN that
+    // resolves to nothing is the documented unknown-ref case.
+    const page = await listAssets(userCtx(uploader.id), {
+      filter: { memoryRefs: [`${orgA.urn}:no-such-memory`] },
+    });
     expect(page).toEqual({ items: [], total: 0 });
   });
 

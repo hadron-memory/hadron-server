@@ -27,8 +27,12 @@ import {
   getAccessibleMemoryIds,
   type Context,
 } from '../../api/graphql/schema/resolvers.helpers.js';
+import { GraphQLError } from 'graphql';
 import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
-import { UrnNotQualifiedError } from '../../lib/entityRef/errors.js';
+// Spec 006 put MemoryNotFoundError in asset/gate.ts; entityRef/errors.ts
+// documents that placement rather than re-exporting it.
+import { MemoryNotFoundError } from '../../lib/asset/gate.js';
+import { MAX_MEMORY_SCOPE_REFS } from '../../lib/usageActivity.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 
 export interface AssetFilterInput {
@@ -82,8 +86,15 @@ export async function listAssets(ctx: Context, input: ListAssetsInput): Promise<
   // wrong direction to fail.
   if (f.mine && !ctx.userId) return EMPTY;
 
-  // The shared read gate. null = unrestricted (platform admin without an
-  // owner-only carve-out); otherwise the explicit accessible set.
+  // The shared read gate — the caller's accessible memory set.
+  //
+  // Its declared type includes `null` ("no filter"), which is how
+  // memoryAccessFilter reads it, but NO branch returns null today: even
+  // the platform-admin path builds an explicit id list, precisely so the
+  // 034 owner-only carve-out for another user's personal/private memory
+  // survives. The null handling below is therefore defensive against the
+  // declared contract, not a live path — if that ever changes, this must
+  // keep meaning "unrestricted" and not silently invert.
   const accessible = await getAccessibleMemoryIds(ctx);
 
   // Org narrowing has to be expressed as a memory-id set too, because the
@@ -111,17 +122,30 @@ export async function listAssets(ctx: Context, input: ListAssetsInput): Promise<
   // Dedupe on the RESOLVED id, not the ref string.
   if (f.memoryRefs) {
     if (f.memoryRefs.length === 0) return EMPTY;
+    // Loud on the QUERY path: resolution is one DB round trip per ref
+    // (two on a miss, via the legacy-alias fallback), so an unbounded
+    // list is a cheap way to tie up a worker. Same cap and same posture
+    // as usageActivity's memoryRefs — reject rather than truncate,
+    // because an over-long list here is caller error, not untrusted
+    // stored config.
+    if (f.memoryRefs.length > MAX_MEMORY_SCOPE_REFS) {
+      throw new GraphQLError(`Too many memoryRefs (max ${MAX_MEMORY_SCOPE_REFS}).`, {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
     const resolved = new Set<string>();
     for (const ref of f.memoryRefs) {
       let id: string;
       try {
         ({ id } = await resolveMemoryRef(db, ref));
       } catch (err) {
-        // A malformed/relative URN is a caller bug — fail loudly. A ref
-        // that merely doesn't resolve to anything the caller may see is
-        // dropped, exactly like an unreadable one.
-        if (err instanceof UrnNotQualifiedError) throw err;
-        continue;
+        // ONLY "this ref names nothing" is silently dropped. A malformed
+        // URN is a caller bug, an ambiguous legacy alias is genuinely
+        // undecidable, and a DB failure is operational — swallowing any
+        // of those would hand back a partial page that looks complete,
+        // which is worse than an error because the caller can't tell.
+        if (err instanceof MemoryNotFoundError) continue;
+        throw err;
       }
       if (allowed === null || allowed.includes(id)) resolved.add(id);
     }

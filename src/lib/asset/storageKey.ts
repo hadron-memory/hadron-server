@@ -1,11 +1,24 @@
 // Storage-key derivation for asset uploads.
 // Spec: hadron-portal/specs/001-asset-upload/data-model.md §E-008.
-// Format: {orgUrn}/{memoryPath}/{assetId}[.{ext}]
-//   memoryPath = Memory.urn after the leading "{orgUrn}:" with each
-//                ":" turned into "/" so colon-delimited per-user memories
-//                (e.g. "<agent-slug>:user:019dd...") become directory
-//                hierarchies in object storage rather than colon-laden
-//                flat keys.
+// Format: {memoryUrn with ":" → "/"}/{assetId}[.{ext}]
+//   e.g. "acme.com:docs:team" → "acme.com/docs/team/<assetId>.pdf"
+//
+// Derived from the MEMORY URN alone. It used to take the org URN
+// separately and strip it as a prefix, which produced byte-identical keys
+// (a memory urn IS "<orgUrn>:<rest>") but made the whole thing unusable
+// for a spec-047 USER-OWNED memory: those have no organization, so
+// `beginAssetUpload` rejected them outright with "asset upload is not
+// supported for a user-owned memory yet". A user-owned memory is exactly
+// where someone puts a personal file, so that ruled out the common case.
+//
+// User-owned memory urns are the same two-atom shape (`holger:jens`), so
+// dropping the org parameter supports them with no key-format change and
+// no migration — existing objects keep resolving.
+//
+// A user handle and an org urn therefore share the top level of the
+// keyspace. Harmless: the asset id makes every key unique regardless, and
+// `storageKey` is unique-constrained. Nothing may infer tenancy from the
+// leading segment — read it off the Asset row's memory instead.
 
 // Each path segment: lowercase alnum + dash/underscore, optionally with
 // dotted parts (e.g. "baragaun.com"). Segments cannot start with a dot,
@@ -35,16 +48,15 @@ export function extractExtension(filename: string): string {
 }
 
 export function buildStorageKey(args: {
-  orgUrn: string;
   memoryUrn: string;
   assetId: string;
   filename: string;
 }): string {
-  const memoryPath = memorySegmentOf(args.memoryUrn, args.orgUrn).replace(/:/g, '/');
+  const memoryPath = args.memoryUrn.replace(/:/g, '/');
   const ext = extractExtension(args.filename);
   const key = ext
-    ? `${args.orgUrn}/${memoryPath}/${args.assetId}.${ext}`
-    : `${args.orgUrn}/${memoryPath}/${args.assetId}`;
+    ? `${memoryPath}/${args.assetId}.${ext}`
+    : `${memoryPath}/${args.assetId}`;
   if (!KEY_REGEX.test(key)) {
     throw new Error(`STORAGE_KEY_INVALID: ${key}`);
   }

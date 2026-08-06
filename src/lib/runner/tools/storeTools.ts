@@ -167,7 +167,6 @@ export const hadronStoreFile: RunToolDef = {
 
     const assetId = generateId();
     const storageKey = buildStorageKey({
-      orgUrn: org.urn,
       memoryUrn: memory.urn,
       assetId,
       filename,

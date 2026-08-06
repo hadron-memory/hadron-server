@@ -39,7 +39,6 @@ describe('extractExtension', () => {
 describe('buildStorageKey', () => {
   it('produces a valid key for a typical PDF upload', () => {
     const key = buildStorageKey({
-      orgUrn: 'baragaun.com',
       memoryUrn: 'baragaun.com:secureid',
       assetId: '01900000-0000-7000-8000-000000000001',
       filename: 'business-plan.pdf',
@@ -52,7 +51,6 @@ describe('buildStorageKey', () => {
 
   it('omits the extension when filename has none', () => {
     const key = buildStorageKey({
-      orgUrn: 'baragaun.com',
       memoryUrn: 'baragaun.com:notes',
       assetId: '01900000-0000-7000-8000-000000000002',
       filename: 'README',
@@ -62,9 +60,24 @@ describe('buildStorageKey', () => {
     );
   });
 
+  it('builds a key for a spec-047 USER-OWNED memory (no organization)', () => {
+    // The reason the org parameter went away. A user-owned memory has no
+    // organization, so the old org-prefix derivation could not produce a
+    // key at all and beginAssetUpload rejected the upload outright —
+    // which ruled out personal memories, the obvious place for a personal
+    // file. User-owned urns are the same two-atom shape, so nothing about
+    // the format changes.
+    const key = buildStorageKey({
+      memoryUrn: 'holger:jens',
+      assetId: '019dd446b8d472e5bd2d2e55b96416e9',
+      filename: 'notes.md',
+    });
+    expect(key).toBe('holger/jens/019dd446b8d472e5bd2d2e55b96416e9.md');
+    expect(validateStorageKey(key)).toBe(true);
+  });
+
   it('explodes per-user memory URN colons into directory segments', () => {
     const key = buildStorageKey({
-      orgUrn: 'baragaun.com',
       memoryUrn: 'baragaun.com:juno:user:019dd3cfdc43783e827690ee7e0c85dd',
       assetId: '019dd446b8d472e5bd2d2e55b96416e9',
       filename: 'photo.jpeg',

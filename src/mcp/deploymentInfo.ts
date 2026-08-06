@@ -53,7 +53,11 @@
 //   uninstallAgentFromApp / addAgentToApp / removeAgentFromApp(appId, agentId
 //   -> appRef, agentRef), publishAgentImport / removeAgentImport(parentAgentId,
 //   importedAgentId -> parentAgentRef, importedAgentRef).
-export const HADRON_SERVER_VERSION = '0.12.0';
+// 0.13.0: #891 — new query `assets(filter, orgId, limit, offset)`, the uniform
+// cross-memory asset list (spec cor:api:120), plus the `AssetFilter` input and
+// `AssetsPage` type. A caller-detectable addition: `memoryAssets(memoryId:)`
+// remains, but "every asset I can reach" was previously unanswerable.
+export const HADRON_SERVER_VERSION = '0.13.0';
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"
