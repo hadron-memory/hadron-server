@@ -260,17 +260,70 @@ describe('POST /internal/webfetch-events', () => {
 });
 
 describe('webfetch event receipt maintenance', () => {
+  // Timestamps are RELATIVE to now, deliberately. This test used fixed
+  // calendar dates (backdate 2026-06-01, cutoff 2026-07-01) and rotted
+  // into a flake as wall-clock time moved: dispatch fires an opportunistic
+  // prune at `now - 45 days`, and once now passed mid-July 2026 the fixed
+  // backdate fell inside that window, so a background delete could race
+  // the assertion. The background prune no longer runs under test, and
+  // relative offsets keep the test's meaning independent of the date.
+  const DAY = 24 * 60 * 60 * 1000;
+
   it('prunes only receipts older than the cutoff', async () => {
     const seeded = await seedBinding();
     const event = pollEvent({ orgId: seeded.orgId, appId: seeded.appId });
     const routed = await dispatchWebFetchEvent(event);
     await db.webFetchEventReceipt.updateMany({
       where: { routedRunId: routed.runId },
-      data: { createdAt: new Date('2026-06-01T00:00:00Z') },
+      data: { createdAt: new Date(Date.now() - 90 * DAY) },
     });
     const newer = await dispatchWebFetchEvent({ ...event, kind: 'poll.expired', snapshotHash: undefined });
     expect(newer.duplicate).toBe(false);
-    expect(await pruneWebFetchEventReceipts(new Date('2026-07-01T00:00:00Z'))).toBe(1);
+    // Cutoff sits between the backdated receipt and the fresh one.
+    expect(await pruneWebFetchEventReceipts(new Date(Date.now() - 30 * DAY))).toBe(1);
     expect(await db.webFetchEventReceipt.count()).toBe(1);
   });
+
+  it('does not prune in the background during a dispatch', async () => {
+    // Pins the NODE_ENV guard in pruneReceiptsOpportunistically. Without
+    // it, this unawaited delete can land inside an unrelated test and
+    // remove rows that test just wrote — the flake this file had.
+    //
+    // Math.random is forced to 0 so the guard is the ONLY thing stopping
+    // the prune. At the real 1% probability this test would pass by luck
+    // ~96% of the time even with the guard removed, which would make it
+    // decorative rather than a regression test.
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      await assertNoBackgroundPrune();
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
+
+  async function assertNoBackgroundPrune() {
+    const seeded = await seedBinding();
+    const event = pollEvent({ orgId: seeded.orgId, appId: seeded.appId });
+    const routed = await dispatchWebFetchEvent(event);
+    // Older than the opportunistic cutoff (now - 45d), so an unguarded
+    // background prune would be eligible to delete it.
+    await db.webFetchEventReceipt.updateMany({
+      where: { routedRunId: routed.runId },
+      data: { createdAt: new Date(Date.now() - 200 * DAY) },
+    });
+
+    // Several further dispatches, each of which would fire the background
+    // prune were it not guarded.
+    const kinds = ['poll.triggered', 'poll.expired', 'poll.failed'] as const;
+    for (const kind of kinds) {
+      await dispatchWebFetchEvent({ ...event, kind, snapshotHash: `${kind}-hash` });
+    }
+    // Give any escaping floating promise a chance to land before asserting.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const survivor = await db.webFetchEventReceipt.findFirst({
+      where: { routedRunId: routed.runId },
+    });
+    expect(survivor).not.toBeNull();
+  }
 });
