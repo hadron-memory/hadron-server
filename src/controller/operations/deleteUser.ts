@@ -4,6 +4,11 @@ import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
+import {
+  collectAssetKeysForMemories,
+  purgeCollectedAssetObjects,
+  type CollectedAssetKeys,
+} from '../../lib/asset/purge.js';
 
 /**
  * Thrown when account deletion is blocked because the target is the only
@@ -57,6 +62,10 @@ const SERIALIZATION_RETRIES = 3;
  *    import edges onto the target's agents are removed first; Apps go before
  *    Memories so app-scoped memories fall to the App cascade; Agents go before
  *    Memories so their system memories (owned rows, no FK) delete cleanly.
+ *    Asset object-store keys for EVERY doomed memory (app-scoped and
+ *    user-owned alike) are collected before the first of those deletes —
+ *    a key exists only on its Asset row, so any cascade that fires first
+ *    strands the bytes permanently.
  * 3. **Credentials + linked accounts:** UserApiKeys are REVOKED (audit rows
  *    kept, `revokedAt` — auth already rejects revoked keys and deleted users);
  *    Sessions, AuthCodes, AuthHandoffCodes, ExchangeConnections (provider
@@ -81,7 +90,11 @@ export async function deleteUserAccount(
 ): Promise<void> {
   for (let attempt = 1; ; attempt++) {
     try {
-      const toolConnections = await runDeletionTxn(db, targetUserId, actorUserId);
+      const { toolConnections, assetKeys } = await runDeletionTxn(
+        db,
+        targetUserId,
+        actorUserId,
+      );
       // Provider-sidecar teardown AFTER the commit: the tools hold their own
       // copy of the OAuth credential + change subscriptions, so deleting the
       // core ExchangeConnection rows alone would leave those live. Outside
@@ -91,6 +104,14 @@ export async function deleteUserAccount(
       for (const c of toolConnections) {
         void deleteToolConnection(c.provider, c.toolConnectionId);
       }
+      // Same posture for the deleted memories' files: the Asset rows went
+      // with the cascade, so these keys are the last record of the bytes.
+      // Post-commit and best-effort — a dead object store must not fail an
+      // account deletion (src/lib/asset/purge.ts).
+      void purgeCollectedAssetObjects(
+        assetKeys,
+        `deleteUserAccount(${targetUserId})`,
+      );
       return;
     } catch (e) {
       const serializationAbort =
@@ -110,7 +131,11 @@ async function runDeletionTxn(
   db: PrismaClient,
   targetUserId: string,
   actorUserId: string,
-): Promise<Array<{ provider: string; toolConnectionId: string }>> {
+): Promise<{
+  toolConnections: Array<{ provider: string; toolConnectionId: string }>;
+  /** Object-store keys of the deleted memories' assets — purged post-commit. */
+  assetKeys: CollectedAssetKeys;
+}> {
   return db.$transaction(
     async (tx) => {
       const now = new Date();
@@ -175,6 +200,39 @@ async function runDeletionTxn(
       });
 
       // ── 2. Hard-erase owned data (FK-safe order) ────────────────────
+      //
+      // FIRST, before anything is deleted: collect the object-store keys of
+      // every asset about to be cascaded away. A storage key exists ONLY on
+      // its Asset row, so once any cascade fires the bytes are unreachable
+      // forever — no reverse index, and for encrypted memories no way to
+      // recover the plaintext key at all.
+      //
+      // This must precede the App delete below, not just the Memory delete:
+      // `Memory.app` is onDelete: Cascade, so `tx.app.deleteMany` silently
+      // takes every app-scoped memory and its assets with it. Collecting
+      // after that point missed them entirely (PR #888 review, Codex P1).
+      //
+      // Both doomed sets, in one pass:
+      //   - app-scoped   — Memory.appId in the target's owned Apps
+      //   - user-owned   — Memory.userId (personal/private, spec 034) or
+      //                    Memory.ownerUserId (tenant memories, spec 047)
+      // The keys are purged from the object store after this transaction
+      // commits (see deleteUserAccount).
+      const doomedMemories = await tx.memory.findMany({
+        where: {
+          OR: [
+            { app: { ownerUserId: targetUserId } },
+            { userId: targetUserId },
+            { ownerUserId: targetUserId },
+          ],
+        },
+        select: { id: true },
+      });
+      const assetKeys = await collectAssetKeysForMemories(
+        tx as unknown as PrismaClient,
+        doomedMemories.map((m) => m.id),
+      );
+
       // AgentImport.importedAgent is ON DELETE RESTRICT — drop import edges
       // onto the target's agents first (the parent-side FK cascades).
       await tx.agentImport.deleteMany({
@@ -190,7 +248,8 @@ async function runDeletionTxn(
       // free-standing rows included) AND user-owned tenant memories (spec 047
       // Memory.ownerUserId). The memory cascade removes nodes, edges,
       // embeddings, revisions, assets, subscriptions, licenses, log entries,
-      // shares and members of these memories.
+      // shares and members of these memories. Their asset keys were
+      // collected at the top of this section, before any cascade fired.
       await tx.memory.deleteMany({
         where: { OR: [{ userId: targetUserId }, { ownerUserId: targetUserId }] },
       });
@@ -267,7 +326,13 @@ async function runDeletionTxn(
         },
       });
 
-      return toolConnections as Array<{ provider: string; toolConnectionId: string }>;
+      return {
+        toolConnections: toolConnections as Array<{
+          provider: string;
+          toolConnectionId: string;
+        }>,
+        assetKeys,
+      };
     },
     {
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,

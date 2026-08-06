@@ -1,8 +1,12 @@
 /**
  * Integration test (US4 / US6 part 2): mintAssetDownloadUrl returns
- * a short-TTL presigned GET URL when the asset is scan-clean and
- * caller-owned. Gated on scan_status; encrypts → decrypts the
- * storage_key on the request stack for encrypted memories.
+ * a short-TTL presigned GET URL when the asset is scan-clean and the
+ * caller can read its holding memory. Gated on scan_status; encrypts →
+ * decrypts the storage_key on the request stack for encrypted
+ * memories.
+ *
+ * The gate is the MEMORY's read access, not uploader identity — see
+ * mintAssetDownloadUrl.ts for why that changed.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -29,7 +33,7 @@ let assetId: string;
 async function seedAsset(over: Partial<{
   scanStatus: 'PENDING' | 'CLEAN' | 'BLOCKED';
   storageKey: string;
-  uploadedBy: string;
+  uploadedBy: string | null;
   deletedAt: Date | null;
   memoryId: string;
 }> = {}) {
@@ -43,7 +47,7 @@ async function seedAsset(over: Partial<{
       sizeBytes: 1024,
       storageKey: over.storageKey ?? `asset-org/buno/user/${assetId}.pdf`,
       scanStatus: over.scanStatus ?? 'CLEAN',
-      uploadedBy: over.uploadedBy ?? user.id,
+      uploadedBy: over.uploadedBy === undefined ? user.id : over.uploadedBy,
       deletedAt: over.deletedAt ?? null,
     },
   });
@@ -72,6 +76,12 @@ beforeEach(async () => {
       name: 'user-memory',
       visibility: 'ORGANIZATION',
     },
+  });
+  // The gate is the MEMORY's read access, so the caller needs genuine
+  // read access to it. `otherUser` is deliberately left OUT of the org
+  // — it is the unreadable-memory case.
+  await db.orgMember.create({
+    data: { userId: user.id, organizationId: org.id, role: 'CONTRIBUTOR' },
   });
 });
 
@@ -115,11 +125,57 @@ describe('mintAssetDownloadUrl', () => {
     ).rejects.toMatchObject({ code: 'SCAN_BLOCKED' });
   });
 
-  it('rejects when the asset belongs to a different user', async () => {
+  // ── The gate is the memory's read access, not uploader identity ──
+
+  it("allows a co-member to download a colleague's upload in a readable memory", async () => {
     await seedAsset({ uploadedBy: otherUser.id });
+    const result = await mintAssetDownloadUrl(
+      db,
+      { userId: user.id },
+      { assetId },
+    );
+    expect(result.url).toBe('https://r2.example/presigned-get');
+  });
+
+  it('allows download of a run-created asset (uploadedBy NULL)', async () => {
+    // hadron_store_file writes uploadedBy: null. Under the old
+    // uploader-identity gate `null !== userId` held for every caller,
+    // so server-authored assets were permanently undownloadable.
+    await seedAsset({ uploadedBy: null });
+    const result = await mintAssetDownloadUrl(
+      db,
+      { userId: user.id },
+      { assetId },
+    );
+    expect(result.url).toBe('https://r2.example/presigned-get');
+  });
+
+  it('rejects a caller who cannot read the holding memory', async () => {
+    await seedAsset();
+    // otherUser is not an org member, so the ORGANIZATION-visible
+    // memory is unreadable to them.
     await expect(
-      mintAssetDownloadUrl(db, { userId: user.id }, { assetId }),
-    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+      mintAssetDownloadUrl(db, { userId: otherUser.id }, { assetId }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('reports an unreadable asset as NOT_FOUND, not PERMISSION_DENIED', async () => {
+    // A distinct "exists but forbidden" answer would be an existence
+    // oracle over asset ids — an unreadable asset must be
+    // indistinguishable from one that does not exist.
+    await seedAsset();
+    const unreadable = await mintAssetDownloadUrl(
+      db,
+      { userId: otherUser.id },
+      { assetId },
+    ).catch((e) => e);
+    const unknown = await mintAssetDownloadUrl(
+      db,
+      { userId: otherUser.id },
+      { assetId: 'nope' },
+    ).catch((e) => e);
+    expect(unreadable.code).toBe(unknown.code);
+    expect(unreadable.message).toBe(unknown.message);
   });
 
   it('rejects soft-deleted assets with NOT_FOUND', async () => {

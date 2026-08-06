@@ -18,6 +18,8 @@ import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { canReadMemory } from '../../../mcp/access-control.js';
+import { publicAssetUrl } from '../../assetPublic.js';
 import {
   canSeeUserPersonalFields,
   canSeeOrgMemberRole,
@@ -316,6 +318,60 @@ export const typeResolvers = {
   },
   Node: {
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
+    // The referenced asset for a `reference` node carrying data.asset
+    // (createAssetReferenceNode / hadron_store_file). Resolves the soft
+    // pointer and returns null when it dangles — there is no FK behind
+    // data.asset.id (cor:dmo:060:10 reserves the schema-level link), so
+    // the asset can be gone or soft-deleted while the node survives.
+    //
+    // Same-memory asset needs no extra gate: reaching this Node already
+    // required its memory's read gate, and an Asset is bound to a
+    // Memory, so an asset in that same memory is already in scope.
+    //
+    // A CROSS-memory pointer does need one. createAssetReferenceNode
+    // permits referencing an asset from another memory (read there +
+    // write here), and `data` is writable through ordinary node
+    // mutations besides — so a hand-written data.asset.id could name an
+    // asset in a memory the reader cannot see. Re-gate on the asset's
+    // OWN memory in that case; null on failure, since a field that
+    // throws would break the whole node read over a stale pointer.
+    asset: async (
+      n: { memoryId: string; data?: unknown },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      // #876: never resolve an asset under impersonation. Every other
+      // asset surface denies impersonation outright, and this field
+      // would otherwise route around them — the ad-hoc auth object
+      // below cannot carry ctx.impersonation, so canReadMemory would
+      // evaluate the TARGET's ordinary access across all their orgs,
+      // not the session's org scope.
+      //
+      // The stakes here are higher than a normal metadata read: asset
+      // ids are the credential for the unauthenticated GET /assets/:id
+      // hotlink, so disclosing an id effectively grants the bytes.
+      if (ctx.impersonation) return null;
+
+      const data = n.data as { asset?: { id?: unknown } } | null | undefined;
+      const assetId = data?.asset?.id;
+      if (typeof assetId !== 'string' || !assetId) return null;
+      const asset = await ctx.db.asset.findUnique({ where: { id: assetId } });
+      if (!asset || asset.deletedAt || !asset.memoryId) return null;
+      if (asset.memoryId !== n.memoryId) {
+        const readable = await canReadMemory(
+          ctx.db,
+          {
+            userId: ctx.userId,
+            appId: ctx.appId,
+            roles: ctx.roles,
+            organizationId: ctx.organizationId,
+          },
+          asset.memoryId,
+        );
+        if (!readable) return null;
+      }
+      return asset;
+    },
     // `node { memory { urn … } }` powers full-URN rendering in clients
     // (the portal composes `<memory.urn>::<loc>`). The generic `nodes`
     // query doesn't `include` the relation, so resolve it lazily by
@@ -524,6 +580,28 @@ export const typeResolvers = {
         console.warn(`[Asset.urn] failed to emit v2 asset urn for memory "${memory.urn}":`, err);
         return assetUrn(memory.urn, a.id);
       }
+    },
+    // The unauthenticated hotlink (see src/api/assetPublic.ts). Mirrors
+    // exactly what that route will actually serve — null whenever the
+    // route would 404 — so a client never shows a "copy link" action
+    // for a URL that cannot work: no canonical origin configured, a
+    // non-CLEAN scan, or an encrypted memory (never hotlinkable, since
+    // an anonymous request holds no session key to decrypt the
+    // storage key with).
+    publicUrl: async (
+      a: { id: string; memoryId: string | null; scanStatus: string; deletedAt: Date | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (a.deletedAt || !a.memoryId || a.scanStatus !== 'CLEAN') return null;
+      const memory = await ctx.db.memory.findUnique({
+        where: { id: a.memoryId },
+        select: { isEncrypted: true, deletedAt: true },
+      });
+      // Soft-deleted memory: the route 404s these, so offering the link
+      // would be offering a dead one.
+      if (!memory || memory.deletedAt || memory.isEncrypted) return null;
+      return publicAssetUrl(a.id);
     },
   },
   Memory: {

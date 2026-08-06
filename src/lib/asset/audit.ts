@@ -14,6 +14,7 @@ export type AssetOperation =
   | 'upload-declined'
   | 'upload-timeout'
   | 'listed'
+  | 'referenced'
   | 'download-url-issued'
   | 'soft-deleted'
   | 'restored'

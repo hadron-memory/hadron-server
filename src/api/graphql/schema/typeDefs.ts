@@ -628,6 +628,18 @@ export const typeDefs = `#graphql
     memory: Memory
     outgoingEdges: [Edge!]!
     incomingEdges: [Edge!]!
+    """
+    The asset this node references, for a reference node created by
+    createAssetReferenceNode or hadron_store_file (its data.asset
+    points at one). Null for every ordinary node.
+
+    Also null when the pointer is DANGLING — the asset was deleted, or
+    is soft-deleted. There is no schema-level Asset-to-Node foreign key
+    (cor:dmo:060:10 reserves it), so data.asset.id is a soft reference
+    and this resolver is what keeps it honest: never assume a node
+    carrying data.asset still has a live asset behind it.
+    """
+    asset: Asset
   }
 
   type Edge {
@@ -3065,6 +3077,19 @@ export const typeDefs = `#graphql
     deletedAt:   DateTime
     """The asset's URN: <memory.urn>:assets:<asset.id>."""
     urn:         String!
+    """
+    Stable, UNAUTHENTICATED hotlink to the bytes (GET /assets/<id>).
+
+    Anyone with this URL can fetch the file — there is no read gate on
+    it. A deliberate, temporary posture; see src/api/assetPublic.ts. Do
+    not present it in a UI as though it were access-controlled.
+
+    Null when the server has no BASE_URL configured (no canonical
+    origin to build an absolute URL from), when the asset is not
+    CLEAN, or when its memory is encrypted — encrypted memories are
+    never hotlinkable, since an anonymous request holds no session key.
+    """
+    publicUrl:   String
   }
 
   enum UploadIntent {
@@ -3119,6 +3144,32 @@ export const typeDefs = `#graphql
 
   input CompleteAssetUploadInput {
     uploadId: ID!
+  }
+
+  """
+  Attach an existing asset to the graph by creating a reference node
+  that points at it.
+
+  The node is a nodeType: reference node whose data.asset carries the
+  asset's id, urn, filename, mimeType and sizeBytes — the same shape
+  hadron_store_file writes for run-created files, so a reader handles
+  both origins identically. There is no schema-level Asset-to-Node
+  link (cor:dmo:060:10 reserves it); the pointer is a soft reference,
+  and Node.asset resolves to null once the asset is gone.
+
+  Requires READ access to the asset's holding memory and WRITE access
+  to the memory the reference node lands in — which need not be the
+  same memory.
+  """
+  input CreateAssetReferenceNodeInput {
+    """Asset id, or its URN (<memory.urn>:assets:<asset.id>)."""
+    assetRef:    String!
+    """Fully-qualified node URN for the reference node."""
+    nodeUrn:     String!
+    """Node name. Defaults to the asset's filename."""
+    name:        String
+    """Node description. Defaults to the asset's own description."""
+    description: String
   }
 
   input SetAgentAssetUploadEnabledInput {
@@ -4243,9 +4294,12 @@ export const typeDefs = `#graphql
     ): AssetListResult!
 
     """
-    v2 (spec 006) — memory-addressed listing. Returns assets for a
-    specific memory; caller must have read access. The replacement
-    for agentAssets in the v2 surface.
+    v2 (spec 006) — memory-addressed listing. Returns every asset
+    attached to the memory; the gate is the memory's read access. The
+    replacement for agentAssets in the v2 surface.
+
+    Set mine: true to narrow to the caller's own uploads — a filter on
+    top of the read gate, not a substitute for it.
 
     Accepts the entity's ID or URN.
     """
@@ -4255,10 +4309,12 @@ export const typeDefs = `#graphql
       skip:           Int = 0
       count:          Int = 20
       includeDeleted: Boolean = false
+      mine:           Boolean = false
     ): AssetListResult!
 
     # Mint a short-TTL presigned GET URL for an asset. Default TTL
-    # 5 minutes; ceiling 1 hour. Gated on scan_status = CLEAN.
+    # 5 minutes; ceiling 1 hour. Gated on the holding memory's read
+    # access and on scan_status = CLEAN.
     assetDownloadUrl(assetId: ID!, ttlSeconds: Int = 300): AssetDownloadUrl!
 
     """
@@ -4746,6 +4802,7 @@ export const typeDefs = `#graphql
     # memory directly, no agent traversal. Replaces agent-addressed
     # beginAssetUpload during the deprecation window.
     beginAssetUploadV2(input: BeginAssetUploadV2Input!): BeginAssetUploadResult!
+    createAssetReferenceNode(input: CreateAssetReferenceNodeInput!): Node!
 
     # Session lifecycle
     startSession(input: SessionInput!): Session!

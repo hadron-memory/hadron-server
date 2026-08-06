@@ -47,6 +47,7 @@ export const assetQueries = {
         skip?: number;
         count?: number;
         includeDeleted?: boolean;
+        mine?: boolean;
       },
       ctx: Context,
     ) => {
@@ -57,10 +58,16 @@ export const assetQueries = {
       // narrowed portal gate — the gate-parity drift CLAUDE.md warns about.
       // That MCP gate admits the target's personal/private memories and calls
       // getOrgReadableMemoryIds WITHOUT restrictToOrgId, so the target's other
-      // orgs resolved too. Denied rather than threaded: the rows are filtered
-      // `uploadedBy: caller.userId` regardless, so an impersonated read is
-      // always identity-scoped, and fixing the shared MCP gate for one
-      // GraphQL caller would risk the MCP surface it also serves.
+      // orgs resolve too. Denied rather than threaded, because fixing the
+      // shared MCP gate for one GraphQL caller would risk the MCP surface it
+      // also serves.
+      //
+      // This denial is now load-bearing on its own. It previously had a
+      // second line of defence — rows were filtered `uploadedBy: caller.userId`
+      // regardless, so an impersonated read was identity-scoped even if the
+      // gate leaked. That filter is gone (listing is now gated on the memory,
+      // per cor:dmo:060:10), so DO NOT relax this throw without first
+      // narrowing the gate itself.
       if (ctx.impersonation) throw new Error('Forbidden');
       const result = await listMemoryAssets(
         ctx.db,
@@ -85,17 +92,23 @@ export const assetQueries = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
-      // #876 (HIGH): the only gate here is `asset.uploadedBy === caller.userId`,
-      // which the target satisfies. Worse than a read: this mints a presigned
-      // R2 GET URL valid for up to an hour that KEEPS WORKING after
-      // stopImpersonation, defeating the "session row is the revocation source
-      // of truth" guarantee the whole design rests on. Denied outright —
-      // clamping the TTL to the session's remaining life would still hand out
-      // a bearer URL that outlives the audit trail's ability to revoke it.
+      // #876 (HIGH): this mints a presigned object-store GET URL valid for up
+      // to an hour that KEEPS WORKING after stopImpersonation, defeating the
+      // "session row is the revocation source of truth" guarantee the whole
+      // design rests on. Denied outright — clamping the TTL to the session's
+      // remaining life would still hand out a bearer URL that outlives the
+      // audit trail's ability to revoke it. (The gate below is now the
+      // memory's read gate rather than `uploadedBy === caller.userId`, which
+      // makes this throw more important, not less.)
       if (ctx.impersonation) throw new Error('Forbidden');
       const result = await mintAssetDownloadUrl(
         ctx.db,
-        { userId: ctx.userId, appId: ctx.appId },
+        {
+          userId: ctx.userId,
+          appId: ctx.appId,
+          roles: ctx.roles,
+          organizationId: ctx.organizationId,
+        },
         { assetId, ttlSeconds },
       );
       return {
