@@ -116,7 +116,24 @@ export async function completeAssetUpload(
     );
   }
 
-  // In dev, allow tests to skip the scan loop end-to-end.
+  // Born CLEAN instead of PENDING when scanning is not in play.
+  //
+  // **This is a PRODUCTION setting now, not just a test hatch** (Holger,
+  // 2026-08-06). There is no malware scanner anywhere in the platform —
+  // nothing transitions PENDING → CLEAN — so with this unset every user
+  // upload is permanently undownloadable: `mintAssetDownloadUrl` gates on
+  // CLEAN and the row never gets there. That is what shipped, and it made
+  // the whole upload feature dead on arrival in prod.
+  //
+  // The tradeoff being accepted: uploaded bytes are served WITHOUT any
+  // malware check, including through the unauthenticated `GET /assets/:id`
+  // hotlink — so an uploaded file becomes a public URL on this deployment's
+  // domain serving unscanned content. Defensible while uploads are limited
+  // to trusted operators and a pilot; NOT once uploads are open to end
+  // users. Tracked for a real scanner in #896.
+  //
+  // Do not "clean this up" as dev-only config. Turning it off without a
+  // scanner in place silently breaks every download again.
   const autoClean = process.env.HADRON_ASSET_SCAN_AUTO_CLEAN === 'true';
 
   const asset = await db.asset.create({
