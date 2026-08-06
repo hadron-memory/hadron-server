@@ -3,6 +3,10 @@ import { listMemoryAssets } from '../../../controller/operations/listMemoryAsset
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
 import { mintAssetDownloadUrl } from '../../../controller/operations/mintAssetDownloadUrl.js';
 import {
+  listAssets,
+  type ListAssetsInput,
+} from '../../../controller/operations/listAssets.js';
+import {
   type Context,
   resolveAssetTargetMemoryId,
 } from './resolvers.helpers.js';
@@ -84,6 +88,28 @@ export const assetQueries = {
         total: result.total,
         hasMore: result.hasMore,
       };
+    },
+
+    // #891 — the uniform cross-memory list. Gate, org scope and ref
+    // handling all live in the controller; this is the thin GraphQL edge.
+    assets: async (
+      _: unknown,
+      input: ListAssetsInput,
+      ctx: Context,
+    ) => {
+      if (!ctx.userId && !ctx.appId) throw new Error('Unauthenticated');
+      // #876 (HIGH): same denial as every other asset read surface, and it
+      // has to be stated HERE rather than inherited — this is a NEW
+      // surface, and cor:acl:100:03 makes uploaded assets and their
+      // download links identity-scoped and invisible to an impersonated
+      // session. #888 removed the incidental `uploadedBy` row filter that
+      // used to be the second line of defence, so this throw is the only
+      // one. A cross-memory list is the worst possible place to leak: it
+      // would enumerate the target's files across every org they belong
+      // to, and an asset id is the credential for the unauthenticated
+      // GET /assets/:id hotlink.
+      if (ctx.impersonation) throw new Error('Forbidden');
+      return listAssets(ctx, input);
     },
 
     assetDownloadUrl: async (

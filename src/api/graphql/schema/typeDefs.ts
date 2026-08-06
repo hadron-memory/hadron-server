@@ -3189,6 +3189,31 @@ export const typeDefs = `#graphql
     hasMore: Boolean!
   }
 
+  """
+  Filter for the cross-memory assets() list. Every field narrows the
+  caller's accessible set; none of them widens it.
+  """
+  input AssetFilter {
+    """
+    Narrow to these memories (id or fully-qualified URN). Unreadable and
+    unknown refs are silently dropped; a malformed URN is an error. An
+    explicitly EMPTY list is the empty scope, never a fallback to the
+    default scope.
+    """
+    memoryRefs:     [ID!]
+    """Only the caller's own uploads. Never widens the gate."""
+    mine:           Boolean
+    mimeType:       String
+    scanStatus:     AssetScanStatus
+    includeDeleted: Boolean
+  }
+
+  """Uniform find-many envelope for assets (spec cor:api:120)."""
+  type AssetsPage {
+    items: [Asset!]!
+    total: Int!
+  }
+
   type AssetDownloadUrl {
     url:       String!
     expiresAt: DateTime!
@@ -4311,6 +4336,22 @@ export const typeDefs = `#graphql
       includeDeleted: Boolean = false
       mine:           Boolean = false
     ): AssetListResult!
+
+    """
+    Cross-memory asset list (#891) — every file the caller can reach,
+    which is every asset held by a memory they can read. The uniform
+    find-many surface for assets (spec cor:api:120); memoryAssets stays
+    as the per-memory one.
+
+    The three tabs of a top-level Assets section are filters over this,
+    not separate queries: mine: true, no filter, and orgId respectively.
+    """
+    assets(
+      filter: AssetFilter
+      orgId:  ID
+      limit:  Int = 50
+      offset: Int = 0
+    ): AssetsPage!
 
     # Mint a short-TTL presigned GET URL for an asset. Default TTL
     # 5 minutes; ceiling 1 hour. Gated on the holding memory's read

@@ -72,6 +72,13 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // cleared explicitly before their parents to keep cleanup order predictable.
   await db.impersonationSession.deleteMany();
   await db.orgMember.deleteMany();
+  // Assets mostly cascade from Memory below — but a STAGED asset has
+  // `memoryId: null` (uploaded, not yet attached), so it has no parent to
+  // cascade from and survived cleanDb entirely. One such row then leaked
+  // into every later test in the same worker and broke the asset-count
+  // assertions in storeTools/purge ("expected 1 to be +0"), which look
+  // like flakes because they depend on which file ran first.
+  await db.asset.deleteMany();
   await db.memory.deleteMany();
   await db.organization.deleteMany();
   // Spec 025-oauth-for-mcp credential models. AuthCode FKs to both
