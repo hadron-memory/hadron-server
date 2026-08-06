@@ -294,14 +294,23 @@ describe('webfetch event receipt maintenance', () => {
     // ~96% of the time even with the guard removed, which would make it
     // decorative rather than a regression test.
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    // Assert on the CALL, not on the surviving row. The prune is
+    // unawaited, so any row-based assertion has to guess how long to wait
+    // for a delete that should never happen — and if it were merely slow,
+    // the test would pass while the guard was broken. Spying on the
+    // delete makes the check deterministic: it either was invoked or it
+    // wasn't, no timing involved. (PR #892 review, Copilot — and exactly
+    // the timing-dependence this whole PR exists to remove.)
+    const deleteSpy = vi.spyOn(db.webFetchEventReceipt, 'deleteMany');
     try {
-      await assertNoBackgroundPrune();
+      await assertNoBackgroundPrune(deleteSpy);
     } finally {
       randomSpy.mockRestore();
+      deleteSpy.mockRestore();
     }
   });
 
-  async function assertNoBackgroundPrune() {
+  async function assertNoBackgroundPrune(deleteSpy: { mock: { calls: unknown[] } }) {
     const seeded = await seedBinding();
     const event = pollEvent({ orgId: seeded.orgId, appId: seeded.appId });
     const routed = await dispatchWebFetchEvent(event);
@@ -318,9 +327,12 @@ describe('webfetch event receipt maintenance', () => {
     for (const kind of kinds) {
       await dispatchWebFetchEvent({ ...event, kind, snapshotHash: `${kind}-hash` });
     }
-    // Give any escaping floating promise a chance to land before asserting.
-    await new Promise((r) => setTimeout(r, 50));
 
+    // The deterministic check, asserted FIRST: the prune either was
+    // invoked or it wasn't, with no waiting involved.
+    expect(deleteSpy.mock.calls).toHaveLength(0);
+
+    // End-state check, kept for readability.
     const survivor = await db.webFetchEventReceipt.findFirst({
       where: { routedRunId: routed.runId },
     });
