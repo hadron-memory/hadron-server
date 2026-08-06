@@ -128,21 +128,27 @@ describe('/auth/apple GET', () => {
 });
 
 describe('POST /auth/apple/callback — pre-exchange guards', () => {
+  // Callback failures render the friendly HTML page (these endpoints are only
+  // ever hit by browsers — Apple form-POSTs the user's browser here); the
+  // diagnostic reason code goes to the server log.
   it('parses the urlencoded form body and rejects an unknown state', async () => {
     // Proves the route-scoped urlencoded parser works (the app is JSON-only
-    // globally): the body fields must reach the handler for it to answer the
-    // state-specific error rather than "Missing code or state".
+    // globally): the body fields must reach the handler for the state to be
+    // looked up at all. (The positive discriminator — a KNOWN state gets past
+    // the 400 guards — lives in durable-login-state.test.ts.)
     const res = await postCallback({ code: 'x', state: 'f'.repeat(32) });
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/Invalid or expired state/);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
+    const body = await res.text();
+    expect(body).toContain('Sign-in didn&#39;t complete');
+    expect(body).toContain('expired or was interrupted');
   });
 
-  it('rejects a callback with missing code or state', async () => {
+  it('rejects a callback with missing code or state (400, human-readable HTML)', async () => {
     const res = await postCallback({});
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/Missing code or state/);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
+    expect(await res.text()).toContain('Sign-in didn&#39;t complete');
   });
 
   it('rejects array-shaped fields (repeated form keys) with 400, not a 500 (Copilot review)', async () => {
@@ -155,8 +161,8 @@ describe('POST /auth/apple/callback — pre-exchange guards', () => {
       redirect: 'manual',
     });
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/Missing code or state/);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
+    expect(await res.text()).toContain('Sign-in didn&#39;t complete');
   });
 
   it('does not answer on GET (Apple form_posts; there is no GET callback)', async () => {
@@ -166,7 +172,7 @@ describe('POST /auth/apple/callback — pre-exchange guards', () => {
     expect(res.status).toBe(404);
   });
 
-  it('does not accept a GitHub-flow state at the Apple callback (separate maps)', async () => {
+  it('does not accept a GitHub-flow state at the Apple callback (provider binding)', async () => {
     const gh = await fetch(`${baseUrl}/auth/github?client_state=${'b'.repeat(64)}`, {
       redirect: 'manual',
     });
@@ -174,5 +180,6 @@ describe('POST /auth/apple/callback — pre-exchange guards', () => {
     const ghState = new URL(gh.headers.get('location')!).searchParams.get('state')!;
     const res = await postCallback({ code: 'x', state: ghState });
     expect(res.status).toBe(400);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
   });
 });

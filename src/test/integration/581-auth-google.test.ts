@@ -118,11 +118,15 @@ describe('/auth/google GET', () => {
 });
 
 describe('/auth/google/callback GET — pre-exchange guards', () => {
-  it('rejects a callback with missing code or state', async () => {
+  // Callback failures render the friendly HTML page (these endpoints are only
+  // ever hit by browsers); the diagnostic reason code goes to the server log.
+  it('rejects a callback with missing code or state (400, human-readable HTML)', async () => {
     const res = await fetch(`${baseUrl}/auth/google/callback`, { redirect: 'manual' });
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/Missing code or state/);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
+    const body = await res.text();
+    expect(body).toContain('Sign-in didn&#39;t complete');
+    expect(body).toContain('expired or was interrupted');
   });
 
   it('rejects an unknown state (covers the expired-and-swept case too)', async () => {
@@ -131,11 +135,11 @@ describe('/auth/google/callback GET — pre-exchange guards', () => {
       { redirect: 'manual' },
     );
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/Invalid or expired state/);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
+    expect(await res.text()).toContain('Sign-in didn&#39;t complete');
   });
 
-  it('does not accept a GitHub-flow state at the Google callback (separate maps)', async () => {
+  it('does not accept a GitHub-flow state at the Google callback (provider binding)', async () => {
     // Mint a pending state via /auth/github, then try to redeem it at the
     // Google callback — cross-provider replay must fail.
     const gh = await fetch(`${baseUrl}/auth/github?client_state=${'b'.repeat(64)}`, {
@@ -147,5 +151,6 @@ describe('/auth/google/callback GET — pre-exchange guards', () => {
       redirect: 'manual',
     });
     expect(res.status).toBe(400);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
   });
 });

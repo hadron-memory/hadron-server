@@ -29,6 +29,14 @@ import {
   resolveAppleUser,
 } from './auth/index.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
+import {
+  createPendingLoginState,
+  claimPendingLoginState,
+  type ClaimResult,
+  type LoginProvider,
+  type PendingLoginState,
+} from './auth/pendingLoginState.js';
+import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { resolveAuthContext } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
@@ -182,17 +190,68 @@ export async function createServer(): Promise<Express> {
   // GitHub OAuth
   // ---------------------------------------------------------------------------
 
-  // Spec 025-oauth-for-mcp FR-007: pendingStates carries the OAuth
+  // Spec 025-oauth-for-mcp FR-007: the pending login state carries the OAuth
   // state-CSRF token plus an optional `returnTo` (Option-C). When
   // `returnTo` is set, the callback writes a server-domain
   // `hadron_token` cookie and redirects to `returnTo` instead of
   // bouncing the JWT through the frontend.
-  const pendingStates = new Map<
-    string,
-    { redirect: string; returnTo?: string; clientState?: string; expiresAt: number }
-  >();
+  //
+  // The state store is DB-backed (`src/auth/pendingLoginState.ts`,
+  // `pending_login_states`) — the former per-provider in-process Maps lost
+  // every in-flight login on deploy/restart (the callback then 400d), which
+  // is the failure mode behind the Apple App Review login rejection. The
+  // per-provider-Map replay isolation survives as the row's `provider`
+  // column; single use is an atomic delete-by-PK claim.
 
-  app.get('/auth/github', (req, res) => {
+  /**
+   * Persist a freshly minted login state or answer a 500. Returns false when
+   * the response has been written — Express 4 does not catch async throws,
+   * so a DB hiccup on the start route must not hang the request.
+   */
+  const persistStateOrFail = async (
+    res: express.Response,
+    state: string,
+    provider: LoginProvider,
+    pending: PendingLoginState,
+  ): Promise<boolean> => {
+    try {
+      await createPendingLoginState(state, provider, pending);
+      return true;
+    } catch (err) {
+      console.error(`[auth] ${provider} login start failed to persist state:`, err);
+      Sentry.captureException(err);
+      res.status(500).json({ error: 'Failed to start sign-in — please try again.' });
+      return false;
+    }
+  };
+
+  /**
+   * Single-use atomic claim of a callback's pending state. On any failure
+   * (unknown / expired / another provider's state / store error) the
+   * response has been written — the friendly HTML page, since these
+   * endpoints are only ever hit by browsers — and null is returned.
+   */
+  const claimStateOrFail = async (
+    res: express.Response,
+    state: string,
+    provider: LoginProvider,
+  ): Promise<PendingLoginState | null> => {
+    let claim: ClaimResult;
+    try {
+      claim = await claimPendingLoginState(state, provider);
+    } catch (err) {
+      Sentry.captureException(err);
+      failLoginCallback(res, provider, 'state_claim_failed', { status: 500, err });
+      return null;
+    }
+    if (!claim.ok) {
+      failLoginCallback(res, provider, claim.reason);
+      return null;
+    }
+    return claim.pending;
+  };
+
+  app.get('/auth/github', async (req, res) => {
     const redirect = (req.query.redirect as string) || '/';
 
     // Option-C: optional `return_to` query param routes the post-
@@ -212,19 +271,6 @@ export async function createServer(): Promise<Express> {
         return;
       }
       returnTo = candidate;
-    }
-
-    // Prune expired entries on every /auth/github hit. pendingStates
-    // is in-process memory; entries are deleted on a successful
-    // callback hit (line below the callback handler), but users who
-    // abandon the flow mid-redirect leave stale rows. O(n) sweep is
-    // cheap at our /auth/github call rate (a few per minute at peak).
-    // Multi-worker deploys (pm2 cluster, k8s replicas) don't share
-    // this map — flagged as a known limitation; revisit when an OAuth
-    // request rate justifies a Redis-backed store.
-    const now = Date.now();
-    for (const [s, p] of pendingStates) {
-      if (p.expiresAt < now) pendingStates.delete(s);
     }
 
     // #477 session-fixation binding: the portal sets an HttpOnly browser nonce
@@ -252,12 +298,9 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    pendingStates.set(state, {
-      redirect,
-      returnTo,
-      clientState,
-      expiresAt: now + 10 * 60 * 1000,
-    });
+    if (!(await persistStateOrFail(res, state, 'github', { redirect, returnTo, clientState }))) {
+      return;
+    }
     res.redirect(buildAuthUrl(state));
   });
 
@@ -265,18 +308,17 @@ export async function createServer(): Promise<Express> {
     const { code, state } = req.query as { code?: string; state?: string };
 
     if (!code || !state) {
-      res.status(400).json({ error: 'Missing code or state' });
+      failLoginCallback(res, 'github', 'state_missing');
       return;
     }
 
-    const pending = pendingStates.get(state);
-    pendingStates.delete(state);
+    const pending = await claimStateOrFail(res, state, 'github');
+    if (!pending) return;
 
-    if (!pending || pending.expiresAt < Date.now()) {
-      res.status(400).json({ error: 'Invalid or expired state' });
-      return;
-    }
-
+    // Diagnostics phase marker: which stage the try block is in, so the
+    // catch can log a stable short reason code (never tokens, codes, or
+    // emails) — App Review reports arrive with no client-side logs.
+    let phase: LoginFailureReason = 'exchange_failed';
     try {
       // #627 / spec 048: `isNew` is derived from whether THIS callback created
       // the user row (`createdAt` on/after `startedAt`, captured before the
@@ -289,12 +331,14 @@ export async function createServer(): Promise<Express> {
       if (requiredOrg) {
         const isMember = await checkOrgMembership(ghToken, requiredOrg);
         if (!isMember) {
+          console.error('[auth] github login callback failed: org_membership_denied');
           res.status(403).json({
             error: `Must be a member of the ${requiredOrg} GitHub organization`,
           });
           return;
         }
       }
+      phase = 'internal_error';
 
       // Upsert user — first check by githubUsername to handle seed data
       // that may have a placeholder githubId
@@ -422,25 +466,19 @@ export async function createServer(): Promise<Express> {
       callbackUrl.searchParams.set('code', handoffCode);
       res.redirect(callbackUrl.toString());
     } catch (err) {
-      console.error('OAuth callback error:', err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'OAuth authentication failed' });
+      failLoginCallback(res, 'github', phase, { status: 500, err });
     }
   });
 
   // ---------------------------------------------------------------------------
   // Google OAuth (Sign-in-with-Google, #581) — near-verbatim sibling of the
-  // GitHub pair above; see those handlers for the rationale comments. Own
-  // pendingStates map so a state minted for one provider can never be replayed
-  // against the other's callback, and so the GitHub machinery stays untouched.
+  // GitHub pair above; see those handlers for the rationale comments. The
+  // shared pending-login-state store keys rows by provider, so a state minted
+  // for one provider can never be replayed against the other's callback.
   // ---------------------------------------------------------------------------
 
-  const pendingGoogleStates = new Map<
-    string,
-    { redirect: string; returnTo?: string; clientState?: string; expiresAt: number }
-  >();
-
-  app.get('/auth/google', (req, res) => {
+  app.get('/auth/google', async (req, res) => {
     // Fail loud and early when the deployment doesn't carry the Google OAuth
     // client — a 302 built with an undefined client_id would send the user to
     // a Google error page instead.
@@ -463,11 +501,6 @@ export async function createServer(): Promise<Express> {
       returnTo = candidate;
     }
 
-    const now = Date.now();
-    for (const [s, p] of pendingGoogleStates) {
-      if (p.expiresAt < now) pendingGoogleStates.delete(s);
-    }
-
     const clientStateRaw = req.query.client_state;
     const clientState = typeof clientStateRaw === 'string' && clientStateRaw !== ''
       ? clientStateRaw
@@ -483,12 +516,9 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    pendingGoogleStates.set(state, {
-      redirect,
-      returnTo,
-      clientState,
-      expiresAt: now + 10 * 60 * 1000,
-    });
+    if (!(await persistStateOrFail(res, state, 'google', { redirect, returnTo, clientState }))) {
+      return;
+    }
     res.redirect(buildGoogleAuthUrl(state));
   });
 
@@ -496,18 +526,15 @@ export async function createServer(): Promise<Express> {
     const { code, state } = req.query as { code?: string; state?: string };
 
     if (!code || !state) {
-      res.status(400).json({ error: 'Missing code or state' });
+      failLoginCallback(res, 'google', 'state_missing');
       return;
     }
 
-    const pending = pendingGoogleStates.get(state);
-    pendingGoogleStates.delete(state);
+    const pending = await claimStateOrFail(res, state, 'google');
+    if (!pending) return;
 
-    if (!pending || pending.expiresAt < Date.now()) {
-      res.status(400).json({ error: 'Invalid or expired state' });
-      return;
-    }
-
+    // Diagnostics phase marker — see the GitHub callback.
+    let phase: LoginFailureReason = 'exchange_failed';
     try {
       // #627 / spec 048: `isNew` derived from user-creation time (see the GitHub
       // callback). Captured before the lookup.
@@ -515,7 +542,9 @@ export async function createServer(): Promise<Express> {
       // Identity comes from the VERIFIED ID-token claims (issuer, audience,
       // signature against Google's JWKS) — never a bare decode.
       const idToken = await exchangeGoogleCode(code);
+      phase = 'verify_failed';
       const identity = await verifyGoogleIdToken(idToken);
+      phase = 'internal_error';
 
       // Match order per #581: by googleId → by verified email (link) → create.
       const user = await resolveGoogleUser(identity);
@@ -560,9 +589,8 @@ export async function createServer(): Promise<Express> {
       callbackUrl.searchParams.set('code', handoffCode);
       res.redirect(callbackUrl.toString());
     } catch (err) {
-      console.error('Google OAuth callback error:', err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'OAuth authentication failed' });
+      failLoginCallback(res, 'google', phase, { status: 500, err });
     }
   });
 
@@ -572,16 +600,11 @@ export async function createServer(): Promise<Express> {
   // the callback is a POST (response_mode=form_post is forced by the `name
   // email` scopes) carrying code/state/user as urlencoded form fields, and the
   // user's name arrives in the `user` field on the FIRST authorization only.
-  // Own pendingStates map so a state minted for one provider can never be
-  // replayed against another's callback.
+  // The shared pending-login-state store keys rows by provider, so a state
+  // minted for one provider can never be replayed against another's callback.
   // ---------------------------------------------------------------------------
 
-  const pendingAppleStates = new Map<
-    string,
-    { redirect: string; returnTo?: string; clientState?: string; expiresAt: number }
-  >();
-
-  app.get('/auth/apple', (req, res) => {
+  app.get('/auth/apple', async (req, res) => {
     // All four vars are required together (client id for the authorize URL,
     // team id + key id + private key for the token-call client secret) — a
     // half-configured deployment must fail loud here, not 500 mid-callback.
@@ -604,11 +627,6 @@ export async function createServer(): Promise<Express> {
       returnTo = candidate;
     }
 
-    const now = Date.now();
-    for (const [s, p] of pendingAppleStates) {
-      if (p.expiresAt < now) pendingAppleStates.delete(s);
-    }
-
     const clientStateRaw = req.query.client_state;
     const clientState = typeof clientStateRaw === 'string' && clientStateRaw !== ''
       ? clientStateRaw
@@ -624,21 +642,19 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    pendingAppleStates.set(state, {
-      redirect,
-      returnTo,
-      clientState,
-      expiresAt: now + 10 * 60 * 1000,
-    });
+    if (!(await persistStateOrFail(res, state, 'apple', { redirect, returnTo, clientState }))) {
+      return;
+    }
     res.redirect(buildAppleAuthUrl(state));
   });
 
   // POST, not GET: Apple form_posts the result cross-site. The state lives in
-  // the server-side pendingAppleStates map (keyed by the body's `state`), NOT
-  // in a cookie — which is load-bearing: SameSite=Lax cookies are not sent on
-  // a cross-site POST, so a cookie-based state check here would always fail.
-  // Don't "fix" this into cookies. The route-scoped urlencoded parser is
-  // needed because the app only mounts JSON parsers globally.
+  // the server-side pending-login-state store (a DB row keyed by the body's
+  // `state`), NOT in a cookie — which is load-bearing: SameSite=Lax cookies
+  // are not sent on a cross-site POST, so a cookie-based state check here
+  // would always fail. Don't "fix" this into cookies. The route-scoped
+  // urlencoded parser is needed because the app only mounts JSON parsers
+  // globally.
   app.post('/auth/apple/callback', express.urlencoded({ extended: false }), async (req, res) => {
     // typeof guards, not a cast: repeated form fields (`code=a&code=b`) parse
     // to arrays, which would slip past a bare truthiness check and 500 inside
@@ -650,18 +666,15 @@ export async function createServer(): Promise<Express> {
     const userField = body.user;
 
     if (!code || !state) {
-      res.status(400).json({ error: 'Missing code or state' });
+      failLoginCallback(res, 'apple', 'state_missing');
       return;
     }
 
-    const pending = pendingAppleStates.get(state);
-    pendingAppleStates.delete(state);
+    const pending = await claimStateOrFail(res, state, 'apple');
+    if (!pending) return;
 
-    if (!pending || pending.expiresAt < Date.now()) {
-      res.status(400).json({ error: 'Invalid or expired state' });
-      return;
-    }
-
+    // Diagnostics phase marker — see the GitHub callback.
+    let phase: LoginFailureReason = 'exchange_failed';
     try {
       // #627 / spec 048: `isNew` derived from user-creation time (see the GitHub
       // callback). Captured before the lookup.
@@ -669,7 +682,9 @@ export async function createServer(): Promise<Express> {
       // Identity comes from the VERIFIED ID-token claims (issuer, audience,
       // signature against Apple's JWKS) — never a bare decode.
       const idToken = await exchangeAppleCode(code);
+      phase = 'verify_failed';
       const identity = await verifyAppleIdToken(idToken);
+      phase = 'internal_error';
 
       // First-authorization-only name capture; null on every later login.
       const name = parseAppleUserField(userField);
@@ -717,9 +732,8 @@ export async function createServer(): Promise<Express> {
       callbackUrl.searchParams.set('code', handoffCode);
       res.redirect(callbackUrl.toString());
     } catch (err) {
-      console.error('Apple OAuth callback error:', err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'OAuth authentication failed' });
+      failLoginCallback(res, 'apple', phase, { status: 500, err });
     }
   });
 
