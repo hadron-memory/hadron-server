@@ -8,21 +8,35 @@
 // written for; the CODE is provider-neutral and the name is the only
 // R2-specific thing left. MinIO covers local dev.
 //
-// Configuration is `OBJECT_STORAGE_*`, with the legacy `R2_*` names
-// still honored as fallbacks so an existing deployment keeps working
-// without a coordinated env change:
+// Configuration is `ASSET_STORAGE_*` — named for what the bucket HOLDS
+// rather than who provides it, so moving providers needs no rename:
 //
-//   OBJECT_STORAGE_ENDPOINT       e.g. https://nbg1.your-objectstorage.com
-//   OBJECT_STORAGE_REGION         e.g. nbg1   (default: auto)
-//   OBJECT_STORAGE_BUCKET
-//   OBJECT_STORAGE_ACCESS_KEY_ID
-//   OBJECT_STORAGE_SECRET_ACCESS_KEY
+//   ASSET_STORAGE_ENDPOINT           e.g. https://nbg1.your-objectstorage.com
+//   ASSET_STORAGE_REGION             e.g. nbg1   (default: auto)
+//   ASSET_STORAGE_BUCKET
+//   ASSET_STORAGE_ACCESS_KEY_ID
+//   ASSET_STORAGE_SECRET_ACCESS_KEY
+//   ASSET_STORAGE_FORCE_PATH_STYLE   default true; set false for R2
+//
+// These names are the ONLY ones read. The earlier `OBJECT_STORAGE_*` and
+// `R2_*` spellings were deliberately dropped rather than kept as
+// fallbacks (Holger, 2026-08-06) — asset storage had never actually been
+// configured in any environment, so there was no deployment to keep
+// working, and a silent fallback chain is exactly what turns a
+// misconfigured env into a confusing runtime error later.
 //
 // Region matters on Hetzner in a way it does not on R2: R2 accepts the
 // pseudo-region `auto`, while Hetzner signs SigV4 against its real
-// region name, so a wrong value fails authentication rather than
-// routing somewhere unexpected. It stays defaulted to `auto` for R2
-// compatibility — set it explicitly on Hetzner.
+// region name, so a wrong value fails AUTHENTICATION rather than routing
+// somewhere unexpected — it reads like a bad key. Default stays `auto`;
+// set it explicitly on Hetzner.
+//
+// Path-style addressing is the default because Hetzner and MinIO both
+// require it. R2 wants virtual-hosted style, so it needs
+// ASSET_STORAGE_FORCE_PATH_STYLE=false plus its full endpoint. (This
+// replaces an earlier rule that inferred path-style from whether the
+// endpoint was explicit — the endpoint is now always explicit, so the
+// inference had no signal left to read.)
 //
 // Spec: hadron-portal/specs/001-asset-upload/contracts/http-endpoints.md.
 
@@ -38,44 +52,30 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 let cached: S3Client | null = null;
 
-/** First non-empty value among the given env vars. */
-function env(...names: string[]): string {
-  for (const n of names) {
-    const v = process.env[n];
-    if (v) return v;
-  }
-  return '';
+/** Value of an env var, or '' when unset or empty. */
+function env(name: string): string {
+  return process.env[name] ?? '';
 }
 
 export function getObjectStoreClient(): S3Client {
   if (cached) return cached;
-  const accountId = env('R2_ACCOUNT_ID');
-  const accessKeyId = env('OBJECT_STORAGE_ACCESS_KEY_ID', 'R2_ACCESS_KEY_ID');
-  const secretAccessKey = env(
-    'OBJECT_STORAGE_SECRET_ACCESS_KEY',
-    'R2_SECRET_ACCESS_KEY',
-  );
+  const accessKeyId = env('ASSET_STORAGE_ACCESS_KEY_ID');
+  const secretAccessKey = env('ASSET_STORAGE_SECRET_ACCESS_KEY');
   if (!accessKeyId || !secretAccessKey) {
     throw new Error(
-      'OBJECT_STORAGE_NOT_CONFIGURED: missing OBJECT_STORAGE_ACCESS_KEY_ID or OBJECT_STORAGE_SECRET_ACCESS_KEY',
+      'ASSET_STORAGE_NOT_CONFIGURED: missing ASSET_STORAGE_ACCESS_KEY_ID or ASSET_STORAGE_SECRET_ACCESS_KEY',
     );
   }
-  // An explicit endpoint wins; otherwise derive R2's from the account id.
-  const explicitEndpoint = env('OBJECT_STORAGE_ENDPOINT', 'R2_ENDPOINT_OVERRIDE');
-  const endpoint =
-    explicitEndpoint || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : '');
+  const endpoint = env('ASSET_STORAGE_ENDPOINT');
   if (!endpoint) {
-    throw new Error(
-      'OBJECT_STORAGE_NOT_CONFIGURED: set OBJECT_STORAGE_ENDPOINT (or R2_ACCOUNT_ID)',
-    );
+    throw new Error('ASSET_STORAGE_NOT_CONFIGURED: missing ASSET_STORAGE_ENDPOINT');
   }
   cached = new S3Client({
-    region: env('OBJECT_STORAGE_REGION') || 'auto',
+    region: env('ASSET_STORAGE_REGION') || 'auto',
     endpoint,
-    // Path-style addressing whenever the endpoint is given explicitly:
-    // both Hetzner and MinIO want it, and R2's derived endpoint is the
-    // only case that needs virtual-hosted style.
-    forcePathStyle: !!explicitEndpoint,
+    // Hetzner and MinIO both require path-style; R2 is the exception and
+    // opts out explicitly.
+    forcePathStyle: env('ASSET_STORAGE_FORCE_PATH_STYLE') !== 'false',
     credentials: { accessKeyId, secretAccessKey },
     // AWS SDK v3 adds flexible-checksum headers by default
     // (x-amz-checksum-crc32 etc.) that MinIO and some R2 path-style
@@ -88,9 +88,9 @@ export function getObjectStoreClient(): S3Client {
 }
 
 export function getObjectStoreBucket(): string {
-  const bucket = env('OBJECT_STORAGE_BUCKET', 'R2_BUCKET_NAME');
+  const bucket = env('ASSET_STORAGE_BUCKET');
   if (!bucket) {
-    throw new Error('OBJECT_STORAGE_NOT_CONFIGURED: missing OBJECT_STORAGE_BUCKET');
+    throw new Error('ASSET_STORAGE_NOT_CONFIGURED: missing ASSET_STORAGE_BUCKET');
   }
   return bucket;
 }
