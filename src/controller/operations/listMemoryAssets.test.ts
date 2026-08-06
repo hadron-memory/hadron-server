@@ -210,23 +210,54 @@ describe('listMemoryAssets', () => {
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
   });
 
-  it('does not leak another user\'s uploads in the same memory', async () => {
-    // Caller's uploads.
+  // ── The gate is the memory's read access; `mine` is only a filter ──
+
+  it("lists another user's uploads in the same readable memory", async () => {
+    // An Asset is bound to a Memory (cor:dmo:060:10) — whoever may read
+    // the memory may see the files attached to it. Spec 004 also
+    // filtered `uploadedBy = caller`, which hid a colleague's file in a
+    // shared memory; that filter is now opt-in via `mine`.
     await makeAsset({ filename: 'mine.pdf' });
-    // Another user's upload to the same memory.
-    const otherUser = await db.user.create({
-      data: { githubId: 9503, githubUsername: 'list-other-user', roles: ['READER'] },
-    });
+    await seedOtherUsersAsset('theirs.pdf');
+
+    const result = await listMemoryAssets(
+      db,
+      { userId: user.id },
+      { memoryId: memory.id },
+    );
+    expect(result.total).toBe(2);
+    expect(result.assets.map((a) => a.filename).sort()).toEqual([
+      'mine.pdf',
+      'theirs.pdf',
+    ]);
+  });
+
+  it('narrows to the caller\'s own uploads with mine: true', async () => {
+    await makeAsset({ filename: 'mine.pdf' });
+    await seedOtherUsersAsset('theirs.pdf');
+
+    const result = await listMemoryAssets(
+      db,
+      { userId: user.id },
+      { memoryId: memory.id, mine: true },
+    );
+    expect(result.total).toBe(1);
+    expect(result.assets[0]!.filename).toBe('mine.pdf');
+  });
+
+  it('lists run-created assets (uploadedBy NULL)', async () => {
+    // hadron_store_file writes uploadedBy: null; the old
+    // `uploadedBy = caller` filter made those invisible to everyone.
     await db.asset.create({
       data: {
         id: generateId(),
         memoryId: memory.id,
-        filename: 'theirs.pdf',
-        mimeType: 'application/pdf',
-        sizeBytes: 1024,
+        filename: 'run-output.csv',
+        mimeType: 'text/csv',
+        sizeBytes: 512,
         storageKey: `key-${generateId()}`,
         scanStatus: 'CLEAN',
-        uploadedBy: otherUser.id,
+        uploadedBy: null,
       },
     });
 
@@ -236,6 +267,37 @@ describe('listMemoryAssets', () => {
       { memoryId: memory.id },
     );
     expect(result.total).toBe(1);
-    expect(result.assets[0]!.filename).toBe('mine.pdf');
+    expect(result.assets[0]!.filename).toBe('run-output.csv');
+
+    // ...but `mine` still excludes them — NULL is not the caller.
+    const mine = await listMemoryAssets(
+      db,
+      { userId: user.id },
+      { memoryId: memory.id, mine: true },
+    );
+    expect(mine.total).toBe(0);
   });
 });
+
+/** Seed an asset in the shared memory uploaded by somebody else. */
+async function seedOtherUsersAsset(filename: string) {
+  const otherUser = await db.user.create({
+    data: {
+      githubId: 9503 + filename.length,
+      githubUsername: `list-other-${filename.replace(/\W/g, '')}`,
+      roles: ['READER'],
+    },
+  });
+  return db.asset.create({
+    data: {
+      id: generateId(),
+      memoryId: memory.id,
+      filename,
+      mimeType: 'application/pdf',
+      sizeBytes: 1024,
+      storageKey: `key-${generateId()}`,
+      scanStatus: 'CLEAN',
+      uploadedBy: otherUser.id,
+    },
+  });
+}

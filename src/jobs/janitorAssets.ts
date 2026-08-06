@@ -108,6 +108,51 @@ export async function runAssetJanitor(
   return { scanned, purged, errors };
 }
 
+/**
+ * Run the asset janitor on an interval for the server's lifetime.
+ *
+ * Until this existed the janitor had no scheduler at all — it was
+ * reachable only by running the file by hand, so in practice every
+ * soft-deleted asset's bytes stayed in the object store indefinitely
+ * and the 24h recovery window never actually expired. Mirrors the
+ * `startAnonymousMemoryCleanupLoop` shape.
+ *
+ * Default cadence is hourly, which is well under the 24h retention
+ * window it enforces — the exact period only affects how promptly
+ * bytes leave the bucket after their window closes.
+ */
+export function startAssetJanitorLoop(
+  db?: PrismaClient,
+  intervalMs = 60 * 60 * 1000,
+  initialDelayMs = 5 * 60 * 1000,
+): NodeJS.Timeout {
+  const run = async () => {
+    try {
+      const outcome = await runAssetJanitor(db);
+      if (outcome.purged > 0 || outcome.errors > 0) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `[janitor:assets] purged ${outcome.purged}, errors ${outcome.errors}`,
+        );
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[janitor:assets] sweep failed:', err);
+    }
+  };
+
+  // Same timer shape as the anonymous-memory cleanup loop: the initial
+  // timeout is returned so callers can cancel it; the interval that
+  // replaces it lives for the server's lifetime by design.
+  let timer: NodeJS.Timeout;
+  const initial = setTimeout(() => {
+    void run();
+    timer = setInterval(() => void run(), intervalMs);
+    void timer;
+  }, initialDelayMs);
+  return initial;
+}
+
 // Allow `tsx src/jobs/janitorAssets.ts` to run the janitor directly.
 if (import.meta.url === `file://${process.argv[1]}`) {
   runAssetJanitor()

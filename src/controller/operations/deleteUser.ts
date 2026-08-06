@@ -4,6 +4,11 @@ import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
+import {
+  collectAssetKeysForMemories,
+  purgeCollectedAssetObjects,
+  type CollectedAssetKeys,
+} from '../../lib/asset/purge.js';
 
 /**
  * Thrown when account deletion is blocked because the target is the only
@@ -81,7 +86,11 @@ export async function deleteUserAccount(
 ): Promise<void> {
   for (let attempt = 1; ; attempt++) {
     try {
-      const toolConnections = await runDeletionTxn(db, targetUserId, actorUserId);
+      const { toolConnections, assetKeys } = await runDeletionTxn(
+        db,
+        targetUserId,
+        actorUserId,
+      );
       // Provider-sidecar teardown AFTER the commit: the tools hold their own
       // copy of the OAuth credential + change subscriptions, so deleting the
       // core ExchangeConnection rows alone would leave those live. Outside
@@ -91,6 +100,14 @@ export async function deleteUserAccount(
       for (const c of toolConnections) {
         void deleteToolConnection(c.provider, c.toolConnectionId);
       }
+      // Same posture for the deleted memories' files: the Asset rows went
+      // with the cascade, so these keys are the last record of the bytes.
+      // Post-commit and best-effort — a dead object store must not fail an
+      // account deletion (src/lib/asset/purge.ts).
+      void purgeCollectedAssetObjects(
+        assetKeys,
+        `deleteUserAccount(${targetUserId})`,
+      );
       return;
     } catch (e) {
       const serializationAbort =
@@ -110,7 +127,11 @@ async function runDeletionTxn(
   db: PrismaClient,
   targetUserId: string,
   actorUserId: string,
-): Promise<Array<{ provider: string; toolConnectionId: string }>> {
+): Promise<{
+  toolConnections: Array<{ provider: string; toolConnectionId: string }>;
+  /** Object-store keys of the deleted memories' assets — purged post-commit. */
+  assetKeys: CollectedAssetKeys;
+}> {
   return db.$transaction(
     async (tx) => {
       const now = new Date();
@@ -191,6 +212,20 @@ async function runDeletionTxn(
       // Memory.ownerUserId). The memory cascade removes nodes, edges,
       // embeddings, revisions, assets, subscriptions, licenses, log entries,
       // shares and members of these memories.
+      //
+      // The cascade takes the Asset ROWS but not the OBJECTS behind
+      // them, and a storage key exists only on its row — so collect the
+      // keys HERE, ahead of the delete, or the bytes are unreachable
+      // forever. They are purged from the object store after this
+      // transaction commits (see deleteUserAccount).
+      const doomedMemories = await tx.memory.findMany({
+        where: { OR: [{ userId: targetUserId }, { ownerUserId: targetUserId }] },
+        select: { id: true },
+      });
+      const assetKeys = await collectAssetKeysForMemories(
+        tx as unknown as PrismaClient,
+        doomedMemories.map((m) => m.id),
+      );
       await tx.memory.deleteMany({
         where: { OR: [{ userId: targetUserId }, { ownerUserId: targetUserId }] },
       });
@@ -267,7 +302,13 @@ async function runDeletionTxn(
         },
       });
 
-      return toolConnections as Array<{ provider: string; toolConnectionId: string }>;
+      return {
+        toolConnections: toolConnections as Array<{
+          provider: string;
+          toolConnectionId: string;
+        }>,
+        assetKeys,
+      };
     },
     {
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,

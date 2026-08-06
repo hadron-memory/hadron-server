@@ -19,7 +19,7 @@ vi.mock('../../integrations/r2/client.js', () => ({
   mintPutUrl: vi.fn().mockResolvedValue('https://r2.example/presigned-put'),
   headObject: vi.fn(),
   deleteObject: vi.fn().mockResolvedValue(undefined),
-  getR2Bucket: vi.fn().mockReturnValue('test-bucket'),
+  getObjectStoreBucket: vi.fn().mockReturnValue('test-bucket'),
 }));
 
 let org: { id: string; urn: string };

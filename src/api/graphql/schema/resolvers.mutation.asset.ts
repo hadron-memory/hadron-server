@@ -6,6 +6,10 @@ import {
   type BeginAssetUploadV2Input,
 } from '../../../controller/operations/beginAssetUpload.js';
 import { completeAssetUpload } from '../../../controller/operations/completeAssetUpload.js';
+import {
+  createAssetReferenceNode,
+  type CreateAssetReferenceNodeInput,
+} from '../../../controller/operations/createAssetReferenceNode.js';
 import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.js';
 import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
@@ -65,6 +69,30 @@ export const assetMutations = {
         maxSizeBytes: ticket.maxSizeBytes,
         allowedMimeType: ticket.allowedMimeType,
       };
+    },
+
+    // Attach an existing asset to the graph as a `reference` node.
+    // Impersonation is denied for the same reason as the rest of the
+    // asset surface (#876): the ad-hoc caller principal cannot carry
+    // ctx.impersonation, and this is a WRITE into the target's memory.
+    createAssetReferenceNode: async (
+      _: unknown,
+      { input }: { input: CreateAssetReferenceNodeInput },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (ctx.impersonation) throw new Error('Forbidden');
+      return createAssetReferenceNode(
+        ctx.db,
+        {
+          userId: ctx.userId,
+          appId: ctx.appId,
+          roles: ctx.roles,
+          organizationId: ctx.organizationId,
+        },
+        ctx,
+        input,
+      );
     },
 
     completeAssetUpload: async (

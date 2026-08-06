@@ -46,6 +46,7 @@ import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
@@ -61,6 +62,7 @@ import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js'
 import { makeProdRunDeps } from './jobs/appRunDeps.js';
 import { startSchedulerLoop } from './jobs/scheduler.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
+import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
 import { mountWebFetchEventRoutes } from './api/webfetchEvents.js';
@@ -1376,6 +1378,11 @@ export async function createServer(): Promise<Express> {
   // Spec 040 §8 — webhook triggers (/hooks/<secret>/<name>?hpt=...).
   mountWebhookRoutes(app, db);
 
+  // Unauthenticated asset hotlinks (GET /assets/:id). Deliberately
+  // public and deliberately temporary — see the header of
+  // src/api/assetPublic.ts before touching or extending it.
+  mountPublicAssetRoutes(app, db);
+
   app.get('/health', (_req, res) => {
     res.json({ ok: true });
   });
@@ -1384,6 +1391,14 @@ export async function createServer(): Promise<Express> {
   // Skipped in test environments to avoid leaking timers.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_ANON_CLEANUP !== 'true') {
     startAnonymousMemoryCleanupLoop(db);
+  }
+
+  // Background job: purge soft-deleted assets past their 24h recovery
+  // window (object first, then the row). Before this the janitor had no
+  // schedule at all — it only ran when someone invoked the file by hand,
+  // so expired assets' bytes accumulated in the bucket indefinitely.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_ASSET_JANITOR !== 'true') {
+    startAssetJanitorLoop(db);
   }
 
   // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in

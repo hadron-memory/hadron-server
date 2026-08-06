@@ -2,10 +2,18 @@
  * listMemoryAssets — v2 memory-addressed asset listing per spec
  * 006-asset-upload-redesign.
  *
- * Returns assets attached to the specified memory, scoped to the
- * calling user's uploads (per spec 004 FR — assets are private to
- * the uploading user; future cross-user visibility is a separate
- * spec). Caller must have read access to the memory.
+ * Returns assets attached to the specified memory. Authorization is
+ * the MEMORY's read gate (canReadMemory) — an Asset is bound to a
+ * Memory (cor:dmo:060:10), so whoever may read the memory may see the
+ * files attached to it. `mine: true` narrows to the caller's own
+ * uploads; it is a FILTER, not the gate.
+ *
+ * History: spec 004 additionally filtered `uploadedBy = caller`, which
+ * made assets private to their uploader. That predated cross-user
+ * visibility and had two costs — an org member could not see a file a
+ * colleague attached to a shared memory, and a run-created asset
+ * (uploadedBy NULL, hadron_store_file) was invisible to everyone. The
+ * gate is now the memory's, matching every other memory-bound read.
  *
  * Replaces v1's listAgentAssets in the v2 surface.
  */
@@ -25,6 +33,12 @@ export interface ListMemoryAssetsInput {
   skip?: number;
   count?: number;
   includeDeleted?: boolean;
+  /**
+   * Narrow to the caller's own uploads. A filter on top of the memory
+   * read gate, never a substitute for it. Default false (every asset
+   * in the memory).
+   */
+  mine?: boolean;
 }
 
 export interface ListMemoryAssetsCaller {
@@ -77,7 +91,7 @@ export async function listMemoryAssets(
 
   const where = {
     memoryId: memoryId,
-    uploadedBy: caller.userId,
+    ...(input.mine ? { uploadedBy: caller.userId } : {}),
     ...(input.includeDeleted ? {} : { deletedAt: null }),
     ...(input.mimeType ? { mimeType: input.mimeType } : {}),
   };
