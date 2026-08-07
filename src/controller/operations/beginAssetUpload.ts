@@ -152,7 +152,7 @@ export async function beginAssetUpload(
 
   // FR-006 — size + MIME pinned by the presigned policy. Validated
   // here before minting; verified again on completion via HeadObject.
-  const limits = getEffectiveLimits(null);
+  const limits = getEffectiveLimits();
   if (input.sizeBytes > limits.maxBytes) {
     throw new AssetUploadError(
       'SIZE_EXCEEDED',
@@ -162,7 +162,7 @@ export async function beginAssetUpload(
   if (!limits.allowedMimeTypes.includes(input.mimeType)) {
     throw new AssetUploadError(
       'MIME_NOT_ALLOWED',
-      `mimeType "${input.mimeType}" not in agent allowlist`,
+      `mimeType "${input.mimeType}" not in the platform allowlist`,
     );
   }
 
@@ -362,7 +362,7 @@ export async function beginAssetUploadV2(
   }
 
   // 4. Size + MIME limits — same as v1.
-  const limits = getEffectiveLimits(null);
+  const limits = getEffectiveLimits();
   if (input.sizeBytes > limits.maxBytes) {
     throw new AssetUploadError(
       'SIZE_EXCEEDED',
@@ -372,7 +372,7 @@ export async function beginAssetUploadV2(
   if (!limits.allowedMimeTypes.includes(input.mimeType)) {
     throw new AssetUploadError(
       'MIME_NOT_ALLOWED',
-      `mimeType "${input.mimeType}" not in allowlist`,
+      `mimeType "${input.mimeType}" not in the platform allowlist`,
     );
   }
 
