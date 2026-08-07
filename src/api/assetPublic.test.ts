@@ -280,6 +280,16 @@ describe('the hotlink is OFF unless a deployment opts in', () => {
     );
   });
 
+  it('emits no publicUrl while disabled, so no client offers a dead link', async () => {
+    // The route and the URL have to agree — gating one but still handing
+    // out the other means a "copy link" action for a URL that 404s
+    // (PR #897 review, Copilot).
+    process.env.BASE_URL = 'https://hadronmemory.com';
+    expect(publicAssetUrl('abc')).toBe('https://hadronmemory.com/assets/abc');
+    delete process.env.ASSET_PUBLIC_HOTLINK_ENABLED;
+    expect(publicAssetUrl('abc')).toBeNull();
+  });
+
   it('takes effect on a restart, not a redeploy', async () => {
     // Read per request rather than captured at mount, so flipping the
     // env var is enough — no rebuild, no re-mount.

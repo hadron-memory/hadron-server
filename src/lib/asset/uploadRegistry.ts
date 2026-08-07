@@ -10,7 +10,14 @@
 export interface UploadRegistryEntry {
   uploadId: string;
   assetId: string;
+  /** FINAL key the Asset will reference once the bytes are verified. */
   storageKey: string;
+  /**
+   * Key the presigned PUT actually targets. Never the final key: a
+   * presigned URL cannot be revoked, so an uploader could re-PUT after
+   * verification and swap the bytes a download serves.
+   */
+  stagingKey: string;
   filename: string;
   mimeType: string;
   expectedSizeBytes: number;

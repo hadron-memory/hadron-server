@@ -44,6 +44,7 @@ import {
   S3Client,
   HeadObjectCommand,
   DeleteObjectCommand,
+  CopyObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
   type HeadObjectCommandOutput,
@@ -195,6 +196,7 @@ export async function readObjectPrefix(
   key: string,
   length: number,
 ): Promise<Buffer | null> {
+  if (length <= 0) return null;
   try {
     const out = await getObjectStoreClient().send(
       new GetObjectCommand({
@@ -214,6 +216,27 @@ export async function readObjectPrefix(
     if (status === 416) return null;
     throw err;
   }
+}
+
+/**
+ * Server-side copy within the bucket. Bytes never transit this process.
+ *
+ * Used to promote a verified upload from its staging key to the key the
+ * Asset will reference, so the presigned PUT URL — which stays valid for
+ * its full TTL and cannot be revoked — can never reach the object a
+ * download serves.
+ */
+export async function copyObject(fromKey: string, toKey: string): Promise<void> {
+  const bucket = getObjectStoreBucket();
+  await getObjectStoreClient().send(
+    new CopyObjectCommand({
+      Bucket: bucket,
+      // CopySource is bucket-qualified and URI-encoded; a key can contain
+      // characters that would otherwise terminate the path.
+      CopySource: `${bucket}/${encodeURIComponent(fromKey)}`,
+      Key: toKey,
+    }),
+  );
 }
 
 export async function deleteObject(key: string): Promise<void> {
