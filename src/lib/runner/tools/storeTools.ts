@@ -142,7 +142,7 @@ export const hadronStoreFile: RunToolDef = {
 
     // Size cap: same platform limits as the upload path (per-App overrides
     // pass null there too — the App properties column isn't wired yet).
-    const limits = getEffectiveLimits(null);
+    const limits = getEffectiveLimits();
     if (body.byteLength > limits.maxBytes) {
       throw new Error(
         `hadron_store_file: content is ${body.byteLength} bytes — over the ` +
