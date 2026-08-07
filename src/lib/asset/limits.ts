@@ -9,9 +9,9 @@
 // what let it survive review — the mechanism looked alive from the suite
 // and from the code, with no signal that its only callers opted out.
 //
-// Removing it is behaviour-preserving: `clampPositive(undefined, 25MB,
-// 100MB)` already resolved to 25MB, so the effective cap was always the
-// default and the ceiling never bound anything.
+// Removing it is behaviour-preserving: with no overrides to clamp, the
+// old code already resolved every limit to its platform default, and the
+// 100MB ceiling it clamped against never bound anything.
 //
 // If per-App (or per-Memory, or per-org) limits are wanted later, note
 // the shape that made the old one unbuildable: the v2 memory-addressed

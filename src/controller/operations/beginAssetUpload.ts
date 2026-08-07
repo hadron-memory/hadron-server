@@ -162,7 +162,7 @@ export async function beginAssetUpload(
   if (!limits.allowedMimeTypes.includes(input.mimeType)) {
     throw new AssetUploadError(
       'MIME_NOT_ALLOWED',
-      `mimeType "${input.mimeType}" not in agent allowlist`,
+      `mimeType "${input.mimeType}" not in the platform allowlist`,
     );
   }
 
@@ -372,7 +372,7 @@ export async function beginAssetUploadV2(
   if (!limits.allowedMimeTypes.includes(input.mimeType)) {
     throw new AssetUploadError(
       'MIME_NOT_ALLOWED',
-      `mimeType "${input.mimeType}" not in allowlist`,
+      `mimeType "${input.mimeType}" not in the platform allowlist`,
     );
   }
 

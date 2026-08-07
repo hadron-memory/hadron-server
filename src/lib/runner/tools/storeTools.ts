@@ -140,8 +140,7 @@ export const hadronStoreFile: RunToolDef = {
     const mimeType = resolveMimeType(filename, args.mimeType);
     const body = Buffer.from(args.content, 'utf8');
 
-    // Size cap: same platform limits as the upload path (per-App overrides
-    // pass null there too — the App properties column isn't wired yet).
+    // Size cap: the same platform limits the upload path enforces.
     const limits = getEffectiveLimits();
     if (body.byteLength > limits.maxBytes) {
       throw new Error(
