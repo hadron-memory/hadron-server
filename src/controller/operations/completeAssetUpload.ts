@@ -16,7 +16,11 @@ import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
 import { consumeUpload } from '../../lib/asset/uploadRegistry.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { encryptStorageKeyForMemory } from '../../lib/asset/encryption.js';
-import { headObject, deleteObject } from '../../integrations/r2/client.js';
+import { headObject, deleteObject, readObjectPrefix } from '../../integrations/r2/client.js';
+import {
+  verifyDeclaredContentType,
+  MAGIC_BYTES_WINDOW,
+} from '../../lib/asset/contentType.js';
 import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
 import { AssetUploadError } from './beginAssetUpload.js';
 import type { AssetCallerContext } from './beginAssetUpload.js';
@@ -76,6 +80,37 @@ export async function completeAssetUpload(
     throw new AssetUploadError(
       'INVALID_INPUT',
       `uploaded mime "${head.contentType}" does not match ticket mime "${entry.mimeType}"`,
+    );
+  }
+
+  // Both values compared above are CLIENT-supplied: the browser PUTs the
+  // bytes to a presigned URL and declares their Content-Type, and the
+  // ticket records what it asked for. Nothing had looked at the file, so
+  // an executable uploaded as image/png satisfied every check and the
+  // allowlist was advisory.
+  //
+  // Check the magic bytes. This matters more while there is no malware
+  // scanner (#896) — the allowlist is currently the only control between
+  // an arbitrary upload and a permanent unauthenticated hotlink.
+  //
+  // Only a MISMATCH rejects. Types with no signature (text, csv, json)
+  // and files too short to judge come back `unverifiable` and pass: a
+  // false reject breaks a legitimate upload, while a false accept only
+  // leaves us where we already were.
+  const magic = await readObjectPrefix(entry.storageKey, MAGIC_BYTES_WINDOW);
+  if (verifyDeclaredContentType(magic, entry.mimeType) === 'mismatch') {
+    await deleteObject(entry.storageKey).catch(() => {});
+    logAssetEvent({
+      operation: 'upload-declined',
+      assetId: entry.assetId,
+      memoryId: entry.memoryId,
+      userId: caller.userId,
+      appId: caller.appId ?? null,
+      reason: `content does not match declared mime "${entry.mimeType}"`,
+    });
+    throw new AssetUploadError(
+      'INVALID_INPUT',
+      `file content does not match its declared type "${entry.mimeType}"`,
     );
   }
 

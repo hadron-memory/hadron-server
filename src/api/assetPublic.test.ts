@@ -59,6 +59,11 @@ async function seedAsset(
 
 beforeEach(async () => {
   await cleanDb(db);
+  // The hotlink is OFF by default (#896 interim hardening) — it serves
+  // unscanned bytes anonymously, so a deployment has to opt in. These
+  // tests exercise the enabled behaviour; the disabled case has its own
+  // block at the bottom.
+  process.env.ASSET_PUBLIC_HOTLINK_ENABLED = 'true';
   mintGetUrlMock.mockReset();
   mintGetUrlMock.mockResolvedValue('https://store.example/presigned-get');
 
@@ -97,6 +102,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  delete process.env.ASSET_PUBLIC_HOTLINK_ENABLED;
   await new Promise<void>((resolve, reject) =>
     server.close((err) => (err ? reject(err) : resolve())),
   );
@@ -236,6 +242,52 @@ describe('GET /assets/:id', () => {
     // A stranger must not be able to tell "pending a scan" from
     // "encrypted" from "never existed".
     expect(new Set(bodies).size).toBe(1);
+  });
+});
+
+describe('the hotlink is OFF unless a deployment opts in', () => {
+  // #896 interim hardening. The route hands uploaded bytes to anyone
+  // holding an asset id, and nothing scans them — so a deployment that
+  // never asked for this must not have it. Opting in is one env var;
+  // finding out you were serving unscanned files anonymously because it
+  // defaulted on is not recoverable.
+
+  it('404s a perfectly good asset when the flag is unset', async () => {
+    const id = await seedAsset();
+    expect((await get(`/assets/${id}`)).status).toBe(302); // enabled by beforeEach
+
+    delete process.env.ASSET_PUBLIC_HOTLINK_ENABLED;
+    expect((await get(`/assets/${id}`)).status).toBe(404);
+  });
+
+  it('never signs a URL while disabled', async () => {
+    const id = await seedAsset();
+    delete process.env.ASSET_PUBLIC_HOTLINK_ENABLED;
+    mintGetUrlMock.mockClear();
+    await get(`/assets/${id}`);
+    expect(mintGetUrlMock).not.toHaveBeenCalled();
+  });
+
+  it('is indistinguishable from a missing asset while disabled', async () => {
+    // Same uniform-404 property as every other rejection: a stranger must
+    // not learn whether the feature is off or the id is unknown.
+    const id = await seedAsset();
+    delete process.env.ASSET_PUBLIC_HOTLINK_ENABLED;
+    const real = await get(`/assets/${id}`);
+    const unknown = await get('/assets/nope');
+    expect(`${real.status}:${await real.text()}`).toBe(
+      `${unknown.status}:${await unknown.text()}`,
+    );
+  });
+
+  it('takes effect on a restart, not a redeploy', async () => {
+    // Read per request rather than captured at mount, so flipping the
+    // env var is enough — no rebuild, no re-mount.
+    const id = await seedAsset();
+    delete process.env.ASSET_PUBLIC_HOTLINK_ENABLED;
+    expect((await get(`/assets/${id}`)).status).toBe(404);
+    process.env.ASSET_PUBLIC_HOTLINK_ENABLED = 'true';
+    expect((await get(`/assets/${id}`)).status).toBe(302);
   });
 });
 

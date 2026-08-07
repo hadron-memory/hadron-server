@@ -179,6 +179,43 @@ export async function headObject(key: string): Promise<HeadResult> {
   }
 }
 
+/**
+ * Read the first `length` bytes of an object.
+ *
+ * Ranged on purpose: the caller wants a file's magic bytes, and pulling
+ * a whole 25MB upload into memory to look at 12 of them would be an easy
+ * way to turn an upload into an OOM.
+ *
+ * Returns null when the object is missing, when the store returned no
+ * body, or when the range isn't satisfiable (a file shorter than the
+ * requested window still returns what exists, but a zero-byte object
+ * yields nothing).
+ */
+export async function readObjectPrefix(
+  key: string,
+  length: number,
+): Promise<Buffer | null> {
+  try {
+    const out = await getObjectStoreClient().send(
+      new GetObjectCommand({
+        Bucket: getObjectStoreBucket(),
+        Key: key,
+        Range: `bytes=0-${Math.max(0, length - 1)}`,
+      }),
+    );
+    if (!out.Body) return null;
+    const bytes = await out.Body.transformToByteArray();
+    return Buffer.from(bytes);
+  } catch (err: unknown) {
+    if (isNotFound(err)) return null;
+    // 416 Range Not Satisfiable — an empty object. Not an error here.
+    const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata
+      ?.httpStatusCode;
+    if (status === 416) return null;
+    throw err;
+  }
+}
+
 export async function deleteObject(key: string): Promise<void> {
   await getObjectStoreClient().send(
     new DeleteObjectCommand({ Bucket: getObjectStoreBucket(), Key: key }),
