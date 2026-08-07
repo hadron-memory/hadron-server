@@ -66,3 +66,39 @@ export function buildStorageKey(args: {
 export function validateStorageKey(key: string): boolean {
   return KEY_REGEX.test(key);
 }
+
+/**
+ * The key an upload's bytes land on BEFORE they have been verified.
+ *
+ * A presigned PUT URL stays valid for its whole TTL — nothing can revoke
+ * it once issued — so an uploader who has had their bytes accepted can
+ * simply PUT the same key again with different content. Both signed
+ * values (ContentLength, ContentType) are trivially reproducible by
+ * padding, so the replacement passes the signature and the Asset row,
+ * already marked CLEAN, now points at bytes nobody checked.
+ *
+ * The fix is to never presign the key the Asset will use. Bytes are
+ * uploaded here, verified here, then server-side copied to the real key
+ * and this one deleted. The presigned URL only ever addressed staging,
+ * so re-PUTting it after completion writes to an object no row
+ * references — and the janitor's orphan sweep reclaims it.
+ *
+ * Shape mirrors the final key so it satisfies the same validator, under
+ * a distinct `staging` root that no final key can collide with (a final
+ * key always begins with a memory URN's root atom).
+ */
+export function buildStagingKey(args: {
+  memoryUrn: string;
+  uploadId: string;
+  filename: string;
+}): string {
+  const memoryPath = args.memoryUrn.replace(/:/g, '/');
+  const ext = extractExtension(args.filename);
+  const key = ext
+    ? `staging/${memoryPath}/${args.uploadId}.${ext}`
+    : `staging/${memoryPath}/${args.uploadId}`;
+  if (!KEY_REGEX.test(key)) {
+    throw new Error(`STORAGE_KEY_INVALID: ${key}`);
+  }
+  return key;
+}

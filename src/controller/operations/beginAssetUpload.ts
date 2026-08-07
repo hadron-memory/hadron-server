@@ -10,7 +10,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
-import { buildStorageKey } from '../../lib/asset/storageKey.js';
+import { buildStorageKey, buildStagingKey } from '../../lib/asset/storageKey.js';
 import { getEffectiveLimits } from '../../lib/asset/limits.js';
 import { recordUpload } from '../../lib/asset/uploadRegistry.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
@@ -195,20 +195,27 @@ export async function beginAssetUpload(
     filename: input.filename,
   });
 
+  // Presign the STAGING key, never the final one — see buildStagingKey.
+  const uploadId = generateId();
+  const stagingKey = buildStagingKey({
+    memoryUrn: memory.urn,
+    uploadId,
+    filename: input.filename,
+  });
   const putUrl = await mintPutUrl({
-    key: storageKey,
+    key: stagingKey,
     contentType: input.mimeType,
     contentLength: input.sizeBytes,
     ttlSeconds: PRESIGN_TTL_SECONDS,
   });
 
-  const uploadId = generateId();
   const expiresAt = new Date(Date.now() + PRESIGN_TTL_SECONDS * 1000);
 
   recordUpload({
     uploadId,
     assetId,
     storageKey,
+    stagingKey,
     filename: input.filename,
     mimeType: input.mimeType,
     expectedSizeBytes: input.sizeBytes,
@@ -377,20 +384,27 @@ export async function beginAssetUploadV2(
     filename: input.filename,
   });
 
+  // Presign the STAGING key, never the final one — see buildStagingKey.
+  const uploadId = generateId();
+  const stagingKey = buildStagingKey({
+    memoryUrn: memory.urn,
+    uploadId,
+    filename: input.filename,
+  });
   const putUrl = await mintPutUrl({
-    key: storageKey,
+    key: stagingKey,
     contentType: input.mimeType,
     contentLength: input.sizeBytes,
     ttlSeconds: PRESIGN_TTL_SECONDS,
   });
 
-  const uploadId = generateId();
   const expiresAt = new Date(Date.now() + PRESIGN_TTL_SECONDS * 1000);
 
   recordUpload({
     uploadId,
     assetId,
     storageKey,
+    stagingKey,
     filename: input.filename,
     mimeType: input.mimeType,
     expectedSizeBytes: input.sizeBytes,

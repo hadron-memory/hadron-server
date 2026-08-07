@@ -46,6 +46,23 @@ import { logAssetEvent } from '../lib/asset/audit.js';
 const REDIRECT_TTL_SECONDS = 5 * 60;
 
 /**
+ * Is the anonymous hotlink switched on for this deployment?
+ *
+ * **Default OFF.** The route hands out uploaded bytes to anyone holding
+ * an asset id, and — until a malware scanner exists (#896) — those bytes
+ * are unscanned, so a deployment that never asked for this should not
+ * have it. Opting in is one env var; discovering you were serving
+ * unscanned files anonymously because it was on by default is not
+ * recoverable.
+ *
+ * Read per call rather than cached at module load so a deployment can
+ * turn it off with a restart, and so tests can flip it.
+ */
+export function isPublicHotlinkEnabled(): boolean {
+  return process.env.ASSET_PUBLIC_HOTLINK_ENABLED === 'true';
+}
+
+/**
  * Absolute public URL for an asset, or null when no canonical origin is
  * configured.
  *
@@ -54,6 +71,9 @@ const REDIRECT_TTL_SECONDS = 5 * 60;
  * the caller cannot tell it is broken.
  */
 export function publicAssetUrl(assetId: string): string | null {
+  // No link when the route is switched off — otherwise a client offers a
+  // "copy link" action for a URL that 404s.
+  if (!isPublicHotlinkEnabled()) return null;
   const base = process.env.BASE_URL;
   if (!base) return null;
   try {
@@ -88,6 +108,14 @@ export function mountPublicAssetRoutes(app: Express, db: PrismaClient): void {
     // Everything below runs inside this try; genuine faults go to next().
     try {
       const assetId = String(req.params.id ?? '');
+
+      // Checked inside the handler, not at mount time, so toggling it is a
+      // restart rather than a redeploy — and so the disabled response is
+      // the same 404 as every other rejection, revealing nothing about
+      // whether the feature exists or the asset does.
+      if (!isPublicHotlinkEnabled()) {
+        return res.status(404).json({ error: 'not found' });
+      }
 
       const asset = await db.asset.findUnique({ where: { id: assetId } });
 

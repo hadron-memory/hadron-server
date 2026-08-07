@@ -12,6 +12,7 @@ const baseEntry = (): UploadRegistryEntry => ({
   uploadId: 'u1',
   assetId: 'a1',
   storageKey: 'org/seg/a1.pdf',
+  stagingKey: 'staging/org/seg/u1.pdf',
   filename: 'x.pdf',
   mimeType: 'application/pdf',
   expectedSizeBytes: 100,
