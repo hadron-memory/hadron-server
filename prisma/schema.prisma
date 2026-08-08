@@ -51,7 +51,14 @@ datasource db {
 //   - Agent:        `<org>:<slug>`           e.g. "micromentor.org:juno"
 //   - App:          `<org>:<slug>`           e.g. "baragaun.com:internal-ops"
 //   - Node:         `<memory.urn>:<loc>`     computed, NOT stored
-//   - Asset:        `<memory.urn>:assets:<asset.id>`
+//   - Asset:        computed, NOT stored — the read surface emits grammar v2
+//                   `hrn:asset:<root>:<mem...>:assets:<asset.id>` (see the
+//                   Asset model doc and the GraphQL `Asset.urn` docstring).
+// The four stored shapes above are the BARE column values. Every read surface
+// renders them through the grammar-v2 emitters (#697 Stage 2), so a client sees
+// `hrn:org:` / `hrn:mem:` / `hrn:agent:` / `hrn:app:` prefixes that the column
+// itself does not carry — and for Memory the `chk_memory_urn_not_prefixed`
+// guardrail actively rejects storing the rendered form.
 // Full scheme: `hadron-concept/hadron-specs/General/URN.md` (sister repo).
 //
 // Table naming
@@ -889,7 +896,11 @@ model Memory {
 /// `hadron-concept/design-discussions/hadron-platform/2026-04-28-asset-upload-design/010-summary.md`
 /// (sister repo) §"Why this summary supersedes 007-summary.md".
 ///
-/// **URN form**: `<memory.urn>:assets:<asset.id>` resolves to this row.
+/// **URN form** (computed, NOT stored): grammar v2
+/// `hrn:asset:<root>:<mem...>:assets:<asset.id>`, emitted by `emitAssetUrnV2`
+/// from the holding memory's stored bare urn. The GraphQL `Asset.urn` docstring
+/// carries the full contract, including the two degraded shapes a parser has to
+/// tolerate and why `<mem...>` is not always a single atom.
 ///
 /// **Cross-references from nodes** are reserved for a future spec —
 /// `Node.attachedAssetId?` (one-asset case) or a `node_assets` join
