@@ -28,10 +28,11 @@
  * encrypted memory is itself encrypted, and decrypting it needs that
  * memory's session key — which a deletion path generally does not
  * hold. Those keys are reported separately rather than silently
- * dropped, so the caller can log them as known-orphaned. Reaping them
- * needs a bucket-side sweep (the ListObjectsV2 orphan reaper the asset
- * janitor still has on its TODO), which is the right long-term answer
- * for every leak path at once.
+ * dropped, so the caller can log them as known-orphaned. Their bytes
+ * are reclaimed by the bucket-side sweep in
+ * `src/jobs/reapOrphanAssetObjects.ts` (#889), which matches plaintext
+ * object keys against asset PKs and so never needs to decrypt anything
+ * — the catch-all for every leak path at once, this one included.
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';

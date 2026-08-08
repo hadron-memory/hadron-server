@@ -56,6 +56,7 @@ import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
+import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
@@ -1424,6 +1425,18 @@ export async function createServer(): Promise<Express> {
     process.env.DISABLE_ASSET_SCAN_SWEEP !== 'true'
   ) {
     startAssetScanSweepLoop(db);
+  }
+
+  // Background job (#889): daily sweep for object-store objects with no
+  // Asset row — the catch-all for every leak path the retention janitor
+  // cannot see (cascaded rows, encrypted memories, abandoned uploads).
+  // Deletes on the ABSENCE of a row, so it is dry-run until an operator
+  // sets ASSET_ORPHAN_REAP_ENABLED=true.
+  if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.DISABLE_ASSET_ORPHAN_SWEEP !== 'true'
+  ) {
+    startOrphanObjectReaperLoop(db);
   }
 
   // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in

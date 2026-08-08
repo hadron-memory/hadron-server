@@ -20,6 +20,16 @@ export const RESERVED_ROOT_NAMES: ReadonlySet<string> = new Set<string>([
   'platform',
   'host',
   'server',
+  // Not a platform word — an object-store namespace. A storage key
+  // begins with the memory URN's root atom, and `buildStagingKey`
+  // reserves `staging/` for pre-verification bytes on the stated premise
+  // that "no final key can collide with it". A principal named `staging`
+  // would falsify that premise. Nothing in #889's orphan reaper depends
+  // on this any more (it confirms every key against the database rather
+  // than trusting the prefix), but the collision itself is still
+  // confusing enough to keep out. Blocks new mints only; an existing
+  // principal with this name would be unaffected.
+  'staging',
 ]);
 
 /** The kind of principal a root name belongs to. */

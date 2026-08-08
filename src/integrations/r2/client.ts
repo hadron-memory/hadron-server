@@ -46,6 +46,7 @@ import {
   DeleteObjectCommand,
   CopyObjectCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   type HeadObjectCommandOutput,
 } from '@aws-sdk/client-s3';
@@ -99,6 +100,23 @@ export function getObjectStoreBucket(): string {
 // For tests / hot config swaps.
 export function resetObjectStoreClient(): void {
   cached = null;
+}
+
+/**
+ * Whether asset storage is configured at all.
+ *
+ * `getObjectStoreClient` throws for a missing setting, which is right for
+ * a request that cannot proceed without bytes — but a background sweep
+ * should stay quiet on a deployment that simply has no asset storage,
+ * rather than log a failure every day forever.
+ */
+export function isObjectStoreConfigured(): boolean {
+  return Boolean(
+    env('ASSET_STORAGE_ENDPOINT') &&
+      env('ASSET_STORAGE_BUCKET') &&
+      env('ASSET_STORAGE_ACCESS_KEY_ID') &&
+      env('ASSET_STORAGE_SECRET_ACCESS_KEY'),
+  );
 }
 
 export interface PresignedPutOptions {
@@ -237,6 +255,55 @@ export async function copyObject(fromKey: string, toKey: string): Promise<void> 
       Key: toKey,
     }),
   );
+}
+
+export interface ObjectSummary {
+  key: string;
+  /** Object size in bytes; 0 when the store omitted it. */
+  size: number;
+  /** Null when the store omitted it — the caller must not infer age. */
+  lastModified: Date | null;
+}
+
+export interface ObjectPage {
+  objects: ObjectSummary[];
+  /** Continuation token for the next page, or null when this is the last. */
+  nextToken: string | null;
+}
+
+/**
+ * One page of a bucket listing (ListObjectsV2).
+ *
+ * Deliberately a single page rather than an async iterator that hides the
+ * paging: the orphan reaper does one batched database lookup per page, so
+ * the page boundary is a unit of work it cares about.
+ */
+export async function listObjectsPage(opts: {
+  prefix?: string;
+  continuationToken?: string | null;
+  maxKeys?: number;
+}): Promise<ObjectPage> {
+  const out = await getObjectStoreClient().send(
+    new ListObjectsV2Command({
+      Bucket: getObjectStoreBucket(),
+      Prefix: opts.prefix || undefined,
+      ContinuationToken: opts.continuationToken ?? undefined,
+      MaxKeys: opts.maxKeys,
+    }),
+  );
+  const objects: ObjectSummary[] = [];
+  for (const o of out.Contents ?? []) {
+    if (!o.Key) continue;
+    objects.push({
+      key: o.Key,
+      size: o.Size ?? 0,
+      lastModified: o.LastModified ?? null,
+    });
+  }
+  return {
+    objects,
+    nextToken: out.IsTruncated ? (out.NextContinuationToken ?? null) : null,
+  };
 }
 
 export async function deleteObject(key: string): Promise<void> {

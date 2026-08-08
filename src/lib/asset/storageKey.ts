@@ -67,6 +67,53 @@ export function validateStorageKey(key: string): boolean {
   return KEY_REGEX.test(key);
 }
 
+/** Root of the pre-verification staging area — see buildStagingKey. */
+export const STAGING_PREFIX = 'staging/';
+
+/**
+ * True when the key addresses the staging area rather than an Asset's
+ * final location. Staging keys are named by UPLOAD id, not asset id, so
+ * nothing in the database can ever vouch for one.
+ */
+export function isStagingKey(key: string): boolean {
+  return key.startsWith(STAGING_PREFIX);
+}
+
+const ASSET_ID_ONLY = new RegExp(`^${ASSET_ID}$`);
+
+/**
+ * The id encoded in a storage key's basename, or null when the key is
+ * not a shape this platform writes.
+ *
+ * This is what makes orphan detection work uniformly across encrypted
+ * and unencrypted memories: `Asset.storageKey` is encrypted at rest for
+ * an encrypted memory, but the key the bytes actually live at is
+ * plaintext and its basename IS the asset id (see buildStorageKey). So a
+ * bucket listing can be matched against primary keys without decrypting
+ * anything.
+ *
+ * **For a FINAL key the id is the Asset's primary key; for a STAGING key
+ * it is the UPLOAD id, which by construction matches no Asset row.** The
+ * caller is deliberately not asked to tell them apart: the orphan reaper
+ * looks up every parsed id and reaps only what has no row, so a genuine
+ * staging object (an upload id, never a PK) is still collected, while a
+ * final key that merely happens to sit under a principal *named*
+ * `staging` is protected by its own row. Branching on the prefix instead
+ * would delete every asset that principal owns — the PR #907 review
+ * caught exactly that, and `staging` is a mintable root name.
+ *
+ * Returns null — never a guess — for any shape `validateStorageKey`
+ * rejects. A caller deleting on the strength of this must treat null as
+ * "not ours, leave it alone".
+ */
+export function parseObjectIdFromKey(key: string): string | null {
+  if (!validateStorageKey(key)) return null;
+  const basename = key.slice(key.lastIndexOf('/') + 1);
+  const dot = basename.indexOf('.');
+  const id = dot < 0 ? basename : basename.slice(0, dot);
+  return ASSET_ID_ONLY.test(id) ? id : null;
+}
+
 /**
  * The key an upload's bytes land on BEFORE they have been verified.
  *
