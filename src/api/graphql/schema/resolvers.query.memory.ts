@@ -20,6 +20,7 @@ import {
   canReadMemoryRecord,
   isMemoryReadableCached,
   resolveOrgScope,
+  resolveReadableMemoryId,
   MEMORY_INCLUDE,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
@@ -50,29 +51,6 @@ const GRAPH_PAGE_MAX = 2000;
 function clampGraphTake(limit?: number | null): number {
   if (limit == null) return GRAPH_PAGE_DEFAULT;
   return Math.min(GRAPH_PAGE_MAX, Math.max(0, limit));
-}
-
-/**
- * Resolve a memory ref (ID or URN) to its id IFF the caller may read it; returns
- * null when the ref does not resolve OR the caller lacks read access — so the
- * graph-view queries return an empty page with no org/memory existence
- * disclosure (same posture as memoryUsageSummary). Uses the scoped
- * getAccessibleMemoryIds point-read so it stays an indexed check.
- */
-async function resolveReadableMemoryId(ctx: Context, memoryRef: string): Promise<string | null> {
-  let resolvedId: string;
-  try {
-    ({ id: resolvedId } = await resolveMemoryRef(ctx.db, memoryRef));
-  } catch (e) {
-    // Only a genuine miss collapses to an empty page (no existence disclosure).
-    // A malformed URN or an unexpected DB/runtime error must propagate rather
-    // than masquerade as "empty graph" — mirrors the Query.memory(id:) resolver.
-    if (e instanceof MemoryNotFoundError) return null;
-    throw e;
-  }
-  const accessible = await getAccessibleMemoryIds(ctx, resolvedId);
-  if (accessible !== null && !accessible.includes(resolvedId)) return null;
-  return resolvedId;
 }
 
 export const memoryQueries = {

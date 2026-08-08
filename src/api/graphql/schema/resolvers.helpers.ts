@@ -311,6 +311,46 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
 }
 
 /**
+ * Resolve a memory ref (ID or URN) to its id IFF the caller may read it; returns
+ * null when the ref does not resolve OR the caller lacks read access — so a
+ * ref-scoped surface answers with an empty page and discloses neither the
+ * memory's nor its org's existence (the `conventions:multi-ref-scope-args`
+ * drop-unreadable posture). Uses the SCOPED `getAccessibleMemoryIds` point-read,
+ * so it stays an indexed check and stays in lockstep with the shared predicate
+ * by construction rather than by a hand-rolled copy of it.
+ *
+ * A MALFORMED ref still throws. Silence is for EXISTENCE, not for shape: a bad
+ * URN is caller error and a DB failure is operational, and swallowing either
+ * hands back a partial page that looks complete.
+ *
+ * **When NOT to use this.** It costs one scoped query PER REF, which is the
+ * right trade only for a surface that does not already hold the caller's
+ * accessible set. A surface that computes the full set anyway for its default
+ * scope — `listAssets` is the live example — should intersect in memory against
+ * that set instead. `listAssets` additionally narrows by `orgId` before checking
+ * refs, so swapping this helper in there would also drop that narrowing and
+ * WIDEN the result. Unify the two only if you keep both checks.
+ */
+export async function resolveReadableMemoryId(
+  ctx: Context,
+  memoryRef: string,
+): Promise<string | null> {
+  let resolvedId: string;
+  try {
+    ({ id: resolvedId } = await resolveMemoryRef(ctx.db, memoryRef));
+  } catch (e) {
+    // Only a genuine miss collapses to an empty page (no existence disclosure).
+    // A malformed URN or an unexpected DB/runtime error must propagate rather
+    // than masquerade as "empty graph" — mirrors the Query.memory(id:) resolver.
+    if (e instanceof MemoryNotFoundError) return null;
+    throw e;
+  }
+  const accessible = await getAccessibleMemoryIds(ctx, resolvedId);
+  if (accessible !== null && !accessible.includes(resolvedId)) return null;
+  return resolvedId;
+}
+
+/**
  * The RECORD-level memory read gate — "may this caller open this memory's
  * record (its scalars: name, description, data)?", as distinct from
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".
