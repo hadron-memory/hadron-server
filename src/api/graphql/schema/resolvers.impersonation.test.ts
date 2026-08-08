@@ -279,7 +279,34 @@ describe('impersonation token resolution (middleware)', () => {
   // reporting it live. `endedBy` stays NULL, which is what distinguishes a
   // system revocation from a person's explicit stop.
   describe('#878 — revocation stamps the audit row', () => {
-    /** The stamp is fire-and-forget; give the microtask + write a moment. */
+    /**
+     * The stamp is fire-and-forget by design (the request is being rejected
+     * regardless, so the write must not add latency to it), which means a
+     * test cannot await it directly.
+     *
+     * POLL for it rather than sleeping a fixed amount. A flat delay is a bet
+     * that one unawaited DB write finishes inside it, and on a loaded CI
+     * runner — four vitest shards against one Postgres — that bet loses
+     * occasionally: this suite went red once on `endedAt` still being null
+     * after 100ms, then passed on rerun. Polling is both faster in the normal
+     * case and immune to the slow one.
+     */
+    const waitForEnded = async (sessionId: string, timeoutMs = 5_000) => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const row = await db.impersonationSession.findUnique({ where: { id: sessionId } });
+        if (row?.endedAt) return row;
+        if (Date.now() > deadline) return row; // let the assertion report it
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+
+    /**
+     * For the two NEGATIVE cases below, which assert the row was NOT touched.
+     * There is no state change to poll for, so a fixed pause is the only
+     * option — and it is safe here: the failure mode is a false PASS, never a
+     * false failure.
+     */
     const settle = () => new Promise((r) => setTimeout(r, 100));
 
     it('demoting the admin ends the session, with endedBy null', async () => {
@@ -289,8 +316,7 @@ describe('impersonation token resolution (middleware)', () => {
         data: { role: 'READER' },
       });
       expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
-      await settle();
-      const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      const row = await waitForEnded(session.id);
       expect(row?.endedAt).not.toBeNull();
       expect(row?.endedBy).toBeNull(); // system revocation, not a person
     });
@@ -302,7 +328,7 @@ describe('impersonation token resolution (middleware)', () => {
         data: { role: 'OWNER' }, // promotion breaches peer-or-below for an ADMIN
       });
       await resolveAuthContext(makeReq(token), db);
-      await settle();
+      await waitForEnded(session.id);
 
       const active = await impersonationSessions(
         {},
@@ -327,8 +353,7 @@ describe('impersonation token resolution (middleware)', () => {
       const { session, token } = await startAsAdmin();
       await db.user.update({ where: { id: mike.id }, data: { deletedAt: new Date() } });
       expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
-      await settle();
-      const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      const row = await waitForEnded(session.id);
       expect(row?.endedAt).not.toBeNull();
       expect(row?.endedBy).toBeNull();
     });
@@ -337,8 +362,7 @@ describe('impersonation token resolution (middleware)', () => {
       const { session, token } = await startAsAdmin();
       await db.user.update({ where: { id: admin.id }, data: { deletedAt: new Date() } });
       expect(await resolveAuthContext(makeReq(token), db)).toEqual({});
-      await settle();
-      const row = await db.impersonationSession.findUnique({ where: { id: session.id } });
+      const row = await waitForEnded(session.id);
       expect(row?.endedAt).not.toBeNull();
     });
 
