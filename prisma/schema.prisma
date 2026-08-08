@@ -918,6 +918,16 @@ model Asset {
   storageKey  String          @unique @map("storage_key")
   /// Virus scan state. Downloads gated on CLEAN.
   scanStatus  AssetScanStatus @default(PENDING) @map("scan_status")
+  /// Engine signature name recorded when the scan verdict was BLOCKED
+  /// (e.g. "Eicar-Signature"). A BLOCKED row is kept as an audit
+  /// tombstone; its object bytes are deleted (#896).
+  scanSignature String? @map("scan_signature")
+  /// Number of scan attempts so far (inline at complete-upload plus
+  /// sweep retries). Drives the retry sweep's exponential backoff.
+  scanAttempts Int @default(0) @map("scan_attempts")
+  /// When the last scan attempt ran (whether or not it produced a
+  /// verdict). NULL = never attempted.
+  scannedAt DateTime? @map("scanned_at")
   /// Optional; agent- or user-provided.
   description String?
   uploadedAt  DateTime        @default(now()) @map("uploaded_at")
@@ -933,6 +943,9 @@ model Asset {
   memory Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
   @@index([memoryId, scanStatus, uploadedAt(sort: Desc)])
+  // #896 — the scan retry sweep's selector (PENDING rows ordered by
+  // last attempt).
+  @@index([scanStatus, scannedAt])
   // 006-asset-upload-redesign: two partial indexes for staged assets
   // (WHERE memory_id IS NULL) live in the migration SQL only — Prisma
   // schema syntax can't express WHERE clauses on @@index. See

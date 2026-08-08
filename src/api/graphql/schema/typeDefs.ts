@@ -3070,6 +3070,8 @@ export const typeDefs = `#graphql
     mimeType:    String!
     sizeBytes:   Int!
     scanStatus:  AssetScanStatus!
+    """Engine signature name recorded when the scan verdict was BLOCKED (the row is kept as an audit tombstone; its bytes are deleted). Null otherwise."""
+    scanSignature: String
     description: String
     uploadedAt:  DateTime!
     """Uploader (User id). Null when the asset was created server-side by an app run (hadron_store_file)."""

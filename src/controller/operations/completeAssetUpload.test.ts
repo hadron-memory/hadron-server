@@ -22,12 +22,25 @@ const copyObjectMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const readObjectPrefixMock = vi.hoisted(() =>
   vi.fn().mockResolvedValue(Buffer.from('%PDF-1.7\n')),
 );
+const mintGetUrlMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue('https://bucket/presigned-get'),
+);
 
 vi.mock('../../integrations/r2/client.js', () => ({
   headObject: headObjectMock,
   deleteObject: deleteObjectMock,
   readObjectPrefix: readObjectPrefixMock,
   copyObject: copyObjectMock,
+  mintGetUrl: mintGetUrlMock,
+}));
+
+// #896 inline scan. Default: scanner NOT configured, so the pre-scanner
+// tests keep their born-PENDING / autoClean semantics untouched.
+const isScanConfiguredMock = vi.hoisted(() => vi.fn().mockReturnValue(false));
+const scanUrlMock = vi.hoisted(() => vi.fn());
+vi.mock('../../lib/scanClient.js', () => ({
+  isScanConfigured: isScanConfiguredMock,
+  scanUrl: scanUrlMock,
 }));
 
 let org: { id: string; urn: string };
@@ -83,6 +96,9 @@ beforeEach(async () => {
   deleteObjectMock.mockClear();
   copyObjectMock.mockClear();
   readObjectPrefixMock.mockClear();
+  mintGetUrlMock.mockClear();
+  isScanConfiguredMock.mockReturnValue(false);
+  scanUrlMock.mockReset();
 });
 
 describe('completeAssetUpload', () => {
@@ -347,5 +363,103 @@ describe('completeAssetUpload', () => {
       { uploadId: entry.uploadId },
     );
     expect(asset.id).toBe(entry.assetId);
+  });
+});
+
+describe('completeAssetUpload — inline malware scan (#896)', () => {
+  function headOk(entry: ReturnType<typeof buildEntry>) {
+    headObjectMock.mockResolvedValueOnce({
+      exists: true,
+      contentLength: entry.expectedSizeBytes,
+      contentType: entry.mimeType,
+    });
+  }
+
+  beforeEach(() => {
+    isScanConfiguredMock.mockReturnValue(true);
+  });
+
+  it('returns a CLEAN asset when the scan verdict is clean', async () => {
+    const entry = buildEntry();
+    headOk(entry);
+    scanUrlMock.mockResolvedValueOnce({ verdict: 'clean' });
+
+    const asset = await completeAssetUpload(
+      db,
+      { userId: user.id },
+      { uploadId: entry.uploadId },
+    );
+
+    expect(asset.scanStatus).toBe('CLEAN');
+    expect(asset.scanAttempts).toBe(1);
+    // The scan URL was minted on the PROMOTED key — never the staging
+    // key, which stays re-PUTtable for its whole presign TTL.
+    expect(mintGetUrlMock).toHaveBeenCalledWith(
+      expect.objectContaining({ key: entry.storageKey }),
+    );
+  });
+
+  it('scanner wins over HADRON_ASSET_SCAN_AUTO_CLEAN when both are on', async () => {
+    vi.stubEnv('HADRON_ASSET_SCAN_AUTO_CLEAN', 'true');
+    try {
+      const entry = buildEntry();
+      headOk(entry);
+      scanUrlMock.mockResolvedValueOnce({ verdict: 'clean' });
+
+      const asset = await completeAssetUpload(
+        db,
+        { userId: user.id },
+        { uploadId: entry.uploadId },
+      );
+
+      // CLEAN via a real verdict, not born-CLEAN: the scan actually ran.
+      expect(asset.scanStatus).toBe('CLEAN');
+      expect(scanUrlMock).toHaveBeenCalledTimes(1);
+      expect(asset.scanAttempts).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('rejects an infected upload with MALWARE_BLOCKED, keeps the tombstone, deletes the bytes', async () => {
+    const entry = buildEntry();
+    headOk(entry);
+    scanUrlMock.mockResolvedValueOnce({
+      verdict: 'infected',
+      signature: 'Eicar-Signature',
+    });
+
+    await expect(
+      completeAssetUpload(db, { userId: user.id }, { uploadId: entry.uploadId }),
+    ).rejects.toMatchObject({ code: 'MALWARE_BLOCKED' });
+
+    const row = await db.asset.findUniqueOrThrow({
+      where: { id: entry.assetId },
+    });
+    expect(row.scanStatus).toBe('BLOCKED');
+    expect(row.scanSignature).toBe('Eicar-Signature');
+    // The promoted object's bytes were purged; the row remains as the
+    // audit tombstone.
+    expect(deleteObjectMock).toHaveBeenCalledWith(entry.storageKey);
+  });
+
+  it('succeeds with a PENDING asset when the scan tool is unavailable', async () => {
+    const entry = buildEntry();
+    headOk(entry);
+    scanUrlMock.mockResolvedValueOnce({
+      verdict: 'unavailable',
+      reason: 'tool down',
+    });
+
+    const asset = await completeAssetUpload(
+      db,
+      { userId: user.id },
+      { uploadId: entry.uploadId },
+    );
+
+    // Fail-closed but not fail-broken: the upload lands, downloads stay
+    // gated, and the sweep settles the row later.
+    expect(asset.scanStatus).toBe('PENDING');
+    expect(asset.scanAttempts).toBe(1);
   });
 });
