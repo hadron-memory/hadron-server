@@ -460,6 +460,12 @@ export const chatMutations = {
             nodeType: 'record',
             description: `Chat: ${convName}`,
             data: initialChatData as InputJsonValue,
+            // #914: record the creator on the audit column too, not only
+            // inside `data.userId`. The column survives encryption and is
+            // what #915's audit expects to find. It stays PROVENANCE — the
+            // chat's creator is never an authorization gate (cor:acl:030:01),
+            // because every member of the host may post here.
+            createdBy: ctx.userId ?? null,
           },
         });
         // Create the messages parent (so the chat subtree is well-formed)
@@ -467,6 +473,7 @@ export const chatMutations = {
           data: {
             id: generateId(), memoryId: targetMemoryId, loc: `${chatLoc}:messages`,
             name: 'messages', nodeType: 'record',
+            createdBy: ctx.userId ?? null,
           },
         });
       });
@@ -534,24 +541,56 @@ export const chatMutations = {
       // decide user-vs-assistant — agent-agnostic per Constitution Invariant
       // #14 (no hardcoded agent names anywhere in the platform).
       const msgNum = String(messageCount).padStart(3, '0');
-      const userId = chatData.userId as string ?? 'user';
+      // #914 — the SENDER, not the chat's creator.
+      //
+      // Every chat in a multi-human memory is a group chat: a chat has no
+      // ACL of its own, so read AND write both fall through the host
+      // memory's per-class rules, and any member of an app-class host may
+      // post into any chat in it (cor:acl:030:01). This path used to stamp
+      // every user turn with `chatData.userId` — the id `startChat` stored
+      // for whoever CREATED the chat — so a second participant's messages
+      // were recorded under the creator's identity. Not merely unattributed:
+      // confidently wrong, which is worse than a NULL that says "unknown".
+      //
+      // `createdBy` is the authoritative home (a plain column, so it stays
+      // readable in an encrypted memory, unlike anything inside `data`).
+      // Null when the caller carries no user identity — e.g. an App-key
+      // principal — which reads as "unknown", never as the creator.
+      const senderUserId = ctx.userId ?? null;
       const newMsgFields = encryptNodeFields(
-        { content: userMessage, data: { role: 'user' } },
+        {
+          content: userMessage,
+          // `authorUserId` is a convenience for transcript readers that
+          // already decrypt `data` — it rides the same encryption as the
+          // rest, so `createdBy` above remains the attribution of record.
+          // Omitted rather than blanked when there is no user identity, so
+          // absent never reads as a claim.
+          data: { role: 'user', ...(senderUserId ? { authorUserId: senderUserId } : {}) },
+        },
         memEncInfo,
       );
       // #664/#752: a message lands under `${chatId}:messages` — hold the
       // ancestor-path lock across the insert so a concurrent non-recursive
       // delete of the chat (or its messages parent) can't orphan it.
-      const userMsgLoc = `${chatId}:messages:${msgNum}-${userId}`;
+      // The suffix is now the ROLE, mirroring `-assistant`, not an identity.
+      // A loc is an address that lands in URNs, portal links, and search;
+      // embedding a user id there both leaked it into those surfaces and
+      // invited exactly this bug — reading the address as if it were the
+      // author. Nothing ever parsed the id out of it: both transcript
+      // readers take `data.role` first and fall back only to "does the
+      // suffix end in `-assistant`", so `-user` is read identically to the
+      // old `-<userId>` form and legacy rows keep resolving unchanged.
+      const userMsgLoc = `${chatId}:messages:${msgNum}-user`;
       await ctx.db.$transaction(async (tx) => {
         await lockAncestorsForCreate(tx, chatNode.memoryId, userMsgLoc);
         await tx.node.create({
           data: {
             id: generateId(), memoryId: chatNode.memoryId,
-            loc: userMsgLoc, name: `${msgNum}-${userId}`,
+            loc: userMsgLoc, name: `${msgNum}-user`,
             nodeType: 'record', content: newMsgFields.content ?? null,
             data: (newMsgFields.data ?? null) as InputJsonValue,
             seq: messageCount,
+            createdBy: senderUserId,
           },
         });
       });
@@ -879,6 +918,12 @@ export const chatMutations = {
       );
       // #664/#752: assistant message under `${chatId}:messages` — lock the
       // ancestor path across the insert (see the user-message create above).
+      // #914: `createdBy` is deliberately left unset on the assistant turn.
+      // The platform authored it, and cor:dmo:010:01 admits the system as an
+      // author — so NULL here means "the platform", not "unrecorded". Do NOT
+      // stamp the sending user: that would assert a human wrote the model's
+      // words. (Which user prompted it is recoverable from the preceding
+      // message's `seq`.)
       const assistantMsgLoc = `${chatId}:messages:${msgNum}-assistant`;
       await ctx.db.$transaction(async (tx) => {
         await lockAncestorsForCreate(tx, chatNode.memoryId, assistantMsgLoc);

@@ -719,9 +719,16 @@ describe('chatHistory', () => {
       userCtx(adminUser.id),
     );
 
-    // The chatNode's userId determines the user-message loc suffix. Set
-    // it to a value that *contains* known agent names ('juno', 'mealplan')
-    // — pre-cleanup, this would misclassify the message as assistant.
+    // Historically the chatNode's userId determined the user-message loc
+    // suffix, so a value *containing* a known agent name ('juno',
+    // 'mealplan') would — pre-cleanup — misclassify the message as
+    // assistant. Since #914 the suffix is the ROLE (`-user`) and no
+    // user-controlled string reaches the loc at all, so this mutation can no
+    // longer influence classification even in principle. It is kept, and
+    // asserted on below, because that structural guarantee is worth pinning:
+    // it is what retires the whole hazard class for new rows, while
+    // `data.role` keeps protecting legacy rows that still carry an identity
+    // in their suffix.
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     const data = (chatNode.data as Record<string, unknown>) ?? {};
     await db.node.update({
@@ -762,9 +769,9 @@ describe('chatHistory', () => {
     // sendChatMessage, an MCP tool, an audit query) gets the correct
     // answer without having to parse loc strings.
     const userMsg = await db.node.findFirstOrThrow({
-      // loc-scope-ok: probes a message row by a loc fragment unique to this
-      // fixture's chat; the holding memory is startChat's to choose.
-      where: { loc: { contains: '-mealplan-juno-fan' }, deletedAt: null },
+      // loc-scope-ok: scoped to this fixture's chat loc; the holding memory
+      // is startChat's to choose.
+      where: { loc: { startsWith: `${start.chatId}:messages:` , endsWith: '-user' }, deletedAt: null },
     });
     const assistantMsg = await db.node.findFirstOrThrow({
       // loc-scope-ok: as above — a fixture-unique loc suffix, not a tenant key.
@@ -772,6 +779,12 @@ describe('chatHistory', () => {
     });
     expect((userMsg.data as { role?: string } | null)?.role).toBe('user');
     expect((assistantMsg.data as { role?: string } | null)?.role).toBe('assistant');
+
+    // #914: the poisoned `chatData.userId` above reached the loc before, and
+    // now reaches nothing. The message address carries a role, not an
+    // identity, so no user-chosen string can ever again make a user turn read
+    // as an assistant turn through the suffix fallback.
+    expect(userMsg.loc).not.toContain('mealplan-juno-fan');
   });
 });
 
@@ -921,6 +934,104 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
         userCtx(adminUser.id, { appId: app.id }),
       ),
     ).rejects.toThrow(/SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS|App-key/);
+  });
+
+  // -------------------------------------------------------------------------
+  // #914 — message author attribution in a group chat
+  //
+  // Every chat in a multi-human memory IS a group chat: a chat has no ACL of
+  // its own, so read and write both fall through the host memory's per-class
+  // rules (cor:acl:030:01). These tests pin both halves — that a second member
+  // may post at all, and that the record says who did.
+  // -------------------------------------------------------------------------
+
+  it('#914 — a second App member may post into a chat they did not create', async () => {
+    // The premise the attribution fix rests on. If this ever starts throwing,
+    // participation has been narrowed and cor:acl:030:01's group-chat property
+    // has been broken — which is a contract change, not a bug fix.
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+
+    await expect(
+      resolvers.Mutation.sendChatMessage(
+        {},
+        { chatId: start.chatId, userMessage: 'the other member speaking' },
+        userCtx(otherUser.id),
+      ),
+    ).resolves.toBeDefined();
+  });
+
+  it('#914 — attributes a message to its SENDER, not to the chat creator', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: start.chatId, userMessage: 'the other member speaking' },
+      userCtx(otherUser.id),
+    );
+
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    const messages = await db.node.findMany({
+      where: {
+        memoryId: chatNode.memoryId,
+        loc: { startsWith: `${start.chatId}:messages:` },
+        deletedAt: null,
+      },
+      orderBy: { seq: 'asc' },
+    });
+    const userMsg = messages.find((m) => m.loc.endsWith('-user'));
+    expect(userMsg).toBeDefined();
+
+    // The whole point: before the fix this was adminUser (the creator).
+    expect(userMsg!.createdBy).toBe(otherUser.id);
+    expect(userMsg!.createdBy).not.toBe(adminUser.id);
+    expect((userMsg!.data as Record<string, unknown>).authorUserId).toBe(otherUser.id);
+
+    // And the loc no longer encodes an identity at all — it carries the ROLE,
+    // mirroring `-assistant`, so no reader can mistake the address for the
+    // author.
+    expect(userMsg!.loc).not.toContain(adminUser.id);
+    expect(userMsg!.loc).not.toContain(otherUser.id);
+  });
+
+  it('#914 — records the creator on the chat root, and leaves the assistant turn system-authored', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: start.chatId, userMessage: 'hello' },
+      userCtx(adminUser.id),
+    );
+
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    expect(chatNode.createdBy).toBe(adminUser.id);
+
+    // NULL on the assistant turn means "the platform wrote this"
+    // (cor:dmo:010:01 admits the system as an author) — never the sending
+    // user, which would assert a human wrote the model's words.
+    const messages = await db.node.findMany({
+      where: {
+        memoryId: chatNode.memoryId,
+        loc: { startsWith: `${start.chatId}:messages:` },
+        deletedAt: null,
+      },
+    });
+    const assistantMsg = messages.find((m) => m.loc.endsWith('-assistant'));
+    if (assistantMsg) expect(assistantMsg.createdBy).toBeNull();
   });
 
   it("myChats returns the union of caller's private chats and all shared chats in apps they belong to", async () => {
