@@ -99,6 +99,18 @@ describe('scanUrl', () => {
     expect(out.verdict).toBe('unavailable');
   });
 
+  it('refuses a definitive verdict that does not declare the scan@1 contract', async () => {
+    // A misrouted SCAN_TOOL_URL answering 200 {verdict:"clean"} from some
+    // other service must not mark unscanned bytes CLEAN.
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { verdict: 'clean' }));
+    expect((await scanUrl({ url: 'https://bucket/x' })).verdict).toBe('unavailable');
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { contract: 'scan@2', verdict: 'infected', signature: 'X' }),
+    );
+    expect((await scanUrl({ url: 'https://bucket/x' })).verdict).toBe('unavailable');
+  });
+
   it('is unavailable when SCAN_TOOL_URL is unset (never fetches)', async () => {
     vi.stubEnv('SCAN_TOOL_URL', '');
     const out = await scanUrl({ url: 'https://bucket/x' });

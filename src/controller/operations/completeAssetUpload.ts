@@ -199,6 +199,11 @@ export async function completeAssetUpload(
         sizeBytes: entry.expectedSizeBytes,
         storageKey: storedStorageKey,
         scanStatus: autoClean ? 'CLEAN' : 'PENDING',
+        // Any PENDING row is born due-now so a crash between here and
+        // the inline scan below leaves a queued row, not a stuck one —
+        // and rows born while no scanner is configured are already
+        // queued the day one appears.
+        scanDueAt: autoClean ? null : new Date(),
         description: entry.description,
         uploadedBy: entry.userId,
       },

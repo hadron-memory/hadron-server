@@ -105,6 +105,19 @@ export async function scanUrl(input: {
     };
   }
 
+  // A DEFINITIVE verdict requires the contract discriminator: a
+  // misrouted SCAN_TOOL_URL answering 200 { verdict: "clean" } from some
+  // other service must not mark unscanned bytes CLEAN (PR-908 review,
+  // Codex/Copilot). Error-shaped bodies are handled below regardless.
+  if (payload.contract !== 'scan@1' && payload.verdict !== 'error') {
+    return {
+      verdict: 'unavailable',
+      reason: `scan tool did not declare the scan@1 contract (got ${JSON.stringify(
+        payload.contract ?? null,
+      )})`,
+    };
+  }
+
   switch (payload.verdict) {
     case 'clean':
       return { verdict: 'clean' };

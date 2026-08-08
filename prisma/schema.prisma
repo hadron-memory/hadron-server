@@ -926,8 +926,16 @@ model Asset {
   /// sweep retries). Drives the retry sweep's exponential backoff.
   scanAttempts Int @default(0) @map("scan_attempts")
   /// When the last scan attempt ran (whether or not it produced a
-  /// verdict). NULL = never attempted.
+  /// verdict). NULL = never attempted. Informational; the sweep
+  /// selects on `scanDueAt`, not this.
   scannedAt DateTime? @map("scanned_at")
+  /// When the next background scan action is due (the #882
+  /// embedding-queue pattern: a future-dated stamp IS the queue).
+  /// PENDING rows: next scan retry. BLOCKED rows: next purge retry
+  /// for object bytes that survived a failed delete. NULL = nothing
+  /// pending (CLEAN, or BLOCKED with bytes confirmed gone). Every
+  /// sweep touch pushes it forward, so no row can monopolize a batch.
+  scanDueAt DateTime? @map("scan_due_at")
   /// Optional; agent- or user-provided.
   description String?
   uploadedAt  DateTime        @default(now()) @map("uploaded_at")
@@ -943,9 +951,8 @@ model Asset {
   memory Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
   @@index([memoryId, scanStatus, uploadedAt(sort: Desc)])
-  // #896 — the scan retry sweep's selector (PENDING rows ordered by
-  // last attempt).
-  @@index([scanStatus, scannedAt])
+  // #896 — the scan sweep's selector (due rows, oldest due first).
+  @@index([scanDueAt])
   // 006-asset-upload-redesign: two partial indexes for staged assets
   // (WHERE memory_id IS NULL) live in the migration SQL only — Prisma
   // schema syntax can't express WHERE clauses on @@index. See

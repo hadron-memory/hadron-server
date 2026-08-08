@@ -16,9 +16,17 @@
  *   infected    → scanStatus BLOCKED + scanSignature; the OBJECT BYTES
  *                 are deleted (known malware never sits in the bucket)
  *                 while the ROW is kept as an audit tombstone
- *                 (Holger, 2026-08-08). `scan-flipped` audit event.
- *   unavailable → row stays PENDING; attempt bookkeeping only. The
- *                 sweep retries with exponential backoff.
+ *                 (Holger, 2026-08-08). If the delete itself fails,
+ *                 `scanDueAt` stays set so the sweep RETRIES the purge.
+ *   unavailable → row stays PENDING; `scanDueAt` pushed to the next
+ *                 backoff slot for the sweep.
+ *
+ * Every transition is a GUARDED updateMany conditioned on the state it
+ * consumes (PR-908 review, Copilot): overlapping workers — inline vs
+ * sweep, or future multiple replicas — can race on the same row, and a
+ * slow clean verdict must never revive a BLOCKED tombstone. Terminal
+ * states are never overwritten; a lost claim re-reads and reports the
+ * winner's verdict.
  *
  * The scan always runs against the PROMOTED key via a short-TTL
  * presigned GET. Never scan the staging key: the presigned PUT stays
@@ -37,22 +45,41 @@ import { logAssetEvent } from './audit.js';
  * min-age, so a scan URL can never outlive interest in the object. */
 export const SCAN_GET_TTL_SECONDS = 5 * 60;
 
+/** First-retry backoff; doubles per attempt. */
+export const SCAN_RETRY_BASE_MS = 5 * 60 * 1000;
+/** Backoff ceiling — a long-stuck row is still retried every 6h. */
+export const SCAN_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
+/** Retry cadence for a BLOCKED row whose object purge failed. */
+export const PURGE_RETRY_MS = 30 * 60 * 1000;
+
+/** Exponential backoff for attempt N (1-based): 5min → 6h cap. */
+export function scanBackoffMs(attempts: number): number {
+  return Math.min(SCAN_RETRY_BASE_MS * 2 ** Math.max(attempts - 1, 0), SCAN_RETRY_MAX_MS);
+}
+
 export type ScanRowResult = 'CLEAN' | 'BLOCKED' | 'PENDING';
+
+/** Re-read the row after a lost claim and report the winner's state. */
+async function settledStatus(db: PrismaClient, assetId: string): Promise<ScanRowResult> {
+  const row = await db.asset.findUnique({
+    where: { id: assetId },
+    select: { scanStatus: true },
+  });
+  return (row?.scanStatus ?? 'PENDING') as ScanRowResult;
+}
 
 /**
  * Scan one PENDING asset row's bytes and apply the verdict. Returns the
  * resulting scanStatus. Never throws for operational failures — those
- * leave the row PENDING (attempt recorded) for the sweep to retry.
+ * leave the row PENDING (attempt recorded, next retry stamped) for the
+ * sweep.
  *
  * `plainStorageKey` MUST be the decrypted object key of the PROMOTED
  * object (callers on the encrypted path decrypt before calling).
  */
 export async function scanAssetRow(
   db: PrismaClient,
-  asset: Pick<
-    Asset,
-    'id' | 'memoryId' | 'filename' | 'sizeBytes' | 'scanAttempts'
-  >,
+  asset: Pick<Asset, 'id' | 'memoryId' | 'filename' | 'sizeBytes' | 'scanAttempts'>,
   plainStorageKey: string,
   context: {
     userId?: string | null;
@@ -60,9 +87,10 @@ export async function scanAssetRow(
     source: 'inline' | 'sweep';
   },
 ): Promise<ScanRowResult> {
+  const now = new Date();
   const attempt = {
     scanAttempts: { increment: 1 },
-    scannedAt: new Date(),
+    scannedAt: now,
   } as const;
 
   let outcome: Awaited<ReturnType<typeof scanUrl>>;
@@ -86,10 +114,11 @@ export async function scanAssetRow(
   }
 
   if (outcome.verdict === 'clean') {
-    await db.asset.update({
-      where: { id: asset.id },
-      data: { ...attempt, scanStatus: 'CLEAN' },
+    const claimed = await db.asset.updateMany({
+      where: { id: asset.id, scanStatus: 'PENDING' },
+      data: { ...attempt, scanStatus: 'CLEAN', scanDueAt: null },
     });
+    if (claimed.count === 0) return settledStatus(db, asset.id);
     logAssetEvent({
       operation: 'scan-flipped',
       assetId: asset.id,
@@ -104,23 +133,23 @@ export async function scanAssetRow(
   }
 
   if (outcome.verdict === 'infected') {
-    await db.asset.update({
-      where: { id: asset.id },
+    // Claim first (PENDING → BLOCKED gates every download path at
+    // once), then purge. scanDueAt stays STAMPED until the purge is
+    // confirmed — a failed delete must leave a retryable trail, not a
+    // swallowed error (PR-908 review): the sweep retries the purge for
+    // BLOCKED rows whose scanDueAt is set.
+    const claimed = await db.asset.updateMany({
+      where: { id: asset.id, scanStatus: 'PENDING' },
       data: {
         ...attempt,
         scanStatus: 'BLOCKED',
         scanSignature: outcome.signature,
+        scanDueAt: now,
       },
     });
-    // Known malware never sits in the bucket: delete the bytes now, keep
-    // the BLOCKED row as the audit tombstone. Best-effort — if the store
-    // is briefly unreachable the BLOCKED row already gates every
-    // download path, and the object is unreferenced garbage the moment
-    // the row says BLOCKED.
-    let purgeError: string | undefined;
-    await deleteObject(plainStorageKey).catch((e) => {
-      purgeError = e instanceof Error ? e.message : String(e);
-    });
+    if (claimed.count === 0) return settledStatus(db, asset.id);
+
+    const purged = await purgeBlockedObject(db, asset.id, plainStorageKey);
     logAssetEvent({
       operation: 'scan-flipped',
       assetId: asset.id,
@@ -130,15 +159,17 @@ export async function scanAssetRow(
       scanStatusFrom: 'PENDING',
       scanStatusTo: 'BLOCKED',
       reason: `scan ${context.source}: ${outcome.signature ?? 'unnamed signature'}`,
-      ...(purgeError
-        ? { error: `object purge failed (bytes remain, row gates): ${purgeError}` }
-        : {}),
+      ...(purged ? {} : { error: 'object purge failed; sweep will retry' }),
     });
     return 'BLOCKED';
   }
 
-  // unavailable — bookkeeping only; the sweep's backoff reads these.
-  await db.asset.update({ where: { id: asset.id }, data: attempt });
+  // unavailable — bookkeeping only; stamp the next retry slot.
+  const nextDue = new Date(now.getTime() + scanBackoffMs(asset.scanAttempts + 1));
+  await db.asset.updateMany({
+    where: { id: asset.id, scanStatus: 'PENDING' },
+    data: { ...attempt, scanDueAt: nextDue },
+  });
   logAssetEvent({
     operation: 'scan-flipped',
     assetId: asset.id,
@@ -149,4 +180,31 @@ export async function scanAssetRow(
     error: outcome.reason,
   });
   return 'PENDING';
+}
+
+/**
+ * Delete a BLOCKED row's object bytes and clear its due stamp on
+ * success; on failure stamp the next purge retry. Returns whether the
+ * bytes are confirmed gone. Shared by the infected transition above
+ * and the sweep's purge-retry path.
+ */
+export async function purgeBlockedObject(
+  db: PrismaClient,
+  assetId: string,
+  plainStorageKey: string,
+): Promise<boolean> {
+  try {
+    await deleteObject(plainStorageKey);
+  } catch {
+    await db.asset.updateMany({
+      where: { id: assetId, scanStatus: 'BLOCKED' },
+      data: { scanDueAt: new Date(Date.now() + PURGE_RETRY_MS) },
+    });
+    return false;
+  }
+  await db.asset.updateMany({
+    where: { id: assetId, scanStatus: 'BLOCKED' },
+    data: { scanDueAt: null },
+  });
+  return true;
 }

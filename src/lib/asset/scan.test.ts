@@ -41,6 +41,7 @@ async function seedPendingAsset() {
       sizeBytes: 2048,
       storageKey: `asset-org/mem/${id}.pdf`,
       scanStatus: 'PENDING',
+      scanDueAt: new Date(),
       uploadedBy: user.id,
     },
   });
@@ -85,6 +86,7 @@ describe('scanAssetRow', () => {
     expect(row.scanStatus).toBe('CLEAN');
     expect(row.scanAttempts).toBe(1);
     expect(row.scannedAt).not.toBeNull();
+    expect(row.scanDueAt).toBeNull(); // settled — out of the queue
     expect(deleteObjectMock).not.toHaveBeenCalled();
     // The presigned GET was minted on the key the caller supplied.
     expect(mintGetUrlMock).toHaveBeenCalledWith(
@@ -107,11 +109,12 @@ describe('scanAssetRow', () => {
     const row = await db.asset.findUniqueOrThrow({ where: { id: asset.id } });
     expect(row.scanStatus).toBe('BLOCKED');
     expect(row.scanSignature).toBe('Eicar-Signature');
+    expect(row.scanDueAt).toBeNull(); // purge confirmed — nothing left to do
     // Bytes gone, tombstone row kept.
     expect(deleteObjectMock).toHaveBeenCalledWith(asset.storageKey);
   });
 
-  it('keeps the BLOCKED tombstone even when the object purge fails', async () => {
+  it('keeps the BLOCKED tombstone and stamps a purge retry when the delete fails', async () => {
     const asset = await seedPendingAsset();
     scanUrlMock.mockResolvedValueOnce({ verdict: 'infected', signature: null });
     deleteObjectMock.mockRejectedValueOnce(new Error('store down'));
@@ -123,6 +126,28 @@ describe('scanAssetRow', () => {
     expect(result).toBe('BLOCKED');
     const row = await db.asset.findUniqueOrThrow({ where: { id: asset.id } });
     expect(row.scanStatus).toBe('BLOCKED');
+    // A failed delete leaves a retryable trail, not a swallowed error:
+    // the sweep retries the purge via the still-set due stamp.
+    expect(row.scanDueAt).not.toBeNull();
+  });
+
+  it('never lets a clean verdict overwrite a BLOCKED tombstone (lost claim)', async () => {
+    const asset = await seedPendingAsset();
+    // Another worker settled the row between our read and our verdict.
+    await db.asset.update({
+      where: { id: asset.id },
+      data: { scanStatus: 'BLOCKED', scanSignature: 'Other-Sig', scanDueAt: null },
+    });
+    scanUrlMock.mockResolvedValueOnce({ verdict: 'clean' });
+
+    const result = await scanAssetRow(db, asset, asset.storageKey, {
+      source: 'sweep',
+    });
+
+    expect(result).toBe('BLOCKED'); // reports the winner's verdict
+    const row = await db.asset.findUniqueOrThrow({ where: { id: asset.id } });
+    expect(row.scanStatus).toBe('BLOCKED');
+    expect(row.scanSignature).toBe('Other-Sig');
   });
 
   it('stays PENDING with attempt bookkeeping when the tool is unavailable', async () => {
@@ -141,6 +166,8 @@ describe('scanAssetRow', () => {
     expect(row.scanStatus).toBe('PENDING');
     expect(row.scanAttempts).toBe(1);
     expect(row.scannedAt).not.toBeNull();
+    // Requeued at the first backoff slot, not left due-now.
+    expect(row.scanDueAt!.getTime()).toBeGreaterThan(Date.now());
     expect(deleteObjectMock).not.toHaveBeenCalled();
   });
 
