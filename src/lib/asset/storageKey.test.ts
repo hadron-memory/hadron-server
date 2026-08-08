@@ -5,7 +5,7 @@ import {
   buildStorageKey,
   buildStagingKey,
   isStagingKey,
-  parseAssetIdFromKey,
+  parseObjectIdFromKey,
   validateStorageKey,
 } from './storageKey.js';
 
@@ -104,7 +104,7 @@ describe('validateStorageKey', () => {
   });
 });
 
-describe('parseAssetIdFromKey', () => {
+describe('parseObjectIdFromKey', () => {
   // The property the orphan reaper (#889) is built on: whatever
   // buildStorageKey emits, this recovers the asset id from — including
   // for encrypted memories, whose storage_key COLUMN is encrypted while
@@ -117,34 +117,44 @@ describe('parseAssetIdFromKey', () => {
       { memoryUrn: 'baragaun.com:juno:user:019dd3cf', filename: 'no-extension' },
     ];
     for (const c of cases) {
-      expect(parseAssetIdFromKey(buildStorageKey({ ...c, assetId }))).toBe(assetId);
+      expect(parseObjectIdFromKey(buildStorageKey({ ...c, assetId }))).toBe(assetId);
     }
   });
 
   it('returns null rather than guessing for keys we did not write', () => {
     // Deleting on the absence of a row means an unparseable key must be
     // left alone, not approximated.
-    expect(parseAssetIdFromKey('backups/hadron-2026-08-08.sql.gz')).toBeNull();
-    expect(parseAssetIdFromKey('org/seg/not-a-uuid.pdf')).toBeNull();
-    expect(parseAssetIdFromKey('toplevel.txt')).toBeNull();
-    expect(parseAssetIdFromKey('../escape/00000000000000000000000000000001')).toBeNull();
+    expect(parseObjectIdFromKey('backups/hadron-2026-08-08.sql.gz')).toBeNull();
+    expect(parseObjectIdFromKey('org/seg/not-a-uuid.pdf')).toBeNull();
+    expect(parseObjectIdFromKey('toplevel.txt')).toBeNull();
+    expect(parseObjectIdFromKey('../escape/00000000000000000000000000000001')).toBeNull();
   });
 
-  it('returns null for a staging key — its basename is an UPLOAD id', () => {
-    // A staging basename would parse as an id-shaped string but match no
-    // asset row, so treating it as a final key would call every staged
-    // object an orphan for the wrong reason.
+  it('parses a staging key too — the UPLOAD id, which matches no Asset row', () => {
+    // Parsing both shapes is what lets the reaper put every key through
+    // the same database check instead of trusting the prefix.
+    const uploadId = '019dd446b8d472e5bd2d2e55b96416e9';
     const staging = buildStagingKey({
       memoryUrn: 'baragaun.com:secureid',
-      uploadId: '019dd446b8d472e5bd2d2e55b96416e9',
+      uploadId,
       filename: 'report.pdf',
     });
     expect(isStagingKey(staging)).toBe(true);
-    expect(parseAssetIdFromKey(staging)).toBeNull();
-    expect(isStagingKey(buildStorageKey({
-      memoryUrn: 'baragaun.com:secureid',
-      assetId: '019dd446b8d472e5bd2d2e55b96416e9',
+    expect(parseObjectIdFromKey(staging)).toBe(uploadId);
+  });
+
+  it('a principal named "staging" produces final keys that LOOK staged', () => {
+    // PR #907 review (Codex P1): `staging` is not a platform word, so
+    // this key is a legitimate asset's. It is now also reserved, but the
+    // reaper must not depend on that — it confirms every key against the
+    // database rather than reading the prefix as permission to delete.
+    const assetId = '019dd446b8d472e5bd2d2e55b96416e9';
+    const key = buildStorageKey({
+      memoryUrn: 'staging:notes',
+      assetId,
       filename: 'report.pdf',
-    }))).toBe(false);
+    });
+    expect(isStagingKey(key)).toBe(true); // indistinguishable by prefix
+    expect(parseObjectIdFromKey(key)).toBe(assetId); // but its row is findable
   });
 });

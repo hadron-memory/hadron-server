@@ -44,7 +44,9 @@ function finalKey(assetId: string): string {
   return `asset-org/orphans/${assetId}.pdf`;
 }
 
-async function seedAsset(over: { deletedAt?: Date } = {}) {
+async function seedAsset(
+  over: { deletedAt?: Date; scanStatus?: 'CLEAN' | 'PENDING' | 'BLOCKED' } = {},
+) {
   const assetId = generateId();
   return db.asset.create({
     data: {
@@ -54,7 +56,7 @@ async function seedAsset(over: { deletedAt?: Date } = {}) {
       mimeType: 'application/pdf',
       sizeBytes: 1024,
       storageKey: finalKey(assetId),
-      scanStatus: 'CLEAN',
+      scanStatus: over.scanStatus ?? 'CLEAN',
       deletedAt: over.deletedAt ?? null,
     },
   });
@@ -174,7 +176,7 @@ describe('reapOrphanAssetObjects', () => {
     expect(deleteObjectMock).not.toHaveBeenCalled();
   });
 
-  it('reaps an aged staging object on age alone (no row can vouch for one)', async () => {
+  it('reaps an aged staging object — its upload id matches no Asset row', async () => {
     const stagingKey = `staging/asset-org/orphans/${generateId()}.pdf`;
     singlePage([{ key: stagingKey }]);
 
@@ -182,6 +184,57 @@ describe('reapOrphanAssetObjects', () => {
 
     expect(outcome.orphans).toBe(1);
     expect(deleteObjectMock).toHaveBeenCalledWith(stagingKey);
+  });
+
+  it('does NOT delete a live asset belonging to a principal named "staging"', async () => {
+    // PR #907 review (Codex P1). `staging` is a mintable root name, so
+    // buildStorageKey emits `staging/<memory>/<assetId>` for that
+    // principal — a FINAL key that is indistinguishable from a staging
+    // key by prefix. Reaping on the prefix would delete every asset they
+    // own. The row is the only thing that may spare an object, so it is
+    // consulted for every key without exception.
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'staging', urn: 'staging' },
+    });
+    const stagingOrgMemory = await db.memory.create({
+      data: {
+        class: 'knowledge',
+        id: generateId(),
+        organizationId: org.id,
+        urn: 'staging:notes',
+        name: 'staging-org-memory',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    const assetId = generateId();
+    const key = `staging/notes/${assetId}.pdf`;
+    await db.asset.create({
+      data: {
+        id: assetId,
+        memoryId: stagingOrgMemory.id,
+        filename: 'report.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 1024,
+        storageKey: key,
+        scanStatus: 'CLEAN',
+      },
+    });
+    singlePage([{ key }]);
+
+    const outcome = await reapOrphanAssetObjects({ db, now: NOW, apply: true });
+
+    expect(outcome.orphans).toBe(0);
+    expect(deleteObjectMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves a BLOCKED scan tombstone alone — the scan sweep owns its purge retry', async () => {
+    const blocked = await seedAsset({ scanStatus: 'BLOCKED' });
+    singlePage([{ key: finalKey(blocked.id) }]);
+
+    const outcome = await reapOrphanAssetObjects({ db, now: NOW, apply: true });
+
+    expect(outcome.orphans).toBe(0);
+    expect(deleteObjectMock).not.toHaveBeenCalled();
   });
 
   it('pages through the whole listing', async () => {

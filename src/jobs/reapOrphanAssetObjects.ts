@@ -32,8 +32,14 @@
  *     written afterwards. Only objects older than `ORPHAN_MIN_AGE_MS`
  *     (a large multiple of the presign TTL) are candidates, and an object
  *     whose age the store did not report is never a candidate.
- *  2. *Shape.* A key that is not one we write is skipped loudly, never
- *     deleted. `parseAssetIdFromKey` returns null rather than guessing.
+ *  2. *Shape, and then the database — for every key without exception.*
+ *     A key that is not one we write is skipped loudly, never deleted
+ *     (`parseObjectIdFromKey` returns null rather than guessing). No
+ *     prefix is ever taken as licence to delete unasked: `staging` is a
+ *     mintable root name, so a principal called `staging` owns final
+ *     keys indistinguishable from staging keys. A genuine staging object
+ *     is still reaped — its basename is an upload id, which matches no
+ *     Asset row.
  *  3. *A database that cannot answer aborts the sweep.* A failed query
  *     must never read as "no rows exist, delete everything" — so the
  *     lookup throws out of the whole run instead of being caught per
@@ -42,8 +48,11 @@
  *     `ASSET_ORPHAN_REAP_ENABLED=true`; until then the sweep reports what
  *     it would delete and touches nothing.
  *
- * Soft-deleted assets still HAVE rows, so they are not orphans — the 24h
- * retention sweep in `janitorAssets.ts` owns those.
+ * Anything with a row is somebody else's job, whatever state it is in: a
+ * soft-deleted asset belongs to the 24h retention sweep in
+ * `janitorAssets.ts`, and a #896 BLOCKED tombstone whose bytes survived a
+ * failed delete belongs to the scan sweep's purge retry. Only a MISSING
+ * row is an orphan.
  *
  * Run by hand with:
  *   tsx src/jobs/reapOrphanAssetObjects.ts            # dry run
@@ -59,11 +68,7 @@ import {
 } from '../integrations/r2/client.js';
 import { logAssetEvent } from '../lib/asset/audit.js';
 import { ORPHAN_MIN_AGE_MS } from '../lib/asset/retention.js';
-import {
-  isStagingKey,
-  parseAssetIdFromKey,
-  validateStorageKey,
-} from '../lib/asset/storageKey.js';
+import { isStagingKey, parseObjectIdFromKey } from '../lib/asset/storageKey.js';
 
 /** Objects requested per ListObjectsV2 call (the S3 maximum). */
 const PAGE_SIZE = 1000;
@@ -135,8 +140,12 @@ export interface OrphanSweepOptions {
 interface Candidate {
   key: string;
   size: number;
-  /** Asset id to look up, or null for a staging object (age decides). */
-  assetId: string | null;
+  /**
+   * Id parsed from the key's basename — an Asset PK for a final key, an
+   * upload id for a staging one. Looked up either way; only a real row
+   * spares the object.
+   */
+  objectId: string;
 }
 
 /**
@@ -194,49 +203,50 @@ export async function reapOrphanAssetObjects(
         continue;
       }
 
-      if (isStagingKey(obj.key)) {
-        // Staging objects are transient by construction:
-        // `completeAssetUpload` copies to the final key and deletes the
-        // staging one immediately. They are named by UPLOAD id, so no row
-        // can ever vouch for one — past the age threshold, a staging
-        // object is garbage regardless of the database. Shape is still
-        // checked so an unrelated `staging/...` key is never assumed ours.
-        if (!validateStorageKey(obj.key)) {
-          outcome.unrecognized += 1;
-          logSkipped(obj.key, 'staging-shaped key does not match the key grammar');
-          continue;
-        }
-        candidates.push({ key: obj.key, size: obj.size, assetId: null });
-        continue;
-      }
-
-      const assetId = parseAssetIdFromKey(obj.key);
-      if (!assetId) {
+      // Every key is treated the same way: parse the id out of its
+      // basename and let the database decide. The `staging/` prefix is
+      // NOT a licence to delete without asking — `staging` is a mintable
+      // root name, so a principal called `staging` has final keys that
+      // look exactly like staging keys, and trusting the prefix would
+      // delete every asset they own (PR #907 review, Codex P1). A real
+      // staging object is still reaped: its basename is an UPLOAD id,
+      // which by construction matches no Asset row.
+      const objectId = parseObjectIdFromKey(obj.key);
+      if (!objectId) {
         outcome.unrecognized += 1;
         logSkipped(obj.key, 'key is not a shape this platform writes');
         continue;
       }
-      candidates.push({ key: obj.key, size: obj.size, assetId });
+      candidates.push({ key: obj.key, size: obj.size, objectId });
     }
 
     const present = await loadPresentAssetIds(
       db,
-      candidates.map((c) => c.assetId).filter((id): id is string => id !== null),
+      candidates.map((c) => c.objectId),
     );
 
     for (const candidate of candidates) {
-      // A soft-deleted asset still has a row, so it is not an orphan —
-      // the retention sweep owns it.
-      if (candidate.assetId && present.has(candidate.assetId)) continue;
+      // Any row at all — including a soft-deleted one (the retention
+      // sweep owns those) and a #896 BLOCKED tombstone (the scan sweep
+      // owns its purge retry) — means this is not an orphan.
+      if (present.has(candidate.objectId)) continue;
 
+      const staging = isStagingKey(candidate.key);
       outcome.orphans += 1;
       outcome.orphanBytes += candidate.size;
       if (outcome.sample.length < SAMPLE_LIMIT) outcome.sample.push(candidate.key);
 
+      // The id is only reported as an assetId for a final key; on a
+      // staging key it is an upload id and would be a lie in the audit
+      // trail.
+      const identity = staging
+        ? { reason: 'abandoned staging object' }
+        : { assetId: candidate.objectId };
+
       if (!apply) {
         logAssetEvent({
           operation: 'orphan-reaped',
-          assetId: candidate.assetId ?? undefined,
+          ...identity,
           key: candidate.key,
           bytes: candidate.size,
           dryRun: true,
@@ -249,7 +259,7 @@ export async function reapOrphanAssetObjects(
         outcome.reaped += 1;
         logAssetEvent({
           operation: 'orphan-reaped',
-          assetId: candidate.assetId ?? undefined,
+          ...identity,
           key: candidate.key,
           bytes: candidate.size,
           dryRun: false,
@@ -258,7 +268,7 @@ export async function reapOrphanAssetObjects(
         outcome.errors += 1;
         logAssetEvent({
           operation: 'orphan-reaped',
-          assetId: candidate.assetId ?? undefined,
+          ...identity,
           key: candidate.key,
           error: err instanceof Error ? err.message : String(err),
         });

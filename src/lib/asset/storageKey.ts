@@ -82,22 +82,32 @@ export function isStagingKey(key: string): boolean {
 const ASSET_ID_ONLY = new RegExp(`^${ASSET_ID}$`);
 
 /**
- * The asset id a FINAL storage key encodes, or null when the key is not
- * one this platform wrote.
+ * The id encoded in a storage key's basename, or null when the key is
+ * not a shape this platform writes.
  *
- * This is what makes orphan detection work uniformly across encrypted and
- * unencrypted memories: `Asset.storageKey` is encrypted at rest for an
- * encrypted memory, but the key the bytes actually live at is plaintext
- * and its basename IS the asset id (see buildStorageKey). So a bucket
- * listing can be matched against primary keys without decrypting
+ * This is what makes orphan detection work uniformly across encrypted
+ * and unencrypted memories: `Asset.storageKey` is encrypted at rest for
+ * an encrypted memory, but the key the bytes actually live at is
+ * plaintext and its basename IS the asset id (see buildStorageKey). So a
+ * bucket listing can be matched against primary keys without decrypting
  * anything.
  *
- * Returns null — never a guess — for staging keys and for any shape
- * `validateStorageKey` rejects. A caller deleting on the strength of this
- * must treat null as "not ours, leave it alone".
+ * **For a FINAL key the id is the Asset's primary key; for a STAGING key
+ * it is the UPLOAD id, which by construction matches no Asset row.** The
+ * caller is deliberately not asked to tell them apart: the orphan reaper
+ * looks up every parsed id and reaps only what has no row, so a genuine
+ * staging object (an upload id, never a PK) is still collected, while a
+ * final key that merely happens to sit under a principal *named*
+ * `staging` is protected by its own row. Branching on the prefix instead
+ * would delete every asset that principal owns — the PR #907 review
+ * caught exactly that, and `staging` is a mintable root name.
+ *
+ * Returns null — never a guess — for any shape `validateStorageKey`
+ * rejects. A caller deleting on the strength of this must treat null as
+ * "not ours, leave it alone".
  */
-export function parseAssetIdFromKey(key: string): string | null {
-  if (isStagingKey(key) || !validateStorageKey(key)) return null;
+export function parseObjectIdFromKey(key: string): string | null {
+  if (!validateStorageKey(key)) return null;
   const basename = key.slice(key.lastIndexOf('/') + 1);
   const dot = basename.indexOf('.');
   const id = dot < 0 ? basename : basename.slice(0, dot);
