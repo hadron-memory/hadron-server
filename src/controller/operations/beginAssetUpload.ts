@@ -26,8 +26,10 @@ import { resolveAgentRef } from '../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
 import { UrnNotQualifiedError } from '../../lib/urn.js';
 import { mintPutUrl } from '../../integrations/r2/client.js';
-
-const PRESIGN_TTL_SECONDS = 5 * 60;
+// Lives in retention.ts because the orphan reaper derives its
+// minimum-age threshold from it — an object younger than a presigned
+// PUT's lifetime may still be an upload in flight.
+import { PRESIGN_TTL_SECONDS } from '../../lib/asset/retention.js';
 
 export type UploadIntent = 'USER' | 'AGENT_REQUEST';
 

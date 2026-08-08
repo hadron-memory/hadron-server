@@ -19,6 +19,8 @@ export type AssetOperation =
   | 'soft-deleted'
   | 'restored'
   | 'purged'
+  | 'orphan-reaped'
+  | 'orphan-skipped'
   | 'scan-flipped';
 
 export interface AssetAuditEvent {
@@ -35,6 +37,14 @@ export interface AssetAuditEvent {
   scanStatusTo?: string;
   count?: number;
   error?: string;
+  /**
+   * Object-store key. Only set by the orphan sweep, where the key is the
+   * whole subject — there is no row left to name the object by, and a dry
+   * run is useless if it will not say what it would delete.
+   */
+  key?: string;
+  /** Set by the orphan sweep: true means nothing was actually deleted. */
+  dryRun?: boolean;
 }
 
 export function logAssetEvent(event: AssetAuditEvent): void {

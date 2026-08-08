@@ -3,6 +3,9 @@ import {
   memorySegmentOf,
   extractExtension,
   buildStorageKey,
+  buildStagingKey,
+  isStagingKey,
+  parseAssetIdFromKey,
   validateStorageKey,
 } from './storageKey.js';
 
@@ -98,5 +101,50 @@ describe('validateStorageKey', () => {
     ['org/seg/01900000-0000-7000-8000-000000000001.PDF', false],
   ])('%s → %s', (key, expected) => {
     expect(validateStorageKey(key)).toBe(expected);
+  });
+});
+
+describe('parseAssetIdFromKey', () => {
+  // The property the orphan reaper (#889) is built on: whatever
+  // buildStorageKey emits, this recovers the asset id from — including
+  // for encrypted memories, whose storage_key COLUMN is encrypted while
+  // the object's actual key is not.
+  it('round-trips every key buildStorageKey produces', () => {
+    const assetId = '019dd446b8d472e5bd2d2e55b96416e9';
+    const cases = [
+      { memoryUrn: 'baragaun.com:secureid', filename: 'report.pdf' },
+      { memoryUrn: 'holger:jens', filename: 'notes.md' },
+      { memoryUrn: 'baragaun.com:juno:user:019dd3cf', filename: 'no-extension' },
+    ];
+    for (const c of cases) {
+      expect(parseAssetIdFromKey(buildStorageKey({ ...c, assetId }))).toBe(assetId);
+    }
+  });
+
+  it('returns null rather than guessing for keys we did not write', () => {
+    // Deleting on the absence of a row means an unparseable key must be
+    // left alone, not approximated.
+    expect(parseAssetIdFromKey('backups/hadron-2026-08-08.sql.gz')).toBeNull();
+    expect(parseAssetIdFromKey('org/seg/not-a-uuid.pdf')).toBeNull();
+    expect(parseAssetIdFromKey('toplevel.txt')).toBeNull();
+    expect(parseAssetIdFromKey('../escape/00000000000000000000000000000001')).toBeNull();
+  });
+
+  it('returns null for a staging key — its basename is an UPLOAD id', () => {
+    // A staging basename would parse as an id-shaped string but match no
+    // asset row, so treating it as a final key would call every staged
+    // object an orphan for the wrong reason.
+    const staging = buildStagingKey({
+      memoryUrn: 'baragaun.com:secureid',
+      uploadId: '019dd446b8d472e5bd2d2e55b96416e9',
+      filename: 'report.pdf',
+    });
+    expect(isStagingKey(staging)).toBe(true);
+    expect(parseAssetIdFromKey(staging)).toBeNull();
+    expect(isStagingKey(buildStorageKey({
+      memoryUrn: 'baragaun.com:secureid',
+      assetId: '019dd446b8d472e5bd2d2e55b96416e9',
+      filename: 'report.pdf',
+    }))).toBe(false);
   });
 });

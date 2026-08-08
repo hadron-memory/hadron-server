@@ -67,6 +67,43 @@ export function validateStorageKey(key: string): boolean {
   return KEY_REGEX.test(key);
 }
 
+/** Root of the pre-verification staging area — see buildStagingKey. */
+export const STAGING_PREFIX = 'staging/';
+
+/**
+ * True when the key addresses the staging area rather than an Asset's
+ * final location. Staging keys are named by UPLOAD id, not asset id, so
+ * nothing in the database can ever vouch for one.
+ */
+export function isStagingKey(key: string): boolean {
+  return key.startsWith(STAGING_PREFIX);
+}
+
+const ASSET_ID_ONLY = new RegExp(`^${ASSET_ID}$`);
+
+/**
+ * The asset id a FINAL storage key encodes, or null when the key is not
+ * one this platform wrote.
+ *
+ * This is what makes orphan detection work uniformly across encrypted and
+ * unencrypted memories: `Asset.storageKey` is encrypted at rest for an
+ * encrypted memory, but the key the bytes actually live at is plaintext
+ * and its basename IS the asset id (see buildStorageKey). So a bucket
+ * listing can be matched against primary keys without decrypting
+ * anything.
+ *
+ * Returns null — never a guess — for staging keys and for any shape
+ * `validateStorageKey` rejects. A caller deleting on the strength of this
+ * must treat null as "not ours, leave it alone".
+ */
+export function parseAssetIdFromKey(key: string): string | null {
+  if (isStagingKey(key) || !validateStorageKey(key)) return null;
+  const basename = key.slice(key.lastIndexOf('/') + 1);
+  const dot = basename.indexOf('.');
+  const id = dot < 0 ? basename : basename.slice(0, dot);
+  return ASSET_ID_ONLY.test(id) ? id : null;
+}
+
 /**
  * The key an upload's bytes land on BEFORE they have been verified.
  *
