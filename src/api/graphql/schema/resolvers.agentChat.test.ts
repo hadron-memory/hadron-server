@@ -1005,13 +1005,17 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
   });
 
   it('#914 — two members sending at once both persist (no loc collision)', async () => {
-    // `messageCount` is read before the insert, so concurrent sends derive
-    // the same msgNum. Pre-#914 the suffix was the chat CREATOR's id —
-    // identical for every sender — so this already collided and dropped a
-    // message; the short random component keeps the role-based suffix from
-    // reintroducing it. (The counter itself is still not allocated
-    // atomically, so messageCount under-counts here — tracked separately.
-    // What must not happen is losing someone's message.)
+    // Pre-#914 the loc suffix was the chat CREATOR's id — identical for every
+    // sender — so two sends that derived the same msgNum collided on
+    // `@@unique([loc, memoryId])` and one member's message was lost. #916 added
+    // the short random component; #919 then made the counter atomic, so two
+    // sends no longer derive the same msgNum in the first place.
+    //
+    // This test keeps the random component honest by forcing the condition the
+    // allocator now prevents — it rewinds the counter so the second send
+    // genuinely reuses msgNum 001. That is the backstop's only remaining job,
+    // and it is why the component was kept: what must not happen, under any
+    // counter state, is losing someone's message.
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const start = await resolvers.Mutation.startChat(
@@ -1099,6 +1103,139 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     const assistantMsg = messages.find((m) => m.loc.endsWith('-assistant'));
     expect(assistantMsg).toBeDefined();
     expect(assistantMsg!.createdBy).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // #919 — the message number is allocated atomically
+  //
+  // `seq` is what every transcript reader orders by, and `messageCount` also
+  // drives the summarization trigger and the `chat.message_count` edge operand.
+  // Both used to come from a read-modify-write spanning the whole turn.
+  //
+  // The lock/allocator itself is pinned deterministically in
+  // src/lib/chatRoot.test.ts (an in-flight allocation is held open and the next
+  // one is observed waiting). These tests assert the property END TO END: after
+  // any interleaving of real chat turns, the numbers still describe the
+  // transcript. Both concurrent ones were checked against the pre-fix resolver
+  // and fail there — unlike #914's loc-collision case, these two turns really
+  // do interleave, because each holds a transaction open across an insert.
+  // -------------------------------------------------------------------------
+
+  /** Every message row of a chat, oldest number first. */
+  async function messagesOf(chatId: string) {
+    const chatNode = await chatNodeByLocOrThrow(db, chatId);
+    const rows = await db.node.findMany({
+      where: {
+        memoryId: chatNode.memoryId,
+        loc: { startsWith: `${chatId}:messages:` },
+        deletedAt: null,
+      },
+      orderBy: [{ seq: 'asc' }, { createdAt: 'asc' }],
+    });
+    return {
+      rows,
+      messageCount: ((chatNode.data as Record<string, unknown>)?.messageCount as number) ?? 0,
+    };
+  }
+
+  it('#919 — two members sending at once get distinct seq, and the count matches', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+
+    await Promise.all([
+      resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'from the creator' }, userCtx(adminUser.id),
+      ),
+      resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'from the other member' }, userCtx(otherUser.id),
+      ),
+    ]);
+
+    const { rows, messageCount } = await messagesOf(start.chatId);
+    expect(rows).toHaveLength(2);
+    // Distinct numbers — a shared seq leaves the two members' messages in an
+    // order the reader picks arbitrarily, and differently between reads.
+    expect(rows.map((m) => m.seq)).toEqual([1, 2]);
+    // And the count is the real number of messages, not one short of it.
+    expect(messageCount).toBe(2);
+  });
+
+  it('#919 — an assistant turn racing a send leaves the count whole', async () => {
+    // The other half of the same defect: the chat root is stored as ONE blob,
+    // so a turn that reads it at its start and writes it back at its end can
+    // roll back a send that committed in between — count included.
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'opening' }, userCtx(adminUser.id),
+    );
+
+    await Promise.all([
+      resolvers.Mutation.processChatResponse(
+        {},
+        { chatId: start.chatId, toolResponse: { message: 'answering', data: null, next_stage: 'analysis' } },
+        userCtx(adminUser.id),
+      ),
+      resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'interrupting' }, userCtx(otherUser.id),
+      ),
+    ]);
+
+    const { rows, messageCount } = await messagesOf(start.chatId);
+    expect(rows).toHaveLength(3);
+    expect(rows.map((m) => m.seq)).toEqual([1, 2, 3]);
+    expect(messageCount).toBe(3);
+    // The turn's own change survived the switch to applying it on fresh data.
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    expect((chatNode.data as Record<string, unknown>).stageName).toBe('analysis');
+  });
+
+  it('#919 — mixed sequential turns number 1..N with no gaps or repeats', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    for (const turn of ['first', 'second']) {
+      await resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: turn }, userCtx(adminUser.id),
+      );
+      await resolvers.Mutation.processChatResponse(
+        {},
+        { chatId: start.chatId, toolResponse: { message: `re: ${turn}`, data: null, next_stage: null } },
+        userCtx(adminUser.id),
+      );
+    }
+
+    const { rows, messageCount } = await messagesOf(start.chatId);
+    expect(rows.map((m) => m.seq)).toEqual([1, 2, 3, 4]);
+    expect(rows.map((m) => m.loc.endsWith('-assistant'))).toEqual([false, true, false, true]);
+    expect(messageCount).toBe(4);
+  });
+
+  it('#919 — a summary is named and ordered from the committed count', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'hello' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.saveChatSummary(
+      {}, { chatId: start.chatId, summary: 'they said hello' }, userCtx(adminUser.id),
+    );
+
+    const { rows, messageCount } = await messagesOf(start.chatId);
+    const summary = rows.find((m) => m.tags.includes('summary'));
+    expect(summary).toBeDefined();
+    expect(summary!.name).toBe('001a-summary');
+    // A summary does not consume a message number.
+    expect(messageCount).toBe(1);
   });
 
   it("myChats returns the union of caller's private chats and all shared chats in apps they belong to", async () => {

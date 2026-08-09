@@ -1,6 +1,11 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
+import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
+import {
+  appendChatMessage,
+  updateChatRootData,
+  withChatRootLock,
+} from '../../../lib/chatRoot.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
@@ -514,7 +519,10 @@ export const chatMutations = {
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
 
-      const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+      // #919: rebound below to the copy read under the chat lock. Everything
+      // before that point reads only `scope`, which is immutable for a chat's
+      // life, so a pre-lock read is safe there.
+      let chatData = (chatNode.data as Record<string, unknown>) ?? {};
 
       // Spec 017 — chat-scope invariant gate (data-model.md §I-1):
       // assert the chat-root node's stored scope matches the holding
@@ -531,16 +539,14 @@ export const chatMutations = {
         memoryClass: chatScopeCheckMemory.class,
         allowMissingScope: true,
       });
-      const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
-      const convName = chatData.conversationName as string;
-      const stageName = chatData.stageName as string;
+      const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
 
       // Save user message. When the memory is encrypted we need to encrypt
       // the message content AND the chat node's updated `data`.
       // The `data.role` field is what the message-history reader uses to
       // decide user-vs-assistant — agent-agnostic per Constitution Invariant
       // #14 (no hardcoded agent names anywhere in the platform).
-      const msgNum = String(messageCount).padStart(3, '0');
+      //
       // #914 — the SENDER, not the chat's creator.
       //
       // Every chat in a multi-human memory is a group chat: a chat has no
@@ -569,10 +575,17 @@ export const chatMutations = {
         },
         memEncInfo,
       );
-      // #664/#752: a message lands under `${chatId}:messages` — hold the
-      // ancestor-path lock across the insert so a concurrent non-recursive
-      // delete of the chat (or its messages parent) can't orphan it.
-      // The suffix is now the ROLE, mirroring `-assistant`, not an identity.
+      // #919: the number is allocated INSIDE the transaction that inserts,
+      // under the chat lock, and written back there — so two concurrent sends
+      // can no longer derive the same `seq` (arbitrary transcript order) or
+      // land the same value in `messageCount` (a permanent under-count that
+      // also shifts the summarization trigger and the `chat.message_count`
+      // edge operand). The lock is the ancestor-path lock this insert already
+      // took for #664/#752 — a message lands under `${chatId}:messages`, whose
+      // ancestors include the chat root, so a concurrent non-recursive delete
+      // of the chat still can't orphan it. See src/lib/chatRoot.ts.
+      //
+      // The suffix is the ROLE, mirroring `-assistant`, not an identity.
       // A loc is an address that lands in URNs, portal links, and search;
       // embedding a user id there both leaked it into those surfaces and
       // invited exactly this bug — reading the address as if it were the
@@ -581,43 +594,35 @@ export const chatMutations = {
       // suffix end in `-assistant`", so `-user` is read identically to the
       // old `-<userId>` form and legacy rows keep resolving unchanged.
       //
-      // The short random component is the same device `startChat` uses on the
-      // chat loc, for the same reason: `messageCount` is read before the
-      // insert, so two concurrent sends derive the same `msgNum` and would
-      // collide on `@@unique([loc, memoryId])` — losing one member's message.
-      // That race is NOT introduced here (the old suffix was the chat
-      // CREATOR's id, identical for every sender, so concurrent sends already
-      // collided), but this is the change that makes several members posting
-      // into one chat a first-class scenario, so it should not leave a hard
-      // failure behind it. The residual non-atomic `messageCount`/`seq`
-      // allocation is tracked separately — it under-counts, but no longer
-      // drops a message.
-      const userMsgLoc = `${chatId}:messages:${msgNum}-${generateId().slice(-8)}-user`;
-      await ctx.db.$transaction(async (tx) => {
-        await lockAncestorsForCreate(tx, chatNode.memoryId, userMsgLoc);
-        await tx.node.create({
-          data: {
-            id: generateId(), memoryId: chatNode.memoryId,
-            loc: userMsgLoc, name: `${msgNum}-user`,
-            nodeType: 'record', content: newMsgFields.content ?? null,
-            data: (newMsgFields.data ?? null) as InputJsonValue,
-            seq: messageCount,
-            createdBy: senderUserId,
-          },
-        });
-      });
-
-      // Update message count + lastMessageAt
-      const newChatData = {
-        ...(chatData as Record<string, unknown>),
-        messageCount,
-        lastMessageAt: new Date().toISOString(),
-      };
-      const encUpdate = encryptNodeFields({ content: null, data: newChatData }, memEncInfo);
-      await ctx.db.node.update({
-        where: { id: chatNode.id },
-        data: { data: (encUpdate.data ?? null) as InputJsonValue },
-      });
+      // The short random component predates the atomic allocation (#916 added
+      // it while two sends could still derive the same `msgNum` and collide on
+      // `@@unique([loc, memoryId])`, losing a message). It is no longer what
+      // keeps locs unique, and it stays anyway: a loc is an immutable address,
+      // so churning the format a second time buys nothing, and it remains a
+      // cheap backstop for any future write path that skips the allocator.
+      const { seq: messageCount, chatData: allocatedChatData } = await appendChatMessage(
+        ctx.db,
+        chatRef,
+        memEncInfo,
+        async ({ tx, seq, msgNum }) => {
+          await tx.node.create({
+            data: {
+              id: generateId(), memoryId: chatNode.memoryId,
+              loc: `${chatId}:messages:${msgNum}-${generateId().slice(-8)}-user`,
+              name: `${msgNum}-user`,
+              nodeType: 'record', content: newMsgFields.content ?? null,
+              data: (newMsgFields.data ?? null) as InputJsonValue,
+              seq,
+              createdBy: senderUserId,
+            },
+          });
+        },
+      );
+      // Everything downstream reads the copy the allocation committed, not the
+      // pre-lock one — a turn that raced us has already been folded in.
+      chatData = allocatedChatData;
+      const convName = chatData.conversationName as string;
+      const stageName = chatData.stageName as string;
 
       // Find the agent that owns this chat. Two ways a memory can belong
       // to an agent: (1) it's a user memory via userMemoryOfAgentId, or
@@ -722,24 +727,24 @@ export const chatMutations = {
           if (bestMatch) {
             activeConvName = bestMatch.convName;
             activeStageName = bestMatch.firstStage;
-            // Update the chat node to reflect the re-route
-            const updatedChatData = {
-              ...(chatData as Record<string, unknown>),
-              conversationName: activeConvName,
-              stageName: activeStageName,
-              messageCount,
-              lastMessageAt: new Date().toISOString(),
-            };
-            appendRouteEntry(updatedChatData, {
-              conversationUrn: `conversations:${activeConvName}`,
-              nodeUrn: `conversations:${activeConvName}:${activeStageName}`,
-              action: 'ENTER',
-              trigger: { type: 'FALLBACK_REROUTE', content: userMessage.slice(0, 100) },
-            });
-            const encReroute = encryptNodeFields({ content: null, data: updatedChatData }, memEncInfo);
-            await ctx.db.node.update({
-              where: { id: chatNode.id },
-              data: { data: (encReroute.data ?? null) as InputJsonValue },
+            // Update the chat node to reflect the re-route. #919: apply the
+            // re-route to a FRESH read under the chat lock — writing the blob
+            // we read before the allocation would roll back a turn that
+            // committed since, `messageCount` included.
+            chatData = await updateChatRootData(ctx.db, chatRef, memEncInfo, (fresh) => {
+              const next = {
+                ...fresh,
+                conversationName: activeConvName,
+                stageName: activeStageName,
+                lastMessageAt: new Date().toISOString(),
+              };
+              appendRouteEntry(next, {
+                conversationUrn: `conversations:${activeConvName}`,
+                nodeUrn: `conversations:${activeConvName}:${activeStageName}`,
+                action: 'ENTER',
+                trigger: { type: 'FALLBACK_REROUTE', content: userMessage.slice(0, 100) },
+              });
+              return next;
             });
           }
         }
@@ -814,7 +819,9 @@ export const chatMutations = {
       // decrypt each message's content before formatting.
       const messages = await ctx.db.node.findMany({
         where: { loc: { startsWith: `${chatId}:messages:` }, memoryId: chatNode.memoryId, deletedAt: null },
-        orderBy: { seq: 'asc' },
+        // #919: same deterministic tiebreak the chatHistory reader uses — the
+        // model's view of the transcript must not reorder between turns.
+        orderBy: [{ seq: 'asc' }, { createdAt: 'asc' }, { loc: 'asc' }],
         take: 50,
         select: { loc: true, content: true, data: true, seq: true, nodeType: true, memoryId: true },
       });
@@ -884,7 +891,9 @@ export const chatMutations = {
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
 
-      const chatData = (chatNode.data as Record<string, unknown>) ?? {};
+      // #919: rebound below to the copy read under the chat lock (see
+      // sendChatMessage). Only `scope`, which is immutable, is read before.
+      let chatData = (chatNode.data as Record<string, unknown>) ?? {};
 
       // Spec 017 — chat-scope invariant gate (see sendChatMessage for
       // the rationale). The write side (extracted data lands in
@@ -911,7 +920,7 @@ export const chatMutations = {
         allowMissingScope: true,
       });
 
-      const messageCount = ((chatData.messageCount as number) ?? 0) + 1;
+      const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
 
       const message = (toolResponse.message as string) ?? '';
       const data = toolResponse.data as Record<string, unknown> | undefined;
@@ -923,32 +932,40 @@ export const chatMutations = {
       // `data.role = 'assistant'` is what the message-history reader uses
       // to identify the role — agent-agnostic per Constitution Invariant
       // #14 (no hardcoded agent names anywhere in the platform).
-      const msgNum = String(messageCount).padStart(3, '0');
       const encMsg = encryptNodeFields(
         { content: message, data: { role: 'assistant' } },
         memEncInfo,
       );
-      // #664/#752: assistant message under `${chatId}:messages` — lock the
-      // ancestor path across the insert (see the user-message create above).
+      // #919: the assistant turn allocates its number the same way a user turn
+      // does — inside the inserting transaction, under the chat lock (which is
+      // still the #664/#752 ancestor-path lock, so an ancestor delete can't
+      // orphan the message). The two paths shared the counter and so shared the
+      // race: a user send interleaved with an assistant turn produced two
+      // messages at the same `seq`.
       // #914: `createdBy` is deliberately left unset on the assistant turn.
       // The platform authored it, and cor:dmo:010:01 admits the system as an
       // author — so NULL here means "the platform", not "unrecorded". Do NOT
       // stamp the sending user: that would assert a human wrote the model's
       // words. (Which user prompted it is recoverable from the preceding
       // message's `seq`.)
-      const assistantMsgLoc = `${chatId}:messages:${msgNum}-assistant`;
-      await ctx.db.$transaction(async (tx) => {
-        await lockAncestorsForCreate(tx, chatNode.memoryId, assistantMsgLoc);
-        await tx.node.create({
-          data: {
-            id: generateId(), memoryId: chatNode.memoryId,
-            loc: assistantMsgLoc, name: `${msgNum}-assistant`,
-            nodeType: 'record', content: encMsg.content ?? null,
-            data: (encMsg.data ?? null) as InputJsonValue,
-            seq: messageCount,
-          },
-        });
-      });
+      const { seq: messageCount, chatData: allocatedChatData } = await appendChatMessage(
+        ctx.db,
+        chatRef,
+        memEncInfo,
+        async ({ tx, seq, msgNum }) => {
+          await tx.node.create({
+            data: {
+              id: generateId(), memoryId: chatNode.memoryId,
+              loc: `${chatId}:messages:${msgNum}-assistant`,
+              name: `${msgNum}-assistant`,
+              nodeType: 'record', content: encMsg.content ?? null,
+              data: (encMsg.data ?? null) as InputJsonValue,
+              seq,
+            },
+          });
+        },
+      );
+      chatData = allocatedChatData;
 
       // Save extracted data to memory's default data node
       if (data && Object.keys(data).length > 0) {
@@ -980,22 +997,26 @@ export const chatMutations = {
       let stageTransitioned = false;
       let newStageName: string | null = null;
       let conversationHandoff: string | null = null;
-      const updatedData: Record<string, unknown> = {
-        ...(chatData as Record<string, unknown>),
-        messageCount,
-        lastMessageAt: new Date().toISOString(),
-      };
+      // #919: what this turn CHANGES about the chat root, recorded as edits and
+      // replayed at the end against a freshly read blob. Edge evaluation below
+      // is unbounded in wall-clock terms, and the root is stored whole — so
+      // writing back a snapshot taken at the top of the turn would roll back
+      // any send that committed while we were evaluating, `messageCount`
+      // included. Edits run in the order they were pushed.
+      const chatRootEdits: Array<(chatData: Record<string, unknown>) => void> = [];
 
       // 1. Explicit stage transition from the LLM
       if (nextStage && nextStage !== chatData.stageName) {
-        updatedData.stageName = nextStage;
         stageTransitioned = true;
         newStageName = nextStage;
-        appendRouteEntry(updatedData, {
-          nodeUrn: `conversations:${chatData.conversationName}:${nextStage}`,
-          conversationUrn: `conversations:${chatData.conversationName}`,
-          action: 'ENTER',
-          trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${nextStage}` },
+        chatRootEdits.push((d) => {
+          d.stageName = nextStage;
+          appendRouteEntry(d, {
+            nodeUrn: `conversations:${chatData.conversationName}:${nextStage}`,
+            conversationUrn: `conversations:${chatData.conversationName}`,
+            action: 'ENTER',
+            trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${nextStage}` },
+          });
         });
       }
 
@@ -1122,10 +1143,12 @@ export const chatMutations = {
 
                   if (behavior === 'detour') {
                     // Push current goal, transition to the detour conversation
-                    pushGoal(updatedData, {
-                      description: (edgeData.label as string) ?? `Detour to ${targetConvName}`,
-                      createdBy: 'ASSISTANT',
-                      conversationUrn: targetLoc,
+                    chatRootEdits.push((d) => {
+                      pushGoal(d, {
+                        description: (edgeData.label as string) ?? `Detour to ${targetConvName}`,
+                        createdBy: 'ASSISTANT',
+                        conversationUrn: targetLoc,
+                      });
                     });
                   }
 
@@ -1139,21 +1162,23 @@ export const chatMutations = {
                   const targetFirstStage = targetStages[0];
 
                   if (targetFirstStage) {
-                    updatedData.conversationName = targetConvName;
-                    updatedData.stageName = targetFirstStage;
                     conversationHandoff = targetConvName;
                     stageTransitioned = true;
                     newStageName = targetFirstStage;
 
-                    appendRouteEntry(updatedData, {
-                      conversationUrn: targetLoc,
-                      nodeUrn: `${targetLoc}:${targetFirstStage}`,
-                      action: 'ENTER',
-                      edgeUrn: edge.id,
-                      trigger: {
-                        type: behavior === 'detour' ? 'DETOUR_EDGE' : 'TRANSITION_EDGE',
-                        content: (edgeData.label as string) ?? undefined,
-                      },
+                    chatRootEdits.push((d) => {
+                      d.conversationName = targetConvName;
+                      d.stageName = targetFirstStage;
+                      appendRouteEntry(d, {
+                        conversationUrn: targetLoc,
+                        nodeUrn: `${targetLoc}:${targetFirstStage}`,
+                        action: 'ENTER',
+                        edgeUrn: edge.id,
+                        trigger: {
+                          type: behavior === 'detour' ? 'DETOUR_EDGE' : 'TRANSITION_EDGE',
+                          content: (edgeData.label as string) ?? undefined,
+                        },
+                      });
                     });
                   }
                   break; // Only follow one edge
@@ -1166,14 +1191,19 @@ export const chatMutations = {
 
       // 3. Track onTrack status
       if (onTrack === false) {
-        updatedData.lastOffTrackReason = offTrackReason ?? 'unspecified';
-        updatedData.lastOffTrackAt = new Date().toISOString();
+        chatRootEdits.push((d) => {
+          d.lastOffTrackReason = offTrackReason ?? 'unspecified';
+          d.lastOffTrackAt = new Date().toISOString();
+        });
       }
 
-      const encUpdate = encryptNodeFields({ content: null, data: updatedData }, memEncInfo);
-      await ctx.db.node.update({
-        where: { id: chatNode.id },
-        data: { data: (encUpdate.data ?? null) as InputJsonValue },
+      // #919: `messageCount` is deliberately absent here — the allocation above
+      // already committed it, and `fresh` carries whatever the latest turn
+      // wrote, which may be higher than the value this turn allocated.
+      await updateChatRootData(ctx.db, chatRef, memEncInfo, (fresh) => {
+        const next = { ...fresh, lastMessageAt: new Date().toISOString() };
+        for (const edit of chatRootEdits) edit(next);
+        return next;
       });
 
       return {
@@ -1210,26 +1240,27 @@ export const chatMutations = {
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
 
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
-      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
-
-      const chatData = (chatNode.data as Record<string, unknown>) ?? {};
-      const messageCount = (chatData.messageCount as number) ?? 0;
-      const summaryName = `${String(messageCount).padStart(3, '0')}a-summary`;
+      const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
 
       const encSummary = encryptNodeFields({ content: summary, data: null }, memEncInfo);
       // #664/#752: summary lands under `${chatId}:messages` — lock the ancestor
       // path across the insert (see the message creates above).
-      const summaryLoc = `${chatId}:messages:${summaryName}`;
-      await ctx.db.$transaction(async (tx) => {
-        await lockAncestorsForCreate(tx, chatNode.memoryId, summaryLoc);
+      // #919: a summary does NOT consume a message number, but it is named and
+      // ordered from the counter, so it reads it under the same lock — against
+      // a value no in-flight turn can still change out from under it.
+      await withChatRootLock(ctx.db, chatRef, memEncInfo, async ({ tx, chatData }) => {
+        const messageCount = (chatData.messageCount as number) ?? 0;
+        const summaryName = `${String(messageCount).padStart(3, '0')}a-summary`;
         await tx.node.create({
           data: {
             id: generateId(), memoryId: chatNode.memoryId,
-            loc: summaryLoc, name: summaryName,
+            loc: `${chatId}:messages:${summaryName}`, name: summaryName,
             nodeType: 'abstract', content: encSummary.content ?? null, seq: messageCount + 1,
             tags: ['summary'],
           },
         });
+        // No chat-root write: the summary is not a message.
+        return { value: undefined };
       });
 
       return true;
