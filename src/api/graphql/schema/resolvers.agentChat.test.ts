@@ -1004,6 +1004,61 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(userMsg!.loc).not.toContain(otherUser.id);
   });
 
+  it('#914 — two members sending at once both persist (no loc collision)', async () => {
+    // `messageCount` is read before the insert, so concurrent sends derive
+    // the same msgNum. Pre-#914 the suffix was the chat CREATOR's id —
+    // identical for every sender — so this already collided and dropped a
+    // message; the short random component keeps the role-based suffix from
+    // reintroducing it. (The counter itself is still not allocated
+    // atomically, so messageCount under-counts here — tracked separately.
+    // What must not happen is losing someone's message.)
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+
+    // Driving this with real concurrency does NOT reproduce it — the two
+    // calls' DB round-trips serialize in practice, so such a test passes with
+    // or without the fix. Rewinding the counter between two sequential sends
+    // reproduces the exact condition a race produces — two sends deriving the
+    // same msgNum — deterministically.
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'from the creator' }, userCtx(adminUser.id),
+    );
+    const mid = await chatNodeByLocOrThrow(db, start.chatId);
+    await db.node.update({
+      where: { id: mid.id },
+      data: {
+        data: {
+          ...((mid.data as Record<string, unknown>) ?? {}),
+          messageCount: 0,
+        } as never,
+      },
+    });
+    await expect(
+      resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'from the other member' }, userCtx(otherUser.id),
+      ),
+    ).resolves.toBeDefined();
+
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    const userMsgs = await db.node.findMany({
+      where: {
+        memoryId: chatNode.memoryId,
+        loc: { startsWith: `${start.chatId}:messages:`, endsWith: '-user' },
+        deletedAt: null,
+      },
+    });
+    expect(userMsgs).toHaveLength(2);
+    // And each is attributed to whoever actually sent it.
+    expect(new Set(userMsgs.map((m) => m.createdBy))).toEqual(
+      new Set([adminUser.id, otherUser.id]),
+    );
+  });
+
   it('#914 — records the creator on the chat root, and leaves the assistant turn system-authored', async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const start = await resolvers.Mutation.startChat(
@@ -1014,6 +1069,17 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await resolvers.Mutation.sendChatMessage(
       {},
       { chatId: start.chatId, userMessage: 'hello' },
+      userCtx(adminUser.id),
+    );
+    // The assistant turn is written by processChatResponse, not by
+    // sendChatMessage — without this call there is no assistant message and
+    // the assertion below would silently pass on an empty find.
+    await resolvers.Mutation.processChatResponse(
+      {},
+      {
+        chatId: start.chatId,
+        toolResponse: { message: 'hello back', data: null, next_stage: null },
+      },
       userCtx(adminUser.id),
     );
 
@@ -1031,7 +1097,8 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
       },
     });
     const assistantMsg = messages.find((m) => m.loc.endsWith('-assistant'));
-    if (assistantMsg) expect(assistantMsg.createdBy).toBeNull();
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.createdBy).toBeNull();
   });
 
   it("myChats returns the union of caller's private chats and all shared chats in apps they belong to", async () => {

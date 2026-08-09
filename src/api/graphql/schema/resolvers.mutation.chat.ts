@@ -580,7 +580,19 @@ export const chatMutations = {
       // readers take `data.role` first and fall back only to "does the
       // suffix end in `-assistant`", so `-user` is read identically to the
       // old `-<userId>` form and legacy rows keep resolving unchanged.
-      const userMsgLoc = `${chatId}:messages:${msgNum}-user`;
+      //
+      // The short random component is the same device `startChat` uses on the
+      // chat loc, for the same reason: `messageCount` is read before the
+      // insert, so two concurrent sends derive the same `msgNum` and would
+      // collide on `@@unique([loc, memoryId])` — losing one member's message.
+      // That race is NOT introduced here (the old suffix was the chat
+      // CREATOR's id, identical for every sender, so concurrent sends already
+      // collided), but this is the change that makes several members posting
+      // into one chat a first-class scenario, so it should not leave a hard
+      // failure behind it. The residual non-atomic `messageCount`/`seq`
+      // allocation is tracked separately — it under-counts, but no longer
+      // drops a message.
+      const userMsgLoc = `${chatId}:messages:${msgNum}-${generateId().slice(-8)}-user`;
       await ctx.db.$transaction(async (tx) => {
         await lockAncestorsForCreate(tx, chatNode.memoryId, userMsgLoc);
         await tx.node.create({
