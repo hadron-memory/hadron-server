@@ -1509,6 +1509,18 @@ export const typeDefs = `#graphql
     id: ID!
     organizationId: String
     organization: Organization
+    """
+    The memory's URN, grammar v2 (cor:urn:010:01): hrn:mem:<root>:<slug...>,
+    emitted by safeCanonicalUrn/emitEntityUrnV2 from the stored urn — so a v1
+    double-colon chain, a legacy single-colon row and an already-v2 row all read
+    back identically here. <slug...> is one atom for a migrated memory but still
+    several for a compound pre-Stage-3 per-user one (<root>:<agent>:app-user:<id>).
+
+    The STORED column is the bare form (<root>:<slug>, no scheme prefix — the
+    chk_memory_urn_not_prefixed guardrail rejects writing a rendered one); this
+    field is the rendered view of it. When emission throws, the stored value is
+    served raw and logged, so a bare, unprefixed value is a possible read.
+    """
     urn: String!
     name: String!
     shortDescription: String
@@ -3054,8 +3066,11 @@ export const typeDefs = `#graphql
 
   # ─── Assets ──────────────────────────────────────────────────────
   # Per spec 004-asset-upload. Assets live in a dedicated Asset
-  # entity (NOT a nodeType) FK-related to Memory. URN form:
-  #   <memory.urn>:assets:<asset.id>
+  # entity (NOT a nodeType) FK-related to Memory. URN form (grammar
+  # v2, #697 Stage 2):
+  #   hrn:asset:<root>:<mem...>:assets:<asset.id>
+  # See Asset.urn below for the two degraded shapes a parser must
+  # tolerate, and for why <mem...> is not always a single atom.
 
   enum AssetScanStatus {
     PENDING
@@ -3077,7 +3092,33 @@ export const typeDefs = `#graphql
     """Uploader (User id). Null when the asset was created server-side by an app run (hadron_store_file)."""
     uploadedBy:  ID
     deletedAt:   DateTime
-    """The asset's URN: <memory.urn>:assets:<asset.id>."""
+    """
+    The asset's URN, grammar v2 (cor:urn:010:01): hrn:asset:<root>:<mem...>:assets:<asset.id>,
+    emitted by emitAssetUrnV2 from the holding memory's STORED urn.
+
+    <mem...> is one or more atoms, not always one. A per-user memory urn minted
+    before the #697 Stage-3 flip is still compound (<root>:<agent>:app-user:<id>
+    and friends), and each extra memory atom lengthens the asset URN with it —
+    so the 'assets' marker is not at a fixed offset. A parser recovering the
+    holding memory must take everything between the type word and that marker,
+    never a fixed two-atom prefix. Prefer locating the LAST 'assets' atom and
+    reading the id after it (assetIdFromRef does exactly this).
+
+    Two degraded shapes a parser must tolerate, both of which really occur:
+      * hrn:asset:unknown:assets:<asset.id> — the holding memory row could not
+        be loaded. Carries no memory identity at all.
+      * <memory.urn>:assets:<asset.id> — the pre-#697 shape, with NO hrn:asset:
+        prefix, served when v2 emission throws (empty, over-length or
+        charset-invalid atom in the stored memory urn). It interpolates the
+        stored memory urn verbatim, which is normally bare (<root>:<slug>), so
+        this shape usually looks like acme.com:docs:assets:<id>.
+
+    A third oddity is reachable through the NORMAL branch, not a fallback: a
+    legacy memories.urn row that predates the chk_memory_urn_not_prefixed
+    guardrail can still hold a rendered hrn:mem:-prefixed value, and that
+    composes into hrn:asset:hrn:mem:<root>:<slug>:assets:<id>. A prefix strip
+    that assumes one leading type word will mis-read it.
+    """
     urn:         String!
     """
     Stable, UNAUTHENTICATED hotlink to the bytes (GET /assets/<id>).
@@ -3164,7 +3205,13 @@ export const typeDefs = `#graphql
   same memory.
   """
   input CreateAssetReferenceNodeInput {
-    """Asset id, or its URN — canonically \`hrn:asset:<root>:<memory>:assets:<asset.id>\` (the memory-prefixed \`<memory.urn>:assets:<asset.id>\` spelling is also accepted)."""
+    """
+    Asset id, or its URN — canonically hrn:asset:<root>:<mem...>:assets:<asset.id>.
+    Parsing is Postel-liberal (assetIdFromRef): the id is whatever follows the
+    LAST 'assets' atom, so every shape Asset.urn can emit is accepted, including
+    the pre-#697 memory-prefixed <memory.urn>:assets:<asset.id> spelling and the
+    other degraded fallback. A ref with no 'assets' atom is taken as a bare id.
+    """
     assetRef:    String!
     """Fully-qualified node URN for the reference node."""
     nodeUrn:     String!

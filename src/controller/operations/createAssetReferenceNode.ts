@@ -41,7 +41,11 @@ import type { AssetCallerContextV2 } from './beginAssetUpload.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 export interface CreateAssetReferenceNodeInput {
-  /** Asset id, or its URN (`<memory.urn>:assets:<asset.id>`). */
+  /**
+   * Asset id, or its URN (`hrn:asset:<root>:<mem...>:assets:<asset.id>`, plus
+   * the two degraded shapes `Asset.urn` can emit — see its SDL docstring).
+   * Parsed by {@link assetIdFromRef}, which only needs the `assets` marker.
+   */
   assetRef: string;
   /**
    * Fully-qualified node URN (`hrn:node:<root>:<memory>:<loc>`) for the
