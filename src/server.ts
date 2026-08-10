@@ -46,8 +46,10 @@ import { resolvers } from './api/graphql/schema/resolvers.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import { typeDefs } from './api/graphql/schema/typeDefs.js';
-import { UrnNotQualifiedError, UrnParseError } from './lib/urn.js';
-import { AmbiguousLegacyUrnError } from './lib/entityRef/errors.js';
+import {
+  formatGraphQLError,
+  isExpectedClientError,
+} from './api/graphql/formatError.js';
 import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
 import { controller } from './controller/controller.js';
@@ -96,10 +98,12 @@ import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
 // Timing gotcha: `didEncounterErrors` fires DURING execution, before
 // `formatError` reshapes the response. So the typed client errors that
 // `formatError` maps to stable codes (URN_NOT_QUALIFIED, BAD_USER_INPUT,
-// AmbiguousLegacyUrnError) do NOT yet carry those codes here — Apollo has them
-// as the default INTERNAL_SERVER_ERROR. We therefore classify the *original*
-// error against the same types `formatError` handles, then fall back to the
-// error code for Apollo's own client-error classes (validation, parse, …).
+// AmbiguousLegacyUrnError, the asset refusals) do NOT yet carry those codes
+// here — Apollo has them as the default INTERNAL_SERVER_ERROR. We therefore
+// classify the *original* error by TYPE, sharing one list with `formatError`
+// (#918 — see api/graphql/formatError.ts; two hand-kept `instanceof` chains is
+// how "mapped but still reported" happens), then fall back to the error code
+// for Apollo's own client-error classes (validation, parse, …).
 const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
   async requestDidStart() {
     return {
@@ -108,13 +112,7 @@ const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
           const original = err.originalError ?? err;
           // Expected client errors reshaped by formatError — skip (they look
           // like INTERNAL_SERVER_ERROR at this stage).
-          if (
-            original instanceof UrnNotQualifiedError ||
-            original instanceof UrnParseError ||
-            original instanceof AmbiguousLegacyUrnError
-          ) {
-            continue;
-          }
+          if (isExpectedClientError(original)) continue;
           // Apollo's own client-error codes (GRAPHQL_VALIDATION_FAILED,
           // GRAPHQL_PARSE_FAILED, BAD_USER_INPUT, …) are already on the raw
           // error and are never server faults.
@@ -1022,58 +1020,9 @@ export async function createServer(): Promise<Express> {
     typeDefs,
     resolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],
-    formatError: (formattedError, error) => {
-      // Spec 022: surface UrnNotQualifiedError with a stable error code so
-      // external callers can branch on it programmatically. The unwrap
-      // pattern matches Apollo's: thrown errors are wrapped in
-      // `GraphQLError` with the original on `.originalError`.
-      const original =
-        (error as { originalError?: unknown })?.originalError ?? error;
-      if (original instanceof UrnNotQualifiedError) {
-        return {
-          ...formattedError,
-          message: original.message,
-          extensions: {
-            ...formattedError.extensions,
-            code: 'URN_NOT_QUALIFIED',
-            offendingValue: original.offendingValue,
-            expectedType: original.expectedType,
-          },
-        };
-      }
-      // A malformed-grammar / bad-slug URN is caller error, not a server
-      // fault. parseUrn / validateUserSlug (create boundaries, e.g.
-      // cloneMemory's targetUrn) throw UrnParseError; without this branch it
-      // would surface as INTERNAL_SERVER_ERROR. Mirrors the qualification
-      // handler above so every resolver gets a typed BAD_USER_INPUT.
-      if (original instanceof UrnParseError) {
-        return {
-          ...formattedError,
-          message: original.message,
-          extensions: {
-            ...formattedError.extensions,
-            code: 'BAD_USER_INPUT',
-            reason: original.reason,
-            offendingValue: original.offendingSegment,
-          },
-        };
-      }
-      // #697: a legacy URN that matches >1 live row through the stored alias map
-      // fails LOUDLY with this typed code (never a silent wrong resolve). Surface
-      // it as the advertised `extensions.code` rather than INTERNAL_SERVER_ERROR.
-      if (original instanceof AmbiguousLegacyUrnError) {
-        return {
-          ...formattedError,
-          message: original.message,
-          extensions: {
-            ...formattedError.extensions,
-            code: 'AmbiguousLegacyUrnError',
-            offendingValue: original.ref,
-          },
-        };
-      }
-      return formattedError;
-    },
+    // #918 — typed client errors carry their stable `extensions.code`.
+    // The mapping list lives beside the Sentry predicate that reads it.
+    formatError: formatGraphQLError,
   });
   await apollo.start();
 
