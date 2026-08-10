@@ -323,9 +323,12 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
  * URN is caller error and a DB failure is operational, and swallowing either
  * hands back a partial page that looks complete.
  *
- * **When NOT to use this.** It costs one scoped query PER REF, which is the
- * right trade only for a surface that does not already hold the caller's
- * accessible set. A surface that computes the full set anyway for its default
+ * **When NOT to use this.** It costs a full authorization round PER REF — the
+ * ref resolution is itself a DB round trip (two on a miss, via the legacy-alias
+ * fallback) and the scoped `getAccessibleMemoryIds` issues one or more of its
+ * own depending on the caller's principal shape. That is the right trade only
+ * for a surface that does not already hold the caller's accessible set. A
+ * surface that computes the full set anyway for its default
  * scope — `listAssets` is the live example — should intersect in memory against
  * that set instead. `listAssets` additionally narrows by `orgId` before checking
  * refs, so swapping this helper in there would also drop that narrowing and
