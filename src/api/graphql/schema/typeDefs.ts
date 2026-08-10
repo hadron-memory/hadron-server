@@ -3164,7 +3164,7 @@ export const typeDefs = `#graphql
   same memory.
   """
   input CreateAssetReferenceNodeInput {
-    """Asset id, or its URN — canonically `hrn:asset:<root>:<memory>:assets:<asset.id>` (the memory-prefixed `<memory.urn>:assets:<asset.id>` spelling is also accepted)."""
+    """Asset id, or its URN — canonically \`hrn:asset:<root>:<memory>:assets:<asset.id>\` (the memory-prefixed \`<memory.urn>:assets:<asset.id>\` spelling is also accepted)."""
     assetRef:    String!
     """Fully-qualified node URN for the reference node."""
     nodeUrn:     String!
