@@ -55,6 +55,8 @@ import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.j
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
+import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
+import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
@@ -1413,6 +1415,28 @@ export async function createServer(): Promise<Express> {
   // so expired assets' bytes accumulated in the bucket indefinitely.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_ASSET_JANITOR !== 'true') {
     startAssetJanitorLoop(db);
+  }
+
+  // #896 — retry sweep for assets stuck in scanStatus PENDING (inline
+  // scan at complete-upload is the primary path; this settles rows the
+  // inline pass couldn't). No-ops per run when SCAN_TOOL_URL is unset.
+  if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.DISABLE_ASSET_SCAN_SWEEP !== 'true'
+  ) {
+    startAssetScanSweepLoop(db);
+  }
+
+  // Background job (#889): daily sweep for object-store objects with no
+  // Asset row — the catch-all for every leak path the retention janitor
+  // cannot see (cascaded rows, encrypted memories, abandoned uploads).
+  // Deletes on the ABSENCE of a row, so it is dry-run until an operator
+  // sets ASSET_ORPHAN_REAP_ENABLED=true.
+  if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.DISABLE_ASSET_ORPHAN_SWEEP !== 'true'
+  ) {
+    startOrphanObjectReaperLoop(db);
   }
 
   // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in

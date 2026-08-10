@@ -27,6 +27,8 @@ import {
   MAGIC_BYTES_WINDOW,
 } from '../../lib/asset/contentType.js';
 import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
+import { isScanConfigured } from '../../lib/scanClient.js';
+import { scanAssetRow } from '../../lib/asset/scan.js';
 import { AssetUploadError } from './beginAssetUpload.js';
 import type { AssetCallerContext } from './beginAssetUpload.js';
 
@@ -156,25 +158,21 @@ export async function completeAssetUpload(
     );
   }
 
-  // Born CLEAN instead of PENDING when scanning is not in play.
+  // Scan posture (#896). When the scan tool is configured, the row is
+  // born PENDING and scanned INLINE right below — the scanner wins and
+  // HADRON_ASSET_SCAN_AUTO_CLEAN is ignored, so flipping the hatch off
+  // is safe the moment SCAN_TOOL_URL is live.
   //
-  // **This is a PRODUCTION setting now, not just a test hatch** (Holger,
-  // 2026-08-06). There is no malware scanner anywhere in the platform —
-  // nothing transitions PENDING → CLEAN — so with this unset every user
-  // upload is permanently undownloadable: `mintAssetDownloadUrl` gates on
-  // CLEAN and the row never gets there. That is what shipped, and it made
-  // the whole upload feature dead on arrival in prod.
-  //
-  // The tradeoff being accepted: uploaded bytes are served WITHOUT any
-  // malware check, including through the unauthenticated `GET /assets/:id`
-  // hotlink — so an uploaded file becomes a public URL on this deployment's
-  // domain serving unscanned content. Defensible while uploads are limited
-  // to trusted operators and a pilot; NOT once uploads are open to end
-  // users. Tracked for a real scanner in #896.
-  //
-  // Do not "clean this up" as dev-only config. Turning it off without a
-  // scanner in place silently breaks every download again.
-  const autoClean = process.env.HADRON_ASSET_SCAN_AUTO_CLEAN === 'true';
+  // When no scanner is configured, the legacy hatch still applies: born
+  // CLEAN under HADRON_ASSET_SCAN_AUTO_CLEAN=true (the 2026-08-06 prod
+  // unblock — without it every upload is permanently undownloadable,
+  // since nothing else transitions PENDING → CLEAN and
+  // `mintAssetDownloadUrl` gates on CLEAN). Do not remove the hatch as
+  // "dev-only config" until the scanner is deployed everywhere;
+  // turning it off without a scanner silently breaks every download.
+  const scannerConfigured = isScanConfigured();
+  const autoClean =
+    !scannerConfigured && process.env.HADRON_ASSET_SCAN_AUTO_CLEAN === 'true';
 
   // Promote the VERIFIED bytes to the key the Asset will reference.
   //
@@ -201,6 +199,11 @@ export async function completeAssetUpload(
         sizeBytes: entry.expectedSizeBytes,
         storageKey: storedStorageKey,
         scanStatus: autoClean ? 'CLEAN' : 'PENDING',
+        // Any PENDING row is born due-now so a crash between here and
+        // the inline scan below leaves a queued row, not a stuck one —
+        // and rows born while no scanner is configured are already
+        // queued the day one appears.
+        scanDueAt: autoClean ? null : new Date(),
         description: entry.description,
         uploadedBy: entry.userId,
       },
@@ -217,6 +220,37 @@ export async function completeAssetUpload(
   // surviving staging object is wasted bytes, not a correctness problem —
   // and the janitor's orphan sweep (#889) is its backstop.
   await deleteObject(entry.stagingKey).catch(() => {});
+
+  // Inline malware scan (#896) — runs against the PROMOTED key (the
+  // staging key can be re-PUT for its whole presign TTL; the promoted
+  // key cannot), and runs HERE because this is the one moment the
+  // plaintext storage key is guaranteed in hand — for encrypted
+  // memories the row's storage_key is ciphertext from now on, so the
+  // retry sweep can only reach those bytes while a session key happens
+  // to be cached.
+  //
+  //   clean       → row flips CLEAN, upload succeeds as before.
+  //   infected    → row flips BLOCKED (kept as tombstone, signature
+  //                 recorded), bytes deleted, and the mutation fails
+  //                 with the typed MALWARE_BLOCKED error.
+  //   unavailable → row stays PENDING and the upload SUCCEEDS — the
+  //                 asset is undownloadable until the sweep settles it,
+  //                 which beats failing the upload because the scanner
+  //                 restarted.
+  if (scannerConfigured) {
+    const result = await scanAssetRow(db, asset, entry.storageKey, {
+      userId: caller.userId,
+      appId: callerAppId,
+      source: 'inline',
+    });
+    if (result === 'BLOCKED') {
+      throw new AssetUploadError(
+        'MALWARE_BLOCKED',
+        'upload rejected: file failed the malware scan',
+      );
+    }
+    asset = await db.asset.findUniqueOrThrow({ where: { id: asset.id } });
+  }
 
   logAssetEvent({
     operation: 'upload-completed',

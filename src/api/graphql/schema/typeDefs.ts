@@ -1514,7 +1514,7 @@ export const typeDefs = `#graphql
     emitted by safeCanonicalUrn/emitEntityUrnV2 from the stored urn — so a v1
     double-colon chain, a legacy single-colon row and an already-v2 row all read
     back identically here. <slug...> is one atom for a migrated memory but still
-    several for a compound pre-Stage-3 one (mentor-co:juno:mike-personal).
+    several for a compound pre-Stage-3 per-user one (<root>:<agent>:app-user:<id>).
 
     The STORED column is the bare form (<root>:<slug>, no scheme prefix — the
     chk_memory_urn_not_prefixed guardrail rejects writing a rendered one); this
@@ -3085,6 +3085,8 @@ export const typeDefs = `#graphql
     mimeType:    String!
     sizeBytes:   Int!
     scanStatus:  AssetScanStatus!
+    """Engine signature name recorded when the scan verdict was BLOCKED (the row is kept as an audit tombstone; its bytes are deleted). Null otherwise."""
+    scanSignature: String
     description: String
     uploadedAt:  DateTime!
     """Uploader (User id). Null when the asset was created server-side by an app run (hadron_store_file)."""
@@ -3094,13 +3096,13 @@ export const typeDefs = `#graphql
     The asset's URN, grammar v2 (cor:urn:010:01): hrn:asset:<root>:<mem...>:assets:<asset.id>,
     emitted by emitAssetUrnV2 from the holding memory's STORED urn.
 
-    <mem...> is one or more atoms, not always one. A memory urn minted before
-    the #697 Stage-3 flip is still compound (e.g. mentor-co:juno:mike-personal),
-    which emits hrn:asset:mentor-co:juno:mike-personal:assets:<id> — five atoms
-    after the type word. A parser recovering the holding memory must therefore
-    take everything between the type word and the 'assets' marker, never a fixed
-    two-atom prefix. Prefer locating the LAST 'assets' atom and reading the id
-    after it (assetIdFromRef does exactly this).
+    <mem...> is one or more atoms, not always one. A per-user memory urn minted
+    before the #697 Stage-3 flip is still compound (<root>:<agent>:app-user:<id>
+    and friends), and each extra memory atom lengthens the asset URN with it —
+    so the 'assets' marker is not at a fixed offset. A parser recovering the
+    holding memory must take everything between the type word and that marker,
+    never a fixed two-atom prefix. Prefer locating the LAST 'assets' atom and
+    reading the id after it (assetIdFromRef does exactly this).
 
     Two degraded shapes a parser must tolerate, both of which really occur:
       * hrn:asset:unknown:assets:<asset.id> — the holding memory row could not
@@ -3204,10 +3206,11 @@ export const typeDefs = `#graphql
   """
   input CreateAssetReferenceNodeInput {
     """
-    Asset id, or its URN. Parsing is Postel-liberal (assetIdFromRef): the id is
-    whatever follows the LAST 'assets' atom, so every shape Asset.urn can emit
-    is accepted — the v2 hrn:asset:<root>:<mem...>:assets:<id> and both of its
-    degraded fallbacks. A ref with no 'assets' atom is taken as a bare id.
+    Asset id, or its URN — canonically hrn:asset:<root>:<mem...>:assets:<asset.id>.
+    Parsing is Postel-liberal (assetIdFromRef): the id is whatever follows the
+    LAST 'assets' atom, so every shape Asset.urn can emit is accepted, including
+    the pre-#697 memory-prefixed <memory.urn>:assets:<asset.id> spelling and the
+    other degraded fallback. A ref with no 'assets' atom is taken as a bare id.
     """
     assetRef:    String!
     """Fully-qualified node URN for the reference node."""

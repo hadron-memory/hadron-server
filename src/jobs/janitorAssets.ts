@@ -9,9 +9,10 @@
  * Run via:
  *   tsx src/jobs/janitorAssets.ts
  *
- * TODO: orphan-key reaping (R2 objects with no matching Asset row)
- * requires ListObjectsV2 paging. Out of scope for v1; tracked
- * separately.
+ * This sweep only ever acts on a tombstone — a row whose `deletedAt` has
+ * aged out. Objects with NO row at all (cascaded deletes, encrypted
+ * memories, abandoned uploads) are the orphan reaper's job:
+ * `src/jobs/reapOrphanAssetObjects.ts` (#889).
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';

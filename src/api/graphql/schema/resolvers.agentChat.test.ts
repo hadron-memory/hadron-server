@@ -3,6 +3,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { withChatRootLock } from '../../../lib/chatRoot.js';
 
 // Prevent git writes
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -719,9 +720,16 @@ describe('chatHistory', () => {
       userCtx(adminUser.id),
     );
 
-    // The chatNode's userId determines the user-message loc suffix. Set
-    // it to a value that *contains* known agent names ('juno', 'mealplan')
-    // — pre-cleanup, this would misclassify the message as assistant.
+    // Historically the chatNode's userId determined the user-message loc
+    // suffix, so a value *containing* a known agent name ('juno',
+    // 'mealplan') would — pre-cleanup — misclassify the message as
+    // assistant. Since #914 the suffix is the ROLE (`-user`) and no
+    // user-controlled string reaches the loc at all, so this mutation can no
+    // longer influence classification even in principle. It is kept, and
+    // asserted on below, because that structural guarantee is worth pinning:
+    // it is what retires the whole hazard class for new rows, while
+    // `data.role` keeps protecting legacy rows that still carry an identity
+    // in their suffix.
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     const data = (chatNode.data as Record<string, unknown>) ?? {};
     await db.node.update({
@@ -762,9 +770,9 @@ describe('chatHistory', () => {
     // sendChatMessage, an MCP tool, an audit query) gets the correct
     // answer without having to parse loc strings.
     const userMsg = await db.node.findFirstOrThrow({
-      // loc-scope-ok: probes a message row by a loc fragment unique to this
-      // fixture's chat; the holding memory is startChat's to choose.
-      where: { loc: { contains: '-mealplan-juno-fan' }, deletedAt: null },
+      // loc-scope-ok: scoped to this fixture's chat loc; the holding memory
+      // is startChat's to choose.
+      where: { loc: { startsWith: `${start.chatId}:messages:` , endsWith: '-user' }, deletedAt: null },
     });
     const assistantMsg = await db.node.findFirstOrThrow({
       // loc-scope-ok: as above — a fixture-unique loc suffix, not a tenant key.
@@ -772,6 +780,12 @@ describe('chatHistory', () => {
     });
     expect((userMsg.data as { role?: string } | null)?.role).toBe('user');
     expect((assistantMsg.data as { role?: string } | null)?.role).toBe('assistant');
+
+    // #914: the poisoned `chatData.userId` above reached the loc before, and
+    // now reaches nothing. The message address carries a role, not an
+    // identity, so no user-chosen string can ever again make a user turn read
+    // as an assistant turn through the suffix fallback.
+    expect(userMsg.loc).not.toContain('mealplan-juno-fan');
   });
 });
 
@@ -921,6 +935,367 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
         userCtx(adminUser.id, { appId: app.id }),
       ),
     ).rejects.toThrow(/SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS|App-key/);
+  });
+
+  // -------------------------------------------------------------------------
+  // #914 — message author attribution in a group chat
+  //
+  // Every chat in a multi-human memory IS a group chat: a chat has no ACL of
+  // its own, so read and write both fall through the host memory's per-class
+  // rules (cor:acl:030:01). These tests pin both halves — that a second member
+  // may post at all, and that the record says who did.
+  // -------------------------------------------------------------------------
+
+  it('#914 — a second App member may post into a chat they did not create', async () => {
+    // The premise the attribution fix rests on. If this ever starts throwing,
+    // participation has been narrowed and cor:acl:030:01's group-chat property
+    // has been broken — which is a contract change, not a bug fix.
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+
+    await expect(
+      resolvers.Mutation.sendChatMessage(
+        {},
+        { chatId: start.chatId, userMessage: 'the other member speaking' },
+        userCtx(otherUser.id),
+      ),
+    ).resolves.toBeDefined();
+  });
+
+  it('#914 — attributes a message to its SENDER, not to the chat creator', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: start.chatId, userMessage: 'the other member speaking' },
+      userCtx(otherUser.id),
+    );
+
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    const messages = await db.node.findMany({
+      where: {
+        memoryId: chatNode.memoryId,
+        loc: { startsWith: `${start.chatId}:messages:` },
+        deletedAt: null,
+      },
+      orderBy: { seq: 'asc' },
+    });
+    const userMsg = messages.find((m) => m.loc.endsWith('-user'));
+    expect(userMsg).toBeDefined();
+
+    // The whole point: before the fix this was adminUser (the creator).
+    expect(userMsg!.createdBy).toBe(otherUser.id);
+    expect(userMsg!.createdBy).not.toBe(adminUser.id);
+    expect((userMsg!.data as Record<string, unknown>).authorUserId).toBe(otherUser.id);
+
+    // And the loc no longer encodes an identity at all — it carries the ROLE,
+    // mirroring `-assistant`, so no reader can mistake the address for the
+    // author.
+    expect(userMsg!.loc).not.toContain(adminUser.id);
+    expect(userMsg!.loc).not.toContain(otherUser.id);
+  });
+
+  it('#914 — two members sending at once both persist (no loc collision)', async () => {
+    // Pre-#914 the loc suffix was the chat CREATOR's id — identical for every
+    // sender — so two sends that derived the same msgNum collided on
+    // `@@unique([loc, memoryId])` and one member's message was lost. #916 added
+    // the short random component; #919 then made the counter atomic, so two
+    // sends no longer derive the same msgNum in the first place.
+    //
+    // This test keeps the random component honest by forcing the condition the
+    // allocator now prevents — it rewinds the counter so the second send
+    // genuinely reuses msgNum 001. That is the backstop's only remaining job,
+    // and it is why the component was kept: what must not happen, under any
+    // counter state, is losing someone's message.
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+
+    // Driving this with real concurrency does NOT reproduce it — the two
+    // calls' DB round-trips serialize in practice, so such a test passes with
+    // or without the fix. Rewinding the counter between two sequential sends
+    // reproduces the exact condition a race produces — two sends deriving the
+    // same msgNum — deterministically.
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'from the creator' }, userCtx(adminUser.id),
+    );
+    const mid = await chatNodeByLocOrThrow(db, start.chatId);
+    await db.node.update({
+      where: { id: mid.id },
+      data: {
+        data: {
+          ...((mid.data as Record<string, unknown>) ?? {}),
+          messageCount: 0,
+        } as never,
+      },
+    });
+    await expect(
+      resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'from the other member' }, userCtx(otherUser.id),
+      ),
+    ).resolves.toBeDefined();
+
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    const userMsgs = await db.node.findMany({
+      where: {
+        memoryId: chatNode.memoryId,
+        loc: { startsWith: `${start.chatId}:messages:`, endsWith: '-user' },
+        deletedAt: null,
+      },
+    });
+    expect(userMsgs).toHaveLength(2);
+    // And each is attributed to whoever actually sent it.
+    expect(new Set(userMsgs.map((m) => m.createdBy))).toEqual(
+      new Set([adminUser.id, otherUser.id]),
+    );
+  });
+
+  it('#914 — records the creator on the chat root, and leaves the assistant turn system-authored', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id, scope: 'shared' },
+      userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: start.chatId, userMessage: 'hello' },
+      userCtx(adminUser.id),
+    );
+    // The assistant turn is written by processChatResponse, not by
+    // sendChatMessage — without this call there is no assistant message and
+    // the assertion below would silently pass on an empty find.
+    await resolvers.Mutation.processChatResponse(
+      {},
+      {
+        chatId: start.chatId,
+        toolResponse: { message: 'hello back', data: null, next_stage: null },
+      },
+      userCtx(adminUser.id),
+    );
+
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    expect(chatNode.createdBy).toBe(adminUser.id);
+
+    // NULL on the assistant turn means "the platform wrote this"
+    // (cor:dmo:010:01 admits the system as an author) — never the sending
+    // user, which would assert a human wrote the model's words.
+    const messages = await db.node.findMany({
+      where: {
+        memoryId: chatNode.memoryId,
+        loc: { startsWith: `${start.chatId}:messages:` },
+        deletedAt: null,
+      },
+    });
+    const assistantMsg = messages.find((m) => m.loc.endsWith('-assistant'));
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.createdBy).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // #919 — the message number is allocated atomically
+  //
+  // `seq` is what every transcript reader orders by, and `messageCount` also
+  // drives the summarization trigger and the `chat.message_count` edge operand.
+  // Both used to come from a read-modify-write spanning the whole turn.
+  //
+  // The lock/allocator itself is pinned deterministically in
+  // src/lib/chatRoot.test.ts (an in-flight allocation is held open and the next
+  // one is observed waiting). These tests assert the property END TO END: after
+  // any interleaving of real chat turns, the numbers still describe the
+  // transcript. Both concurrent ones were checked against the pre-fix resolver
+  // and fail there — unlike #914's loc-collision case, these two turns really
+  // do interleave, because each holds a transaction open across an insert.
+  // -------------------------------------------------------------------------
+
+  /** Every message row of a chat, oldest number first. */
+  async function messagesOf(chatId: string) {
+    const chatNode = await chatNodeByLocOrThrow(db, chatId);
+    const rows = await db.node.findMany({
+      where: {
+        memoryId: chatNode.memoryId,
+        loc: { startsWith: `${chatId}:messages:` },
+        deletedAt: null,
+      },
+      // Same total order the production readers use — `loc` is unique per
+      // memory, so it settles a `seq`+`createdAt` tie that would otherwise
+      // leave the assertion at the planner's mercy.
+      orderBy: [{ seq: 'asc' }, { createdAt: 'asc' }, { loc: 'asc' }],
+    });
+    return {
+      rows,
+      messageCount: ((chatNode.data as Record<string, unknown>)?.messageCount as number) ?? 0,
+    };
+  }
+
+  it('#919 — two members sending at once get distinct seq, and the count matches', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+
+    await Promise.all([
+      resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'from the creator' }, userCtx(adminUser.id),
+      ),
+      resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'from the other member' }, userCtx(otherUser.id),
+      ),
+    ]);
+
+    const { rows, messageCount } = await messagesOf(start.chatId);
+    expect(rows).toHaveLength(2);
+    // Distinct numbers — a shared seq leaves the two members' messages in an
+    // order the reader picks arbitrarily, and differently between reads.
+    expect(rows.map((m) => m.seq)).toEqual([1, 2]);
+    // And the count is the real number of messages, not one short of it.
+    expect(messageCount).toBe(2);
+  });
+
+  it('#919 — an assistant turn racing a send leaves the count whole', async () => {
+    // The other half of the same defect: the chat root is stored as ONE blob,
+    // so a turn that reads it at its start and writes it back at its end can
+    // roll back a send that committed in between — count included.
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'opening' }, userCtx(adminUser.id),
+    );
+
+    await Promise.all([
+      resolvers.Mutation.processChatResponse(
+        {},
+        { chatId: start.chatId, toolResponse: { message: 'answering', data: null, next_stage: 'analysis' } },
+        userCtx(adminUser.id),
+      ),
+      resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'interrupting' }, userCtx(otherUser.id),
+      ),
+    ]);
+
+    const { rows, messageCount } = await messagesOf(start.chatId);
+    expect(rows).toHaveLength(3);
+    expect(rows.map((m) => m.seq)).toEqual([1, 2, 3]);
+    expect(messageCount).toBe(3);
+    // The turn's own change survived the switch to applying it on fresh data.
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    expect((chatNode.data as Record<string, unknown>).stageName).toBe('analysis');
+  });
+
+  it('#919 — a rename waits for an in-flight turn instead of restoring its count', async () => {
+    // `updateChatTitle` looks nothing like a message write, but it persists the
+    // whole root blob — so before it went through the serializer it could put
+    // back the `messageCount` that was current when its entitlement query ran,
+    // and the next send would reuse a live `seq`. Every whole-root writer has to
+    // be on the same protocol, not just the ones that allocate.
+    //
+    // Racing the two with Promise.all does NOT reproduce this (a rename opens no
+    // transaction, so the round trips serialize on their own and it passes
+    // either way). Holding the chat lock open around a committed count does:
+    // pre-fix the rename sails past and reverts it.
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'opening' }, userCtx(adminUser.id),
+    );
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
+    const memEnc = { id: chatNode.memoryId, isEncrypted: false };
+
+    // A turn is mid-flight: it has raised the count to 2 and still holds the
+    // lock, exactly as a send does between its insert and its commit.
+    let release: () => void = () => {};
+    let announceHeld: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const held = new Promise<void>((r) => { announceHeld = r; });
+    const turn = withChatRootLock(db, chatRef, memEnc, async ({ chatData }) => {
+      announceHeld();
+      await gate;
+      return { chatData: { ...chatData, messageCount: 2 }, value: null };
+    });
+    await held;
+
+    let renamed = false;
+    const rename = resolvers.Mutation.updateChatTitle(
+      {}, { chatId: start.chatId, title: 'Renamed mid-conversation' }, userCtx(adminUser.id),
+    ).then(() => { renamed = true; });
+
+    // Pre-fix the rename completes here, on the blob it read before the turn.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(renamed).toBe(false);
+
+    release();
+    await turn;
+    await rename;
+
+    const after = await chatNodeByLocOrThrow(db, start.chatId);
+    const data = after.data as Record<string, unknown>;
+    // The rename landed AND the turn's count survived it — applying to fresh
+    // data is not the same as dropping the write.
+    expect(data.title).toBe('Renamed mid-conversation');
+    expect(data.messageCount).toBe(2);
+  });
+
+  it('#919 — mixed sequential turns number 1..N with no gaps or repeats', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    for (const turn of ['first', 'second']) {
+      await resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: turn }, userCtx(adminUser.id),
+      );
+      await resolvers.Mutation.processChatResponse(
+        {},
+        { chatId: start.chatId, toolResponse: { message: `re: ${turn}`, data: null, next_stage: null } },
+        userCtx(adminUser.id),
+      );
+    }
+
+    const { rows, messageCount } = await messagesOf(start.chatId);
+    expect(rows.map((m) => m.seq)).toEqual([1, 2, 3, 4]);
+    expect(rows.map((m) => m.loc.endsWith('-assistant'))).toEqual([false, true, false, true]);
+    expect(messageCount).toBe(4);
+  });
+
+  it('#919 — a summary is named and ordered from the committed count', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'hello' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.saveChatSummary(
+      {}, { chatId: start.chatId, summary: 'they said hello' }, userCtx(adminUser.id),
+    );
+
+    const { rows, messageCount } = await messagesOf(start.chatId);
+    const summary = rows.find((m) => m.tags.includes('summary'));
+    expect(summary).toBeDefined();
+    expect(summary!.name).toBe('001a-summary');
+    // A summary does not consume a message number.
+    expect(messageCount).toBe(1);
   });
 
   it("myChats returns the union of caller's private chats and all shared chats in apps they belong to", async () => {

@@ -26,8 +26,10 @@ import { resolveAgentRef } from '../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
 import { UrnNotQualifiedError } from '../../lib/urn.js';
 import { mintPutUrl } from '../../integrations/r2/client.js';
-
-const PRESIGN_TTL_SECONDS = 5 * 60;
+// Lives in retention.ts because the orphan reaper derives its
+// minimum-age threshold from it — an object younger than a presigned
+// PUT's lifetime may still be an upload in flight.
+import { PRESIGN_TTL_SECONDS } from '../../lib/asset/retention.js';
 
 export type UploadIntent = 'USER' | 'AGENT_REQUEST';
 
@@ -152,7 +154,7 @@ export async function beginAssetUpload(
 
   // FR-006 — size + MIME pinned by the presigned policy. Validated
   // here before minting; verified again on completion via HeadObject.
-  const limits = getEffectiveLimits(null);
+  const limits = getEffectiveLimits();
   if (input.sizeBytes > limits.maxBytes) {
     throw new AssetUploadError(
       'SIZE_EXCEEDED',
@@ -162,7 +164,7 @@ export async function beginAssetUpload(
   if (!limits.allowedMimeTypes.includes(input.mimeType)) {
     throw new AssetUploadError(
       'MIME_NOT_ALLOWED',
-      `mimeType "${input.mimeType}" not in agent allowlist`,
+      `mimeType "${input.mimeType}" not in the platform allowlist`,
     );
   }
 
@@ -362,7 +364,7 @@ export async function beginAssetUploadV2(
   }
 
   // 4. Size + MIME limits — same as v1.
-  const limits = getEffectiveLimits(null);
+  const limits = getEffectiveLimits();
   if (input.sizeBytes > limits.maxBytes) {
     throw new AssetUploadError(
       'SIZE_EXCEEDED',
@@ -372,7 +374,7 @@ export async function beginAssetUploadV2(
   if (!limits.allowedMimeTypes.includes(input.mimeType)) {
     throw new AssetUploadError(
       'MIME_NOT_ALLOWED',
-      `mimeType "${input.mimeType}" not in allowlist`,
+      `mimeType "${input.mimeType}" not in the platform allowlist`,
     );
   }
 

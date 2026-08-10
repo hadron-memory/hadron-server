@@ -5,6 +5,7 @@ import {
   lockAncestorsForCreate,
   lockAncestorsForCreateMany,
   lockNodeForDelete,
+  lockPathForCreateUnder,
 } from './nodeSubtreeLock.js';
 
 describe('ancestorLocs', () => {
@@ -74,6 +75,38 @@ describe('lockAncestorsForCreateMany', () => {
     await lockAncestorsForCreateMany(tx, 'mem1', ['x:y:z']);
     const del = makeTxSpy();
     await lockNodeForDelete(del.tx, 'mem1', 'x:y');
+    expect(calls).toContainEqual(del.calls[0]);
+  });
+});
+
+describe('lockPathForCreateUnder', () => {
+  it('takes exactly the keys a create under that parent would take (#919)', async () => {
+    // The contract: identical key set and order to lockAncestorsForCreate on
+    // any child, so an allocator that must lock BEFORE it knows the child's
+    // name still contends with — and cannot slip past — the ordinary creates.
+    const under = makeTxSpy();
+    await lockPathForCreateUnder(under.tx, 'mem1', 'chats:c1:messages');
+    const child = makeTxSpy();
+    await lockAncestorsForCreate(child.tx, 'mem1', 'chats:c1:messages:001-user');
+    expect(under.calls).toEqual(child.calls);
+    expect(under.calls).toEqual([
+      { key1: 'mem1', key2: 'chats' },
+      { key1: 'mem1', key2: 'chats:c1' },
+      { key1: 'mem1', key2: 'chats:c1:messages' },
+    ]);
+  });
+
+  it('locks a root-level parent itself (it is still an ancestor of its children)', async () => {
+    const { tx, calls } = makeTxSpy();
+    await lockPathForCreateUnder(tx, 'mem1', 'a');
+    expect(calls).toEqual([{ key1: 'mem1', key2: 'a' }]);
+  });
+
+  it('contends with a delete of the parent', async () => {
+    const { tx, calls } = makeTxSpy();
+    await lockPathForCreateUnder(tx, 'mem1', 'a:b');
+    const del = makeTxSpy();
+    await lockNodeForDelete(del.tx, 'mem1', 'a:b');
     expect(calls).toContainEqual(del.calls[0]);
   });
 });

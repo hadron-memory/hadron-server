@@ -710,7 +710,7 @@ model Memory {
   /// Free-form structured metadata for this memory — a client-defined
   /// JSON bag with no server-side semantics. Written via the GraphQL
   /// createMemory / updateMemory mutations; surfaced read-only over MCP
-  /// (h-list-memories renders it as a `data:` line). The MCP surface has
+  /// (hadron_list_memories renders it as a `data:` line). The MCP surface has
   /// no memory-mutation tool, so writes stay GraphQL-only. NULL when unset.
   data                 Json?
   /// #725 — opt-in per-memory PROPERTY SCHEMA (structured storage): the
@@ -929,6 +929,24 @@ model Asset {
   storageKey  String          @unique @map("storage_key")
   /// Virus scan state. Downloads gated on CLEAN.
   scanStatus  AssetScanStatus @default(PENDING) @map("scan_status")
+  /// Engine signature name recorded when the scan verdict was BLOCKED
+  /// (e.g. "Eicar-Signature"). A BLOCKED row is kept as an audit
+  /// tombstone; its object bytes are deleted (#896).
+  scanSignature String? @map("scan_signature")
+  /// Number of scan attempts so far (inline at complete-upload plus
+  /// sweep retries). Drives the retry sweep's exponential backoff.
+  scanAttempts Int @default(0) @map("scan_attempts")
+  /// When the last scan attempt ran (whether or not it produced a
+  /// verdict). NULL = never attempted. Informational; the sweep
+  /// selects on `scan_due_at`, not this.
+  scannedAt DateTime? @map("scanned_at")
+  /// When the next background scan action is due (the #882
+  /// embedding-queue pattern: a future-dated stamp IS the queue).
+  /// PENDING rows: next scan retry. BLOCKED rows: next purge retry
+  /// for object bytes that survived a failed delete. NULL = nothing
+  /// pending (CLEAN, or BLOCKED with bytes confirmed gone). Every
+  /// sweep touch pushes it forward, so no row can monopolize a batch.
+  scanDueAt DateTime? @map("scan_due_at")
   /// Optional; agent- or user-provided.
   description String?
   uploadedAt  DateTime        @default(now()) @map("uploaded_at")
@@ -944,6 +962,8 @@ model Asset {
   memory Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
   @@index([memoryId, scanStatus, uploadedAt(sort: Desc)])
+  // #896 — the scan sweep's selector (due rows, oldest due first).
+  @@index([scanDueAt])
   // 006-asset-upload-redesign: two partial indexes for staged assets
   // (WHERE memory_id IS NULL) live in the migration SQL only — Prisma
   // schema syntax can't express WHERE clauses on @@index. See
@@ -1015,7 +1035,7 @@ model Node {
   /// enforced at the API boundary (not as a DB CHECK — caps are
   /// validation, not invariants). Surfacing rules across MCP tools
   /// (find/read/list/validate), the `Source: abstract-fallback` marker
-  /// on `h-read-node` content-scope fallback, and the RAG-substrate
+  /// on `hadron_get_node` content-scope fallback, and the RAG-substrate
   /// motivation are documented in spec 031 (FR-005 + edge cases). That
   /// is the load-bearing reference; this comment is the cold-read
   /// pointer for someone scanning the schema.
@@ -1034,8 +1054,8 @@ model Node {
   /// time, compared against `computeContentHash(node.content)` (via
   /// `src/lib/contentHash.ts`) to detect staleness; when the two
   /// values differ AND `abstractOriginHash` is non-null, the abstract
-  /// may not reflect current content. Surfaced by `h-read-node`'s
-  /// `Source: abstract-stale` marker, `h-validate`'s `[stale-abstract]`
+  /// may not reflect current content. Surfaced by `hadron_get_node`'s
+  /// `Source: abstract-stale` marker, `hadron_validate`'s `[stale-abstract]`
   /// warning, and the upcoming RAG layer. System-managed: never
   /// settable via GraphQL `NodeInput`.
   abstractOriginHash String?   @map("abstract_origin_hash")
@@ -1049,7 +1069,7 @@ model Node {
   embeddingFailedAt  DateTime? @map("embedding_failed_at")
   /// Attempt counter for backoff / give-up. Non-null; reset to 0 on success/revoke.
   embeddingAttempts  Int       @default(0) @map("embedding_attempts")
-  /// Last embed error (diagnosability; surfaced by h-validate).
+  /// Last embed error (diagnosability; surfaced by hadron_validate).
   embeddingError     String?   @map("embedding_error")
   /// Number of input tokens.
   tokens             Int?
@@ -1059,10 +1079,11 @@ model Node {
   properties         Json?
   /// Structured JSON on the node; used for template-variable
   /// resolution, user profiles, extracted facts, reference metadata.
-  /// Returned by `h-get-data`, set by `h-set-data`.
+  /// Returned by `hadron_get_node`; written by `hadron_update_node`
+  /// (replaces the bag) or `hadron_update_node_data` (shallow merge).
   data               Json?
   /// Sort order among sibling nodes (lower values come first); used
-  /// by `h-read-next-node` and portal drag-and-drop reordering.
+  /// by `hadron_get_next_node` and portal drag-and-drop reordering.
   seq                Int?
   /// GitHub repo slug (e.g. "micromentor/mmdata").
   ownerRepo          String?   @map("owner_repo")
