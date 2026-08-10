@@ -1308,14 +1308,19 @@ export const chatMutations = {
         }
       }
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
-      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
-      const chatData = (chatNode.data as Record<string, unknown>) ?? {};
-      const updated = { ...chatData, title: title.trim() };
-      const enc = encryptNodeFields({ content: null, data: updated }, memEncInfo);
-      await ctx.db.node.update({
-        where: { id: chatNode.id },
-        data: { data: (enc.data ?? null) as InputJsonValue },
-      });
+      // #919: a rename is a whole-blob write like any other, so it goes through
+      // the serializer too. Renaming is nowhere near a message append in
+      // intent, but the root is stored whole — writing `{...blobReadAbove,
+      // title}` would restore whatever `messageCount` was current when the
+      // entitlement query ran, and the next send would then reuse a live `seq`.
+      // The gate above stays exactly where it is: it authorizes before we take
+      // any lock.
+      await updateChatRootData(
+        ctx.db,
+        { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc },
+        memEncInfo,
+        (fresh) => ({ ...fresh, title: title.trim() }),
+      );
       return true;
     },
 

@@ -3,6 +3,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { withChatRootLock } from '../../../lib/chatRoot.js';
 
 // Prevent git writes
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -1130,7 +1131,10 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
         loc: { startsWith: `${chatId}:messages:` },
         deletedAt: null,
       },
-      orderBy: [{ seq: 'asc' }, { createdAt: 'asc' }],
+      // Same total order the production readers use — `loc` is unique per
+      // memory, so it settles a `seq`+`createdAt` tie that would otherwise
+      // leave the assertion at the planner's mercy.
+      orderBy: [{ seq: 'asc' }, { createdAt: 'asc' }, { loc: 'asc' }],
     });
     return {
       rows,
@@ -1194,6 +1198,62 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     // The turn's own change survived the switch to applying it on fresh data.
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     expect((chatNode.data as Record<string, unknown>).stageName).toBe('analysis');
+  });
+
+  it('#919 — a rename waits for an in-flight turn instead of restoring its count', async () => {
+    // `updateChatTitle` looks nothing like a message write, but it persists the
+    // whole root blob — so before it went through the serializer it could put
+    // back the `messageCount` that was current when its entitlement query ran,
+    // and the next send would reuse a live `seq`. Every whole-root writer has to
+    // be on the same protocol, not just the ones that allocate.
+    //
+    // Racing the two with Promise.all does NOT reproduce this (a rename opens no
+    // transaction, so the round trips serialize on their own and it passes
+    // either way). Holding the chat lock open around a committed count does:
+    // pre-fix the rename sails past and reverts it.
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'opening' }, userCtx(adminUser.id),
+    );
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
+    const memEnc = { id: chatNode.memoryId, isEncrypted: false };
+
+    // A turn is mid-flight: it has raised the count to 2 and still holds the
+    // lock, exactly as a send does between its insert and its commit.
+    let release: () => void = () => {};
+    let announceHeld: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const held = new Promise<void>((r) => { announceHeld = r; });
+    const turn = withChatRootLock(db, chatRef, memEnc, async ({ chatData }) => {
+      announceHeld();
+      await gate;
+      return { chatData: { ...chatData, messageCount: 2 }, value: null };
+    });
+    await held;
+
+    let renamed = false;
+    const rename = resolvers.Mutation.updateChatTitle(
+      {}, { chatId: start.chatId, title: 'Renamed mid-conversation' }, userCtx(adminUser.id),
+    ).then(() => { renamed = true; });
+
+    // Pre-fix the rename completes here, on the blob it read before the turn.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(renamed).toBe(false);
+
+    release();
+    await turn;
+    await rename;
+
+    const after = await chatNodeByLocOrThrow(db, start.chatId);
+    const data = after.data as Record<string, unknown>;
+    // The rename landed AND the turn's count survived it — applying to fresh
+    // data is not the same as dropping the write.
+    expect(data.title).toBe('Renamed mid-conversation');
+    expect(data.messageCount).toBe(2);
   });
 
   it('#919 — mixed sequential turns number 1..N with no gaps or repeats', async () => {
