@@ -927,7 +927,7 @@ model Asset {
   scanAttempts Int @default(0) @map("scan_attempts")
   /// When the last scan attempt ran (whether or not it produced a
   /// verdict). NULL = never attempted. Informational; the sweep
-  /// selects on `scanDueAt`, not this.
+  /// selects on `scan_due_at`, not this.
   scannedAt DateTime? @map("scanned_at")
   /// When the next background scan action is due (the #882
   /// embedding-queue pattern: a future-dated stamp IS the queue).
