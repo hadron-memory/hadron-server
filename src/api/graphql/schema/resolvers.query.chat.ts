@@ -111,7 +111,12 @@ export const chatQueries = {
               loc: { startsWith: `${top.loc}:messages:` },
               deletedAt: null,
             },
-            orderBy: { seq: 'asc' as const },
+            // #919: `seq` alone is not a total order — chats written before
+            // the counter was allocated atomically hold colliding values, and
+            // "the first message" must not depend on which row the planner
+            // happens to return. `createdAt` then `loc` (unique per memory)
+            // make the tiebreak deterministic.
+            orderBy: [{ seq: 'asc' as const }, { createdAt: 'asc' as const }, { loc: 'asc' as const }],
             select: { content: true },
           });
           return [top.loc, firstMsg?.content ?? null] as const;
@@ -214,7 +219,11 @@ export const chatQueries = {
           loc: { startsWith: `${chatId}:messages:` },
           deletedAt: null,
         },
-        orderBy: { seq: 'asc' as const },
+        // #919: transcript order must be the same on every read. `seq` is
+        // allocated atomically now, but chats written before that hold
+        // colliding values, and a tie left to the planner can order two
+        // members' messages differently from one read to the next.
+        orderBy: [{ seq: 'asc' as const }, { createdAt: 'asc' as const }, { loc: 'asc' as const }],
         take: limit ?? 100,
         select: { loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },
       });
