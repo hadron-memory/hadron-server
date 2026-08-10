@@ -117,6 +117,28 @@ export async function lockAncestorsForCreateMany(
 }
 
 /**
+ * Acquire exactly the locks a create UNDER `parentLoc` would take — `parentLoc`
+ * itself plus its strict ancestors — before the child's own loc is known.
+ *
+ * Identical key set to `lockAncestorsForCreate(tx, memoryId, `${parentLoc}:x`)`
+ * for any `x`, and taken in the same root→leaf order, so it neither deadlocks
+ * with nor slips past the other helpers here. #919 needs it because a chat
+ * message's name embeds a sequence number that can only be allocated once the
+ * lock is held: the loc doesn't exist yet at lock time.
+ *
+ * MUST run inside the same READ COMMITTED transaction as the create.
+ */
+export async function lockPathForCreateUnder(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  parentLoc: string,
+): Promise<void> {
+  for (const loc of [...ancestorLocs(parentLoc), parentLoc]) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
+  }
+}
+
+/**
  * Acquire the transaction-scoped advisory lock for DELETING the node at `loc`,
  * keyed identically to the lock a descendant-create takes on this loc as one of
  * its ancestors (#664). A delete therefore blocks — and is blocked by — any

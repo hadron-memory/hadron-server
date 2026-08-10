@@ -85,7 +85,12 @@ import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js'
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
-import { decryptNodeFieldsWithKey, encryptNodeFieldsWithKey } from '../lib/nodeCrypto.js';
+import {
+  decryptNodeFieldsWithKey,
+  encryptNodeFieldsWithKey,
+  getMemoryEncryptionInfo,
+} from '../lib/nodeCrypto.js';
+import { withChatRootLock } from '../lib/chatRoot.js';
 import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
@@ -4970,23 +4975,31 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           chatId,
         );
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
-        const chatData = (chatNode.data as Record<string, unknown>) ?? {};
-        const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
-        stack.push({
-          description,
-          createdBy: createdBy ?? 'ASSISTANT',
-          createdAt: new Date().toISOString(),
-          conversationUrn: chatData.conversationName ? `conversations:${chatData.conversationName}` : undefined,
-          nodeUrn: chatData.stageName && chatData.conversationName
-            ? `conversations:${chatData.conversationName}:${chatData.stageName}`
-            : undefined,
-          status: 'ACTIVE',
-        });
-        chatData.goalStack = stack;
-        await db.node.update({
-          where: { id: chatNode.id },
-          data: { data: chatData as InputJsonValue },
-        });
+        // #919: the chat root is stored as one blob, so a read-modify-write
+        // that spans a chat turn silently rolls that turn back — including
+        // `messageCount`, which the turn allocates its `seq` from. Go through
+        // the shared serializer: it re-reads under the chat lock (and handles
+        // the encrypted case, which this path used to write straight past).
+        const memEncInfo = await getMemoryEncryptionInfo(db, chatNode.memoryId);
+        const stack = await withChatRootLock(
+          db,
+          { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc },
+          memEncInfo,
+          async ({ chatData }) => {
+            const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
+            stack.push({
+              description,
+              createdBy: createdBy ?? 'ASSISTANT',
+              createdAt: new Date().toISOString(),
+              conversationUrn: chatData.conversationName ? `conversations:${chatData.conversationName}` : undefined,
+              nodeUrn: chatData.stageName && chatData.conversationName
+                ? `conversations:${chatData.conversationName}:${chatData.stageName}`
+                : undefined,
+              status: 'ACTIVE',
+            });
+            return { chatData: { ...chatData, goalStack: stack }, value: stack };
+          },
+        );
         return textResult(`Goal pushed: "${description}". Stack depth: ${stack.filter((g: any) => g.status === 'ACTIVE').length}`);
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to push goal'}`);
@@ -5021,25 +5034,32 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           chatId,
         );
         if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
-        const chatData = (chatNode.data as Record<string, unknown>) ?? {};
-        const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
+        // #919 — same serializer as push_goal above, same two reasons.
+        const memEncInfo = await getMemoryEncryptionInfo(db, chatNode.memoryId);
+        const { stack, completed } = await withChatRootLock(
+          db,
+          { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc },
+          memEncInfo,
+          async ({ chatData }) => {
+            const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
 
-        // Find and complete the topmost ACTIVE goal
-        let completed: Record<string, unknown> | null = null;
-        for (let i = stack.length - 1; i >= 0; i--) {
-          if (stack[i].status === 'ACTIVE') {
-            stack[i].status = 'COMPLETED';
-            stack[i].completedAt = new Date().toISOString();
-            completed = stack[i];
-            break;
-          }
-        }
+            // Find and complete the topmost ACTIVE goal
+            let completed: Record<string, unknown> | null = null;
+            for (let i = stack.length - 1; i >= 0; i--) {
+              if (stack[i].status === 'ACTIVE') {
+                stack[i].status = 'COMPLETED';
+                stack[i].completedAt = new Date().toISOString();
+                completed = stack[i];
+                break;
+              }
+            }
 
-        chatData.goalStack = stack;
-        await db.node.update({
-          where: { id: chatNode.id },
-          data: { data: chatData as InputJsonValue },
-        });
+            return {
+              chatData: { ...chatData, goalStack: stack },
+              value: { stack, completed },
+            };
+          },
+        );
 
         if (completed) {
           const remaining = stack.filter((g: any) => g.status === 'ACTIVE').length;
