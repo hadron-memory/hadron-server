@@ -164,9 +164,42 @@ describe('rule 2 — inactivity', () => {
 
     const outcome = await runSessionReaper(db, now);
 
-    expect(outcome.examined).toBe(1);
+    // Never even a candidate: the heartbeat check is IN the query, so a busy
+    // session cannot occupy a slot in the batch (PR-933 Codex P2).
+    expect(outcome.examined).toBe(0);
     expect(outcome.idle).toBe(0);
     expect((await reload(s.id)).endedAt).toBeNull();
+  });
+
+  it('does not end a session that comes back to life between selection and claim', async () => {
+    // The claim re-applies the full selecting predicate, so a heartbeat that
+    // lands mid-sweep spares the row instead of losing the race (PR-933).
+    const s = await seedSession({ startedAt: ago(30 * HOUR) });
+    let raced = false;
+    const spy = db.session.findMany.bind(db.session);
+    const patched = async (...args: Parameters<typeof spy>) => {
+      const result = await spy(...args);
+      // Fire once, right after the query that selected this session as a
+      // candidate — i.e. in the window between selection and the claim.
+      if (!raced && Array.isArray(result) && result.some((r) => r.id === s.id)) {
+        raced = true;
+        await seedUsage(s.id, ago(60_000)); // the driver is still working
+      }
+      return result;
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db.session as any).findMany = patched;
+    try {
+      const outcome = await runSessionReaper(db, now);
+      expect(outcome.examined).toBe(1);
+      expect(outcome.idle).toBe(0);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (db.session as any).findMany = spy;
+    }
+    const after = await reload(s.id);
+    expect(after.endedAt).toBeNull();
+    expect(after.autoExpiredAt).toBeNull();
   });
 
   it('reaps when the latest attributed usage is itself outside the window', async () => {

@@ -63,17 +63,26 @@ function idleWindowEnvName(type: SessionType): string {
   return `SESSION_IDLE_WINDOW_${type}_MS`;
 }
 
+/** Env vars already warned about, so a permanently-malformed value doesn't
+ * reprint on every sweep (PR-933 Copilot). Keyed by name AND value, so
+ * fixing one typo into another is still reported. */
+const warnedWindowValues = new Set<string>();
+
 /**
- * Parse a positive-integer millisecond env value; returns null (and warns
- * once per bad read) for anything else, so a typo degrades to the default
- * rather than reaping every session immediately or never.
+ * Parse a positive-integer millisecond env value; returns null for anything
+ * else (warning once per distinct bad value), so a typo degrades to the
+ * default rather than reaping every session immediately or never.
  */
 function parseWindowMs(name: string, raw: string | undefined): number | null {
   if (raw === undefined || raw.trim() === '') return null;
   const n = Number(raw);
   if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
-    // eslint-disable-next-line no-console
-    console.warn(`[reaper:sessions] ignoring ${name}="${raw}" — expected a positive integer of milliseconds`);
+    const seen = `${name}=${raw}`;
+    if (!warnedWindowValues.has(seen)) {
+      warnedWindowValues.add(seen);
+      // eslint-disable-next-line no-console
+      console.warn(`[reaper:sessions] ignoring ${name}="${raw}" — expected a positive integer of milliseconds`);
+    }
     return null;
   }
   return n;
@@ -98,16 +107,44 @@ export interface SessionReapOutcome {
   expired: number;
   /** Sessions ended by rule 2 (no heartbeat within the idle window). */
   idle: number;
-  /** Rule-2 candidates examined (before the UsageEvent heartbeat check). */
+  /** Candidates selected across both rules. Exceeds `expired + idle` only
+   * when a heartbeat or an explicit `endSession` landed between selection
+   * and the guarded claim — i.e. it counts sessions the race spared. */
   examined: number;
+}
+
+/**
+ * Predicate for rule 2 on one session type: no hard expiry, and none of the
+ * three heartbeat sources inside the window.
+ *
+ * The `UsageEvent` check lives IN the query rather than in a post-filter
+ * (PR-933 Codex P2): with a post-filter, 500 stale-looking-but-actually-busy
+ * sessions would re-fill the batch every sweep and genuinely idle rows
+ * ordered behind them would never be examined at all. Selecting only rows
+ * that are truly idle makes the batch cap a real drain, not a stall.
+ *
+ * `updatedAt` is null on a session never updated since its insert, which
+ * reads as "no touch since startedAt" — `startedAt` then decides.
+ */
+function idlePredicate(type: SessionType, cutoff: Date) {
+  return {
+    type,
+    endedAt: null,
+    deletedAt: null,
+    expiresAt: null,
+    startedAt: { lt: cutoff },
+    OR: [{ updatedAt: null }, { updatedAt: { lt: cutoff } }],
+    events: { none: { createdAt: { gte: cutoff } } },
+  };
 }
 
 /**
  * End the sessions the two rules select, stamping `endedAt` +
  * `autoExpiredAt`. Safe to re-run and safe to run concurrently with
- * `endSession`: every write is an `updateMany` guarded on `endedAt: null`,
- * so an explicit end that lands first is never overwritten (and never
- * mislabeled as auto-expired).
+ * `endSession` or with a live driver: the claim re-applies the FULL
+ * selecting predicate (not just `endedAt: null`), so a heartbeat or an
+ * explicit end landing between selection and write leaves the row alone
+ * rather than ending a session that just came back to life (PR-933).
  */
 export async function runSessionReaper(
   db: PrismaClient = defaultDb,
@@ -118,69 +155,34 @@ export async function runSessionReaper(
   // ── Rule 1: hard expiry ────────────────────────────────────────────
   // Ids first (not a bare updateMany) so the in-process session-key cache
   // can release the reaped sessions' keys, mirroring endAgentSession.
+  const expiredWhere = { endedAt: null, deletedAt: null, expiresAt: { lt: now } };
   const hardExpired = await db.session.findMany({
-    where: { endedAt: null, deletedAt: null, expiresAt: { lt: now } },
+    where: expiredWhere,
     select: { id: true },
     orderBy: { expiresAt: 'asc' },
     take: REAP_BATCH_SIZE,
   });
   if (hardExpired.length > 0) {
-    outcome.expired = await reap(db, hardExpired.map((s) => s.id), now);
+    outcome.examined += hardExpired.length;
+    outcome.expired = await claim(db, hardExpired.map((s) => s.id), expiredWhere, now);
   }
 
   // ── Rule 2: inactivity ─────────────────────────────────────────────
   // Only sessions with NO hard expiry: one with an `expiresAt` is governed
-  // by rule 1, and an idle window must not end it early.
-  //
-  // The window is per type, so the candidate predicate is one OR branch per
-  // type. `updatedAt` is null on a session never updated since its insert,
-  // which reads as "no touch since startedAt" — startedAt then decides.
-  const cutoffs = new Map<SessionType, Date>(
-    SESSION_TYPES.map((t) => [t, new Date(now.getTime() - idleWindowMsFor(t))]),
-  );
-  const candidates = await db.session.findMany({
-    where: {
-      endedAt: null,
-      deletedAt: null,
-      expiresAt: null,
-      OR: SESSION_TYPES.map((type) => {
-        const cutoff = cutoffs.get(type)!;
-        return {
-          type,
-          startedAt: { lt: cutoff },
-          OR: [{ updatedAt: null }, { updatedAt: { lt: cutoff } }],
-        };
-      }),
-    },
-    select: { id: true, type: true },
-    orderBy: { startedAt: 'asc' },
-    take: REAP_BATCH_SIZE,
-  });
-  outcome.examined = candidates.length;
-
-  if (candidates.length > 0) {
-    // The third heartbeat source: any UsageEvent attributed to the session.
-    // One grouped query for the whole batch — a session with recent usage is
-    // alive even though its own columns look stale (nothing bumps a Session
-    // row when work is merely recorded against it).
-    const latestEvents = await db.usageEvent.groupBy({
-      by: ['sessionId'],
-      where: { sessionId: { in: candidates.map((c) => c.id) } },
-      _max: { createdAt: true },
+  // by rule 1, and an idle window must not end it early. One pass per type,
+  // since each type's window makes its own cutoff.
+  for (const type of SESSION_TYPES) {
+    const cutoff = new Date(now.getTime() - idleWindowMsFor(type));
+    const where = idlePredicate(type, cutoff);
+    const candidates = await db.session.findMany({
+      where,
+      select: { id: true },
+      orderBy: { startedAt: 'asc' },
+      take: REAP_BATCH_SIZE,
     });
-    const lastEventAt = new Map<string, Date | null>(
-      latestEvents.map((row) => [row.sessionId as string, row._max.createdAt]),
-    );
-
-    const idleIds = candidates
-      .filter((c) => {
-        const last = lastEventAt.get(c.id);
-        return !last || last < cutoffs.get(c.type)!;
-      })
-      .map((c) => c.id);
-    if (idleIds.length > 0) {
-      outcome.idle = await reap(db, idleIds, now);
-    }
+    if (candidates.length === 0) continue;
+    outcome.examined += candidates.length;
+    outcome.idle += await claim(db, candidates.map((s) => s.id), where, now);
   }
 
   return outcome;
@@ -188,18 +190,31 @@ export async function runSessionReaper(
 
 /**
  * Mark the given sessions auto-expired and release their cached data keys.
- * Returns how many rows the guard actually claimed.
+ * `where` is the same predicate that selected them, re-evaluated inside the
+ * single UPDATE so the claim is atomic with respect to a concurrent
+ * heartbeat or `endSession`. Returns how many rows it actually claimed.
  */
-async function reap(db: PrismaClient, ids: string[], now: Date): Promise<number> {
+async function claim(
+  db: PrismaClient,
+  ids: string[],
+  where: Record<string, unknown>,
+  now: Date,
+): Promise<number> {
   const { count } = await db.session.updateMany({
-    where: { id: { in: ids }, endedAt: null },
+    where: { ...where, id: { in: ids } },
     data: { endedAt: now, autoExpiredAt: now },
   });
-  // Best-effort and in-process only (another instance holds its own cache):
+  if (count === 0) return 0;
+  // Evict only what the claim actually took — a candidate the race spared is
+  // live, and dropping ITS key would break decryption for a working session.
+  // Best-effort and in-process only (another instance holds its own cache);
   // eviction is ref-counted, so a memory shared with a still-live session
-  // keeps its key. A key that outlives its reaped session is not a
-  // correctness problem — dropping it is hygiene, matching endAgentSession.
-  for (const id of ids) sessionKeyCache.evict(id);
+  // keeps its key. Mirrors endAgentSession.
+  const claimed = await db.session.findMany({
+    where: { id: { in: ids }, autoExpiredAt: now },
+    select: { id: true },
+  });
+  for (const s of claimed) sessionKeyCache.evict(s.id);
   return count;
 }
 
