@@ -129,6 +129,20 @@ export async function setup() {
       ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
   `);
 
+  // #928 team personas: persona names are unique per owner (org XOR user),
+  // case-insensitively (partial functional uniques — Prisma can't express
+  // them). NOT filtered on deleted_at: a persona name binds to one agent
+  // forever (D-2026-08-11-006). Synced with prisma/post-push.sql + the
+  // 20260811120000 migration.
+  await client.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS agents_org_persona_name_uniq
+      ON agents (organization_id, lower(persona_name))
+      WHERE persona_name IS NOT NULL AND organization_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS agents_owner_persona_name_uniq
+      ON agents (owner_user_id, lower(persona_name))
+      WHERE persona_name IS NOT NULL AND owner_user_id IS NOT NULL;
+  `);
+
   // 043-slack-integration: one LIVE Slack connection per (org, workspace) —
   // PARTIAL unique (Prisma can't express the WHERE), so a soft-deleted row
   // never blocks re-registration. Synced with prisma/post-push.sql.

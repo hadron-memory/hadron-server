@@ -993,7 +993,12 @@ export async function sessionScopeFilter(ctx: Context): Promise<Record<string, u
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return {};
   // App Key path — sessions belonging to the authenticated App.
   if (ctx.appId) return { appId: ctx.appId };
-  // JWT user — sessions for Apps in any org the user is a member of.
+  // JWT user — sessions for Apps in any org the user is a member of, PLUS
+  // sessions attributed to the user themself (#929 review P1: a session
+  // started outside any App context — the CLI coding case — has appId null,
+  // so without the userId branch its own creator could not list it).
+  // Identity-scoped, so the self branch does not apply via impersonation
+  // (#876 class: impersonation stays bounded to the shared org's Apps).
   if (ctx.userId) {
     const memberships = await ctx.db.orgMember.findMany({
       where: {
@@ -1005,12 +1010,17 @@ export async function sessionScopeFilter(ctx: Context): Promise<Record<string, u
       select: { organizationId: true },
     });
     const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
-    if (orgIds.length === 0) return { id: '__none__' };
-    const apps = await ctx.db.app.findMany({
-      where: { organizationId: { in: orgIds }, deletedAt: null },
-      select: { id: true },
-    });
-    return { appId: { in: apps.map((a) => a.id) } };
+    const clauses: Record<string, unknown>[] = [];
+    if (orgIds.length > 0) {
+      const apps = await ctx.db.app.findMany({
+        where: { organizationId: { in: orgIds }, deletedAt: null },
+        select: { id: true },
+      });
+      if (apps.length > 0) clauses.push({ appId: { in: apps.map((a) => a.id) } });
+    }
+    if (!ctx.impersonation) clauses.push({ userId: ctx.userId });
+    if (clauses.length === 0) return { id: '__none__' };
+    return clauses.length === 1 ? clauses[0] : { OR: clauses };
   }
   return { id: '__none__' }; // unauthenticated — no sessions
 }
@@ -2301,6 +2311,12 @@ export interface SessionInput {
   llmModel?: string;
   parentSessionId?: string;
   prevSessionId?: string;
+  // #928 coding-session provenance.
+  transcriptPath?: string;
+  host?: string;
+  tool?: string;
+  // #928 / cor:api:140: the Agent (persona) driving this session (PK or URN).
+  agentRef?: string;
 }
 
 export interface UsageEventInput {

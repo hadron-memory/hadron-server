@@ -1323,6 +1323,13 @@ model Session {
   plan            String?
   /// LLM model used (e.g. "claude-opus-4-6").
   llmModel        String?     @map("llm_model")
+  /// #928 coding-session provenance: where the driving tool's transcript
+  /// physically lives on `host` (a filesystem path in that tool's store).
+  transcriptPath  String?     @map("transcript_path")
+  /// #928: machine identifier the session ran on.
+  host            String?
+  /// #928: the tool driving the session ("claude-code", "codex", ...).
+  tool            String?
   /// Total prompt tokens across the session.
   inputTokens     Int?        @map("input_tokens")
   /// Total completion tokens across the session.
@@ -1541,6 +1548,27 @@ model Agent {
   /// string[] }`. `maxMembers` enforced at AppMember
   /// invite-acceptance time. 008-agent-installation FR-009.
   installationPolicy   Json            @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
+  // #928 team personas (hadron-concept 2026-08-11-agent-personas): a persona
+  // — a named AI team member driven by external coding sessions (Claude Code,
+  // Codex) or portal chat — IS an Agent. These three columns are PURE
+  // METADATA (searchable identity); no server behavior may fork on their
+  // presence (that would rebuild the deprecated AgentType axis).
+  /// Persona display name ("Iris"). Unique per owner (org XOR user),
+  /// case-insensitively — partial unique indexes in post-push.sql
+  /// (agents_org_persona_name_uniq / agents_owner_persona_name_uniq; Prisma
+  /// cannot express partial/functional uniques). Deliberately NOT filtered
+  /// on deleted_at: a persona name binds to one agent forever (PR trailers
+  /// and chat history reference it), so even a soft-deleted agent keeps its
+  /// name reserved (D-2026-08-11-006).
+  personaName          String?         @map("persona_name")
+  /// Persona role — free string with conventions ("backend-engineer").
+  /// A dedicated column so roster/allocation queries and chat attribution
+  /// can filter without parsing the prompt.
+  personaRole          String?         @map("persona_role")
+  /// The persona identity paragraph ("You are Iris, a senior backend
+  /// engineer ..."). By CONVENTION clients compose it into the head of
+  /// systemPrompt; the server does no injection.
+  personaPrompt        String?         @map("persona_prompt")
   createdAt            DateTime        @default(now()) @map("created_at")
   createdBy            String?         @map("created_by")
   updatedAt            DateTime?       @updatedAt @map("updated_at")

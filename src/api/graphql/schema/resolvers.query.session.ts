@@ -59,6 +59,11 @@ export const sessionQueries = {
       if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return session;
       // App-keyed caller can see sessions belonging to their App
       if (ctx.appId && session.appId === ctx.appId) return session;
+      // #929 review P1: a session attributed to the caller themself is
+      // readable by its creator regardless of App association — the CLI
+      // coding case, where appId is null. Identity-scoped, so not via
+      // impersonation (#876 class); mirrors sessionScopeFilter's self branch.
+      if (ctx.userId && session.userId === ctx.userId && !ctx.impersonation) return session;
       // User can see sessions from Apps in any org they belong to
       if (ctx.userId && session.appId) {
         const app = await ctx.db.app.findUnique({

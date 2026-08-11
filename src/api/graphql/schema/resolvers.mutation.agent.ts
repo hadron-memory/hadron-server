@@ -46,12 +46,49 @@ import {
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 
+/**
+ * #928 team personas: persona-name uniqueness lives in raw partial indexes
+ * (agents_org_persona_name_uniq / agents_owner_persona_name_uniq — post-push.sql),
+ * so a collision surfaces as P2002 with the index name as target. Map it to a
+ * stable typed code: "name taken, retry with the next free name" is the
+ * allocation contract clients program against (D-2026-08-11-006). Any other
+ * P2002 rethrows untouched.
+ */
+/**
+ * #928/#929 review: persona fields are trimmed, and a blank-after-trim value
+ * is NULL (absent on create, clear on update) — never a stored value, so
+ * whitespace can't reserve a name in the uniqueness index. undefined passes
+ * through (omitted arg = no change on update).
+ */
+const normalizePersonaField = (v: string | null | undefined): string | null | undefined => {
+  if (v === undefined || v === null) return v;
+  const trimmed = v.trim();
+  return trimmed === '' ? null : trimmed;
+};
+
+const throwIfPersonaNameCollision = (e: unknown, personaName: string | null | undefined): void => {
+  if (
+    e instanceof Prisma.PrismaClientKnownRequestError &&
+    e.code === 'P2002' &&
+    String((e.meta as { target?: unknown } | undefined)?.target ?? '').includes('persona_name')
+  ) {
+    throw new GraphQLError(
+      `Persona name ${JSON.stringify(personaName ?? '')} is already taken for this owner — pick another name.`,
+      { extensions: { code: 'PERSONA_NAME_TAKEN' } },
+    );
+  }
+};
+
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaName, personaRole, personaPrompt }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaName?: string; personaRole?: string; personaPrompt?: string },
       ctx: Context,
     ) => {
+      // #929 review: normalize persona inputs before anything touches them.
+      const personaNameNorm = normalizePersonaField(personaName);
+      const personaRoleNorm = normalizePersonaField(personaRole);
+      const personaPromptNorm = normalizePersonaField(personaPrompt);
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
       // present ⇒ org-owned (org ADMIN); `orgId` omitted ⇒ user-owned by the
       // caller, namespaced under their `@<handle>`. The chosen `namespace` is
@@ -199,19 +236,28 @@ export const agentMutations = {
             visibility: agentVisibility,
             type: inferredType,
             surfaces: surfaces ?? defaultSurfaces,
+            // #928 team personas — pure metadata (see schema.prisma).
+            personaName: personaNameNorm, personaRole: personaRoleNorm, personaPrompt: personaPromptNorm,
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           },
           include: AGENT_INCLUDE,
         });
+      }).catch((e: unknown) => {
+        throwIfPersonaNameCollision(e, personaNameNorm);
+        throw e;
       });
       return createdAgent;
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaName, personaRole, personaPrompt }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaName?: string | null; personaRole?: string | null; personaPrompt?: string | null },
       ctx: Context,
     ) => {
+      // #929 review: normalize persona inputs (blank-after-trim clears).
+      const personaNameNorm = normalizePersonaField(personaName);
+      const personaRoleNorm = normalizePersonaField(personaRole);
+      const personaPromptNorm = normalizePersonaField(personaPrompt);
       // #789 / cor:api:140 — was a PK-only findUniqueOrThrow, so a caller
       // holding a URN or handle had to pre-resolve it. resolveAgentRef is a
       // pure lookup and does NOT authorize (#554): the resource-scoped
@@ -348,8 +394,16 @@ export const agentMutations = {
           ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
           ...(type !== undefined ? { type } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
+          // #928 team personas — pure metadata. An explicit null (or a
+          // blank-after-trim string) clears the field; omitted preserves.
+          ...(personaNameNorm !== undefined ? { personaName: personaNameNorm } : {}),
+          ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
+          ...(personaPromptNorm !== undefined ? { personaPrompt: personaPromptNorm } : {}),
         },
         include: AGENT_INCLUDE,
+      }).catch((e: unknown) => {
+        throwIfPersonaNameCollision(e, personaNameNorm);
+        throw e;
       });
     },
 

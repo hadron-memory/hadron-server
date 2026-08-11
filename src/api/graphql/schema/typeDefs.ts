@@ -686,6 +686,12 @@ export const typeDefs = `#graphql
     language: String
     plan: String
     llmModel: String
+    "#928: where the driving tool's transcript lives on 'host'."
+    transcriptPath: String
+    "#928: machine identifier the session ran on."
+    host: String
+    "#928: the tool driving the session ('claude-code', 'codex', ...)."
+    tool: String
     inputTokens: Int
     outputTokens: Int
     turnCount: Int
@@ -1660,6 +1666,15 @@ export const typeDefs = `#graphql
     listedOnMarketplace: Boolean!
     type: AgentType!
     surfaces: [String!]!
+    # #928 team personas: a persona - a named AI team member driven by
+    # external coding sessions or portal chat - IS an Agent. Pure metadata:
+    # no server behavior forks on these fields.
+    "Persona display name ('Iris'). Unique per owner, case-insensitively."
+    personaName: String
+    "Persona role - free string with conventions ('backend-engineer')."
+    personaRole: String
+    "Persona identity paragraph; clients compose it into systemPrompt."
+    personaPrompt: String
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -3007,6 +3022,17 @@ export const typeDefs = `#graphql
     llmModel: String
     parentSessionId: String
     prevSessionId: String
+    # #928 coding-session provenance.
+    transcriptPath: String
+    host: String
+    tool: String
+    """
+    #928 / cor:api:140: the Agent (persona) driving this session, as a PK or
+    URN. Resolves to Session.agentId. The caller must be able to READ the
+    agent (PUBLIC, or owner / org member) - a session is never attributed to
+    an agent the caller cannot see.
+    """
+    agentRef: String
   }
 
   input UsageEventInput {
@@ -5247,14 +5273,14 @@ export const typeDefs = `#graphql
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!]): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaName: String, personaRole: String, personaPrompt: String): Agent!
 
     """
     Update an Agent.
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaName: String, personaRole: String, personaPrompt: String): Agent!
 
     """
     Soft-delete an Agent.
