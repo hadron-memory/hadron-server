@@ -57,6 +57,7 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
+import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
@@ -1437,6 +1438,16 @@ export async function createServer(): Promise<Express> {
     process.env.DISABLE_ASSET_ORPHAN_SWEEP !== 'true'
   ) {
     startOrphanObjectReaperLoop(db);
+  }
+
+  // Background job (#930): end sessions past `expiresAt` and sessions with
+  // no heartbeat inside their type's idle window, stamping `autoExpiredAt`.
+  // Until this loop existed both columns were schema-only fiction and an
+  // abandoned session stayed "active" forever — which is what every
+  // liveness/presence reader (the persona "taken right now" check first)
+  // hangs on.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_SESSION_REAPER !== 'true') {
+    startSessionReaperLoop(db);
   }
 
   // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in

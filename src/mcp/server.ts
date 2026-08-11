@@ -1878,7 +1878,18 @@ export function createMcpServerInstance(
           // authenticated principal is a user (createdBy unchanged).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
-          sessionId: null,
+          // #930 (PR-933 Codex P1): attribute the event to the bound session.
+          // `auth.sessionId` is a validated Session.id — an App-key caller's
+          // X-Hadron-Session, checked in resolveAppKey for existence, App
+          // ownership, not-ended and not-past-expiry — so this is a real FK,
+          // not the MCP transport session id. It was hardcoded null in all
+          // five MCP usage writers, which meant MCP work produced no session
+          // heartbeat at all: the #930 reaper counts the latest attributed
+          // UsageEvent as liveness, so a busy session could be reaped as idle.
+          // Residual gap: user-credential MCP callers cannot bind a session
+          // today (cor:aut:020:02 restricts binding to App-key callers), so
+          // their heartbeat is still only updateSession — tracked separately.
+          sessionId: auth.sessionId ?? null,
         },
       }).catch(() => {});
 
@@ -2164,7 +2175,7 @@ export function createMcpServerInstance(
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
-          sessionId: null,
+          sessionId: auth.sessionId ?? null,
         });
       }
       // One batched insert for all returned nodes' read events, fire-and-forget
@@ -2951,7 +2962,7 @@ export function createMcpServerInstance(
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
-          sessionId: null,
+          sessionId: auth.sessionId ?? null,
         },
       }).catch(() => {});
 
@@ -3238,7 +3249,7 @@ export function createMcpServerInstance(
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
-          sessionId: null,
+          sessionId: auth.sessionId ?? null,
         },
       }).catch(() => {});
 
@@ -4143,7 +4154,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
-          sessionId: null,
+          sessionId: auth.sessionId ?? null,
           actionArgs: (args ?? undefined) as Record<string, string> | undefined,
         },
       })

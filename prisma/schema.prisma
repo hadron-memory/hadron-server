@@ -1307,7 +1307,11 @@ model Session {
   /// The active write-memory for this session, when there's an
   /// unambiguous one. Resolves the multi-writable-memory ambiguity.
   memoryId        String?     @map("memory_id")
-  /// Hard expiry; the janitor reaps sessions past this point.
+  /// Hard expiry; the session reaper (src/jobs/reapSessions.ts, #930) ends
+  /// sessions past this point. NULL means no hard expiry — those are
+  /// governed by the reaper's inactivity rule instead. Set by
+  /// startAgentSession from the App's sessionTimeoutSeconds; startSession
+  /// deliberately leaves it null (the client contract carries no TTL).
   expiresAt       DateTime?   @map("expires_at")
   /// Git repo slug.
   repo            String?
@@ -1353,8 +1357,11 @@ model Session {
   outcomeMeta     Json?       @map("outcome_meta")
   startedAt       DateTime    @default(now()) @map("started_at")
   endedAt         DateTime?   @map("ended_at")
-  /// Set if the session was auto-expired due to inactivity (vs.
-  /// explicitly ended).
+  /// Set by the reaper (#930) when the session was auto-expired — past
+  /// `expiresAt`, or no heartbeat inside its type's idle window — rather
+  /// than explicitly ended. Always written together with `endedAt` and to
+  /// the same instant, so "active" stays the single predicate
+  /// `endedAt IS NULL` and this column records only HOW it ended.
   autoExpiredAt   DateTime?   @map("auto_expired_at")
   createdAt       DateTime    @default(now()) @map("created_at")
   createdBy       String?     @map("created_by")
