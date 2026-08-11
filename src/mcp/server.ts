@@ -4635,10 +4635,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!session) return textResult(`Session "${id}" not found.`);
       // #931: same write gate as the GraphQL endSession — previously this raw
       // update was ungated, so any App-scoped caller holding a session id
-      // could end another App's (or user's) session. Allowed: the session's
-      // own App, or the authenticated user the session is attributed to.
+      // could end another App's (or user's) session. Allowed: a PURE App-key
+      // principal for its own App's sessions, or the authenticated user the
+      // session is attributed to. The App branch requires the ABSENCE of a
+      // userId (#932 Codex P1): for OAuth/user callers requireAppScope()
+      // fills auth.appId from the user's active-App SELECTION, and that must
+      // not let co-members of an App end each other's sessions.
       const mayEnd =
-        (auth.appId && session.appId === auth.appId) ||
+        (!auth.userId && auth.appId && session.appId === auth.appId) ||
         (auth.userId && session.userId === auth.userId);
       if (!mayEnd) {
         return textResult(`Forbidden: session "${id}" belongs to a different App or user.`);

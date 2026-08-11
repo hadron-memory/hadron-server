@@ -1003,7 +1003,13 @@ export function requireSessionWriteAccess(
   session: { appId: string | null; userId: string | null },
 ): void {
   if (isPlatformAdmin(ctx)) return;
-  if (ctx.appId && session.appId === ctx.appId) return;
+  // App branch: PURE App-key principals only (#932 Codex P1). A hybrid
+  // principal — a user with an active-App selection, the MCP auth shape —
+  // must NOT inherit App authority, or any co-member of an App could end
+  // another member's session (and free their persona). GraphQL App-key
+  // contexts carry no userId, so this is a no-op for them; it exists so a
+  // Context built from MCP auth (userId + selected appId) can't widen.
+  if (!ctx.userId && ctx.appId && session.appId === ctx.appId) return;
   if (ctx.userId && session.userId === ctx.userId && !ctx.impersonation) return;
   throw new Error('Forbidden');
 }

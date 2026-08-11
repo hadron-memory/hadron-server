@@ -119,6 +119,17 @@ describe('updateSession (#931)', () => {
     await expect(
       M.updateSession({}, { id: appSession.id, prNumber: 4 }, ctx({ appId: generateId() })),
     ).rejects.toThrow(/Forbidden/);
+
+    // Hybrid principal (a user with an active-App selection — the MCP auth
+    // shape): the App branch must NOT apply (#932 Codex P1). A co-member of
+    // the session's App who is not its attributed user stays Forbidden.
+    const memberSession = await startAs(creator.id, app.id);
+    await expect(
+      M.updateSession({}, { id: memberSession.id, prNumber: 5 }, ctx({ userId: stranger.id, appId: app.id })),
+    ).rejects.toThrow(/Forbidden/);
+    // …while the attributed user, also carrying the App selection, passes.
+    const bySelf = await M.updateSession({}, { id: memberSession.id, prNumber: 6 }, ctx({ userId: creator.id, appId: app.id }));
+    expect(bySelf.prNumber).toBe(6);
   });
 
   it('maps an unknown id to BAD_USER_INPUT', async () => {
