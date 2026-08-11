@@ -216,6 +216,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_app_name_uniq
 CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
   ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
 
+-- #928 team personas: persona names are unique per owner (org XOR user),
+-- case-insensitively (partial functional uniques — Prisma cannot express
+-- them). Deliberately NOT filtered on deleted_at: a persona name binds to
+-- one agent forever (D-2026-08-11-006), so a soft-deleted agent keeps its
+-- name reserved.
+CREATE UNIQUE INDEX IF NOT EXISTS agents_org_persona_name_uniq
+  ON agents (organization_id, lower(persona_name))
+  WHERE persona_name IS NOT NULL AND organization_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS agents_owner_persona_name_uniq
+  ON agents (owner_user_id, lower(persona_name))
+  WHERE persona_name IS NOT NULL AND owner_user_id IS NOT NULL;
+
 -- ─── 325-user-urn: handle is the hrn:user:<handle> slug ──────────────────
 -- Case-insensitive uniqueness on the handle (lowercase-canonical), so a new
 -- lowercased handle can never collide-by-case with an existing one. Prisma's

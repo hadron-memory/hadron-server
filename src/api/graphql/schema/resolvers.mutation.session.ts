@@ -29,7 +29,7 @@ import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
-import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { NodeNotFoundError, AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -63,11 +63,41 @@ function dropNulls(t: { dateTime?: string | null; date?: string | null; timeZone
 
 export const sessionMutations = {
     startSession: async (_: unknown, { input }: { input: SessionInput }, ctx: Context) => {
+      // #928: optional persona link. `agentRef` (PK or URN, cor:api:140)
+      // resolves to Session.agentId. Gate mirrors Query.agent's read gate —
+      // a PUBLIC agent attaches for any caller, otherwise owner / org member
+      // (READER) — so a session is never attributed to an agent the caller
+      // cannot read. Resolution is not authorization (#554): the
+      // resource-scoped gate runs on the RESOLVED agent.
+      let agentId: string | undefined;
+      if (input.agentRef != null && input.agentRef !== '') {
+        let resolvedAgentId: string;
+        try {
+          ({ id: resolvedAgentId } = await resolveAgentRef(ctx.db, input.agentRef));
+        } catch (e) {
+          // A mutation input error surfaces loudly (contrast Query.agent,
+          // which masks not-found to null); malformed URNs propagate their
+          // own typed error from assertFullyQualifiedUrn.
+          if (e instanceof AgentNotFoundError) {
+            throw new GraphQLError(`Agent not found: ${input.agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          }
+          throw e;
+        }
+        const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+        if (agent.deletedAt) {
+          throw new GraphQLError(`Agent not found: ${input.agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        if (agent.visibility !== 'PUBLIC') {
+          await requireOwnerOrOrgRole(ctx, agent, 'READER');
+        }
+        agentId = resolvedAgentId;
+      }
       return ctx.db.session.create({
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
           appId: ctx.appId,
+          agentId,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
           repo: input.repo,
           branch: input.branch,
@@ -77,6 +107,10 @@ export const sessionMutations = {
           llmModel: input.llmModel,
           parentSessionId: input.parentSessionId,
           prevSessionId: input.prevSessionId,
+          // #928 coding-session provenance.
+          transcriptPath: input.transcriptPath,
+          host: input.host,
+          tool: input.tool,
         },
         include: SESSION_INCLUDE,
       });

@@ -2258,6 +2258,12 @@ export interface SessionInput {
   llmModel?: string;
   parentSessionId?: string;
   prevSessionId?: string;
+  // #928 coding-session provenance.
+  transcriptPath?: string;
+  host?: string;
+  tool?: string;
+  // #928 / cor:api:140: the Agent (persona) driving this session (PK or URN).
+  agentRef?: string;
 }
 
 export interface UsageEventInput {

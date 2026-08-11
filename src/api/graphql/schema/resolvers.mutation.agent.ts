@@ -46,10 +46,31 @@ import {
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 
+/**
+ * #928 team personas: persona-name uniqueness lives in raw partial indexes
+ * (agents_org_persona_name_uniq / agents_owner_persona_name_uniq — post-push.sql),
+ * so a collision surfaces as P2002 with the index name as target. Map it to a
+ * stable typed code: "name taken, retry with the next free name" is the
+ * allocation contract clients program against (D-2026-08-11-006). Any other
+ * P2002 rethrows untouched.
+ */
+const throwIfPersonaNameCollision = (e: unknown, personaName: string | null | undefined): void => {
+  if (
+    e instanceof Prisma.PrismaClientKnownRequestError &&
+    e.code === 'P2002' &&
+    String((e.meta as { target?: unknown } | undefined)?.target ?? '').includes('persona_name')
+  ) {
+    throw new GraphQLError(
+      `Persona name ${JSON.stringify(personaName ?? '')} is already taken for this owner — pick another name.`,
+      { extensions: { code: 'PERSONA_NAME_TAKEN' } },
+    );
+  }
+};
+
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaName, personaRole, personaPrompt }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaName?: string; personaRole?: string; personaPrompt?: string },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -199,17 +220,22 @@ export const agentMutations = {
             visibility: agentVisibility,
             type: inferredType,
             surfaces: surfaces ?? defaultSurfaces,
+            // #928 team personas — pure metadata (see schema.prisma).
+            personaName, personaRole, personaPrompt,
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           },
           include: AGENT_INCLUDE,
         });
+      }).catch((e: unknown) => {
+        throwIfPersonaNameCollision(e, personaName);
+        throw e;
       });
       return createdAgent;
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[] },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaName, personaRole, personaPrompt }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaName?: string | null; personaRole?: string | null; personaPrompt?: string | null },
       ctx: Context,
     ) => {
       // #789 / cor:api:140 — was a PK-only findUniqueOrThrow, so a caller
@@ -348,8 +374,16 @@ export const agentMutations = {
           ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
           ...(type !== undefined ? { type } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
+          // #928 team personas — pure metadata. An explicit null clears the
+          // field (GraphQL null reaches here as null, omitted as undefined).
+          ...(personaName !== undefined ? { personaName } : {}),
+          ...(personaRole !== undefined ? { personaRole } : {}),
+          ...(personaPrompt !== undefined ? { personaPrompt } : {}),
         },
         include: AGENT_INCLUDE,
+      }).catch((e: unknown) => {
+        throwIfPersonaNameCollision(e, personaName);
+        throw e;
       });
     },
 
