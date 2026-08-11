@@ -40,6 +40,7 @@ import {
   requireRole,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  requireSessionWriteAccess,
   resolveReadableNodeByLoc,
   SESSION_INCLUDE,
   mapToolCalendarEvent,
@@ -125,6 +126,36 @@ export const sessionMutations = {
       });
     },
 
+    // #931: set a live session's mutable provenance fields mid-session — a PR
+    // usually gets opened AFTER startSession already ran, so prNumber needs a
+    // write path that doesn't wait for endSession. Explicit null clears,
+    // omitted preserves. Deliberately id-only (sessions have no URN, so there
+    // is no ref form to accept — cor:api:140's "genuine PK" case). Any
+    // authorized update also bumps updatedAt, which is the liveness heartbeat
+    // the #930 inactivity reaper counts (an empty update is a valid "touch").
+    // Updates on an ENDED session stay allowed: a PR merge lands after the
+    // session ends, and late attribution is better than none.
+    updateSession: async (
+      _: unknown,
+      { id, prNumber, branch }: { id: string; prNumber?: number | null; branch?: string | null },
+      ctx: Context,
+    ) => {
+      const session = await ctx.db.session.findUnique({ where: { id } });
+      if (!session || session.deletedAt) {
+        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      requireSessionWriteAccess(ctx, session);
+      return ctx.db.session.update({
+        where: { id },
+        data: {
+          ...(prNumber !== undefined ? { prNumber } : {}),
+          ...(branch !== undefined ? { branch } : {}),
+          updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+        include: SESSION_INCLUDE,
+      });
+    },
+
     endSession: async (
       _: unknown,
       {
@@ -137,6 +168,15 @@ export const sessionMutations = {
       }: { id: string; summary?: string; inputTokens?: number; outputTokens?: number; turnCount?: number; errorCount?: number },
       ctx: Context,
     ) => {
+      // #931: same write gate as updateSession — this was previously ungated,
+      // so any authenticated principal holding a session id could end it and
+      // overwrite its summary (and free another driver's persona, since
+      // "taken" derives from active sessions post-#928).
+      const session = await ctx.db.session.findUnique({ where: { id } });
+      if (!session || session.deletedAt) {
+        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      requireSessionWriteAccess(ctx, session);
       return ctx.db.session.update({
         where: { id },
         data: { endedAt: new Date(), summary, inputTokens, outputTokens, turnCount, errorCount },

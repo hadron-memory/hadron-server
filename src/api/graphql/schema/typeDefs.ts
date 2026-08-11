@@ -4922,6 +4922,18 @@ export const typeDefs = `#graphql
 
     # Session lifecycle
     startSession(input: SessionInput!): Session!
+    """
+    #931: update a live session's mutable provenance fields (a PR is usually
+    opened after startSession already ran). Explicit null clears; omitted
+    preserves; an empty update is a valid liveness touch (bumps updatedAt,
+    which the #930 inactivity reaper counts). id-only - sessions have no URN.
+    Gate: platform admin, the session's App, or the attributed user (not via
+    impersonation). Updates on an ended session stay allowed (late PR-merge
+    attribution).
+    """
+    updateSession(id: ID!, prNumber: Int, branch: String): Session!
+
+    "Gate (#931): platform admin, the session's App, or the attributed user (not via impersonation)."
     endSession(id: ID!, summary: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
 
     # Record a usage event

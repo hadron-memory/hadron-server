@@ -988,6 +988,26 @@ export async function getAccessibleMemoryIds(
   return publicMemories.map((g) => g.id);
 }
 
+/**
+ * #931: write gate for session mutations (`updateSession` / `endSession`).
+ * A session may be written by: a platform ADMIN/OWNER; the App it belongs to
+ * (App-key caller); or the user it is attributed to (identity-scoped — not
+ * via impersonation, #876 class). Deliberately NARROWER than the session read
+ * gates: org membership grants read, never write. Before #931 `endSession`
+ * was ungated — any authenticated principal holding a session id could end
+ * it and overwrite its summary (and, post-#928, free another driver's
+ * persona, since "taken" derives from active sessions).
+ */
+export function requireSessionWriteAccess(
+  ctx: Context,
+  session: { appId: string | null; userId: string | null },
+): void {
+  if (isPlatformAdmin(ctx)) return;
+  if (ctx.appId && session.appId === ctx.appId) return;
+  if (ctx.userId && session.userId === ctx.userId && !ctx.impersonation) return;
+  throw new Error('Forbidden');
+}
+
 /** Prisma `where` clause that restricts sessions to the caller's scope. */
 export async function sessionScopeFilter(ctx: Context): Promise<Record<string, unknown>> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return {};
