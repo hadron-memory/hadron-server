@@ -70,22 +70,25 @@ export const sessionMutations = {
       // cannot read. Resolution is not authorization (#554): the
       // resource-scoped gate runs on the RESOLVED agent.
       let agentId: string | undefined;
-      if (input.agentRef != null && input.agentRef !== '') {
+      // Trimmed: a whitespace-only ref is a trivial client bug and reads as
+      // absent, not as a malformed URN (#929 review).
+      const agentRef = input.agentRef?.trim();
+      if (agentRef) {
         let resolvedAgentId: string;
         try {
-          ({ id: resolvedAgentId } = await resolveAgentRef(ctx.db, input.agentRef));
+          ({ id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef));
         } catch (e) {
           // A mutation input error surfaces loudly (contrast Query.agent,
           // which masks not-found to null); malformed URNs propagate their
           // own typed error from assertFullyQualifiedUrn.
           if (e instanceof AgentNotFoundError) {
-            throw new GraphQLError(`Agent not found: ${input.agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+            throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
           }
           throw e;
         }
         const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
         if (agent.deletedAt) {
-          throw new GraphQLError(`Agent not found: ${input.agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
         }
         if (agent.visibility !== 'PUBLIC') {
           await requireOwnerOrOrgRole(ctx, agent, 'READER');
@@ -98,6 +101,12 @@ export const sessionMutations = {
           type: (input.type as any) ?? 'DEVELOPER',
           appId: ctx.appId,
           agentId,
+          // #929 review P1: attribute the session to the calling user (the
+          // schema documents userId as "the developer in a DEVELOPER
+          // session"). Without it a session started outside any App context
+          // (appId null — the CLI coding case) was invisible to its own
+          // creator through both session read gates.
+          userId: ctx.userId ?? null,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
           repo: input.repo,
           branch: input.branch,

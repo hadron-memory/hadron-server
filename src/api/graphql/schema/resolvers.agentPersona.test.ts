@@ -28,6 +28,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 }));
 
 const M = resolvers.Mutation as any;
+const Q = resolvers.Query as any;
 
 function ctx(userId?: string): Context {
   return { db, userId, roles: ['READER'] };
@@ -140,6 +141,31 @@ describe('createAgent — persona columns (#928)', () => {
     expect(other.personaName).toBe('Iris');
   });
 
+  it('trims persona fields; blank-after-trim is stored as NULL and reserves nothing (#929 review)', async () => {
+    const blank = await M.createAgent(
+      {},
+      { orgId: orgA.id, name: 'Blank One', personaName: '   ', personaRole: ' ', personaPrompt: '' },
+      ctx(adminA.id),
+    );
+    expect(blank.personaName).toBeNull();
+    expect(blank.personaRole).toBeNull();
+    expect(blank.personaPrompt).toBeNull();
+    // A second blank does not collide — whitespace reserved nothing.
+    const blank2 = await M.createAgent(
+      {},
+      { orgId: orgA.id, name: 'Blank Two', personaName: '  ' },
+      ctx(adminA.id),
+    );
+    expect(blank2.personaName).toBeNull();
+    // A padded real name is stored trimmed.
+    const padded = await M.createAgent(
+      {},
+      { orgId: orgA.id, name: 'Padded', personaName: '  Iris  ' },
+      ctx(adminA.id),
+    );
+    expect(padded.personaName).toBe('Iris');
+  });
+
   it('user-owned: uniqueness is per owner — two users may both have Iris, one user may not have her twice', async () => {
     const first = await M.createAgent(
       {},
@@ -248,6 +274,35 @@ describe('startSession — coding provenance + agentRef (#928)', () => {
       ),
       'BAD_USER_INPUT',
     );
+  });
+
+  it('treats a whitespace-only agentRef as absent (#929 review)', async () => {
+    const s = await M.startSession(
+      {},
+      { input: { id: generateId(), agentRef: '   ', tool: 'claude-code' } },
+      ctx(readerA.id),
+    );
+    expect(s.agentId).toBeNull();
+  });
+
+  it('attributes the session to the calling user and makes it readable by its creator (#929 review P1)', async () => {
+    // `outsider` belongs to NO org, so pre-P1 both read gates (app-scoped
+    // only) would hide this session from its own creator.
+    const s = await M.startSession(
+      {},
+      { input: { id: generateId(), tool: 'claude-code', host: 'mbp' } },
+      ctx(outsider.id),
+    );
+    expect(s.userId).toBe(outsider.id);
+    // Single read: creator sees it; an unrelated user does not.
+    const single = await Q.session({}, { id: s.id }, ctx(outsider.id));
+    expect(single?.id).toBe(s.id);
+    expect(await Q.session({}, { id: s.id }, ctx(userOne.id))).toBeNull();
+    // List: creator's scope includes it; org member readerA's does not.
+    const mine = await Q.sessions({}, {}, ctx(outsider.id));
+    expect(mine.map((x: { id: string }) => x.id)).toContain(s.id);
+    const others = await Q.sessions({}, {}, ctx(userOne.id));
+    expect(others.map((x: { id: string }) => x.id)).not.toContain(s.id);
   });
 
   it('refuses to attribute a session to a non-public agent the caller cannot read', async () => {

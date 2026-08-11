@@ -54,6 +54,18 @@ import {
  * allocation contract clients program against (D-2026-08-11-006). Any other
  * P2002 rethrows untouched.
  */
+/**
+ * #928/#929 review: persona fields are trimmed, and a blank-after-trim value
+ * is NULL (absent on create, clear on update) — never a stored value, so
+ * whitespace can't reserve a name in the uniqueness index. undefined passes
+ * through (omitted arg = no change on update).
+ */
+const normalizePersonaField = (v: string | null | undefined): string | null | undefined => {
+  if (v === undefined || v === null) return v;
+  const trimmed = v.trim();
+  return trimmed === '' ? null : trimmed;
+};
+
 const throwIfPersonaNameCollision = (e: unknown, personaName: string | null | undefined): void => {
   if (
     e instanceof Prisma.PrismaClientKnownRequestError &&
@@ -73,6 +85,10 @@ export const agentMutations = {
       { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaName, personaRole, personaPrompt }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaName?: string; personaRole?: string; personaPrompt?: string },
       ctx: Context,
     ) => {
+      // #929 review: normalize persona inputs before anything touches them.
+      const personaNameNorm = normalizePersonaField(personaName);
+      const personaRoleNorm = normalizePersonaField(personaRole);
+      const personaPromptNorm = normalizePersonaField(personaPrompt);
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
       // present ⇒ org-owned (org ADMIN); `orgId` omitted ⇒ user-owned by the
       // caller, namespaced under their `@<handle>`. The chosen `namespace` is
@@ -221,13 +237,13 @@ export const agentMutations = {
             type: inferredType,
             surfaces: surfaces ?? defaultSurfaces,
             // #928 team personas — pure metadata (see schema.prisma).
-            personaName, personaRole, personaPrompt,
+            personaName: personaNameNorm, personaRole: personaRoleNorm, personaPrompt: personaPromptNorm,
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           },
           include: AGENT_INCLUDE,
         });
       }).catch((e: unknown) => {
-        throwIfPersonaNameCollision(e, personaName);
+        throwIfPersonaNameCollision(e, personaNameNorm);
         throw e;
       });
       return createdAgent;
@@ -238,6 +254,10 @@ export const agentMutations = {
       { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaName, personaRole, personaPrompt }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaName?: string | null; personaRole?: string | null; personaPrompt?: string | null },
       ctx: Context,
     ) => {
+      // #929 review: normalize persona inputs (blank-after-trim clears).
+      const personaNameNorm = normalizePersonaField(personaName);
+      const personaRoleNorm = normalizePersonaField(personaRole);
+      const personaPromptNorm = normalizePersonaField(personaPrompt);
       // #789 / cor:api:140 — was a PK-only findUniqueOrThrow, so a caller
       // holding a URN or handle had to pre-resolve it. resolveAgentRef is a
       // pure lookup and does NOT authorize (#554): the resource-scoped
@@ -374,15 +394,15 @@ export const agentMutations = {
           ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
           ...(type !== undefined ? { type } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
-          // #928 team personas — pure metadata. An explicit null clears the
-          // field (GraphQL null reaches here as null, omitted as undefined).
-          ...(personaName !== undefined ? { personaName } : {}),
-          ...(personaRole !== undefined ? { personaRole } : {}),
-          ...(personaPrompt !== undefined ? { personaPrompt } : {}),
+          // #928 team personas — pure metadata. An explicit null (or a
+          // blank-after-trim string) clears the field; omitted preserves.
+          ...(personaNameNorm !== undefined ? { personaName: personaNameNorm } : {}),
+          ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
+          ...(personaPromptNorm !== undefined ? { personaPrompt: personaPromptNorm } : {}),
         },
         include: AGENT_INCLUDE,
       }).catch((e: unknown) => {
-        throwIfPersonaNameCollision(e, personaName);
+        throwIfPersonaNameCollision(e, personaNameNorm);
         throw e;
       });
     },
