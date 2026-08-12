@@ -51,6 +51,7 @@ import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
 import { teamPersonaMutations } from './resolvers.mutation.teamPersona.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
+import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { appMutations } from './resolvers.mutation.app.js';
 import { chatMutations } from './resolvers.mutation.chat.js';
 import { sessionMutations } from './resolvers.mutation.session.js';
@@ -76,6 +77,7 @@ export const resolvers = {
     ...appQueries,
     ...chatQueries,
     ...teamChatQueries,
+    ...teamWorkQueries,
     ...sessionQueries,
     ...slackQueries,
     ...mcpQueries,
@@ -105,6 +107,7 @@ export const resolvers = {
     ...agentMutations,
     ...teamPersonaMutations,
     ...teamChatMutations,
+    ...teamWorkMutations,
     ...appMutations,
     ...chatMutations,
     ...sessionMutations,

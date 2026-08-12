@@ -1850,6 +1850,40 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  """
+  One team-worklog record (#947) — an externally visible work milestone (a PR
+  opened, a branch pushed, an issue closed), append-only. The worklog is the
+  AUTHORITATIVE PR-session join (spec cor:agt:020:03); Session.prNumber is a
+  latest-wins display convenience. ref carries the ONE canonical spelling per
+  artifact (github: owner/repo#N, owner/repo@sha, owner/repo:branch,
+  owner/repo; owner/repo lowercased).
+  """
+  type TeamWorkItem {
+    "The record node's id."
+    nodeId: ID!
+    "The session the work is attributed to."
+    sessionId: ID!
+    "Display convenience, denormalized at write: the session's bound persona name, else the attributed user's handle."
+    personaName: String!
+    "The external tool the artifact lives in ('github', ...). Lowercased."
+    tool: String!
+    "Artifact kind: pr, issue, commit, branch, or repo."
+    kind: String!
+    "The canonical artifact ref — the equality-lookup key."
+    ref: String!
+    "What happened: opened, merged, claimed, reviewed, closed, pushed, ... (free string, lowercased)."
+    action: String!
+    "When the record was made (server-stamped)."
+    at: DateTime!
+    "Optional display extras (title, URL) — never filtered on."
+    detail: JSON
+  }
+
+  type TeamWorkItemsPage {
+    items: [TeamWorkItem!]!
+    total: Int!
+  }
+
   type AgentMemoryItem {
     id: ID!
     memory: Memory!
@@ -4458,6 +4492,33 @@ export const typeDefs = `#graphql
       offset: Int
     ): TeamChatMessagesPage!
 
+    """
+    Read a team App's worklog (#947) — the provenance query: which sessions
+    (and transcripts) produced this PR? Newest first, as a uniform
+    { items, total } page. ref accepts ANY accepted spelling (URL, short form,
+    canonical) and is normalized before matching, so a lookup by
+    'https://github.com/o/r/pull/371' and by 'o/r#371' return the same
+    records; a spelling that fits no github form matches verbatim (non-github
+    tools). sessionRef / tool / kind are equality filters; kind must be one of
+    pr, issue, commit, branch, repo when given. limit defaults to 50 (cap
+    200); limit: 0 returns only total.
+
+    Authorization: an AppMember of the App (any role), an org member with
+    CONTRIBUTOR+ on the App's org, the owner of a user-owned App, or the
+    App's own key (a pure App-key principal may READ its own App's worklog).
+
+    appRef accepts the entity's ID or URN; sessionRef is the session id.
+    """
+    teamWorkItems(
+      appRef: ID!
+      ref: String
+      sessionRef: ID
+      tool: String
+      kind: String
+      limit: Int
+      offset: Int
+    ): TeamWorkItemsPage!
+
     # ── Assets (spec 004-asset-upload + 006-asset-upload-redesign) ────
     # v1 — agent-addressed listing. Deprecated; use memoryAssets.
     agentAssets(
@@ -6042,6 +6103,43 @@ export const typeDefs = `#graphql
       replyToSeq: Int
       sessionRef: ID
     ): TeamChatMessage!
+
+    """
+    Record an externally visible work milestone into the team App's worklog
+    (#947) — the append-only, authoritative PR-session join (spec
+    cor:agt:020:03). The session must be writable by the caller and a session
+    OF this App (SessionInput.appRef, #944); an ENDED session is accepted —
+    late attribution (a merge lands after the session ends) is the point.
+    ref accepts URL and short spellings and is stored in ONE canonical form
+    (github: owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo);
+    a bare number is refused — the server never infers a repo. kind must be
+    one of pr, issue, commit, branch, repo; action is a free lowercased verb
+    (opened, merged, claimed, reviewed, closed, pushed, ...). kind: pr also
+    denormalizes the latest-wins Session.prNumber display convenience.
+    detail is an optional JSON bag of display extras (title, URL) — stored,
+    never filtered on. Records are append-only: correct a wrong record by
+    recording a newer one.
+
+    Authorization: an AppMember of the App (any role), an org member with
+    CONTRIBUTOR+ on the App's org, or the owner of a user-owned App. A pure
+    App-key principal may NOT record (read-only on the worklog).
+
+    Typed refusals: WORK_REF_INVALID, SESSION_NOT_FOUND, SESSION_NOT_IN_APP,
+    SESSION_AGENT_NOT_IN_APP, TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS
+    (first-write bootstrap could not locate the Team Agent),
+    APP_UNINSTALLED, FORBIDDEN, BAD_USER_INPUT.
+
+    appRef accepts the entity's ID or URN; sessionRef is the session id.
+    """
+    recordTeamWork(
+      appRef: ID!
+      sessionRef: ID!
+      tool: String!
+      kind: String!
+      ref: String!
+      action: String!
+      detail: JSON
+    ): TeamWorkItem!
 
     """
     Uninstall an Agent from an App. Deletes the AppAgent row. The Agent's

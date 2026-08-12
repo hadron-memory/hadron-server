@@ -4834,6 +4834,115 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
+  // ── hadron_record_work / hadron_team_work_items ───────────────────────────────
+
+  server.tool(
+    'hadron_record_work',
+    'Record an externally visible work milestone (a PR opened, a branch pushed, an issue closed) into the team App\'s worklog (#947) — the append-only, authoritative PR-session join. Pass the session doing the work; ref accepts a github URL or short form (owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) and is stored in ONE canonical spelling. A bare number is refused — include the repo. kind: pr also updates the session\'s displayed PR number. Correct a wrong record by recording a newer one (records are never edited).',
+    {
+      session: z.string().describe('The session id the work is attributed to (must be a session of the team App).'),
+      tool: z.string().describe('The external tool the artifact lives in, e.g. "github".'),
+      kind: z.string().describe('Artifact kind: pr | issue | commit | branch | repo.'),
+      ref: z.string().describe('The artifact ref — a github URL or short form; stored canonically (e.g. owner/repo#371).'),
+      action: z.string().describe('What happened: opened | merged | claimed | reviewed | closed | pushed | ... (free verb).'),
+      detail: z.record(z.string(), z.unknown()).optional().describe('Optional display extras (title, URL) — stored, never filtered on.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ session, tool, kind, ref, action, detail, app }) => {
+      // Delegate to the GraphQL resolver (findings:node-write-surface-
+      // invariants — MCP tools delegate, never re-implement). App default
+      // mirrors hadron_create_persona: requireAppScope() runs BEFORE reading
+      // auth.appId so the omit-app flow honors hadron_set_active_app.
+      let appRef = app;
+      if (!appRef) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      try {
+        const item = await resolvers.Mutation.recordTeamWork(
+          {},
+          { appRef, sessionRef: session, tool, kind, ref, action, detail: detail ?? null },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
+        return textResult(
+          `Recorded: ${item.kind} ${item.action} ${item.ref} — session ${item.sessionId} (${item.personaName}) at ${item.at.toISOString()}.`,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'work record failed'}`);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_team_work_items',
+    'Read the team App\'s worklog (#947) — the provenance query: which sessions produced this PR/artifact? Newest first. Pass ref in ANY accepted spelling (github URL, owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) — it is normalized before matching. Filter further by session, tool, or kind. Each item carries the sessionId; read the session for its transcript path.',
+    {
+      ref: z.string().optional().describe('The artifact to look up, in any accepted spelling (e.g. a PR URL or owner/repo#371).'),
+      session: z.string().optional().describe('Filter to records of this session id.'),
+      tool: z.string().optional().describe('Filter by tool (e.g. "github").'),
+      kind: z.string().optional().describe('Filter by kind: pr | issue | commit | branch | repo.'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ ref, session, tool, kind, limit, offset, app }) => {
+      let appRef = app;
+      if (!appRef) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      try {
+        const page = await resolvers.Query.teamWorkItems(
+          {},
+          {
+            appRef,
+            ref: ref ?? null,
+            sessionRef: session ?? null,
+            tool: tool ?? null,
+            kind: kind ?? null,
+            limit: limit ?? null,
+            offset: offset ?? null,
+          },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
+        if (page.total === 0) return textResult('No matching worklog records.');
+        const lines = page.items.map(
+          (i) =>
+            `${i.at.toISOString()} [${i.personaName}] ${i.kind} ${i.action} ${i.ref} (session ${i.sessionId})`,
+        );
+        return textResult(
+          `${page.total} record(s) total, showing ${page.items.length}:\n\n${lines.join('\n')}`,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'worklog read failed'}`);
+      }
+    },
+  );
+
   // ── hadron_validate ───────────────────────────────────────────────────────────
 
   server.tool(
