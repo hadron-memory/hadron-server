@@ -95,7 +95,7 @@ type TeamAgentRow = {
  * self-describing. Zero markers or two-plus markers are typed refusals, never
  * a guess.
  */
-async function locateTeamAgent(
+export async function locateTeamAgent(
   ctx: Context,
   appId: string,
   teamAgentRef: string | null | undefined,

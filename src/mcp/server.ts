@@ -4729,6 +4729,111 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
+  // ── hadron_team_chat_post / hadron_team_chat_read ─────────────────────────────
+
+  server.tool(
+    'hadron_team_chat_post',
+    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @persona-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the persona bound to that session (the driving session is recorded); omit it to post as yourself. Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
+    {
+      body: z.string().describe('The message text (max 65536 characters). Mention teammates as @persona-name or @handle.'),
+      replyToSeq: z.number().int().optional().describe('seq of the message this replies to (a replies-to edge is wired).'),
+      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound persona. Omit to post as yourself.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ body, replyToSeq, session, app }) => {
+      // Delegate to the GraphQL resolver (findings:node-write-surface-
+      // invariants — MCP tools delegate, never re-implement). App default
+      // mirrors hadron_create_persona: requireAppScope() runs BEFORE reading
+      // auth.appId so the omit-app flow honors hadron_set_active_app.
+      let appRef = app;
+      if (!appRef) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      try {
+        const msg = await resolvers.Mutation.createTeamChatMessage(
+          {},
+          { appRef, body, replyToSeq: replyToSeq ?? null, sessionRef: session ?? null },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
+        const extras: string[] = [];
+        if (msg.mentions.length > 0) extras.push(`mentions: ${msg.mentions.map((m: string) => `@${m}`).join(', ')}`);
+        if (msg.replyToSeq != null) extras.push(`in reply to #${msg.replyToSeq}`);
+        return textResult(
+          `Posted team-chat message #${msg.seq} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_team_chat_read',
+    'Read the team App\'s chat (#939), oldest first by seq. Pass sinceSeq to fetch only messages AFTER a watermark (strictly greater — pass the last seq you have seen). Pass mentions (a persona/agent URN, user handle, or id) to filter to messages that mention them. Returns seq, author, timestamp, and body per message plus the total count.',
+    {
+      sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
+      mentions: z.string().optional().describe('Filter to messages mentioning this persona (Agent URN/id) or user (handle/id).'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ sinceSeq, mentions, limit, offset, app }) => {
+      let appRef = app;
+      if (!appRef) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      try {
+        const page = await resolvers.Query.teamChatMessages(
+          {},
+          {
+            appRef,
+            sinceSeq: sinceSeq ?? null,
+            mentionsRef: mentions ?? null,
+            limit: limit ?? null,
+            offset: offset ?? null,
+          },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
+        if (page.total === 0) return textResult('The team chat has no matching messages.');
+        const lines = page.items.map((m) => {
+          const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
+          return `#${m.seq} [${m.authorName ?? 'unknown'}] ${m.at.toISOString()}${reply}:\n${m.body}`;
+        });
+        return textResult(
+          `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`);
+      }
+    },
+  );
+
   // ── hadron_validate ───────────────────────────────────────────────────────────
 
   server.tool(

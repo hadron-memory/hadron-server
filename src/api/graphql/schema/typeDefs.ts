@@ -1820,6 +1820,36 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
   }
 
+  """
+  One message in a team App's chat (#939). Exactly one of authorUserId /
+  authorAgentId is set: a human post carries the user, a persona post carries
+  the persona Agent plus the driving sessionId. mentions holds the lowercased
+  tokens extracted server-side at write time (the '@persona-name / @handle'
+  format, stored without the '@').
+  """
+  type TeamChatMessage {
+    "The message node's id."
+    nodeId: ID!
+    "Ordering key, unique per chat, allocated atomically (ascending from 1)."
+    seq: Int!
+    body: String!
+    at: DateTime!
+    authorUserId: ID
+    authorAgentId: ID
+    "Display convenience: the persona name or the user handle."
+    authorName: String
+    "The session driving the persona author, when posted via sessionRef."
+    sessionId: ID
+    "The seq this message replies to, when it is a reply."
+    replyToSeq: Int
+    mentions: [String!]!
+  }
+
+  type TeamChatMessagesPage {
+    items: [TeamChatMessage!]!
+    total: Int!
+  }
+
   type AgentMemoryItem {
     id: ID!
     memory: Memory!
@@ -4383,6 +4413,32 @@ export const typeDefs = `#graphql
     # suitable for feeding back into an LLM.
     chatHistory(chatId: String!, limit: Int): [ChatMessage!]!
 
+    """
+    Read a team App's chat (#939), seq-ordered ascending, as a uniform
+    { items, total } page. sinceSeq is a watermark cursor: only messages with
+    seq STRICTLY GREATER than it are returned (pass the last seq you have
+    seen). mentionsRef filters to messages whose stored envelope mentions the
+    referenced persona (Agent ref) or user (user ref) — matching runs against
+    the mention tokens extracted at write time, never by re-parsing bodies.
+    The ref must name a member of THIS App's roster (an installed Agent, an
+    AppMember, or the caller); an unresolvable or off-roster mentionsRef
+    yields the empty page identically (no existence oracle). limit defaults
+    to 50 (cap 200); limit: 0 returns only total.
+
+    Authorization: an AppMember of the App (any role), an org member with
+    CONTRIBUTOR+ on the App's org, the owner of a user-owned App, or the
+    App's own key (a pure App-key principal may READ its team chat).
+
+    appRef and mentionsRef accept the entity's ID or URN.
+    """
+    teamChatMessages(
+      appRef: ID!
+      sinceSeq: Int
+      mentionsRef: ID
+      limit: Int
+      offset: Int
+    ): TeamChatMessagesPage!
+
     # ── Assets (spec 004-asset-upload + 006-asset-upload-redesign) ────
     # v1 — agent-addressed listing. Deprecated; use memoryAssets.
     agentAssets(
@@ -5929,6 +5985,44 @@ export const typeDefs = `#graphql
       teamAgentRef: ID
       name: String
     ): Agent!
+
+    """
+    Post a message into a team App's chat (#939) as a platform operation.
+    The team chat is ONE well-known chat per team App, at loc chats:team in
+    the Team Agent's shared app-class memory, bootstrapped on first post.
+    The message is written through the atomic chat-message allocator (#919),
+    so racing posts get distinct consecutive seqs.
+
+    Author derivation: with sessionRef, the message is authored by that
+    session's bound persona (the session must be writable by the caller, a
+    session OF this App, active, and agent-bound) and the envelope records
+    the driving sessionId; without it, by the calling human. Mentions
+    ('@persona-name' / '@handle'; a multi-word name is mentioned by its
+    slug, e.g. '@mary-jane') are extracted server-side at write time into
+    the envelope. replyToSeq wires a replies-to edge to the cited message.
+    body is capped at 65536 characters.
+
+    Authorization: an AppMember of the App (any role — every member of the
+    host is a participant per cor:acl:030:01), an org member with
+    CONTRIBUTOR+ on the App's org, or the owner of a user-owned App. Pure
+    App-key principals cannot post.
+
+    Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE,
+    TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_NOT_IN_APP (the
+    session belongs to a different App — a persona never authors across
+    Apps), SESSION_ENDED, SESSION_NOT_PERSONA_BOUND, SESSION_EXPIRED
+    (encrypted team memory without an active session key),
+    TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could
+    not locate the Team Agent), APP_UNINSTALLED, FORBIDDEN.
+
+    appRef accepts the entity's ID or URN; sessionRef is the session id.
+    """
+    createTeamChatMessage(
+      appRef: ID!
+      body: String!
+      replyToSeq: Int
+      sessionRef: ID
+    ): TeamChatMessage!
 
     """
     Uninstall an Agent from an App. Deletes the AppAgent row. The Agent's
