@@ -86,8 +86,8 @@ const throwIfPersonaNameCollision = (e: unknown, personaName: string | null | un
  * get a stable code instead of INTERNAL_SERVER_ERROR.
  */
 export class AgentUrnTakenError extends GraphQLError {
-  constructor(urn: string) {
-    super(`An agent with URN "${urn}" already exists`, {
+  constructor(urn: string, message?: string) {
+    super(message ?? `An agent with URN "${urn}" already exists`, {
       extensions: { code: 'AGENT_URN_TAKEN', urn },
     });
   }
@@ -220,7 +220,14 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         if (staleHolder.deletedAt) {
           await tx.memory.delete({ where: { id: staleHolder.id } });
         } else {
-          throw new Error(`A memory with URN "${systemMemoryUrn}" already exists`);
+          // #935: typed — under racing creates of the same name, the loser
+          // can land HERE (the winner's system memory committed between the
+          // agent-urn pre-check and this one), and allocation loops must see
+          // the same slot-occupied refusal as every other urn collision.
+          throw new AgentUrnTakenError(
+            agentUrn,
+            `A memory with URN "${systemMemoryUrn}" already exists`,
+          );
         }
       }
       const systemMemory = await tx.memory.create({
