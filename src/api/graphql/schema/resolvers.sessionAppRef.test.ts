@@ -197,7 +197,7 @@ describe('#943 — appRef resolution', () => {
     await expectCode(startSession(ctx(admin.id), { appRef: dead.id }), 'BAD_USER_INPUT');
   });
 
-  it('rejects an uninstalled App with APP_UNINSTALLED', async () => {
+  it('rejects an uninstalled App: APP_UNINSTALLED by PK, BAD_USER_INPUT by URN', async () => {
     const gone = await db.app.create({
       data: {
         id: generateId(),
@@ -207,7 +207,13 @@ describe('#943 — appRef resolution', () => {
         uninstalledAt: new Date(),
       },
     });
+    // By PK the row is unambiguous, so the refusal is the specific one.
     await expectCode(startSession(ctx(admin.id), { appRef: gone.id }), 'APP_UNINSTALLED');
+    // By URN it is not found at all, and that is correct rather than a gap
+    // (#944 review): App URNs are unique only among ACTIVE rows (spec 021
+    // FR-027), so this URN may name several uninstalled rows — and may later
+    // name a different LIVE App. Pinned so the asymmetry is deliberate.
+    await expectCode(startSession(ctx(admin.id), { appRef: gone.urn }), 'BAD_USER_INPUT');
   });
 
   it('declares appRef on SessionInput in the SDL (#789 drift class)', () => {
@@ -286,6 +292,101 @@ describe('#943 — App-key precedence', () => {
     await expectCode(
       startSession(ctx(contrib.id, app.id), { appRef: otherApp.id }),
       'SESSION_APP_MISMATCH',
+    );
+  });
+});
+
+describe('#944 review — the bound agent must be on the App\'s roster to author', () => {
+  /**
+   * Codex P1 / Copilot on PR #944. `appRef` and `agentRef` are authorized
+   * INDEPENDENTLY — the agent gate only requires readability, so a PUBLIC
+   * agent of another tenant can legitimately be bound to a session. Without a
+   * roster check at post time, a participant could author into their team's
+   * chat under that foreign agent's identity. The mention filter already
+   * resolves Agent refs only when INSTALLED, so the write side was the
+   * asymmetric half.
+   */
+  it('refuses a foreign PUBLIC agent bound to a session of this App', async () => {
+    const otherOrg = await db.organization.create({
+      data: { id: generateId(), name: 'sar-other-org', urn: `sar-other-${generateId().slice(-8)}.com` },
+    });
+    const foreignAgent = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: otherOrg.id,
+        name: 'Impostor',
+        personaName: 'Ada',
+        urn: `${otherOrg.urn}:impostor`,
+        visibility: 'PUBLIC',
+      },
+    });
+    // Binding succeeds — attribution is not authorship (a PUBLIC agent is
+    // readable by anyone, which is exactly why the gate can't live here).
+    const session = await startSession(ctx(contrib.id), {
+      appRef: app.id,
+      agentRef: foreignAgent.id,
+    });
+    expect(session.agentId).toBe(foreignAgent.id);
+    // Authorship is refused.
+    await expectCode(
+      M.createTeamChatMessage(
+        {},
+        { appRef: app.id, body: 'hello from nowhere', sessionRef: session.id },
+        ctx(contrib.id),
+      ),
+      'SESSION_AGENT_NOT_IN_APP',
+    );
+  });
+
+  it('refuses an own-org agent that is not installed in the App', async () => {
+    const notInstalled = await M.createAgent(
+      {},
+      { orgId: org.id, name: 'Unrostered', personaName: 'Mallory' },
+      ctx(admin.id),
+    );
+    const session = await startSession(ctx(contrib.id), {
+      appRef: app.id,
+      agentRef: notInstalled.id,
+    });
+    await expectCode(
+      M.createTeamChatMessage(
+        {},
+        { appRef: app.id, body: 'not on the team', sessionRef: session.id },
+        ctx(contrib.id),
+      ),
+      'SESSION_AGENT_NOT_IN_APP',
+    );
+  });
+
+  it('honours an uninstall that happens AFTER the session started', async () => {
+    // Why the check lives at post time and not at bind time: this sequence is
+    // inexpressible with a bind-time gate.
+    const persona = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer' },
+      ctx(admin.id),
+    );
+    const session = await startSession(ctx(contrib.id), {
+      appRef: app.id,
+      agentRef: persona.urn,
+    });
+    // Posting works while the persona is on the roster.
+    await M.createTeamChatMessage(
+      {},
+      { appRef: app.id, body: 'still on the team', sessionRef: session.id },
+      ctx(contrib.id),
+    );
+    // Uninstall is a hard row delete (AppAgent has no soft-delete).
+    await db.appAgent.delete({
+      where: { appId_agentId: { appId: app.id, agentId: persona.id } },
+    });
+    await expectCode(
+      M.createTeamChatMessage(
+        {},
+        { appRef: app.id, body: 'after the uninstall', sessionRef: session.id },
+        ctx(contrib.id),
+      ),
+      'SESSION_AGENT_NOT_IN_APP',
     );
   });
 });

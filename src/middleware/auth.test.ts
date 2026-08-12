@@ -244,6 +244,58 @@ describe('resolveAuthContext', () => {
       const ctx = await resolveAuthContext(req, db);
       expect(ctx.sessionId).toBeUndefined();
     });
+
+    /**
+     * #943 regression. `Session.appId` used to be writable ONLY by an App key,
+     * so "this session names my App" and "my App created this session" were
+     * the same statement. `SessionInput.appRef` (PR #944) lets a MEMBER stamp
+     * it, and the session id is caller-generated — so this binding check is
+     * now the only thing standing between a caller-suppliable column and
+     * `getAccessibleMemoryIds`'s App-key-with-session branch
+     * (`resolvers.helpers.ts:926`), which returns the session's memory + the
+     * bound agent's system memory AS the accessible set.
+     *
+     * Both directions are pinned: a foreign App's key must not bind a session
+     * merely because a user stamped that session with some App, and the named
+     * App's key must still bind (the feature would be inert otherwise).
+     */
+    it('binds by the session App, not by who created it (#943 caller-suppliable appId)', async () => {
+      const { appId, rawKey } = await createAppWithKey();
+      await db.organization.create({
+        data: { id: 'org-bystander', name: 'bystander', urn: 'bystander' },
+      });
+      const bystander = await db.app.create({
+        data: { id: 'app-bystander', organizationId: 'org-bystander', name: 'Bystander', urn: 'bystander:app' },
+      });
+      const { createHash, randomBytes } = await import('crypto');
+      const bystanderKey = 'hdr_app_' + randomBytes(32).toString('hex');
+      await db.appKey.create({
+        data: {
+          id: 'key-bystander',
+          appId: bystander.id,
+          keyHash: createHash('sha256').update(bystanderKey).digest('hex'),
+          keyPreview: bystanderKey.slice(0, 12) + '...',
+        },
+      });
+      // A member-started session that NAMES app-1 — the state `appRef` makes
+      // reachable without app-1's key ever being involved.
+      await db.user.create({
+        data: { id: 'user-member', githubId: 9431, githubUsername: 'member', roles: ['READER'] },
+      });
+      await db.session.create({
+        data: { id: 'sess-member', appId, userId: 'user-member', type: 'DEVELOPER' },
+      });
+      const withKey = (key: string) =>
+        resolveAuthContext(
+          {
+            headers: { authorization: `Bearer ${key}`, 'x-hadron-session': 'sess-member' },
+          } as unknown as Request,
+          db,
+        );
+
+      expect((await withKey(bystanderKey)).sessionId).toBeUndefined();
+      expect((await withKey(rawKey)).sessionId).toBe('sess-member');
+    });
   });
 
   // ── User API Key auth (spec 025-oauth-for-mcp) ──────────────────

@@ -127,6 +127,13 @@ export const sessionMutations = {
         // resolveAppRef already excludes soft-deleted rows, and excludes
         // uninstalled ones on the URN path only — re-check both here so the ID
         // path can't attach a session to a dead App.
+        //
+        // The URN/PK asymmetry on APP_UNINSTALLED is deliberate, not an
+        // oversight (#944 review): App URNs are unique only among ACTIVE rows
+        // (spec 021 FR-027), so an uninstalled App's URN may name several dead
+        // rows and/or belong to a different live App — "not found" is the only
+        // honest answer there. By PK the row is unambiguous, so it earns the
+        // more specific refusal. Both forms are tested.
         if (app.deletedAt) {
           throw new GraphQLError(`App not found: ${appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
         }
