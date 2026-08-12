@@ -3063,6 +3063,25 @@ export const typeDefs = `#graphql
     an agent the caller cannot see.
     """
     agentRef: String
+    """
+    #943 / cor:api:140: the App this session is a unit of work for, as a PK or
+    URN. Resolves to Session.appId - the pivot that was previously stamped ONLY
+    from an App-key credential, which made a user-started session structurally
+    unable to satisfy the team-chat authorship gate (cor:agt:020:04 condition b,
+    SESSION_NOT_IN_APP). The caller must be a member of that App: an AppMember
+    at any role, an org member with CONTRIBUTOR+ on its owning org, or the
+    owner of a user-owned App. Unknown or deleted App: BAD_USER_INPUT;
+    non-member: FORBIDDEN. An App-key credential wins - if the caller
+    authenticated as an App and appRef names a DIFFERENT App, the call is
+    refused (SESSION_APP_MISMATCH).
+
+    Uninstalled Apps differ by ref form, because App URNs are only unique
+    among ACTIVE rows (spec 021 FR-027: one live App plus N uninstalled
+    history rows may share a URN). By URN an uninstalled App is simply not
+    found - BAD_USER_INPUT - since there is no single row the URN names; by
+    PK it is found and refused APP_UNINSTALLED.
+    """
+    appRef: String
   }
 
   input UsageEventInput {

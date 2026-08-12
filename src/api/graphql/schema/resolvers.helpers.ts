@@ -577,6 +577,63 @@ export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<b
   return !!member;
 }
 
+/**
+ * App-participation predicate — "may this USER act as a member of this App?"
+ * (#939's team-chat gate, generalized in #943 so `startSession`'s `appRef`
+ * gate is the SAME predicate rather than a second copy of it).
+ *
+ * Admits: an AppMember at ANY role (participation follows the host memory's
+ * audience — `cor:acl:030:01`, so a 'reader' member counts), an org member
+ * with CONTRIBUTOR+ on the App's owning org (parity with the persona-mint
+ * gate's org branch, and platform ADMIN/OWNER via `requireOrgRole`), or the
+ * owner of a user-owned App.
+ *
+ * This is the USER branch only. Callers own their principal-shape policy
+ * around it (findings:auth-appid-credential-vs-selection): a caller with no
+ * `userId` is a pure App-key (or anonymous) principal and is false here —
+ * whether an App KEY may act for its own App is the caller's call, not this
+ * predicate's. A hybrid principal (userId + an active-App SELECTION from
+ * MCP's `requireAppScope`) is judged solely on the user, which is exactly
+ * what this returns.
+ */
+export async function isAppParticipant(
+  ctx: Context,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null },
+): Promise<boolean> {
+  if (!ctx.userId) return false;
+  if (app.ownerUserId !== null) {
+    // spec 047: a user-owned App admits its owner and nobody else
+    // (findings:org-xor-owner-null-comparison-bypass — branch on the
+    // ownership CLASS first; for two different users' entities BOTH
+    // `organizationId`s are NULL, so an org comparison would read
+    // `null !== null` and admit exactly the cross-tenant case).
+    // Identity-scoped, so never via impersonation (isOwnerOrOrgMember's rule;
+    // the team-chat caller already denies org-less Apps under impersonation —
+    // this keeps the predicate safe for any future caller that doesn't).
+    if (ctx.impersonation) return false;
+    return ctx.userId === app.ownerUserId;
+  }
+  const member = await ctx.db.appMember.findUnique({
+    where: { appId_userId: { appId: app.id, userId: ctx.userId } },
+    select: { userId: true },
+  });
+  if (member) return true;
+  if (app.organizationId !== null) {
+    try {
+      await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
+      return true;
+    } catch (e) {
+      // requireOrgRole signals denial with a plain Error('Forbidden'); anything
+      // else (a DB failure inside the membership lookup) must propagate rather
+      // than read as "not a member" (review:narrow-catch-blocks — the
+      // team-chat original swallowed everything here).
+      if (e instanceof Error && e.message === 'Forbidden') return false;
+      throw e;
+    }
+  }
+  return false;
+}
+
 /** Row shape shared by the masked mappers below (no key material leaves). */
 export interface AiServiceConfigRow {
   id: string;
@@ -2343,6 +2400,9 @@ export interface SessionInput {
   tool?: string;
   // #928 / cor:api:140: the Agent (persona) driving this session (PK or URN).
   agentRef?: string;
+  // #943 / cor:api:140: the App this session is a unit of work for (PK or URN),
+  // gated on the caller's membership of that App.
+  appRef?: string;
 }
 
 export interface UsageEventInput {

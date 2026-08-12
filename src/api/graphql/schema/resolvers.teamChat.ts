@@ -40,6 +40,7 @@ import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
+import { isAgentInstalled } from '../../../lib/appAgent.js';
 import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
@@ -48,7 +49,7 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import {
   type Context,
-  requireOrgRole,
+  isAppParticipant,
   requireSessionWriteAccess,
   clampListTake,
 } from './resolvers.helpers.js';
@@ -157,26 +158,11 @@ async function requireTeamChatAccess(
     if (mode === 'read' && ctx.appId && ctx.appId === app.id) return;
     throw forbidden();
   }
-  if (app.ownerUserId !== null) {
-    // spec 047: user-owned entities are strictly owner-only
-    // (findings:org-xor-owner-null-comparison-bypass — branch on the
-    // ownership class before comparing owner columns).
-    if (ctx.userId === app.ownerUserId) return;
-    throw forbidden();
-  }
-  const member = await ctx.db.appMember.findUnique({
-    where: { appId_userId: { appId: app.id, userId: ctx.userId } },
-    select: { userId: true },
-  });
-  if (member) return;
-  if (app.organizationId !== null) {
-    try {
-      await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
-      return;
-    } catch {
-      // fall through to the refusal
-    }
-  }
+  // The user branch is the shared App-participation predicate (#943 extracted
+  // it to resolvers.helpers so startSession's appRef gate is the SAME rule,
+  // not a second copy that can drift): AppMember at any role, org CONTRIBUTOR+,
+  // or the owner of a user-owned App.
+  if (await isAppParticipant(ctx, app)) return;
   throw forbidden();
 }
 
@@ -456,6 +442,25 @@ async function resolveSessionAuthor(
     throw new GraphQLError(
       `Session "${sessionRef}" is bound to an agent that no longer exists.`,
       { extensions: { code: 'SESSION_NOT_PERSONA_BOUND' } },
+    );
+  }
+  // #944 review (Codex P1 / Copilot): the author must be ON THIS APP'S ROSTER.
+  // The session's agent binding is ATTRIBUTION — `SessionInput.agentRef` only
+  // requires the agent to be readable, so a PUBLIC agent of another tenant can
+  // legitimately be bound to a session. Authorization belongs here, at the
+  // point authorship is claimed: without this check a participant could post
+  // into their team's chat under a foreign agent's identity, and the read side
+  // already scopes to the roster (`resolveMentionTokens` resolves an Agent ref
+  // only when it is INSTALLED), so the write side was the asymmetric half.
+  //
+  // Checked at POST time rather than at bind time deliberately: an agent
+  // uninstalled after the session started must stop being able to author
+  // through it, which a bind-time check cannot express. `AppAgent` uninstall
+  // is a hard row delete, so the lookup needs no liveness filter.
+  if (!(await isAgentInstalled(ctx.db, appId, agent.id))) {
+    throw new GraphQLError(
+      `Session "${sessionRef}" is bound to an agent that is not installed in this App — it cannot author in this team chat.`,
+      { extensions: { code: 'SESSION_AGENT_NOT_IN_APP', appId } },
     );
   }
   return { agentId: agent.id, name: agent.personaName ?? agent.name, sessionId: session.id };

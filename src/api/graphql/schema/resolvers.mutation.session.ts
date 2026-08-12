@@ -28,8 +28,9 @@ import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
-import { NodeNotFoundError, AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -37,6 +38,7 @@ import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
   type Context,
+  isAppParticipant,
   requireRole,
   requireOrgRole,
   requireOwnerOrOrgRole,
@@ -96,11 +98,83 @@ export const sessionMutations = {
         }
         agentId = resolvedAgentId;
       }
+
+      // #943: optional App pivot. Before this, `Session.appId` was stamped
+      // ONLY from `ctx.appId` (an App-key credential), so a user-authenticated
+      // session — every CLI session — always had `appId: null` and could never
+      // satisfy the team-chat authorship gate's "a session OF this App"
+      // condition (cor:agt:020:04 (b) / SESSION_NOT_IN_APP). The gate is right;
+      // the write path to satisfy it was missing.
+      //
+      // Same shape as `agentRef` above (cor:api:140, PK or URN): resolution is
+      // NOT authorization (#554) — the gate runs on the RESOLVED App.
+      let appId: string | null = ctx.appId ?? null;
+      const appRef = input.appRef?.trim();
+      if (appRef) {
+        let resolvedAppId: string;
+        try {
+          ({ id: resolvedAppId } = await resolveAppRef(ctx.db, appRef));
+        } catch (e) {
+          if (e instanceof AppNotFoundError) {
+            throw new GraphQLError(`App not found: ${appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          }
+          throw e;
+        }
+        const app = await ctx.db.app.findUniqueOrThrow({
+          where: { id: resolvedAppId },
+          select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+        });
+        // resolveAppRef already excludes soft-deleted rows, and excludes
+        // uninstalled ones on the URN path only — re-check both here so the ID
+        // path can't attach a session to a dead App.
+        //
+        // The URN/PK asymmetry on APP_UNINSTALLED is deliberate, not an
+        // oversight (#944 review): App URNs are unique only among ACTIVE rows
+        // (spec 021 FR-027), so an uninstalled App's URN may name several dead
+        // rows and/or belong to a different live App — "not found" is the only
+        // honest answer there. By PK the row is unambiguous, so it earns the
+        // more specific refusal. Both forms are tested.
+        if (app.deletedAt) {
+          throw new GraphQLError(`App not found: ${appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        if (app.uninstalledAt) {
+          throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+            extensions: { code: 'APP_UNINSTALLED', appId: resolvedAppId },
+          });
+        }
+        // Precedence (documented decision, #943): an App-key CREDENTIAL wins
+        // over a caller-supplied ref. A pure App-key principal IS an App, so a
+        // ref naming a different App is a client bug, not a widening — refuse
+        // it typed rather than silently honouring one or the other.
+        if (ctx.appId && ctx.appId !== resolvedAppId) {
+          throw new GraphQLError(
+            `appRef "${appRef}" does not name the App this request is authenticated for.`,
+            { extensions: { code: 'SESSION_APP_MISMATCH', appId: ctx.appId } },
+          );
+        }
+        // Authority. A pure App-key principal (no userId) needs no membership:
+        // its credential IS the App. Everyone else — including a HYBRID
+        // principal carrying MCP's active-App SELECTION, which is not a
+        // credential (findings:auth-appid-credential-vs-selection) — must be a
+        // member of the resolved App, the same predicate the team-chat gate
+        // uses. Without this, any caller could stamp any App's id onto a
+        // session and author into that team's chat as its persona.
+        if (ctx.userId || !ctx.appId) {
+          if (!(await isAppParticipant(ctx, app))) {
+            throw new GraphQLError(
+              'You are not a member of this App, so a session cannot be attributed to it.',
+              { extensions: { code: 'FORBIDDEN' } },
+            );
+          }
+        }
+        appId = resolvedAppId;
+      }
+
       return ctx.db.session.create({
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
-          appId: ctx.appId,
+          appId,
           agentId,
           // #929 review P1: attribute the session to the calling user (the
           // schema documents userId as "the developer in a DEVELOPER
