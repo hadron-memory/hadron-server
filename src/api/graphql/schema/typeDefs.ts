@@ -4419,9 +4419,11 @@ export const typeDefs = `#graphql
     seq STRICTLY GREATER than it are returned (pass the last seq you have
     seen). mentionsRef filters to messages whose stored envelope mentions the
     referenced persona (Agent ref) or user (user ref) — matching runs against
-    the mention tokens extracted at write time, never by re-parsing bodies; an
-    unresolvable mentionsRef yields the empty page. limit defaults to 50
-    (cap 200); limit: 0 returns only total.
+    the mention tokens extracted at write time, never by re-parsing bodies.
+    The ref must name a member of THIS App's roster (an installed Agent, an
+    AppMember, or the caller); an unresolvable or off-roster mentionsRef
+    yields the empty page identically (no existence oracle). limit defaults
+    to 50 (cap 200); limit: 0 returns only total.
 
     Authorization: an AppMember of the App (any role), an org member with
     CONTRIBUTOR+ on the App's org, the owner of a user-owned App, or the
@@ -5992,12 +5994,13 @@ export const typeDefs = `#graphql
     so racing posts get distinct consecutive seqs.
 
     Author derivation: with sessionRef, the message is authored by that
-    session's bound persona (the session must be writable by the caller,
-    active, and agent-bound) and the envelope records the driving sessionId;
-    without it, by the calling human. Mentions ('@persona-name' / '@handle')
-    are extracted server-side at write time into the envelope. replyToSeq
-    wires a replies-to edge to the cited message. body is capped at 65536
-    characters.
+    session's bound persona (the session must be writable by the caller, a
+    session OF this App, active, and agent-bound) and the envelope records
+    the driving sessionId; without it, by the calling human. Mentions
+    ('@persona-name' / '@handle'; a multi-word name is mentioned by its
+    slug, e.g. '@mary-jane') are extracted server-side at write time into
+    the envelope. replyToSeq wires a replies-to edge to the cited message.
+    body is capped at 65536 characters.
 
     Authorization: an AppMember of the App (any role — every member of the
     host is a participant per cor:acl:030:01), an org member with
@@ -6005,11 +6008,12 @@ export const typeDefs = `#graphql
     App-key principals cannot post.
 
     Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE,
-    TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_ENDED,
-    SESSION_NOT_PERSONA_BOUND, SESSION_EXPIRED (encrypted team memory
-    without an active session key), TEAM_AGENT_NOT_FOUND /
-    TEAM_AGENT_AMBIGUOUS (first-post bootstrap could not locate the Team
-    Agent), APP_UNINSTALLED, FORBIDDEN.
+    TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_NOT_IN_APP (the
+    session belongs to a different App — a persona never authors across
+    Apps), SESSION_ENDED, SESSION_NOT_PERSONA_BOUND, SESSION_EXPIRED
+    (encrypted team memory without an active session key),
+    TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could
+    not locate the Team Agent), APP_UNINSTALLED, FORBIDDEN.
 
     appRef accepts the entity's ID or URN; sessionRef is the session id.
     """

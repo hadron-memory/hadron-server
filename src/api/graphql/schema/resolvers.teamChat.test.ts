@@ -19,6 +19,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import {
   extractMentions,
+  mentionTokenOf,
   TEAM_CHAT_LOC,
   TEAM_CHAT_MESSAGES_LOC,
   TEAM_CHAT_BODY_MAX_CHARS,
@@ -141,9 +142,16 @@ describe('extractMentions — the one mention format', () => {
       'bob-1',
     ]);
   });
-  it('ignores bare @ and email-ish text mid-word', () => {
-    expect(extractMentions('send to x@example.com and @ nothing')).toContain('example.com');
+  it('ignores bare @ and email addresses (the @ must sit at a token boundary)', () => {
+    expect(extractMentions('send to x@example.com and @ nothing')).toEqual([]);
     expect(extractMentions('@ alone')).toEqual([]);
+    expect(extractMentions('(@iris) start@end @real-one')).toEqual(['iris', 'real-one']);
+  });
+
+  it('mentionTokenOf slugs a multiword name to the canonical mention atom', () => {
+    expect(mentionTokenOf('Mary Jane')).toBe('mary-jane');
+    expect(mentionTokenOf('Iris')).toBe('iris');
+    expect(mentionTokenOf('  ~~ ')).toBeNull();
   });
 });
 
@@ -309,6 +317,17 @@ describe('createTeamChatMessage — sessionRef author derivation', () => {
   it('refuses an unknown session with SESSION_NOT_FOUND', async () => {
     await expectCode(post(ctx(appMember.id), { sessionRef: 'nope' }), 'SESSION_NOT_FOUND');
   });
+
+  it("refuses another App's session with SESSION_NOT_IN_APP (Codex P1 — no cross-App persona authoring)", async () => {
+    // The caller's OWN writable session, but bound to a different App: the
+    // write gate passes and the App binding must still refuse it.
+    const s = await personaSession(appMember.id);
+    const otherApp = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Other App', urn: `${org.urn}:other-s` },
+    });
+    await db.session.update({ where: { id: s.sessionId }, data: { appId: otherApp.id } });
+    await expectCode(post(ctx(appMember.id), { sessionRef: s.sessionId }), 'SESSION_NOT_IN_APP');
+  });
 });
 
 describe('teamChatMessages — mentions round trip', () => {
@@ -336,6 +355,106 @@ describe('teamChatMessages — mentions round trip', () => {
     await post(ctx(appMember.id), { body: '@nobody hello' });
     const page = await read(ctx(appMember.id), { mentionsRef: 'hrn:agent:no-such-org.com:ghost' });
     expect(page).toEqual({ items: [], total: 0 });
+  });
+
+  it('an Agent NOT installed in this App reads as the same empty page (Codex P1 — no existence oracle)', async () => {
+    // A foreign org's private agent whose name matches a stored token: the
+    // filter must not distinguish it from a nonexistent ref.
+    const foreignOrg = await db.organization.create({
+      data: { id: generateId(), name: 'foreign', urn: `foreign-${Date.now()}.example` },
+    });
+    const foreign = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: foreignOrg.id,
+        name: 'Ghost',
+        urn: `${foreignOrg.urn}:ghost`,
+        personaName: 'Iris',
+      },
+    });
+    await post(ctx(appMember.id), { body: '@iris are you there' });
+    const page = await read(ctx(appMember.id), { mentionsRef: foreign.id });
+    expect(page).toEqual({ items: [], total: 0 });
+  });
+
+  it('a user who is not on the roster reads as the empty page; the caller themself resolves', async () => {
+    await post(ctx(appMember.id), { body: `ping @${appMember.handle}` });
+    // outsider (a real user, resolvable globally) is not an AppMember —
+    // filtering by them must look identical to a nonexistent ref.
+    const page = await read(ctx(appMember.id), { mentionsRef: outsider.id });
+    expect(page).toEqual({ items: [], total: 0 });
+    // The caller can always filter for their own mentions.
+    const self = await read(ctx(appMember.id), { mentionsRef: appMember.id });
+    expect(self.total).toBe(1);
+  });
+
+  it('a multiword persona is mentioned by its slug (@mary-jane)', async () => {
+    const mj = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        name: 'Mary Jane',
+        urn: `${org.urn}:mary-jane`,
+        personaName: 'Mary Jane',
+      },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: mj.id } });
+    await post(ctx(appMember.id), { body: '@mary-jane please review' });
+    const page = await read(ctx(appMember.id), { mentionsRef: mj.id });
+    expect(page.total).toBe(1);
+    expect(page.items[0].mentions).toEqual(['mary-jane']);
+  });
+});
+
+describe('canonical-shape guards (off-road nodes, tombstoned root)', () => {
+  it('off-road nodes under the messages prefix neither read as messages nor accept replies', async () => {
+    await post(ctx(appMember.id), { body: 'real message' });
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+    });
+    // A generic write (D-2026-08-10-003 keeps the surface open) parks an
+    // off-road node with a seq under the messages prefix.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: root!.memoryId,
+        loc: `${TEAM_CHAT_MESSAGES_LOC}:offroad-note`,
+        name: 'offroad',
+        nodeType: 'info',
+        seq: 999,
+      },
+    });
+    const page = await read(ctx(appMember.id));
+    expect(page.total).toBe(1);
+    expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
+    await expectCode(
+      post(ctx(appMember.id), { body: 'replying off-road', replyToSeq: 999 }),
+      'TEAM_CHAT_REPLY_NOT_FOUND',
+    );
+  });
+
+  it('a soft-deleted chats:team root is restored on the next post, seq continuing (Copilot on PR #941)', async () => {
+    await post(ctx(appMember.id), { body: 'before delete' });
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+    });
+    // Soft-delete the whole chat subtree (root, container, message).
+    await db.node.updateMany({
+      where: { memoryId: root!.memoryId, loc: { startsWith: 'chats' } },
+      data: { deletedAt: new Date() },
+    });
+    const msg = await post(ctx(appMember.id), { body: 'after restore' });
+    // The tombstone was restored, not re-created: data survives, so the seq
+    // continues past the (still-deleted) first message.
+    expect(msg.seq).toBe(2);
+    const restored = await db.node.findUnique({ where: { id: root!.id } });
+    expect(restored!.deletedAt).toBeNull();
+    // Old messages stay deleted; the transcript shows only the new one.
+    const page = await read(ctx(appMember.id));
+    expect(page.total).toBe(1);
+    expect(page.items[0].body).toBe('after restore');
   });
 });
 
@@ -424,6 +543,36 @@ describe('auth matrix — one case per principal shape', () => {
     const page = await Q.teamChatMessages({}, { appRef: app.id }, imp);
     expect(page.total).toBe(1);
     await expectCode(M.createTeamChatMessage({}, { appRef: app.id, body: 'hi' }, imp), 'FORBIDDEN');
+  });
+
+  it("impersonation reads stay inside the support session's org (#876 class)", async () => {
+    await post(ctx(appMember.id), { body: 'org-A only' });
+    // Support session opened for a DIFFERENT org: the target's membership in
+    // this App must not widen the view.
+    const otherOrg = await db.organization.create({
+      data: { id: generateId(), name: 'other-org', urn: `imp-other-${Date.now()}.com` },
+    });
+    const crossOrgImp: Context = {
+      db,
+      userId: appMember.id,
+      roles: ['READER'],
+      impersonation: { orgId: otherOrg.id } as any,
+    } as Context;
+    await expectCode(Q.teamChatMessages({}, { appRef: app.id }, crossOrgImp), 'FORBIDDEN');
+    // And a user-owned App is never readable under impersonation at all.
+    const owner = await db.user.create({
+      data: { id: generateId(), githubId: 93907, githubUsername: `tc-imp-owner-${Date.now()}`, roles: ['READER'] },
+    });
+    const userApp = await db.app.create({
+      data: { id: generateId(), ownerUserId: owner.id, name: 'Owned', urn: `u:${owner.id}:owned` },
+    });
+    const ownerImp: Context = {
+      db,
+      userId: owner.id,
+      roles: ['READER'],
+      impersonation: { orgId: org.id } as any,
+    } as Context;
+    await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ownerImp), 'FORBIDDEN');
   });
 
   it('a user-owned App is strictly owner-gated (spec 047)', async () => {
