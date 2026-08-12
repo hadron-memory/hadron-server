@@ -5916,7 +5916,10 @@ export const typeDefs = `#graphql
 
     Error codes (extensions.code): TEAM_AGENT_NOT_FOUND, TEAM_AGENT_AMBIGUOUS,
     TEAM_AGENT_NOT_INSTALLED, PERSONA_ROLE_NOT_FOUND, PERSONA_ROLE_INVALID,
-    PERSONA_NAME_TAKEN, PERSONA_REGISTER_EXHAUSTED, APP_UNINSTALLED.
+    PERSONA_NAME_TAKEN, PERSONA_REGISTER_EXHAUSTED, AGENT_URN_TAKEN (an
+    explicit name whose derived slug is occupied by a non-persona Agent or
+    reserved by a retired persona), SESSION_EXPIRED (encrypted system memory
+    without an active session key), APP_UNINSTALLED.
 
     Accepts the entity's ID or URN for appRef and teamAgentRef.
     """

@@ -4691,11 +4691,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // invariants — MCP tools delegate, never re-implement). Auth semantics
       // live in the resolver's gate: a hybrid user+selection principal is
       // judged on the user's own rights, a pure App-key principal is denied.
-      const appRef = app ?? auth.appId;
+      //
+      // App default (Codex review): requireAppScope() must run BEFORE reading
+      // auth.appId — for OAuth callers it is what copies the session's
+      // hadron_set_active_app selection into auth.appId.
+      let appRef = app;
       if (!appRef) {
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
-        return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
       }
       try {
         const agent = await resolvers.Mutation.createTeamPersona(

@@ -148,8 +148,20 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // Check for existing agent with the same URN
   const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
   if (existing) {
-    if (existing.deletedAt) {
+    if (existing.deletedAt && existing.personaName === null) {
+      // Tombstone reclaim — for a NON-persona tombstone only.
       await ctx.db.agent.delete({ where: { id: existing.id } });
+    } else if (existing.deletedAt) {
+      // #935 review (Codex P1): a soft-deleted PERSONA keeps its name
+      // reserved forever (cor:agt:020:02 — history references the name).
+      // Hard-deleting the tombstone here would release the case-insensitive
+      // personaName reservation and let a new persona silently re-attribute
+      // the old one's work. Refuse instead; register allocation advances to
+      // the next name.
+      throw new AgentUrnTakenError(
+        agentUrn,
+        `URN "${agentUrn}" is reserved by a retired persona — persona names are never recycled.`,
+      );
     } else {
       throw new AgentUrnTakenError(agentUrn);
     }

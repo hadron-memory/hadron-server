@@ -245,27 +245,44 @@ export const teamPersonaMutations = {
       );
     }
     // Encrypted system memory: decrypt with the active session key (spec 041);
-    // without one this throws SESSION_EXPIRED, the standard locked-memory
-    // refusal.
+    // without one, refuse with the typed SESSION_EXPIRED (the same code the
+    // encrypted node mutations emit — decryptNodeFields' bare Error would
+    // read INTERNAL_SERVER_ERROR on the wire).
     const memInfo = await getMemoryEncryptionInfo(ctx.db, teamAgent.systemMemoryId);
-    decryptNodeFields(roleNode, memInfo);
-    const template = typeof roleNode.content === 'string' ? roleNode.content.trim() : '';
-    if (template === '') {
+    try {
+      decryptNodeFields(roleNode, memInfo);
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith('SESSION_EXPIRED')) {
+        throw new GraphQLError(
+          `SESSION_EXPIRED: memory ${memInfo.id} is encrypted but no active session key is available.`,
+          { extensions: { code: 'SESSION_EXPIRED', memoryId: memInfo.id } },
+        );
+      }
+      throw e;
+    }
+    // The template is used VERBATIM (intentional leading/trailing whitespace
+    // survives); trim only decides blankness.
+    const template = typeof roleNode.content === 'string' ? roleNode.content : '';
+    if (template.trim() === '') {
       throw new GraphQLError(
         `Role "${roleNorm}" has no prompt template — the ${ROLES_BRANCH_PREFIX}${roleNorm} node's content is empty.`,
         { extensions: { code: 'PERSONA_ROLE_INVALID', role: roleNorm } },
       );
     }
+    // Register order is the allocation order (first-to-last), and on a
+    // case-insensitive duplicate the FIRST spelling wins.
     const rawNames = (roleNode.data as { names?: unknown } | null)?.names;
-    const register: string[] = Array.isArray(rawNames)
-      ? [...new Map(
-          rawNames
-            .filter((n): n is string => typeof n === 'string')
-            .map((n) => n.trim())
-            .filter((n) => n !== '')
-            .map((n) => [n.toLowerCase(), n] as const),
-        ).values()]
-      : [];
+    const register: string[] = [];
+    if (Array.isArray(rawNames)) {
+      const seen = new Set<string>();
+      for (const raw of rawNames) {
+        if (typeof raw !== 'string') continue;
+        const trimmed = raw.trim();
+        if (trimmed === '' || seen.has(trimmed.toLowerCase())) continue;
+        seen.add(trimmed.toLowerCase());
+        register.push(trimmed);
+      }
+    }
 
     // 4. Owner + URN namespace: the minted persona is owned by the App's
     //    owner (org XOR user), like every entity the App provisions.

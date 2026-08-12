@@ -247,6 +247,47 @@ describe('createTeamPersona — name allocation', () => {
     );
   });
 
+  it('a soft-deleted persona keeps its name reserved forever (cor:agt:020:02)', async () => {
+    const iris = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer' },
+      ctx(admin.id),
+    );
+    expect(iris.personaName).toBe('Iris');
+    await M.deleteAgent({}, { ref: iris.id }, ctx(admin.id));
+    // The register must NOT hard-delete the tombstone and recycle "Iris" —
+    // history still references her (Codex P1 on PR #936).
+    const next = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer' },
+      ctx(admin.id),
+    );
+    expect(next.personaName).toBe('Henry');
+    const tombstone = await db.agent.findUnique({ where: { id: iris.id } });
+    expect(tombstone?.personaName).toBe('Iris');
+    // An explicit re-mint of the retired name is the typed persona refusal.
+    await expectCode(
+      M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer', name: 'Iris' }, ctx(admin.id)),
+      'PERSONA_NAME_TAKEN',
+    );
+  });
+
+  it('a NON-persona tombstone still reclaims its URN slot (pre-#935 behavior preserved)', async () => {
+    const scratch = await M.createAgent({}, { orgId: org.id, name: 'Scratch' }, ctx(admin.id));
+    await M.deleteAgent({}, { ref: scratch.id }, ctx(admin.id));
+    const again = await M.createAgent({}, { orgId: org.id, name: 'Scratch' }, ctx(admin.id));
+    expect(again.urn).toBe(scratch.urn);
+    expect(again.id).not.toBe(scratch.id);
+  });
+
+  it('a case-insensitive register duplicate keeps the FIRST spelling', async () => {
+    await createRoleNode(teamAgent.systemMemoryId, 'writer', { names: ['Ana', 'ANA', 'Ben'] });
+    const first = await M.createTeamPersona({}, { appRef: app.id, role: 'writer' }, ctx(admin.id));
+    const second = await M.createTeamPersona({}, { appRef: app.id, role: 'writer' }, ctx(admin.id));
+    expect(first.personaName).toBe('Ana');
+    expect(second.personaName).toBe('Ben');
+  });
+
   it('a non-persona Agent squatting the name slug advances the register (AGENT_URN_TAKEN)', async () => {
     // An ordinary agent named "Iris" holds urn <org>:iris but reserves no
     // personaName — the register loop must still move on to Henry.
@@ -276,6 +317,30 @@ describe('createTeamPersona — Team Agent location and role definition', () => 
     await expectCode(
       M.createTeamPersona({}, { appRef: app.id, role: 'qa' }, ctx(admin.id)),
       'PERSONA_ROLE_INVALID',
+    );
+  });
+
+  it('the template is composed verbatim — internal whitespace/indentation survives (edges trimmed by #929 normalization)', async () => {
+    await createRoleNode(teamAgent.systemMemoryId, 'poet', {
+      content: '\nYou are {{name}}.\n\n  - keep this indented\n  - and this\n',
+      names: ['Vera'],
+    });
+    const agent = await M.createTeamPersona({}, { appRef: app.id, role: 'poet' }, ctx(admin.id));
+    // Composition does NOT trim the template (PR #936 Copilot review); the
+    // stored field's edge-trim comes from the existing persona-field
+    // normalization (#929), which is why the leading/trailing newlines are
+    // gone while every internal newline and indent survives.
+    expect(agent.personaPrompt).toBe('You are Vera.\n\n  - keep this indented\n  - and this');
+  });
+
+  it('an encrypted system memory without a session key refuses with the typed SESSION_EXPIRED', async () => {
+    await db.memory.update({
+      where: { id: teamAgent.systemMemoryId },
+      data: { isEncrypted: true },
+    });
+    await expectCode(
+      M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id)),
+      'SESSION_EXPIRED',
     );
   });
 

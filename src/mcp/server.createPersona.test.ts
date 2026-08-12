@@ -88,6 +88,22 @@ describe('hadron_create_persona (#935)', () => {
     expect(out).toContain('Persona minted: **Zoe**');
   });
 
+  it('the omit-app flow honors a hadron_set_active_app selection (Codex P2 on PR #936)', async () => {
+    // OAuth caller with NO auth.appId at init — the selection lives in the
+    // per-MCP-session map and requireAppScope() must copy it into auth.appId
+    // BEFORE the tool reads it. App selection resolves through AppMember,
+    // so the admin needs a membership row.
+    await db.appMember.create({ data: { appId: app.id, userId: admin.id, role: 'member' } });
+    const srv = createTestableMcpServer(
+      { userId: admin.id, roles: ['READER'], clientId: `user:${admin.id}` },
+      { sessionId: `mcp-sess-935-${app.id}` },
+    );
+    const sel = await srv.callToolText('hadron_set_active_app', { app: `hrn:app:${app.urn}` });
+    expect(sel).toContain('Active App set');
+    const out = await srv.callToolText('hadron_create_persona', { role: 'backend-engineer' });
+    expect(out).toContain('Persona minted: **Iris**');
+  });
+
   it('a pure App-key principal is refused by the resolver gate', async () => {
     const srv = createTestableMcpServer({ appId: app.id, clientId: `app:${app.id}` });
     const out = await srv.callToolText('hadron_create_persona', { role: 'backend-engineer' });
