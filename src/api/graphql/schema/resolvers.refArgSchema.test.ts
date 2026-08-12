@@ -35,6 +35,7 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   installAgentIntoApp: ['appRef', 'agentRef'],
   createTeamPersona: ['appRef', 'teamAgentRef'],
   createTeamChatMessage: ['appRef', 'sessionRef'],
+  recordTeamWork: ['appRef', 'sessionRef'],
   uninstallAgentFromApp: ['appRef', 'agentRef'],
   addAgentToApp: ['appRef', 'agentRef'],
   removeAgentFromApp: ['appRef', 'agentRef'],
