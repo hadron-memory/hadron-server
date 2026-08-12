@@ -48,7 +48,7 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import {
   type Context,
-  requireOrgRole,
+  isAppParticipant,
   requireSessionWriteAccess,
   clampListTake,
 } from './resolvers.helpers.js';
@@ -157,26 +157,11 @@ async function requireTeamChatAccess(
     if (mode === 'read' && ctx.appId && ctx.appId === app.id) return;
     throw forbidden();
   }
-  if (app.ownerUserId !== null) {
-    // spec 047: user-owned entities are strictly owner-only
-    // (findings:org-xor-owner-null-comparison-bypass — branch on the
-    // ownership class before comparing owner columns).
-    if (ctx.userId === app.ownerUserId) return;
-    throw forbidden();
-  }
-  const member = await ctx.db.appMember.findUnique({
-    where: { appId_userId: { appId: app.id, userId: ctx.userId } },
-    select: { userId: true },
-  });
-  if (member) return;
-  if (app.organizationId !== null) {
-    try {
-      await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
-      return;
-    } catch {
-      // fall through to the refusal
-    }
-  }
+  // The user branch is the shared App-participation predicate (#943 extracted
+  // it to resolvers.helpers so startSession's appRef gate is the SAME rule,
+  // not a second copy that can drift): AppMember at any role, org CONTRIBUTOR+,
+  // or the owner of a user-owned App.
+  if (await isAppParticipant(ctx, app)) return;
   throw forbidden();
 }
 
