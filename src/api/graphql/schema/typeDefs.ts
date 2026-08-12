@@ -5895,6 +5895,39 @@ export const typeDefs = `#graphql
     ): InstallAgentIntoAppPayload!
 
     """
+    #935 — mint a team persona: role-template + name-register instantiation as
+    a platform operation (spec cor:agt:020:01/:02). Locates the Team Agent
+    among the App's installed Agents (teamAgentRef when given; otherwise the
+    single installed Agent whose system memory carries a 'roles:' branch —
+    zero or several candidates is a typed error, never a guess), reads the
+    role definition node 'roles:<role>' from that system memory (prompt
+    template in content, name register in data.names), allocates a name (a
+    caller-supplied name wins; otherwise the register's next free name,
+    advancing past PERSONA_NAME_TAKEN per the allocation contract), composes
+    personaPrompt from the template ({{name}} and {{role}} placeholders),
+    creates the Agent owned by the App's owner with personaRole set, and
+    installs it into the App (AppAgent row) so the minted persona is on the
+    roster immediately. Returns the created Agent — clients print its
+    personaPrompt as the persona's boot briefing.
+
+    Authorization: an org member with CONTRIBUTOR+ on the App's org, an
+    AppMember of the App whose role is not 'reader', or the owner of a
+    user-owned App. Pure App-key principals are denied.
+
+    Error codes (extensions.code): TEAM_AGENT_NOT_FOUND, TEAM_AGENT_AMBIGUOUS,
+    TEAM_AGENT_NOT_INSTALLED, PERSONA_ROLE_NOT_FOUND, PERSONA_ROLE_INVALID,
+    PERSONA_NAME_TAKEN, PERSONA_REGISTER_EXHAUSTED, APP_UNINSTALLED.
+
+    Accepts the entity's ID or URN for appRef and teamAgentRef.
+    """
+    createTeamPersona(
+      appRef: ID!
+      role: String!
+      teamAgentRef: ID
+      name: String
+    ): Agent!
+
+    """
     Uninstall an Agent from an App. Deletes the AppAgent row. The Agent's
     per-(App, Agent, *) memories are NOT cascade-deleted (spec 023 FR-005);
     they persist as orphans and become reachable again if the same Agent

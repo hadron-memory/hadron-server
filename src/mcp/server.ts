@@ -461,7 +461,7 @@ export async function replaceOutgoingEdges(args: {
  * to the raw stored bare urn if a row can't compose to v2 — display strings must
  * never crash a tool (serve-and-fall-back).
  */
-function safeEmitEntityUrnV2(type: 'memory' | 'app', bareUrn: string): string {
+function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent', bareUrn: string): string {
   try {
     return emitEntityUrnV2(type, bareUrn);
   } catch {
@@ -4672,6 +4672,53 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       });
 
       return textResult(`Session ended: ${id}`);
+    },
+  );
+
+  // ── hadron_create_persona ─────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_create_persona',
+    'Mint a team persona (#935, spec cor:agt:020): create a named AI team member — an ordinary Agent with personaName/personaRole/personaPrompt set — from a role template in the Team Agent\'s system memory, and install it into the team App\'s roster. The role definition lives at the roles:<role> node (prompt template in content with {{name}}/{{role}} placeholders, name register in data.names). A caller-supplied name wins; otherwise the register\'s next free name is allocated. Returns the persona\'s name, URN, and personaPrompt — print the personaPrompt as the persona\'s boot briefing.',
+    {
+      role: z.string().describe('The role to instantiate — names the roles:<role> node in the Team Agent\'s system memory (e.g. "backend-engineer").'),
+      name: z.string().optional().describe('Explicit persona name. Omit to allocate the next free name from the role\'s register.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+      teamAgent: z.string().optional().describe('The Team Agent (Agent URN or ID) carrying the role definitions. Omit to auto-detect: the single installed Agent whose system memory has a roles: branch.'),
+    },
+    async ({ role, name, app, teamAgent }) => {
+      // Delegate to the GraphQL resolver (findings:node-write-surface-
+      // invariants — MCP tools delegate, never re-implement). Auth semantics
+      // live in the resolver's gate: a hybrid user+selection principal is
+      // judged on the user's own rights, a pure App-key principal is denied.
+      const appRef = app ?? auth.appId;
+      if (!appRef) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+      }
+      try {
+        const agent = await resolvers.Mutation.createTeamPersona(
+          {},
+          { appRef, role, teamAgentRef: teamAgent ?? null, name: name ?? null },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
+        return textResult(
+          `Persona minted: **${agent.personaName}** (${agent.personaRole})\n` +
+            `Agent URN: ${safeEmitEntityUrnV2('agent', agent.urn)}\n\n` +
+            `Boot briefing (personaPrompt):\n\n${agent.personaPrompt ?? ''}`,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'persona creation failed'}`);
+      }
     },
   );
 
