@@ -4496,12 +4496,12 @@ export const typeDefs = `#graphql
     Read a team App's worklog (#947) — the provenance query: which sessions
     (and transcripts) produced this PR? Newest first, as a uniform
     { items, total } page. ref accepts ANY accepted spelling (URL, short form,
-    canonical) and is normalized before matching, so a lookup by
-    'https://github.com/o/r/pull/371' and by 'o/r#371' return the same
-    records; a spelling that fits no github form matches verbatim (non-github
-    tools). sessionRef / tool / kind are equality filters; kind must be one of
-    pr, issue, commit, branch, repo when given. limit defaults to 50 (cap
-    200); limit: 0 returns only total.
+    canonical) and is matched tool-awarely: with tool 'github' (or none) it is
+    normalized, so 'https://github.com/o/r/pull/371' and 'o/r#371' return the
+    same records; with another tool it matches the stored verbatim ref; with
+    no tool it matches either spelling. sessionRef / tool / kind are equality
+    filters; kind must be one of pr, issue, commit, branch, repo when given.
+    limit defaults to 50 (cap 200); limit: 0 returns only total.
 
     Authorization: an AppMember of the App (any role), an org member with
     CONTRIBUTOR+ on the App's org, the owner of a user-owned App, or the

@@ -175,19 +175,32 @@ async function locateWorklogRoot(ctx: Context, appId: string): Promise<WorklogRo
  * surface, the issue's "team init's client-side schema job retires" point).
  * An already-declared `worklog` collection is left untouched — a deployment
  * that tightened it governs this surface too, which is the point of schema
- * governance. Merging is last-write-wins under a race of identical merges,
- * which is idempotent in effect.
+ * governance.
+ *
+ * The read-merge-write runs under a `FOR UPDATE` row lock on the memory
+ * (Codex P2 on PR #948): `Memory.schema` is one JSON column written whole, so
+ * an unlocked merge racing an administrator's schema edit would silently drop
+ * whichever write lost — this declaration, or the admin's other collections.
+ * The lock serializes this merge against any concurrent merge; an admin's
+ * whole-column write through updateMemory remains last-write-wins by design
+ * (deleting the declaration is then a deliberate act, and the next record's
+ * ensure re-declares it).
  */
 async function ensureWorklogSchema(ctx: Context, memoryId: string): Promise<void> {
   const row = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { schema: true } });
-  const schema = (row?.schema as unknown as MemorySchema | null) ?? null;
-  if (schema?.objectTypes?.[WORKLOG_OBJECT_TYPE]) return;
-  const merged: MemorySchema = {
-    objectTypes: { ...(schema?.objectTypes ?? {}), [WORKLOG_OBJECT_TYPE]: WORKLOG_COLLECTION_SCHEMA },
-  };
-  await ctx.db.memory.update({
-    where: { id: memoryId },
-    data: { schema: merged as unknown as InputJsonValue },
+  if ((row?.schema as unknown as MemorySchema | null)?.objectTypes?.[WORKLOG_OBJECT_TYPE]) return;
+  await ctx.db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+    const locked = await tx.memory.findUnique({ where: { id: memoryId }, select: { schema: true } });
+    const schema = (locked?.schema as unknown as MemorySchema | null) ?? null;
+    if (schema?.objectTypes?.[WORKLOG_OBJECT_TYPE]) return;
+    const merged: MemorySchema = {
+      objectTypes: { ...(schema?.objectTypes ?? {}), [WORKLOG_OBJECT_TYPE]: WORKLOG_COLLECTION_SCHEMA },
+    };
+    await tx.memory.update({
+      where: { id: memoryId },
+      data: { schema: merged as unknown as InputJsonValue },
+    });
   });
 }
 
@@ -319,15 +332,17 @@ async function resolveWorkSession(
       where: { id: session.agentId },
       select: { id: true, name: true, personaName: true, deletedAt: true },
     });
-    if (agent && !agent.deletedAt) {
-      if (!(await isAgentInstalled(ctx.db, app.id, agent.id))) {
-        throw new GraphQLError(
-          `Session "${sessionRef}" is bound to an agent that is not installed in this App — its work cannot be recorded under that persona here.`,
-          { extensions: { code: 'SESSION_AGENT_NOT_IN_APP', appId: app.id } },
-        );
-      }
-      return { sessionId: session.id, personaName: agent.personaName ?? agent.name };
+    // A missing or soft-deleted agent is treated EXACTLY like an uninstalled
+    // one (Codex P2 + Copilot on PR #948) — never as an unbound session: the
+    // fall-through would relabel the persona's work as the human driver's,
+    // and a claimed identity that no longer exists must refuse, not reshape.
+    if (!agent || agent.deletedAt || !(await isAgentInstalled(ctx.db, app.id, agent.id))) {
+      throw new GraphQLError(
+        `Session "${sessionRef}" is bound to an agent that is not installed in this App — its work cannot be recorded under that persona here.`,
+        { extensions: { code: 'SESSION_AGENT_NOT_IN_APP', appId: app.id } },
+      );
     }
+    return { sessionId: session.id, personaName: agent.personaName ?? agent.name };
   }
   if (session.userId) {
     const user = await ctx.db.user.findUnique({
@@ -562,6 +577,12 @@ export const teamWorkQueries = {
    * read gate, which does not admit AppMembers of the App — this surface's
    * audience IS the team (the participant gate, like the chat read).
    *
+   * Scoped to the CANONICAL worklog root's memory (Copilot on PR #948, the
+   * chat reader's shape): writes select one root, so reads must read exactly
+   * that worklog — in a multi-agent App, a worklog-typed node in another
+   * agent's shared memory is not part of this App's ledger. No root ⇒ the
+   * empty page (reads never provision).
+   *
    * Ordering is `createdAt` DESC — identical to `at` DESC for every record
    * this surface writes (`at` is server-stamped in the same write); an
    * off-road record's caller-chosen `at` sorts by its insertion time instead.
@@ -594,27 +615,46 @@ export const teamWorkQueries = {
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     await requireTeamWorkAccess(ctx, app, 'read');
 
-    // Normalize the ref filter: any accepted github spelling collapses to the
-    // canonical one; anything else (a non-github tool's verbatim ref) matches
-    // as given. A read filter never throws WORK_REF_INVALID — an unmatched
-    // spelling is simply an empty page.
-    let refFilter: string | undefined;
-    if (ref != null && ref.trim() !== '') {
-      const parsed = parseWorkRef(ref);
-      refFilter = parsed ? parsed.ref : ref.trim();
-    }
+    const root = await locateWorklogRoot(ctx, appId);
+    if (!root) return { items: [], total: 0 };
 
+    const toolFilter = tool != null && tool.trim() !== '' ? tool.trim().toLowerCase() : undefined;
+
+    // Normalize the ref filter TOOL-AWARELY (Codex P2 + Copilot on PR #948):
+    // only github refs are stored canonically, so canonicalizing a non-github
+    // tool's filter would break its verbatim contract (a jira "Acme/Proj#12"
+    // is stored as typed, but PARSES as the github short form and would be
+    // lowercased into never matching). tool 'github' ⇒ match canonical;
+    // another tool ⇒ match verbatim; no tool ⇒ match EITHER spelling. A read
+    // filter never throws WORK_REF_INVALID — an unmatched spelling is simply
+    // an empty page.
     const propEq = (key: string, value: string) => ({
       properties: { path: [key], equals: value },
     });
+    let refClause: Record<string, unknown> | undefined;
+    if (ref != null && ref.trim() !== '') {
+      const verbatim = ref.trim();
+      const canonical = parseWorkRef(verbatim)?.ref;
+      const candidates =
+        toolFilter === 'github'
+          ? [canonical ?? verbatim]
+          : toolFilter !== undefined
+            ? [verbatim]
+            : [...new Set([canonical, verbatim].filter((c): c is string => c !== undefined))];
+      refClause =
+        candidates.length === 1
+          ? propEq('ref', candidates[0])
+          : { OR: candidates.map((c) => propEq('ref', c)) };
+    }
+
     const where = {
       deletedAt: null,
       objectType: WORKLOG_OBJECT_TYPE,
-      memory: { appId, class: 'app' as const, deletedAt: null },
+      memoryId: root.memoryId,
       AND: [
-        ...(refFilter !== undefined ? [propEq('ref', refFilter)] : []),
+        ...(refClause !== undefined ? [refClause] : []),
         ...(sessionRef != null && sessionRef !== '' ? [propEq('sessionId', sessionRef)] : []),
-        ...(tool != null && tool.trim() !== '' ? [propEq('tool', tool.trim().toLowerCase())] : []),
+        ...(toolFilter !== undefined ? [propEq('tool', toolFilter)] : []),
         ...(kind != null ? [propEq('kind', kind)] : []),
       ],
     };

@@ -233,6 +233,19 @@ describe('recordTeamWork — session conditions', () => {
     expect(item.action).toBe('merged');
   });
 
+  it('a session bound to a soft-deleted agent → SESSION_AGENT_NOT_IN_APP, never handle fall-through', async () => {
+    // PR #948 review (Codex P2 + Copilot): a vanished persona must refuse,
+    // not silently relabel its work as the human driver's.
+    const persona = await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    const s = await M.startSession(
+      {},
+      { input: { id: generateId(), appRef: app.id, agentRef: persona.id } },
+      ctx(contrib.id),
+    );
+    await db.agent.update({ where: { id: persona.id }, data: { deletedAt: new Date() } });
+    await expectCode(record(ctx(contrib.id), { sessionRef: s.id }), 'SESSION_AGENT_NOT_IN_APP');
+  });
+
   it('a session bound to an agent NOT installed in the App → SESSION_AGENT_NOT_IN_APP', async () => {
     const foreignAgent = await M.createAgent(
       {},
@@ -457,6 +470,63 @@ describe('teamWorkItems — the provenance read surface', () => {
     await record(ctx(appMember.id), { sessionRef: s.id, tool: 'jira', kind: 'issue', ref: 'PROJ-42', action: 'closed' });
     const page = await items(ctx(appMember.id), { ref: 'PROJ-42' });
     expect(page.total).toBe(1);
+  });
+
+  it("ref matching is tool-aware: a non-github ref that PARSES as a github form still matches verbatim", async () => {
+    // PR #948 review (Codex P2 + Copilot): jira "Acme/Proj#12" parses as the
+    // github short form — canonicalizing the filter would lowercase it into
+    // never matching the verbatim stored ref.
+    const s = await ownSession(appMember.id);
+    await record(ctx(appMember.id), { sessionRef: s.id, tool: 'jira', kind: 'issue', ref: 'Acme/Proj#12', action: 'closed' });
+
+    // With the tool named: verbatim match.
+    const withTool = await items(ctx(appMember.id), { tool: 'jira', ref: 'Acme/Proj#12' });
+    expect(withTool.total).toBe(1);
+    // Without a tool: either spelling matches (canonical OR verbatim).
+    const noTool = await items(ctx(appMember.id), { ref: 'Acme/Proj#12' });
+    expect(noTool.total).toBe(1);
+    // The canonicalized spelling does NOT claim the jira record when the tool
+    // filter says github.
+    const asGithub = await items(ctx(appMember.id), { tool: 'github', ref: 'Acme/Proj#12' });
+    expect(asGithub.total).toBe(0);
+  });
+
+  it('reads are scoped to the canonical worklog root — a worklog-typed node in ANOTHER app-class memory is not this ledger', async () => {
+    // PR #948 review (Copilot): writes select one root; reads must read
+    // exactly that worklog.
+    await record(ctx(contrib.id));
+    const otherMemory = await db.memory.create({
+      data: {
+        id: generateId(),
+        name: 'other shared',
+        urn: `${org.urn}:other-shared-${generateId().slice(-6)}`,
+        class: 'app',
+        appId: app.id,
+        organizationId: org.id,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: otherMemory.id,
+        loc: `worklog:stray-${generateId().slice(-6)}`,
+        name: 'stray',
+        nodeType: 'record',
+        objectType: WORKLOG_OBJECT_TYPE,
+        properties: {
+          sessionId: contribSession.id,
+          personaName: 'stray',
+          tool: 'github',
+          kind: 'pr',
+          ref: 'o/r#371',
+          action: 'opened',
+          at: new Date().toISOString(),
+        },
+      },
+    });
+    const page = await items(ctx(contrib.id));
+    expect(page.total).toBe(1);
+    expect(page.items[0].personaName).not.toBe('stray');
   });
 
   it('limit 0 is count-only; an empty worklog reads as an empty page (reads never provision)', async () => {
