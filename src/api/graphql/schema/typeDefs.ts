@@ -6089,10 +6089,11 @@ export const typeDefs = `#graphql
     ORGANIZATION for an org-owned App (the roster is the team's shared view of
     who is on it), PERSONAL for a user-owned one. The Agent's description is
     the role node's 'data.personaDescription' template when set (same
-    {{name}}/{{role}} substitution as the prompt), otherwise the synthesized
-    'AI coding agent using <role> role'. It is NEVER the role node's own
-    description, which describes the role-definition artifact rather than the
-    persona.
+    {{name}}/{{role}} substitution as the prompt, keeping the raw role slug),
+    otherwise the synthesized 'AI coding agent using <role> role' with the role
+    slug humanized for prose ('backend-engineer' renders 'backend engineer').
+    It is NEVER the role node's own description, which describes the
+    role-definition artifact rather than the persona.
 
     Authorization: an org member with CONTRIBUTOR+ on the App's org, an
     AppMember of the App whose role is not 'reader', or the owner of a

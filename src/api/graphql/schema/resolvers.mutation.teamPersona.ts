@@ -26,6 +26,10 @@ import {
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
 import { type Context, requireOrgRole, isNonReaderAppMember } from './resolvers.helpers.js';
+import {
+  applyPersonaTemplate,
+  composePersonaDescription,
+} from '../../../lib/personaDescription.js';
 import { createAgentCore } from './resolvers.mutation.agent.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
@@ -161,34 +165,11 @@ export async function locateTeamAgent(
 }
 
 /**
- * Substitute {{name}} / {{role}} into a role template. split/join rather than
- * replaceAll so a name containing replacement-pattern characters ($&, $') is
- * inserted literally.
+ * Substitute {{name}} / {{role}} into the role's PROMPT template — the raw
+ * role, as it has always been. (#950's description string lives in
+ * `src/lib/personaDescription.ts`, shared with the backfill sweep.)
  */
-function composePersonaPrompt(template: string, name: string, role: string): string {
-  return template.split('{{name}}').join(name).split('{{role}}').join(role);
-}
-
-/**
- * Default persona description (#950). The role NODE's own `description`
- * describes the role-definition ARTIFACT ("Role definition + name register
- * for …") because that is what the node is — copying it onto the Agent
- * described every persona of a role as if it were a registry document, and
- * identically. So: an optional `data.personaDescription` template on the role
- * node wins (same {{name}}/{{role}} substitution as the prompt), else this
- * synthesized one.
- */
-function composePersonaDescription(
-  roleData: unknown,
-  name: string,
-  role: string,
-): string {
-  const template = (roleData as { personaDescription?: unknown } | null)?.personaDescription;
-  if (typeof template === 'string' && template.trim() !== '') {
-    return composePersonaPrompt(template, name, role);
-  }
-  return `AI coding agent using ${role} role`;
-}
+const composePersonaPrompt = applyPersonaTemplate;
 
 /** True when the error is one of the two "this name's slot is occupied" refusals. */
 function isNameOccupied(e: unknown): boolean {

@@ -100,7 +100,7 @@ describe('planPersonaRepairs', () => {
     expect(plan?.visibility).toEqual({ from: 'PERSONAL', to: 'ORGANIZATION' });
     expect(plan?.description).toEqual({
       from: ROLE_NODE_DESCRIPTION,
-      to: 'AI coding agent using backend-engineer role',
+      to: 'AI coding agent using backend engineer role',
     });
   });
 
@@ -190,7 +190,7 @@ describe('planPersonaRepairs', () => {
     expect(written).toBe(1);
     const after = await db.agent.findUniqueOrThrow({ where: { id: iris.id } });
     expect(after.visibility).toBe('ORGANIZATION');
-    expect(after.description).toBe('AI coding agent using backend-engineer role');
+    expect(after.description).toBe('AI coding agent using backend engineer role');
 
     const second = await planPersonaRepairs(db);
     expect(second.find((p) => p.agentId === iris.id)?.visibility).toBeUndefined();
