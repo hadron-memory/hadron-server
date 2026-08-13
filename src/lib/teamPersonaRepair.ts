@@ -31,6 +31,10 @@
  * needs an active session key (spec 041), which a batch job does not have.
  */
 import type { PrismaClient } from '../generated/prisma/index.js';
+// The backfill writes exactly what the mint path would write — one shared
+// definition rather than a second copy here (two copies with a "keep in step"
+// comment is what let the role slug's hyphen diverge from #950's wording).
+import { composePersonaDescription } from './personaDescription.js';
 
 /** What the sweep decided for one persona Agent. */
 export interface PersonaRepairPlan {
@@ -43,24 +47,6 @@ export interface PersonaRepairPlan {
   description?: { from: string; to: string };
   /** Set when the role node could not be read (encrypted / not found). */
   note?: string;
-}
-
-/**
- * Synthesized persona description — must stay in step with
- * `composePersonaDescription` in resolvers.mutation.teamPersona.ts (the mint
- * path). Kept as a separate small function rather than imported from the
- * resolver module so this admin sweep doesn't pull the whole GraphQL layer in.
- */
-export function synthesizePersonaDescription(
-  roleData: unknown,
-  name: string,
-  role: string,
-): string {
-  const template = (roleData as { personaDescription?: unknown } | null)?.personaDescription;
-  if (typeof template === 'string' && template.trim() !== '') {
-    return template.split('{{name}}').join(name).split('{{role}}').join(role);
-  }
-  return `AI coding agent using ${role} role`;
 }
 
 /**
@@ -155,7 +141,7 @@ export async function planPersonaRepairs(db: PrismaClient): Promise<PersonaRepai
     } else if (p.description && p.description === roleNode.description) {
       plan.description = {
         from: p.description,
-        to: synthesizePersonaDescription(
+        to: composePersonaDescription(
           roleNode.data,
           p.personaName ?? p.name,
           p.personaRole!,

@@ -202,7 +202,7 @@ describe('createTeamPersona — persona metadata (#950)', () => {
       { appRef: app.id, role: 'backend-engineer' },
       ctx(admin.id),
     );
-    expect(agent.description).toBe('AI coding agent using backend-engineer role');
+    expect(agent.description).toBe('AI coding agent using backend engineer role');
   });
 
   it('data.personaDescription on the role node wins, with {{name}}/{{role}} substituted', async () => {
@@ -237,7 +237,7 @@ describe('createTeamPersona — persona metadata (#950)', () => {
       { appRef: app.id, role: 'backend-engineer' },
       ctx(admin.id),
     );
-    expect(agent.description).toBe('AI coding agent using backend-engineer role');
+    expect(agent.description).toBe('AI coding agent using backend engineer role');
   });
 });
 
