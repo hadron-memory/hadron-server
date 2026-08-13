@@ -528,6 +528,14 @@ export const teamWorkMutations = {
         extensions: { code: 'UNAUTHENTICATED' },
       });
     }
+    // Authorize on the APP before anything is written (Codex P1 on PR #958).
+    // The bootstrap below CREATES rows — the App's shared memory and the
+    // worklog root — so gating only on the resulting memory would let any
+    // authenticated caller provision storage inside another tenant's App and
+    // collect a FORBIDDEN afterwards, with the writes already committed. The
+    // App's owner is the memory's owner (findOrCreateAppClassMemory inherits
+    // it), so this is the same tenancy question asked before the side effect.
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
     // The memory exists from App-install time (#951); bootstrap covers Apps
     // created before that, and is idempotent either way.
     const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));
@@ -535,6 +543,9 @@ export const teamWorkMutations = {
       where: { id: root.memoryId },
       select: { id: true, organizationId: true, ownerUserId: true },
     });
+    // Re-asked on the memory itself: it is the subject of the schema edit, and
+    // this is the exact bar updateMemory applies (kept so the two cannot drift
+    // if a memory's owner ever diverges from its App's).
     await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
     const changed = await convergeWorklogSchema(ctx, memory.id);
     return { memoryId: memory.id, collections: [WORKLOG_OBJECT_TYPE], changed };

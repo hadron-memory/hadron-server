@@ -619,6 +619,18 @@ describe('updateTeamCollections — explicit convergence (hadron-cli#401)', () =
     expect(root).not.toBeNull();
   });
 
+  it('authorizes BEFORE bootstrapping — an unauthorized caller writes nothing (Codex P1)', async () => {
+    // No record() first: the App has no shared memory and no worklog root, so
+    // the bootstrap path is live. A caller who cannot pass the gate must not
+    // provision storage inside this tenant's App on the way to being refused.
+    const memoriesBefore = await db.memory.count({ where: { appId: app.id } });
+    for (const c of [ctx(outsider.id), ctx(appMember.id), ctx(contrib.id)]) {
+      await expect(M.updateTeamCollections({}, { appRef: app.id }, c)).rejects.toThrow('Forbidden');
+    }
+    expect(await db.memory.count({ where: { appId: app.id } })).toBe(memoriesBefore);
+    expect(await findWorklogRoot()).toBeNull();
+  });
+
   it('is a schema edit, so team participation is not enough', async () => {
     await record(ctx(contrib.id));
     // A CONTRIBUTOR may record work but may not redefine what a record is.
