@@ -139,23 +139,69 @@ describe('MCP memory-scope resolution honors the #697 legacyUrn alias map', () =
   });
 
   // #697's rule: never silently resolve to one of several claimants.
-  it('fails LOUDLY when two live rows claim the same legacyUrn', async () => {
-    await db.memory.create({
-      data: {
-        id: generateId(),
-        organizationId: orgId,
-        urn: `${V2_URN}-2`,
-        legacyUrn: LEGACY_URN,
-        name: 'Impostor',
-        class: 'knowledge',
-        visibility: 'ORGANIZATION',
-      },
+  describe('ambiguity fails loudly', () => {
+    beforeEach(async () => {
+      await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: orgId,
+          urn: `${V2_URN}-2`,
+          legacyUrn: LEGACY_URN,
+          name: 'Impostor',
+          class: 'knowledge',
+          visibility: 'ORGANIZATION',
+        },
+      });
     });
-    const srv = createTestableMcpServer(adminAuth());
-    await expect(
-      srv.callToolText('hadron_find_nodes', { query: '*', memoryUrn: LEGACY_URN }),
-    ).rejects.toThrow(/ambiguous/i);
-    // …and the unambiguous row is untouched by the ambiguity.
-    expect(await db.memory.count({ where: { id: memoryId } })).toBe(1);
+
+    it('on the memoryUrn scope path', async () => {
+      const srv = createTestableMcpServer(adminAuth());
+      await expect(
+        srv.callToolText('hadron_find_nodes', { query: '*', memoryUrn: LEGACY_URN }),
+      ).rejects.toThrow(/ambiguous/i);
+      // …and the unambiguous row is untouched by the ambiguity.
+      expect(await db.memory.count({ where: { id: memoryId } })).toBe(1);
+    });
+
+    // `parentRel` routes a node URN through resolveLocFromUrn, whose catch
+    // existed for splitNodeUrn's malformed-input rejection. Left broad, it
+    // swallowed the ambiguity and degraded to best-effort loc matching —
+    // answering an ambiguous reference with unrelated results is exactly what
+    // the alias map exists to prevent (PR #963 review, Codex P2).
+    //
+    // The legacy urn here is FLAT (two atoms), unlike the compound one the rest
+    // of this file uses: splitNodeUrn takes the first two atoms as the memory,
+    // so only a flat legacy urn ever reaches the alias lookup on this path —
+    // which is also the shape most #697-migrated rows have (a re-slugged
+    // `<org>:<slug>`).
+    const FLAT_LEGACY = 'legacy-org.com:eng-team-old';
+
+    it('on the parentRel path, instead of degrading to best-effort loc matching', async () => {
+      const srv = createTestableMcpServer(adminAuth());
+      // One claimant: resolves (control).
+      await db.memory.update({
+        where: { id: memoryId },
+        data: { legacyUrn: FLAT_LEGACY },
+      });
+      await expect(
+        srv.callToolText('hadron_find_nodes', { query: '*', parentRel: `hrn:node:${FLAT_LEGACY}:chats` }),
+      ).resolves.toContain('chats:team');
+
+      // Two claimants: must fail loudly rather than fall through.
+      await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: orgId,
+          urn: `${V2_URN}-3`,
+          legacyUrn: FLAT_LEGACY,
+          name: 'Second claimant',
+          class: 'knowledge',
+          visibility: 'ORGANIZATION',
+        },
+      });
+      await expect(
+        srv.callToolText('hadron_find_nodes', { query: '*', parentRel: `hrn:node:${FLAT_LEGACY}:chats` }),
+      ).rejects.toThrow(/ambiguous/i);
+    });
   });
 });

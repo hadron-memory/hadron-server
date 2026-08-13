@@ -565,8 +565,15 @@ async function resolveLocFromUrn(
       // Memory unknown / inaccessible — fall through to the legacy
       // best-effort path below so behavior degrades gracefully for the
       // (rare) caller passing a stale or out-of-scope URN.
-    } catch {
-      // splitNodeUrn rejects malformed inputs — fall through.
+    } catch (err) {
+      // ONLY splitNodeUrn's malformed-input rejection degrades to the
+      // best-effort path below. Anything else — an AmbiguousLegacyUrnError from
+      // the #697 alias fallback in resolveMemoryByUrn, a DB failure — must
+      // escape: silently falling through would answer a genuinely ambiguous
+      // reference with unrelated best-effort loc matches instead of failing
+      // loudly, which is the one outcome the alias map is designed to prevent
+      // (PR #963 review).
+      if (!(err instanceof UrnNotQualifiedError)) throw err;
     }
   }
 
