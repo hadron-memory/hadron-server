@@ -131,6 +131,28 @@ describe('urnEmit (v2 emission)', () => {
         safeNodeUrnV2Result('acme.com:mmdata', 'has space');
         expect(warn).toHaveBeenCalledTimes(1);
       });
+
+      // `safeEmit` is shared with edges, and an EDGE loc is the edge's identity
+      // (spec 037) — always derived non-empty. An empty one is real corruption,
+      // so the node-root suppression must not extend to it.
+      it('still warns for an empty EDGE loc (edges have no root shape)', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        expect(safeEdgeUrnV2('acme.com:mmdata', '')).toBe('hrn:edge:acme.com:mmdata:');
+        expect(warn).toHaveBeenCalledTimes(1);
+      });
+
+      // A root node cannot vouch for its memory: if the stored memory urn is
+      // itself un-emittable, that is a genuine defect the empty loc would
+      // otherwise mask.
+      it.each([
+        ['empty memory urn', ''],
+        ['single-atom memory urn', 'lonely'],
+      ])('still warns when the memory urn is un-emittable (%s)', (_label, memUrn) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const result = safeNodeUrnV2Result(memUrn, '');
+        expect(result.fellBack).toBe(true);
+        expect(warn).toHaveBeenCalledTimes(1);
+      });
     });
 
     it('logs the stored loc and memory so the corrupt ROW can be located', () => {

@@ -131,9 +131,27 @@ export interface SafeUrnEmission {
  * form (`hrn:node:<root>:<mem>:`) is served and flagged as a fallback, so it
  * still never becomes a link.
  */
-function isRootNodeLoc(loc: string): boolean {
-  return loc === '';
+function isExpectedRootNodeEmission(type: 'node' | 'edge', memBareUrn: string, loc: string): boolean {
+  // NODES only. An EDGE loc is the edge's identity (spec 037) and is always
+  // derived non-empty by `deriveEdgeLoc`, so an empty edge loc is real
+  // corruption and must stay loud.
+  if (type !== 'node' || loc !== '') return false;
+  // The throw must be attributable to the empty LOC and nothing else. Re-emit
+  // with a minimal valid loc atom: if that succeeds, the memory portion is
+  // sound and the empty loc was the only problem. If it still throws, the
+  // stored MEMORY urn is corrupt or still compound (see the NODE/EDGE caveat
+  // above) — a genuine defect that happens to be sitting under a root node,
+  // and exactly the case a blanket `loc === ''` check would have hidden.
+  try {
+    emitNodeUrnV2(memBareUrn, ROOT_PROBE_ATOM);
+    return true;
+  } catch {
+    return false;
+  }
 }
+
+/** Minimal valid atom used to prove a memory urn emits independently of the loc. */
+const ROOT_PROBE_ATOM = 'x';
 
 /**
  * Shared strict-then-fallback emit. Logs enough to locate the offending ROW —
@@ -149,8 +167,10 @@ function safeEmit(type: 'node' | 'edge', memBareUrn: string, loc: string): SafeU
     const urn = type === 'node' ? emitNodeUrnV2(memBareUrn, loc) : emitEdgeUrnV2(memBareUrn, loc);
     return { urn, fellBack: false };
   } catch (err) {
-    // Known-shape root node: fall back silently, it is not a defect.
-    if (!isRootNodeLoc(loc)) {
+    // Known-shape root node on a sound memory: fall back silently, it is not a
+    // defect. Everything else — including an empty EDGE loc, and a root node
+    // whose memory urn is itself un-emittable — still warns.
+    if (!isExpectedRootNodeEmission(type, memBareUrn, loc)) {
       console.warn(
         `[safeUrnEmit] stored ${type} loc ${JSON.stringify(loc)} in memory "${memBareUrn}" is not ` +
           'emittable as a v2 URN; serving a best-effort form. The STORED value needs repair — ' +
