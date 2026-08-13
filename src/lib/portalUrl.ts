@@ -96,5 +96,12 @@ export function portalUrlForUrn(urn: string): string | null {
   if (!base) return null;
   const trimmed = urn.trim();
   if (!trimmed) return null;
+  // The "raw, not percent-encoded" contract above is only safe while the URN
+  // really is delimiters plus slug atoms. Enforce that rather than assume it:
+  // a URN reconstructed from a CORRUPT stored loc (see `bestEffortFlatNodeUrn`)
+  // is unvalidated, and a `/`, `?`, `#`, or whitespace in it would re-point the
+  // path, graft on a query/fragment, or break the href outright. Emit nothing
+  // instead — same rule as a malformed base URL, for the same reason.
+  if (/[/?#\\\s]/.test(trimmed)) return null;
   return `${base}/app/u/${trimmed}`;
 }

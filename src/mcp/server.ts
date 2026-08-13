@@ -15,7 +15,14 @@ import {
   normalizeUrnForLookup,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
-import { emitEntityUrnV2, emitNodeUrnV2, safeNodeUrnV2, safeEdgeUrnV2 } from '../lib/urnEmit.js';
+import {
+  emitEntityUrnV2,
+  emitNodeUrnV2,
+  safeNodeUrnV2,
+  safeNodeUrnV2Result,
+  safeEdgeUrnV2,
+  type SafeUrnEmission,
+} from '../lib/urnEmit.js';
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
@@ -486,6 +493,24 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
   return safeNodeUrnV2(memUrn, loc);
 }
 
+/**
+ * {@link nodeUrn} for the SUBJECT of a projection, reporting whether the URN is
+ * the unvalidated best-effort fallback. Only needed where the URN becomes a
+ * portal LINK — a fallback URN can carry `/`, `?`, or `#` straight out of a
+ * corrupt stored loc, and `portalUrlForUrn` interpolates the URN raw, so the
+ * emitted href could point somewhere other than the node being displayed.
+ * Edge-neighbour URNs are display-only and use the plain string form.
+ */
+async function nodeUrnResult(loc: string, memoryId: string): Promise<SafeUrnEmission> {
+  let memUrn = memoryUrnCache.get(memoryId);
+  if (!memUrn) {
+    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+    memUrn = mem?.urn ?? memoryId;
+    memoryUrnCache.set(memoryId, memUrn);
+  }
+  return safeNodeUrnV2Result(memUrn, loc);
+}
+
 /** Build a full hrn:edge: URN from an edge loc and its memoryId (spec 037). */
 async function edgeUrn(loc: string, memoryId: string): Promise<string> {
   let memUrn = memoryUrnCache.get(memoryId);
@@ -666,7 +691,7 @@ async function renderNodeReadProjection(
   scope: 'content' | 'abstract' | 'all',
   opts: { locked?: boolean } = {},
 ): Promise<string> {
-  const urn = await nodeUrn(node.loc, node.memoryId);
+  const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
   const outgoingLines = await Promise.all(
     node.outgoingEdges.map(async (e) => {
       const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
@@ -713,8 +738,11 @@ async function renderNodeReadProjection(
   // ever *constructs* one — constructing means guessing which URN spelling
   // /app/u/<urn> resolves, and an agent that has been reading `::` forms all
   // session guesses wrong (see src/lib/portalUrl.ts). Omitted when no portal
-  // origin is configured.
-  const portalUrl = portalUrlForUrn(urn);
+  // origin is configured — and when the URN is the best-effort fallback for a
+  // corrupt stored loc, since that string is unvalidated and could carry URL
+  // structure (`/`, `?`, `#`) into the href. Same rule as a malformed base
+  // URL: a link that points somewhere other than the node is worse than none.
+  const portalUrl = urnFellBack ? null : portalUrlForUrn(urn);
 
   // #186: surface nodeType so callers can tell `parent` from `info`.
   const meta = [
@@ -1712,7 +1740,7 @@ export function createMcpServerInstance(
         score: number | null;
       }): Promise<string> => {
         const n = hit.node;
-        const urn = await nodeUrn(n.loc, n.memoryId);
+        const { urn, fellBack: urnFellBack } = await nodeUrnResult(n.loc, n.memoryId);
         const score = hit.score;
         // #497: show the score relative to the top hit (mode-independent signal).
         const relStr =
@@ -1740,7 +1768,8 @@ export function createMcpServerInstance(
         // over a working link instead of assembling one from the URN above.
         // Excluded from `brief` mode for the same reason the abstract is: brief
         // stays terse (cor:api:020:03). Omitted when no portal origin is set.
-        if (!brief) {
+        // Omitted for a best-effort fallback URN — see renderNodeReadProjection.
+        if (!brief && !urnFellBack) {
           const hitPortalUrl = portalUrlForUrn(urn);
           if (hitPortalUrl) parts.push(`  URL: ${hitPortalUrl}`);
         }
@@ -2302,14 +2331,15 @@ export function createMcpServerInstance(
       });
       if (!node) return textResult('Node not found.');
 
-      const urn = await nodeUrn(node.loc, node.memoryId);
+      const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
         const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
         // #322: surface the target's stable PK alongside the URN.
         return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
       }));
       // #186: nodeType in the meta block, mirroring hadron_get_node's format.
-      const nextPortalUrl = portalUrlForUrn(urn); // #881 — parity with hadron_get_node
+      // #881 — parity with hadron_get_node, including the fallback-URN omission.
+      const nextPortalUrl = urnFellBack ? null : portalUrlForUrn(urn);
       const meta = [
         `**${node.name}**`,
         urn,

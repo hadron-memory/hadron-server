@@ -155,6 +155,80 @@ describe('hadron_get_node — URL line', () => {
   });
 });
 
+// ───── corrupt stored loc (the #959 regression) ───────────────────────────
+
+/**
+ * A stored `loc` carrying an empty atom (leading/trailing/doubled `:`) makes the
+ * STRICT v2 emitter throw `invalid-segment-shape`. Before the safe emitters, one
+ * such row anywhere in a node's edge set failed the whole `hadron_get_node`
+ * response — with an error that named the CALLER's URN, so it read as a
+ * URN-grammar bug rather than a corrupt row.
+ *
+ * `validateLoc` rejects these on the write path, so the fixtures go in via raw
+ * Prisma — which is also how the surviving production rows got there (a write
+ * path that predates or bypasses the check).
+ */
+describe('hadron_get_node — corrupt stored loc', () => {
+  /** Insert a node straight past `validateLoc`. */
+  async function rawNode(loc: string, name: string) {
+    return db.node.create({
+      data: { id: generateId(), memoryId: fx.memory.id, loc, name, nodeType: 'info' },
+    });
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it('renders a healthy subject whose EDGE NEIGHBOUR has a corrupt loc', async () => {
+    await addNode('subject', { content: 'Body.' });
+    const subject = await db.node.findFirstOrThrow({
+      where: { memoryId: fx.memory.id, loc: 'subject' },
+    });
+    const broken = await rawNode('neighbour:', 'broken-neighbour');
+    await db.edge.create({
+      data: {
+        id: generateId(),
+        memoryId: fx.memory.id,
+        loc: 'subject:rel:broken',
+        sourceId: subject.id,
+        targetId: broken.id,
+        name: 'routes-to',
+      },
+    });
+
+    // The regression: this used to throw invalid-segment-shape for the whole call.
+    const text = await getNode(`${ORG}::${MEM}::subject`);
+    expect(text).toContain('Body.');
+    // The healthy subject keeps its own URN and link…
+    expect(urnLine(text)).toBe(`hrn:node:${ORG}:${MEM}:subject`);
+    expect(urlLine(text)).toBe(`${PORTAL}/app/u/hrn:node:${ORG}:${MEM}:subject`);
+    // …and the corrupt neighbour still appears, best-effort.
+    expect(text).toContain('broken-neighbour');
+  });
+
+  it('renders a subject whose OWN loc is corrupt, but emits no portal link for it', async () => {
+    await rawNode('broken:', 'broken-subject');
+    const text = await getNode(`${ORG}::${MEM}::broken:`);
+    expect(text).toContain('broken-subject');
+    // The URN is best-effort — unvalidated, so it must not become an href.
+    expect(urlLine(text)).toBeNull();
+  });
+
+  // The reason the link is suppressed rather than merely odd-looking: a loc can
+  // carry URL structure, and portalUrlForUrn interpolates the URN raw.
+  it.each([
+    ['fragment', 'evil#@example.com'],
+    ['query', 'evil?x=1'],
+    ['path', 'evil/elsewhere'],
+  ])('emits no portal link when a corrupt loc carries a URL %s', async (_label, loc) => {
+    await rawNode(loc, `node-${_label}`);
+    const text = await getNode(`${ORG}::${MEM}::${loc}`);
+    expect(text).toContain(`node-${_label}`);
+    expect(urlLine(text)).toBeNull();
+  });
+});
+
 // ───── hadron_get_nodes (batch) ───────────────────────────────────────────
 
 describe('hadron_get_nodes — per-node parity (cor:api:040:01)', () => {

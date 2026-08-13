@@ -101,14 +101,27 @@ export function bestEffortFlatNodeUrn(type: 'node' | 'edge', memBareUrn: string,
   return `hrn:${type}:${mem}:${loc}`;
 }
 
+export interface SafeUrnEmission {
+  urn: string;
+  /**
+   * `true` when strict emission failed and `urn` is the UNVALIDATED best-effort
+   * join. Such a URN may contain anything the stored loc did — including `/`,
+   * `?`, and `#`, which change the structure of a URL it is interpolated into.
+   * Callers that put a URN somewhere structural (a link, a redirect) must check
+   * this and degrade; callers that only display it can ignore it.
+   */
+  fellBack: boolean;
+}
+
 /**
  * Shared strict-then-fallback emit. Logs enough to locate the offending ROW —
  * the strict error names the composed URN, never the stored `loc`/memory that
  * produced it, which is what makes this corruption class so hard to trace.
  */
-function safeEmit(type: 'node' | 'edge', memBareUrn: string, loc: string): string {
+function safeEmit(type: 'node' | 'edge', memBareUrn: string, loc: string): SafeUrnEmission {
   try {
-    return type === 'node' ? emitNodeUrnV2(memBareUrn, loc) : emitEdgeUrnV2(memBareUrn, loc);
+    const urn = type === 'node' ? emitNodeUrnV2(memBareUrn, loc) : emitEdgeUrnV2(memBareUrn, loc);
+    return { urn, fellBack: false };
   } catch (err) {
     console.warn(
       `[safeUrnEmit] stored ${type} loc ${JSON.stringify(loc)} in memory "${memBareUrn}" is not ` +
@@ -116,8 +129,13 @@ function safeEmit(type: 'node' | 'edge', memBareUrn: string, loc: string): strin
         'this is not a malformed caller request:',
       err,
     );
-    return bestEffortFlatNodeUrn(type, memBareUrn, loc);
+    return { urn: bestEffortFlatNodeUrn(type, memBareUrn, loc), fellBack: true };
   }
+}
+
+/** {@link safeNodeUrnV2}, but reporting whether the value is the unvalidated fallback. */
+export function safeNodeUrnV2Result(memBareUrn: string, loc: string): SafeUrnEmission {
+  return safeEmit('node', memBareUrn, loc);
 }
 
 /**
@@ -137,12 +155,15 @@ function safeEmit(type: 'node' | 'edge', memBareUrn: string, loc: string): strin
  *
  * Same failure class and same remedy as `safeCanonicalUrn` (#298): serve the
  * row, log the corruption, repair the data separately.
+ *
+ * A fallback URN is NOT safe to interpolate into a URL — use
+ * {@link safeNodeUrnV2Result} and check `fellBack` when the value becomes a link.
  */
 export function safeNodeUrnV2(memBareUrn: string, loc: string): string {
-  return safeEmit('node', memBareUrn, loc);
+  return safeEmit('node', memBareUrn, loc).urn;
 }
 
 /** Read-path edge-URN emission that cannot throw. See {@link safeNodeUrnV2}. */
 export function safeEdgeUrnV2(memBareUrn: string, loc: string): string {
-  return safeEmit('edge', memBareUrn, loc);
+  return safeEmit('edge', memBareUrn, loc).urn;
 }
