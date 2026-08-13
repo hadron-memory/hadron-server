@@ -108,6 +108,7 @@ import {
   InvalidContentScopeError,
 } from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
+import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
 import { HADRON_SERVER_VERSION, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -604,6 +605,22 @@ async function resolveLocFromUrn(
  *
  * Soft-deleted memories are treated as not found, matching the convention
  * in `resolveMemoryRef` and the entity-ref helpers under `src/lib/entityRef/`.
+ *
+ * #697 STORED ALIAS MAP: after the primary `urn` lookup misses, a URN that
+ * addressed this row BEFORE the grammar-v2 migration re-minted it is redirected
+ * via `legacyUrn` — the same fallback `resolveMemoryRef` already had, and the
+ * whole reason the migration records the old value instead of rewriting
+ * references. Every MCP memory-scope path (all 22 call sites: the `memoryUrn` /
+ * `memoryUrns` scopes, node reads that split a node URN, edge endpoints, move,
+ * sync) funnels through here, so its absence made a re-minted memory
+ * unreachable by any stored reference to its old URN — which is exactly what a
+ * user hits after #723 flattens their team memory (found running the prod
+ * backfill: `hadron_find_nodes memoryUrn:'<old compound urn>'` answered "Memory
+ * not found" the moment the row was re-minted).
+ *
+ * Ambiguity (two live rows claiming the same `legacyUrn`) throws
+ * `AmbiguousLegacyUrnError` rather than picking one — the #697 rule is fail
+ * loudly, never silently resolve to the wrong tenant's row.
  */
 async function resolveMemoryByUrn(
   rawUrn: string,
@@ -622,13 +639,22 @@ async function resolveMemoryByUrn(
   const canonicalForm = legacyForm.includes(':')
     ? legacyForm.split(':').join('::')
     : legacyForm;
-  return await db.memory.findFirst({
+  const direct = await db.memory.findFirst({
     where: {
       deletedAt: null,
       OR: [{ urn: legacyForm }, { urn: canonicalForm }],
     },
     select: { id: true, urn: true },
   });
+  if (direct) return direct;
+  // #697 alias-map fallback. Inert until the migration populates `legacyUrn`.
+  const candidates = await db.memory.findMany({
+    where: { deletedAt: null, legacyUrn: { in: [legacyForm, canonicalForm] } },
+    select: { id: true, urn: true },
+    take: 2,
+  });
+  const aliased = resolveLegacyAlias(rawUrn, candidates);
+  return aliased ? (candidates.find((m) => m.id === aliased.id) ?? null) : null;
 }
 
 // Access control lives in ./access-control.ts.
