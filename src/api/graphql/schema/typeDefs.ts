@@ -1884,6 +1884,16 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  "Result of updateTeamCollections (hadron-cli#401)."
+  type TeamCollectionsPayload {
+    "The team App's shared memory the declaration was written to."
+    memoryId: ID!
+    "The server-owned collections declared on it."
+    collections: [String!]!
+    "False when the declaration already matched the canonical definition (idempotent no-op)."
+    changed: Boolean!
+  }
+
   type AgentMemoryItem {
     id: ID!
     memory: Memory!
@@ -6189,6 +6199,38 @@ export const typeDefs = `#graphql
       action: String!
       detail: JSON
     ): TeamWorkItem!
+
+    """
+    (Re)declare the server-owned team collections on the team App's shared
+    memory, converging a drifted declaration to the canonical definition
+    (hadron-cli#401). Idempotent: 'changed' is false when the declaration
+    already matched.
+
+    Why this exists as its own operation. recordTeamWork declares the worklog
+    collection on first write, but deliberately leaves an ALREADY-declared one
+    untouched — a deployment that tightened it governs that surface too, which
+    is the point of schema governance. A declaration is not always a
+    deployment decision though: 'hadron team init' shipped a client-side copy
+    of this schema that has since drifted from the server's (its kind enum
+    predates the 'repo' kind), so on a CLI-bootstrapped memory a
+    recordTeamWork(kind: 'repo') is refused by a rule nobody chose.
+    Overriding silently would break real governance; this operation makes
+    convergence an explicit act instead.
+
+    Only the server-owned collections are rewritten — every other collection
+    on the memory is preserved.
+
+    Authorization: owner or org ADMIN on the memory, the same bar updateMemory
+    applies to a schema edit. Team participation is deliberately NOT enough:
+    it lets you record work, not redefine what a record is.
+
+    Typed refusals: APP_UNINSTALLED, UNAUTHENTICATED, TEAM_AGENT_NOT_FOUND /
+    TEAM_AGENT_AMBIGUOUS (when the App's shared memory must still be
+    bootstrapped).
+
+    Accepts the entity's ID or URN.
+    """
+    updateTeamCollections(appRef: ID!): TeamCollectionsPayload!
 
     """
     Uninstall an Agent from an App. Deletes the AppAgent row. The Agent's
