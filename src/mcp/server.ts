@@ -4332,12 +4332,57 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     return emitNodeUrnV2(memUrn, loc);
   }
 
-  function runTaskCandidate(mem: RunTaskMem, node: RunTaskNode) {
-    return {
-      urn: nodeUrnFromMem(mem.urn, node.loc),
-      label: node.name,
-      description: node.description,
-    };
+  type RunTaskCandidate = { urn: string; label: string; description: string | null };
+
+  /**
+   * A picker entry, or `null` when the node's loc has no v2 URN.
+   *
+   * Dropping it is deliberate, and is NOT the same call as the read path's
+   * best-effort fallback. Here the URN is an execution identity — it round-trips
+   * through `splitNodeUrn`/`resolveNodeRef` to load the node — so a best-effort
+   * string is worse than nothing: `splitNodeUrn` takes the first two atoms as
+   * the memory, so a malformed URN can silently resolve a DIFFERENT node. A
+   * candidate we cannot address is one we cannot run, so offering it would
+   * present an action that must fail.
+   *
+   * Dropping one candidate also beats the status quo, where a single
+   * un-emittable loc anywhere in the match set throws and takes down the whole
+   * hadron_run_task call.
+   */
+  function runTaskCandidate(mem: RunTaskMem, node: RunTaskNode): RunTaskCandidate | null {
+    try {
+      return { urn: nodeUrnFromMem(mem.urn, node.loc), label: node.name, description: node.description };
+    } catch (err) {
+      console.warn(
+        `[hadron_run_task] skipping candidate ${JSON.stringify(node.loc)} in memory ` +
+          `"${mem.urn}" — its loc has no v2 URN, so it cannot be addressed to run:`,
+        err,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Build the picker list. Returns how many entries were dropped so the caller
+   * can SAY so — a silently shortened list reads as "these are all the tasks".
+   */
+  function buildCandidates(
+    pairs: Array<{ mem: RunTaskMem; node: RunTaskNode }>,
+  ): { usable: RunTaskCandidate[]; skipped: number } {
+    const usable: RunTaskCandidate[] = [];
+    let skipped = 0;
+    for (const { mem, node } of pairs) {
+      const candidate = runTaskCandidate(mem, node);
+      if (candidate) usable.push(candidate);
+      else skipped++;
+    }
+    return { usable, skipped };
+  }
+
+  /** Header suffix disclosing dropped candidates; empty when none were. */
+  function skippedNote(skipped: number): string {
+    if (skipped === 0) return '';
+    return ` (${skipped} unaddressable task${skipped === 1 ? '' : 's'} hidden — see server logs)`;
   }
 
   // Present candidates and run the chosen one: an interactive single-select
@@ -4571,9 +4616,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return runOrRender(nodeUrnFromMem(memory.urn, matches[0].loc));
         }
         if (matches.length > 1) {
+          const { usable, skipped } = buildCandidates(matches.map((n) => ({ mem: memory, node: n })));
+          if (usable.length === 0) {
+            return textResult(
+              `Tasks matching "${taskHint}" in ${memory.name} exist, but none can be addressed to run ` +
+                '(their locs have no URN). See server logs.',
+            );
+          }
           return presentAndRun(
-            matches.map((n) => runTaskCandidate(memory, n)),
-            `Multiple tasks match "${taskHint}" in ${memory.name} — pick one:`,
+            usable,
+            `Multiple tasks match "${taskHint}" in ${memory.name} — pick one:${skippedNote(skipped)}`,
             runOrRender,
           );
         }
@@ -4582,9 +4634,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (wide.length === 0) {
           return textResult(`No runnable task matching "${taskHint}" in ${memory.name}.`);
         }
+        const wideBuilt = buildCandidates(wide.map((w) => ({ mem: w.mem, node: w.node })));
+        if (wideBuilt.usable.length === 0) {
+          return textResult(
+            `No runnable task matching "${taskHint}" in ${memory.name}. Matches exist in other ` +
+              'memories but none can be addressed to run (their locs have no URN). See server logs.',
+          );
+        }
         return presentAndRun(
-          wide.map((w) => runTaskCandidate(w.mem, w.node)),
-          `No match in ${memory.name}, but "${taskHint}" matches runnable tasks in other memories — pick one:`,
+          wideBuilt.usable,
+          `No match in ${memory.name}, but "${taskHint}" matches runnable tasks in other memories — ` +
+            `pick one:${skippedNote(wideBuilt.skipped)}`,
           runOrRender,
         );
       }
@@ -4594,9 +4654,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (runnable.length === 1) {
         return runOrRender(nodeUrnFromMem(memory.urn, runnable[0].loc));
       }
+      const listed = buildCandidates(runnable.map((n) => ({ mem: memory, node: n })));
+      if (listed.usable.length === 0) {
+        return textResult(
+          `No runnable tasks in ${memory.name} can be addressed to run (their locs have no URN). ` +
+            'See server logs.',
+        );
+      }
       return presentAndRun(
-        runnable.map((n) => runTaskCandidate(memory, n)),
-        `Tasks in ${memory.name} — pick one to run:`,
+        listed.usable,
+        `Tasks in ${memory.name} — pick one to run:${skippedNote(listed.skipped)}`,
         runOrRender,
       );
     },

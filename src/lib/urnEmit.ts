@@ -114,21 +114,70 @@ export interface SafeUrnEmission {
 }
 
 /**
+ * A memory's ROOT node carries `loc === ''`. That is a SUPPORTED shape, not
+ * corruption: git-sync maps it to the repo-root `README.md`
+ * (`src/integrations/github/nodeFrontmatter.ts` — "the empty-loc root node maps
+ * to the repo-root README.md"), and every memory has one.
+ *
+ * The v2 grammar has no URN for it — `''.split(':')` is a single EMPTY atom, and
+ * `composeUrnV2` rejects that — so strict emission throws. That is a gap in the
+ * grammar, not a bad row, and it must not be reported as one: there are as many
+ * of these as there are memories, so logging each read as corruption is both
+ * wrong and loud, and it invites someone to "repair" a root node's loc, which
+ * would break the README mapping.
+ *
+ * What a root node's canonical URN SHOULD be is a grammar question for
+ * `cor:urn:010:01`, deliberately not decided here. Until it is, the best-effort
+ * form (`hrn:node:<root>:<mem>:`) is served and flagged as a fallback, so it
+ * still never becomes a link.
+ */
+function isExpectedRootNodeEmission(type: 'node' | 'edge', memBareUrn: string, loc: string): boolean {
+  // NODES only. An EDGE loc is the edge's identity (spec 037) and is always
+  // derived non-empty by `deriveEdgeLoc`, so an empty edge loc is real
+  // corruption and must stay loud.
+  if (type !== 'node' || loc !== '') return false;
+  // The throw must be attributable to the empty LOC and nothing else. Re-emit
+  // with a minimal valid loc atom: if that succeeds, the memory portion is
+  // sound and the empty loc was the only problem. If it still throws, the
+  // stored MEMORY urn is corrupt or still compound (see the NODE/EDGE caveat
+  // above) — a genuine defect that happens to be sitting under a root node,
+  // and exactly the case a blanket `loc === ''` check would have hidden.
+  try {
+    emitNodeUrnV2(memBareUrn, ROOT_PROBE_ATOM);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Minimal valid atom used to prove a memory urn emits independently of the loc. */
+const ROOT_PROBE_ATOM = 'x';
+
+/**
  * Shared strict-then-fallback emit. Logs enough to locate the offending ROW —
  * the strict error names the composed URN, never the stored `loc`/memory that
- * produced it, which is what makes this corruption class so hard to trace.
+ * produced it, which is what makes a genuinely bad row so hard to trace.
+ *
+ * The try/catch (rather than an up-front `isRootNodeLoc` branch) is deliberate:
+ * behaviour stays driven by what the emitter can actually do, so if the grammar
+ * later gains a root-node URN this starts emitting it with no change here.
  */
 function safeEmit(type: 'node' | 'edge', memBareUrn: string, loc: string): SafeUrnEmission {
   try {
     const urn = type === 'node' ? emitNodeUrnV2(memBareUrn, loc) : emitEdgeUrnV2(memBareUrn, loc);
     return { urn, fellBack: false };
   } catch (err) {
-    console.warn(
-      `[safeUrnEmit] stored ${type} loc ${JSON.stringify(loc)} in memory "${memBareUrn}" is not ` +
-        'emittable as a v2 URN; serving a best-effort form. The STORED value needs repair — ' +
-        'this is not a malformed caller request:',
-      err,
-    );
+    // Known-shape root node on a sound memory: fall back silently, it is not a
+    // defect. Everything else — including an empty EDGE loc, and a root node
+    // whose memory urn is itself un-emittable — still warns.
+    if (!isExpectedRootNodeEmission(type, memBareUrn, loc)) {
+      console.warn(
+        `[safeUrnEmit] stored ${type} loc ${JSON.stringify(loc)} in memory "${memBareUrn}" is not ` +
+          'emittable as a v2 URN; serving a best-effort form. The STORED value needs repair — ' +
+          'this is not a malformed caller request:',
+        err,
+      );
+    }
     return { urn: bestEffortFlatNodeUrn(type, memBareUrn, loc), fellBack: true };
   }
 }

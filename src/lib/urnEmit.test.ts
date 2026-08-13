@@ -10,6 +10,7 @@ import {
   emitInstalledAgentUrnV2,
   bestEffortFlatNodeUrn,
   safeNodeUrnV2,
+  safeNodeUrnV2Result,
   safeEdgeUrnV2,
 } from './urnEmit.js';
 
@@ -103,6 +104,55 @@ describe('urnEmit (v2 emission)', () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       expect(() => safeNodeUrnV2('', 'review')).not.toThrow();
       expect(() => safeEdgeUrnV2('', 'intro:next')).not.toThrow();
+    });
+
+    // A memory's ROOT node has loc ''. Supported shape (git-sync maps it to the
+    // repo-root README.md), so it must fall back WITHOUT being reported as
+    // corruption — there is one per memory, so the warning would be both wrong
+    // and constant, and it invites "repairing" a legitimate row.
+    describe('root node (loc === "")', () => {
+      it('falls back without logging a corruption warning', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const result = safeNodeUrnV2Result('acme.com:mmdata', '');
+        expect(result.fellBack).toBe(true);
+        expect(result.urn).toBe('hrn:node:acme.com:mmdata:');
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('is still flagged as a fallback, so it never becomes a portal link', () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        // The grammar has no root-node URN yet (cor:urn:010:01) — until it does,
+        // the best-effort form must not be treated as addressable.
+        expect(safeNodeUrnV2Result('acme.com:mmdata', '').fellBack).toBe(true);
+      });
+
+      it('still warns for a genuinely malformed loc (the suppression is narrow)', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        safeNodeUrnV2Result('acme.com:mmdata', 'has space');
+        expect(warn).toHaveBeenCalledTimes(1);
+      });
+
+      // `safeEmit` is shared with edges, and an EDGE loc is the edge's identity
+      // (spec 037) — always derived non-empty. An empty one is real corruption,
+      // so the node-root suppression must not extend to it.
+      it('still warns for an empty EDGE loc (edges have no root shape)', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        expect(safeEdgeUrnV2('acme.com:mmdata', '')).toBe('hrn:edge:acme.com:mmdata:');
+        expect(warn).toHaveBeenCalledTimes(1);
+      });
+
+      // A root node cannot vouch for its memory: if the stored memory urn is
+      // itself un-emittable, that is a genuine defect the empty loc would
+      // otherwise mask.
+      it.each([
+        ['empty memory urn', ''],
+        ['single-atom memory urn', 'lonely'],
+      ])('still warns when the memory urn is un-emittable (%s)', (_label, memUrn) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const result = safeNodeUrnV2Result(memUrn, '');
+        expect(result.fellBack).toBe(true);
+        expect(warn).toHaveBeenCalledTimes(1);
+      });
     });
 
     it('logs the stored loc and memory so the corrupt ROW can be located', () => {
