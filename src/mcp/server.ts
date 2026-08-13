@@ -15,7 +15,7 @@ import {
   normalizeUrnForLookup,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
-import { emitEntityUrnV2, emitNodeUrnV2, emitEdgeUrnV2 } from '../lib/urnEmit.js';
+import { emitEntityUrnV2, emitNodeUrnV2, safeNodeUrnV2, safeEdgeUrnV2 } from '../lib/urnEmit.js';
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
@@ -479,9 +479,11 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
     memoryUrnCache.set(memoryId, memUrn);
   }
   // Grammar-v2 node URN (#697 emission flip). Shared with the global-search
-  // node adapter via emitNodeUrnV2 (src/lib/urnEmit.ts) so the two surfaces
-  // can't drift on node-URN shape.
-  return emitNodeUrnV2(memUrn, loc);
+  // node adapter via urnEmit (src/lib/urnEmit.ts) so the two surfaces can't
+  // drift on node-URN shape. The SAFE variant is load-bearing here: this is
+  // called once per rendered node AND once per edge neighbour, so a single
+  // corrupt stored loc would otherwise fail the entire tool response.
+  return safeNodeUrnV2(memUrn, loc);
 }
 
 /** Build a full hrn:edge: URN from an edge loc and its memoryId (spec 037). */
@@ -492,7 +494,7 @@ async function edgeUrn(loc: string, memoryId: string): Promise<string> {
     memUrn = mem?.urn ?? memoryId;
     memoryUrnCache.set(memoryId, memUrn);
   }
-  return emitEdgeUrnV2(memUrn, loc);
+  return safeEdgeUrnV2(memUrn, loc);
 }
 
 // The `hadron_find_nodes` tool delegates retrieval to resolvers.Query.findNodes
