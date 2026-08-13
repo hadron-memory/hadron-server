@@ -1607,6 +1607,36 @@ export async function requireMemorySharePrincipal(
 // `App`). Keeping the logic in one place prevents drift between the two
 // surfaces.
 
+/**
+ * "Is the caller a non-`reader` member of this App?" — the AppMember half of
+ * `createTeamPersona`'s mint gate, extracted here (#952) so the one
+ * conventional read-only role spelling lives in a single place rather than
+ * being restated by each surface that admits App members.
+ *
+ * `installAgentIntoAppCore` deliberately does NOT use it — see the note on its
+ * gate: installing an EXISTING Agent is itself a read grant on that Agent's
+ * design, which minting a fresh one is not.
+ *
+ * AppMember roles are free-form strings drawn from the Agent's
+ * `installationPolicy.memberRoles`, so `reader` is the one conventional
+ * read-only spelling this predicate knows (case-insensitive, trimmed).
+ *
+ * Never admits on a USER-owned App: spec 047 keeps those strictly owner-only,
+ * and the owner is already admitted by the org/owner gate this backs up.
+ * Never admits under impersonation — support sessions are read-only (#875).
+ */
+export async function isNonReaderAppMember(
+  ctx: Context,
+  app: { id: string; ownerUserId: string | null },
+): Promise<boolean> {
+  if (ctx.impersonation || !ctx.userId || app.ownerUserId !== null) return false;
+  const member = await ctx.db.appMember.findUnique({
+    where: { appId_userId: { appId: app.id, userId: ctx.userId } },
+    select: { role: true },
+  });
+  return !!member && member.role.trim().toLowerCase() !== 'reader';
+}
+
 export class DuplicateAppAgentError extends GraphQLError {
   constructor(appId: string, agentId: string) {
     super(`Agent ${agentId} is already installed in App ${appId}.`, {
@@ -1650,6 +1680,24 @@ export async function installAgentIntoAppCore(
   // #551: installing is a member-level write on the App's org (CONTRIBUTOR+),
   // not an ADMIN-only action — any org member who can author App config can
   // install an Agent.
+  //
+  //
+  // #952 asked for a non-`reader` AppMember fallback here, "matching
+  // createTeamPersona's gate", so a team's own members can compose the roster.
+  // NOT done, deliberately — the two operations are not symmetric:
+  // createTeamPersona installs an Agent it MINTS in the same call (empty, so
+  // nothing pre-existing is revealed), whereas this one installs an EXISTING
+  // Agent, and installing is itself a read grant. An installed Agent's system
+  // memory becomes READ_ONLY in every App-context access map
+  // (`foldAgentIntoAccessMap`), and the mutation payload returns the Agent
+  // object, whose own definition fields (systemPrompt / systemMemoryId /
+  // memoryItems) are NOT field-gated — they rely on this object-level gate
+  // (#551). An AppMember who is not an org member cannot read a non-PUBLIC org
+  // Agent today (`Query.agent` requires org READER), so admitting them here
+  // would hand them exactly that — the
+  // findings:broadening-read-gate-leaks-nested-objects class. Widening this
+  // needs a deliberate call on that exposure, not an inference from the
+  // roster-composition use case.
   await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR');
   const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
   // #756: an org-owned App and a user-owned App have DIFFERENT accessibility

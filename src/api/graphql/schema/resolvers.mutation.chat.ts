@@ -219,7 +219,7 @@ export const chatMutations = {
             },
           },
           select: {
-            app: { select: { id: true, urn: true, name: true, organizationId: true } },
+            app: { select: { id: true, urn: true, name: true, organizationId: true, ownerUserId: true } },
           },
         });
         if (!membership?.app) {
@@ -240,6 +240,7 @@ export const chatMutations = {
           agentUrn: agent.urn,
           agentName: agent.name,
           organizationId: membership.app.organizationId,
+          ownerUserId: membership.app.ownerUserId,
           actingUserId: ctx.userId,
           db: ctx.db,
         });

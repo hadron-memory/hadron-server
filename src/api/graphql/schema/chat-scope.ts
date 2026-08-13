@@ -102,10 +102,16 @@ export function allowedReadSet(
 }
 
 /**
- * Lazy-provision the app-class memory for an `(App, Agent)` pair. On
- * first call creates a `class='app'` memory with URN
- * `${app.urn}:${agentSlug}:shared`; subsequent calls for the same pair
- * return the existing memory's id.
+ * Provision the app-class memory for an `(App, Agent)` pair. On first call
+ * creates a `class='app'` memory with URN `${app.urn}:${agentSlug}:shared`;
+ * subsequent calls for the same pair return the existing memory's id.
+ *
+ * #951: `createApp` now calls this for the App's founding Agent, so a freshly
+ * installed App HAS a writable memory from the start. It stays idempotent and
+ * lazily callable — the shared-chat and team-chat paths still call it, which
+ * is what covers Apps created before that change. It is deliberately NOT
+ * called from `installAgentIntoApp`: a team App installs one persona Agent per
+ * teammate, and one shared memory per persona would be noise, not a team space.
  *
  * One app-class memory per `(app, agent)`, not per `app` alone — the
  * 2026-05-12-user-installing-app design discussion (§3) reintroduced
@@ -139,10 +145,19 @@ export async function findOrCreateAppClassMemory(args: {
   agentUrn: string;
   agentName: string;
   organizationId: string | null;
+  /**
+   * #951: the App's USER owner, for a user-owned App (spec 047). Memories
+   * carry the same org-XOR-user ownership as every other tenanted row
+   * (`chk_memory_owner_xor`), so passing only `organizationId` left BOTH
+   * columns null for a user-owned App and the insert failed the CHECK — i.e.
+   * the shared memory could never be provisioned there at all.
+   */
+  ownerUserId?: string | null;
   actingUserId: string;
   db: PrismaClient;
 }): Promise<string> {
   const { appId, appUrn, appName, agentUrn, agentName, organizationId, actingUserId, db } = args;
+  const ownerUserId = args.ownerUserId ?? null;
   const agentSlug = agentUrn.split(':').slice(1).join(':');
   if (!agentSlug) {
     throw new Error(
@@ -180,6 +195,9 @@ export async function findOrCreateAppClassMemory(args: {
     const created = await db.memory.create({
       data: {
         organizationId,
+        // Owner XOR (`chk_memory_owner_xor`): an org-owned App's shared memory
+        // is org-owned, a user-owned App's belongs to that user.
+        ownerUserId: organizationId === null ? ownerUserId : null,
         urn,
         name: `${appName} — ${agentName} — shared chats`,
         class: 'app',

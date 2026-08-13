@@ -177,6 +177,70 @@ describe('createTeamPersona — happy path', () => {
   });
 });
 
+describe('createTeamPersona — persona metadata (#950)', () => {
+  it('an org-owned team App mints an ORGANIZATION-visible persona (the roster is shared)', async () => {
+    const agent = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer' },
+      ctx(admin.id),
+    );
+    expect(agent.visibility).toBe('ORGANIZATION');
+  });
+
+  it('the description is synthesized, never the role node\'s own description', async () => {
+    // The role node describes the ARTIFACT — that string must not land on the
+    // persona (and would be identical for every persona of the role).
+    const roleNode = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer' },
+    });
+    await db.node.update({
+      where: { id: roleNode.id },
+      data: { description: 'Role definition + name register for backend engineers' },
+    });
+    const agent = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer' },
+      ctx(admin.id),
+    );
+    expect(agent.description).toBe('AI coding agent using backend-engineer role');
+  });
+
+  it('data.personaDescription on the role node wins, with {{name}}/{{role}} substituted', async () => {
+    const roleNode = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer' },
+    });
+    await db.node.update({
+      where: { id: roleNode.id },
+      data: {
+        description: 'Role definition + name register for backend engineers',
+        data: { names: ['Iris'], personaDescription: '{{name}} — {{role}} on the Micromentor team' },
+      },
+    });
+    const agent = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer' },
+      ctx(admin.id),
+    );
+    expect(agent.description).toBe('Iris — backend-engineer on the Micromentor team');
+  });
+
+  it('a blank data.personaDescription falls back to the synthesized one', async () => {
+    const roleNode = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer' },
+    });
+    await db.node.update({
+      where: { id: roleNode.id },
+      data: { data: { names: ['Iris'], personaDescription: '   ' } },
+    });
+    const agent = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer' },
+      ctx(admin.id),
+    );
+    expect(agent.description).toBe('AI coding agent using backend-engineer role');
+  });
+});
+
 describe('createTeamPersona — name allocation', () => {
   it('advances past taken names (PERSONA_NAME_TAKEN retry contract)', async () => {
     const first = await M.createTeamPersona(

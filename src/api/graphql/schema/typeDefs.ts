@@ -5438,6 +5438,28 @@ export const typeDefs = `#graphql
     deleteAgent(ref: ID!): Boolean!
 
     """
+    #949 — re-own an Agent's class=system memory to the Agent's own owner
+    (org XOR user) and re-derive its URN as '<agent-urn>-system'.
+
+    The recovery path for a system memory that ended up owned by a different
+    tenant. Access to a memory follows the MEMORY's owner, so such a row puts
+    one tenant's Agent design (for a Team Agent: its 'roles:<role>'
+    definitions and name registers) inside another tenant's audience. System
+    memories are only ever created by Agent provisioning, so before this the
+    only fix was to recreate the Agent.
+
+    Authorization: PLATFORM ADMIN only — the row being moved belongs to a
+    different tenant than the Agent, so neither side's org admin is the right
+    authority. Idempotent: an already-consistent pair is a no-op.
+
+    Error codes (extensions.code): FORBIDDEN, AGENT_HAS_NO_SYSTEM_MEMORY,
+    SYSTEM_MEMORY_NOT_FOUND.
+
+    Accepts the entity's ID or URN.
+    """
+    repairAgentSystemMemory(agentRef: ID!): Agent!
+
+    """
     Attach a Memory to an Agent.
 
     Accepts the entity's ID or URN.
@@ -6016,8 +6038,25 @@ export const typeDefs = `#graphql
     row joining the two. An App can have multiple Agents installed; one
     credential addresses all of them.
 
+    This is the ONE operation that attaches an EXISTING Agent to an EXISTING
+    App — distinct from createApp (which makes a NEW App from an Agent) and
+    createTeamPersona (which installs an Agent it mints in the same call). It
+    is therefore also the re-attach that cor:dmo:050:03 promises: detaching an
+    Agent retains the memories accumulated under that App-and-Agent pairing as
+    orphans, and installing the Agent again is what makes them reachable.
+    Under cor:agt:020:01 the AppAgent join IS a team's roster, so this is how a
+    roster is composed: adding an existing persona to a second team App, or
+    putting back one uninstalled by mistake.
+
     Rejects with code DUPLICATE_APP_AGENT when the Agent is already
     installed in the App.
+
+    Authorization: the owner of a user-owned App, or an org member with
+    CONTRIBUTOR+ on an org-owned App's org (platform admins included). NOT
+    plain AppMembers: installing an existing Agent is itself a read grant on
+    that Agent's design — its system memory becomes readable from every App
+    context, and the returned Agent carries its systemPrompt — so this gate
+    stays at the level that can already read the org's Agents.
 
     Accepts the entity's ID or URN for both appId and agentId. Optional
     trainingMode flag updates the per-App training flag (applies to
@@ -6045,6 +6084,15 @@ export const typeDefs = `#graphql
     installs it into the App (AppAgent row) so the minted persona is on the
     roster immediately. Returns the created Agent — clients print its
     personaPrompt as the persona's boot briefing.
+
+    Persona metadata (#950): visibility follows the team App's owner —
+    ORGANIZATION for an org-owned App (the roster is the team's shared view of
+    who is on it), PERSONAL for a user-owned one. The Agent's description is
+    the role node's 'data.personaDescription' template when set (same
+    {{name}}/{{role}} substitution as the prompt), otherwise the synthesized
+    'AI coding agent using <role> role'. It is NEVER the role node's own
+    description, which describes the role-definition artifact rather than the
+    persona.
 
     Authorization: an org member with CONTRIBUTOR+ on the App's org, an
     AppMember of the App whose role is not 'reader', or the owner of a
