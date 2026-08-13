@@ -217,6 +217,60 @@ describe('hadron_run_task — disambiguation (cor:api:060:03, fallback/list path
     });
     expect(text).toContain('No runnable tasks in Gamma');
   });
+
+  /**
+   * A runnable node whose loc has no v2 URN cannot be addressed, so it cannot be
+   * run. It used to throw out of the strict emitter and take the WHOLE picker
+   * down with it; now it is dropped, and the omission is disclosed rather than
+   * silent. Inserted via raw Prisma because `validateLoc` rejects the loc.
+   */
+  it('drops an unaddressable task from the picker instead of failing the call', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: fx.alpha.id,
+        loc: 'tasks:add broken',
+        name: 'Add broken',
+        nodeType: 'task',
+        isRunnable: true,
+      },
+    });
+
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
+      task: 'add',
+      memory: 'Alpha',
+    });
+
+    // The healthy candidates still render…
+    expect(text).toContain('Add review');
+    expect(text).toContain('Add note');
+    // …the unaddressable one does not…
+    expect(text).not.toContain('Add broken');
+    // …and the shortened list says so rather than passing itself off as complete.
+    expect(text).toContain('1 unaddressable task hidden');
+  });
+
+  it('says so when every matching task is unaddressable (never an empty picker)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const loc of ['zed one', 'zed two']) {
+      await db.node.create({
+        data: {
+          id: generateId(),
+          memoryId: fx.alpha.id,
+          loc,
+          name: `Zed ${loc}`,
+          nodeType: 'task',
+          isRunnable: true,
+        },
+      });
+    }
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
+      task: 'zed',
+      memory: 'Alpha',
+    });
+    expect(text).toContain('none can be addressed to run');
+  });
 });
 
 describe('hadron_run_task — resolution by name (cor:api:060:02)', () => {

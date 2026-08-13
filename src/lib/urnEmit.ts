@@ -114,21 +114,50 @@ export interface SafeUrnEmission {
 }
 
 /**
+ * A memory's ROOT node carries `loc === ''`. That is a SUPPORTED shape, not
+ * corruption: git-sync maps it to the repo-root `README.md`
+ * (`src/integrations/github/nodeFrontmatter.ts` — "the empty-loc root node maps
+ * to the repo-root README.md"), and every memory has one.
+ *
+ * The v2 grammar has no URN for it — `''.split(':')` is a single EMPTY atom, and
+ * `composeUrnV2` rejects that — so strict emission throws. That is a gap in the
+ * grammar, not a bad row, and it must not be reported as one: there are as many
+ * of these as there are memories, so logging each read as corruption is both
+ * wrong and loud, and it invites someone to "repair" a root node's loc, which
+ * would break the README mapping.
+ *
+ * What a root node's canonical URN SHOULD be is a grammar question for
+ * `cor:urn:010:01`, deliberately not decided here. Until it is, the best-effort
+ * form (`hrn:node:<root>:<mem>:`) is served and flagged as a fallback, so it
+ * still never becomes a link.
+ */
+function isRootNodeLoc(loc: string): boolean {
+  return loc === '';
+}
+
+/**
  * Shared strict-then-fallback emit. Logs enough to locate the offending ROW —
  * the strict error names the composed URN, never the stored `loc`/memory that
- * produced it, which is what makes this corruption class so hard to trace.
+ * produced it, which is what makes a genuinely bad row so hard to trace.
+ *
+ * The try/catch (rather than an up-front `isRootNodeLoc` branch) is deliberate:
+ * behaviour stays driven by what the emitter can actually do, so if the grammar
+ * later gains a root-node URN this starts emitting it with no change here.
  */
 function safeEmit(type: 'node' | 'edge', memBareUrn: string, loc: string): SafeUrnEmission {
   try {
     const urn = type === 'node' ? emitNodeUrnV2(memBareUrn, loc) : emitEdgeUrnV2(memBareUrn, loc);
     return { urn, fellBack: false };
   } catch (err) {
-    console.warn(
-      `[safeUrnEmit] stored ${type} loc ${JSON.stringify(loc)} in memory "${memBareUrn}" is not ` +
-        'emittable as a v2 URN; serving a best-effort form. The STORED value needs repair — ' +
-        'this is not a malformed caller request:',
-      err,
-    );
+    // Known-shape root node: fall back silently, it is not a defect.
+    if (!isRootNodeLoc(loc)) {
+      console.warn(
+        `[safeUrnEmit] stored ${type} loc ${JSON.stringify(loc)} in memory "${memBareUrn}" is not ` +
+          'emittable as a v2 URN; serving a best-effort form. The STORED value needs repair — ' +
+          'this is not a malformed caller request:',
+        err,
+      );
+    }
     return { urn: bestEffortFlatNodeUrn(type, memBareUrn, loc), fellBack: true };
   }
 }
