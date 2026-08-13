@@ -297,6 +297,55 @@ describe('findOrCreateAppClassMemory', () => {
     });
   }
 
+  // The lazy path must match exactly what the migration and the sweep match.
+  // Prisma's endsWith compiles to SQL LIKE, where `_` is a single-character
+  // wildcard — a pattern matcher would adopt salesXbot's team space for
+  // sales_bot (PR #962 review).
+  it('does not treat `_` in the agent slug as a LIKE wildcard', async () => {
+    const underscored = await db.agent.create({
+      data: { id: generateId(), organizationId: orgId, urn: `${orgUrn}:sales_bot`, name: 'Sales' },
+    });
+    await db.appAgent.create({ data: { appId, agentId: underscored.id } });
+    const decoy = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        urn: `${appUrn}:salesXbot:shared`,
+        name: 'another agent shared',
+        class: 'app',
+        appId,
+      },
+    });
+    const id = await findOrCreateAppClassMemory(
+      args({ agentId: underscored.id, agentUrn: underscored.urn, agentName: underscored.name }),
+    );
+    expect(id).not.toBe(decoy.id);
+    expect(
+      (await db.memory.findUniqueOrThrow({ where: { id: decoy.id } })).sharedMemoryOfAgentId,
+    ).toBeNull();
+  });
+
+  // The #697 Task-A sweep can re-slug an Agent after its shared memory urn was
+  // written — matching only the current slug would provision a duplicate.
+  it("adopts via the Agent's pre-#697 slug (legacyUrn), not just its current one", async () => {
+    const legacy = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        urn: `${appUrn}:agent-017:shared`,
+        name: 'legacy shared',
+        class: 'app',
+        appId,
+      },
+    });
+    await db.agent.update({
+      where: { id: agentId },
+      data: { urn: `${orgUrn}:agent-017-renamed`, legacyUrn: `${orgUrn}:agent-017` },
+    });
+    const id = await findOrCreateAppClassMemory(args({ agentUrn: `${orgUrn}:agent-017-renamed` }));
+    expect(id).toBe(legacy.id);
+  });
+
   // The adoption suffix must not swallow a name-addressable app-class memory
   // (createMemoryInApp) that happens to end in `:shared`.
   it('does not adopt a `…:app-mem:shared` named memory', async () => {

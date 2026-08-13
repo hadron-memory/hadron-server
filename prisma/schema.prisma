@@ -871,7 +871,15 @@ model Memory {
   userMemoryOfAgent Agent?           @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
   // #723: SetNull mirrors userMemoryOfAgent — a hard-deleted Agent leaves the
   // shared memory's content intact (orphan retention, cor:dmo:050:03); the row
-  // simply stops being the find-or-create target for that pairing.
+  // simply stops being the find-or-create target for that pairing. Restrict was
+  // considered and rejected: `deleteAgent` is a SOFT delete, so the only hard
+  // deletes are user-account deletion and the create-persona compensation, and
+  // blocking those on a memory FK trades a rare orphan for a stuck account
+  // deletion. A nulled row can in principle be re-adopted by a replacement Agent
+  // that reuses the slug in the same App — but only while it still carries the
+  // pre-#723 compound urn (a post-#723 row's flat `<app>-shared` never matches
+  // the legacy key), and user-account deletion cascades the App's memories away
+  // in the same pass, so the window is narrow and self-closing.
   sharedMemoryOfAgent Agent?         @relation("SharedMemoriesOfAgent", fields: [sharedMemoryOfAgentId], references: [id], onDelete: SetNull)
   user              User?            @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
   // 008-agent-installation: hard App deletion cascades to its personal/app

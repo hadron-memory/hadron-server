@@ -22,6 +22,10 @@ import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
+import {
+  agentSlugCandidates,
+  memoryCarriesLegacyKeyFor,
+} from '../../../lib/sharedMemoryLegacyKey.js';
 
 /** Resolved description of a chat sufficient to compute its read-set. */
 export interface ChatScopeContext {
@@ -153,10 +157,11 @@ export function allowedReadSet(
  * Concurrency + soft-delete handling: the lookup keys off the
  * `(appId, sharedMemoryOfAgentId)` unique, which spans soft-deleted rows, so a
  * tombstoned pairing is found and restored rather than colliding with a fresh
- * `create`. The `create` call is wrapped to recover from a concurrent winner —
- * if another request inserted the row between our findUnique and create, P2002
- * fires (on that unique, or on `urn` if two provisioners minted the same slug)
- * and we re-read instead of bubbling the failure.
+ * `create`. A P2002 on the insert is resolved by WHICH unique it hit: the
+ * pairing unique means a concurrent request provisioned this same pairing (take
+ * its row), while the `urn` unique means a DIFFERENT pairing won the slug we
+ * probed as free — there is nothing of ours to re-read, so the mint is retried
+ * and aliases around the winner.
  */
 export async function findOrCreateAppClassMemory(args: {
   appId: string;
@@ -214,24 +219,30 @@ export async function findOrCreateAppClassMemory(args: {
   });
   if (existing) return revive(existing);
 
-  // 2. Pre-#723 rows carry no column — adopt the one the OLD string key names.
-  //    The suffix is matched against `urn` AND `legacyUrn` (the #697 Task-A
-  //    sweep moves the compound form to the latter) and scoped to this App, so
-  //    it cannot reach another App's memory. `endsWith` is exact, not a LIKE
-  //    pattern with wildcards, and `:<agentSlug>:shared` cannot match a named
-  //    `…:app-mem:<slug>` memory unless the agent is literally slugged
-  //    `app-mem`. Oldest wins, deterministically.
-  const legacySuffix = `:${agentSlug}:shared`;
-  const legacyRow = await db.memory.findFirst({
-    where: {
-      appId,
-      class: 'app',
-      sharedMemoryOfAgentId: null,
-      OR: [{ urn: { endsWith: legacySuffix } }, { legacyUrn: { endsWith: legacySuffix } }],
-    },
+  // 2. Pre-#723 rows carry no column — adopt the one the OLD string key names,
+  //    through the SAME matcher the migration and the sweep use
+  //    (`sharedMemoryLegacyKey.ts`): parsed-atom equality against the Agent's
+  //    current AND legacy slug. Deliberately not a Prisma `endsWith` filter —
+  //    that compiles to SQL LIKE, where a legal `_` in a slug is a wildcard, so
+  //    provisioning `sales_bot` could adopt `salesXbot`'s team space. The
+  //    candidate scan is scoped to this App's unkeyed app-class rows (a
+  //    handful). Oldest wins, deterministically.
+  const candidates = await db.memory.findMany({
+    where: { appId, class: 'app', sharedMemoryOfAgentId: null },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    select: { id: true, deletedAt: true },
+    select: { id: true, urn: true, legacyUrn: true, deletedAt: true },
   });
+  // The Agent's legacy urn comes from the row, not the caller: the #697 Task-A
+  // sweep can have re-slugged the Agent since the memory urn was written, and
+  // matching only the current slug would miss that Agent's own memory and
+  // provision a duplicate. Threading it through every caller's `select` would
+  // be four chances to forget.
+  const agentRow = await db.agent.findUnique({
+    where: { id: agentId },
+    select: { urn: true, legacyUrn: true },
+  });
+  const agentSlugs = agentSlugCandidates(agentRow ?? { urn: agentUrn });
+  const legacyRow = candidates.find((m) => memoryCarriesLegacyKeyFor(m, agentSlugs));
   if (legacyRow) {
     // Guarded on `sharedMemoryOfAgentId: null` so a concurrent adopter (or the
     // migration) can't be overwritten; a lost race re-reads the winner.
@@ -257,48 +268,61 @@ export async function findOrCreateAppClassMemory(args: {
   //    longer recompute the urn.
   const appSlug = normalizeUrnForLookup(appUrn).split(':').pop() ?? appUrn;
   const root = await resolveMemoryRoot(db, { organizationId, ownerUserId, appUrn });
-  const urn = await mintMemoryUrnV2(db, {
-    root,
-    desiredSlug: `${appSlug}-shared`,
-    authorRoot: agentSlug,
-  });
 
-  try {
-    const created = await db.memory.create({
-      data: {
-        organizationId,
-        // Owner XOR (`chk_memory_owner_xor`): an org-owned App's shared memory
-        // is org-owned, a user-owned App's belongs to that user.
-        ownerUserId: organizationId === null ? ownerUserId : null,
-        urn,
-        name: `${appName} — ${agentName} — shared chats`,
-        class: 'app',
-        // 035-visibility-enum-cleanup: app-class visibility is NULL.
-        visibility: null,
-        appId,
-        sharedMemoryOfAgentId: agentId,
-        userId: null,
-        createdBy: actingUserId,
-      },
-      select: { id: true },
+  // Mint-and-insert is RETRIED, because the two uniques a P2002 can come from
+  // mean opposite things. Losing the (App, Agent) unique means someone
+  // provisioned THIS pairing — take their row. Losing `urn` means a DIFFERENT
+  // pairing took the slug we probed as free (two Agents in one App bootstrapping
+  // at once both see `<app>-shared` unclaimed); there is no row of ours to find,
+  // and the right answer is to mint again — the second probe sees the winner and
+  // aliases to `<app>-shared-<agent>`. Rethrowing there would fail a first-time
+  // team chat or worklog write on a pure race.
+  for (let attempt = 0; ; attempt++) {
+    const urn = await mintMemoryUrnV2(db, {
+      root,
+      desiredSlug: `${appSlug}-shared`,
+      authorRoot: agentSlug,
     });
-    return created.id;
-  } catch (err) {
-    // Concurrent provisioner won the race — on the (App, Agent) unique, or on
-    // `urn` when both minted the same slug before either inserted. Re-read the
-    // pairing and return the winner; only a urn clash with an unrelated row
-    // (impossible via this path — the mint probes both `urn` and `legacyUrn`)
-    // would leave nothing to find, and that bubbles.
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+    try {
+      const created = await db.memory.create({
+        data: {
+          organizationId,
+          // Owner XOR (`chk_memory_owner_xor`): an org-owned App's shared memory
+          // is org-owned, a user-owned App's belongs to that user.
+          ownerUserId: organizationId === null ? ownerUserId : null,
+          urn,
+          name: `${appName} — ${agentName} — shared chats`,
+          class: 'app',
+          // 035-visibility-enum-cleanup: app-class visibility is NULL.
+          visibility: null,
+          appId,
+          sharedMemoryOfAgentId: agentId,
+          userId: null,
+          createdBy: actingUserId,
+        },
+        select: { id: true },
+      });
+      return created.id;
+    } catch (err) {
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') throw err;
       const race = await db.memory.findUnique({
         where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
         select: { id: true, deletedAt: true },
       });
       if (race) return revive(race);
+      // A urn clash with another pairing. Bounded so a genuinely unwinnable
+      // clash surfaces as the DB error rather than spinning.
+      if (attempt >= MINT_RETRY_LIMIT) throw err;
     }
-    throw err;
   }
 }
+
+/**
+ * How many times a urn clash with a DIFFERENT pairing may force a re-mint before
+ * the P2002 is allowed to surface. Each retry re-probes and aliases, so more
+ * than a couple means something is wrong with the probe, not with contention.
+ */
+const MINT_RETRY_LIMIT = 3;
 
 /**
  * The pool root a newly provisioned shared memory is minted under: the owning

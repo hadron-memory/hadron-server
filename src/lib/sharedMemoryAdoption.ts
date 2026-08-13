@@ -17,29 +17,43 @@
  *   2. this sweep, which additionally REPORTS what it cannot decide;
  *   3. `findOrCreateAppClassMemory`, lazily, on the pairing's next touch.
  *
- * This module owns (2). It is deliberately conservative: a candidate that
- * resolves to no Agent, to more than one, or to a pairing already held by
- * another row is reported and SKIPPED, never guessed at — an adoption points a
- * team's chat and worklog at a memory, so a wrong one is worse than a manual fix.
+ * All three match through {@link memoryCarriesLegacyKeyFor} so they can't drift
+ * into adopting different sets of rows. This sweep is deliberately conservative:
+ * a candidate that resolves to no Agent, to more than one, or to a pairing
+ * already held by another row is reported and SKIPPED, never guessed at — an
+ * adoption points a team's chat and worklog at a memory, so a wrong one is worse
+ * than a manual fix.
  *
  * It does NOT rewrite any urn. Flattening an existing memory's address is the
  * #697 backfill's job (`pnpm admin:backfill-urn-v2`), which parks the old value
- * in `legacyUrn` so existing references keep resolving; this sweep counts the
- * rows still waiting for it so the operator knows to run it.
+ * in `legacyUrn` so existing references keep resolving; this sweep counts every
+ * keyed row still waiting for it so the operator knows to run it.
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { normalizeUrnForLookup } from './urn.js';
+import {
+  agentSlugCandidates,
+  hasCompoundUrn,
+  memoryCarriesLegacyKeyFor,
+  sharedUrnAgentSlug,
+} from './sharedMemoryLegacyKey.js';
 
 /** Outcome tally for one sweep. */
 export interface SharedMemoryAdoptionStats {
-  /** Rows that gained `sharedMemoryOfAgentId`. */
+  /** Rows that gained `sharedMemoryOfAgentId` (would gain, in a dry run). */
   adopted: number;
-  /** Rows already carrying the column (nothing to do). */
+  /** Rows already carrying the column when the sweep started. */
   alreadyKeyed: number;
   /** Candidates left alone — no agent match, ambiguous, or pairing taken. */
   skipped: number;
-  /** Adopted rows whose urn is still compound (needs `admin:backfill-urn-v2`). */
+  /**
+   * Keyed shared memories whose urn is STILL COMPOUND once this run is done —
+   * every one of them is a live 404 on its nodes' portal links until
+   * `admin:backfill-urn-v2` flattens them. Counted across ALL keyed rows, not
+   * just the ones this run adopted: the migration adopts without rewriting
+   * urns, so a sweep that only counted its own work would report a reassuring
+   * zero while every pre-existing team chat was still unaddressable.
+   */
   stillCompoundUrn: number;
 }
 
@@ -51,40 +65,7 @@ export interface SharedMemoryAdoptionOptions {
   log?: (msg: string) => void;
 }
 
-/**
- * The agent slug embedded in a pre-#723 shared-memory urn: the penultimate atom
- * of `<root>:<app>:<agent-slug>:shared`. Returns null unless the urn really has
- * that shape — at least three atoms and a `:shared` terminal — so a flat
- * `<root>:shared` can never be read as `<agent>:shared`.
- */
-export function sharedUrnAgentSlug(urn: string | null): string | null {
-  if (!urn) return null;
-  const atoms = normalizeUrnForLookup(urn).split(':');
-  if (atoms.length < 3) return null;
-  if (atoms[atoms.length - 1] !== 'shared') return null;
-  const slug = atoms[atoms.length - 2]!;
-  if (slug.length === 0) return null;
-  // `…:<agent>:app-mem:<name>` is a NAME-addressable createMemoryInApp memory
-  // that happens to be called "shared" — the marker sits where the agent slug
-  // would be, so exclude it rather than report a phantom "no Agent slugged
-  // app-mem" every run.
-  if (slug === 'app-mem') return null;
-  return slug;
-}
-
-/**
- * The slug an Agent contributes to that string key: everything after the first
- * atom of its urn (the rule `findOrCreateAppClassMemory` used when it minted
- * the key). Both the current and the pre-#697 urn count — the Task-A sweep can
- * have re-slugged the Agent since the memory urn was written.
- */
-function agentSlugCandidates(agent: { urn: string; legacyUrn: string | null }): string[] {
-  const slugs = [agent.urn, agent.legacyUrn]
-    .filter((u): u is string => !!u)
-    .map((u) => normalizeUrnForLookup(u).split(':').slice(1).join(':'))
-    .filter((s) => s.length > 0);
-  return Array.from(new Set(slugs));
-}
+export { sharedUrnAgentSlug };
 
 /**
  * Adopt every pre-#723 shared app-class memory onto the `(appId, agent)` column
@@ -103,17 +84,12 @@ export async function adoptSharedMemories(
     stillCompoundUrn: 0,
   };
 
-  // Candidate set: app-class, App-scoped, not yet keyed, and carrying the old
-  // string key in `urn` or (post-Task-A) `legacyUrn`. The `:shared` terminal is
-  // matched in SQL only to narrow the scan — sharedUrnAgentSlug re-validates the
-  // full shape below.
+  // Candidate set: app-class, App-scoped, not yet keyed. Narrowed by indexed
+  // columns only — the `:shared` shape is matched in memory, because Prisma's
+  // string filters compile to SQL LIKE and a legal slug may contain `_` (see
+  // sharedMemoryLegacyKey.ts).
   const rows = await db.memory.findMany({
-    where: {
-      class: 'app',
-      appId: { not: null },
-      sharedMemoryOfAgentId: null,
-      OR: [{ urn: { endsWith: ':shared' } }, { legacyUrn: { endsWith: ':shared' } }],
-    },
+    where: { class: 'app', appId: { not: null }, sharedMemoryOfAgentId: null },
     select: { id: true, urn: true, legacyUrn: true, appId: true },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
@@ -121,6 +97,17 @@ export async function adoptSharedMemories(
   stats.alreadyKeyed = await db.memory.count({
     where: { sharedMemoryOfAgentId: { not: null } },
   });
+
+  /**
+   * Pairings this run has already spoken for. In an APPLY run the DB holds
+   * them, but a DRY RUN writes nothing — without this, two unkeyed rows for the
+   * same pairing would both be previewed as adoptable and the preview would
+   * disagree with what the apply run does (the `claimed` set in the #697
+   * backfill exists for the same reason).
+   */
+  const claimed = new Set<string>();
+  /** Rows this run plans to adopt whose urn is compound (dry-run accounting). */
+  const plannedCompound = new Set<string>();
 
   for (const row of rows) {
     const slug = sharedUrnAgentSlug(row.urn) ?? sharedUrnAgentSlug(row.legacyUrn);
@@ -133,7 +120,7 @@ export async function adoptSharedMemories(
     const matches = installed
       .map((r) => r.agent)
       .filter((a): a is NonNullable<typeof a> => !!a)
-      .filter((a) => agentSlugCandidates(a).includes(slug));
+      .filter((a) => memoryCarriesLegacyKeyFor(row, agentSlugCandidates(a)));
 
     if (matches.length === 0) {
       stats.skipped += 1;
@@ -149,40 +136,59 @@ export async function adoptSharedMemories(
       continue;
     }
     const agent = matches[0]!;
+    const pairing = `${row.appId}::${agent.id}`;
 
     // The pairing may already be held — by a row adopted earlier in this run, by
     // the migration, or by a memory provisioned after the App was renamed. The
     // holder keeps it; this row stays unkeyed and gets reported.
-    const holder = await db.memory.findUnique({
-      where: { appId_sharedMemoryOfAgentId: { appId: row.appId!, sharedMemoryOfAgentId: agent.id } },
-      select: { id: true, urn: true },
-    });
+    const holder = claimed.has(pairing)
+      ? { id: '(claimed earlier in this run)', urn: '' }
+      : await db.memory.findUnique({
+          where: {
+            appId_sharedMemoryOfAgentId: { appId: row.appId!, sharedMemoryOfAgentId: agent.id },
+          },
+          select: { id: true, urn: true },
+        });
     if (holder) {
       stats.skipped += 1;
       log(
         `  ✗ ${row.id} (${row.urn}): the (App, ${agent.name}) pairing is already held by ` +
-          `${holder.id} (${holder.urn}) — resolve by hand if this row holds real content`,
+          `${holder.id}${holder.urn ? ` (${holder.urn})` : ''} — resolve by hand if this row ` +
+          'holds real content',
       );
       continue;
     }
 
     log(`  → ${row.id} (${row.urn}): adopt as the shared memory of ${agent.name} (${agent.id})`);
     stats.adopted += 1;
-    if (normalizeUrnForLookup(row.urn).split(':').length > 2) stats.stillCompoundUrn += 1;
+    claimed.add(pairing);
+    if (hasCompoundUrn(row.urn)) plannedCompound.add(row.id);
     if (opts.dryRun) continue;
 
     // Guarded on the column still being null so a concurrent lazy adoption in
     // findOrCreateAppClassMemory is never overwritten.
-    const claimed = await db.memory.updateMany({
+    const written = await db.memory.updateMany({
       where: { id: row.id, sharedMemoryOfAgentId: null },
       data: { sharedMemoryOfAgentId: agent.id },
     });
-    if (claimed.count === 0) {
+    if (written.count === 0) {
       stats.adopted -= 1;
       stats.skipped += 1;
+      claimed.delete(pairing);
+      plannedCompound.delete(row.id);
       log(`  · ${row.id}: claimed by a concurrent writer — left as found`);
     }
   }
+
+  // Every keyed shared memory still on a compound address, INCLUDING the ones
+  // the migration adopted and (in a dry run) the ones this run would adopt.
+  const keyed = await db.memory.findMany({
+    where: { sharedMemoryOfAgentId: { not: null } },
+    select: { id: true, urn: true },
+  });
+  const compound = new Set(keyed.filter((m) => hasCompoundUrn(m.urn)).map((m) => m.id));
+  for (const id of plannedCompound) compound.add(id);
+  stats.stillCompoundUrn = compound.size;
 
   return stats;
 }

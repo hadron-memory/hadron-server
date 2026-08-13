@@ -11,7 +11,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
-import { adoptSharedMemories, sharedUrnAgentSlug } from './sharedMemoryAdoption.js';
+import { adoptSharedMemories } from './sharedMemoryAdoption.js';
+import { sharedUrnAgentSlug } from './sharedMemoryLegacyKey.js';
 
 describe('sharedUrnAgentSlug', () => {
   it('extracts the penultimate atom of a compound shared urn', () => {
@@ -172,5 +173,65 @@ describe('adoptSharedMemories', () => {
     expect(
       (await db.memory.findUniqueOrThrow({ where: { id: row.id } })).sharedMemoryOfAgentId,
     ).toBeNull();
+  });
+
+  // A dry run writes nothing, so nothing in the DB stops a second candidate for
+  // the same pairing from ALSO previewing as adoptable — the preview would then
+  // promise two adoptions the apply run won't make (PR #962 review).
+  it('dry run reserves planned pairings, matching what an apply run would do', async () => {
+    await legacyShared({ urn: `${appUrn}:iris:shared` });
+    await legacyShared({ urn: `${orgUrn}:eng-team-renamed:iris:shared` });
+    const preview = await adoptSharedMemories(db, { ...silent, dryRun: true });
+    const applied = await adoptSharedMemories(db, silent);
+    expect(preview.adopted).toBe(1);
+    expect(preview.skipped).toBe(1);
+    expect(applied.adopted).toBe(preview.adopted);
+    expect(applied.skipped).toBe(preview.skipped);
+  });
+
+  // The migration adopts without rewriting urns, so counting only THIS run's
+  // work would report a reassuring zero while every pre-existing team chat was
+  // still unaddressable (PR #962 review).
+  it('counts compound urns across ALL keyed rows, not just the ones it adopted', async () => {
+    const already = await legacyShared({ urn: `${appUrn}:iris:shared` });
+    await db.memory.update({
+      where: { id: already.id },
+      data: { sharedMemoryOfAgentId: agentId },
+    });
+    const stats = await adoptSharedMemories(db, silent);
+    expect(stats.adopted).toBe(0);
+    expect(stats.alreadyKeyed).toBe(1);
+    expect(stats.stillCompoundUrn).toBe(1);
+  });
+
+  // Prisma's endsWith/contains compile to SQL LIKE, where `_` matches ANY single
+  // character — so a pattern-based matcher would adopt salesXbot's memory for
+  // sales_bot and route its chat and worklog into another Agent's content.
+  it('does not treat `_` in a slug as a LIKE wildcard', async () => {
+    const underscored = await db.agent.create({
+      data: { id: generateId(), organizationId: orgId, urn: `${orgUrn}:sales_bot`, name: 'Sales' },
+    });
+    await db.appAgent.create({ data: { appId, agentId: underscored.id } });
+    const other = await legacyShared({ urn: `${appUrn}:salesXbot:shared` });
+    const stats = await adoptSharedMemories(db, silent);
+    expect(stats.adopted).toBe(0);
+    expect(
+      (await db.memory.findUniqueOrThrow({ where: { id: other.id } })).sharedMemoryOfAgentId,
+    ).toBeNull();
+  });
+
+  // The #697 Task-A sweep can re-slug an Agent after its shared memory urn was
+  // written; matching only the current slug would miss the Agent's OWN memory.
+  it("matches an Agent's pre-#697 slug from its legacyUrn", async () => {
+    await db.agent.update({
+      where: { id: agentId },
+      data: { urn: `${orgUrn}:iris-2`, legacyUrn: `${orgUrn}:iris` },
+    });
+    const row = await legacyShared({ urn: `${appUrn}:iris:shared` });
+    const stats = await adoptSharedMemories(db, silent);
+    expect(stats.adopted).toBe(1);
+    expect(
+      (await db.memory.findUniqueOrThrow({ where: { id: row.id } })).sharedMemoryOfAgentId,
+    ).toBe(agentId);
   });
 });
