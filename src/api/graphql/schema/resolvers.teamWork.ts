@@ -50,6 +50,7 @@ import {
 import {
   type Context,
   isAppParticipant,
+  requireOwnerOrOrgRole,
   requireSessionWriteAccess,
   clampListTake,
 } from './resolvers.helpers.js';
@@ -287,6 +288,67 @@ async function bootstrapWorklog(ctx: Context, app: AppRow): Promise<WorklogRootR
 }
 
 /**
+ * Converge the memory's `worklog` declaration to the server's canonical
+ * definition (hadron-cli#401) — the EXPLICIT counterpart to
+ * `ensureWorklogSchema`'s declare-if-absent.
+ *
+ * Why both exist. The first-write path deliberately leaves an already-declared
+ * collection untouched, because an admin who tightened it is exercising schema
+ * governance and this surface should be held to it. But a declaration is not
+ * always an admin decision: `hadron team init` shipped its own copy of this
+ * schema as a client-side constant, and that copy drifted — its `kind` enum
+ * predates the `repo` kind, so on any memory bootstrapped by the CLI a
+ * `recordTeamWork(kind: "repo")` is refused by a rule nobody chose. Silently
+ * overriding the declaration would break real governance; leaving it strands
+ * those memories forever. So convergence is its own operation: an explicit act,
+ * gated like any other schema edit.
+ *
+ * Overwrites ONLY the `worklog` entry — every other collection on the memory is
+ * preserved. Runs under the same `FOR UPDATE` row lock as the declare path,
+ * since `Memory.schema` is one JSON column written whole.
+ */
+/**
+ * Order-insensitive JSON comparison key. `Memory.schema` is a jsonb column and
+ * Postgres does NOT preserve object key order, so a round-tripped declaration
+ * never byte-equals the constant it was written from — comparing with a plain
+ * `JSON.stringify` reports a difference on every call, which would make the
+ * "idempotent, changed:false" contract a lie and rewrite the column each time.
+ * Arrays keep their order (an enum's `values` order is what we wrote).
+ */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+async function convergeWorklogSchema(
+  ctx: Context,
+  memoryId: string,
+): Promise<boolean> {
+  return ctx.db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+    const locked = await tx.memory.findUnique({ where: { id: memoryId }, select: { schema: true } });
+    const schema = (locked?.schema as unknown as MemorySchema | null) ?? null;
+    const current = schema?.objectTypes?.[WORKLOG_OBJECT_TYPE];
+    if (stableJson(current) === stableJson(WORKLOG_COLLECTION_SCHEMA)) return false;
+    const merged: MemorySchema = {
+      ...(schema ?? {}),
+      objectTypes: { ...(schema?.objectTypes ?? {}), [WORKLOG_OBJECT_TYPE]: WORKLOG_COLLECTION_SCHEMA },
+    };
+    await tx.memory.update({
+      where: { id: memoryId },
+      data: { schema: merged as unknown as InputJsonValue, updatedBy: ctx.userId ?? null },
+    });
+    return true;
+  });
+}
+
+/**
  * Resolve + authorize the session a work record attributes: it must exist, be
  * writable by the caller (`requireSessionWriteAccess` semantics,
  * cor:dmo:070:05), and be a session OF the target App (SESSION_NOT_IN_APP —
@@ -433,6 +495,51 @@ function normalizeRecordRef(tool: string, ref: unknown, kind: WorkKind): string 
 }
 
 export const teamWorkMutations = {
+  /**
+   * hadron-cli#401 — (re)declare the server-owned team collections on the team
+   * App's shared memory, converging a drifted declaration to canonical.
+   *
+   * This is what lets `hadron team init`'s client-side schema constant retire
+   * for memories that ALREADY carry its (stale) copy: the first-write
+   * `ensureWorklogSchema` only declares when absent, on purpose, so it can
+   * never override a deployment that tightened the collection deliberately.
+   * Convergence therefore has to be asked for.
+   *
+   * Gate: owner / org ADMIN **on the memory**, the same bar `updateMemory`
+   * applies to a schema edit — resolved from the memory row rather than the
+   * App so the two cannot drift (this IS a schema edit, it just knows what to
+   * write). Deliberately NOT the team-participation gate the rest of this file
+   * uses: participation lets you record work, not redefine what a record is.
+   */
+  updateTeamCollections: async (
+    _: unknown,
+    { appRef }: { appRef: string },
+    ctx: Context,
+  ): Promise<{ memoryId: string; collections: string[]; changed: boolean }> => {
+    const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+    if (app.uninstalledAt) {
+      throw new GraphQLError("Cannot declare collections on an uninstalled App's memory.", {
+        extensions: { code: 'APP_UNINSTALLED', appId },
+      });
+    }
+    if (!ctx.userId) {
+      throw new GraphQLError('Declaring team collections requires an authenticated user.', {
+        extensions: { code: 'UNAUTHENTICATED' },
+      });
+    }
+    // The memory exists from App-install time (#951); bootstrap covers Apps
+    // created before that, and is idempotent either way.
+    const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));
+    const memory = await ctx.db.memory.findUniqueOrThrow({
+      where: { id: root.memoryId },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+    const changed = await convergeWorklogSchema(ctx, memory.id);
+    return { memoryId: memory.id, collections: [WORKLOG_OBJECT_TYPE], changed };
+  },
+
   /**
    * #947 — record an externally visible work milestone into the team App's
    * worklog: resolve the App (cor:api:140), gate on team participation,

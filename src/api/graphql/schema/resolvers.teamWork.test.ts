@@ -376,6 +376,42 @@ describe('recordTeamWork — storage, governance, and races', () => {
     expect(ok.action).toBe('opened');
   });
 
+  it('a CLI-shipped stale declaration makes a supported kind unwritable (the hadron-cli#401 symptom)', async () => {
+    await record(ctx(contrib.id));
+    const root = await findWorklogRoot();
+    // Exactly what `hadron team init` writes today: the same collection, with
+    // a `kind` enum that predates the `repo` kind.
+    const stale = JSON.parse(JSON.stringify((await db.memory.findUnique({
+      where: { id: root!.memoryId }, select: { schema: true },
+    }))!.schema));
+    stale.objectTypes[WORKLOG_OBJECT_TYPE].fields.kind = {
+      type: 'enum',
+      required: true,
+      values: ['pr', 'issue', 'commit', 'branch'],
+    };
+    await db.memory.update({ where: { id: root!.memoryId }, data: { schema: stale } });
+
+    // The server accepts kind:'repo' (WORK_KINDS) but the declaration refuses
+    // it — a rule nobody chose, on a memory the CLI bootstrapped.
+    await expectCode(
+      record(ctx(contrib.id), { kind: 'repo', ref: 'o/r', action: 'claimed' }),
+      'BAD_USER_INPUT',
+    );
+    // First-write ensure does NOT rescue it: declare-if-absent by design.
+    await record(ctx(contrib.id));
+    await expectCode(
+      record(ctx(contrib.id), { kind: 'repo', ref: 'o/r', action: 'claimed' }),
+      'BAD_USER_INPUT',
+    );
+
+    // Convergence is the explicit fix.
+    const res = await M.updateTeamCollections({}, { appRef: app.id }, ctx(admin.id));
+    expect(res.changed).toBe(true);
+    expect(res.collections).toEqual([WORKLOG_OBJECT_TYPE]);
+    const ok = await record(ctx(contrib.id), { kind: 'repo', ref: 'o/r', action: 'claimed' });
+    expect(ok.kind).toBe('repo');
+  });
+
   it('a soft-deleted worklog root is restored, not P2002-bricked', async () => {
     await record(ctx(contrib.id));
     const root = await findWorklogRoot();
@@ -539,5 +575,70 @@ describe('teamWorkItems — the provenance read surface', () => {
     const countOnly = await items(ctx(contrib.id), { limit: 0 });
     expect(countOnly.items).toEqual([]);
     expect(countOnly.total).toBe(1);
+  });
+});
+
+describe('updateTeamCollections — explicit convergence (hadron-cli#401)', () => {
+  it('is idempotent — a matching declaration reports changed:false', async () => {
+    await record(ctx(contrib.id));
+    const first = await M.updateTeamCollections({}, { appRef: app.id }, ctx(admin.id));
+    expect(first.changed).toBe(false); // ensureWorklogSchema already wrote canonical
+    const second = await M.updateTeamCollections({}, { appRef: app.id }, ctx(admin.id));
+    expect(second.changed).toBe(false);
+  });
+
+  it('preserves every other collection on the memory', async () => {
+    await record(ctx(contrib.id));
+    const root = await findWorklogRoot();
+    const withExtra = JSON.parse(JSON.stringify((await db.memory.findUnique({
+      where: { id: root!.memoryId }, select: { schema: true },
+    }))!.schema));
+    withExtra.objectTypes.competitor = { fields: { name: { type: 'text', required: true } } };
+    withExtra.objectTypes[WORKLOG_OBJECT_TYPE].fields.kind = {
+      type: 'enum', required: true, values: ['pr'],
+    };
+    await db.memory.update({ where: { id: root!.memoryId }, data: { schema: withExtra } });
+
+    await M.updateTeamCollections({}, { appRef: app.id }, ctx(admin.id));
+    const after = await db.memory.findUnique({
+      where: { id: root!.memoryId }, select: { schema: true },
+    });
+    const schema = after!.schema as any;
+    expect(schema.objectTypes.competitor).toEqual({
+      fields: { name: { type: 'text', required: true } },
+    });
+    expect(schema.objectTypes[WORKLOG_OBJECT_TYPE].fields.kind.values).toContain('repo');
+  });
+
+  it('bootstraps the memory for an App that has never recorded work', async () => {
+    // No record() first — the shared memory + worklog root are provisioned here.
+    const res = await M.updateTeamCollections({}, { appRef: app.id }, ctx(admin.id));
+    expect(res.changed).toBe(true);
+    expect(res.memoryId).toBeTruthy();
+    const root = await findWorklogRoot();
+    expect(root).not.toBeNull();
+  });
+
+  it('is a schema edit, so team participation is not enough', async () => {
+    await record(ctx(contrib.id));
+    // A CONTRIBUTOR may record work but may not redefine what a record is.
+    await expect(
+      M.updateTeamCollections({}, { appRef: app.id }, ctx(contrib.id)),
+    ).rejects.toThrow('Forbidden');
+    // An AppMember likewise.
+    await expect(
+      M.updateTeamCollections({}, { appRef: app.id }, ctx(appMember.id)),
+    ).rejects.toThrow('Forbidden');
+    // An unauthenticated caller is refused before anything is resolved.
+    await expectCode(M.updateTeamCollections({}, { appRef: app.id }, ctx()), 'UNAUTHENTICATED');
+  });
+
+  it('refuses an uninstalled App', async () => {
+    await record(ctx(contrib.id));
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    await expectCode(
+      M.updateTeamCollections({}, { appRef: app.id }, ctx(admin.id)),
+      'APP_UNINSTALLED',
+    );
   });
 });
