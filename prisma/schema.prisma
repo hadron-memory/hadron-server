@@ -697,6 +697,18 @@ model Memory {
   /// access-control, which uses `appId` directly. A future cleanup
   /// spec may collapse it.
   userMemoryOfAgentId String? @map("user_memory_of_agent_id")
+  /// #723 — the IDENTITY of an App's `shared` app-class memory: the Agent whose
+  /// shared space this is, under `appId`. Set ONLY on that runtime memory (NULL
+  /// on every other row, including the name-addressable `createMemoryInApp`
+  /// app-class memories), so `@@unique([appId, sharedMemoryOfAgentId])` is the
+  /// find-or-create key for `findOrCreateAppClassMemory` — Postgres treats NULLs
+  /// as distinct, so unset rows are unconstrained. Before #723 that identity was
+  /// the URN STRING (`<app-urn>:<agent-slug>:shared`), which forced the row to
+  /// keep a compound v1 URN (node URNs inside it could not round-trip through
+  /// `splitNodeUrn`, so portal links to them 404'd) and silently orphaned the
+  /// memory when its App was renamed. Enforced by chk_memory_shared_agent_scope
+  /// (set ⇒ `class='app'` AND `app_id IS NOT NULL`).
+  sharedMemoryOfAgentId String? @map("shared_memory_of_agent_id")
 
   /// Globally unique identifier, e.g. "baragaun.com:secureid".
   /// Derived from `org.urn + ":" + slug`.
@@ -857,6 +869,10 @@ model Memory {
 
   logEntries        MemoryLogEntry[]
   userMemoryOfAgent Agent?           @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
+  // #723: SetNull mirrors userMemoryOfAgent — a hard-deleted Agent leaves the
+  // shared memory's content intact (orphan retention, cor:dmo:050:03); the row
+  // simply stops being the find-or-create target for that pairing.
+  sharedMemoryOfAgent Agent?         @relation("SharedMemoriesOfAgent", fields: [sharedMemoryOfAgentId], references: [id], onDelete: SetNull)
   user              User?            @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
   // 008-agent-installation: hard App deletion cascades to its personal/app
   // memories (per data-model.md "Cascade behavior"). The CHECK constraint
@@ -881,6 +897,12 @@ model Memory {
   @@index([appId])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
+  // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
+  // provisioner RESTORES a tombstoned row rather than creating a second one),
+  // and NULL `sharedMemoryOfAgentId` rows are unconstrained (Postgres NULLs are
+  // distinct), so it binds only the runtime shared memories.
+  @@unique([appId, sharedMemoryOfAgentId])
   @@map("memories")
 }
 
@@ -1598,6 +1620,9 @@ model Agent {
   organization      Organization?       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   memoryItems       AgentMemoryItem[]
   userMemories      Memory[]            @relation("UserMemoriesOfAgent")
+  /// #723 — the per-App `shared` app-class memories this Agent is the identity
+  /// of (at most one per App).
+  sharedMemories    Memory[]            @relation("SharedMemoriesOfAgent")
   sessions          Session[]           @relation("SessionAgent")
   userSubscriptions AgentSubscription[] @relation("AgentUserSubscriptions")
   // 023-app-shape Phase 2b: App↔Agent goes through `AppAgent` (N:M).

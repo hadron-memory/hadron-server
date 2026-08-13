@@ -5,8 +5,9 @@
  *   - `allowedReadSet` — pure function, no DB; covers the
  *     load-bearing safety property (shared chats never include any
  *     personal-class memory) plus the private-chat read-set shape.
- *   - `findOrCreateAppClassMemory` — DB-backed; covers idempotency
- *     and the URN convention `${app.urn}:shared`.
+ *   - `findOrCreateAppClassMemory` — DB-backed; covers idempotency, the
+ *     #723 `(appId, sharedMemoryOfAgentId)` identity, the flat v2 urn it
+ *     now mints, and adoption of pre-#723 string-keyed rows.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -138,9 +139,11 @@ describe('allowedReadSet', () => {
 
 describe('findOrCreateAppClassMemory', () => {
   let orgId: string;
+  let orgUrn: string;
   let appId: string;
   let appUrn: string;
   let appName: string;
+  let agentId: string;
   let agentUrn: string;
   let agentName: string;
   let actingUserId: string;
@@ -149,6 +152,7 @@ describe('findOrCreateAppClassMemory', () => {
     await cleanDb(db);
     const { org } = await createDbOrgAndGraph(db);
     orgId = org.id;
+    orgUrn = org.urn;
     const user = await db.user.create({
       data: { githubId: 7717, githubUsername: 'spec017', roles: ['READER'] },
     });
@@ -159,6 +163,7 @@ describe('findOrCreateAppClassMemory', () => {
     const agent = await db.agent.create({
       data: { id: generateId(), organizationId: orgId, urn: `${org.urn}:agent-017`, name: 'agent-017' },
     });
+    agentId = agent.id;
     agentUrn = agent.urn;
     agentName = agent.name;
     const app = await db.app.create({
@@ -176,87 +181,145 @@ describe('findOrCreateAppClassMemory', () => {
     appName = app.name;
   });
 
-  it('creates a new app-class memory on first call, keyed per (app, agent)', async () => {
-    const id = await findOrCreateAppClassMemory({
+  /** Base args for the App/Agent provisioned in beforeEach. */
+  function args(overrides: Record<string, unknown> = {}) {
+    return {
       appId,
       appUrn,
       appName,
+      agentId,
       agentUrn,
       agentName,
       organizationId: orgId,
       actingUserId,
       db,
-    });
+      ...overrides,
+    } as Parameters<typeof findOrCreateAppClassMemory>[0];
+  }
+
+  it('creates a new app-class memory on first call, keyed per (app, agent)', async () => {
+    const id = await findOrCreateAppClassMemory(args());
     const memory = await db.memory.findUnique({ where: { id } });
     expect(memory).not.toBeNull();
     expect(memory!.class).toBe('app');
     expect(memory!.appId).toBe(appId);
     expect(memory!.userId).toBeNull();
-    // URN is `${app.urn}:${agentSlug}:shared`. agentSlug is everything
-    // after the first colon-segment of agent.urn (which itself starts
-    // with the org urn).
-    const agentSlug = agentUrn.split(':').slice(1).join(':');
-    expect(memory!.urn).toBe(`${appUrn}:${agentSlug}:shared`);
+    // #723: the identity is the column, not the urn.
+    expect(memory!.sharedMemoryOfAgentId).toBe(agentId);
+  });
+
+  // #723 — the whole point of the re-key: a FLAT single-atom v2 urn
+  // (`<root>:<slug>`), so node URNs inside the memory round-trip through
+  // splitNodeUrn and the portal link a node read emits resolves.
+  it('mints a flat single-atom v2 urn rooted on the owning org', async () => {
+    const id = await findOrCreateAppClassMemory(args());
+    const memory = await db.memory.findUniqueOrThrow({ where: { id } });
+    expect(memory.urn).toBe(`${orgUrn}:app-017-shared`);
+    expect(memory.urn.split(':')).toHaveLength(2);
   });
 
   it('returns the same memory id on a second call for the same (app, agent) — idempotent', async () => {
-    const id1 = await findOrCreateAppClassMemory({
-      appId,
-      appUrn,
-      appName,
-      agentUrn,
-      agentName,
-      organizationId: orgId,
-      actingUserId,
-      db,
-    });
-    const id2 = await findOrCreateAppClassMemory({
-      appId,
-      appUrn,
-      appName,
-      agentUrn,
-      agentName,
-      organizationId: orgId,
-      actingUserId,
-      db,
-    });
+    const id1 = await findOrCreateAppClassMemory(args());
+    const id2 = await findOrCreateAppClassMemory(args());
     expect(id1).toBe(id2);
+    expect(await db.memory.count({ where: { appId, class: 'app' } })).toBe(1);
   });
 
   // Spec 017 + 2026-05-12-user-installing-app §3: shared memory is keyed
   // per (App, Agent), not per App. Two Agents installed in the same App
   // get DIFFERENT shared memories — required for multi-Agent App isolation.
   it('returns distinct memories for two Agents installed in the same App', async () => {
-    const org = await db.organization.findFirstOrThrow({ where: { id: orgId } });
     const agentB = await db.agent.create({
-      data: { id: generateId(), organizationId: orgId, urn: `${org.urn}:agent-017-b`, name: 'agent-017-b' },
+      data: { id: generateId(), organizationId: orgId, urn: `${orgUrn}:agent-017-b`, name: 'agent-017-b' },
     });
-    const idA = await findOrCreateAppClassMemory({
-      appId, appUrn, appName,
-      agentUrn, agentName,
-      organizationId: orgId, actingUserId, db,
-    });
-    const idB = await findOrCreateAppClassMemory({
-      appId, appUrn, appName,
-      agentUrn: agentB.urn, agentName: agentB.name,
-      organizationId: orgId, actingUserId, db,
-    });
+    const idA = await findOrCreateAppClassMemory(args());
+    const idB = await findOrCreateAppClassMemory(
+      args({ agentId: agentB.id, agentUrn: agentB.urn, agentName: agentB.name }),
+    );
     expect(idA).not.toBe(idB);
     const memA = await db.memory.findUniqueOrThrow({ where: { id: idA } });
     const memB = await db.memory.findUniqueOrThrow({ where: { id: idB } });
     expect(memA.urn).not.toBe(memB.urn);
-    expect(memA.urn.endsWith(`:agent-017:shared`)).toBe(true);
-    expect(memB.urn.endsWith(`:agent-017-b:shared`)).toBe(true);
+    // The second one aliases deterministically on the agent slug — allowed now
+    // that lookups no longer recompute the urn.
+    expect(memA.urn).toBe(`${orgUrn}:app-017-shared`);
+    expect(memB.urn).toBe(`${orgUrn}:app-017-shared-agent-017-b`);
+  });
+
+  // Renaming the App used to move the string key, orphaning the memory and
+  // provisioning a second one on the next chat post.
+  it('survives an App rename — the pairing is a column, not a urn prefix', async () => {
+    const id = await findOrCreateAppClassMemory(args());
+    await db.app.update({ where: { id: appId }, data: { urn: `${orgUrn}:app-017-renamed` } });
+    const again = await findOrCreateAppClassMemory(args({ appUrn: `${orgUrn}:app-017-renamed` }));
+    expect(again).toBe(id);
+    expect(await db.memory.count({ where: { appId, class: 'app' } })).toBe(1);
+  });
+
+  it('restores a soft-deleted pairing rather than creating a second memory', async () => {
+    const id = await findOrCreateAppClassMemory(args());
+    await db.memory.update({ where: { id }, data: { deletedAt: new Date() } });
+    const again = await findOrCreateAppClassMemory(args());
+    expect(again).toBe(id);
+    const memory = await db.memory.findUniqueOrThrow({ where: { id } });
+    expect(memory.deletedAt).toBeNull();
+  });
+
+  // Pre-#723 rows are keyed by the urn STRING. Both shapes must be adopted:
+  // the compound urn as written, and the #697 Task-A form where the sweep
+  // flattened `urn` and parked the compound value in `legacyUrn`.
+  for (const [label, columns] of [
+    ['a pre-#723 compound urn', (u: string) => ({ urn: u })],
+    ['a Task-A-migrated row (compound urn in legacyUrn)', (u: string) => ({
+      urn: `mig-${generateId()}`,
+      legacyUrn: u,
+    })],
+  ] as const) {
+    it(`adopts ${label} instead of provisioning a second memory`, async () => {
+      const legacy = await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: orgId,
+          name: 'legacy shared',
+          class: 'app',
+          appId,
+          ...columns(`${appUrn}:agent-017:shared`),
+        },
+      });
+      const id = await findOrCreateAppClassMemory(args());
+      expect(id).toBe(legacy.id);
+      const adopted = await db.memory.findUniqueOrThrow({ where: { id: legacy.id } });
+      expect(adopted.sharedMemoryOfAgentId).toBe(agentId);
+      // Adoption claims the row; it does NOT rewrite its address (that is the
+      // #697 backfill's job, which records the old value in legacyUrn).
+      expect(adopted.urn).toBe(legacy.urn);
+      expect(await db.memory.count({ where: { appId, class: 'app' } })).toBe(1);
+    });
+  }
+
+  // The adoption suffix must not swallow a name-addressable app-class memory
+  // (createMemoryInApp) that happens to end in `:shared`.
+  it('does not adopt a `…:app-mem:shared` named memory', async () => {
+    const named = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        urn: `${appUrn}:agent-017:app-mem:shared`,
+        name: 'a memory literally named shared',
+        class: 'app',
+        appId,
+      },
+    });
+    const id = await findOrCreateAppClassMemory(args());
+    expect(id).not.toBe(named.id);
+    expect(
+      (await db.memory.findUniqueOrThrow({ where: { id: named.id } })).sharedMemoryOfAgentId,
+    ).toBeNull();
   });
 
   it('throws when agentUrn has no slug segment after the org prefix', async () => {
     await expect(
-      findOrCreateAppClassMemory({
-        appId, appUrn, appName,
-        agentUrn: 'no-colon-no-slug',
-        agentName,
-        organizationId: orgId, actingUserId, db,
-      }),
+      findOrCreateAppClassMemory(args({ agentUrn: 'no-colon-no-slug' })),
     ).rejects.toThrow(/no slug segment/);
   });
 });

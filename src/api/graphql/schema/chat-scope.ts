@@ -20,6 +20,8 @@
 
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
+import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
 
 /** Resolved description of a chat sufficient to compute its read-set. */
 export interface ChatScopeContext {
@@ -103,8 +105,31 @@ export function allowedReadSet(
 
 /**
  * Provision the app-class memory for an `(App, Agent)` pair. On first call
- * creates a `class='app'` memory with URN `${app.urn}:${agentSlug}:shared`;
+ * creates a `class='app'` memory carrying `sharedMemoryOfAgentId = agentId`;
  * subsequent calls for the same pair return the existing memory's id.
+ *
+ * #723 — the pair's identity is the `(appId, sharedMemoryOfAgentId)` COLUMN
+ * unique, not the URN string it used to be (`${app.urn}:${agentSlug}:shared`).
+ * The string key was the last thing pinning a memory to a compound v1 URN
+ * (#722 Stage 3 flipped the other six creation sites): a multi-atom memory slug
+ * means node URNs inside the memory don't round-trip through `splitNodeUrn`, so
+ * the portal link a node read emits 404s — which is every team chat, since
+ * `chats:team` lives in this memory by construction (#939). It also made the
+ * lookup key move when the App was renamed, silently orphaning the memory and
+ * provisioning a second one. With identity in a column the URN is minted FLAT
+ * (`<root>:<app-slug>-shared`, aliased on collision) like every other memory,
+ * and it can be re-minted later without disturbing find-or-create.
+ *
+ * Rows created before #723 carry no agent column, so the lookup falls back ONCE
+ * to the old string key — matching `…:<agent-slug>:shared` in either `urn` or
+ * `legacyUrn` (the #697 Task-A sweep moves the compound form there), scoped to
+ * this App — and ADOPTS the match by writing the column. The migration adopts
+ * them in bulk; this path covers whatever it left (an Agent installed after it
+ * ran, an ambiguous match it declined to guess at) so no legacy pairing can
+ * quietly get a second shared memory. The adoption does NOT rewrite the row's
+ * urn: flattening an existing memory's address is the #697 backfill's job
+ * (`pnpm admin:backfill-urn-v2`), which records the old value in `legacyUrn` so
+ * existing references keep resolving.
  *
  * #951: `createApp` now calls this for the App's founding Agent, so a freshly
  * installed App HAS a writable memory from the start. It stays idempotent and
@@ -120,25 +145,29 @@ export function allowedReadSet(
  * the chat-visibility decision (`shared` chats are scoped to one App
  * AND one Agent) intact across the upcoming 008-amendment migration:
  * two Agents installed in the same App will not collide on one shared
- * memory. The agent slug is derived from `agent.urn` — for an agent
- * with URN `<org-urn>:<agent-slug>` installed in App
- * `<org-urn>:<app-slug>`, the shared memory URN is
- * `<org-urn>:<app-slug>:<agent-slug>:shared`.
+ * memory.
  *
  * Mirrors the personal-memory provisioner pattern at
  * `resolvers.ts:3573-3625`.
  *
- * Concurrency + soft-delete handling: the lookup keys off `urn` (the
- * unique column) so a soft-deleted row with the same URN is found and
- * restored rather than colliding with a fresh `create`. The `create`
- * call is wrapped to recover from a concurrent winner — if another
- * request inserted the row between our findUnique and create, P2002
- * fires and we re-read instead of bubbling the failure.
+ * Concurrency + soft-delete handling: the lookup keys off the
+ * `(appId, sharedMemoryOfAgentId)` unique, which spans soft-deleted rows, so a
+ * tombstoned pairing is found and restored rather than colliding with a fresh
+ * `create`. The `create` call is wrapped to recover from a concurrent winner —
+ * if another request inserted the row between our findUnique and create, P2002
+ * fires (on that unique, or on `urn` if two provisioners minted the same slug)
+ * and we re-read instead of bubbling the failure.
  */
 export async function findOrCreateAppClassMemory(args: {
   appId: string;
   appUrn: string;
   appName: string;
+  /**
+   * #723 — the Agent side of the pairing's IDENTITY (stored in
+   * `Memory.sharedMemoryOfAgentId`). A PK, so it survives an Agent rename; the
+   * urn below is only used to derive the legacy string key and a display name.
+   */
+  agentId: string;
   /** The Agent the shared chat is conducted with. URN form
    *  `<org-urn>:<agent-slug>`; the slug is everything after the first
    *  colon segment. */
@@ -156,40 +185,83 @@ export async function findOrCreateAppClassMemory(args: {
   actingUserId: string;
   db: PrismaClient;
 }): Promise<string> {
-  const { appId, appUrn, appName, agentUrn, agentName, organizationId, actingUserId, db } = args;
+  const { appId, appUrn, appName, agentId, agentUrn, agentName, organizationId, actingUserId, db } =
+    args;
   const ownerUserId = args.ownerUserId ?? null;
-  const agentSlug = agentUrn.split(':').slice(1).join(':');
+  const agentSlug = agentSlugFromUrn(agentUrn);
   if (!agentSlug) {
     throw new Error(
       `findOrCreateAppClassMemory: agentUrn "${agentUrn}" has no slug segment after the org prefix.`,
     );
   }
-  // #697 Stage 3 DEFERRED (the only compound-memory creation site not flipped to
-  // a flat single-atom v2 urn): this find-or-create keys on a DETERMINISTIC urn,
-  // which is fundamentally at odds with mintLocalSlug's order-dependent collision
-  // aliasing — a `<org>:shared` / `<org>:shared-<agent>` alias can't be recomputed
-  // for lookup. A deterministic single-atom encoding (`<app>-<agent>-shared`)
-  // would also diverge from Task A's terminal-atom collapse of existing shared
-  // rows (`<org>:shared`), orphaning them. Needs a design decision (deterministic
-  // composite slug + a backfill reconciliation, OR re-key find-or-create on the
-  // (appId, agent, class) columns so the urn can be minted freely). Until then
-  // this keeps the v1 compound form — node URNs in a `:shared` memory don't
-  // round-trip through splitNodeUrn (same known caveat as pre-flip rows).
-  const urn = `${appUrn}:${agentSlug}:shared`;
 
-  const existing = await db.memory.findUnique({
-    where: { urn },
-    select: { id: true, deletedAt: true },
-  });
-  if (existing) {
-    if (existing.deletedAt) {
+  /** Un-delete a tombstoned pairing rather than provisioning a second one. */
+  const revive = async (row: { id: string; deletedAt: Date | null }): Promise<string> => {
+    if (row.deletedAt) {
       await db.memory.update({
-        where: { id: existing.id },
+        where: { id: row.id },
         data: { deletedAt: null, deletedBy: null },
       });
     }
-    return existing.id;
+    return row.id;
+  };
+
+  // 1. The canonical key: the (App, Agent) column unique. Spans soft-deleted
+  //    rows by design (see the doc comment).
+  const existing = await db.memory.findUnique({
+    where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
+    select: { id: true, deletedAt: true },
+  });
+  if (existing) return revive(existing);
+
+  // 2. Pre-#723 rows carry no column — adopt the one the OLD string key names.
+  //    The suffix is matched against `urn` AND `legacyUrn` (the #697 Task-A
+  //    sweep moves the compound form to the latter) and scoped to this App, so
+  //    it cannot reach another App's memory. `endsWith` is exact, not a LIKE
+  //    pattern with wildcards, and `:<agentSlug>:shared` cannot match a named
+  //    `…:app-mem:<slug>` memory unless the agent is literally slugged
+  //    `app-mem`. Oldest wins, deterministically.
+  const legacySuffix = `:${agentSlug}:shared`;
+  const legacyRow = await db.memory.findFirst({
+    where: {
+      appId,
+      class: 'app',
+      sharedMemoryOfAgentId: null,
+      OR: [{ urn: { endsWith: legacySuffix } }, { legacyUrn: { endsWith: legacySuffix } }],
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: { id: true, deletedAt: true },
+  });
+  if (legacyRow) {
+    // Guarded on `sharedMemoryOfAgentId: null` so a concurrent adopter (or the
+    // migration) can't be overwritten; a lost race re-reads the winner.
+    const claimed = await db.memory.updateMany({
+      where: { id: legacyRow.id, sharedMemoryOfAgentId: null },
+      data: { sharedMemoryOfAgentId: agentId, updatedBy: actingUserId },
+    });
+    if (claimed.count === 1) return revive(legacyRow);
+    const winner = await db.memory.findUnique({
+      where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
+      select: { id: true, deletedAt: true },
+    });
+    if (winner) return revive(winner);
   }
+
+  // 3. Mint a FLAT single-atom v2 urn (#697 Stage 3, the site #722 deferred).
+  //    Root is the owning principal (Task A FK-rooting: the org, or the user
+  //    handle for a user-owned App), falling back to the App's own root atom
+  //    when neither name resolves. The slug is the App's terminal atom plus the
+  //    `-shared` marker — self-describing, and far less of a landgrab under the
+  //    root than a bare `shared`; a collision aliases deterministically on the
+  //    agent slug (`<app>-shared-<agent>`), which is safe now that lookups no
+  //    longer recompute the urn.
+  const appSlug = normalizeUrnForLookup(appUrn).split(':').pop() ?? appUrn;
+  const root = await resolveMemoryRoot(db, { organizationId, ownerUserId, appUrn });
+  const urn = await mintMemoryUrnV2(db, {
+    root,
+    desiredSlug: `${appSlug}-shared`,
+    authorRoot: agentSlug,
+  });
 
   try {
     const created = await db.memory.create({
@@ -204,6 +276,7 @@ export async function findOrCreateAppClassMemory(args: {
         // 035-visibility-enum-cleanup: app-class visibility is NULL.
         visibility: null,
         appId,
+        sharedMemoryOfAgentId: agentId,
         userId: null,
         createdBy: actingUserId,
       },
@@ -211,30 +284,49 @@ export async function findOrCreateAppClassMemory(args: {
     });
     return created.id;
   } catch (err) {
-    // Concurrent provisioner won the race. The winner left a live (non-
-    // soft-deleted) row — re-read and return it. Soft-delete branch is
-    // unreachable here in practice but kept for symmetry with the lookup
-    // above.
-    if (
-      err instanceof Prisma.PrismaClientKnownRequestError &&
-      err.code === 'P2002'
-    ) {
+    // Concurrent provisioner won the race — on the (App, Agent) unique, or on
+    // `urn` when both minted the same slug before either inserted. Re-read the
+    // pairing and return the winner; only a urn clash with an unrelated row
+    // (impossible via this path — the mint probes both `urn` and `legacyUrn`)
+    // would leave nothing to find, and that bubbles.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
       const race = await db.memory.findUnique({
-        where: { urn },
+        where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
         select: { id: true, deletedAt: true },
       });
-      if (race) {
-        if (race.deletedAt) {
-          await db.memory.update({
-            where: { id: race.id },
-            data: { deletedAt: null, deletedBy: null },
-          });
-        }
-        return race.id;
-      }
+      if (race) return revive(race);
     }
     throw err;
   }
+}
+
+/**
+ * The pool root a newly provisioned shared memory is minted under: the owning
+ * ORG's name, or the owning USER's handle for a user-owned App (spec 047), per
+ * Task A's rule that the root comes from the OWNER FK and never from a stored
+ * URN string (a stored root can have drifted from the real owner). The App's
+ * own root atom is the last-resort fallback — only reachable if the owner row
+ * is gone or handle-less, where minting under the App's root still beats
+ * failing to provision the App's only writable memory.
+ */
+async function resolveMemoryRoot(
+  db: PrismaClient,
+  args: { organizationId: string | null; ownerUserId: string | null; appUrn: string },
+): Promise<string> {
+  if (args.organizationId) {
+    const org = await db.organization.findUnique({
+      where: { id: args.organizationId },
+      select: { urn: true },
+    });
+    if (org?.urn) return org.urn;
+  } else if (args.ownerUserId) {
+    const user = await db.user.findUnique({
+      where: { id: args.ownerUserId },
+      select: { handle: true },
+    });
+    if (user?.handle) return user.handle;
+  }
+  return normalizeUrnForLookup(args.appUrn).split(':')[0] ?? args.appUrn;
 }
 
 /**

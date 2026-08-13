@@ -102,7 +102,10 @@ describe('#951 — createApp provisions the app-class shared memory', () => {
     );
     const memories = await appMemories(app.id);
     expect(memories).toHaveLength(1);
-    expect(memories[0].urn).toBe(`${app.urn}:team-agent:shared`);
+    // #723: identity is the (app, agent) column pair; the urn is a flat
+    // single-atom v2 memory slug under the owning org.
+    expect(memories[0].sharedMemoryOfAgentId).toBe(agent.id);
+    expect(memories[0].urn).toBe(`${org.urn}:${app.urn.split(':').pop()}-shared`);
     // Owned by the App's org (chk_memory_owner_xor), and NOT the read-only
     // system class the Agent's own memory carries.
     expect(memories[0].organizationId).toBe(org.id);
@@ -158,6 +161,7 @@ describe('#951 — createApp provisions the app-class shared memory', () => {
       appId: app.id,
       appUrn: app.urn,
       appName: app.name,
+      agentId: agent.id,
       agentUrn: agent.urn,
       agentName: 'Team Agent',
       organizationId: org.id,

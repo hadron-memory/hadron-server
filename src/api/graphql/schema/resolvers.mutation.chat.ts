@@ -237,6 +237,7 @@ export const chatMutations = {
           appId: membership.app.id,
           appUrn: membership.app.urn,
           appName: membership.app.name,
+          agentId: resolvedAgentId,
           agentUrn: agent.urn,
           agentName: agent.name,
           organizationId: membership.app.organizationId,

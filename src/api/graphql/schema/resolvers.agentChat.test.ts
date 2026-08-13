@@ -898,7 +898,9 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
 
     const sharedMem = await db.memory.findUniqueOrThrow({ where: { id: chat1.memoryId } });
     expect(sharedMem.class).toBe('app');
-    expect(sharedMem.urn).toMatch(/:shared$/);
+    // #723: flat single-atom v2 urn; the (app, agent) pairing lives in columns.
+    expect(sharedMem.urn).toMatch(/^[^:]+:[^:]+-shared$/);
+    expect(sharedMem.sharedMemoryOfAgentId).toBe(agent.id);
 
     // Only one app-class memory provisioned per App (idempotency).
     const all = await db.memory.findMany({
