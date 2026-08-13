@@ -54,6 +54,7 @@ import {
   installAgentIntoAppCore,
   uninstallAgentFromAppCore,
 } from './resolvers.helpers.js';
+import { findOrCreateAppClassMemory } from './chat-scope.js';
 
 /**
  * Can the caller manage this App's members by ROLE alone — independent of any
@@ -91,6 +92,56 @@ async function callerManagesAppMembers(
       })
     : null;
   return ownerMember?.role === 'owner';
+}
+
+/**
+ * #951 — provision an App's `class='app'` shared memory for its founding
+ * Agent, at App-create time. Idempotent (find-or-create on the derived URN),
+ * and deliberately BEST-EFFORT: the App row is already committed by the time
+ * we get here, the lazy provisioners on the chat paths remain, and an App
+ * without its shared memory is exactly the pre-#951 state — so a failure is
+ * logged, not raised.
+ *
+ * `actingUserId` may be absent for a platform-admin caller (createApp guards
+ * its member grant the same way), in which case provisioning is skipped: the
+ * memory's `createdBy` wants a real user, and the first post will provision it.
+ *
+ * Honors the Agent's own declaration (`memoryProvisioning.appMemory`, spec 008
+ * FR-008 — 'shared' | 'user' | 'none', defaulting to 'shared'): eagerly
+ * creating shared writable storage for an Agent that declares 'user' or 'none'
+ * would contradict the contract it published. (Codex P1 on PR #953. The lazy
+ * chat-time provisioners have never consulted this declaration either — that
+ * pre-dates #951 and is left alone here rather than changed blind; a shared
+ * chat needs its holding memory whatever the declaration says.)
+ */
+async function provisionAppSharedMemory(
+  ctx: Context,
+  app: { id: string; urn: string; name: string; organizationId: string | null; ownerUserId: string | null },
+  agentId: string,
+): Promise<void> {
+  if (!ctx.userId) return;
+  try {
+    const agent = await ctx.db.agent.findUniqueOrThrow({
+      where: { id: agentId },
+      select: { urn: true, name: true, memoryProvisioning: true },
+    });
+    const appMemoryMode =
+      (agent.memoryProvisioning as { appMemory?: unknown } | null)?.appMemory ?? 'shared';
+    if (appMemoryMode !== 'shared') return;
+    await findOrCreateAppClassMemory({
+      appId: app.id,
+      appUrn: app.urn,
+      appName: app.name,
+      agentUrn: agent.urn,
+      agentName: agent.name,
+      organizationId: app.organizationId,
+      ownerUserId: app.ownerUserId,
+      actingUserId: ctx.userId,
+      db: ctx.db,
+    });
+  } catch (err) {
+    console.warn('[createApp] app-class memory provisioning failed:', err);
+  }
 }
 
 export const appMutations = {
@@ -310,6 +361,22 @@ export const appMutations = {
         include: APP_INCLUDE,
       });
 
+      // #951 — provision the App's own class='app' shared memory NOW, the way
+      // an Agent's system memory is provisioned at Agent-create time. Until
+      // this, the memory was created lazily on the first shared/team chat
+      // post, so a freshly installed App's only memory was the Agent's
+      // system memory — which is READ-ONLY from every App that runs it
+      // (cor:dmo:050:03). That left a correctly-built App badged "read-only"
+      // in the portal with no writable memory at all, and made `hadron team
+      // init -m <memory>` unrunnable: the memory it needs did not exist until
+      // somebody posted to the chat first.
+      //
+      // Best-effort: the App itself is already committed (createApp is not one
+      // transaction), and the lazy provisioners are still in place, so a
+      // failure here must not fail the install — it only defers provisioning
+      // to first post, which is exactly the old behavior.
+      await provisionAppSharedMemory(ctx, createdApp, resolvedAgentId);
+
       // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args
       // become the App's 'default' registry config (deploy-time override
       // that wins over the Agent's default in the resolution walk).
@@ -409,7 +476,7 @@ export const appMutations = {
             }
           }
 
-          await ctx.db.app.create({
+          const depApp = await ctx.db.app.create({
             data: {
               organizationId: resolvedOrgId,
               name: `${depAgent.name} (cascaded from ${name})`,
@@ -422,6 +489,9 @@ export const appMutations = {
               },
             },
           });
+          // #951: a cascaded dependency App is an App like any other — it gets
+          // its shared memory at install time too, not on first chat.
+          await provisionAppSharedMemory(ctx, depApp, imp.importedAgentId);
         }
       }
 

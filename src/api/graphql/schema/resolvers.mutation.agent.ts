@@ -2,6 +2,10 @@
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
+  assertSystemMemoryOwner,
+  repairAgentSystemMemoryOwner,
+} from '../../../lib/agentSystemMemory.js';
+import {
   AiServiceConfigNotFoundError,
   AiConfigValidationError,
   DuplicateAiServiceConfigNameError,
@@ -196,11 +200,13 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
       const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
-      // spec 047: the promoted memory must share the agent's owner — same
-      // org (org-owned) OR same user (user-owned).
-      if (target.organizationId !== resolvedOrgId || target.ownerUserId !== ownerUserId) {
-        throw new Error('System memory must have the same owner as the agent');
-      }
+      // spec 047 / #949: the promoted memory must share the agent's owner —
+      // same org (org-owned) OR same user (user-owned). One shared assertion
+      // so this path and updateAgent's first-attach can't drift.
+      assertSystemMemoryOwner(
+        { organizationId: resolvedOrgId, ownerUserId },
+        { organizationId: target.organizationId, ownerUserId: target.ownerUserId, id: target.id },
+      );
       const otherAgent = await tx.agent.findFirst({
         where: { systemMemoryId, deletedAt: null },
         select: { id: true },
@@ -411,9 +417,16 @@ export const agentMutations = {
           // org, isn't already another agent's system memory, and promote it
           // to class='system'.
           const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: incoming } });
-          if (target.organizationId !== agent.organizationId) {
-            throw new Error('System memory must belong to the same organization as the agent');
-          }
+          // #949: was a bare `target.organizationId !== agent.organizationId`,
+          // which for a USER-owned agent compares `null !== null` ⇒ false and
+          // waves through ANOTHER user's memory
+          // (findings:org-xor-owner-null-comparison-bypass). The shared
+          // assertion branches on the ownership class first.
+          assertSystemMemoryOwner(agent, {
+            organizationId: target.organizationId,
+            ownerUserId: target.ownerUserId,
+            id: target.id,
+          });
           const otherAgent = await ctx.db.agent.findFirst({
             where: { systemMemoryId: incoming, deletedAt: null, id: { not: id } },
             select: { id: true },
@@ -530,6 +543,43 @@ export const agentMutations = {
           .catch((err) => console.warn('[deleteAgent] system memory cleanup failed:', err));
       }
       return true;
+    },
+
+    /**
+     * #949 — re-own an Agent's system memory to the Agent's OWN owner.
+     *
+     * The recovery path for rows that predate the shared owner assertion: a
+     * system memory can only ever be created by Agent provisioning, so before
+     * this there was nothing to hand `updateAgent(systemMemoryId:)` and the
+     * only fix was to recreate the Agent, move its role nodes, reinstall the
+     * App, and retire the old one.
+     *
+     * PLATFORM ADMIN ONLY, deliberately: the memory to be moved is owned by a
+     * DIFFERENT tenant, so neither side's org admin is the right authority —
+     * the agent's org admin would be pulling a row out of an org they have no
+     * standing in, and the holding org's admin would be handing away a row
+     * their own members can currently read. Idempotent: an already-consistent
+     * pair is a no-op.
+     */
+    repairAgentSystemMemory: async (
+      _: unknown,
+      { agentRef }: { agentRef: string },
+      ctx: Context,
+    ) => {
+      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+      // Impersonation sessions are read-only support views (#875) — never a
+      // cross-tenant write, whatever the impersonator's own roles say.
+      if (!isPlatformAdmin || ctx.impersonation) {
+        throw new GraphQLError('Repairing an agent system memory requires a platform administrator.', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+      const { id } = await resolveAgentRef(ctx.db, agentRef);
+      const result = await repairAgentSystemMemoryOwner(ctx.db, id, {
+        actorId: ctx.userId ?? ctx.clientId ?? null,
+      });
+      if (result.urnNote) console.warn('[repairAgentSystemMemory]', result.urnNote);
+      return ctx.db.agent.findUniqueOrThrow({ where: { id }, include: AGENT_INCLUDE });
     },
 
     createAgentOrgGrant: async (

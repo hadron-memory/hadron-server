@@ -12,6 +12,10 @@
 //                   placeholders are substituted at mint time
 //     data.names  — the name register: an ordered array of strings, tried
 //                   first-to-last
+//     data.personaDescription (optional, #950) — template for the minted
+//                   Agent's `description`, same placeholders. The node's OWN
+//                   `description` is never copied onto the persona: it
+//                   describes the role-definition artifact, not the persona.
 import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -21,7 +25,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { type Context, requireOrgRole } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, isNonReaderAppMember } from './resolvers.helpers.js';
 import { createAgentCore } from './resolvers.mutation.agent.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
@@ -72,11 +76,10 @@ async function requireTeamPersonaMintAccess(
     } catch {
       // fall through to the AppMember path
     }
-    const member = await ctx.db.appMember.findUnique({
-      where: { appId_userId: { appId: app.id, userId: ctx.userId } },
-      select: { role: true },
-    });
-    if (member && member.role.trim().toLowerCase() !== 'reader') return;
+    // #952 extracted the 'reader' rule to one predicate, shared with
+    // installAgentIntoAppCore, so the two roster-write gates can't drift on
+    // what counts as read-only membership.
+    if (await isNonReaderAppMember(ctx, app)) return;
   }
   throw forbidden();
 }
@@ -158,12 +161,33 @@ export async function locateTeamAgent(
 }
 
 /**
- * Substitute {{name}} / {{role}} into the role's prompt template. split/join
- * rather than replaceAll so a name containing replacement-pattern characters
- * ($&, $') is inserted literally.
+ * Substitute {{name}} / {{role}} into a role template. split/join rather than
+ * replaceAll so a name containing replacement-pattern characters ($&, $') is
+ * inserted literally.
  */
 function composePersonaPrompt(template: string, name: string, role: string): string {
   return template.split('{{name}}').join(name).split('{{role}}').join(role);
+}
+
+/**
+ * Default persona description (#950). The role NODE's own `description`
+ * describes the role-definition ARTIFACT ("Role definition + name register
+ * for …") because that is what the node is — copying it onto the Agent
+ * described every persona of a role as if it were a registry document, and
+ * identically. So: an optional `data.personaDescription` template on the role
+ * node wins (same {{name}}/{{role}} substitution as the prompt), else this
+ * synthesized one.
+ */
+function composePersonaDescription(
+  roleData: unknown,
+  name: string,
+  role: string,
+): string {
+  const template = (roleData as { personaDescription?: unknown } | null)?.personaDescription;
+  if (typeof template === 'string' && template.trim() !== '') {
+    return composePersonaPrompt(template, name, role);
+  }
+  return `AI coding agent using ${role} role`;
 }
 
 /** True when the error is one of the two "this name's slot is occupied" refusals. */
@@ -320,6 +344,13 @@ export const teamPersonaMutations = {
         { extensions: { code: 'PERSONA_REGISTER_EXHAUSTED', role: roleNorm } },
       );
     }
+    // #950: the roster is the team's shared view of who is on it
+    // (cor:agt:020:01 — "the AppAgent join is the roster"), so a persona in an
+    // ORG-owned team App is ORGANIZATION-visible; PERSONAL would make every
+    // teammate's persona invisible to the others. A user-owned team App stays
+    // PERSONAL — spec 047 keeps a user-owned agent owner-only, and
+    // createAgentCore refuses anything else.
+    const personaVisibility = app.ownerUserId !== null ? 'PERSONAL' : 'ORGANIZATION';
     let created: Awaited<ReturnType<typeof createAgentCore>> | null = null;
     for (const candidate of candidates) {
       try {
@@ -328,7 +359,8 @@ export const teamPersonaMutations = {
           ownerUserId: app.ownerUserId,
           namespace,
           name: candidate,
-          description: roleNode.description ?? `Team persona — ${roleNorm}`,
+          description: composePersonaDescription(roleNode.data, candidate, roleNorm),
+          visibility: personaVisibility,
           personaName: candidate,
           personaRole: roleNorm,
           personaPrompt: composePersonaPrompt(template, candidate, roleNorm),

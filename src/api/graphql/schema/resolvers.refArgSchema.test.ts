@@ -24,6 +24,7 @@ import { typeDefs } from './typeDefs.js';
 const EXPECTED_REF_ARGS: Record<string, string[]> = {
   updateAgent: ['ref'],
   deleteAgent: ['ref'],
+  repairAgentSystemMemory: ['agentRef'],
   addMemoryToAgent: ['agentRef', 'memoryRef'],
   updateAgentMemoryRole: ['agentRef', 'memoryRef'],
   removeMemoryFromAgent: ['agentRef', 'memoryRef'],

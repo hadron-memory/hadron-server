@@ -239,6 +239,7 @@ async function bootstrapWorklog(ctx: Context, app: AppRow): Promise<WorklogRootR
     agentUrn: teamAgent.urn,
     agentName: teamAgent.name,
     organizationId: app.organizationId,
+    ownerUserId: app.ownerUserId,
     // record requires a user identity (requireTeamWorkAccess), so this is set.
     actingUserId: ctx.userId!,
     db: ctx.db,

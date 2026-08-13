@@ -223,6 +223,7 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
     agentUrn: teamAgent.urn,
     agentName: teamAgent.name,
     organizationId: app.organizationId,
+    ownerUserId: app.ownerUserId,
     // Post requires a user identity (requireTeamChatAccess), so this is set.
     actingUserId: ctx.userId!,
     db: ctx.db,

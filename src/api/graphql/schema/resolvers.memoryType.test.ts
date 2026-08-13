@@ -320,13 +320,15 @@ describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
             class: 'knowledge',
       },
     });
+    // #949: the refusal is now the shared, typed owner assertion (it also
+    // covers the user-owned case the org comparison could not express).
     await expect(
       resolvers.Mutation.updateAgent(
         {},
         { ref: agent.id, systemMemoryId: foreign.id },
         adminCtx(),
       ),
-    ).rejects.toThrow(/same organization/);
+    ).rejects.toThrow(/same owner as its agent/);
   });
 
   it('refuses a memory already attached to another agent', async () => {
