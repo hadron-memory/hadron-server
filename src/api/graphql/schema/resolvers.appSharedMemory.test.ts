@@ -123,6 +123,30 @@ describe('#951 — createApp provisions the app-class shared memory', () => {
     expect(memories[0].organizationId).toBeNull();
   });
 
+  it("honors the Agent's memoryProvisioning declaration (spec 008 FR-008)", async () => {
+    // An Agent that declares appMemory 'none' (or 'user') published a contract
+    // saying it expects no shared per-App memory — eagerly creating shared
+    // writable storage for it would contradict that (Codex P1).
+    for (const mode of ['none', 'user'] as const) {
+      const declining = await db.agent.create({
+        data: {
+          id: generateId(),
+          organizationId: org.id,
+          urn: `${org.urn}:declines-${mode}`,
+          name: `Declines ${mode}`,
+          visibility: 'ORGANIZATION',
+          memoryProvisioning: { appMemory: mode },
+        },
+      });
+      const app = await M.createApp(
+        null,
+        { orgRef: org.id, agentRef: declining.id, name: `App ${mode}` },
+        ctx(admin.id),
+      );
+      expect(await appMemories(app.id)).toHaveLength(0);
+    }
+  });
+
   it('is idempotent with the lazy chat-time provisioner — no second memory', async () => {
     const app = await M.createApp(
       null,

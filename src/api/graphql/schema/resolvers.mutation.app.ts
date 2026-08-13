@@ -105,6 +105,14 @@ async function callerManagesAppMembers(
  * `actingUserId` may be absent for a platform-admin caller (createApp guards
  * its member grant the same way), in which case provisioning is skipped: the
  * memory's `createdBy` wants a real user, and the first post will provision it.
+ *
+ * Honors the Agent's own declaration (`memoryProvisioning.appMemory`, spec 008
+ * FR-008 — 'shared' | 'user' | 'none', defaulting to 'shared'): eagerly
+ * creating shared writable storage for an Agent that declares 'user' or 'none'
+ * would contradict the contract it published. (Codex P1 on PR #953. The lazy
+ * chat-time provisioners have never consulted this declaration either — that
+ * pre-dates #951 and is left alone here rather than changed blind; a shared
+ * chat needs its holding memory whatever the declaration says.)
  */
 async function provisionAppSharedMemory(
   ctx: Context,
@@ -115,8 +123,11 @@ async function provisionAppSharedMemory(
   try {
     const agent = await ctx.db.agent.findUniqueOrThrow({
       where: { id: agentId },
-      select: { urn: true, name: true },
+      select: { urn: true, name: true, memoryProvisioning: true },
     });
+    const appMemoryMode =
+      (agent.memoryProvisioning as { appMemory?: unknown } | null)?.appMemory ?? 'shared';
+    if (appMemoryMode !== 'shared') return;
     await findOrCreateAppClassMemory({
       appId: app.id,
       appUrn: app.urn,

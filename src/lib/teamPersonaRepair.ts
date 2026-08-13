@@ -13,11 +13,19 @@
  *      describes the role-definition ARTIFACT ("Role definition + name register
  *      for …"). Every persona of a role also ended up identical.
  *
- * The description rewrite is EVIDENCE-BASED: it only fires when the persona's
- * current description still equals the role node's own description (the
- * fingerprint of the copy bug). A description someone has since edited by hand
- * is left alone — a backfill that overwrites deliberate content is worse than
- * one that skips a row.
+ * BOTH fixes are EVIDENCE-BASED, because `personaRole IS NOT NULL` does not
+ * prove `createTeamPersona` minted the row — the persona fields are settable
+ * directly through createAgent/updateAgent:
+ *
+ *   - visibility changes only for a persona that is on a team ROSTER — installed
+ *     in an App alongside a Team Agent defining `roles:<its role>`. PERSONAL →
+ *     ORGANIZATION is a widening (it exposes the Agent's systemPrompt + system
+ *     memory to the org), so a deliberately creator-only Agent that merely
+ *     carries persona metadata must not be swept up.
+ *   - description changes only where the persona's current value still equals
+ *     the role node's own description (the fingerprint of the copy bug). One
+ *     edited by hand since is left alone — a backfill that overwrites
+ *     deliberate content is worse than one that skips a row.
  *
  * Encrypted system memories are skipped, not guessed at: reading the role node
  * needs an active session key (spec 041), which a batch job does not have.
@@ -125,15 +133,23 @@ export async function planPersonaRepairs(db: PrismaClient): Promise<PersonaRepai
       agentUrn: p.urn,
       personaRole: p.personaRole!,
     };
-    // Visibility: only an ORG-owned persona changes. A user-owned Agent must
-    // stay PERSONAL (spec 047 — createAgentCore/updateAgent both refuse
-    // anything else), and a PUBLIC persona was a deliberate act.
-    if (p.organizationId !== null && p.visibility === 'PERSONAL') {
+    const roleNode = await findRoleNode(db, p.id, p.personaRole!);
+    // Visibility: only an ORG-owned persona changes, and only on EVIDENCE that
+    // it came from the buggy mint path — it is installed in an App alongside a
+    // Team Agent that defines `roles:<its role>`, i.e. it is on a team roster
+    // (`cor:agt:020:01`). The persona fields are settable directly through
+    // createAgent/updateAgent, so `personaRole IS NOT NULL` alone does not
+    // imply createTeamPersona minted it, and PERSONAL → ORGANIZATION is a
+    // WIDENING: it exposes the Agent's definition (systemPrompt, system
+    // memory) to the whole org. A deliberately creator-only Agent that merely
+    // carries persona metadata must not be caught by a data fix. (Codex P2 on
+    // PR #953 — same exposure class as the #952 gate decision.)
+    if (p.organizationId !== null && p.visibility === 'PERSONAL' && roleNode) {
       plan.visibility = { from: p.visibility, to: 'ORGANIZATION' };
     }
-    const roleNode = await findRoleNode(db, p.id, p.personaRole!);
     if (!roleNode) {
-      plan.note = 'role node not reachable — description left as is';
+      plan.note =
+        'no team role definition reachable — not treated as a minted persona; left as is';
     } else if (roleNode.encrypted) {
       plan.note = 'role node lives in an encrypted memory — description left as is';
     } else if (p.description && p.description === roleNode.description) {

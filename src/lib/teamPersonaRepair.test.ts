@@ -127,6 +127,54 @@ describe('planPersonaRepairs', () => {
     expect(plan?.visibility).toEqual({ from: 'PERSONAL', to: 'ORGANIZATION' });
   });
 
+  it('leaves a persona-metadata Agent that is on no team roster alone (Codex P2)', async () => {
+    // personaRole is settable straight through createAgent/updateAgent, so it
+    // is not proof the buggy mint path created the row — and PERSONAL →
+    // ORGANIZATION would expose this Agent's definition to the whole org.
+    const standalone = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:solo`,
+        name: 'Solo',
+        description: 'A deliberately private draft',
+        visibility: 'PERSONAL',
+        personaName: 'Solo',
+        personaRole: 'backend-engineer',
+      },
+    });
+    const plan = (await planPersonaRepairs(db)).find((p) => p.agentId === standalone.id);
+    expect(plan?.visibility).toBeUndefined();
+    expect(plan?.description).toBeUndefined();
+    expect(plan?.note).toMatch(/not treated as a minted persona/);
+  });
+
+  it('leaves a rostered persona whose role is undefined by the Team Agent alone', async () => {
+    // On the roster, but no roles:<its role> node — same lack of evidence.
+    const odd = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:odd`,
+        name: 'Odd',
+        visibility: 'PERSONAL',
+        personaName: 'Odd',
+        personaRole: 'sysops',
+      },
+    });
+    await db.appAgent.create({ data: { appId, agentId: odd.id } });
+    expect((await planPersonaRepairs(db)).find((p) => p.agentId === odd.id)?.visibility)
+      .toBeUndefined();
+  });
+
+  it('still repairs visibility for an encrypted role memory (existence is the evidence)', async () => {
+    await db.memory.update({ where: { id: sysMemoryId }, data: { isEncrypted: true } });
+    const iris = await makePersona({ name: 'Iris', slug: 'iris' });
+    const plan = (await planPersonaRepairs(db)).find((p) => p.agentId === iris.id);
+    expect(plan?.visibility).toEqual({ from: 'PERSONAL', to: 'ORGANIZATION' });
+    expect(plan?.description).toBeUndefined();
+  });
+
   it('never changes visibility on a user-owned persona (spec 047 keeps it PERSONAL)', async () => {
     const user = await db.user.create({
       data: { id: generateId(), githubId: 96001, githubUsername: `pr-user-${Date.now()}`, roles: ['READER'] },
