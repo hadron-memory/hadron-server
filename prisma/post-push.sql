@@ -36,6 +36,17 @@ ALTER TABLE memories
     OR (class IN ('knowledge', 'group', 'personal', 'private'))
   );
 
+-- #723: shared_memory_of_agent_id IDENTIFIES an App's runtime `shared`
+-- app-class memory (the find-or-create key that replaced the deterministic
+-- `…:shared` urn), so it is meaningful only on an App-scoped app-class row.
+-- NULL everywhere else — including the name-addressable createMemoryInApp
+-- app-class memories.
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_shared_agent_scope;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_shared_agent_scope
+  CHECK (shared_memory_of_agent_id IS NULL OR (class = 'app' AND app_id IS NOT NULL));
+
 -- 023-app-shape FR-024: bidirectional invariant — class='group' ⇔
 -- visibility='GROUP'.
 ALTER TABLE memories

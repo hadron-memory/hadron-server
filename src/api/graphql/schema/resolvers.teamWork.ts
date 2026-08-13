@@ -237,6 +237,7 @@ async function bootstrapWorklog(ctx: Context, app: AppRow): Promise<WorklogRootR
     appId: app.id,
     appUrn: app.urn,
     appName: app.name,
+    agentId: teamAgent.id,
     agentUrn: teamAgent.urn,
     agentName: teamAgent.name,
     organizationId: app.organizationId,

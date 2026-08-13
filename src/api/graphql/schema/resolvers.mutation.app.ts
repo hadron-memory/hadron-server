@@ -132,6 +132,7 @@ async function provisionAppSharedMemory(
       appId: app.id,
       appUrn: app.urn,
       appName: app.name,
+      agentId,
       agentUrn: agent.urn,
       agentName: agent.name,
       organizationId: app.organizationId,

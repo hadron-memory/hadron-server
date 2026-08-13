@@ -52,6 +52,16 @@ export async function setup() {
       CHECK (class NOT IN ('personal', 'private') OR app_id IS NULL OR user_memory_of_agent_id IS NOT NULL);
   `);
 
+  // #723: shared_memory_of_agent_id identifies an App's runtime `shared`
+  // app-class memory, so it is meaningful only on an App-scoped app-class row.
+  // Synced with prisma/post-push.sql + the 20260813120000 migration.
+  await client.query(`
+    ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_shared_agent_scope";
+    ALTER TABLE "memories"
+      ADD CONSTRAINT "chk_memory_shared_agent_scope"
+      CHECK (shared_memory_of_agent_id IS NULL OR (class = 'app' AND app_id IS NOT NULL));
+  `);
+
   // #510: an AgentSchedule is EITHER recurring (cron) or one-shot (run_at).
   await client.query(`
     ALTER TABLE "agent_schedules" DROP CONSTRAINT IF EXISTS "chk_agent_schedule_cron_xor_run_at";
