@@ -961,7 +961,7 @@ export async function getAccessibleMemoryIds(
   // App Key without an active session — the App's installed-agent reach:
   // its agent's system memory + linked memories, via the SAME predicate the
   // MCP read gates use (`getAppMemoryAccess`). This branch returned [] from
-  // its Station-era origin ("management-only context, no memory access") —
+  // its pre-App-rename origin ("management-only context, no memory access") —
   // written when App keys had no GraphQL node reads at all. Once the MCP
   // search tools started delegating to Query.findNodes (#403), that stance
   // made this the one gate that disagreed with the MCP layer: the same key
