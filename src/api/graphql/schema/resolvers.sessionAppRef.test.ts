@@ -3,17 +3,19 @@
  * authorship gate reachable.
  *
  * The headline test is the dogfood repro (found on the first real team App,
- * 2026-08-12): a USER starts a session bound to a persona AND to the team App,
- * then posts into the team chat as that persona. Before `appRef`,
- * `Session.appId` was stamped only from an App-key credential, so this exact
- * sequence was structurally impossible — `createTeamChatMessage` refused every
- * CLI-started session with `SESSION_NOT_IN_APP` (cor:agt:020:04 condition b).
+ * 2026-08-12, re-cut by #974): a USER starts a session bound to a Worker AND
+ * to the team App, then posts into the team chat as that worker. Before
+ * `appRef`, `Session.appId` was stamped only from an App-key credential, so
+ * this exact sequence was structurally impossible — `createTeamChatMessage`
+ * refused every CLI-started session with `SESSION_NOT_IN_APP`
+ * (cor:agt:020:04 condition b).
  *
  * The rest is the auth matrix, one case per PRINCIPAL SHAPE (the #935/#936
  * template): AppMember, org member, non-member, user-owned-App owner, pure
  * App-key credential, and the HYBRID user+active-App-selection shape that
  * findings:auth-appid-credential-vs-selection says is the one that gets
- * skipped.
+ * skipped — plus the #974 `SessionInput.workerRef` contract (binding the
+ * named identity, deriving the App from the worker behind the same gate).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -33,6 +35,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 }));
 
 const M = resolvers.Mutation as any;
+const Q = resolvers.Query as any;
 
 function ctx(userId?: string, appId?: string): Context {
   return { db, userId, appId, roles: ['READER'] };
@@ -94,7 +97,7 @@ beforeEach(async () => {
   });
 
   // The Team Agent — through the real mutation, with the roles: branch marker
-  // createTeamPersona locates it by (mirrors resolvers.teamChat.test.ts).
+  // the worker bootstraps locate it by (mirrors resolvers.teamChat.test.ts).
   const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   await db.node.create({
@@ -131,22 +134,24 @@ beforeEach(async () => {
 });
 
 describe('#943 acceptance — a user-started session can author in the team chat', () => {
-  it('appRef + agentRef, then createTeamChatMessage posts as the persona', async () => {
-    // 1. The persona (Ada), minted from the Team Agent's role definition.
-    const persona = await M.createTeamPersona(
+  it('appRef + workerRef, then createTeamChatMessage posts as the worker', async () => {
+    // 1. The worker (Ada) — the named casting of the Team Agent (#974).
+    const ada = await M.castWorker(
       {},
-      { appRef: app.id, role: 'backend-engineer' },
+      { appRef: app.id, agentRef: teamAgent.id, name: 'Ada' },
       ctx(admin.id),
     );
 
     // 2. `hadron team session start --as Ada` — a USER-authenticated session
-    //    (no App key anywhere), bound to both the persona and the App.
+    //    (no App key anywhere), bound to both the worker and the App.
     const session = await startSession(ctx(contrib.id), {
       appRef: app.urn,
-      agentRef: persona.urn,
+      workerRef: ada.id,
     });
     expect(session.appId).toBe(app.id);
-    expect(session.agentId).toBe(persona.id);
+    expect(session.workerId).toBe(ada.id);
+    // Session.agentId records the ROLE-agent behind the casting.
+    expect(session.agentId).toBe(teamAgent.id);
     expect(session.userId).toBe(contrib.id);
 
     // 3. `hadron chat post` — this returned SESSION_NOT_IN_APP before #943.
@@ -155,11 +160,11 @@ describe('#943 acceptance — a user-started session can author in the team chat
       { appRef: app.id, body: 'shipping the appRef fix', sessionRef: session.id },
       ctx(contrib.id),
     );
-    expect(message.authorAgentId).toBe(persona.id);
-    expect(message.authorName).toBe(persona.personaName);
+    expect(message.authorWorkerId).toBe(ada.id);
+    expect(message.authorName).toBe('Ada');
     expect(message.sessionId).toBe(session.id);
-    // #914: the envelope's author is the persona, the node's createdBy is the
-    // human driver — attribution resolves persona -> session -> driver.
+    // #914: the envelope's author is the worker, the node's createdBy is the
+    // human driver — attribution resolves worker -> session -> driver.
     expect(message.authorUserId).toBeNull();
   });
 });
@@ -296,38 +301,25 @@ describe('#943 — App-key precedence', () => {
   });
 });
 
-describe('#944 review — the bound agent must be on the App\'s roster to author', () => {
+describe('#944/#974 review — agent binding alone cannot author; the worker-App pin gates at post time', () => {
   /**
-   * Codex P1 / Copilot on PR #944. `appRef` and `agentRef` are authorized
-   * INDEPENDENTLY — the agent gate only requires readability, so a PUBLIC
-   * agent of another tenant can legitimately be bound to a session. Without a
-   * roster check at post time, a participant could author into their team's
-   * chat under that foreign agent's identity. The mention filter already
-   * resolves Agent refs only when INSTALLED, so the write side was the
-   * asymmetric half.
+   * Codex P1 / Copilot on PR #944, re-cut by #974: `appRef` and `agentRef`
+   * are authorized INDEPENDENTLY — the agent gate only requires readability,
+   * so a PUBLIC agent of another tenant can legitimately be bound to a
+   * session. Chat authorship now requires a WORKER binding (the worker-App
+   * pin replaced the old SESSION_AGENT_NOT_IN_APP roster check), so an
+   * agent-only binding must never confer a voice in the team chat.
    */
-  it('refuses a foreign PUBLIC agent bound to a session of this App', async () => {
+  it('a foreign PUBLIC agent can be bound, but confers no authorship', async () => {
     const otherOrg = await db.organization.create({
       data: { id: generateId(), name: 'sar-other-org', urn: `sar-other-${generateId().slice(-8)}.com` },
-    });
-    // #974: a persona is team-bound, so the other tenant's Ada needs that
-    // tenant's own team App to exist at all.
-    const otherApp = await db.app.create({
-      data: {
-        id: generateId(),
-        organizationId: otherOrg.id,
-        name: 'Other Team',
-        urn: `${otherOrg.urn}:other-team`,
-      },
     });
     const foreignAgent = await db.agent.create({
       data: {
         id: generateId(),
         organizationId: otherOrg.id,
         name: 'Impostor',
-        personaName: 'Ada',
-        teamAppId: otherApp.id,
-        urn: `${otherOrg.urn}:other-team.impostor`,
+        urn: `${otherOrg.urn}:impostor`,
         visibility: 'PUBLIC',
       },
     });
@@ -338,82 +330,60 @@ describe('#944 review — the bound agent must be on the App\'s roster to author
       agentRef: foreignAgent.id,
     });
     expect(session.agentId).toBe(foreignAgent.id);
-    // Authorship is refused.
+    expect(session.workerId).toBeNull();
+    // Authorship is refused: no Worker binding, no voice.
     await expectCode(
       M.createTeamChatMessage(
         {},
         { appRef: app.id, body: 'hello from nowhere', sessionRef: session.id },
         ctx(contrib.id),
       ),
-      'SESSION_AGENT_NOT_IN_APP',
+      'SESSION_NOT_WORKER_BOUND',
     );
   });
 
-  it('refuses an own-org agent that is not installed in the App', async () => {
-    // #974: createAgent no longer accepts personaName (a persona is minted by
-    // createTeamPersona); the roster check under test does not depend on it.
-    const notInstalled = await M.createAgent(
-      {},
-      { orgId: org.id, name: 'Unrostered' },
-      ctx(admin.id),
-    );
-    const session = await startSession(ctx(contrib.id), {
-      appRef: app.id,
-      agentRef: notInstalled.id,
-    });
-    await expectCode(
-      M.createTeamChatMessage(
-        {},
-        { appRef: app.id, body: 'not on the team', sessionRef: session.id },
-        ctx(contrib.id),
-      ),
-      'SESSION_AGENT_NOT_IN_APP',
-    );
-  });
-
-  it('honours an uninstall that happens AFTER the session started', async () => {
+  it('honours a retirement that happens AFTER the session started', async () => {
     // Why the check lives at post time and not at bind time: this sequence is
-    // inexpressible with a bind-time gate.
-    const persona = await M.createTeamPersona(
+    // inexpressible with a bind-time gate. (An agent uninstall no longer
+    // severs authorship — the Worker row survives it, cor:dmo:050:11;
+    // retirement is the revocation lever.)
+    const rae = await M.castWorker(
       {},
-      { appRef: app.id, role: 'backend-engineer' },
+      { appRef: app.id, agentRef: teamAgent.id, name: 'Rae' },
       ctx(admin.id),
     );
     const session = await startSession(ctx(contrib.id), {
       appRef: app.id,
-      agentRef: persona.urn,
+      workerRef: rae.id,
     });
-    // Posting works while the persona is on the roster.
+    // Posting works while the worker is active.
     await M.createTeamChatMessage(
       {},
-      { appRef: app.id, body: 'still on the team', sessionRef: session.id },
+      { appRef: app.id, body: 'still casting', sessionRef: session.id },
       ctx(contrib.id),
     );
-    // Uninstall is a hard row delete (AppAgent has no soft-delete).
-    await db.appAgent.delete({
-      where: { appId_agentId: { appId: app.id, agentId: persona.id } },
-    });
+    await M.retireWorker({}, { workerRef: rae.id }, ctx(admin.id));
     await expectCode(
       M.createTeamChatMessage(
         {},
-        { appRef: app.id, body: 'after the uninstall', sessionRef: session.id },
+        { appRef: app.id, body: 'after the retirement', sessionRef: session.id },
         ctx(contrib.id),
       ),
-      'SESSION_AGENT_NOT_IN_APP',
+      'WORKER_RETIRED',
     );
   });
 });
 
 describe('#943 — the gate the fix makes reachable stays closed elsewhere', () => {
   it('a session of App A still cannot author into App B\'s chat', async () => {
-    const persona = await M.createTeamPersona(
+    const ada = await M.castWorker(
       {},
-      { appRef: app.id, role: 'backend-engineer' },
+      { appRef: app.id, agentRef: teamAgent.id, name: 'Ada' },
       ctx(admin.id),
     );
     const session = await startSession(ctx(contrib.id), {
       appRef: app.id,
-      agentRef: persona.urn,
+      workerRef: ada.id,
     });
     await db.appAgent.create({ data: { appId: otherApp.id, agentId: teamAgent.id } });
     await expectCode(
@@ -424,5 +394,99 @@ describe('#943 — the gate the fix makes reachable stays closed elsewhere', () 
       ),
       'SESSION_NOT_IN_APP',
     );
+  });
+});
+
+describe('SessionInput.workerRef (#974) — binding the named identity', () => {
+  /**
+   * Contract (cor:agt:020:03): workerRef is PK-only (workers have no URN);
+   * the worker must belong to the session's App; with NO App context the
+   * worker's App becomes the session's — behind the SAME participant
+   * predicate the appRef path runs, so binding a worker never widens who can
+   * attribute a session to an App. Session.agentId is stamped from the
+   * casting's role-agent. "Taken" is deliberately not refused here (informed
+   * takeover is the client's contract).
+   */
+  let worker: { id: string };
+
+  beforeEach(async () => {
+    worker = await db.worker.create({
+      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris' },
+    });
+  });
+
+  it('binds the worker and derives the App and role-agent from the casting', async () => {
+    const s = await startSession(ctx(contrib.id), { workerRef: worker.id });
+    expect(s.workerId).toBe(worker.id);
+    expect(s.appId).toBe(app.id);
+    expect(s.agentId).toBe(teamAgent.id);
+  });
+
+  it('accepts an explicit appRef that matches the worker\'s App', async () => {
+    const s = await startSession(ctx(contrib.id), { appRef: app.urn, workerRef: worker.id });
+    expect(s.workerId).toBe(worker.id);
+    expect(s.appId).toBe(app.id);
+  });
+
+  it('refuses an appRef naming a DIFFERENT App than the worker\'s → SESSION_WORKER_NOT_IN_APP', async () => {
+    await expectCode(
+      startSession(ctx(contrib.id), { appRef: otherApp.id, workerRef: worker.id }),
+      'SESSION_WORKER_NOT_IN_APP',
+    );
+  });
+
+  it('refuses a retired worker → WORKER_RETIRED (the name stays reserved, the identity takes no new sessions)', async () => {
+    await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
+    await expectCode(startSession(ctx(contrib.id), { workerRef: worker.id }), 'WORKER_RETIRED');
+  });
+
+  it('refuses an unknown workerRef → WORKER_NOT_FOUND', async () => {
+    await expectCode(startSession(ctx(contrib.id), { workerRef: 'no-such-worker' }), 'WORKER_NOT_FOUND');
+  });
+
+  it('gates the derived-App path on the same participant predicate (non-member → FORBIDDEN)', async () => {
+    // Binding a worker with no App context must not widen who can attribute a
+    // session to the worker's App.
+    await expectCode(startSession(ctx(outsider.id), { workerRef: worker.id }), 'FORBIDDEN');
+  });
+
+  it('refuses the derived-App path into an uninstalled App → APP_UNINSTALLED', async () => {
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    await expectCode(startSession(ctx(contrib.id), { workerRef: worker.id }), 'APP_UNINSTALLED');
+  });
+
+  it('refuses an agentRef that disagrees with the casting → BAD_USER_INPUT; a matching one is fine', async () => {
+    const otherAgent = await M.createAgent({}, { orgId: org.id, name: 'Some Other Agent' }, ctx(admin.id));
+    await expectCode(
+      startSession(ctx(contrib.id), { agentRef: otherAgent.id, workerRef: worker.id }),
+      'BAD_USER_INPUT',
+    );
+    const s = await startSession(ctx(contrib.id), { agentRef: teamAgent.urn, workerRef: worker.id });
+    expect(s.workerId).toBe(worker.id);
+    expect(s.agentId).toBe(teamAgent.id);
+  });
+
+  it('does NOT refuse binding a "taken" worker — informed takeover is client-side', async () => {
+    const first = await startSession(ctx(contrib.id), { workerRef: worker.id });
+    expect(first.endedAt).toBeNull();
+    const second = await startSession(ctx(appMember.id), { workerRef: worker.id });
+    expect(second.workerId).toBe(worker.id);
+  });
+
+  it('sessions(workerRef:) filters to that worker\'s sessions inside the ordinary scope', async () => {
+    const s1 = await startSession(ctx(contrib.id), { workerRef: worker.id });
+    const s2 = await startSession(ctx(contrib.id), { workerRef: worker.id });
+    const unbound = await startSession(ctx(contrib.id), { appRef: app.id });
+    const rows = await Q.sessions({}, { workerRef: worker.id }, ctx(contrib.id));
+    const ids = rows.map((r: { id: string }) => r.id);
+    expect(ids).toContain(s1.id);
+    expect(ids).toContain(s2.id);
+    expect(ids).not.toContain(unbound.id);
+  });
+
+  it('declares workerRef on SessionInput in the SDL (#789 drift class)', () => {
+    const input = buildSchema(typeDefs).getType('SessionInput') as GraphQLInputObjectType;
+    expect(Object.keys(input.getFields())).toContain('workerRef');
+    expect(String(input.getFields().workerRef.type)).toBe('String');
   });
 });

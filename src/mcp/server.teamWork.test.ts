@@ -3,9 +3,10 @@
  * delegation to resolvers.Mutation.recordTeamWork /
  * resolvers.Query.teamWorkItems (findings:node-write-surface-invariants —
  * MCP tools delegate, never re-implement). Pins the delegation round trip,
- * the active-App default (same shape as hadron_create_persona), and that the
+ * the active-App default (same shape as hadron_cast_worker), and that the
  * full operation ran server-side (canonical ref stored on a real worklog
- * node; Session.prNumber denormalized).
+ * node; Session.prNumber denormalized; #974 — output lines carry the bound
+ * Worker's name).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -59,9 +60,14 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: org.id, name: 'MCP Team App 947', urn: `${org.urn}:team` },
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
+  // #974: the named identity is a Worker casting bound via workerRef — the
+  // record's workerName comes from this row.
+  const worker = await db.worker.create({
+    data: { appId: app.id, agentId: teamAgent.id, name: 'Iris' },
+  });
   session = await M.startSession(
     {},
-    { input: { id: generateId(), appRef: app.id, transcriptPath: '/tmp/mcp-947.jsonl' } },
+    { input: { id: generateId(), appRef: app.id, workerRef: worker.id, transcriptPath: '/tmp/mcp-947.jsonl' } },
     ctx,
   );
 });
@@ -82,10 +88,13 @@ describe('hadron_record_work / hadron_team_work_items (#947)', () => {
     });
     expect(recorded).toContain('Recorded: pr opened acme/widgets#371');
     expect(recorded).toContain(session.id);
+    // #974: the output line names the bound Worker.
+    expect(recorded).toContain('(Iris)');
 
     const page = await srv.callToolText('hadron_team_work_items', { ref: 'acme/widgets#371' });
     expect(page).toContain('1 record(s) total');
     expect(page).toContain('pr opened acme/widgets#371');
+    expect(page).toContain('[Iris]');
 
     // The full operation ran server-side: a real worklog node exists with the
     // canonical ref, and the pr convenience denormalized Session.prNumber.

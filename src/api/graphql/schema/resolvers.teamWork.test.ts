@@ -10,6 +10,11 @@
  * precondition must be client-reachable), then look it up by EVERY accepted
  * ref spelling and resolve the sessionIds to sessions carrying
  * transcriptPath.
+ *
+ * #974 (Worker re-cut): the named identity is a Worker row bound via
+ * Session.workerId — records carry workerName (+ workerId when worker-bound),
+ * and the session conditions test the worker-App pin (SESSION_WORKER_NOT_IN_APP
+ * / WORKER_RETIRED) instead of the retired agent-roster checks.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -169,7 +174,7 @@ describe('recordTeamWork — auth matrix (one case per principal shape)', () => 
   it('an AppMember (role member) records against their own session', async () => {
     const s = await ownSession(appMember.id);
     const item = await record(ctx(appMember.id), { sessionRef: s.id });
-    expect(item.personaName).toBe(appMember.handle);
+    expect(item.workerName).toBe(appMember.handle);
   });
 
   it("an AppMember with role 'reader' records too (participation follows the memory audience)", async () => {
@@ -233,46 +238,61 @@ describe('recordTeamWork — session conditions', () => {
     expect(item.action).toBe('merged');
   });
 
-  it('a session bound to a soft-deleted agent → SESSION_AGENT_NOT_IN_APP, never handle fall-through', async () => {
-    // PR #948 review (Codex P2 + Copilot): a vanished persona must refuse,
-    // not silently relabel its work as the human driver's.
-    const persona = await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+  it('a session bound to a worker of a DIFFERENT App → SESSION_WORKER_NOT_IN_APP, never handle fall-through', async () => {
+    // PR #948 review (Codex P2 + Copilot), re-keyed by #974: a claimed
+    // identity that is not THIS App's must refuse, not silently relabel its
+    // work as the human driver's.
+    const otherApp = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Other Team', urn: `${org.urn}:other-team` },
+    });
+    const foreignWorker = await db.worker.create({
+      data: { appId: otherApp.id, agentId: teamAgent.id, name: 'Iris' },
+    });
+    const s = await db.session.create({
+      data: { id: generateId(), userId: contrib.id, appId: app.id, workerId: foreignWorker.id },
+    });
+    await expectCode(record(ctx(contrib.id), { sessionRef: s.id }), 'SESSION_WORKER_NOT_IN_APP');
+  });
+
+  it('a session bound to a RETIRED worker → WORKER_RETIRED (a retired identity takes no new records)', async () => {
+    // cor:agt:020:05 — retirement AFTER the bind still refuses: the check
+    // runs at record time, unlike the ended-session case (late attribution).
+    const worker = await db.worker.create({
+      data: { appId: app.id, agentId: teamAgent.id, name: 'Henry' },
+    });
     const s = await M.startSession(
       {},
-      { input: { id: generateId(), appRef: app.id, agentRef: persona.id } },
+      { input: { id: generateId(), appRef: app.id, workerRef: worker.id } },
       ctx(contrib.id),
     );
-    await db.agent.update({ where: { id: persona.id }, data: { deletedAt: new Date() } });
-    await expectCode(record(ctx(contrib.id), { sessionRef: s.id }), 'SESSION_AGENT_NOT_IN_APP');
+    await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
+    await expectCode(record(ctx(contrib.id), { sessionRef: s.id }), 'WORKER_RETIRED');
   });
 
-  it('a session bound to an agent NOT installed in the App → SESSION_AGENT_NOT_IN_APP', async () => {
-    const foreignAgent = await M.createAgent(
-      {},
-      { orgId: org.id, name: 'Uninstalled Agent' },
-      ctx(admin.id),
-    );
-    const s = await db.session.create({
-      data: { id: generateId(), userId: contrib.id, appId: app.id, agentId: foreignAgent.id },
+  it('a worker-bound session records under the worker name, with workerId stamped', async () => {
+    const worker = await db.worker.create({
+      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris' },
     });
-    await expectCode(record(ctx(contrib.id), { sessionRef: s.id }), 'SESSION_AGENT_NOT_IN_APP');
-  });
-
-  it('a persona-bound session records under the persona name', async () => {
-    const persona = await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
     const s = await M.startSession(
       {},
-      { input: { id: generateId(), appRef: app.id, agentRef: persona.id } },
+      { input: { id: generateId(), appRef: app.id, workerRef: worker.id } },
       ctx(contrib.id),
     );
     const item = await record(ctx(contrib.id), { sessionRef: s.id });
-    expect(item.personaName).toBe(persona.personaName);
+    expect(item.workerName).toBe('Iris');
+    expect(item.workerId).toBe(worker.id);
+    // The opportunistic workerId stamp lands on the stored properties too.
+    const node = await db.node.findUnique({ where: { id: item.nodeId } });
+    expect((node!.properties as any).workerId).toBe(worker.id);
   });
 
-  it('an unbound session records under the attributed user handle', async () => {
+  it('an unbound session records under the attributed user handle (workerId null)', async () => {
     const s = await ownSession(appMember.id);
     const item = await record(ctx(appMember.id), { sessionRef: s.id });
-    expect(item.personaName).toBe(appMember.handle);
+    expect(item.workerName).toBe(appMember.handle);
+    expect(item.workerId).toBeNull();
+    const node = await db.node.findUnique({ where: { id: item.nodeId } });
+    expect((node!.properties as any).workerId).toBeUndefined();
   });
 });
 
@@ -551,7 +571,7 @@ describe('teamWorkItems — the provenance read surface', () => {
         objectType: WORKLOG_OBJECT_TYPE,
         properties: {
           sessionId: contribSession.id,
-          personaName: 'stray',
+          workerName: 'stray',
           tool: 'github',
           kind: 'pr',
           ref: 'o/r#371',
@@ -562,7 +582,37 @@ describe('teamWorkItems — the provenance read surface', () => {
     });
     const page = await items(ctx(contrib.id));
     expect(page.total).toBe(1);
-    expect(page.items[0].personaName).not.toBe('stray');
+    expect(page.items[0].workerName).not.toBe('stray');
+  });
+
+  it('a pre-#974 record carrying personaName projects it as workerName (no data migration)', async () => {
+    await record(ctx(contrib.id));
+    const root = await findWorklogRoot();
+    // Exactly what the persona-era write path stored: personaName, no
+    // workerName / workerId.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: root!.memoryId,
+        loc: `worklog:legacy-${generateId().slice(-6)}`,
+        name: 'legacy',
+        nodeType: 'record',
+        objectType: WORKLOG_OBJECT_TYPE,
+        properties: {
+          sessionId: contribSession.id,
+          personaName: 'Old Iris',
+          tool: 'github',
+          kind: 'pr',
+          ref: 'o/r#9',
+          action: 'opened',
+          at: new Date().toISOString(),
+        },
+      },
+    });
+    const page = await items(ctx(contrib.id), { ref: 'o/r#9' });
+    expect(page.total).toBe(1);
+    expect(page.items[0].workerName).toBe('Old Iris');
+    expect(page.items[0].workerId).toBeNull();
   });
 
   it('limit 0 is count-only; an empty worklog reads as an empty page (reads never provision)', async () => {
