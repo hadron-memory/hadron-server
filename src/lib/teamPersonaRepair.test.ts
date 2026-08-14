@@ -39,6 +39,8 @@ async function makePersona(opts: {
       description: opts.description === undefined ? ROLE_NODE_DESCRIPTION : opts.description,
       visibility: opts.visibility ?? 'PERSONAL',
       personaName: opts.name,
+      // #974: a persona is team-bound (chk_agent_persona_team_app).
+      teamAppId: appId,
       personaRole: 'backend-engineer',
     },
   });
@@ -131,6 +133,8 @@ describe('planPersonaRepairs', () => {
     // personaRole is settable straight through createAgent/updateAgent, so it
     // is not proof the buggy mint path created the row — and PERSONAL →
     // ORGANIZATION would expose this Agent's definition to the whole org.
+    // (#974 made personaName the team-bound half; personaRole stays free, and
+    // it is what this sweep keys on.)
     const standalone = await db.agent.create({
       data: {
         id: generateId(),
@@ -139,7 +143,6 @@ describe('planPersonaRepairs', () => {
         name: 'Solo',
         description: 'A deliberately private draft',
         visibility: 'PERSONAL',
-        personaName: 'Solo',
         personaRole: 'backend-engineer',
       },
     });
@@ -155,10 +158,11 @@ describe('planPersonaRepairs', () => {
       data: {
         id: generateId(),
         organizationId: org.id,
-        urn: `${org.urn}:odd`,
+        urn: `${org.urn}:eng-team.odd`,
         name: 'Odd',
         visibility: 'PERSONAL',
         personaName: 'Odd',
+        teamAppId: appId,
         personaRole: 'sysops',
       },
     });

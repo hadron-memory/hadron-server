@@ -47,6 +47,7 @@ import {
   AgentNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { assertAgentNotTeamBound } from '../../../lib/teamBinding.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
 import {
@@ -961,7 +962,7 @@ export async function getAccessibleMemoryIds(
   // App Key without an active session — the App's installed-agent reach:
   // its agent's system memory + linked memories, via the SAME predicate the
   // MCP read gates use (`getAppMemoryAccess`). This branch returned [] from
-  // its Station-era origin ("management-only context, no memory access") —
+  // its pre-App-rename origin ("management-only context, no memory access") —
   // written when App keys had no GraphQL node reads at all. Once the MCP
   // search tools started delegating to Query.findNodes (#403), that stance
   // made this the one gate that disagreed with the MCP layer: the same key
@@ -1736,6 +1737,18 @@ export async function installAgentIntoAppCore(
       extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
     });
   }
+  // #974 / cor:agt:020:01: a persona belongs to EXACTLY ONE team App — the one
+  // its `teamAppId` names, set at mint by createTeamPersona (which installs it
+  // there itself, without coming through here). Guest-installing it into a
+  // second team App is what team-boundness forbids: two same-named personas
+  // could then meet in one App context, which is precisely what the team-scoped
+  // name uniqueness assumes cannot happen. Shared with createApp's founding and
+  // cascade-install paths (PR #975 review: three restatements, one hole).
+  assertAgentNotTeamBound(
+    { id: resolvedAgentId, personaName: agent.personaName, teamAppId: agent.teamAppId },
+    resolvedAppId,
+    { appId: resolvedAppId },
+  );
   // Best-effort pre-check for the typed `DUPLICATE_APP_AGENT` error.
   // The race-safe fallback lives inside the transaction below — under
   // concurrent installs of the same (App, Agent), one of the two will

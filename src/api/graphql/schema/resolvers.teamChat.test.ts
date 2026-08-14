@@ -363,13 +363,25 @@ describe('teamChatMessages — mentions round trip', () => {
     const foreignOrg = await db.organization.create({
       data: { id: generateId(), name: 'foreign', urn: `foreign-${Date.now()}.example` },
     });
+    // #974: a persona is team-bound (chk_agent_persona_team_app), so the
+    // foreign org needs its own team App for its own Iris to exist at all —
+    // which is exactly the per-team name scoping this test now also shows.
+    const foreignApp = await db.app.create({
+      data: {
+        id: generateId(),
+        organizationId: foreignOrg.id,
+        name: 'Foreign Team',
+        urn: `${foreignOrg.urn}:foreign-team`,
+      },
+    });
     const foreign = await db.agent.create({
       data: {
         id: generateId(),
         organizationId: foreignOrg.id,
         name: 'Ghost',
-        urn: `${foreignOrg.urn}:ghost`,
+        urn: `${foreignOrg.urn}:foreign-team.ghost`,
         personaName: 'Iris',
+        teamAppId: foreignApp.id,
       },
     });
     await post(ctx(appMember.id), { body: '@iris are you there' });
@@ -394,8 +406,10 @@ describe('teamChatMessages — mentions round trip', () => {
         id: generateId(),
         organizationId: org.id,
         name: 'Mary Jane',
-        urn: `${org.urn}:mary-jane`,
+        // #974: the derived compound slug — <team-app-slug>.<persona-name>.
+        urn: `${org.urn}:${app.urn.split(':').pop()}.mary-jane`,
         personaName: 'Mary Jane',
+        teamAppId: app.id,
       },
     });
     await db.appAgent.create({ data: { appId: app.id, agentId: mj.id } });

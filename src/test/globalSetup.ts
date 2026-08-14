@@ -139,18 +139,24 @@ export async function setup() {
       ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
   `);
 
-  // #928 team personas: persona names are unique per owner (org XOR user),
-  // case-insensitively (partial functional uniques — Prisma can't express
-  // them). NOT filtered on deleted_at: a persona name binds to one agent
-  // forever (D-2026-08-11-006). Synced with prisma/post-push.sql + the
-  // 20260811120000 migration.
+  // #974 team personas (cor:agt:020:01/:02 v0.0.2): a persona is TEAM-BOUND
+  // (persona_name ⇒ team_app_id) and its name is unique per TEAM App,
+  // case-insensitively (partial functional unique — Prisma can't express it).
+  // NOT filtered on deleted_at: a persona name binds to one agent forever
+  // within its team (D-2026-08-11-006, re-scoped by D-2026-08-14-001). Synced
+  // with prisma/post-push.sql + the 20260814120000 migration; the DROPs retire
+  // the superseded owner-wide pair from #928.
   await client.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS agents_org_persona_name_uniq
-      ON agents (organization_id, lower(persona_name))
-      WHERE persona_name IS NOT NULL AND organization_id IS NOT NULL;
-    CREATE UNIQUE INDEX IF NOT EXISTS agents_owner_persona_name_uniq
-      ON agents (owner_user_id, lower(persona_name))
-      WHERE persona_name IS NOT NULL AND owner_user_id IS NOT NULL;
+    DROP INDEX IF EXISTS agents_org_persona_name_uniq;
+    DROP INDEX IF EXISTS agents_owner_persona_name_uniq;
+    CREATE UNIQUE INDEX IF NOT EXISTS agents_team_persona_name_uniq
+      ON agents (team_app_id, lower(persona_name))
+      WHERE persona_name IS NOT NULL;
+
+    ALTER TABLE "agents" DROP CONSTRAINT IF EXISTS "chk_agent_persona_team_app";
+    ALTER TABLE "agents"
+      ADD CONSTRAINT "chk_agent_persona_team_app"
+      CHECK ("persona_name" IS NULL OR "team_app_id" IS NOT NULL);
   `);
 
   // 043-slack-integration: one LIVE Slack connection per (org, workspace) —

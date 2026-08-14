@@ -1,10 +1,16 @@
 // createTeamPersona — #935: server-side persona instantiation (spec
-// cor:agt:020:01/:02). Role templates + the name register live as CONTENT in
-// the Team Agent's system memory; this operation reads them, allocates a name
-// against the personaName uniqueness constraint (the allocation primitive —
-// no lease, no lock), creates the persona Agent through the shared
+// cor:agt:020:01/:02/:06). Role templates + the name register live as CONTENT
+// in the Team Agent's system memory; this operation reads them, allocates a
+// name against the personaName uniqueness constraint (the allocation primitive
+// — no lease, no lock), creates the persona Agent through the shared
 // createAgentCore (no behavior fork on persona fields), and installs it into
 // the team App so a minted persona is on the roster immediately.
+//
+// #974 re-scoped all three of those to the TEAM App: the minted Agent carries
+// `teamAppId`, its name only has to be free within that team, and its slug is
+// derived as `<team-app-slug>.<persona-name>` — the platform's only dotted
+// agent slug. This is therefore the ONE place a persona can come into being
+// (createAgent refuses personaName), and the one writer of dotted slugs.
 //
 // Node shape (#935 — adopted into cor:agt:020:01's volatile section on merge):
 //   roles:<role>  in the Team Agent's system memory
@@ -31,6 +37,7 @@ import {
   composePersonaDescription,
 } from '../../../lib/personaDescription.js';
 import { createAgentCore } from './resolvers.mutation.agent.js';
+import { derivePersonaAgentSlug } from '../../../lib/personaSlug.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
 const ROLES_BRANCH_PREFIX = 'roles:';
@@ -171,11 +178,39 @@ export async function locateTeamAgent(
  */
 const composePersonaPrompt = applyPersonaTemplate;
 
-/** True when the error is one of the two "this name's slot is occupied" refusals. */
+/**
+ * #974 / cor:agt:020:06 — the ONE refusal that means "this name is spoken for
+ * in this team", which the register loop advances past.
+ *
+ * With the dot reserved (cor:urn:010:03), a persona slug can only collide with
+ * another persona slug of the same team App — so an `AGENT_URN_TAKEN` on a mint
+ * IS a name collision in this team, and {@link asNameTaken} translates it
+ * before it can escape. Pre-#974 the two codes were genuinely different
+ * situations (an ordinary agent named "Iris" squatted the flat slug
+ * `<org>:iris`); that leg is gone.
+ *
+ * The collision need not be with the SAME spelling: slugification is
+ * many-to-one, so "Mary Jane" and "Mary-Jane" address the same persona slot
+ * (see src/lib/personaSlug.ts). The refusal names the derived slug for exactly
+ * that reason — the register then advances past the whole slot, which is right.
+ */
 function isNameOccupied(e: unknown): boolean {
-  if (!(e instanceof GraphQLError)) return false;
-  const code = e.extensions?.code;
-  return code === 'PERSONA_NAME_TAKEN' || code === 'AGENT_URN_TAKEN';
+  return e instanceof GraphQLError && e.extensions?.code === 'PERSONA_NAME_TAKEN';
+}
+
+/**
+ * Translate the slug-level refusal into the name-level one for persona mints.
+ * The client contract is `PERSONA_NAME_TAKEN` (cor:agt:020:02): a caller of
+ * `createTeamPersona` never chose a slug, so `AGENT_URN_TAKEN` would name a
+ * concept it can't act on. The holder is a persona of this team with this name
+ * — including a RETIRED one, whose name stays reserved forever.
+ */
+function asNameTaken(e: unknown, personaName: string): unknown {
+  if (!(e instanceof GraphQLError) || e.extensions?.code !== 'AGENT_URN_TAKEN') return e;
+  return new GraphQLError(
+    `Persona name ${JSON.stringify(personaName)} is already taken in this team (its derived agent slug ${JSON.stringify(String(e.extensions?.urn ?? ''))} is reserved) — pick another name.`,
+    { extensions: { code: 'PERSONA_NAME_TAKEN', urn: e.extensions?.urn } },
+  );
 }
 
 export const teamPersonaMutations = {
@@ -316,8 +351,11 @@ export const teamPersonaMutations = {
     // 5. Allocate + create. Caller-supplied name: one attempt, the typed
     //    refusal IS the answer (cor:agt:020:02). Register mode: walk the
     //    pool relying on the uniqueness constraint as the atomic primitive —
-    //    a P2002-mapped PERSONA_NAME_TAKEN (or an AGENT_URN_TAKEN from a
-    //    non-persona Agent squatting the slug) advances to the next name.
+    //    a P2002-mapped PERSONA_NAME_TAKEN advances to the next name. #974
+    //    dropped the AGENT_URN_TAKEN advance leg: with the dot reserved
+    //    (cor:agt:020:06) a slug-level refusal on a mint can only BE a name
+    //    collision in this team — possibly against a slug-equivalent spelling —
+    //    so it is translated into one and advances the register the same way.
     const candidates = requestedName ? [requestedName] : register;
     if (candidates.length === 0) {
       throw new GraphQLError(
@@ -340,42 +378,25 @@ export const teamPersonaMutations = {
           ownerUserId: app.ownerUserId,
           namespace,
           name: candidate,
+          // #974 / cor:agt:020:06: the slug is DERIVED, never chosen —
+          // `<team-app-slug>.<persona-name-slug>`, the platform's only dotted
+          // agent slug. Two teams may each mint an Iris; their slugs differ by
+          // construction, so nothing here retries a slug.
+          slug: derivePersonaAgentSlug(app.urn, candidate),
           description: composePersonaDescription(roleNode.data, candidate, roleNorm),
           visibility: personaVisibility,
           personaName: candidate,
           personaRole: roleNorm,
           personaPrompt: composePersonaPrompt(template, candidate, roleNorm),
+          // #974 / cor:agt:020:01: the persona's home team, fixed at mint —
+          // the scope of its name's uniqueness and of the slug prefix above.
+          teamAppId: appId,
         });
         break;
       } catch (e) {
-        if (!requestedName && isNameOccupied(e)) continue;
-        // Explicit-name mint: the URN pre-check fires BEFORE the persona
-        // index, so a taken persona name can surface as AGENT_URN_TAKEN (the
-        // persona "Iris" also holds the slug "iris"). The spec's allocation
-        // contract promises PERSONA_NAME_TAKEN for a taken NAME
-        // (cor:agt:020:02) — translate when a persona really reserves it.
-        if (
-          requestedName &&
-          e instanceof GraphQLError &&
-          e.extensions?.code === 'AGENT_URN_TAKEN'
-        ) {
-          const holder = await ctx.db.agent.findFirst({
-            where: {
-              personaName: { equals: requestedName, mode: 'insensitive' },
-              ...(app.organizationId !== null
-                ? { organizationId: app.organizationId }
-                : { ownerUserId: app.ownerUserId }),
-            },
-            select: { id: true },
-          });
-          if (holder) {
-            throw new GraphQLError(
-              `Persona name ${JSON.stringify(requestedName)} is already taken for this owner — pick another name.`,
-              { extensions: { code: 'PERSONA_NAME_TAKEN' } },
-            );
-          }
-        }
-        throw e;
+        const refusal = asNameTaken(e, candidate);
+        if (!requestedName && isNameOccupied(refusal)) continue;
+        throw refusal;
       }
     }
     if (!created) {

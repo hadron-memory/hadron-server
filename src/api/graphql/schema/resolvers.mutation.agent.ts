@@ -28,6 +28,7 @@ import { removeAgentImport } from '../../../controller/operations/removeAgentImp
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
+import { assertDotFreeSlug } from '../../../lib/personaSlug.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
@@ -51,12 +52,13 @@ import {
 } from './resolvers.helpers.js';
 
 /**
- * #928 team personas: persona-name uniqueness lives in raw partial indexes
- * (agents_org_persona_name_uniq / agents_owner_persona_name_uniq — post-push.sql),
- * so a collision surfaces as P2002 with the index name as target. Map it to a
- * stable typed code: "name taken, retry with the next free name" is the
- * allocation contract clients program against (D-2026-08-11-006). Any other
- * P2002 rethrows untouched.
+ * #928/#974 team personas: persona-name uniqueness lives in a raw partial index
+ * (`agents_team_persona_name_uniq` on `(team_app_id, lower(persona_name))` —
+ * post-push.sql), so a collision surfaces as P2002 with the index name as
+ * target. Map it to a stable typed code: "name taken, retry with the next free
+ * name" is the allocation contract clients program against (D-2026-08-11-006,
+ * re-scoped to the team App by D-2026-08-14-001). Any other P2002 rethrows
+ * untouched.
  */
 /**
  * #928/#929 review: persona fields are trimmed, and a blank-after-trim value
@@ -77,7 +79,7 @@ const throwIfPersonaNameCollision = (e: unknown, personaName: string | null | un
     String((e.meta as { target?: unknown } | undefined)?.target ?? '').includes('persona_name')
   ) {
     throw new GraphQLError(
-      `Persona name ${JSON.stringify(personaName ?? '')} is already taken for this owner — pick another name.`,
+      `Persona name ${JSON.stringify(personaName ?? '')} is already taken in this team — pick another name.`,
       { extensions: { code: 'PERSONA_NAME_TAKEN' } },
     );
   }
@@ -117,6 +119,20 @@ export interface CreateAgentCoreInput {
   personaName?: string | null;
   personaRole?: string | null;
   personaPrompt?: string | null;
+  /**
+   * #974 — the persona's required home team App (cor:agt:020:01). Set by
+   * `createTeamPersona`, the only minter of personas; the DB CHECK
+   * `chk_agent_persona_team_app` refuses a persona without it.
+   */
+  teamAppId?: string | null;
+  /**
+   * #974 — a SERVER-DERIVED slug, used verbatim instead of slugifying `name`.
+   * The one caller is persona minting, whose compound `<team-app-slug>.<name>`
+   * is the only dotted agent slug the platform writes (cor:agt:020:06); every
+   * other path derives from the display name and is held to the dot
+   * reservation (cor:urn:010:03).
+   */
+  slug?: string;
 }
 
 /**
@@ -148,7 +164,18 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #574: slugify the display name — a raw name would persist a
   // case-sensitive / space-bearing URN (and the system memory URN derives
   // from this one, so it inherits the clean slug).
-  const agentUrn = `${namespace}:${deriveSlugFromName(name)}`;
+  //
+  // #974 / cor:urn:010:03: the derived slug must be dot-free — the dot is
+  // reserved for the server-derived persona compound, which arrives through
+  // `input.slug` instead (the single writer of dotted agent slugs).
+  let agentSlug: string;
+  if (input.slug !== undefined) {
+    agentSlug = input.slug;
+  } else {
+    agentSlug = deriveSlugFromName(name);
+    assertDotFreeSlug(agentSlug, 'agent');
+  }
+  const agentUrn = `${namespace}:${agentSlug}`;
   // Check for existing agent with the same URN
   const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
   if (existing) {
@@ -274,6 +301,8 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         surfaces: surfaces ?? defaultSurfaces,
         // #928 team personas — pure metadata (see schema.prisma).
         personaName: personaNameNorm, personaRole: personaRoleNorm, personaPrompt: personaPromptNorm,
+        // #974 — the persona's required home team App (cor:agt:020:01).
+        teamAppId: input.teamAppId ?? null,
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
@@ -303,6 +332,18 @@ export const agentMutations = {
       { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaName, personaRole, personaPrompt }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaName?: string; personaRole?: string; personaPrompt?: string },
       ctx: Context,
     ) => {
+      // #974 / cor:agt:020:01: a persona is TEAM-BOUND — it needs a home team
+      // App, which this mutation has no way to name. Personas are minted by
+      // `createTeamPersona` (which also derives the compound slug and installs
+      // onto the roster); refuse here with a typed pointer rather than letting
+      // the request die on the `chk_agent_persona_team_app` CHECK. The other two
+      // persona fields carry no invariant and stay settable.
+      if (normalizePersonaField(personaName) != null) {
+        throw new GraphQLError(
+          'A persona belongs to a team App (cor:agt:020:01) — mint it with createTeamPersona, which allocates the name, derives the agent slug, and installs it onto the roster. createAgent cannot set personaName.',
+          { extensions: { code: 'PERSONA_TEAM_REQUIRED' } },
+        );
+      }
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
       // present ⇒ org-owned (org ADMIN); `orgId` omitted ⇒ user-owned by the
       // caller, namespaced under their `@<handle>`. The chosen `namespace` is
@@ -394,13 +435,38 @@ export const agentMutations = {
       if (visibility === 'PUBLIC') {
         await assertAgentPublicAllowed(ctx.db, id);
       }
+      // #974 / cor:agt:020:01: a persona's `personaName` may only be set on an
+      // agent that already HAS a home team App — i.e. one minted by
+      // createTeamPersona. Without this the write dies on the
+      // `chk_agent_persona_team_app` CHECK as an untyped 500. Clearing
+      // (explicit null / blank) stays allowed: it only removes a persona.
+      if (personaNameNorm != null && agent.teamAppId === null) {
+        throw new GraphQLError(
+          'A persona belongs to a team App (cor:agt:020:01) — this agent has none. Mint personas with createTeamPersona.',
+          { extensions: { code: 'PERSONA_TEAM_REQUIRED' } },
+        );
+      }
       let newUrn: string | undefined;
       if (urn !== undefined) {
         if (!agent.organizationId) {
           throw new GraphQLError('Renaming via urn is not supported for user-owned agents.', { extensions: { code: 'BAD_USER_INPUT' } });
         }
+        // #974 / cor:agt:020:06: a persona's slug is SERVER-DERIVED
+        // (`<team-app-slug>.<persona-name>`) and never chosen by a caller —
+        // accepting a rename here would make it caller-chosen, and the dot
+        // reservation would strip the compound shape on the way through.
+        // Renaming the team App leaves the persona slug spelling the old team
+        // slug; that staleness is accepted by design.
+        if (agent.personaName !== null) {
+          throw new GraphQLError(
+            'A persona\'s agent slug is server-derived from its team App and persona name (cor:agt:020:06) — it cannot be renamed.',
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: agent.organizationId }, select: { urn: true } });
-        newUrn = `${org.urn}:${deriveSlugFromName(urn)}`; // #574: slugify the explicit rename slug
+        const renamedSlug = deriveSlugFromName(urn); // #574: slugify the explicit rename slug
+        assertDotFreeSlug(renamedSlug, 'agent'); // #974 / cor:urn:010:03
+        newUrn = `${org.urn}:${renamedSlug}`;
       }
 
       // ── systemMemoryId: first-attach is allowed, but unset/change are not.
