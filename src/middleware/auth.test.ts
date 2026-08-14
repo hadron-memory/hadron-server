@@ -431,4 +431,155 @@ describe('resolveAuthContext', () => {
     });
   });
 
+  // ── User-principal session binding (#934, amending cor:aut:020:02) ──────
+  //
+  // Binding is ATTRIBUTION only (the usage-event heartbeat the #930 reaper
+  // counts), never a credential: strict `session.userId === userId`, no
+  // platform-admin bypass, never under impersonation. The scope-side
+  // narrow-never-grant mirror (#967 class) is pinned in
+  // resolvers.sessionIsolationScope.test.ts.
+  describe('User-principal session binding (#934)', () => {
+    async function createUserWithKey(
+      id: string,
+      roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] = ['READER'],
+    ): Promise<{ userId: string; rawKey: string }> {
+      const { randomBytes } = await import('crypto');
+      const user = await db.user.create({
+        data: { id, githubUsername: id, githubId: Math.floor(Math.random() * 1e9), roles },
+      });
+      const rawKey = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
+      await db.userApiKey.create({
+        data: {
+          userId: user.id,
+          keyHash: hashUserApiKey(rawKey),
+          keyPreview: rawKey.slice(-4),
+          label: 'test',
+          createdBy: user.id,
+          issuedVia: 'portal',
+        },
+      });
+      return { userId: user.id, rawKey };
+    }
+
+    const withSession = (token: string, sessionId: string) =>
+      resolveAuthContext(
+        {
+          headers: { authorization: `Bearer ${token}`, 'x-hadron-session': sessionId },
+        } as unknown as Request,
+        db,
+      );
+
+    it('binds a session the user is attributed to (hdr_user_ key)', async () => {
+      const { userId, rawKey } = await createUserWithKey('user-owner');
+      // The self-attributed CLI shape: appId null — ownership, not
+      // App-membership, is the predicate.
+      await db.session.create({
+        data: { id: 'sess-own', userId, type: 'DEVELOPER' },
+      });
+      const ctx = await withSession(rawKey, 'sess-own');
+      expect(ctx.userId).toBe(userId);
+      expect(ctx.sessionId).toBe('sess-own');
+    });
+
+    it('binds via a JWT user credential too (one binding path)', async () => {
+      await db.user.create({
+        data: { id: 'user-jwt', handle: 'jwtu', githubUsername: 'jwtu', githubId: 77, roles: ['READER'] },
+      });
+      await db.session.create({
+        data: { id: 'sess-jwt', userId: 'user-jwt', type: 'DEVELOPER' },
+      });
+      const token = await makeJwt({ sub: 'user-jwt', githubUsername: 'jwtu', roles: ['READER'], githubId: 77 });
+      const ctx = await withSession(token, 'sess-jwt');
+      expect(ctx.sessionId).toBe('sess-jwt');
+    });
+
+    it("refuses another user's session — strict ownership", async () => {
+      const { rawKey } = await createUserWithKey('user-a');
+      const { userId: otherId } = await createUserWithKey('user-b');
+      await db.session.create({
+        data: { id: 'sess-other-user', userId: otherId, type: 'DEVELOPER' },
+      });
+      const ctx = await withSession(rawKey, 'sess-other-user');
+      expect(ctx.userId).toBe('user-a');
+      expect(ctx.sessionId).toBeUndefined();
+    });
+
+    it('platform ADMIN gets no bypass on the ownership check', async () => {
+      const { rawKey } = await createUserWithKey('user-admin', ['ADMIN']);
+      const { userId: otherId } = await createUserWithKey('user-c');
+      await db.session.create({
+        data: { id: 'sess-of-c', userId: otherId, type: 'DEVELOPER' },
+      });
+      const ctx = await withSession(rawKey, 'sess-of-c');
+      expect(ctx.roles).toEqual(['ADMIN']);
+      expect(ctx.sessionId).toBeUndefined();
+    });
+
+    it('refuses an ended session (same honor conditions as App-key)', async () => {
+      const { userId, rawKey } = await createUserWithKey('user-ended');
+      await db.session.create({
+        data: { id: 'sess-ended', userId, type: 'DEVELOPER', endedAt: new Date() },
+      });
+      expect((await withSession(rawKey, 'sess-ended')).sessionId).toBeUndefined();
+    });
+
+    it('refuses a hard-expired session (same honor conditions as App-key)', async () => {
+      const { userId, rawKey } = await createUserWithKey('user-expired');
+      await db.session.create({
+        data: {
+          id: 'sess-expired',
+          userId,
+          type: 'DEVELOPER',
+          expiresAt: new Date(Date.now() - 60_000),
+        },
+      });
+      expect((await withSession(rawKey, 'sess-expired')).sessionId).toBeUndefined();
+    });
+
+    it('never binds under impersonation, even for the TARGET-owned session', async () => {
+      // A live, fully-authorized impersonation context: platform-admin actor,
+      // target a READER in the shared org. The target OWNS the session — the
+      // ownership predicate would match — but a support session heartbeating
+      // the target's coding session is attribution theater, and the binding
+      // must stay identity-scoped (the #876 class).
+      const org = await db.organization.create({
+        data: { id: 'org-imp', name: 'imp', urn: 'imp-org.com' },
+      });
+      const actor = await db.user.create({
+        data: { id: 'imp-actor', githubUsername: 'imp-actor', githubId: 501, roles: ['ADMIN'] },
+      });
+      const target = await db.user.create({
+        data: { id: 'imp-target', githubUsername: 'imp-target', githubId: 502, roles: ['READER'] },
+      });
+      await db.orgMember.createMany({
+        data: [
+          { id: 'om-imp-a', organizationId: org.id, userId: actor.id, role: 'ADMIN' },
+          { id: 'om-imp-t', organizationId: org.id, userId: target.id, role: 'READER' },
+        ],
+      });
+      await db.impersonationSession.create({
+        data: {
+          id: 'imp-sess-1',
+          adminUserId: actor.id,
+          targetUserId: target.id,
+          organizationId: org.id,
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      });
+      await db.session.create({
+        data: { id: 'sess-of-target', userId: target.id, type: 'DEVELOPER' },
+      });
+      const token = await makeJwt({
+        sub: target.id,
+        imp: { sid: 'imp-sess-1', act: actor.id, org: org.id },
+      });
+      const ctx = await withSession(token, 'sess-of-target');
+      // Sanity: the impersonation context itself resolved…
+      expect(ctx.userId).toBe(target.id);
+      expect(ctx.impersonation?.actorUserId).toBe(actor.id);
+      // …and the binding did not.
+      expect(ctx.sessionId).toBeUndefined();
+    });
+  });
+
 });

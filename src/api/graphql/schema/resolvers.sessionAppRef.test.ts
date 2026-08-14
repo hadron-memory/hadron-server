@@ -404,8 +404,9 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
    * worker's App becomes the session's — behind the SAME participant
    * predicate the appRef path runs, so binding a worker never widens who can
    * attribute a session to an App. Session.agentId is stamped from the
-   * casting's role-agent. "Taken" is deliberately not refused here (informed
-   * takeover is the client's contract).
+   * casting's role-agent. #940: binding a TAKEN worker (an active session)
+   * refuses WORKER_TAKEN unless force — informed takeover is now
+   * server-enforced (the thin-client directive), never silent.
    */
   let worker: { id: string };
 
@@ -466,16 +467,49 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     expect(s.agentId).toBe(teamAgent.id);
   });
 
-  it('does NOT refuse binding a "taken" worker — informed takeover is client-side', async () => {
+  it('refuses binding a taken worker → WORKER_TAKEN, carrying the takeover-prompt payload (#940)', async () => {
     const first = await startSession(ctx(contrib.id), { workerRef: worker.id });
     expect(first.endedAt).toBeNull();
+    try {
+      await startSession(ctx(appMember.id), { workerRef: worker.id });
+      expect.fail('expected WORKER_TAKEN');
+    } catch (e) {
+      const ext = (e as GraphQLError).extensions as Record<string, unknown>;
+      expect(ext.code).toBe('WORKER_TAKEN');
+      // Everything the informed-takeover prompt needs, in one round trip:
+      // the blocking session, who last drove it, and when.
+      expect(ext.workerId).toBe(worker.id);
+      expect(ext.sessionId).toBe(first.id);
+      const contribUser = await db.user.findUniqueOrThrow({ where: { id: contrib.id } });
+      expect(ext.lastDriver).toBe(contribUser.handle ?? contribUser.githubUsername);
+      expect(typeof ext.lastSeenAt).toBe('string');
+      expect(new Date(ext.lastSeenAt as string).getTime()).toBeGreaterThan(0);
+    }
+  });
+
+  it('force: true takes over — the explicit override, never the default (#940)', async () => {
+    await startSession(ctx(contrib.id), { workerRef: worker.id });
+    const second = await startSession(ctx(appMember.id), { workerRef: worker.id, force: true });
+    expect(second.workerId).toBe(worker.id);
+  });
+
+  it('an ENDED session frees the worker — no refusal, no force needed (#940)', async () => {
+    const first = await startSession(ctx(contrib.id), { workerRef: worker.id });
+    await db.session.update({ where: { id: first.id }, data: { endedAt: new Date() } });
     const second = await startSession(ctx(appMember.id), { workerRef: worker.id });
     expect(second.workerId).toBe(worker.id);
   });
 
+  it('an unauthorized caller hits FORBIDDEN, never WORKER_TAKEN (no driver-identity oracle)', async () => {
+    // WORKER_TAKEN discloses who is driving; the App gates must run first.
+    await startSession(ctx(contrib.id), { workerRef: worker.id });
+    await expectCode(startSession(ctx(outsider.id), { workerRef: worker.id }), 'FORBIDDEN');
+  });
+
   it('sessions(workerRef:) filters to that worker\'s sessions inside the ordinary scope', async () => {
     const s1 = await startSession(ctx(contrib.id), { workerRef: worker.id });
-    const s2 = await startSession(ctx(contrib.id), { workerRef: worker.id });
+    // #940: the worker is taken by s1, so the second binding forces.
+    const s2 = await startSession(ctx(contrib.id), { workerRef: worker.id, force: true });
     const unbound = await startSession(ctx(contrib.id), { appRef: app.id });
     const rows = await Q.sessions({}, { workerRef: worker.id }, ctx(contrib.id));
     const ids = rows.map((r: { id: string }) => r.id);
@@ -484,9 +518,10 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     expect(ids).not.toContain(unbound.id);
   });
 
-  it('declares workerRef on SessionInput in the SDL (#789 drift class)', () => {
+  it('declares workerRef and force on SessionInput in the SDL (#789 drift class)', () => {
     const input = buildSchema(typeDefs).getType('SessionInput') as GraphQLInputObjectType;
     expect(Object.keys(input.getFields())).toContain('workerRef');
     expect(String(input.getFields().workerRef.type)).toBe('String');
+    expect(String(input.getFields().force.type)).toBe('Boolean');
   });
 });

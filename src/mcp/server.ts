@@ -1493,7 +1493,10 @@ export function createMcpServerInstance(
       // (a session-boundary access oracle). Mirrors the resolver's
       // getAccessibleMemoryIds app+session branch.
       let sessionMemoryIds: Set<string> | null = null;
-      if (auth.appId && auth.sessionId) {
+      // #934: pure App-key shape only (`!auth.userId`) — mirrors the resolver
+      // branch's guard: a user-credential caller's session binding is
+      // heartbeat attribution, never a scope change.
+      if (auth.appId && auth.sessionId && !auth.userId) {
         // #945: was a hand-copied duplicate of the resolver branch, so the
         // admissibility fix would have landed on one surface only. Both now
         // share `sessionScopedMemoryIds` — a foreign PUBLIC agent bound to the
@@ -4775,7 +4778,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a new work session. All subsequent tool calls can reference this session ID for attribution.',
+    'Start a new work session. All subsequent tool calls can reference this session ID for attribution. Pass workerRef (a worker id from hadron_cast_worker) to work AS that named casting — required for worker-attributed team chat posts and worklog records. Binding a worker someone is already driving refuses WORKER_TAKEN with who last drove it and when (informed takeover, cor:agt:020:03); retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
     {
       description: z.string().describe("What this session is about"),
       type: z.string().optional().describe('Session type: DEVELOPER, CHATBOT, AUTOMATION, EDGE'),
@@ -4787,41 +4790,62 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       llmModel: z.string().optional().describe('LLM model being used'),
       parentSessionId: z.string().optional().describe('Parent session ID'),
       prevSessionId: z.string().optional().describe('Previous session ID'),
+      workerRef: z.string().optional().describe('The Worker (named casting) this session works as — the worker id (workers have no URN). Must belong to this App; stamps the session\'s agentId from the casting.'),
+      force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker. Use only on the user\'s explicit override, after showing who last drove it.'),
     },
-    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId }) => {
+    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId, workerRef, force }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
       // context to attribute the session. Errors with typed [no_active_app]
       // envelope for multi-App OAuth callers without selection.
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
 
-      const sessionId = generateId();
+      // #940: delegate to the GraphQL resolver (findings:node-write-surface-
+      // invariants — MCP tools delegate, never re-implement), so the worker
+      // binding runs the ONE gated path: App-membership checks, WORKER_RETIRED,
+      // SESSION_WORKER_NOT_IN_APP, and the WORKER_TAKEN informed-takeover
+      // refusal (cor:agt:020:03) are all the server's, and this surface can
+      // never drift from the GraphQL one. The direct db.session.create this
+      // replaces predated the worker model; the resolver stamps the same
+      // appId/userId attribution (#931) from the same ctx fields.
+      try {
+        const session = await resolvers.Mutation.startSession(
+          {},
+          {
+            input: {
+              id: generateId(),
+              type: type ?? undefined,
+              plan: description,
+              repo: repo ?? undefined,
+              branch: branch ?? undefined,
+              prNumber: prNumber ?? undefined,
+              customerId: customerId ?? undefined,
+              language: language ?? undefined,
+              llmModel: llmModel ?? undefined,
+              parentSessionId: parentSessionId ?? undefined,
+              prevSessionId: prevSessionId ?? undefined,
+              workerRef: workerRef ?? undefined,
+              force: force ?? undefined,
+            },
+          },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
 
-      const session = await db.session.create({
-        data: {
-          id: sessionId,
-          type: (type || 'DEVELOPER') as SessionType,
-          plan: description,
-          appId: auth.appId ?? null,
-          // #931 (same class as the #929 GraphQL fix): attribute the session
-          // to the authenticated user, so the attributed-user write gate and
-          // self-read apply to MCP-started sessions too.
-          userId: auth.userId ?? null,
-          createdBy: auth.clientId ?? null,
-          repo: repo ?? null,
-          branch: branch ?? null,
-          prNumber: prNumber ?? null,
-          customerId: customerId ?? null,
-          language: language ?? null,
-          llmModel: llmModel ?? null,
-          parentSessionId: parentSessionId ?? null,
-          prevSessionId: prevSessionId ?? null,
-        },
-      });
-
-      return textResult(
-        `Session started: ${session.id}\n> ${description}`,
-      );
+        return textResult(
+          `Session started: ${session.id}\n> ${description}` +
+            (session.workerId ? `\nWorking as worker ${session.workerId}.` : ''),
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'session start failed'}`);
+      }
     },
   );
 

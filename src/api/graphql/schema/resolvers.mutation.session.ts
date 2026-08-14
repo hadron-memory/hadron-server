@@ -176,10 +176,11 @@ export const sessionMutations = {
       // session's App; with no App context yet, the worker's App becomes the
       // session's — behind the SAME participant predicate the appRef path
       // runs, so binding a worker never widens who can attribute a session to
-      // an App. A retired worker refuses new bindings. "Taken" is deliberately
-      // NOT enforced here: informed takeover is the client's contract (the
-      // spec's takeover prompt), and the server keeps liveness derivable from
-      // active sessions rather than a lease.
+      // an App. A retired worker refuses new bindings; a TAKEN worker (an
+      // active session — honest since the #930 reaper) refuses WORKER_TAKEN
+      // unless force (#940 — informed takeover moved server-side per the
+      // thin-client directive; before this it was the CLI's contract only,
+      // and this mutation was an ungated second surface in waiting).
       let workerId: string | undefined;
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
@@ -229,6 +230,59 @@ export const sessionMutations = {
           }
           appId = worker.appId;
         }
+        // #940 (cor:agt:020:03 — informed takeover, never silent): binding a
+        // worker that already has an ACTIVE session refuses typed, carrying
+        // who last drove it and when — everything the takeover prompt needs
+        // in one round trip — unless the caller explicitly forces. Ordering
+        // is load-bearing: this runs AFTER the App/participant gates above,
+        // because WORKER_TAKEN discloses the driver's identity and an
+        // unauthorized caller must hit FORBIDDEN first. Best-effort by
+        // design: there is no lease (liveness stays derivable from active
+        // sessions), so two concurrent starts can both pass — the contract
+        // is informed consent, not mutual exclusion.
+        if (!input.force) {
+          const active = await ctx.db.session.findFirst({
+            where: { workerId: worker.id, endedAt: null, deletedAt: null },
+            orderBy: { startedAt: 'desc' },
+            select: { id: true, userId: true, startedAt: true, updatedAt: true },
+          });
+          if (active) {
+            // lastSeenAt mirrors the #930 reaper's activity derivation:
+            // greatest of startedAt, updatedAt (the explicit heartbeat), and
+            // the latest attributed UsageEvent.
+            const lastEvent = await ctx.db.usageEvent.findFirst({
+              where: { sessionId: active.id },
+              orderBy: { createdAt: 'desc' },
+              select: { createdAt: true },
+            });
+            const lastSeenAt = new Date(
+              Math.max(
+                active.startedAt.getTime(),
+                active.updatedAt?.getTime() ?? 0,
+                lastEvent?.createdAt.getTime() ?? 0,
+              ),
+            );
+            const driver = active.userId
+              ? await ctx.db.user.findUnique({
+                  where: { id: active.userId },
+                  select: { handle: true, githubUsername: true },
+                })
+              : null;
+            const lastDriver = driver?.handle ?? driver?.githubUsername ?? active.userId ?? null;
+            throw new GraphQLError(
+              `This worker is taken: session ${active.id}${lastDriver ? ` (last driven by ${lastDriver})` : ''}, last seen ${lastSeenAt.toISOString()}. Show the user who is driving it, and pass force: true only on their explicit override.`,
+              {
+                extensions: {
+                  code: 'WORKER_TAKEN',
+                  workerId: worker.id,
+                  sessionId: active.id,
+                  lastDriver,
+                  lastSeenAt: lastSeenAt.toISOString(),
+                },
+              },
+            );
+          }
+        }
         // Session.agentId keeps recording the ROLE-agent behind the casting
         // (cor:agt:020:03); an agentRef naming a DIFFERENT agent is a client
         // bug, refused rather than silently overridden.
@@ -256,6 +310,7 @@ export const sessionMutations = {
           // creator through both session read gates.
           userId: ctx.userId ?? null,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
+          plan: input.plan,
           repo: input.repo,
           branch: input.branch,
           prNumber: input.prNumber,

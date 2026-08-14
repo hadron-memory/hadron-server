@@ -317,3 +317,78 @@ describe('#945 — the two surfaces share one predicate', () => {
     expect(await sessionScopedMemoryIds(db, app.id, generateId())).toEqual([]);
   });
 });
+
+describe("#934 — a user principal's session binding never changes their scope", () => {
+  // User principals can now carry `ctx.sessionId` (the X-Hadron-Session
+  // heartbeat binding, amending cor:aut:020:02). The session-scope branch
+  // above is the PURE App-key boundary: a hybrid user+selection principal
+  // entering it would swap their reach for `sessionScopedMemoryIds`, which
+  // never consults the USER's rights — a narrowing at best, a grant at
+  // worst. This is the #967 narrow-never-grant rule, mirrored for users.
+  //
+  // Note the hybrid shape's reach is the App-SELECTION reach (the
+  // `ctx.appId` branch) with or without a binding — pre-existing design,
+  // not this change. What #934 pins is that the BINDING is inert for scope.
+
+  /** The hybrid MCP shape: a user credential plus an active-App selection. */
+  const hybridCtx = (userId: string, appId: string, sessionId?: string): Context =>
+    ({ db, userId, appId, sessionId, roles: ['READER'] }) as Context;
+
+  /** The pure user shape: the self-attributed CLI/portal case (appId null). */
+  const userCtx = (userId: string, sessionId?: string): Context =>
+    ({ db, userId, sessionId, roles: ['READER'] }) as Context;
+
+  it('pure user shape: reach with a bound session equals reach without one', async () => {
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: user.id, role: 'READER' },
+    });
+    const knowledge = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:kn-${generateId().slice(-8)}`,
+        name: 'kn', class: 'knowledge',
+      },
+    });
+    const session = await db.session.create({
+      data: { id: generateId(), userId: user.id, type: 'DEVELOPER' },
+    });
+    const unbound = await getAccessibleMemoryIds(userCtx(user.id));
+    const bound = await getAccessibleMemoryIds(userCtx(user.id, session.id));
+    expect(new Set(bound)).toEqual(new Set(unbound));
+    expect(bound).toContain(knowledge.id);
+  });
+
+  it('hybrid shape: reach with a bound session equals reach without one', async () => {
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: user.id, role: 'READER' },
+    });
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id },
+    });
+    const unbound = await getAccessibleMemoryIds(hybridCtx(user.id, app.id));
+    const bound = await getAccessibleMemoryIds(hybridCtx(user.id, app.id, session.id));
+    expect(new Set(bound)).toEqual(new Set(unbound));
+  });
+
+  it("hybrid shape: the binding does not grant the session's memory (what the App-key branch returns)", async () => {
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: user.id, role: 'READER' },
+    });
+    // The anonymous app-class scratch memory: inside the App-key session
+    // scope, OUTSIDE both the App's management reach and the user's org
+    // reach — so it is a clean witness for the grant the guard prevents.
+    const scratch = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:sc-${generateId().slice(-8)}`,
+        name: 'scratch', class: 'app', userMemoryOfAgentId: ownAgent.id, appId: app.id,
+      },
+    });
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: scratch.id },
+    });
+    // Sanity: the App-key session branch WOULD include it…
+    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toContain(scratch.id);
+    // …and the bound hybrid principal must not.
+    const bound = await getAccessibleMemoryIds(hybridCtx(user.id, app.id, session.id));
+    expect(bound).not.toContain(scratch.id);
+  });
+});

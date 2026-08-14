@@ -1157,6 +1157,24 @@ export const typeResolvers = {
   },
   Session: {
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
+    /**
+     * #980: the bound Worker, nested — prefers the eager row SESSION_INCLUDE
+     * loads (the one-query list path; no DataLoader in this repo) and falls
+     * back to a point read for partially-selected parents. Deliberately NO
+     * retirement filter: a session's worker may since have retired, and the
+     * row must still attribute (retirement ends the casting, not the
+     * history). Worker.app / Worker.agent self-guard behind their own read
+     * gates (#552), so nothing nested here outruns the session gate.
+     */
+    worker: async (
+      s: { workerId?: string | null; worker?: unknown },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!s.workerId) return null;
+      if (s.worker !== undefined) return s.worker;
+      return ctx.db.worker.findUnique({ where: { id: s.workerId } });
+    },
   },
   Organization: {
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
