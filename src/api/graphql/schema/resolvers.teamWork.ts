@@ -116,7 +116,7 @@ type AppRow = {
  * Principal shapes (findings:auth-appid-credential-vs-selection): a PURE
  * App-key principal is DENIED for `record` and ALLOWED for `read` of its own
  * App's worklog — the documented #947 decision, mirroring the chat: the
- * worklog is the team-persona provenance ledger and persona work has a human
+ * worklog is the team's provenance ledger and worker work has a human
  * driver by construction (cor:agt:020:03); App-key automation provenance is
  * already recorded as UsageEvents, and the bootstrap path requires a human
  * actor. Widening record to App keys later is additive; retracting it would
@@ -214,7 +214,7 @@ async function ensureWorklogSchema(ctx: Context, memoryId: string): Promise<void
  * tombstone still occupies the unique, so it is revived rather than
  * P2002-looping forever.
  *
- * The Team Agent is located exactly as createTeamPersona does (the roles:
+ * The Team Agent is located exactly as castWorker does (the roles:
  * branch marker), with the chat's fallback: an App with EXACTLY ONE installed
  * Agent needs no marker to be unambiguous.
  */

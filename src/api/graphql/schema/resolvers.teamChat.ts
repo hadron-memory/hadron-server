@@ -195,7 +195,7 @@ async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRoot
  * post loses the root create on `@@unique([loc, memoryId])` (P2002) and
  * re-reads the winner's row.
  *
- * The Team Agent is located exactly as createTeamPersona does (the roles:
+ * The Team Agent is located exactly as castWorker does (the roles:
  * branch marker), with one chat-specific fallback: an App with EXACTLY ONE
  * installed Agent needs no marker to be unambiguous — a single-agent team App
  * without role definitions can still chat.

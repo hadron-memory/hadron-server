@@ -16,6 +16,7 @@ import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { deriveSlugFromName, normalizeUrnForLookup } from '../../../lib/urn.js';
 import {
@@ -77,7 +78,11 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
     try {
       await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
       return;
-    } catch {
+    } catch (e) {
+      // requireOrgRole signals denial with a plain Error('Forbidden'); anything
+      // else (a DB failure inside the membership lookup) must propagate rather
+      // than read as "not a member" (review:narrow-catch-blocks).
+      if (!(e instanceof Error && e.message === 'Forbidden')) throw e;
       // fall through to the AppMember path
     }
     if (await isNonReaderAppMember(ctx, app)) return;
@@ -445,7 +450,20 @@ export const workerMutations = {
     // 2. Resolve the agent being cast — installed in this App at cast time.
     let agent: { id: string; name: string; personaRole: string | null };
     if (agentRef && agentRef.trim() !== '') {
-      const { id } = await resolveAgentRef(ctx.db, agentRef.trim());
+      // resolveAgentRef throws a plain AgentNotFoundError (which would read
+      // INTERNAL_SERVER_ERROR on the wire) — translate to the typed refusal,
+      // matching startSession's agentRef handling.
+      let id: string;
+      try {
+        ({ id } = await resolveAgentRef(ctx.db, agentRef.trim()));
+      } catch (e) {
+        if (e instanceof AgentNotFoundError) {
+          throw new GraphQLError(`Agent not found: ${agentRef.trim()}`, {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        throw e;
+      }
       const row = await ctx.db.appAgent.findUnique({
         where: { appId_agentId: { appId, agentId: id } },
         select: {

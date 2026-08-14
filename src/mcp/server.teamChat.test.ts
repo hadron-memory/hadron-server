@@ -3,7 +3,7 @@
  * delegation to resolvers.Mutation.createTeamChatMessage /
  * resolvers.Query.teamChatMessages (findings:node-write-surface-invariants —
  * MCP tools delegate, never re-implement). Pins the delegation round trip,
- * the active-App default (same shape as hadron_create_persona), and the
+ * the active-App default (same shape as hadron_cast_worker), and the
  * principal-shape behavior at the tool level: a pure App-key principal is
  * refused for post but reads its own team chat.
  */

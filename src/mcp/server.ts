@@ -4819,8 +4819,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       agent: z.string().optional().describe('The agent to cast (Agent URN or ID) — must be installed in the App. Omit to resolve it from role.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       teamAgent: z.string().optional().describe('The Team Agent (Agent URN or ID) carrying the cast-list register. Omit to auto-detect: the single installed Agent whose system memory has a roles: branch.'),
+      promptOverride: z.string().optional().describe('Per-worker individuality layered over the agent\'s template prompt — appended to the bound template in the worker\'s resolved prompt.'),
     },
-    async ({ role, name, agent, app, teamAgent }) => {
+    async ({ role, name, agent, app, teamAgent, promptOverride }) => {
       // Delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement). Auth semantics
       // live in the resolver's gate: a hybrid user+selection principal is
@@ -4850,7 +4851,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         };
         const worker = await resolvers.Mutation.castWorker(
           {},
-          { appRef, role: role ?? null, agentRef: agent ?? null, teamAgentRef: teamAgent ?? null, name: name ?? null },
+          { appRef, role: role ?? null, agentRef: agent ?? null, teamAgentRef: teamAgent ?? null, name: name ?? null, promptOverride: promptOverride ?? null },
           ctx,
         );
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);

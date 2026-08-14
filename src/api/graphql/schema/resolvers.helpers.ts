@@ -1619,7 +1619,8 @@ export async function requireMemorySharePrincipal(
 
 /**
  * "Is the caller a non-`reader` member of this App?" — the AppMember half of
- * `createTeamPersona`'s mint gate, extracted here (#952) so the one
+ * the worker-staffing gate (castWorker, formerly createTeamPersona's mint
+ * gate), extracted here (#952) so the one
  * conventional read-only role spelling lives in a single place rather than
  * being restated by each surface that admits App members.
  *
@@ -1693,10 +1694,10 @@ export async function installAgentIntoAppCore(
   //
   //
   // #952 asked for a non-`reader` AppMember fallback here, "matching
-  // createTeamPersona's gate", so a team's own members can compose the roster.
+  // the staffing gate", so a team's own members can compose the roster.
   // NOT done, deliberately — the two operations are not symmetric:
-  // createTeamPersona installs an Agent it MINTS in the same call (empty, so
-  // nothing pre-existing is revealed), whereas this one installs an EXISTING
+  // castWorker only CASTS an agent that is already installed (nothing
+  // pre-existing is revealed), whereas this one installs an EXISTING
   // Agent, and installing is itself a read grant. An installed Agent's system
   // memory becomes READ_ONLY in every App-context access map
   // (`foldAgentIntoAccessMap`), and the mutation payload returns the Agent
