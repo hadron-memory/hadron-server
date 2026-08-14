@@ -170,12 +170,85 @@ export const sessionMutations = {
         appId = resolvedAppId;
       }
 
+      // #974: optional Worker binding (cor:agt:020:03) — the named identity
+      // this session works as. PK-only (workers have no URN — cor:agt:020:02
+      // keeps names out of URNs). Gated: the worker must belong to the
+      // session's App; with no App context yet, the worker's App becomes the
+      // session's — behind the SAME participant predicate the appRef path
+      // runs, so binding a worker never widens who can attribute a session to
+      // an App. A retired worker refuses new bindings. "Taken" is deliberately
+      // NOT enforced here: informed takeover is the client's contract (the
+      // spec's takeover prompt), and the server keeps liveness derivable from
+      // active sessions rather than a lease.
+      let workerId: string | undefined;
+      const workerRef = input.workerRef?.trim();
+      if (workerRef) {
+        const worker = await ctx.db.worker.findUnique({
+          where: { id: workerRef },
+          select: { id: true, appId: true, agentId: true, retiredAt: true },
+        });
+        if (!worker) {
+          throw new GraphQLError(`Worker not found: ${workerRef}`, {
+            extensions: { code: 'WORKER_NOT_FOUND' },
+          });
+        }
+        if (worker.retiredAt) {
+          throw new GraphQLError(
+            'This worker is retired — its name stays reserved, but it takes no new sessions.',
+            { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
+          );
+        }
+        if (appId !== null && appId !== worker.appId) {
+          throw new GraphQLError(
+            'workerRef names a worker of a different App than this session is attributed to.',
+            { extensions: { code: 'SESSION_WORKER_NOT_IN_APP', workerId: worker.id, appId } },
+          );
+        }
+        if (appId === null) {
+          const app = await ctx.db.app.findUniqueOrThrow({
+            where: { id: worker.appId },
+            select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+          });
+          if (app.deletedAt) {
+            throw new GraphQLError(`Worker not found: ${workerRef}`, {
+              extensions: { code: 'WORKER_NOT_FOUND' },
+            });
+          }
+          if (app.uninstalledAt) {
+            throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+              extensions: { code: 'APP_UNINSTALLED', appId: worker.appId },
+            });
+          }
+          if (ctx.userId || !ctx.appId) {
+            if (!(await isAppParticipant(ctx, app))) {
+              throw new GraphQLError(
+                'You are not a member of this worker\'s App, so a session cannot be attributed to it.',
+                { extensions: { code: 'FORBIDDEN' } },
+              );
+            }
+          }
+          appId = worker.appId;
+        }
+        // Session.agentId keeps recording the ROLE-agent behind the casting
+        // (cor:agt:020:03); an agentRef naming a DIFFERENT agent is a client
+        // bug, refused rather than silently overridden.
+        if (agentId !== undefined && agentId !== worker.agentId) {
+          throw new GraphQLError(
+            'agentRef and workerRef disagree — the worker casts a different agent. Omit agentRef; it is derived from the worker.',
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+        agentId = worker.agentId;
+        workerId = worker.id;
+      }
+
       return ctx.db.session.create({
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
           appId,
           agentId,
+          workerId,
           // #929 review P1: attribute the session to the calling user (the
           // schema documents userId as "the developer in a DEVELOPER
           // session"). Without it a session started outside any App context

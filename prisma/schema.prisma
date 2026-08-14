@@ -890,6 +890,9 @@ model Memory {
   // app_members, not in apps.
   app               App?             @relation("AppMemories", fields: [appId], references: [id], onDelete: Cascade)
   sessions          Session[]        @relation("SessionMemory")
+  /// #974 — the Workers whose casting-scoped working memory this is (at most
+  /// one in practice; identity lives on `Worker.memoryId`, cor:dmo:050:11).
+  workerOf          Worker[]         @relation("WorkerMemory")
   // 023-app-shape: per-Memory authorization primitives.
   // `shares`      — populated only when `class = 'personal'` (FR-018);
   //                 cross-user grants (asymmetric).
@@ -1332,8 +1335,14 @@ model Session {
   /// session).
   userId          String?     @map("user_id")
   /// The Agent driving the session (NULL for free-form developer
-  /// sessions not tied to a specific Agent).
+  /// sessions not tied to a specific Agent). When `workerId` is set this
+  /// records the ROLE-agent behind the casting (cor:agt:020:03).
   agentId         String?     @map("agent_id")
+  /// #974 — the named identity doing the work: the Worker (casting) this
+  /// session is bound to (cor:dmo:050:11, cor:agt:020:03). Binding is
+  /// gated at start (the worker must belong to the session's App); "taken
+  /// right now" derives from an ACTIVE session bound to the worker.
+  workerId        String?     @map("worker_id")
   /// The active write-memory for this session, when there's an
   /// unambiguous one. Resolves the multi-writable-memory ambiguity.
   memoryId        String?     @map("memory_id")
@@ -1408,6 +1417,7 @@ model Session {
   app          App?         @relation(fields: [appId], references: [id], onDelete: SetNull)
   user         User?        @relation("SessionUser", fields: [userId], references: [id], onDelete: SetNull)
   agent        Agent?       @relation("SessionAgent", fields: [agentId], references: [id], onDelete: SetNull)
+  worker       Worker?      @relation("SessionWorker", fields: [workerId], references: [id], onDelete: SetNull)
   memory       Memory?      @relation("SessionMemory", fields: [memoryId], references: [id], onDelete: SetNull)
 
   @@index([type])
@@ -1418,6 +1428,7 @@ model Session {
   @@index([prevSessionId])
   @@index([appId, userId])
   @@index([expiresAt])
+  @@index([workerId])
   @@map("sessions")
 }
 
@@ -1585,40 +1596,23 @@ model Agent {
   /// string[] }`. `maxMembers` enforced at AppMember
   /// invite-acceptance time. 008-agent-installation FR-009.
   installationPolicy   Json            @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
-  // #928 team personas (hadron-concept 2026-08-11-agent-personas): a persona
-  // — a named AI team member driven by external coding sessions (Claude Code,
-  // Codex) or portal chat — IS an Agent. These three columns are PURE
-  // METADATA (searchable identity); no server behavior may fork on their
-  // presence (that would rebuild the deprecated AgentType axis).
-  /// Persona display name ("Iris"). Unique per TEAM App, case-insensitively —
-  /// the partial functional unique `agents_team_persona_name_uniq` on
-  /// `(team_app_id, lower(persona_name))` in post-push.sql (Prisma cannot
-  /// express partial/functional uniques). `teamAppId` determines the owner, so
-  /// the two-column index implements cor:agt:020:02's (owner, team App) scope.
-  /// Deliberately NOT filtered on deleted_at: a persona name binds to one agent
-  /// forever within its team (PR trailers and chat history reference it), so a
-  /// soft-deleted agent — and a soft-deleted team App — keep the name reserved
-  /// (D-2026-08-11-006, re-scoped by D-2026-08-14-001).
-  personaName          String?         @map("persona_name")
-  /// #974 / cor:agt:020:01 — the persona's required HOME TEAM App, fixed at
-  /// mint. `chk_agent_persona_team_app` enforces the invariant
-  /// `persona_name IS NOT NULL ⇒ team_app_id IS NOT NULL`: there are no
-  /// team-less personas, and a worker belongs to exactly ONE team App (no guest
-  /// install into a second one — that would put two same-named personas into
-  /// one App context). This is a create-time schema invariant, not a behavior
-  /// fork: the persona fields stay pure metadata (cor:agt:020:01). It is also
-  /// the scope of the persona-name uniqueness above and the LEFT constituent of
-  /// the derived agent slug `<team-app-slug>.<persona-name>`
-  /// (cor:agt:020:06) — read the column, never parse the slug.
-  teamAppId            String?         @map("team_app_id")
-  teamApp              App?            @relation("TeamPersonas", fields: [teamAppId], references: [id], onDelete: Cascade)
+  // #928 persona dressing, re-cut to the Worker model by #974 (cor:agt:020:01,
+  // D-2026-08-14-004): a persona is UNIVERSAL DRESSING on an Agent — a role
+  // plus a template prompt that let any agent present as a colleague. The
+  // NAMED identity ("Iris") lives on the Worker entity (the casting of an
+  // installed agent into an App), never here: the retired persona-as-agent
+  // model's `persona_name` / `team_app_id` columns were dropped by the
+  // 20260814130000_worker_model migration. These two columns are PURE
+  // METADATA; no server behavior may fork on their presence (that would
+  // rebuild the deprecated AgentType axis).
   /// Persona role — free string with conventions ("backend-engineer").
-  /// A dedicated column so roster/allocation queries and chat attribution
-  /// can filter without parsing the prompt.
+  /// A dedicated column so roster/casting queries can filter without
+  /// parsing the prompt.
   personaRole          String?         @map("persona_role")
-  /// The persona identity paragraph ("You are Iris, a senior backend
-  /// engineer ..."). By CONVENTION clients compose it into the head of
-  /// systemPrompt; the server does no injection.
+  /// The persona identity TEMPLATE ("You are {{name}}, a senior backend
+  /// engineer ..."). `{{name}}` is bound at casting time with the Worker's
+  /// name (cor:agt:020:01); by CONVENTION clients compose the bound result
+  /// into the head of systemPrompt — the server does no injection.
   personaPrompt        String?         @map("persona_prompt")
   createdAt            DateTime        @default(now()) @map("created_at")
   createdBy            String?         @map("created_by")
@@ -1654,10 +1648,11 @@ model Agent {
   importedBy        AgentImport[]       @relation("ImportedAgent")
   orgGrants         AgentOrgGrant[]
   aiServiceConfigs  AiServiceConfig[]
+  /// #974 — the named castings of this agent into Apps (cor:dmo:050:11).
+  workers           Worker[]
 
   @@index([ownerUserId])
   @@index([legacyUrn])
-  @@index([teamAppId])
   @@map("agents")
 }
 
@@ -2738,10 +2733,11 @@ model App {
   // 023-app-shape Phase 2b: App↔Agent is N:M through AppAgent. The
   // direct `agent` relation is gone (dropped with `agentId`).
   appAgents        AppAgent[]
-  /// #974 — the personas whose HOME TEAM this App is (`Agent.teamAppId`,
-  /// cor:agt:020:01). Distinct from `appAgents`: the roster join says an Agent
-  /// is installed here; this says the App is the persona's one team.
-  teamPersonas     Agent[]           @relation("TeamPersonas")
+  /// #974 — this App's STAFF: the named castings of installed agents
+  /// (cor:dmo:050:11). Distinct from `appAgents`: the roster join says an
+  /// Agent is installed here; a Worker is who, by name, does attributable
+  /// work.
+  workers          Worker[]
   keys             AppKey[]
   members          AppMember[]
   memories         Memory[]          @relation("AppMemories")
@@ -3087,6 +3083,66 @@ model AppAgent {
   @@id([appId, agentId])
   @@index([agentId])
   @@map("app_agents")
+}
+
+/// #974 — a **Worker**: the named casting of an installed Agent into an App
+/// (cor:dmo:050:11, cor:agt:020:01). The Agent carries the reusable persona
+/// dressing (`personaRole` + the `personaPrompt` template); the Worker is the
+/// local named identity ("Iris") that does attributable work. Casting is
+/// opt-in (an installed agent with no Worker row is just an agent) and
+/// requires the agent installed in the App at cast time; multiple Workers may
+/// cast the SAME agent in one App (Iris and Henry, both `backend-engineer`).
+///
+/// **Name uniqueness**: unique per App, case-insensitively — the functional
+/// unique `workers_app_name_uniq` on `(app_id, lower(name))` in post-push.sql
+/// (Prisma cannot express functional uniques). Deliberately NOT filtered on
+/// retirement: a name binds to one casting forever (cor:agt:020:02 — PR
+/// trailers and chat archives reference it, and a recycled name would
+/// silently re-attribute old work).
+///
+/// **Lifecycle**: workers RETIRE (`retiredAt`), never soft-delete — the row
+/// must survive the agent's uninstall and keep resolving for history. There
+/// is no `deletedAt`; the only removal escape is the hard delete of a
+/// never-used miscast (no sessions ever bound, empty working memory).
+/// `agentId` is `Restrict` so a referenced casting can never lose its agent
+/// silently (agent deletion is soft everywhere; the hard-delete compensation
+/// paths only ever remove agents without castings).
+model Worker {
+  id             String    @id @default(cuid())
+  appId          String    @map("app_id")
+  agentId        String    @map("agent_id")
+  /// The worker's name ("Iris") — the identity every surface renders.
+  name           String
+  /// The cast-list role this filling answers ("backend-engineer").
+  /// Free string with conventions; defaults to the agent's `personaRole`
+  /// at cast time when the caller names none.
+  role           String?
+  /// Per-worker individuality layered over the agent's template prompt
+  /// (cor:agt:020:01) — nullable; two castings of one agent share the
+  /// template and nothing else.
+  promptOverride String?   @map("prompt_override")
+  /// #974 — the worker-scoped working memory in the App's container
+  /// (`hrn:mem:<owner>:<app-slug>:<worker-slug>`), provisioned at cast.
+  /// Identity is THIS column, never the memory's URN (the #723 rule).
+  memoryId       String?   @map("memory_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  /// Retirement instant — the name stays reserved forever (cor:agt:020:02).
+  /// A retired worker stops authoring (team chat's worker-App pin checks
+  /// retirement at post time) and refuses new session bindings.
+  retiredAt      DateTime? @map("retired_at")
+  retiredBy      String?   @map("retired_by")
+
+  app      App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+  agent    Agent     @relation(fields: [agentId], references: [id], onDelete: Restrict)
+  memory   Memory?   @relation("WorkerMemory", fields: [memoryId], references: [id], onDelete: SetNull)
+  sessions Session[] @relation("SessionWorker")
+
+  @@index([appId])
+  @@index([agentId])
+  @@map("workers")
 }
 
 /// Asymmetric cross-user grant for personal-class memory (spec 023

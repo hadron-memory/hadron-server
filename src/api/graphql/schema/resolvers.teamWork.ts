@@ -15,7 +15,8 @@
 // node) in the team App's shared app-class memory, the same home as the team
 // chat. Each record is a node with objectType 'worklog' and flat queried
 // fields in `properties`:
-//   sessionId, personaName (denormalized one-hop display), tool ('github', …),
+//   sessionId, workerName + workerId (denormalized one-hop display — the
+//   Worker casting, #974/D-2026-08-14-004), tool ('github', …),
 //   kind (pr | issue | commit | branch | repo), ref (THE equality-lookup key,
 //   canonical spelling per src/lib/workRef.ts), action (free string —
 //   opened | merged | claimed | reviewed | closed | pushed | …), at (ISO,
@@ -37,7 +38,6 @@ import type { InputJsonValue } from '../../../generated/prisma/runtime/library.j
 import { generateId } from '../../../lib/id.js';
 import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { isAgentInstalled } from '../../../lib/appAgent.js';
 import { enforceNodeSchemaOnWrite } from '../../../lib/enforceNodeSchema.js';
 import type { MemorySchema, MemorySchemaObjectType } from '../../../lib/memorySchema.js';
 import {
@@ -55,7 +55,7 @@ import {
   clampListTake,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
-import { locateTeamAgent } from './resolvers.mutation.teamPersona.js';
+import { locateTeamAgent } from './resolvers.worker.js';
 
 /** Canonical loc of the worklog collection root in a team App's shared memory. */
 export const WORKLOG_LOC = 'worklog';
@@ -80,7 +80,7 @@ export const WORKLOG_COLLECTION_SCHEMA: MemorySchemaObjectType = {
     'Append-only team worklog — externally visible work milestones (#947, spec cor:agt:020). ref is the canonical equality-lookup key.',
   fields: {
     sessionId: { type: 'text', required: true },
-    personaName: { type: 'text', required: true },
+    workerName: { type: 'text', required: true },
     tool: { type: 'text', required: true },
     kind: { type: 'enum', required: true, values: [...WORK_KINDS] },
     ref: { type: 'text', required: true },
@@ -358,20 +358,22 @@ async function convergeWorklogSchema(
  * Unlike chat authorship, an ENDED session is ACCEPTED (#947 decision): the
  * worklog's whole point is late attribution — a merge lands after the session
  * ends, and `updateSession` set the precedent ("late attribution is better
- * than none"). The persona derivation mirrors the chat's roster rule where a
- * persona IS claimed: an agent-bound session's agent must be installed in the
- * App (SESSION_AGENT_NOT_IN_APP — identity may not be borrowed from a foreign
- * readable agent). An unbound session is fine — the record then displays the
- * attributed human's handle: the worklog records work, not persona speech.
+ * than none"). The named-identity derivation follows the chat's worker-App
+ * pin where a Worker IS claimed (#974, cor:agt:020:05): a worker-bound
+ * session's worker must belong to THIS App and not be retired
+ * (SESSION_WORKER_NOT_IN_APP / WORKER_RETIRED — a retired or foreign worker
+ * refuses rather than reshaping the attribution). An unbound session is fine
+ * — the record then displays the attributed human's handle: the worklog
+ * records work, not worker speech.
  */
 async function resolveWorkSession(
   ctx: Context,
   app: AppRow,
   sessionRef: string,
-): Promise<{ sessionId: string; personaName: string }> {
+): Promise<{ sessionId: string; workerName: string; workerId: string | null }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, agentId: true, deletedAt: true },
+    select: { id: true, appId: true, userId: true, workerId: true, deletedAt: true },
   });
   if (!session || session.deletedAt) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -391,31 +393,39 @@ async function resolveWorkSession(
       { extensions: { code: 'SESSION_NOT_IN_APP', appId: app.id } },
     );
   }
-  if (session.agentId) {
-    const agent = await ctx.db.agent.findUnique({
-      where: { id: session.agentId },
-      select: { id: true, name: true, personaName: true, deletedAt: true },
+  if (session.workerId) {
+    const worker = await ctx.db.worker.findUnique({
+      where: { id: session.workerId },
+      select: { id: true, appId: true, name: true, retiredAt: true },
     });
-    // A missing or soft-deleted agent is treated EXACTLY like an uninstalled
-    // one (Codex P2 + Copilot on PR #948) — never as an unbound session: the
-    // fall-through would relabel the persona's work as the human driver's,
-    // and a claimed identity that no longer exists must refuse, not reshape.
-    if (!agent || agent.deletedAt || !(await isAgentInstalled(ctx.db, app.id, agent.id))) {
+    // A missing worker is treated EXACTLY like a foreign one (the PR #948
+    // rule, re-keyed) — never as an unbound session: the fall-through would
+    // relabel the worker's work as the human driver's, and a claimed identity
+    // that no longer exists must refuse, not reshape.
+    if (!worker || worker.appId !== app.id) {
       throw new GraphQLError(
-        `Session "${sessionRef}" is bound to an agent that is not installed in this App — its work cannot be recorded under that persona here.`,
-        { extensions: { code: 'SESSION_AGENT_NOT_IN_APP', appId: app.id } },
+        `Session "${sessionRef}" is bound to a worker that does not belong to this App — its work cannot be recorded under that identity here.`,
+        { extensions: { code: 'SESSION_WORKER_NOT_IN_APP', appId: app.id } },
       );
     }
-    return { sessionId: session.id, personaName: agent.personaName ?? agent.name };
+    // cor:agt:020:05: a RETIRED worker refuses too — unlike late attribution
+    // on an ended session (fine), a retired identity takes no new records.
+    if (worker.retiredAt) {
+      throw new GraphQLError(
+        `Session "${sessionRef}" is bound to a retired worker — a retired identity takes no new work records.`,
+        { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
+      );
+    }
+    return { sessionId: session.id, workerName: worker.name, workerId: worker.id };
   }
   if (session.userId) {
     const user = await ctx.db.user.findUnique({
       where: { id: session.userId },
       select: { handle: true },
     });
-    if (user?.handle) return { sessionId: session.id, personaName: user.handle };
+    if (user?.handle) return { sessionId: session.id, workerName: user.handle, workerId: null };
   }
-  return { sessionId: session.id, personaName: app.name };
+  return { sessionId: session.id, workerName: app.name, workerId: null };
 }
 
 /** GraphQL shape of one worklog record. (Exported — TS4023: a resolver map
@@ -423,7 +433,8 @@ async function resolveWorkSession(
 export interface TeamWorkItemOut {
   nodeId: string;
   sessionId: string;
-  personaName: string;
+  workerName: string;
+  workerId: string | null;
   tool: string;
   kind: string;
   ref: string;
@@ -445,7 +456,10 @@ function projectWorkItem(row: WorkRow): TeamWorkItemOut {
   return {
     nodeId: row.id,
     sessionId: str(p.sessionId),
-    personaName: str(p.personaName),
+    // Pre-#974 records carry personaName; read it as the worker name so
+    // history keeps rendering (no data migration — issue #974).
+    workerName: str(p.workerName) || str(p.personaName),
+    workerId: typeof p.workerId === 'string' ? p.workerId : null,
     tool: str(p.tool),
     kind: str(p.kind),
     ref: str(p.ref),
@@ -609,7 +623,7 @@ export const teamWorkMutations = {
       });
     }
     await requireTeamWorkAccess(ctx, app, 'record');
-    const { sessionId, personaName } = await resolveWorkSession(ctx, app, sessionRef);
+    const { sessionId, workerName, workerId } = await resolveWorkSession(ctx, app, sessionRef);
 
     const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));
     await ensureWorklogSchema(ctx, root.memoryId);
@@ -617,7 +631,8 @@ export const teamWorkMutations = {
     const at = new Date();
     const properties: Record<string, unknown> = {
       sessionId,
-      personaName,
+      workerName,
+      ...(workerId != null ? { workerId } : {}),
       tool: toolToken,
       kind: workKind,
       ref: canonicalRef,
@@ -670,7 +685,8 @@ export const teamWorkMutations = {
     return {
       nodeId: recordId,
       sessionId,
-      personaName,
+      workerName,
+      workerId,
       tool: toolToken,
       kind: workKind,
       ref: canonicalRef,

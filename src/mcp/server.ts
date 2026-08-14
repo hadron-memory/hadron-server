@@ -4808,18 +4808,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  // ── hadron_create_persona ─────────────────────────────────────────────────────
+  // ── hadron_cast_worker ────────────────────────────────────────────────────────
 
   server.tool(
-    'hadron_create_persona',
-    'Mint a team persona (#935/#974, spec cor:agt:020): create a named AI team member — an ordinary Agent with personaName/personaRole/personaPrompt set — from a role template in the Team Agent\'s system memory, and install it into the team App\'s roster. The role definition lives at the roles:<role> node (prompt template in content with {{name}}/{{role}} placeholders, name register in data.names). A caller-supplied name wins; otherwise the register\'s next free name is allocated. The persona is bound to this team App: its name only has to be free WITHIN the team (two teams may each have an Iris), and its agent slug is derived server-side as <team-app-slug>.<persona-name>. A name already taken in this team — including one reserved by a retired persona — is refused with PERSONA_NAME_TAKEN. Returns the persona\'s name, URN, and personaPrompt — print the personaPrompt as the persona\'s boot briefing.',
+    'hadron_cast_worker',
+    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the personaPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. A caller-supplied name wins; otherwise the next free name is allocated from the Team Agent\'s cast-list register (the roles:<role> node\'s data.names). Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). Returns the worker\'s id, name, and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the id as workerRef when starting sessions.',
     {
-      role: z.string().describe('The role to instantiate — names the roles:<role> node in the Team Agent\'s system memory (e.g. "backend-engineer").'),
-      name: z.string().optional().describe('Explicit persona name. Omit to allocate the next free name from the role\'s register.'),
+      role: z.string().optional().describe('The cast-list role ("backend-engineer") — picks the installed agent by its personaRole when agent is omitted, and names the roles:<role> register node for name allocation.'),
+      name: z.string().optional().describe('Explicit worker name. Omit to allocate the next free name from the role\'s register.'),
+      agent: z.string().optional().describe('The agent to cast (Agent URN or ID) — must be installed in the App. Omit to resolve it from role.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
-      teamAgent: z.string().optional().describe('The Team Agent (Agent URN or ID) carrying the role definitions. Omit to auto-detect: the single installed Agent whose system memory has a roles: branch.'),
+      teamAgent: z.string().optional().describe('The Team Agent (Agent URN or ID) carrying the cast-list register. Omit to auto-detect: the single installed Agent whose system memory has a roles: branch.'),
     },
-    async ({ role, name, app, teamAgent }) => {
+    async ({ role, name, agent, app, teamAgent }) => {
       // Delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement). Auth semantics
       // live in the resolver's gate: a hybrid user+selection principal is
@@ -4838,26 +4839,28 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
       }
       try {
-        const agent = await resolvers.Mutation.createTeamPersona(
+        const ctx = {
+          db,
+          clientId: auth.clientId ?? undefined,
+          userId: auth.userId ?? undefined,
+          appId: auth.appId ?? undefined,
+          sessionId: auth.sessionId ?? undefined,
+          roles: auth.roles as Context['roles'],
+          organizationId: auth.organizationId ?? undefined,
+        };
+        const worker = await resolvers.Mutation.castWorker(
           {},
-          { appRef, role, teamAgentRef: teamAgent ?? null, name: name ?? null },
-          {
-            db,
-            clientId: auth.clientId ?? undefined,
-            userId: auth.userId ?? undefined,
-            appId: auth.appId ?? undefined,
-            sessionId: auth.sessionId ?? undefined,
-            roles: auth.roles as Context['roles'],
-            organizationId: auth.organizationId ?? undefined,
-          },
+          { appRef, role: role ?? null, agentRef: agent ?? null, teamAgentRef: teamAgent ?? null, name: name ?? null },
+          ctx,
         );
+        const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
         return textResult(
-          `Persona minted: **${agent.personaName}** (${agent.personaRole})\n` +
-            `Agent URN: ${safeEmitEntityUrnV2('agent', agent.urn)}\n\n` +
-            `Boot briefing (personaPrompt):\n\n${agent.personaPrompt ?? ''}`,
+          `Worker cast: **${worker.name}**${worker.role ? ` (${worker.role})` : ''}\n` +
+            `Worker id: ${worker.id}\n\n` +
+            `Boot briefing:\n\n${prompt ?? ''}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'persona creation failed'}`);
+        return textResult(`Error: ${e instanceof Error ? e.message : 'worker casting failed'}`);
       }
     },
   );
@@ -4866,17 +4869,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_post',
-    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @persona-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the persona bound to that session (the driving session is recorded); omit it to post as yourself. Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
+    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must belong to this App and not be retired); omit it to post as yourself. Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
     {
-      body: z.string().describe('The message text (max 65536 characters). Mention teammates as @persona-name or @handle.'),
+      body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
       replyToSeq: z.number().int().optional().describe('seq of the message this replies to (a replies-to edge is wired).'),
-      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound persona. Omit to post as yourself.'),
+      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
     async ({ body, replyToSeq, session, app }) => {
       // Delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement). App default
-      // mirrors hadron_create_persona: requireAppScope() runs BEFORE reading
+      // mirrors hadron_cast_worker: requireAppScope() runs BEFORE reading
       // auth.appId so the omit-app flow honors hadron_set_active_app.
       let appRef = app;
       if (!appRef) {
@@ -4915,10 +4918,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_read',
-    'Read the team App\'s chat (#939), oldest first by seq. Pass sinceSeq to fetch only messages AFTER a watermark (strictly greater — pass the last seq you have seen). Pass mentions (a persona/agent URN, user handle, or id) to filter to messages that mention them. Returns seq, author, timestamp, and body per message plus the total count.',
+    'Read the team App\'s chat (#939), oldest first by seq. Pass sinceSeq to fetch only messages AFTER a watermark (strictly greater — pass the last seq you have seen). Pass mentions (a worker name or id, or a user handle/id) to filter to messages that mention them. Returns seq, author, timestamp, and body per message plus the total count.',
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
-      mentions: z.string().optional().describe('Filter to messages mentioning this persona (Agent URN/id) or user (handle/id).'),
+      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
@@ -4984,7 +4987,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     async ({ session, tool, kind, ref, action, detail, app }) => {
       // Delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement). App default
-      // mirrors hadron_create_persona: requireAppScope() runs BEFORE reading
+      // mirrors hadron_cast_worker: requireAppScope() runs BEFORE reading
       // auth.appId so the omit-app flow honors hadron_set_active_app.
       let appRef = app;
       if (!appRef) {
@@ -5010,7 +5013,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           },
         );
         return textResult(
-          `Recorded: ${item.kind} ${item.action} ${item.ref} — session ${item.sessionId} (${item.personaName}) at ${item.at.toISOString()}.`,
+          `Recorded: ${item.kind} ${item.action} ${item.ref} — session ${item.sessionId} (${item.workerName}) at ${item.at.toISOString()}.`,
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'work record failed'}`);
@@ -5065,7 +5068,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (page.total === 0) return textResult('No matching worklog records.');
         const lines = page.items.map(
           (i) =>
-            `${i.at.toISOString()} [${i.personaName}] ${i.kind} ${i.action} ${i.ref} (session ${i.sessionId})`,
+            `${i.at.toISOString()} [${i.workerName}] ${i.kind} ${i.action} ${i.ref} (session ${i.sessionId})`,
         );
         return textResult(
           `${page.total} record(s) total, showing ${page.items.length}:\n\n${lines.join('\n')}`,

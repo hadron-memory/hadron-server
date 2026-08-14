@@ -32,7 +32,7 @@ import {
 export const sessionQueries = {
     sessions: async (
       _: unknown,
-      { type, repo, customerId, limit, offset }: { type?: string; repo?: string; customerId?: string; limit?: number; offset?: number },
+      { type, repo, customerId, workerRef, limit, offset }: { type?: string; repo?: string; customerId?: string; workerRef?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       // ADMIN/OWNER see all; App-keyed callers see their own sessions;
@@ -44,6 +44,11 @@ export const sessionQueries = {
           ...(type ? { type: type as any } : {}),
           ...(repo ? { repo } : {}),
           ...(customerId ? { customerId } : {}),
+          // #974 / cor:agt:020:03: the "taken right now" / "last driven by"
+          // reads — a worker's sessions, newest first, inside the caller's
+          // ordinary session scope. PK-only (workers have no URN); an unknown
+          // id simply matches nothing (a filter, not a lookup).
+          ...(workerRef ? { workerId: workerRef.trim() } : {}),
         },
         orderBy: { startedAt: 'desc' },
         take: limit ?? 50,

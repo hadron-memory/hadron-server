@@ -47,7 +47,6 @@ import {
   AgentNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
-import { assertAgentNotTeamBound } from '../../../lib/teamBinding.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
 import {
@@ -1737,18 +1736,6 @@ export async function installAgentIntoAppCore(
       extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
     });
   }
-  // #974 / cor:agt:020:01: a persona belongs to EXACTLY ONE team App — the one
-  // its `teamAppId` names, set at mint by createTeamPersona (which installs it
-  // there itself, without coming through here). Guest-installing it into a
-  // second team App is what team-boundness forbids: two same-named personas
-  // could then meet in one App context, which is precisely what the team-scoped
-  // name uniqueness assumes cannot happen. Shared with createApp's founding and
-  // cascade-install paths (PR #975 review: three restatements, one hole).
-  assertAgentNotTeamBound(
-    { id: resolvedAgentId, personaName: agent.personaName, teamAppId: agent.teamAppId },
-    resolvedAppId,
-    { appId: resolvedAppId },
-  );
   // Best-effort pre-check for the typed `DUPLICATE_APP_AGENT` error.
   // The race-safe fallback lives inside the transaction below — under
   // concurrent installs of the same (App, Agent), one of the two will
@@ -2491,11 +2478,15 @@ export interface SessionInput {
   transcriptPath?: string;
   host?: string;
   tool?: string;
-  // #928 / cor:api:140: the Agent (persona) driving this session (PK or URN).
+  // #928 / cor:api:140: the role-Agent driving this session (PK or URN).
   agentRef?: string;
   // #943 / cor:api:140: the App this session is a unit of work for (PK or URN),
   // gated on the caller's membership of that App.
   appRef?: string;
+  // #974 / cor:agt:020:03: the Worker (named casting) this session works as.
+  // PK only — workers have no URN. Gated: the worker must belong to the
+  // session's App; a retired worker refuses.
+  workerRef?: string;
 }
 
 export interface UsageEventInput {
