@@ -1,13 +1,17 @@
 /**
- * #935 — createTeamPersona: server-side persona instantiation (spec
- * cor:agt:020:01/:02).
+ * #935/#974 — createTeamPersona: server-side persona instantiation (spec
+ * cor:agt:020:01/:02/:06).
  *
  * The operation reads the role definition (prompt template + name register)
  * from the Team Agent's system memory, allocates a name against the
- * personaName uniqueness constraint (retrying past PERSONA_NAME_TAKEN /
- * AGENT_URN_TAKEN in register mode — the constraint IS the allocation
- * primitive), creates the persona through the shared createAgentCore, and
- * installs it into the team App's roster.
+ * personaName uniqueness constraint (retrying past PERSONA_NAME_TAKEN in
+ * register mode — the constraint IS the allocation primitive), creates the
+ * persona through the shared createAgentCore, and installs it into the team
+ * App's roster.
+ *
+ * #974 scoped the persona to its team App: `teamAppId` is set at mint, the
+ * name is unique within that team only, and the agent slug is derived as
+ * `<team-app-slug>.<persona-name>`.
  *
  * The auth matrix is tested one case per PRINCIPAL SHAPE
  * (findings:auth-appid-credential-vs-selection): org admin, org contributor,
@@ -141,6 +145,9 @@ describe('createTeamPersona — happy path', () => {
     expect(agent.organizationId).toBe(org.id);
     expect(agent.ownerUserId).toBeNull();
     expect(agent.systemMemoryId).toBeTruthy();
+    // #974: bound to this team App, with the derived compound slug.
+    expect(agent.teamAppId).toBe(app.id);
+    expect(agent.urn).toBe(`${org.urn}:team.iris`);
     // On the roster immediately.
     const roster = await db.appAgent.findUnique({
       where: { appId_agentId: { appId: app.id, agentId: agent.id } },
@@ -352,16 +359,93 @@ describe('createTeamPersona — name allocation', () => {
     expect(second.personaName).toBe('Ben');
   });
 
-  it('a non-persona Agent squatting the name slug advances the register (AGENT_URN_TAKEN)', async () => {
-    // An ordinary agent named "Iris" holds urn <org>:iris but reserves no
-    // personaName — the register loop must still move on to Henry.
-    await M.createAgent({}, { orgId: org.id, name: 'Iris' }, ctx(admin.id));
+  it('an ordinary Agent named Iris no longer blocks the register (#974 — the namespaces cannot meet)', async () => {
+    // Pre-#974 this advanced to Henry: the persona's flat slug <org>:iris
+    // collided with the ordinary agent's. The derived compound is
+    // <org>:team.iris, and the dot reservation keeps the ordinary agent out of
+    // that namespace — so Iris is free (cor:agt:020:06).
+    const squatter = await M.createAgent({}, { orgId: org.id, name: 'Iris' }, ctx(admin.id));
+    expect(squatter.urn).toBe(`${org.urn}:iris`);
     const agent = await M.createTeamPersona(
       {},
       { appRef: app.id, role: 'backend-engineer' },
       ctx(admin.id),
     );
-    expect(agent.personaName).toBe('Henry');
+    expect(agent.personaName).toBe('Iris');
+    expect(agent.urn).toBe(`${org.urn}:team.iris`);
+  });
+});
+
+describe('createTeamPersona — team scoping (#974, cor:agt:020:01/:02/:06)', () => {
+  /** A SECOND team App in the same org, with its own Team Agent + roles. */
+  async function secondTeam(slug: string) {
+    const second = await M.createAgent({}, { orgId: org.id, name: `Team Agent ${slug}` }, ctx(admin.id));
+    await createRoleNode(second.systemMemoryId, 'backend-engineer');
+    const secondApp = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: `App ${slug}`, urn: `${org.urn}:${slug}` },
+    });
+    await db.appAgent.create({ data: { appId: secondApp.id, agentId: second.id } });
+    return secondApp;
+  }
+
+  it('two teams in ONE org may each mint an Iris — different derived slugs', async () => {
+    const dataTeam = await secondTeam('data-team');
+    const a = await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    const b = await M.createTeamPersona({}, { appRef: dataTeam.id, role: 'backend-engineer' }, ctx(admin.id));
+    expect(a.personaName).toBe('Iris');
+    expect(b.personaName).toBe('Iris');
+    expect(a.urn).toBe(`${org.urn}:team.iris`);
+    expect(b.urn).toBe(`${org.urn}:data-team.iris`);
+    expect(a.teamAppId).toBe(app.id);
+    expect(b.teamAppId).toBe(dataTeam.id);
+  });
+
+  it('within ONE team the name is still taken — case-insensitively', async () => {
+    await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer', name: 'Iris' }, ctx(admin.id));
+    await expectCode(
+      M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer', name: 'IRIS' }, ctx(admin.id)),
+      'PERSONA_NAME_TAKEN',
+    );
+  });
+
+  it('a persona cannot be installed into a second team App (PERSONA_TEAM_BOUND)', async () => {
+    const dataTeam = await secondTeam('data-team');
+    const iris = await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    await expectCode(
+      M.installAgentIntoApp({}, { appRef: dataTeam.id, agentRef: iris.id }, ctx(admin.id)),
+      'PERSONA_TEAM_BOUND',
+    );
+  });
+
+  it('a persona cannot found a new App (PERSONA_TEAM_BOUND)', async () => {
+    const iris = await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    await expectCode(
+      M.createApp({}, { orgRef: org.id, name: 'Hijacked', agentRef: iris.id }, ctx(admin.id)),
+      'PERSONA_TEAM_BOUND',
+    );
+  });
+
+  it('a retired team App keeps reserving its personas: its slug cannot be reclaimed', async () => {
+    // The URN-reclaim path hard-deletes a soft-deleted App, and teamAppId
+    // cascades — so without the guard, re-creating "team" would recycle Iris.
+    await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    await expectCode(
+      M.createApp({}, { orgRef: org.id, name: 'team', agentRef: teamAgent.id }, ctx(admin.id)),
+      'PERSONA_TEAM_BOUND',
+    );
+    // The tombstone (and its persona) survive the refused reclaim.
+    expect(await db.agent.count({ where: { teamAppId: app.id } })).toBe(1);
+  });
+
+  it('a persona name with a dot still derives a single-dot compound slug', async () => {
+    const agent = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer', name: 'R2.D2' },
+      ctx(admin.id),
+    );
+    expect(agent.personaName).toBe('R2.D2');
+    expect(agent.urn).toBe(`${org.urn}:team.r2-d2`);
   });
 });
 

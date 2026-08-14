@@ -1669,12 +1669,21 @@ export const typeDefs = `#graphql
     # #928 team personas: a persona - a named AI team member driven by
     # external coding sessions or portal chat - IS an Agent. Pure metadata:
     # no server behavior forks on these fields.
-    "Persona display name ('Iris'). Unique per owner, case-insensitively."
+    "Persona display name ('Iris'). Unique per TEAM App, case-insensitively (cor:agt:020:02) - two teams may each have an Iris. Set only by createTeamPersona."
     personaName: String
     "Persona role - free string with conventions ('backend-engineer')."
     personaRole: String
     "Persona identity paragraph; clients compose it into systemPrompt."
     personaPrompt: String
+    """
+    #974 - the persona's home team App (cor:agt:020:01), required for any agent
+    with a personaName and fixed at mint. It scopes the persona-name uniqueness
+    and is the left constituent of the derived agent slug
+    '<team-app-slug>.<persona-name>'. Read this column to answer 'which team' -
+    never parse the slug (cor:agt:020:06). Resolve the App itself through the
+    gated app(ref:) query; null on every non-persona agent.
+    """
+    teamAppId: ID
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -5429,12 +5438,29 @@ export const typeDefs = `#graphql
     v2 — no @ sigil) and its system memory is user-owned too. Exactly one owner
     (org XOR user).
 
+    The slug is derived from name and must not contain '.' — the dot is
+    reserved for server-derived team-persona slugs (cor:urn:010:03).
+
+    personaName is REFUSED here with PERSONA_TEAM_REQUIRED (#974): a persona is
+    team-bound (cor:agt:020:01) and is minted by createTeamPersona, which
+    supplies the home team App, derives the compound slug, and installs it onto
+    the roster. personaRole / personaPrompt carry no such invariant.
+
     orgId accepts the org's ID or URN.
     """
     createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaName: String, personaRole: String, personaPrompt: String): Agent!
 
     """
     Update an Agent.
+
+    urn renames the slug (org-owned agents only); the new slug must not contain
+    '.' (cor:urn:010:03), and a PERSONA cannot be renamed at all — its slug is
+    server-derived from its team App and persona name (cor:agt:020:06).
+
+    personaName may only be SET on an agent that already has a team App (one
+    minted by createTeamPersona) — otherwise PERSONA_TEAM_REQUIRED (#974).
+    Clearing it (explicit null / blank) is always allowed. A name already taken
+    in the same team is PERSONA_NAME_TAKEN.
 
     Accepts the entity's ID or URN.
     """
@@ -6080,8 +6106,11 @@ export const typeDefs = `#graphql
     ): InstallAgentIntoAppPayload!
 
     """
-    #935 — mint a team persona: role-template + name-register instantiation as
-    a platform operation (spec cor:agt:020:01/:02). Locates the Team Agent
+    #935/#974 — mint a team persona: role-template + name-register
+    instantiation as a platform operation (spec cor:agt:020:01/:02/:06). This
+    is the ONLY way a persona comes into being: createAgent refuses
+    personaName (PERSONA_TEAM_REQUIRED), because a persona needs the home team
+    App only this operation can supply. Locates the Team Agent
     among the App's installed Agents (teamAgentRef when given; otherwise the
     single installed Agent whose system memory carries a 'roles:' branch —
     zero or several candidates is a typed error, never a guess), reads the
@@ -6094,6 +6123,14 @@ export const typeDefs = `#graphql
     installs it into the App (AppAgent row) so the minted persona is on the
     roster immediately. Returns the created Agent — clients print its
     personaPrompt as the persona's boot briefing.
+
+    Team scoping (#974, cor:agt:020:01/:02/:06): the minted Agent carries
+    teamAppId = this App, its name is unique within that team only (two teams
+    may each mint an Iris), and its agent slug is SERVER-DERIVED as
+    '<team-app-slug>.<persona-name>' — the platform's only dotted agent slug,
+    collision-free by construction, so nothing here ever retries a slug.
+    Context-free surfaces (PR trailers, anything rendered outside Hadron)
+    carry the team-qualified compound, never the bare short name.
 
     Persona metadata (#950): visibility follows the team App's owner —
     ORGANIZATION for an org-owned App (the roster is the team's shared view of
@@ -6111,9 +6148,10 @@ export const typeDefs = `#graphql
 
     Error codes (extensions.code): TEAM_AGENT_NOT_FOUND, TEAM_AGENT_AMBIGUOUS,
     TEAM_AGENT_NOT_INSTALLED, PERSONA_ROLE_NOT_FOUND, PERSONA_ROLE_INVALID,
-    PERSONA_NAME_TAKEN, PERSONA_REGISTER_EXHAUSTED, AGENT_URN_TAKEN (an
-    explicit name whose derived slug is occupied by a non-persona Agent or
-    reserved by a retired persona), SESSION_EXPIRED (encrypted system memory
+    PERSONA_NAME_TAKEN (a name taken in THIS team — including one reserved by
+    a retired persona; #974 folded the former AGENT_URN_TAKEN refusal into it,
+    so a register loop advances on this code alone),
+    PERSONA_REGISTER_EXHAUSTED, SESSION_EXPIRED (encrypted system memory
     without an active session key), APP_UNINSTALLED.
 
     Accepts the entity's ID or URN for appRef and teamAgentRef.

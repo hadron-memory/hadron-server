@@ -1736,6 +1736,18 @@ export async function installAgentIntoAppCore(
       extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
     });
   }
+  // #974 / cor:agt:020:01: a persona belongs to EXACTLY ONE team App — the one
+  // its `teamAppId` names, set at mint by createTeamPersona (which installs it
+  // there itself, without coming through here). Guest-installing it into a
+  // second team App is what team-boundness forbids: two same-named personas
+  // could then meet in one App context, which is precisely what the team-scoped
+  // name uniqueness assumes cannot happen.
+  if (agent.personaName !== null && agent.teamAppId !== resolvedAppId) {
+    throw new GraphQLError(
+      `${agent.personaName} is a persona of another team App and cannot be installed here — a persona belongs to exactly one team (cor:agt:020:01).`,
+      { extensions: { code: 'PERSONA_TEAM_BOUND', appId: resolvedAppId, agentId: resolvedAgentId } },
+    );
+  }
   // Best-effort pre-check for the typed `DUPLICATE_APP_AGENT` error.
   // The race-safe fallback lives inside the transaction below — under
   // concurrent installs of the same (App, Agent), one of the two will

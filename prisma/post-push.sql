@@ -227,17 +227,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_app_name_uniq
 CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
   ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
 
--- #928 team personas: persona names are unique per owner (org XOR user),
--- case-insensitively (partial functional uniques — Prisma cannot express
--- them). Deliberately NOT filtered on deleted_at: a persona name binds to
--- one agent forever (D-2026-08-11-006), so a soft-deleted agent keeps its
--- name reserved.
-CREATE UNIQUE INDEX IF NOT EXISTS agents_org_persona_name_uniq
-  ON agents (organization_id, lower(persona_name))
-  WHERE persona_name IS NOT NULL AND organization_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS agents_owner_persona_name_uniq
-  ON agents (owner_user_id, lower(persona_name))
-  WHERE persona_name IS NOT NULL AND owner_user_id IS NOT NULL;
+-- #974 team personas (cor:agt:020:01/:02 v0.0.2): a persona is TEAM-BOUND —
+-- `persona_name IS NOT NULL ⇒ team_app_id IS NOT NULL` — and its name is
+-- unique per TEAM App, case-insensitively (partial functional unique — Prisma
+-- cannot express it). `team_app_id` determines the owner, so the two-column
+-- index implements the spec's (owner, team App) scope. Deliberately NOT
+-- filtered on deleted_at: a persona name binds to one agent forever within its
+-- team (D-2026-08-11-006, re-scoped by D-2026-08-14-001), so a soft-deleted
+-- agent — and a soft-deleted team App — keep the name reserved.
+-- Superseded: the owner-wide pair agents_org_persona_name_uniq /
+-- agents_owner_persona_name_uniq (#928), dropped by the 20260814120000
+-- migration; the DROPs below keep a re-pushed dev DB in step.
+DROP INDEX IF EXISTS agents_org_persona_name_uniq;
+DROP INDEX IF EXISTS agents_owner_persona_name_uniq;
+CREATE UNIQUE INDEX IF NOT EXISTS agents_team_persona_name_uniq
+  ON agents (team_app_id, lower(persona_name))
+  WHERE persona_name IS NOT NULL;
+
+ALTER TABLE "agents" DROP CONSTRAINT IF EXISTS "chk_agent_persona_team_app";
+ALTER TABLE "agents"
+  ADD CONSTRAINT "chk_agent_persona_team_app"
+  CHECK ("persona_name" IS NULL OR "team_app_id" IS NOT NULL);
 
 -- ─── 325-user-urn: handle is the hrn:user:<handle> slug ──────────────────
 -- Case-insensitive uniqueness on the handle (lowercase-canonical), so a new

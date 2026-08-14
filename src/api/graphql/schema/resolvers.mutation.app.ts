@@ -37,6 +37,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
+import { assertDotFreeSlug } from '../../../lib/personaSlug.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import {
@@ -264,11 +265,32 @@ export const appMutations = {
       // URN format matches memories and agents: "{namespace}:{slug}" — the
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
-      const appUrn = `${namespace}:${deriveSlugFromName(urn ?? name)}`;
+      //
+      // #974 / cor:urn:010:03: an App slug must be dot-free. It is the LEFT
+      // constituent of every persona compound `<team-app-slug>.<persona-name>`,
+      // so a dotted App slug would break that compound's injectivity — two
+      // different (team, persona) pairs could spell the same agent slug.
+      const appSlug = deriveSlugFromName(urn ?? name);
+      assertDotFreeSlug(appSlug, 'App');
+      const appUrn = `${namespace}:${appSlug}`;
 
       // 009-install-agent-flow: agentRef is required (typeDef gate). Resolve the
       // Agent (resolveAgentRef rejects soft-deleted Agents).
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      // #974 / cor:agt:020:01: a persona belongs to exactly one team App, so it
+      // can never be the founding Agent of a NEW one. Same rule as
+      // installAgentIntoAppCore's guard — restated because this path links the
+      // roster row itself rather than going through that helper.
+      const foundingAgent = await ctx.db.agent.findUniqueOrThrow({
+        where: { id: resolvedAgentId },
+        select: { personaName: true },
+      });
+      if (foundingAgent.personaName !== null) {
+        throw new GraphQLError(
+          `${foundingAgent.personaName} is a persona and belongs to its own team App (cor:agt:020:01) — it cannot found another App.`,
+          { extensions: { code: 'PERSONA_TEAM_BOUND', agentId: resolvedAgentId } },
+        );
+      }
       if (resolvedOrgId) {
         // Org path: auto-provision the AgentOrgGrant (008 behavior; portal hides
         // the cross-org Install affordance — a hard server gate is the
@@ -330,6 +352,23 @@ export const appMutations = {
       });
       if (existing) {
         if (existing.deletedAt) {
+          // #974 / cor:agt:020:02: a soft-deleted TEAM App keeps reserving all
+          // of its personas' names — history (PR trailers, chat archives)
+          // references them, and a new App at the same slug would derive the
+          // very same `<slug>.<persona-name>` compounds. `Agent.teamAppId` is
+          // onDelete: Cascade, so hard-deleting the tombstone here would
+          // silently take the personas with it and recycle their names. Refuse
+          // instead — the same shape as createAgent's persona-tombstone
+          // refusal.
+          const personaCount = await ctx.db.agent.count({
+            where: { teamAppId: existing.id, personaName: { not: null } },
+          });
+          if (personaCount > 0) {
+            throw new GraphQLError(
+              `URN "${appUrn}" is reserved by a retired team App with ${personaCount} persona(s) — their names are never recycled (cor:agt:020:02). Pick a different slug.`,
+              { extensions: { code: 'PERSONA_TEAM_BOUND', appId: existing.id } },
+            );
+          }
           await ctx.db.app.delete({ where: { id: existing.id } });
         } else {
           throw new Error(`An app with URN "${appUrn}" already exists`);
@@ -594,7 +633,9 @@ export const appMutations = {
         const org = await ctx.db.organization.findUniqueOrThrow({
           where: { id: app.organizationId }, select: { urn: true },
         });
-        newUrn = `${org.urn}:${deriveSlugFromName(urn)}`; // #574: shared slugify
+        const renamedSlug = deriveSlugFromName(urn); // #574: shared slugify
+        assertDotFreeSlug(renamedSlug, 'App'); // #974 / cor:urn:010:03
+        newUrn = `${org.urn}:${renamedSlug}`;
       }
       // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args
       // maintain the App's 'default' registry config. Explicit null

@@ -310,13 +310,24 @@ describe('#944 review — the bound agent must be on the App\'s roster to author
     const otherOrg = await db.organization.create({
       data: { id: generateId(), name: 'sar-other-org', urn: `sar-other-${generateId().slice(-8)}.com` },
     });
+    // #974: a persona is team-bound, so the other tenant's Ada needs that
+    // tenant's own team App to exist at all.
+    const otherApp = await db.app.create({
+      data: {
+        id: generateId(),
+        organizationId: otherOrg.id,
+        name: 'Other Team',
+        urn: `${otherOrg.urn}:other-team`,
+      },
+    });
     const foreignAgent = await db.agent.create({
       data: {
         id: generateId(),
         organizationId: otherOrg.id,
         name: 'Impostor',
         personaName: 'Ada',
-        urn: `${otherOrg.urn}:impostor`,
+        teamAppId: otherApp.id,
+        urn: `${otherOrg.urn}:other-team.impostor`,
         visibility: 'PUBLIC',
       },
     });
@@ -339,9 +350,11 @@ describe('#944 review — the bound agent must be on the App\'s roster to author
   });
 
   it('refuses an own-org agent that is not installed in the App', async () => {
+    // #974: createAgent no longer accepts personaName (a persona is minted by
+    // createTeamPersona); the roster check under test does not depend on it.
     const notInstalled = await M.createAgent(
       {},
-      { orgId: org.id, name: 'Unrostered', personaName: 'Mallory' },
+      { orgId: org.id, name: 'Unrostered' },
       ctx(admin.id),
     );
     const session = await startSession(ctx(contrib.id), {
