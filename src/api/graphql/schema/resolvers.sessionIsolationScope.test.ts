@@ -1,0 +1,319 @@
+/**
+ * #945 — the App-key-with-session isolation branch must NARROW, never GRANT.
+ *
+ * The branch confines an App key operating inside a session to that session's
+ * memory plus the bound agent's system memory. It was written when
+ * `startAgentSession` was the only writer of `Session.memoryId`/`agentId`, so
+ * the App had authored both and the row could be trusted. `SessionInput.agentRef`
+ * (#928) and `SessionInput.appRef` (#943) made both pivots caller-suppliable,
+ * which turns an unguarded branch into a grant.
+ *
+ * The live case is the agent leg: `agentRef` gates only on the agent being
+ * READABLE, so a member can bind a foreign PUBLIC agent to a session of their
+ * own App — and before this fix the App's key could then read that agent's
+ * system memory (its prompt and role definitions).
+ *
+ * Both surfaces that implement the confinement now share one predicate, so the
+ * parity test at the bottom is the guard against them re-diverging.
+ */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb, createDbAgentOrgGrant, createDbAgentSubscription } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { getAccessibleMemoryIds, type Context } from './resolvers.helpers.js';
+import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
+
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
+  syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }),
+}));
+
+/** An App-key principal operating inside a session (no userId — a credential). */
+const appKeyCtx = (appId: string, sessionId: string): Context =>
+  ({ db, appId, sessionId, roles: [] }) as Context;
+
+let org: { id: string; urn: string };
+let foreignOrg: { id: string; urn: string };
+let app: { id: string };
+let ownAgent: { id: string; systemMemoryId: string };
+let foreignAgent: { id: string; systemMemoryId: string };
+let user: { id: string };
+
+/** Create an agent with its own system memory, in `orgId`. */
+async function makeAgent(orgId: string, orgUrn: string, slug: string, visibility: string) {
+  const systemMemory = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: orgId,
+      urn: `${orgUrn}:${slug}-sys`,
+      name: `${slug} system`,
+      class: 'system',
+    },
+  });
+  const agent = await db.agent.create({
+    data: {
+      id: generateId(),
+      organizationId: orgId,
+      urn: `${orgUrn}:${slug}`,
+      name: slug,
+      systemMemoryId: systemMemory.id,
+      visibility: visibility as any,
+      systemPrompt: 'the secret identity paragraph',
+    },
+  });
+  return { id: agent.id, systemMemoryId: systemMemory.id };
+}
+
+beforeEach(async () => {
+  await cleanDb(db);
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+  org = await db.organization.create({
+    data: { id: generateId(), name: 'sis-org', urn: `sis-org-${suffix}.com` },
+  });
+  foreignOrg = await db.organization.create({
+    data: { id: generateId(), name: 'sis-foreign', urn: `sis-foreign-${suffix}.com` },
+  });
+  user = await db.user.create({
+    data: { id: generateId(), githubId: 94501, githubUsername: `sis-user-${suffix}`, roles: ['READER'] },
+  });
+  app = await db.app.create({
+    data: { id: generateId(), organizationId: org.id, name: 'App', urn: `${org.urn}:app` },
+  });
+  ownAgent = await makeAgent(org.id, org.urn, 'own', 'ORGANIZATION');
+  await db.appAgent.create({ data: { appId: app.id, agentId: ownAgent.id } });
+  // Another tenant's PUBLIC agent — readable, so `agentRef` accepts it, but
+  // NOT installed in our App.
+  foreignAgent = await makeAgent(foreignOrg.id, foreignOrg.urn, 'foreign', 'PUBLIC');
+});
+
+/** The per-user memory startAgentSession provisions: appId + userMemoryOfAgentId. */
+async function provisionedMemory(agentId: string, appId: string | null, ownerUserId?: string) {
+  return db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: org.id,
+      urn: `${org.urn}:${generateId().slice(-10)}`,
+      name: 'user memory',
+      class: 'personal',
+      userId: ownerUserId ?? user.id,
+      userMemoryOfAgentId: agentId,
+      appId,
+    },
+  });
+}
+
+describe('#945 — the agent leg rides on the INSTALL, not the binding', () => {
+  it('excludes a foreign PUBLIC agent\'s system memory (the live escalation)', async () => {
+    // A member stamps their own session with their App (#943 appRef) and binds
+    // it to another tenant's PUBLIC agent (#928 agentRef — readable, so allowed).
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: foreignAgent.id },
+    });
+    const ids = await getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
+    expect(ids).not.toContain(foreignAgent.systemMemoryId);
+    expect(ids).toEqual([]);
+  });
+
+  it('still includes the system memory of an agent installed in this App', async () => {
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id },
+    });
+    const ids = await getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
+    expect(ids).toContain(ownAgent.systemMemoryId);
+  });
+
+  it('drops the system memory as soon as the agent is uninstalled', async () => {
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id },
+    });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).toContain(
+      ownAgent.systemMemoryId,
+    );
+    await db.appAgent.delete({
+      where: { appId_agentId: { appId: app.id, agentId: ownAgent.id } },
+    });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).not.toContain(
+      ownAgent.systemMemoryId,
+    );
+  });
+});
+
+describe('#945 — the memory leg must be tied to this App or this session\'s agent', () => {
+  it('admits a memory this App provisioned (the startAgentSession shape)', async () => {
+    await createDbAgentSubscription(db, user.id, ownAgent.id);
+    const mem = await provisionedMemory(ownAgent.id, app.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
+    });
+    const ids = await getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
+    expect(new Set(ids)).toEqual(new Set([mem.id, ownAgent.systemMemoryId]));
+  });
+
+  it('admits the reuse case — another App provisioned the (agent, user) memory', async () => {
+    // startAgentSession reuses an existing per-user memory keyed on
+    // (agent, user), so its appId can name a DIFFERENT App that installed the
+    // same agent. That must keep working.
+    const otherApp = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` },
+    });
+    await createDbAgentSubscription(db, user.id, ownAgent.id);
+    const mem = await provisionedMemory(ownAgent.id, otherApp.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
+    });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).toContain(mem.id);
+  });
+
+  it('excludes a memory tied to neither this App nor this session\'s agent', async () => {
+    // No caller path writes Session.memoryId today (#946 decided to keep it
+    // App-provisioned), so this pins the invariant against a FUTURE writer —
+    // which is why the row is built directly rather than through a mutation.
+    const strangerMem = await provisionedMemory(foreignAgent.id, null, user.id);
+    const session = await db.session.create({
+      data: {
+        id: generateId(), appId: app.id, userId: user.id,
+        agentId: ownAgent.id, memoryId: strangerMem.id,
+      },
+    });
+    const ids = await getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
+    expect(ids).not.toContain(strangerMem.id);
+    expect(ids).toEqual([ownAgent.systemMemoryId]);
+  });
+
+  it('keeps the onlyMemoryId scoping honest for an inadmissible target', async () => {
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: foreignAgent.id },
+    });
+    expect(
+      await getAccessibleMemoryIds(appKeyCtx(app.id, session.id), foreignAgent.systemMemoryId),
+    ).toEqual([]);
+  });
+});
+
+describe('#945 review — lifecycle, not just structure', () => {
+  /** Subscribe `user` to `agentId` so a personal session memory is licensed
+   *  (what `startAgentSession` does via `ensureAgentSubscription`). */
+  const subscribe = (agentId: string) => createDbAgentSubscription(db, user.id, agentId);
+
+  it('drops the system memory when a cross-org install\'s AgentOrgGrant is revoked (Codex P1)', async () => {
+    // The foreign agent is installed cross-org under an ACTIVE grant, so its
+    // system memory is legitimately in scope...
+    await db.appAgent.create({ data: { appId: app.id, agentId: foreignAgent.id } });
+    await createDbAgentOrgGrant(db, org.id, foreignAgent.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: foreignAgent.id },
+    });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).toContain(
+      foreignAgent.systemMemoryId,
+    );
+
+    // ...and out of scope the moment the grant is revoked. The AppAgent join
+    // row survives revocation, so `isAgentInstalled` alone would still say yes
+    // (getAppMemoryAccess collapses to empty here — 008-multi-install-isolation).
+    await db.agentOrgGrant.update({
+      where: { orgId_agentId: { orgId: org.id, agentId: foreignAgent.id } },
+      data: { revokedAt: new Date() },
+    });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).not.toContain(
+      foreignAgent.systemMemoryId,
+    );
+  });
+
+  it('a same-org install needs no grant row (the auto-pass path)', async () => {
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id },
+    });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).toContain(
+      ownAgent.systemMemoryId,
+    );
+  });
+
+  it('drops a soft-deleted memory and a soft-deleted agent (Copilot)', async () => {
+    await subscribe(ownAgent.id);
+    const mem = await provisionedMemory(ownAgent.id, app.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
+    });
+    expect(new Set(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id)))).toEqual(
+      new Set([mem.id, ownAgent.systemMemoryId]),
+    );
+
+    // deleteMemory stamps only the Memory row; the session keeps pointing at it.
+    await db.memory.update({ where: { id: mem.id }, data: { deletedAt: new Date() } });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).toEqual([
+      ownAgent.systemMemoryId,
+    ]);
+
+    // deleteAgent soft-deletes the Agent and leaves Session/AppAgent behind.
+    await db.agent.update({ where: { id: ownAgent.id }, data: { deletedAt: new Date() } });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).toEqual([]);
+  });
+
+  it('requires an active AgentSubscription for a personal session memory (Copilot)', async () => {
+    await subscribe(ownAgent.id);
+    const mem = await provisionedMemory(ownAgent.id, app.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
+    });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).toContain(mem.id);
+
+    // Revocation does not end the session or empty the memory, so without this
+    // the branch would be the one place a de-licensed pair still reads.
+    await db.agentSubscription.update({
+      where: { userId_agentId: { userId: user.id, agentId: ownAgent.id } },
+      data: { revokedAt: new Date() },
+    });
+    const after = await getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
+    expect(after).not.toContain(mem.id);
+    expect(after).toEqual([ownAgent.systemMemoryId]);
+  });
+
+  it('refuses a personal memory owned by someone other than the session driver', async () => {
+    const other = await db.user.create({
+      data: { id: generateId(), githubId: 94502, githubUsername: `sis-other-${generateId().slice(-6)}`, roles: ['READER'] },
+    });
+    await createDbAgentSubscription(db, other.id, ownAgent.id);
+    const mem = await provisionedMemory(ownAgent.id, app.id, other.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
+    });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).not.toContain(mem.id);
+  });
+
+  it('leaves non-personal session memories alone (anonymous scratch + knowledge)', async () => {
+    // The anonymous 'app'-class scratch memory carries no per-user license.
+    const scratch = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:anon-${generateId().slice(-8)}`,
+        name: 'anon', class: 'app', userMemoryOfAgentId: ownAgent.id, appId: app.id,
+      },
+    });
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, agentId: ownAgent.id, memoryId: scratch.id },
+    });
+    expect(await getAccessibleMemoryIds(appKeyCtx(app.id, session.id))).toContain(scratch.id);
+  });
+});
+
+describe('#945 — the two surfaces share one predicate', () => {
+  it('the resolver gate returns exactly what the shared predicate returns', async () => {
+    // The MCP node-search scope (src/mcp/server.ts) calls the same function, so
+    // pinning the resolver to it pins both. A hand-copied second branch is what
+    // this test exists to prevent (findings:public-read-predicate-has-two-copies).
+    await createDbAgentSubscription(db, user.id, ownAgent.id);
+    const mem = await provisionedMemory(ownAgent.id, app.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
+    });
+    const viaResolver = await getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
+    const viaPredicate = await sessionScopedMemoryIds(db, app.id, session.id);
+    expect(new Set(viaResolver)).toEqual(new Set(viaPredicate));
+  });
+
+  it('returns an empty scope for a session that no longer exists', async () => {
+    expect(await sessionScopedMemoryIds(db, app.id, generateId())).toEqual([]);
+  });
+});

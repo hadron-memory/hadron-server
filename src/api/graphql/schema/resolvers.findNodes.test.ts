@@ -369,9 +369,23 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
   it('an App-key caller may scope to its own App org, but not another org', async () => {
     await mkNode(graph.id, { loc: 'app.task', name: 'App Task', isRunnable: true });
     // App in orgA + a session scoped to orgA's `graph` memory → App-key access.
+    // #945: the session carries an installed agent that is LINKED to `graph`
+    // (an AgentMemoryItem — the schema's "active write-memory for this session"
+    // shape). This is scaffolding for the orgId-scope assertions below, and it
+    // previously named a bare memoryId with no agent at all — a row production
+    // cannot produce (`startAgentSession` is the only writer of
+    // Session.memoryId and always sets agentId), and one the isolation branch
+    // now correctly refuses to honor.
     const { app } = await createDbAppWithKey(db, 'fn-appkey', orgA.id);
+    const agent = await db.agent.create({
+      data: {
+        id: generateId(), organizationId: orgA.id, urn: 'fn-org:fn-agent', name: 'fn agent',
+        memoryItems: { create: [{ memoryId: graph.id, role: 'read' }] },
+      },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const session = await db.session.create({
-      data: { id: generateId(), appId: app.id, memoryId: graph.id },
+      data: { id: generateId(), appId: app.id, agentId: agent.id, memoryId: graph.id },
     });
     const appCtx = ctx({ appId: app.id, sessionId: session.id });
 
