@@ -184,10 +184,14 @@ async function locateWorklogRoot(ctx: Context, appId: string): Promise<WorklogRo
   return ctx.db.node.findFirst({
     // loc-scope-ok: deliberately spans the App's OWN app-class memories (one
     // per installed agent) — the relation filter is the tenant scope (#947).
+    // `workerOf: none` (#982 review): a Worker's casting-scoped working
+    // memory (#974) is also an app-class row under this App; a hand-created
+    // `worklog` node in one must never make the TEAM ledger resolve there.
+    // Kept in lockstep with App.sharedMemory's worklog branch.
     where: {
       loc: WORKLOG_LOC,
       deletedAt: null,
-      memory: { appId, class: 'app', deletedAt: null },
+      memory: { appId, class: 'app', deletedAt: null, workerOf: { none: {} } },
     },
     orderBy: { createdAt: 'asc' },
     select: { id: true, memoryId: true },
