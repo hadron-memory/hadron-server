@@ -44,8 +44,10 @@
  * intersection with a set that was never meant to cover them.
  */
 
+import { isLifecycleActive } from '@hadron-memory/access-control';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isAgentInstalled } from '../appAgent.js';
+import { isActiveAgentSubscription } from '../agentSubscription.js';
 
 /**
  * Memory ids an App key may reach while operating inside `sessionId`.
@@ -66,8 +68,16 @@ export async function sessionScopedMemoryIds(
     where: { id: sessionId },
     select: {
       agentId: true,
-      memory: { select: { id: true, appId: true, userMemoryOfAgentId: true } },
-      agent: { select: { systemMemoryId: true } },
+      userId: true,
+      memory: {
+        select: {
+          id: true, appId: true, userMemoryOfAgentId: true,
+          class: true, userId: true, deletedAt: true,
+        },
+      },
+      agent: {
+        select: { systemMemoryId: true, organizationId: true, deletedAt: true },
+      },
     },
   });
   if (!session) return [];
@@ -90,7 +100,9 @@ export async function sessionScopedMemoryIds(
   // `getAppMemoryAccess`, which folds in only the App's FIRST installed agent —
   // wrong for a multi-agent App (a team App installs one agent per persona).
   const mem = session.memory;
-  if (mem) {
+  // A soft-deleted memory leaves the session row pointing at it (`deleteMemory`
+  // stamps only the Memory), so a stale session would keep it readable.
+  if (mem && mem.deletedAt === null) {
     const tiedToApp = mem.appId === appId;
     const isAgentsOwnMemory =
       session.agentId !== null && mem.userMemoryOfAgentId === session.agentId;
@@ -102,17 +114,85 @@ export async function sessionScopedMemoryIds(
         where: { agentId: session.agentId, memoryId: mem.id, deletedAt: null },
         select: { id: true },
       })) !== null;
-    if (tiedToApp || isAgentsOwnMemory || isAgentLinked) ids.push(mem.id);
+    if ((tiedToApp || isAgentsOwnMemory || isAgentLinked) && (await personalMemoryLicensed(db, session, mem))) {
+      ids.push(mem.id);
+    }
   }
 
-  // The agent's system memory rides on the INSTALL, not on the session binding.
+  // The agent's system memory rides on an ACTIVE install, not on the session
+  // binding and not on the join row alone. `deleteAgent` soft-deletes the Agent
+  // and its system Memory while leaving `AppAgent` in place, and a cross-org
+  // install can have its `AgentOrgGrant` revoked or expire without the join row
+  // going anywhere — `getAppMemoryAccess` collapses to an empty map in that
+  // state (pinned by 008-multi-install-isolation), so honoring the join alone
+  // here would keep serving a de-licensed agent's system memory.
   if (
     session.agentId &&
     session.agent?.systemMemoryId &&
-    (await isAgentInstalled(db, appId, session.agentId))
+    session.agent.deletedAt === null &&
+    (await isAgentInstalled(db, appId, session.agentId)) &&
+    (await crossOrgInstallLicensed(db, appId, session.agentId, session.agent.organizationId))
   ) {
     ids.push(session.agent.systemMemoryId);
   }
 
   return ids;
+}
+
+/**
+ * Cross-org install licensing — mirrors `getAppMemoryAccess`'s gate 1
+ * (`src/mcp/access-control.ts`). A same-org install auto-passes: the agent's
+ * owner has implicit license to deploy it. A user-owned App (no org) rides its
+ * owner's AgentSubscription rather than an org grant, so the org gate does not
+ * apply (spec 047, Phase 2c-2).
+ */
+async function crossOrgInstallLicensed(
+  db: PrismaClient,
+  appId: string,
+  agentId: string,
+  agentOrganizationId: string | null,
+): Promise<boolean> {
+  const app = await db.app.findUnique({
+    where: { id: appId },
+    select: { organizationId: true },
+  });
+  if (!app) return false;
+  if (app.organizationId === null || app.organizationId === agentOrganizationId) return true;
+  const grant = await db.agentOrgGrant.findUnique({
+    where: { orgId_agentId: { orgId: app.organizationId, agentId } },
+  });
+  return grant !== null && isLifecycleActive(grant);
+}
+
+/**
+ * Per-user memory licensing. A personal/private session memory belongs to ONE
+ * user and is licensed by that user's AgentSubscription for the memory's agent —
+ * the same pair `canReadMemory` requires on the user path
+ * (`src/mcp/access-control.ts`), which an App-key principal never reaches
+ * (`auth.userId !== memory.userId` denies it outright), so without this the
+ * session branch would be the one place a revoked subscription still reads.
+ *
+ * `startAgentSession` calls `ensureAgentSubscription` immediately before
+ * provisioning the memory, so this is a no-op for a live, licensed session.
+ * Non-personal memories (the anonymous 'app'-class scratch memory, org
+ * knowledge memories) carry no per-user license and pass through.
+ */
+async function personalMemoryLicensed(
+  db: PrismaClient,
+  session: { userId: string | null },
+  mem: {
+    class: string | null;
+    userId: string | null;
+    userMemoryOfAgentId: string | null;
+  },
+): Promise<boolean> {
+  if (mem.class !== 'personal' && mem.class !== 'private') return true;
+  // The memory belongs to one user; a session driven by anyone else must not
+  // reach it even when the App provisioned both.
+  if (mem.userId === null || mem.userId !== session.userId) return false;
+  if (mem.userMemoryOfAgentId === null) return false;
+  const sub = await db.agentSubscription.findUnique({
+    where: { userId_agentId: { userId: mem.userId, agentId: mem.userMemoryOfAgentId } },
+  });
+  return sub !== null && isActiveAgentSubscription(sub);
 }
