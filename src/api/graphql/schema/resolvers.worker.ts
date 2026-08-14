@@ -731,8 +731,52 @@ export const workerQueries = {
   },
 };
 
+/**
+ * #983 review (Codex + Copilot P1): `Session.worker` made Worker rows
+ * reachable by principals the worker queries never admitted —
+ * `sessionScopeFilter` admits ANY org member (READER included), and a
+ * self-attributed session stays readable by its user after they leave the
+ * App. Attribution needs only the IDENTITY scalars (name, role, appId,
+ * retiredAt); the WORKING-STATE fields — `prompt`, `promptOverride`,
+ * `memoryId` — must stay behind the worker read gate, masked to null on
+ * deny (the #552 posture applied field-level, like Worker.app/agent).
+ * Memoized per request+App: one gate check covers a whole session page.
+ */
+async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
+  type Cache = Map<string, Promise<boolean>>;
+  const holder = ctx as Context & { workerInternalsCache?: Cache };
+  const cache = (holder.workerInternalsCache ??= new Map());
+  let pending = cache.get(appId);
+  if (!pending) {
+    pending = (async () => {
+      const app = await ctx.db.app.findUnique({ where: { id: appId } });
+      if (!app || app.deletedAt) return false;
+      try {
+        await requireWorkerReadAccess(ctx, app);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    cache.set(appId, pending);
+  }
+  return pending;
+}
+
 export const workerFieldResolvers = {
   Worker: {
+    /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
+    promptOverride: async (
+      worker: { appId: string; promptOverride: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.promptOverride : null),
+    /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
+    memoryId: async (
+      worker: { appId: string; memoryId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.memoryId : null),
     /**
      * The role-agent behind the casting — behind Query.agent's OWN read gate
      * (PUBLIC, else owner / org READER), masked to null on deny. The Worker
@@ -780,10 +824,15 @@ export const workerFieldResolvers = {
      * and the worker no override.
      */
     prompt: async (
-      worker: { agentId: string; name: string; role: string | null; promptOverride: string | null },
+      worker: { appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
       _: unknown,
       ctx: Context,
     ) => {
+      // Working-state field: the composed boot prompt embeds the agent's
+      // persona template, which this resolver loads WITHOUT the Agent read
+      // gate — so it must sit behind the worker read gate itself (#983
+      // review; see maySeeWorkerInternals).
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       const agent = await ctx.db.agent.findUnique({
         where: { id: worker.agentId },
         select: { personaPrompt: true, personaRole: true },

@@ -241,27 +241,42 @@ export const sessionMutations = {
         // sessions), so two concurrent starts can both pass — the contract
         // is informed consent, not mutual exclusion.
         if (!input.force) {
-          const active = await ctx.db.session.findFirst({
+          // ALL active sessions, not the newest-created (PR #983 review,
+          // Copilot): force allows several to coexist, and the most recent
+          // ACTIVITY can be on an older one — the takeover prompt must name
+          // whoever actually drove the worker last.
+          const activeSessions = await ctx.db.session.findMany({
             where: { workerId: worker.id, endedAt: null, deletedAt: null },
-            orderBy: { startedAt: 'desc' },
             select: { id: true, userId: true, startedAt: true, updatedAt: true },
           });
-          if (active) {
+          if (activeSessions.length > 0) {
             // lastSeenAt mirrors the #930 reaper's activity derivation:
             // greatest of startedAt, updatedAt (the explicit heartbeat), and
-            // the latest attributed UsageEvent.
-            const lastEvent = await ctx.db.usageEvent.findFirst({
-              where: { sessionId: active.id },
-              orderBy: { createdAt: 'desc' },
-              select: { createdAt: true },
+            // the latest attributed UsageEvent — computed per session, then
+            // the most recently active session wins.
+            const events = await ctx.db.usageEvent.groupBy({
+              by: ['sessionId'],
+              where: { sessionId: { in: activeSessions.map((s) => s.id) } },
+              _max: { createdAt: true },
             });
-            const lastSeenAt = new Date(
-              Math.max(
-                active.startedAt.getTime(),
-                active.updatedAt?.getTime() ?? 0,
-                lastEvent?.createdAt.getTime() ?? 0,
-              ),
+            const lastEventBySession = new Map(
+              events.map((e) => [e.sessionId, e._max.createdAt]),
             );
+            let active = activeSessions[0];
+            let lastSeenAt = new Date(0);
+            for (const s of activeSessions) {
+              const seen = new Date(
+                Math.max(
+                  s.startedAt.getTime(),
+                  s.updatedAt?.getTime() ?? 0,
+                  lastEventBySession.get(s.id)?.getTime() ?? 0,
+                ),
+              );
+              if (seen > lastSeenAt) {
+                lastSeenAt = seen;
+                active = s;
+              }
+            }
             const driver = active.userId
               ? await ctx.db.user.findUnique({
                   where: { id: active.userId },

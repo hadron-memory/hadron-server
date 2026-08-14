@@ -500,6 +500,33 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     expect(second.workerId).toBe(worker.id);
   });
 
+  it('lastDriver names the most recently ACTIVE session, not the newest-created (#983 review)', async () => {
+    // force allows several active sessions to coexist; the takeover prompt
+    // must name whoever actually drove the worker last.
+    const first = await startSession(ctx(contrib.id), { workerRef: worker.id });
+    await startSession(ctx(admin.id), { workerRef: worker.id, force: true });
+    // The OLDER session heartbeats after the takeover — a usage event lands
+    // on it, making contrib the most recent driver despite admin's newer row.
+    await db.usageEvent.create({
+      data: {
+        id: generateId(),
+        type: 'tool_call',
+        sessionId: first.id,
+        createdAt: new Date(Date.now() + 60_000),
+      },
+    });
+    try {
+      await startSession(ctx(appMember.id), { workerRef: worker.id });
+      expect.fail('expected WORKER_TAKEN');
+    } catch (e) {
+      const ext = (e as GraphQLError).extensions as Record<string, unknown>;
+      expect(ext.code).toBe('WORKER_TAKEN');
+      expect(ext.sessionId).toBe(first.id);
+      const contribUser = await db.user.findUniqueOrThrow({ where: { id: contrib.id } });
+      expect(ext.lastDriver).toBe(contribUser.handle ?? contribUser.githubUsername);
+    }
+  });
+
   it('an unauthorized caller hits FORBIDDEN, never WORKER_TAKEN (no driver-identity oracle)', async () => {
     // WORKER_TAKEN discloses who is driving; the App gates must run first.
     await startSession(ctx(contrib.id), { workerRef: worker.id });
