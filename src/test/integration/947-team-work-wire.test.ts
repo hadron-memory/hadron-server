@@ -32,7 +32,8 @@ const RECORD = `
     recordTeamWork(appRef: $appRef, sessionRef: $sessionRef, tool: $tool, kind: $kind, ref: $ref, action: $action, detail: $detail) {
       nodeId
       sessionId
-      personaName
+      workerName
+      workerId
       tool
       kind
       ref
@@ -47,7 +48,7 @@ const ITEMS = `
   query Items($appRef: ID!, $ref: String, $sessionRef: ID, $tool: String, $kind: String, $limit: Int, $offset: Int) {
     teamWorkItems(appRef: $appRef, ref: $ref, sessionRef: $sessionRef, tool: $tool, kind: $kind, limit: $limit, offset: $offset) {
       total
-      items { nodeId sessionId ref kind action }
+      items { nodeId sessionId workerName workerId ref kind action }
     }
   }
 `;
@@ -57,6 +58,7 @@ let baseUrl: string;
 let jwt: string;
 let app: { id: string };
 let session: { id: string };
+let worker: { id: string };
 let adminId: string;
 
 async function gql(query: string, variables: Record<string, unknown>) {
@@ -105,9 +107,14 @@ beforeAll(async () => {
     data: { id: generateId(), organizationId: org.id, name: 'Wire Team App 947', urn: `${org.urn}:team` },
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
+  // #974: bind the session to a Worker casting so the wire test exercises the
+  // workerName + workerId selection fields for a worker-bound record.
+  worker = await db.worker.create({
+    data: { appId: app.id, agentId: teamAgent.id, name: 'Iris' },
+  });
   session = await M.startSession(
     {},
-    { input: { id: generateId(), appRef: app.id, transcriptPath: '/tmp/wire-947.jsonl' } },
+    { input: { id: generateId(), appRef: app.id, workerRef: worker.id, transcriptPath: '/tmp/wire-947.jsonl' } },
     ctx,
   );
 
@@ -137,12 +144,16 @@ describe('team worklog on the wire (#947)', () => {
     expect(recorded.errors).toBeUndefined();
     expect(recorded.data?.recordTeamWork?.ref).toBe('acme/widgets#371');
     expect(recorded.data?.recordTeamWork?.sessionId).toBe(session.id);
+    expect(recorded.data?.recordTeamWork?.workerName).toBe('Iris');
+    expect(recorded.data?.recordTeamWork?.workerId).toBe(worker.id);
     expect(recorded.data?.recordTeamWork?.detail).toEqual({ title: 'Add widgets' });
 
     const page = await gql(ITEMS, { appRef: app.id, ref: 'Acme/Widgets#371' });
     expect(page.errors).toBeUndefined();
     expect(page.data?.teamWorkItems?.total).toBe(1);
     expect(page.data?.teamWorkItems?.items[0].sessionId).toBe(session.id);
+    expect(page.data?.teamWorkItems?.items[0].workerName).toBe('Iris');
+    expect(page.data?.teamWorkItems?.items[0].workerId).toBe(worker.id);
   });
 
   it('an unparseable github ref carries WORK_REF_INVALID as extensions.code', async () => {

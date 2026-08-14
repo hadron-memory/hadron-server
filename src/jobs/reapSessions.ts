@@ -8,7 +8,7 @@
  * janitor at all. A session ended only when a caller ran `endSession`,
  * so a crashed or abandoned client left its session "active" forever
  * (finding `findings:session-expiry-no-reaper`). Anything reading
- * "active session" as presence — the team-persona "taken right now"
+ * "active session" as presence — the team-worker "taken right now"
  * check (hadron-cli#369, cor:agt:020:03) first among them — inherited
  * that lie.
  *

@@ -28,7 +28,6 @@ import { removeAgentImport } from '../../../controller/operations/removeAgentImp
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
-import { assertDotFreeSlug } from '../../../lib/personaSlug.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
@@ -52,19 +51,9 @@ import {
 } from './resolvers.helpers.js';
 
 /**
- * #928/#974 team personas: persona-name uniqueness lives in a raw partial index
- * (`agents_team_persona_name_uniq` on `(team_app_id, lower(persona_name))` —
- * post-push.sql), so a collision surfaces as P2002 with the index name as
- * target. Map it to a stable typed code: "name taken, retry with the next free
- * name" is the allocation contract clients program against (D-2026-08-11-006,
- * re-scoped to the team App by D-2026-08-14-001). Any other P2002 rethrows
- * untouched.
- */
-/**
- * #928/#929 review: persona fields are trimmed, and a blank-after-trim value
- * is NULL (absent on create, clear on update) — never a stored value, so
- * whitespace can't reserve a name in the uniqueness index. undefined passes
- * through (omitted arg = no change on update).
+ * #928/#929 review: persona dressing fields are trimmed, and a blank-after-trim
+ * value is NULL (absent on create, clear on update). undefined passes through
+ * (omitted arg = no change on update).
  */
 const normalizePersonaField = (v: string | null | undefined): string | null | undefined => {
   if (v === undefined || v === null) return v;
@@ -72,24 +61,10 @@ const normalizePersonaField = (v: string | null | undefined): string | null | un
   return trimmed === '' ? null : trimmed;
 };
 
-const throwIfPersonaNameCollision = (e: unknown, personaName: string | null | undefined): void => {
-  if (
-    e instanceof Prisma.PrismaClientKnownRequestError &&
-    e.code === 'P2002' &&
-    String((e.meta as { target?: unknown } | undefined)?.target ?? '').includes('persona_name')
-  ) {
-    throw new GraphQLError(
-      `Persona name ${JSON.stringify(personaName ?? '')} is already taken in this team — pick another name.`,
-      { extensions: { code: 'PERSONA_NAME_TAKEN' } },
-    );
-  }
-};
-
 /**
  * #935: a live Agent already holds the derived URN. Typed (rather than the
- * former bare `Error`) so createTeamPersona's register loop can advance past a
- * name whose URN slot is occupied by a non-persona Agent — and so API callers
- * get a stable code instead of INTERNAL_SERVER_ERROR.
+ * former bare `Error`) so API callers get a stable code instead of
+ * INTERNAL_SERVER_ERROR.
  */
 export class AgentUrnTakenError extends GraphQLError {
   constructor(urn: string, message?: string) {
@@ -116,33 +91,18 @@ export interface CreateAgentCoreInput {
   visibility?: string;
   type?: 'ASSISTANT' | 'CHATBOT';
   surfaces?: string[];
-  personaName?: string | null;
   personaRole?: string | null;
   personaPrompt?: string | null;
-  /**
-   * #974 — the persona's required home team App (cor:agt:020:01). Set by
-   * `createTeamPersona`, the only minter of personas; the DB CHECK
-   * `chk_agent_persona_team_app` refuses a persona without it.
-   */
-  teamAppId?: string | null;
-  /**
-   * #974 — a SERVER-DERIVED slug, used verbatim instead of slugifying `name`.
-   * The one caller is persona minting, whose compound `<team-app-slug>.<name>`
-   * is the only dotted agent slug the platform writes (cor:agt:020:06); every
-   * other path derives from the display name and is held to the dot
-   * reservation (cor:urn:010:03).
-   */
-  slug?: string;
 }
 
 /**
  * The authorization-free core of createAgent: URN compose + reclaim, type/
  * visibility defaults, and the one transaction that provisions the system
- * memory alongside the Agent row. Extracted for #935 so createTeamPersona
- * reuses the exact same provisioning (cor:agt:020:01 — a persona is an
- * ordinary Agent, never a behavior fork) after running its own gate. Persona
- * fields are normalized here (blank-after-trim ⇒ NULL) and a persona-name
- * collision surfaces as the typed PERSONA_NAME_TAKEN.
+ * memory alongside the Agent row. (Extracted for #935; the Worker re-cut of
+ * #974 removed its persona-minting caller, so createAgent is its one caller
+ * again.) Persona dressing fields (`personaRole`/`personaPrompt` —
+ * cor:agt:020:01) are normalized here (blank-after-trim ⇒ NULL); the named
+ * identity lives on the Worker entity, never here.
  */
 export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput) {
   const {
@@ -157,42 +117,34 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     type,
     surfaces,
   } = input;
-  // #929 review: normalize persona inputs before anything touches them.
-  const personaNameNorm = normalizePersonaField(input.personaName);
+  // #929 review: normalize persona dressing inputs before anything touches
+  // them.
   const personaRoleNorm = normalizePersonaField(input.personaRole);
   const personaPromptNorm = normalizePersonaField(input.personaPrompt);
   // #574: slugify the display name — a raw name would persist a
   // case-sensitive / space-bearing URN (and the system memory URN derives
   // from this one, so it inherits the clean slug).
-  //
-  // #974 / cor:urn:010:03: the derived slug must be dot-free — the dot is
-  // reserved for the server-derived persona compound, which arrives through
-  // `input.slug` instead (the single writer of dotted agent slugs).
-  let agentSlug: string;
-  if (input.slug !== undefined) {
-    agentSlug = input.slug;
-  } else {
-    agentSlug = deriveSlugFromName(name);
-    assertDotFreeSlug(agentSlug, 'agent');
-  }
+  const agentSlug = deriveSlugFromName(name);
   const agentUrn = `${namespace}:${agentSlug}`;
-  // Check for existing agent with the same URN
+  // Check for existing agent with the same URN. A tombstone is reclaimed —
+  // worker-name permanence lives on Worker rows (cor:agt:020:02), never on
+  // agent tombstones (the #974 re-cut removed the persona-reservation branch
+  // here; a Worker's agent FK is Restrict, so a casting's agent can't be a
+  // hard-deletable tombstone anyway).
   const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
   if (existing) {
-    if (existing.deletedAt && existing.personaName === null) {
-      // Tombstone reclaim — for a NON-persona tombstone only.
-      await ctx.db.agent.delete({ where: { id: existing.id } });
-    } else if (existing.deletedAt) {
-      // #935 review (Codex P1): a soft-deleted PERSONA keeps its name
-      // reserved forever (cor:agt:020:02 — history references the name).
-      // Hard-deleting the tombstone here would release the case-insensitive
-      // personaName reservation and let a new persona silently re-attribute
-      // the old one's work. Refuse instead; register allocation advances to
-      // the next name.
-      throw new AgentUrnTakenError(
-        agentUrn,
-        `URN "${agentUrn}" is reserved by a retired persona — persona names are never recycled.`,
-      );
+    if (existing.deletedAt) {
+      await ctx.db.agent.delete({ where: { id: existing.id } }).catch((e: unknown) => {
+        // P2003 = a Worker casting still references the tombstone (Restrict):
+        // the URN slot is genuinely occupied — refuse typed, don't 500.
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2003') {
+          throw new AgentUrnTakenError(
+            agentUrn,
+            `URN "${agentUrn}" belongs to a deleted agent that still has Worker castings — their history keeps it reserved.`,
+          );
+        }
+        throw e;
+      });
     } else {
       throw new AgentUrnTakenError(agentUrn);
     }
@@ -299,21 +251,17 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         visibility: agentVisibility,
         type: inferredType,
         surfaces: surfaces ?? defaultSurfaces,
-        // #928 team personas — pure metadata (see schema.prisma).
-        personaName: personaNameNorm, personaRole: personaRoleNorm, personaPrompt: personaPromptNorm,
-        // #974 — the persona's required home team App (cor:agt:020:01).
-        teamAppId: input.teamAppId ?? null,
+        // #928 persona dressing — pure metadata (see schema.prisma).
+        personaRole: personaRoleNorm, personaPrompt: personaPromptNorm,
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
     });
   }).catch((e: unknown) => {
-    throwIfPersonaNameCollision(e, personaNameNorm);
     // #935: under CONCURRENT creates the pre-check above races — the loser
     // surfaces as P2002 on the agent (or derived system-memory) urn unique
     // instead. Map it to the same typed refusal the pre-check throws, so
-    // createTeamPersona's register loop can advance instead of dying on a
-    // raw P2002.
+    // callers see a stable code instead of a raw P2002.
     if (
       e instanceof Prisma.PrismaClientKnownRequestError &&
       e.code === 'P2002' &&
@@ -329,21 +277,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaName, personaRole, personaPrompt }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaName?: string; personaRole?: string; personaPrompt?: string },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, personaPrompt }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; personaPrompt?: string },
       ctx: Context,
     ) => {
-      // #974 / cor:agt:020:01: a persona is TEAM-BOUND — it needs a home team
-      // App, which this mutation has no way to name. Personas are minted by
-      // `createTeamPersona` (which also derives the compound slug and installs
-      // onto the roster); refuse here with a typed pointer rather than letting
-      // the request die on the `chk_agent_persona_team_app` CHECK. The other two
-      // persona fields carry no invariant and stay settable.
-      if (normalizePersonaField(personaName) != null) {
-        throw new GraphQLError(
-          'A persona belongs to a team App (cor:agt:020:01) — mint it with createTeamPersona, which allocates the name, derives the agent slug, and installs it onto the roster. createAgent cannot set personaName.',
-          { extensions: { code: 'PERSONA_TEAM_REQUIRED' } },
-        );
-      }
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
       // present ⇒ org-owned (org ADMIN); `orgId` omitted ⇒ user-owned by the
       // caller, namespaced under their `@<handle>`. The chosen `namespace` is
@@ -386,7 +322,7 @@ export const agentMutations = {
         namespace = handle;
       }
       // #935: authorization + owner resolution above, provisioning in the
-      // shared core (also used by createTeamPersona).
+      // shared core.
       return createAgentCore(ctx, {
         organizationId: resolvedOrgId,
         ownerUserId,
@@ -398,7 +334,6 @@ export const agentMutations = {
         visibility,
         type,
         surfaces,
-        personaName,
         personaRole,
         personaPrompt,
       });
@@ -406,11 +341,10 @@ export const agentMutations = {
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaName, personaRole, personaPrompt }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaName?: string | null; personaRole?: string | null; personaPrompt?: string | null },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, personaPrompt }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; personaPrompt?: string | null },
       ctx: Context,
     ) => {
-      // #929 review: normalize persona inputs (blank-after-trim clears).
-      const personaNameNorm = normalizePersonaField(personaName);
+      // #929 review: normalize persona dressing (blank-after-trim clears).
       const personaRoleNorm = normalizePersonaField(personaRole);
       const personaPromptNorm = normalizePersonaField(personaPrompt);
       // #789 / cor:api:140 — was a PK-only findUniqueOrThrow, so a caller
@@ -435,37 +369,13 @@ export const agentMutations = {
       if (visibility === 'PUBLIC') {
         await assertAgentPublicAllowed(ctx.db, id);
       }
-      // #974 / cor:agt:020:01: a persona's `personaName` may only be set on an
-      // agent that already HAS a home team App — i.e. one minted by
-      // createTeamPersona. Without this the write dies on the
-      // `chk_agent_persona_team_app` CHECK as an untyped 500. Clearing
-      // (explicit null / blank) stays allowed: it only removes a persona.
-      if (personaNameNorm != null && agent.teamAppId === null) {
-        throw new GraphQLError(
-          'A persona belongs to a team App (cor:agt:020:01) — this agent has none. Mint personas with createTeamPersona.',
-          { extensions: { code: 'PERSONA_TEAM_REQUIRED' } },
-        );
-      }
       let newUrn: string | undefined;
       if (urn !== undefined) {
         if (!agent.organizationId) {
           throw new GraphQLError('Renaming via urn is not supported for user-owned agents.', { extensions: { code: 'BAD_USER_INPUT' } });
         }
-        // #974 / cor:agt:020:06: a persona's slug is SERVER-DERIVED
-        // (`<team-app-slug>.<persona-name>`) and never chosen by a caller —
-        // accepting a rename here would make it caller-chosen, and the dot
-        // reservation would strip the compound shape on the way through.
-        // Renaming the team App leaves the persona slug spelling the old team
-        // slug; that staleness is accepted by design.
-        if (agent.personaName !== null) {
-          throw new GraphQLError(
-            'A persona\'s agent slug is server-derived from its team App and persona name (cor:agt:020:06) — it cannot be renamed.',
-            { extensions: { code: 'BAD_USER_INPUT' } },
-          );
-        }
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: agent.organizationId }, select: { urn: true } });
         const renamedSlug = deriveSlugFromName(urn); // #574: slugify the explicit rename slug
-        assertDotFreeSlug(renamedSlug, 'agent'); // #974 / cor:urn:010:03
         newUrn = `${org.urn}:${renamedSlug}`;
       }
 
@@ -581,16 +491,12 @@ export const agentMutations = {
           ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
           ...(type !== undefined ? { type } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
-          // #928 team personas — pure metadata. An explicit null (or a
+          // #928 persona dressing — pure metadata. An explicit null (or a
           // blank-after-trim string) clears the field; omitted preserves.
-          ...(personaNameNorm !== undefined ? { personaName: personaNameNorm } : {}),
           ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
           ...(personaPromptNorm !== undefined ? { personaPrompt: personaPromptNorm } : {}),
         },
         include: AGENT_INCLUDE,
-      }).catch((e: unknown) => {
-        throwIfPersonaNameCollision(e, personaNameNorm);
-        throw e;
       });
     },
 

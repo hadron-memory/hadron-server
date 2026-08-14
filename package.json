@@ -27,7 +27,6 @@
     "admin:backfill-shared-memory-agent": "tsx scripts/backfill-shared-memory-agent.ts",
     "admin:transfer-exchange-tokens": "tsx scripts/admin-transfer-exchange-tokens.ts",
     "admin:audit-system-memory": "tsx scripts/admin-audit-system-memory.ts",
-    "admin:repair-personas": "tsx scripts/admin-repair-personas.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"

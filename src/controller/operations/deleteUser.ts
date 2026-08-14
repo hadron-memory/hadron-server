@@ -239,8 +239,19 @@ async function runDeletionTxn(
         where: { importedAgent: { ownerUserId: targetUserId } },
       });
       // User-owned Apps: the App cascade removes app-scoped memories, keys,
-      // members, installs, runs, schedules, webhooks, pending setups.
+      // members, installs, runs, schedules, webhooks, pending setups — and
+      // their Worker castings (Worker.appId cascades).
       await tx.app.deleteMany({ where: { ownerUserId: targetUserId } });
+      // Worker castings of the target's agents: `Worker.agentId` is ON DELETE
+      // RESTRICT (#974), so any surviving casting would fail the agent delete
+      // below with P2003 and roll back the whole erasure. In v1 this set is
+      // empty by construction — a user-owned agent is strictly PERSONAL, so
+      // it can only ever be cast in the owner's OWN Apps, which the App
+      // cascade above just took — but the explicit sweep keeps account
+      // erasure whole if agent sharing is ever relaxed (PR #978 review,
+      // Copilot). Erasure wins over worker-name permanence for the erased
+      // user's own castings, deliberately.
+      await tx.worker.deleteMany({ where: { agent: { ownerUserId: targetUserId } } });
       // User-owned Agents (before memories: their system memories are owned
       // rows swept by the memory pass — Agent.systemMemoryId carries no FK).
       await tx.agent.deleteMany({ where: { ownerUserId: targetUserId } });

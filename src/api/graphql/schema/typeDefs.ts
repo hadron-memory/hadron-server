@@ -676,7 +676,10 @@ export const typeDefs = `#graphql
     type: String!
     appId: String
     userId: String
+    "The role-agent driving the session (with workerId set, the agent behind the casting)."
     agentId: String
+    "#974 / cor:agt:020:03: the Worker (named casting) this session works as."
+    workerId: String
     memoryId: String
     expiresAt: DateTime
     repo: String
@@ -1666,24 +1669,14 @@ export const typeDefs = `#graphql
     listedOnMarketplace: Boolean!
     type: AgentType!
     surfaces: [String!]!
-    # #928 team personas: a persona - a named AI team member driven by
-    # external coding sessions or portal chat - IS an Agent. Pure metadata:
-    # no server behavior forks on these fields.
-    "Persona display name ('Iris'). Unique per TEAM App, case-insensitively (cor:agt:020:02) - two teams may each have an Iris. Set only by createTeamPersona."
-    personaName: String
+    # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
+    # lets any agent present as a colleague. The NAMED identity ('Iris') is
+    # the Worker - the casting of an installed agent into an App - never a
+    # field here. Pure metadata: no server behavior forks on these fields.
     "Persona role - free string with conventions ('backend-engineer')."
     personaRole: String
-    "Persona identity paragraph; clients compose it into systemPrompt."
+    "Persona identity TEMPLATE ('You are {{name}}, ...'); {{name}}/{{role}} are bound at casting time (Worker.prompt returns the bound result)."
     personaPrompt: String
-    """
-    #974 - the persona's home team App (cor:agt:020:01), required for any agent
-    with a personaName and fixed at mint. It scopes the persona-name uniqueness
-    and is the left constituent of the derived agent slug
-    '<team-app-slug>.<persona-name>'. Read this column to answer 'which team' -
-    never parse the slug (cor:agt:020:06). Resolve the App itself through the
-    gated app(ref:) query; null on every non-persona agent.
-    """
-    teamAppId: ID
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -1830,11 +1823,12 @@ export const typeDefs = `#graphql
   }
 
   """
-  One message in a team App's chat (#939). Exactly one of authorUserId /
-  authorAgentId is set: a human post carries the user, a persona post carries
-  the persona Agent plus the driving sessionId. mentions holds the lowercased
-  tokens extracted server-side at write time (the '@persona-name / @handle'
-  format, stored without the '@').
+  One message in a team App's chat (#939, Worker envelope since #974). Exactly
+  one of authorUserId / authorWorkerId is set: a human post carries the user, a
+  worker post carries the Worker (the named casting, cor:dmo:050:11) plus the
+  driving sessionId. mentions holds the lowercased tokens extracted
+  server-side at write time (the '@worker-name / @handle' format, stored
+  without the '@').
   """
   type TeamChatMessage {
     "The message node's id."
@@ -1844,10 +1838,10 @@ export const typeDefs = `#graphql
     body: String!
     at: DateTime!
     authorUserId: ID
-    authorAgentId: ID
-    "Display convenience: the persona name or the user handle."
+    authorWorkerId: ID
+    "Display convenience: the worker name or the user handle."
     authorName: String
-    "The session driving the persona author, when posted via sessionRef."
+    "The session driving the worker author, when posted via sessionRef."
     sessionId: ID
     "The seq this message replies to, when it is a reply."
     replyToSeq: Int
@@ -1872,8 +1866,10 @@ export const typeDefs = `#graphql
     nodeId: ID!
     "The session the work is attributed to."
     sessionId: ID!
-    "Display convenience, denormalized at write: the session's bound persona name, else the attributed user's handle."
-    personaName: String!
+    "Display convenience, denormalized at write: the session's bound worker name, else the attributed user's handle (pre-#974 records surface their stored personaName here)."
+    workerName: String!
+    "The Worker (named casting) behind the record, when the session was worker-bound."
+    workerId: ID
     "The external tool the artifact lives in ('github', ...). Lowercased."
     tool: String!
     "Artifact kind: pr, issue, commit, branch, or repo."
@@ -1890,6 +1886,49 @@ export const typeDefs = `#graphql
 
   type TeamWorkItemsPage {
     items: [TeamWorkItem!]!
+    total: Int!
+  }
+
+  """
+  A Worker (#974, cor:dmo:050:11) — the named casting of an installed Agent
+  into an App: 'Iris', the backend-engineer agent cast into the eng-team App.
+  The Agent carries the reusable persona dressing; the Worker is the local
+  named identity that does attributable work. Names are unique per App,
+  case-insensitively, forever (retirement and uninstall never free them —
+  cor:agt:020:02); rows survive the agent's uninstall. Workers have no URN.
+  """
+  type Worker {
+    id: ID!
+    appId: ID!
+    agentId: ID!
+    "The worker's name ('Iris') — the identity every surface renders."
+    name: String!
+    "The cast-list role this filling answers ('backend-engineer')."
+    role: String
+    "Per-worker individuality layered over the agent's template prompt."
+    promptOverride: String
+    "The worker-scoped working memory in the App's container (null until provisioned)."
+    memoryId: ID
+    "The role-agent behind the casting."
+    agent: Agent
+    "The App whose staff this casting fills."
+    app: App
+    """
+    The worker's boot prompt, resolved: the agent's personaPrompt template
+    with {{name}}/{{role}} bound, then promptOverride appended as its own
+    paragraph. Null when the agent carries no template and the worker no
+    override.
+    """
+    prompt: String
+    createdAt: DateTime!
+    createdBy: String
+    "Retirement instant — a retired worker stops authoring and takes no new sessions; the name stays reserved."
+    retiredAt: DateTime
+    retiredBy: String
+  }
+
+  type WorkersPage {
+    items: [Worker!]!
     total: Int!
   }
 
@@ -3110,12 +3149,25 @@ export const typeDefs = `#graphql
     host: String
     tool: String
     """
-    #928 / cor:api:140: the Agent (persona) driving this session, as a PK or
-    URN. Resolves to Session.agentId. The caller must be able to READ the
-    agent (PUBLIC, or owner / org member) - a session is never attributed to
-    an agent the caller cannot see.
+    #928 / cor:api:140: the role-Agent driving this session, as a PK or URN.
+    Resolves to Session.agentId. The caller must be able to READ the agent
+    (PUBLIC, or owner / org member) - a session is never attributed to an
+    agent the caller cannot see. Usually omitted with workerRef, which derives
+    it from the casting.
     """
     agentRef: String
+    """
+    #974 / cor:agt:020:03: the Worker (named casting) this session works as -
+    the worker's id (workers have no URN; names never enter URNs, cor:agt:020:02).
+    Resolves to Session.workerId, and stamps Session.agentId with the worker's
+    role-agent. The worker must belong to the session's App: with appRef (or an
+    App-key credential) it must match the worker's App; without one, the
+    worker's App becomes the session's, behind the same membership gate as
+    appRef. A retired worker refuses (WORKER_RETIRED). Binding a worker that
+    is already driven elsewhere is NOT refused - informed takeover is the
+    client's contract (show who last drove it, proceed on explicit override).
+    """
+    workerRef: String
     """
     #943 / cor:api:140: the App this session is a unit of work for, as a PK or
     URN. Resolves to Session.appId - the pivot that was previously stamped ONLY
@@ -3920,7 +3972,8 @@ export const typeDefs = `#graphql
     ): [UsageActivityBucket!]!
 
     # Sessions, most recent first
-    sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
+    "workerRef (#974): only sessions bound to that Worker (by id), newest first - the 'taken right now' / 'last driven by' read (cor:agt:020:03)."
+    sessions(type: String, repo: String, customerId: String, workerRef: String, limit: Int, offset: Int): [Session!]!
     session(id: ID!): Session
 
     """
@@ -4490,12 +4543,13 @@ export const typeDefs = `#graphql
     { items, total } page. sinceSeq is a watermark cursor: only messages with
     seq STRICTLY GREATER than it are returned (pass the last seq you have
     seen). mentionsRef filters to messages whose stored envelope mentions the
-    referenced persona (Agent ref) or user (user ref) — matching runs against
-    the mention tokens extracted at write time, never by re-parsing bodies.
-    The ref must name a member of THIS App's roster (an installed Agent, an
-    AppMember, or the caller); an unresolvable or off-roster mentionsRef
-    yields the empty page identically (no existence oracle). limit defaults
-    to 50 (cap 200); limit: 0 returns only total.
+    referenced worker (a Worker id or name of THIS App, retired included) or
+    user (handle/id) — matching runs against the mention tokens extracted at
+    write time, never by re-parsing bodies. The ref must name this App's own
+    staff or members (a Worker of the App, an AppMember, or the caller); an
+    unresolvable or foreign mentionsRef yields the empty page identically (no
+    existence oracle). limit defaults to 50 (cap 200); limit: 0 returns only
+    total.
 
     Authorization: an AppMember of the App (any role), an org member with
     CONTRIBUTOR+ on the App's org, the owner of a user-owned App, or the
@@ -4537,6 +4591,23 @@ export const typeDefs = `#graphql
       limit: Int
       offset: Int
     ): TeamWorkItemsPage!
+
+    """
+    One Worker by id (#974; workers have no URN, so ref is the PK only).
+    Authorization: an AppMember of the worker's App (any role), an org member
+    with CONTRIBUTOR+ on its org, the owner of a user-owned App, or the App's
+    own key.
+    """
+    worker(ref: ID!): Worker
+
+    """
+    A team App's STAFF (#974, cor:agt:020:01 — Workers are the staff; the
+    AppAgent join is the install roster): the App's castings, oldest first,
+    as a uniform { items, total } page. Retired castings are hidden unless
+    includeRetired. Same authorization as worker. appRef accepts the App's
+    ID or URN.
+    """
+    workers(appRef: ID!, includeRetired: Boolean, limit: Int, offset: Int): WorkersPage!
 
     # ── Assets (spec 004-asset-upload + 006-asset-upload-redesign) ────
     # v1 — agent-addressed listing. Deprecated; use memoryAssets.
@@ -5438,33 +5509,25 @@ export const typeDefs = `#graphql
     v2 — no @ sigil) and its system memory is user-owned too. Exactly one owner
     (org XOR user).
 
-    The slug is derived from name and must not contain '.' — the dot is
-    reserved for server-derived team-persona slugs (cor:urn:010:03).
-
-    personaName is REFUSED here with PERSONA_TEAM_REQUIRED (#974): a persona is
-    team-bound (cor:agt:020:01) and is minted by createTeamPersona, which
-    supplies the home team App, derives the compound slug, and installs it onto
-    the roster. personaRole / personaPrompt carry no such invariant.
+    personaRole / personaPrompt are the persona dressing (cor:agt:020:01) —
+    the reusable role plus the '{{name}}'-templated identity prompt. The NAMED
+    identity is a Worker, cast with castWorker; names never live on agents.
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaName: String, personaRole: String, personaPrompt: String): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String): Agent!
 
     """
     Update an Agent.
 
-    urn renames the slug (org-owned agents only); the new slug must not contain
-    '.' (cor:urn:010:03), and a PERSONA cannot be renamed at all — its slug is
-    server-derived from its team App and persona name (cor:agt:020:06).
-
-    personaName may only be SET on an agent that already has a team App (one
-    minted by createTeamPersona) — otherwise PERSONA_TEAM_REQUIRED (#974).
-    Clearing it (explicit null / blank) is always allowed. A name already taken
-    in the same team is PERSONA_NAME_TAKEN.
+    urn renames the slug (org-owned agents only). personaRole / personaPrompt
+    are the persona dressing (cor:agt:020:01); explicit null or blank clears,
+    omitted preserves. Worker castings referencing this agent are unaffected —
+    the named identity lives on the Worker.
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaName: String, personaRole: String, personaPrompt: String): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String): Agent!
 
     """
     Soft-delete an Agent.
@@ -6075,14 +6138,14 @@ export const typeDefs = `#graphql
     credential addresses all of them.
 
     This is the ONE operation that attaches an EXISTING Agent to an EXISTING
-    App — distinct from createApp (which makes a NEW App from an Agent) and
-    createTeamPersona (which installs an Agent it mints in the same call). It
+    App — distinct from createApp (which makes a NEW App from an Agent). It
     is therefore also the re-attach that cor:dmo:050:03 promises: detaching an
     Agent retains the memories accumulated under that App-and-Agent pairing as
     orphans, and installing the Agent again is what makes them reachable.
-    Under cor:agt:020:01 the AppAgent join IS a team's roster, so this is how a
-    roster is composed: adding an existing persona to a second team App, or
-    putting back one uninstalled by mistake.
+    Under cor:agt:020:01 the AppAgent join is a team's install ROSTER (which
+    agents are available); the App's STAFF are its Workers, cast from
+    installed agents with castWorker. Worker rows survive uninstall
+    (cor:dmo:050:11) — uninstalling severs future casting, not history.
 
     Rejects with code DUPLICATE_APP_AGENT when the Agent is already
     installed in the App.
@@ -6106,62 +6169,74 @@ export const typeDefs = `#graphql
     ): InstallAgentIntoAppPayload!
 
     """
-    #935/#974 — mint a team persona: role-template + name-register
-    instantiation as a platform operation (spec cor:agt:020:01/:02/:06). This
-    is the ONLY way a persona comes into being: createAgent refuses
-    personaName (PERSONA_TEAM_REQUIRED), because a persona needs the home team
-    App only this operation can supply. Locates the Team Agent
-    among the App's installed Agents (teamAgentRef when given; otherwise the
-    single installed Agent whose system memory carries a 'roles:' branch —
-    zero or several candidates is a typed error, never a guess), reads the
-    role definition node 'roles:<role>' from that system memory (prompt
-    template in content, name register in data.names), allocates a name (a
-    caller-supplied name wins; otherwise the register's next free name,
-    advancing past PERSONA_NAME_TAKEN per the allocation contract), composes
-    personaPrompt from the template ({{name}} and {{role}} placeholders),
-    creates the Agent owned by the App's owner with personaRole set, and
-    installs it into the App (AppAgent row) so the minted persona is on the
-    roster immediately. Returns the created Agent — clients print its
-    personaPrompt as the persona's boot briefing.
+    #974 — cast a Worker (cor:dmo:050:11, cor:agt:020:01/:02): the named
+    casting of an agent ALREADY INSTALLED in the App, superseding
+    createTeamPersona's minting semantics (nothing is minted — the agent
+    carries the persona dressing; the Worker is the local named identity).
+    Casting is opt-in, never requires a Team Agent (an explicit name skips the
+    register entirely), and multiple castings of one agent per App are legal
+    (Iris and Henry, both backend-engineer).
 
-    Team scoping (#974, cor:agt:020:01/:02/:06): the minted Agent carries
-    teamAppId = this App, its name is unique within that team only (two teams
-    may each mint an Iris), and its agent slug is SERVER-DERIVED as
-    '<team-app-slug>.<persona-name>' — the platform's only dotted agent slug,
-    collision-free by construction, so nothing here ever retries a slug.
-    Context-free surfaces (PR trailers, anything rendered outside Hadron)
-    carry the team-qualified compound, never the bare short name.
+    Agent resolution: agentRef when given (must be installed here —
+    WORKER_AGENT_NOT_INSTALLED); otherwise role picks the single installed
+    agent whose personaRole matches (zero / several candidates:
+    WORKER_AGENT_NOT_FOUND / WORKER_AGENT_AMBIGUOUS, never a guess). The
+    casting's role defaults to the agent's personaRole when role is omitted.
 
-    Persona metadata (#950): visibility follows the team App's owner —
-    ORGANIZATION for an org-owned App (the roster is the team's shared view of
-    who is on it), PERSONAL for a user-owned one. The Agent's description is
-    the role node's 'data.personaDescription' template when set (same
-    {{name}}/{{role}} substitution as the prompt, keeping the raw role slug),
-    otherwise the synthesized 'AI coding agent using <role> role' with the role
-    slug humanized for prose ('backend-engineer' renders 'backend engineer').
-    It is NEVER the role node's own description, which describes the
-    role-definition artifact rather than the persona.
+    Name allocation (cor:agt:020:02): a caller-supplied name wins (one
+    attempt — WORKER_NAME_TAKEN is the answer); otherwise the Team Agent's
+    cast-list register for the role (the roles:<role> node's data.names,
+    located as before: teamAgentRef, or the single installed agent with a
+    roles: branch) is walked first-to-last, advancing past WORKER_NAME_TAKEN —
+    the workers_app_name_uniq constraint IS the allocation primitive. Names
+    are unique per App, case-insensitively, FOREVER (two Apps may each have an
+    Iris; retirement and uninstall never free a name).
+
+    A worker-scoped working memory is provisioned in the App's container
+    (Worker.memoryId; best-effort — a failed provision leaves it null for
+    lazy provisioning).
 
     Authorization: an org member with CONTRIBUTOR+ on the App's org, an
     AppMember of the App whose role is not 'reader', or the owner of a
     user-owned App. Pure App-key principals are denied.
 
-    Error codes (extensions.code): TEAM_AGENT_NOT_FOUND, TEAM_AGENT_AMBIGUOUS,
-    TEAM_AGENT_NOT_INSTALLED, PERSONA_ROLE_NOT_FOUND, PERSONA_ROLE_INVALID,
-    PERSONA_NAME_TAKEN (a name taken in THIS team — including one reserved by
-    a retired persona; #974 folded the former AGENT_URN_TAKEN refusal into it,
-    so a register loop advances on this code alone),
-    PERSONA_REGISTER_EXHAUSTED, SESSION_EXPIRED (encrypted system memory
-    without an active session key), APP_UNINSTALLED.
+    Error codes (extensions.code): WORKER_NAME_TAKEN,
+    WORKER_REGISTER_EXHAUSTED, WORKER_AGENT_NOT_INSTALLED,
+    WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS, WORKER_ROLE_NOT_FOUND,
+    TEAM_AGENT_NOT_FOUND, TEAM_AGENT_AMBIGUOUS, TEAM_AGENT_NOT_INSTALLED,
+    SESSION_EXPIRED (encrypted system memory without an active session key),
+    APP_UNINSTALLED.
 
-    Accepts the entity's ID or URN for appRef and teamAgentRef.
+    Accepts the entity's ID or URN for appRef, agentRef, and teamAgentRef.
     """
-    createTeamPersona(
+    castWorker(
       appRef: ID!
-      role: String!
-      teamAgentRef: ID
+      agentRef: ID
+      role: String
       name: String
-    ): Agent!
+      teamAgentRef: ID
+      promptOverride: String
+    ): Worker!
+
+    """
+    #974 — retire a Worker (cor:agt:020:02): end the casting while reserving
+    its name FOREVER. A retired worker stops authoring team chat at once (the
+    worker-App pin checks retirement at post time), takes no new work records,
+    and refuses new session bindings; the row and its name reservation
+    survive. Idempotent — retiring an already-retired worker returns it
+    unchanged. Same authorization as castWorker. workerRef is the worker's id
+    (workers have no URN).
+    """
+    retireWorker(workerRef: ID!): Worker!
+
+    """
+    #974 — hard-delete a NEVER-USED miscast (cor:dmo:050:11's only removal
+    escape): refused with WORKER_IN_USE unless no session was ever bound and
+    the worker's working memory holds no content. Anything with history
+    retires instead — its name is bound to that history forever. Also removes
+    the empty working memory. Same authorization as castWorker.
+    """
+    deleteWorker(workerRef: ID!): Boolean!
 
     """
     Post a message into a team App's chat (#939) as a platform operation.
@@ -6170,14 +6245,15 @@ export const typeDefs = `#graphql
     The message is written through the atomic chat-message allocator (#919),
     so racing posts get distinct consecutive seqs.
 
-    Author derivation: with sessionRef, the message is authored by that
-    session's bound persona (the session must be writable by the caller, a
-    session OF this App, active, and agent-bound) and the envelope records
-    the driving sessionId; without it, by the calling human. Mentions
-    ('@persona-name' / '@handle'; a multi-word name is mentioned by its
-    slug, e.g. '@mary-jane') are extracted server-side at write time into
-    the envelope. replyToSeq wires a replies-to edge to the cited message.
-    body is capped at 65536 characters.
+    Author derivation (#974): with sessionRef, the message is authored by
+    that session's bound Worker (the session must be writable by the caller, a
+    session OF this App, active, and bound to a non-retired Worker OF this
+    App — the worker-App pin, checked at post time so retirement revokes) and
+    the envelope records the driving sessionId; without it, by the calling
+    human. Mentions ('@worker-name' / '@handle'; a multi-word name is
+    mentioned by its slug, e.g. '@mary-jane') are extracted server-side at
+    write time into the envelope. replyToSeq wires a replies-to edge to the
+    cited message. body is capped at 65536 characters.
 
     Authorization: an AppMember of the App (any role — every member of the
     host is a participant per cor:acl:030:01), an org member with
@@ -6186,9 +6262,10 @@ export const typeDefs = `#graphql
 
     Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE,
     TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_NOT_IN_APP (the
-    session belongs to a different App — a persona never authors across
-    Apps), SESSION_ENDED, SESSION_NOT_PERSONA_BOUND, SESSION_EXPIRED
-    (encrypted team memory without an active session key),
+    session belongs to a different App — a worker never authors across
+    Apps), SESSION_ENDED, SESSION_NOT_WORKER_BOUND,
+    SESSION_WORKER_NOT_IN_APP (the worker-App pin), WORKER_RETIRED,
+    SESSION_EXPIRED (encrypted team memory without an active session key),
     TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could
     not locate the Team Agent), APP_UNINSTALLED, FORBIDDEN.
 
@@ -6221,10 +6298,16 @@ export const typeDefs = `#graphql
     CONTRIBUTOR+ on the App's org, or the owner of a user-owned App. A pure
     App-key principal may NOT record (read-only on the worklog).
 
+    A worker-bound session records under its Worker's name (#974,
+    cor:agt:020:05) — the worker must belong to THIS App and not be retired
+    (SESSION_WORKER_NOT_IN_APP / WORKER_RETIRED — a retired or foreign
+    worker refuses rather than reshaping the attribution); an unbound
+    session records under the attributed user's handle.
+
     Typed refusals: WORK_REF_INVALID, SESSION_NOT_FOUND, SESSION_NOT_IN_APP,
-    SESSION_AGENT_NOT_IN_APP, TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS
-    (first-write bootstrap could not locate the Team Agent),
-    APP_UNINSTALLED, FORBIDDEN, BAD_USER_INPUT.
+    SESSION_WORKER_NOT_IN_APP, WORKER_RETIRED, TEAM_AGENT_NOT_FOUND /
+    TEAM_AGENT_AMBIGUOUS (first-write bootstrap could not locate the Team
+    Agent), APP_UNINSTALLED, FORBIDDEN, BAD_USER_INPUT.
 
     appRef accepts the entity's ID or URN; sessionRef is the session id.
     """

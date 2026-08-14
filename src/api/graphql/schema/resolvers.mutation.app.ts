@@ -32,13 +32,11 @@ import {
   AppUninstalledError,
 } from '../../../controller/operations/joinApp.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
-import { assertAgentNotTeamBound, assertNoTeamPersonas } from '../../../lib/teamBinding.js';
 import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
-import { assertDotFreeSlug } from '../../../lib/personaSlug.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import {
@@ -57,6 +55,28 @@ import {
   uninstallAgentFromAppCore,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
+
+/**
+ * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
+ * names FOREVER — history (PR trailers, chat archives) references them, and
+ * `Worker.appId` is onDelete: Cascade, so hard-deleting the tombstone would
+ * silently take the castings with it and recycle their names. Every
+ * tombstone-reclaim path must refuse instead when castings exist.
+ */
+async function assertNoWorkers(
+  db: Context['db'],
+  appId: string,
+  appUrn: string,
+  action: 'reclaim',
+): Promise<void> {
+  const workers = await db.worker.count({ where: { appId } });
+  if (workers > 0) {
+    throw new GraphQLError(
+      `Cannot ${action} the URN "${appUrn}": the deleted App holding it still has ${workers} worker casting(s), whose names are permanently reserved (cor:agt:020:02).`,
+      { extensions: { code: 'WORKER_NAMES_RESERVED', appId, workers } },
+    );
+  }
+}
 
 /**
  * Can the caller manage this App's members by ROLE alone — independent of any
@@ -267,27 +287,12 @@ export const appMutations = {
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
       //
-      // #974 / cor:urn:010:03: an App slug must be dot-free. It is the LEFT
-      // constituent of every persona compound `<team-app-slug>.<persona-name>`,
-      // so a dotted App slug would break that compound's injectivity — two
-      // different (team, persona) pairs could spell the same agent slug.
       const appSlug = deriveSlugFromName(urn ?? name);
-      assertDotFreeSlug(appSlug, 'App');
       const appUrn = `${namespace}:${appSlug}`;
 
       // 009-install-agent-flow: agentRef is required (typeDef gate). Resolve the
       // Agent (resolveAgentRef rejects soft-deleted Agents).
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
-      // #974 / cor:agt:020:01: a persona belongs to exactly one team App, so it
-      // can never be the founding Agent of a NEW one. Same rule as
-      // installAgentIntoAppCore's guard — restated because this path links the
-      // roster row itself rather than going through that helper.
-      const foundingAgent = await ctx.db.agent.findUniqueOrThrow({
-        where: { id: resolvedAgentId },
-        select: { personaName: true, teamAppId: true },
-      });
-      // targetAppId null: the App does not exist yet, so ANY team binding refuses.
-      assertAgentNotTeamBound({ id: resolvedAgentId, ...foundingAgent }, null);
       if (resolvedOrgId) {
         // Org path: auto-provision the AgentOrgGrant (008 behavior; portal hides
         // the cross-org Install affordance — a hard server gate is the
@@ -349,15 +354,13 @@ export const appMutations = {
       });
       if (existing) {
         if (existing.deletedAt) {
-          // #974 / cor:agt:020:02: a soft-deleted TEAM App keeps reserving all
-          // of its personas' names — history (PR trailers, chat archives)
-          // references them, and a new App at the same slug would derive the
-          // very same `<slug>.<persona-name>` compounds. `Agent.teamAppId` is
-          // onDelete: Cascade, so hard-deleting the tombstone here would
-          // silently take the personas with it and recycle their names. Refuse
-          // instead — the same shape as createAgent's persona-tombstone
-          // refusal.
-          await assertNoTeamPersonas(ctx.db, existing.id, appUrn, 'reclaim');
+          // #974 / cor:agt:020:02: a soft-deleted App keeps reserving all of
+          // its workers' names — history (PR trailers, chat archives)
+          // references them, and `Worker.appId` is onDelete: Cascade, so
+          // hard-deleting the tombstone here would silently take the castings
+          // with it and recycle their permanently-reserved names. Refuse
+          // instead.
+          await assertNoWorkers(ctx.db, existing.id, appUrn, 'reclaim');
           await ctx.db.app.delete({ where: { id: existing.id } });
         } else {
           throw new Error(`An app with URN "${appUrn}" already exists`);
@@ -484,15 +487,8 @@ export const appMutations = {
           // a slug suffix (defensive — all 008-shape Agents have URNs).
           const depAgent = await ctx.db.agent.findUniqueOrThrow({
             where: { id: imp.importedAgentId },
-            select: { name: true, urn: true, personaName: true, teamAppId: true },
+            select: { name: true, urn: true },
           });
-          // #974 / cor:agt:020:01 (PR #975 review — both bots): this loop links
-          // its AppAgent row directly, so it never reaches
-          // installAgentIntoAppCore's gate. Without this a parent Agent that
-          // imports a persona would install that persona into a SECOND team and
-          // derive the new App's slug from the persona's dotted agent slug —
-          // breaking team-boundness and the App dot reservation in one step.
-          assertAgentNotTeamBound({ id: imp.importedAgentId, ...depAgent }, null);
           const depSlug =
             depAgent.urn.split(':').slice(1).join(':') || `dep-${imp.importedAgentId}`;
           let depUrn = `${org.urn}:${depSlug}`;
@@ -506,11 +502,10 @@ export const appMutations = {
           });
           if (depCollision) {
             if (depCollision.deletedAt) {
-              // Same reclaim rule as the parent App branch (PR #975 review —
-              // codex P1): `Agent.teamAppId` cascades, so hard-deleting a
-              // retired TEAM App here would delete its personas and recycle
-              // their permanently-reserved names.
-              await assertNoTeamPersonas(ctx.db, depCollision.id, depUrn, 'reclaim');
+              // Same reclaim rule as the parent App branch: `Worker.appId`
+              // cascades, so hard-deleting a retired App here would delete its
+              // castings and recycle their permanently-reserved names.
+              await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               await ctx.db.app.delete({ where: { id: depCollision.id } });
             } else {
               depUrn = `${depUrn}:${imp.importedAgentId.slice(-8)}`;
@@ -635,20 +630,7 @@ export const appMutations = {
           where: { id: app.organizationId }, select: { urn: true },
         });
         const renamedSlug = deriveSlugFromName(urn); // #574: shared slugify
-        assertDotFreeSlug(renamedSlug, 'App'); // #974 / cor:urn:010:03
         newUrn = `${org.urn}:${renamedSlug}`;
-        // #974 / cor:agt:020:02 (PR #975 review — both bots): a persona's slug
-        // is `<team-app-slug>.<persona-name>`, frozen at mint because history
-        // cites it. Renaming its team App would free the OLD slug for a new App
-        // while the personas still spell it — and minting the same name there
-        // would derive an already-occupied compound, refused as
-        // PERSONA_NAME_TAKEN for a name that is genuinely free in that team.
-        // Refuse the rename instead; it is the reversible end of the trade, and
-        // the same "a team slug with personas is never recycled" rule the
-        // reclaim path enforces. A no-op rename (same slug) still passes.
-        if (newUrn !== app.urn) {
-          await assertNoTeamPersonas(ctx.db, resolvedId, app.urn, 'rename');
-        }
       }
       // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args
       // maintain the App's 'default' registry config. Explicit null

@@ -55,6 +55,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.edge.deleteMany();
   await db.pendingEdge.deleteMany();
   await db.session.deleteMany();
+  // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
+  await db.worker.deleteMany();
   await db.node.deleteMany();
   await db.agentMemoryItem.deleteMany();
   await db.appLogEntry.deleteMany();

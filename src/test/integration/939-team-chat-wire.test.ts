@@ -33,6 +33,7 @@ const POST_MSG = `
       seq
       body
       authorUserId
+      authorWorkerId
       authorName
       replyToSeq
       mentions
@@ -44,7 +45,7 @@ const READ_MSGS = `
   query Read($appRef: ID!, $sinceSeq: Int, $mentionsRef: ID, $limit: Int, $offset: Int) {
     teamChatMessages(appRef: $appRef, sinceSeq: $sinceSeq, mentionsRef: $mentionsRef, limit: $limit, offset: $offset) {
       total
-      items { seq body authorName mentions }
+      items { seq body authorWorkerId authorName mentions }
     }
   }
 `;
@@ -118,6 +119,8 @@ describe('team chat on the wire (#939)', () => {
     expect(posted.errors).toBeUndefined();
     expect(posted.data?.createTeamChatMessage?.seq).toBe(1);
     expect(posted.data?.createTeamChatMessage?.mentions).toEqual(['iris']);
+    // #974: a human post carries no worker author.
+    expect(posted.data?.createTeamChatMessage?.authorWorkerId).toBeNull();
 
     const reply = await gql(POST_MSG, { appRef: app.id, body: 'ack', replyToSeq: 1 });
     expect(reply.errors).toBeUndefined();
@@ -140,7 +143,7 @@ describe('team chat on the wire (#939)', () => {
   });
 
   it('an unknown sessionRef carries SESSION_NOT_FOUND as extensions.code', async () => {
-    const body = await gql(POST_MSG, { appRef: app.id, body: 'as persona', sessionRef: 'nope' });
+    const body = await gql(POST_MSG, { appRef: app.id, body: 'as worker', sessionRef: 'nope' });
     expect(body.errors?.[0]?.extensions?.code).toBe('SESSION_NOT_FOUND');
   });
 });

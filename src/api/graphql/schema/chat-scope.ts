@@ -333,7 +333,7 @@ const MINT_RETRY_LIMIT = 3;
  * is gone or handle-less, where minting under the App's root still beats
  * failing to provision the App's only writable memory.
  */
-async function resolveMemoryRoot(
+export async function resolveMemoryRoot(
   db: PrismaClient,
   args: { organizationId: string | null; ownerUserId: string | null; appUrn: string },
 ): Promise<string> {

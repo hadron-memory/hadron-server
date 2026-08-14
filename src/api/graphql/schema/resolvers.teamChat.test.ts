@@ -121,18 +121,18 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: app.id, userId: appReader.id, role: 'reader' } });
 });
 
-/** Mint a persona and bind an active session (driven by `userId`) to it. */
-async function personaSession(userId: string): Promise<{ agentId: string; personaName: string; sessionId: string }> {
-  const persona = await M.createTeamPersona(
-    {},
-    { appRef: app.id, role: 'backend-engineer' },
-    ctx(admin.id),
-  );
+/** Cast a Worker of the installed team agent and bind an active session
+ * (driven by `userId`) to it — the #974 fixture shape: the Worker row IS the
+ * named identity; `Session.agentId` still records the role-agent. */
+async function workerSession(userId: string, name = 'Iris'): Promise<{ workerId: string; workerName: string; sessionId: string }> {
+  const worker = await db.worker.create({
+    data: { appId: app.id, agentId: teamAgent.id, name },
+  });
   const sessionId = generateId();
   await db.session.create({
-    data: { id: sessionId, appId: app.id, userId, agentId: persona.id },
+    data: { id: sessionId, appId: app.id, userId, agentId: teamAgent.id, workerId: worker.id },
   });
-  return { agentId: persona.id, personaName: persona.personaName, sessionId };
+  return { workerId: worker.id, workerName: worker.name, sessionId };
 }
 
 describe('extractMentions — the one mention format', () => {
@@ -160,7 +160,7 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
     const msg = await post(ctx(appMember.id), { body: 'first!' });
     expect(msg.seq).toBe(1);
     expect(msg.authorUserId).toBe(appMember.id);
-    expect(msg.authorAgentId).toBeNull();
+    expect(msg.authorWorkerId).toBeNull();
     expect(msg.authorName).toBe(appMember.handle);
     expect(msg.body).toBe('first!');
 
@@ -282,73 +282,120 @@ describe('createTeamChatMessage — replyToSeq', () => {
 });
 
 describe('createTeamChatMessage — sessionRef author derivation', () => {
-  it('posts as the session-bound persona and stamps the driving session', async () => {
-    const s = await personaSession(appMember.id);
-    const msg = await post(ctx(appMember.id), { body: 'persona speaking', sessionRef: s.sessionId });
-    expect(msg.authorAgentId).toBe(s.agentId);
+  it('posts as the session-bound worker and stamps the driving session', async () => {
+    const s = await workerSession(appMember.id);
+    const msg = await post(ctx(appMember.id), { body: 'worker speaking', sessionRef: s.sessionId });
+    expect(msg.authorWorkerId).toBe(s.workerId);
     expect(msg.authorUserId).toBeNull();
-    expect(msg.authorName).toBe(s.personaName);
+    expect(msg.authorName).toBe(s.workerName);
     expect(msg.sessionId).toBe(s.sessionId);
     // createdBy stays the human DRIVER (#914 — the sender column).
     const row = await db.node.findUnique({ where: { id: msg.nodeId } });
     expect(row!.createdBy).toBe(appMember.id);
     const env = row!.data as Record<string, unknown>;
-    expect(env.authorAgentId).toBe(s.agentId);
+    expect(env.authorWorkerId).toBe(s.workerId);
     expect(env.sessionId).toBe(s.sessionId);
   });
 
-  it("refuses a session attributed to someone else (co-members can't wear each other's persona)", async () => {
-    const s = await personaSession(admin.id);
+  it("refuses a session attributed to someone else (co-members can't wear each other's worker)", async () => {
+    const s = await workerSession(admin.id);
     await expectCode(post(ctx(appMember.id), { sessionRef: s.sessionId }), 'FORBIDDEN');
   });
 
   it('refuses an ended session with SESSION_ENDED', async () => {
-    const s = await personaSession(appMember.id);
+    const s = await workerSession(appMember.id);
     await db.session.update({ where: { id: s.sessionId }, data: { endedAt: new Date() } });
     await expectCode(post(ctx(appMember.id), { sessionRef: s.sessionId }), 'SESSION_ENDED');
   });
 
-  it('refuses a session with no persona binding with SESSION_NOT_PERSONA_BOUND', async () => {
+  it('refuses a session with no worker binding with SESSION_NOT_WORKER_BOUND', async () => {
     const sessionId = generateId();
     await db.session.create({ data: { id: sessionId, appId: app.id, userId: appMember.id } });
-    await expectCode(post(ctx(appMember.id), { sessionRef: sessionId }), 'SESSION_NOT_PERSONA_BOUND');
+    await expectCode(post(ctx(appMember.id), { sessionRef: sessionId }), 'SESSION_NOT_WORKER_BOUND');
   });
 
   it('refuses an unknown session with SESSION_NOT_FOUND', async () => {
     await expectCode(post(ctx(appMember.id), { sessionRef: 'nope' }), 'SESSION_NOT_FOUND');
   });
 
-  it("refuses another App's session with SESSION_NOT_IN_APP (Codex P1 — no cross-App persona authoring)", async () => {
+  it("refuses another App's session with SESSION_NOT_IN_APP (Codex P1 — no cross-App worker authoring)", async () => {
     // The caller's OWN writable session, but bound to a different App: the
     // write gate passes and the App binding must still refuse it.
-    const s = await personaSession(appMember.id);
+    const s = await workerSession(appMember.id);
     const otherApp = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Other App', urn: `${org.urn}:other-s` },
     });
     await db.session.update({ where: { id: s.sessionId }, data: { appId: otherApp.id } });
     await expectCode(post(ctx(appMember.id), { sessionRef: s.sessionId }), 'SESSION_NOT_IN_APP');
   });
+
+  it("refuses a worker of a DIFFERENT App with SESSION_WORKER_NOT_IN_APP (#974 — the worker-App pin)", async () => {
+    // A session OF this App, hand-bound to another App's worker: the
+    // session-App check passes, so the worker-App pin must refuse it —
+    // this is what the old SESSION_AGENT_NOT_IN_APP roster check became.
+    const otherApp = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Other App W', urn: `${org.urn}:other-w` },
+    });
+    await db.appAgent.create({ data: { appId: otherApp.id, agentId: teamAgent.id } });
+    const foreignWorker = await db.worker.create({
+      data: { appId: otherApp.id, agentId: teamAgent.id, name: 'Iris' },
+    });
+    const sessionId = generateId();
+    await db.session.create({
+      data: { id: sessionId, appId: app.id, userId: appMember.id, agentId: teamAgent.id, workerId: foreignWorker.id },
+    });
+    await expectCode(post(ctx(appMember.id), { sessionRef: sessionId }), 'SESSION_WORKER_NOT_IN_APP');
+  });
+
+  it('a retired worker stops authoring at once — WORKER_RETIRED at post time (#974)', async () => {
+    const s = await workerSession(appMember.id);
+    await post(ctx(appMember.id), { body: 'still cast', sessionRef: s.sessionId });
+    // Retirement is checked at POST time, not bind time: the still-active
+    // session does not grandfather the identity.
+    await db.worker.update({ where: { id: s.workerId }, data: { retiredAt: new Date() } });
+    await expectCode(post(ctx(appMember.id), { sessionRef: s.sessionId }), 'WORKER_RETIRED');
+  });
+
+  it("posting survives the agent's uninstall — retirement, not uninstall, is the revocation lever (#974)", async () => {
+    const s = await workerSession(appMember.id);
+    // Bootstrap while the agent is still installed (first-post bootstrap
+    // locates the Team Agent; the Worker row itself does not need it).
+    await post(ctx(appMember.id), { body: 'bootstrap' });
+    await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: teamAgent.id } } });
+    const msg = await post(ctx(appMember.id), { body: 'after uninstall', sessionRef: s.sessionId });
+    expect(msg.authorWorkerId).toBe(s.workerId);
+    expect(msg.authorName).toBe(s.workerName);
+  });
 });
 
 describe('teamChatMessages — mentions round trip', () => {
-  it('write-time extraction feeds the read-time filter, for personas and users', async () => {
-    const s = await personaSession(appMember.id);
-    await post(ctx(appMember.id), { body: `@${s.personaName} please take auth` });
+  it('write-time extraction feeds the read-time filter, for workers and users', async () => {
+    const s = await workerSession(appMember.id);
+    await post(ctx(appMember.id), { body: `@${s.workerName} please take auth` });
     await post(ctx(admin.id), { body: `thanks @${appMember.handle}, merged` });
     await post(ctx(admin.id), { body: 'no mentions here' });
 
-    const forPersona = await read(ctx(appMember.id), { mentionsRef: s.agentId });
-    expect(forPersona.total).toBe(1);
-    expect(forPersona.items[0].body).toContain('please take auth');
-    expect(forPersona.items[0].mentions).toContain(s.personaName.toLowerCase());
+    const forWorker = await read(ctx(appMember.id), { mentionsRef: s.workerId });
+    expect(forWorker.total).toBe(1);
+    expect(forWorker.items[0].body).toContain('please take auth');
+    expect(forWorker.items[0].mentions).toContain(s.workerName.toLowerCase());
+
+    // A worker also resolves by NAME, case-insensitively (#974).
+    const byName = await read(ctx(appMember.id), { mentionsRef: s.workerName.toUpperCase() });
+    expect(byName.total).toBe(1);
 
     const forUser = await read(ctx(appMember.id), { mentionsRef: `hrn:user:${appMember.handle}` });
     expect(forUser.total).toBe(1);
     expect(forUser.items[0].body).toContain('merged');
 
     // The mentions filter composes with the sinceSeq watermark.
-    const windowed = await read(ctx(appMember.id), { mentionsRef: s.agentId, sinceSeq: 1 });
+    const windowed = await read(ctx(appMember.id), { mentionsRef: s.workerId, sinceSeq: 1 });
     expect(windowed.total).toBe(0);
+
+    // A RETIRED worker still resolves — history keeps its mentions readable.
+    await db.worker.update({ where: { id: s.workerId }, data: { retiredAt: new Date() } });
+    const retired = await read(ctx(appMember.id), { mentionsRef: s.workerId });
+    expect(retired.total).toBe(1);
   });
 
   it('an unresolvable mentionsRef collapses to the empty page, never an error', async () => {
@@ -357,15 +404,13 @@ describe('teamChatMessages — mentions round trip', () => {
     expect(page).toEqual({ items: [], total: 0 });
   });
 
-  it('an Agent NOT installed in this App reads as the same empty page (Codex P1 — no existence oracle)', async () => {
-    // A foreign org's private agent whose name matches a stored token: the
-    // filter must not distinguish it from a nonexistent ref.
+  it("a Worker of ANOTHER App reads as the same empty page (Codex P1 — no existence oracle)", async () => {
+    // A foreign App's worker whose name matches a stored token: the filter
+    // must not distinguish it from a nonexistent ref — a worker ref only
+    // resolves within THIS App's own staff (#974).
     const foreignOrg = await db.organization.create({
       data: { id: generateId(), name: 'foreign', urn: `foreign-${Date.now()}.example` },
     });
-    // #974: a persona is team-bound (chk_agent_persona_team_app), so the
-    // foreign org needs its own team App for its own Iris to exist at all —
-    // which is exactly the per-team name scoping this test now also shows.
     const foreignApp = await db.app.create({
       data: {
         id: generateId(),
@@ -374,19 +419,23 @@ describe('teamChatMessages — mentions round trip', () => {
         urn: `${foreignOrg.urn}:foreign-team`,
       },
     });
-    const foreign = await db.agent.create({
+    const foreignAgent = await db.agent.create({
       data: {
         id: generateId(),
         organizationId: foreignOrg.id,
         name: 'Ghost',
-        urn: `${foreignOrg.urn}:foreign-team.ghost`,
-        personaName: 'Iris',
-        teamAppId: foreignApp.id,
+        urn: `${foreignOrg.urn}:ghost`,
       },
     });
+    const foreignWorker = await db.worker.create({
+      data: { appId: foreignApp.id, agentId: foreignAgent.id, name: 'Iris' },
+    });
     await post(ctx(appMember.id), { body: '@iris are you there' });
-    const page = await read(ctx(appMember.id), { mentionsRef: foreign.id });
+    const page = await read(ctx(appMember.id), { mentionsRef: foreignWorker.id });
     expect(page).toEqual({ items: [], total: 0 });
+    // Nor does the foreign worker's NAME resolve here — this App has no Iris.
+    const byName = await read(ctx(appMember.id), { mentionsRef: 'Iris' });
+    expect(byName).toEqual({ items: [], total: 0 });
   });
 
   it('a user who is not on the roster reads as the empty page; the caller themself resolves', async () => {
@@ -400,23 +449,19 @@ describe('teamChatMessages — mentions round trip', () => {
     expect(self.total).toBe(1);
   });
 
-  it('a multiword persona is mentioned by its slug (@mary-jane)', async () => {
-    const mj = await db.agent.create({
-      data: {
-        id: generateId(),
-        organizationId: org.id,
-        name: 'Mary Jane',
-        // #974: the derived compound slug — <team-app-slug>.<persona-name>.
-        urn: `${org.urn}:${app.urn.split(':').pop()}.mary-jane`,
-        personaName: 'Mary Jane',
-        teamAppId: app.id,
-      },
+  it('a multiword worker is mentioned by its slug (@mary-jane)', async () => {
+    // Worker names may legally contain spaces; the mention contract slugs
+    // them (mentionTokenOf) on both the write and the filter side.
+    const mj = await db.worker.create({
+      data: { appId: app.id, agentId: teamAgent.id, name: 'Mary Jane' },
     });
-    await db.appAgent.create({ data: { appId: app.id, agentId: mj.id } });
     await post(ctx(appMember.id), { body: '@mary-jane please review' });
     const page = await read(ctx(appMember.id), { mentionsRef: mj.id });
     expect(page.total).toBe(1);
     expect(page.items[0].mentions).toEqual(['mary-jane']);
+    // The full display name resolves to the same slugged token.
+    const byName = await read(ctx(appMember.id), { mentionsRef: 'mary jane' });
+    expect(byName.total).toBe(1);
   });
 });
 

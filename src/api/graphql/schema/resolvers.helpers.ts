@@ -47,7 +47,6 @@ import {
   AgentNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
-import { assertAgentNotTeamBound } from '../../../lib/teamBinding.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
 import {
@@ -1620,7 +1619,8 @@ export async function requireMemorySharePrincipal(
 
 /**
  * "Is the caller a non-`reader` member of this App?" — the AppMember half of
- * `createTeamPersona`'s mint gate, extracted here (#952) so the one
+ * the worker-staffing gate (castWorker, formerly createTeamPersona's mint
+ * gate), extracted here (#952) so the one
  * conventional read-only role spelling lives in a single place rather than
  * being restated by each surface that admits App members.
  *
@@ -1694,10 +1694,10 @@ export async function installAgentIntoAppCore(
   //
   //
   // #952 asked for a non-`reader` AppMember fallback here, "matching
-  // createTeamPersona's gate", so a team's own members can compose the roster.
+  // the staffing gate", so a team's own members can compose the roster.
   // NOT done, deliberately — the two operations are not symmetric:
-  // createTeamPersona installs an Agent it MINTS in the same call (empty, so
-  // nothing pre-existing is revealed), whereas this one installs an EXISTING
+  // castWorker only CASTS an agent that is already installed (nothing
+  // pre-existing is revealed), whereas this one installs an EXISTING
   // Agent, and installing is itself a read grant. An installed Agent's system
   // memory becomes READ_ONLY in every App-context access map
   // (`foldAgentIntoAccessMap`), and the mutation payload returns the Agent
@@ -1737,18 +1737,6 @@ export async function installAgentIntoAppCore(
       extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
     });
   }
-  // #974 / cor:agt:020:01: a persona belongs to EXACTLY ONE team App — the one
-  // its `teamAppId` names, set at mint by createTeamPersona (which installs it
-  // there itself, without coming through here). Guest-installing it into a
-  // second team App is what team-boundness forbids: two same-named personas
-  // could then meet in one App context, which is precisely what the team-scoped
-  // name uniqueness assumes cannot happen. Shared with createApp's founding and
-  // cascade-install paths (PR #975 review: three restatements, one hole).
-  assertAgentNotTeamBound(
-    { id: resolvedAgentId, personaName: agent.personaName, teamAppId: agent.teamAppId },
-    resolvedAppId,
-    { appId: resolvedAppId },
-  );
   // Best-effort pre-check for the typed `DUPLICATE_APP_AGENT` error.
   // The race-safe fallback lives inside the transaction below — under
   // concurrent installs of the same (App, Agent), one of the two will
@@ -2491,11 +2479,15 @@ export interface SessionInput {
   transcriptPath?: string;
   host?: string;
   tool?: string;
-  // #928 / cor:api:140: the Agent (persona) driving this session (PK or URN).
+  // #928 / cor:api:140: the role-Agent driving this session (PK or URN).
   agentRef?: string;
   // #943 / cor:api:140: the App this session is a unit of work for (PK or URN),
   // gated on the caller's membership of that App.
   appRef?: string;
+  // #974 / cor:agt:020:03: the Worker (named casting) this session works as.
+  // PK only — workers have no URN. Gated: the worker must belong to the
+  // session's App; a retired worker refuses.
+  workerRef?: string;
 }
 
 export interface UsageEventInput {

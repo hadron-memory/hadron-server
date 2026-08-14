@@ -23,13 +23,14 @@
 //     `chatRoot.appendChatMessage` — #919; a hand-rolled node write here IS
 //     the bug that operation exists to prevent).
 //
-// Envelope (`Node.data`) fields:
-//   authorUserId  — the human author (no sessionRef; #914 parity)
-//   authorAgentId — the persona author (sessionRef path)
-//   authorName    — display convenience: persona name / user handle
-//   sessionId     — the driving session (sessionRef path; D16 attribution)
-//   mentions      — lowercased mention tokens extracted server-side at write
-//   replyToSeq    — the seq this message replies to (also a `replies-to` edge)
+// Envelope (`Node.data`) fields (#974 re-cut — the Worker model, cor:agt:020:04):
+//   authorUserId   — the human author (no sessionRef; #914 parity)
+//   authorWorkerId — the Worker author (sessionRef path; replaced the
+//                    persona-as-agent model's authorAgentId, D-2026-08-14-004)
+//   authorName     — display convenience: worker name / user handle
+//   sessionId      — the driving session (sessionRef path; D16 attribution)
+//   mentions       — lowercased mention tokens extracted server-side at write
+//   replyToSeq     — the seq this message replies to (also a `replies-to` edge)
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -38,9 +39,7 @@ import { appendChatMessage } from '../../../lib/chatRoot.js';
 import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
-import { isAgentInstalled } from '../../../lib/appAgent.js';
 import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
@@ -54,7 +53,8 @@ import {
   clampListTake,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
-import { locateTeamAgent } from './resolvers.mutation.teamPersona.js';
+import { mentionTokenOf } from '../../../lib/mentionToken.js';
+import { locateTeamAgent } from './resolvers.worker.js';
 
 /** Canonical loc of the one team chat in a team App's shared memory (#939). */
 export const TEAM_CHAT_LOC = 'chats:team';
@@ -92,22 +92,10 @@ export function extractMentions(body: string): string[] {
   return [...seen];
 }
 
-/**
- * Canonical mention token of a display name — the slug both sides of the
- * mention contract use (Codex P2 on PR #941): persona names may legally
- * contain spaces ("Mary Jane"), which the extraction atom cannot, so the
- * writer mentions `@mary-jane` and the reader slugs the resolved name the
- * same way. Lowercase; runs of out-of-atom characters collapse to `-`;
- * trimmed to alphanumeric ends. Returns null when nothing usable remains.
- */
-export function mentionTokenOf(name: string): string | null {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[^a-z0-9]+/, '')
-    .replace(/[^a-z0-9]+$/, '');
-  return slug.length > 0 ? slug : null;
-}
+// The mention token moved to src/lib/mentionToken.ts (PR #978 review): worker
+// casting has to refuse a name whose token is taken, and that resolver must not
+// import this one. Re-exported so existing importers are unchanged.
+export { mentionTokenOf };
 
 type AppRow = {
   id: string;
@@ -121,16 +109,16 @@ type AppRow = {
 /**
  * #939 membership gate. Posting and reading are both team-member acts
  * (`cor:acl:030:01` — every member of the owning App is a participant in
- * every chat in its shared memory, so unlike persona minting the gate does
+ * every chat in its shared memory, so unlike worker casting the gate does
  * NOT exclude 'reader' AppMembers: participation follows the host memory's
  * audience, and app-class grants read and write to the same audience).
  * May post/read: an AppMember of the team App (any role), an org member with
- * CONTRIBUTOR+ on the App's org (parity with the persona-mint gate's org
+ * CONTRIBUTOR+ on the App's org (parity with the worker-staffing gate's org
  * branch), or the owner of a user-owned App.
  *
  * Principal shapes (findings:auth-appid-credential-vs-selection): a PURE
  * App-key principal is DENIED for `post` (the documented lean — a chat
- * message is authored, and authorship is a human or a session-driven persona
+ * message is authored, and authorship is a human or a session-driven worker
  * with a human driver behind it) but ALLOWED for `read` when the key IS this
  * App's (the App's own automation may read its team's chat). A hybrid
  * user+selection principal is judged solely on the USER's own rights.
@@ -196,7 +184,7 @@ async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRoot
  * post loses the root create on `@@unique([loc, memoryId])` (P2002) and
  * re-reads the winner's row.
  *
- * The Team Agent is located exactly as createTeamPersona does (the roles:
+ * The Team Agent is located exactly as castWorker does (the roles:
  * branch marker), with one chat-specific fallback: an App with EXACTLY ONE
  * installed Agent needs no marker to be unambiguous — a single-agent team App
  * without role definitions can still chat.
@@ -354,7 +342,7 @@ export interface TeamChatMessageOut {
   body: string;
   at: Date;
   authorUserId: string | null;
-  authorAgentId: string | null;
+  authorWorkerId: string | null;
   authorName: string | null;
   sessionId: string | null;
   replyToSeq: number | null;
@@ -379,7 +367,7 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo): Team
     body: dec.content ?? '',
     at: row.createdAt,
     authorUserId: typeof env.authorUserId === 'string' ? env.authorUserId : null,
-    authorAgentId: typeof env.authorAgentId === 'string' ? env.authorAgentId : null,
+    authorWorkerId: typeof env.authorWorkerId === 'string' ? env.authorWorkerId : null,
     authorName: typeof env.authorName === 'string' ? env.authorName : null,
     sessionId: typeof env.sessionId === 'string' ? env.sessionId : null,
     replyToSeq: typeof env.replyToSeq === 'number' ? env.replyToSeq : null,
@@ -388,23 +376,24 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo): Team
 }
 
 /**
- * Resolve the author of a sessionRef post: the session's bound persona.
- * Refuses a session the caller couldn't write (requireSessionWriteAccess
- * semantics, cor:dmo:070:05 — attributed user only here, since the membership
- * gate already denied pure App-key principals for posts), a session that is
- * not bound to the TARGET App (Codex P1 on PR #941 — without this, a member
- * of Apps A and B could author into B's chat as A's persona), a session that
- * has ended (its persona may since have been freed and taken over — the
- * cor:agt:020:03 liveness model), and a session bound to no persona.
+ * Resolve the author of a sessionRef post: the session's bound Worker (#974,
+ * cor:agt:020:04's four-condition derivation). Refuses a session the caller
+ * couldn't write (requireSessionWriteAccess semantics, cor:dmo:070:05 —
+ * attributed user only here, since the membership gate already denied pure
+ * App-key principals for posts), a session that is not bound to the TARGET
+ * App (Codex P1 on PR #941 — without this, a member of Apps A and B could
+ * author into B's chat as A's worker), a session that has ended (its worker
+ * may since have been freed and taken over — the cor:agt:020:03 liveness
+ * model), and a session bound to no Worker.
  */
 async function resolveSessionAuthor(
   ctx: Context,
   appId: string,
   sessionRef: string,
-): Promise<{ agentId: string; name: string; sessionId: string }> {
+): Promise<{ workerId: string; name: string; sessionId: string }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, agentId: true, endedAt: true },
+    select: { id: true, appId: true, userId: true, workerId: true, endedAt: true },
   });
   if (!session) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -420,87 +409,90 @@ async function resolveSessionAuthor(
   }
   if (session.appId !== appId) {
     throw new GraphQLError(
-      `Session "${sessionRef}" is not a session of this App — its persona cannot author messages in this team chat.`,
+      `Session "${sessionRef}" is not a session of this App — its worker cannot author messages in this team chat.`,
       { extensions: { code: 'SESSION_NOT_IN_APP', appId } },
     );
   }
   if (session.endedAt) {
     throw new GraphQLError(
-      `Session "${sessionRef}" has ended — its persona can no longer author messages through it.`,
+      `Session "${sessionRef}" has ended — its worker can no longer author messages through it.`,
       { extensions: { code: 'SESSION_ENDED' } },
     );
   }
-  if (!session.agentId) {
+  if (!session.workerId) {
     throw new GraphQLError(
-      `Session "${sessionRef}" is not bound to a persona (no agent attribution) — omit sessionRef to post as yourself.`,
-      { extensions: { code: 'SESSION_NOT_PERSONA_BOUND' } },
+      `Session "${sessionRef}" is not bound to a worker — omit sessionRef to post as yourself.`,
+      { extensions: { code: 'SESSION_NOT_WORKER_BOUND' } },
     );
   }
-  const agent = await ctx.db.agent.findUnique({
-    where: { id: session.agentId },
-    select: { id: true, name: true, personaName: true },
+  // The worker-App pin (#974 — what the old SESSION_AGENT_NOT_IN_APP roster
+  // check became): a Worker belongs to exactly one App by construction, and
+  // that App must be THIS one. Evaluated at POST time rather than bind time
+  // deliberately — a worker retired after the session started must stop being
+  // able to author through it, which a bind-time check cannot express. The
+  // Worker row survives the agent's uninstall (cor:dmo:050:11), so uninstall
+  // no longer severs authorship — retirement is the revocation lever.
+  const worker = await ctx.db.worker.findUnique({
+    where: { id: session.workerId },
+    select: { id: true, appId: true, name: true, retiredAt: true },
   });
-  if (!agent) {
+  if (!worker) {
     throw new GraphQLError(
-      `Session "${sessionRef}" is bound to an agent that no longer exists.`,
-      { extensions: { code: 'SESSION_NOT_PERSONA_BOUND' } },
+      `Session "${sessionRef}" is bound to a worker that no longer exists.`,
+      { extensions: { code: 'SESSION_NOT_WORKER_BOUND' } },
     );
   }
-  // #944 review (Codex P1 / Copilot): the author must be ON THIS APP'S ROSTER.
-  // The session's agent binding is ATTRIBUTION — `SessionInput.agentRef` only
-  // requires the agent to be readable, so a PUBLIC agent of another tenant can
-  // legitimately be bound to a session. Authorization belongs here, at the
-  // point authorship is claimed: without this check a participant could post
-  // into their team's chat under a foreign agent's identity, and the read side
-  // already scopes to the roster (`resolveMentionTokens` resolves an Agent ref
-  // only when it is INSTALLED), so the write side was the asymmetric half.
-  //
-  // Checked at POST time rather than at bind time deliberately: an agent
-  // uninstalled after the session started must stop being able to author
-  // through it, which a bind-time check cannot express. `AppAgent` uninstall
-  // is a hard row delete, so the lookup needs no liveness filter.
-  if (!(await isAgentInstalled(ctx.db, appId, agent.id))) {
+  if (worker.appId !== appId) {
     throw new GraphQLError(
-      `Session "${sessionRef}" is bound to an agent that is not installed in this App — it cannot author in this team chat.`,
-      { extensions: { code: 'SESSION_AGENT_NOT_IN_APP', appId } },
+      `Session "${sessionRef}" is bound to a worker of a different App — it cannot author in this team chat.`,
+      { extensions: { code: 'SESSION_WORKER_NOT_IN_APP', appId } },
     );
   }
-  return { agentId: agent.id, name: agent.personaName ?? agent.name, sessionId: session.id };
+  if (worker.retiredAt) {
+    throw new GraphQLError(
+      `Session "${sessionRef}" is bound to a retired worker — a retired worker stops authoring at once.`,
+      { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
+    );
+  }
+  return { workerId: worker.id, name: worker.name, sessionId: session.id };
 }
 
 /**
  * Resolve a mentionsRef filter argument to the set of tokens it can appear as
- * in stored envelopes: an Agent ref → the slugs of its persona name and plain
- * name (via {@link mentionTokenOf} — the canonical mention atom), a user ref
- * → their handle. Returns null when the ref resolves to nothing OR to a
- * principal outside this App's roster — the caller collapses both to the
- * empty page identically. The roster restriction is the anti-oracle guard
- * (Codex P1 on PR #941): the mention filter must not distinguish a private
- * foreign Agent/user from a nonexistent one, so an Agent ref only resolves
- * when the Agent is INSTALLED in this App, and a user ref only when the user
- * is an AppMember of it (or the caller themself).
+ * in stored envelopes (#974 — mentions resolve against the App's WORKERS and
+ * members, cor:agt:020:04): a worker ref (PK, or the worker's name — matched
+ * case-insensitively against this App's own staff, retired included, since
+ * history still carries their mentions) → the slug of its name (via
+ * {@link mentionTokenOf} — the canonical mention atom), a user ref → their
+ * handle. Returns null when the ref resolves to nothing OR to a principal
+ * outside this App — the caller collapses both to the empty page identically.
+ * The staff restriction is the anti-oracle guard (Codex P1 on PR #941): the
+ * mention filter must not distinguish a foreign worker/user from a
+ * nonexistent one, so a worker ref only resolves within THIS App's staff, and
+ * a user ref only when the user is an AppMember of it (or the caller
+ * themself).
  */
 async function resolveMentionTokens(
   ctx: Context,
   appId: string,
   mentionsRef: string,
 ): Promise<string[] | null> {
-  try {
-    const { id } = await resolveAgentRef(ctx.db, mentionsRef);
-    const installed = await ctx.db.appAgent.findUnique({
-      where: { appId_agentId: { appId, agentId: id } },
-      select: { agent: { select: { name: true, personaName: true } } },
-    });
-    if (installed?.agent) {
-      const tokens = [installed.agent.personaName, installed.agent.name]
-        .filter((t): t is string => typeof t === 'string' && t.length > 0)
-        .map((t) => mentionTokenOf(t))
-        .filter((t): t is string => t !== null);
-      if (tokens.length > 0) return [...new Set(tokens)];
-    }
+  // Worker path: the App's own staff only — matched in memory on PK or
+  // case-insensitive name (never a LIKE-backed filter,
+  // findings:prisma-string-filters-are-unescaped-like). The staff list of one
+  // App is small by construction.
+  const staff = await ctx.db.worker.findMany({
+    where: { appId },
+    select: { id: true, name: true },
+  });
+  const refLower = mentionsRef.trim().toLowerCase();
+  const workerMatch = staff.find(
+    (w) => w.id === mentionsRef.trim() || w.name.toLowerCase() === refLower,
+  );
+  if (workerMatch) {
+    const token = mentionTokenOf(workerMatch.name);
+    if (token) return [token];
     return null;
-  } catch {
-    // not an agent ref — try user
   }
   // User path: accept an id, an hrn:user:<handle> URN, or (as a convenience
   // for the MCP tool) a BARE handle — resolveUserRef rejects a bare handle as
@@ -535,7 +527,8 @@ export const teamChatMutations = {
    * #939 — post a message into the team App's chat as a platform operation:
    * resolve the App (cor:api:140), gate on team membership, locate (or
    * bootstrap) the team chat, derive the author (sessionRef → the session's
-   * persona; else the calling human), extract mentions server-side, and write
+   * bound Worker; else the calling human), extract mentions server-side, and
+   * write
    * the message through `chatRoot.appendChatMessage` (atomic seq, #919),
    * wiring a `replies-to` edge for replyToSeq.
    */
@@ -570,16 +563,17 @@ export const teamChatMutations = {
     }
     await requireTeamChatAccess(ctx, app, 'post');
 
-    // Author derivation (#939): sessionRef → the session's persona, with the
-    // driving session stamped in the envelope; no sessionRef → the calling
-    // human. The membership gate above guarantees ctx.userId is set here.
+    // Author derivation (#939, re-keyed to the Worker by #974): sessionRef →
+    // the session's bound Worker, with the driving session stamped in the
+    // envelope; no sessionRef → the calling human. The membership gate above
+    // guarantees ctx.userId is set here.
     let envelope: Record<string, unknown>;
     let authorLabel: string;
     if (sessionRef) {
       const author = await resolveSessionAuthor(ctx, appId, sessionRef);
       authorLabel = author.name;
       envelope = {
-        authorAgentId: author.agentId,
+        authorWorkerId: author.workerId,
         authorName: author.name,
         sessionId: author.sessionId,
       };
@@ -647,7 +641,7 @@ export const teamChatMutations = {
           content: msgFields.content ?? null,
           data: (msgFields.data ?? null) as InputJsonValue,
           seq,
-          // #914: the SENDER's user id — for persona posts, the human driver.
+          // #914: the SENDER's user id — for worker posts, the human driver.
           createdBy,
         },
       });
@@ -673,7 +667,7 @@ export const teamChatMutations = {
       body,
       at: createdAt,
       authorUserId: (envelope.authorUserId as string | undefined) ?? null,
-      authorAgentId: (envelope.authorAgentId as string | undefined) ?? null,
+      authorWorkerId: (envelope.authorWorkerId as string | undefined) ?? null,
       authorName: authorLabel,
       sessionId: (envelope.sessionId as string | undefined) ?? null,
       replyToSeq: replyToSeq ?? null,
@@ -688,7 +682,7 @@ export const teamChatQueries = {
    * `{ items, total }` page (conventions:uniform-read-surface). `sinceSeq` is
    * a watermark cursor: only messages with seq STRICTLY GREATER are returned
    * (so a client passes the last seq it has seen). `mentionsRef` filters on
-   * the STORED envelope mentions (resolved to a persona name or user handle —
+   * the STORED envelope mentions (resolved to a worker name or user handle —
    * the one mention format); because the envelope lives in `data`, which is
    * ciphertext in an encrypted memory, the mentions filter decrypts and
    * filters in memory over the seq window rather than in SQL. An unresolvable

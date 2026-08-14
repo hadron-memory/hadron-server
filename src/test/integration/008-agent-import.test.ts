@@ -363,77 +363,26 @@ describe('T065: integration — full Suite/Calendar/Notes scenario (SC-006)', ()
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// #974 / PR #975 review — the cascade path is a roster write too
+// #974 — a deleted App's Worker castings keep its URN reserved
 // ─────────────────────────────────────────────────────────────────────────
 
-describe('cascade install respects team-boundness (#974, cor:agt:020:01/:02)', () => {
-  it('refuses to cascade a dep that is a team-bound persona', async () => {
-    // The loop creates the dep's App + AppAgent directly, so it never reaches
-    // installAgentIntoAppCore's gate. Unguarded, installing Suite would put
-    // another team's persona on a second roster AND derive the dep App's slug
-    // from the persona's dotted agent slug (banned by cor:urn:010:03).
-    const teamApp = await db.app.create({
-      data: { id: generateId(), organizationId: beaOrg.id, name: 'Team', urn: `${beaOrg.urn}:team` },
-    });
-    const persona = await db.agent.create({
-      data: {
-        id: generateId(),
-        organizationId: beaOrg.id,
-        urn: `${beaOrg.urn}:team.iris`,
-        name: 'Iris',
-        visibility: 'PUBLIC',
-        personaName: 'Iris',
-        teamAppId: teamApp.id,
-      },
-    });
-    await createDbAgentOrgGrant(db, beaOrg.id, persona.id);
-    await publishAgentImport(db, {
-      parentAgentId: suite.id,
-      importedAgentId: persona.id,
-      position: 100,
-      required: true,
-    });
-
-    await expect(
-      resolvers.Mutation.createApp(
-        {},
-        { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X' },
-        adminCtx(bea.id),
-      ),
-    ).rejects.toMatchObject({ extensions: { code: 'PERSONA_TEAM_BOUND' } });
-
-    // Iris stays on exactly one roster: none (she was never installed here).
-    expect(await db.appAgent.count({ where: { agentId: persona.id } })).toBe(0);
-  });
-
-  it("refuses to reclaim a retired team App's URN from the dep-collision path", async () => {
-    // The dep branch hard-deletes a soft-deleted URN collision, and
-    // Agent.teamAppId cascades — so an unguarded reclaim here would delete a
-    // retired team's personas and recycle their reserved names.
+describe('App-tombstone URN reclaim respects Worker castings (#974, cor:agt:020:02)', () => {
+  it("refuses WORKER_NAMES_RESERVED while the soft-deleted App still has Worker rows", async () => {
+    // `Worker.appId` is onDelete: Cascade, so hard-deleting the tombstone
+    // would silently take the castings with it and recycle their permanently
+    // reserved names (PR trailers and chat archives reference them). The
+    // reclaim path must refuse instead.
     const retired = await db.app.create({
       data: {
         id: generateId(),
         organizationId: orgX.id,
-        name: 'Retired team',
-        urn: `${orgX.urn}:calendar`, // the slug the Calendar dep will want
+        name: 'Suite @ X',
+        urn: `${orgX.urn}:suite-x`, // the slug createApp derives from the name
         deletedAt: new Date(),
       },
     });
-    const persona = await db.agent.create({
-      data: {
-        id: generateId(),
-        organizationId: orgX.id,
-        urn: `${orgX.urn}:calendar.iris`,
-        name: 'Iris',
-        personaName: 'Iris',
-        teamAppId: retired.id,
-      },
-    });
-    await publishAgentImport(db, {
-      parentAgentId: suite.id,
-      importedAgentId: calendar.id,
-      position: 100,
-      required: true,
+    await db.worker.create({
+      data: { appId: retired.id, agentId: suite.id, name: 'Iris' },
     });
 
     await expect(
@@ -442,10 +391,10 @@ describe('cascade install respects team-boundness (#974, cor:agt:020:01/:02)', (
         { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X' },
         adminCtx(bea.id),
       ),
-    ).rejects.toMatchObject({ extensions: { code: 'PERSONA_TEAM_BOUND' } });
+    ).rejects.toMatchObject({ extensions: { code: 'WORKER_NAMES_RESERVED' } });
 
-    // The tombstone and its persona both survive the refused reclaim.
+    // The tombstone and its casting both survive the refused reclaim.
     expect(await db.app.findUnique({ where: { id: retired.id } })).not.toBeNull();
-    expect(await db.agent.findUnique({ where: { id: persona.id } })).not.toBeNull();
+    expect(await db.worker.count({ where: { appId: retired.id } })).toBe(1);
   });
 });
