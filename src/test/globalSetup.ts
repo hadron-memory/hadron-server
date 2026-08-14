@@ -149,27 +149,12 @@ export async function setup() {
       ON workers (app_id, lower(name));
   `);
 
-  // …and its MENTION TOKEN is unique per App too (PR #978 review — Copilot):
-  // the mention contract addresses a worker by the SLUG of its name, and that
-  // map is many-to-one ("Mary Jane" / "Mary-Jane" → @mary-jane). The
-  // expression mirrors mentionTokenOf (resolvers.teamChat.ts); empty tokens
-  // are unaddressable, not colliding, so they stay out of the index. Synced
-  // with prisma/post-push.sql + the 20260814140000 migration.
+  // The mention-token unique (workers_app_mention_token_uniq) was REMOVED by
+  // decision (Holger, 2026-08-14): cor:agt:020:02 keeps ONE uniqueness layer.
+  // The DROP keeps an already-provisioned template in step. Synced with
+  // prisma/post-push.sql + the 20260814150000 migration.
   await client.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS workers_app_mention_token_uniq
-      ON workers (
-        app_id,
-        regexp_replace(
-          regexp_replace(
-            regexp_replace(lower(name), '[^a-z0-9._-]+', '-', 'g'),
-            '^[^a-z0-9]+', ''),
-          '[^a-z0-9]+$', '')
-      )
-      WHERE regexp_replace(
-              regexp_replace(
-                regexp_replace(lower(name), '[^a-z0-9._-]+', '-', 'g'),
-                '^[^a-z0-9]+', ''),
-              '[^a-z0-9]+$', '') <> '';
+    DROP INDEX IF EXISTS workers_app_mention_token_uniq;
   `);
 
   // 043-slack-integration: one LIVE Slack connection per (org, workspace) —

@@ -1,16 +1,11 @@
 // The canonical mention token — the address side of the team-chat mention
-// contract (cor:agt:020:04).
-//
-// It lives in its own module (moved out of resolvers.teamChat.ts by the PR #978
-// review) because BOTH sides of the contract need it and they must not import
-// each other: the chat resolver slugs a resolved name to match stored envelope
-// tokens, and worker casting refuses a name whose token is already spoken for.
-//
-// There is a SQL mirror of this function — the `workers_app_mention_token_uniq`
-// functional unique, written out in prisma/post-push.sql, the
-// 20260814140000_worker_mention_token_uniq migration, and
-// src/test/globalSetup.ts. Changing the rule here means changing all three, or
-// the database will admit a pair of names this function maps to one address.
+// contract (cor:agt:020:04). Extracted to its own module during the PR #978
+// review cycle; the mention-token UNIQUENESS that briefly accompanied it
+// (workers_app_mention_token_uniq + a castWorker refusal) was removed by
+// decision (Holger, 2026-08-14 / PR #979): cor:agt:020:02 keeps the
+// case-insensitive NAME as the only uniqueness layer, so two names may
+// legally share one token — a mention then addresses both workers, which is
+// the accepted behavior of the one-format mention contract.
 
 /**
  * Canonical mention token of a display name — the slug both sides of the
@@ -19,9 +14,9 @@
  * writer mentions `@mary-jane` and the reader slugs the resolved name the
  * same way. Lowercase; runs of out-of-atom characters collapse to `-`;
  * trimmed to alphanumeric ends. Returns null when nothing usable remains —
- * such a name is UNADDRESSABLE (never mentionable), not a collision, which is
- * why the SQL mirror excludes empty tokens from its unique index rather than
- * letting every unaddressable name share one slot.
+ * such a name is UNADDRESSABLE (never mentionable). The map is deliberately
+ * LOSSY and carries no uniqueness guarantee: distinct worker names may share
+ * a token, and the mention filter simply matches them all.
  */
 export function mentionTokenOf(name: string): string | null {
   const slug = name
