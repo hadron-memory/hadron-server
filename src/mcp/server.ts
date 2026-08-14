@@ -84,6 +84,7 @@ import {
   type SearchPrincipal,
 } from '../lib/global-search/index.js';
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
+import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash } from '../lib/contentHash.js';
 import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
@@ -1493,13 +1494,13 @@ export function createMcpServerInstance(
       // getAccessibleMemoryIds app+session branch.
       let sessionMemoryIds: Set<string> | null = null;
       if (auth.appId && auth.sessionId) {
-        const session = await db.session.findUnique({
-          where: { id: auth.sessionId },
-          select: { memoryId: true, agent: { select: { systemMemoryId: true } } },
-        });
-        sessionMemoryIds = new Set<string>();
-        if (session?.memoryId) sessionMemoryIds.add(session.memoryId);
-        if (session?.agent?.systemMemoryId) sessionMemoryIds.add(session.agent.systemMemoryId);
+        // #945: was a hand-copied duplicate of the resolver branch, so the
+        // admissibility fix would have landed on one surface only. Both now
+        // share `sessionScopedMemoryIds` — a foreign PUBLIC agent bound to the
+        // session no longer drags its system memory into scope here either.
+        sessionMemoryIds = new Set<string>(
+          await sessionScopedMemoryIds(db, auth.appId, auth.sessionId),
+        );
       }
 
       // Resolved scope handed to findNodes. When neither memoryUrn nor a

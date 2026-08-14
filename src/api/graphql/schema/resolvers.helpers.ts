@@ -22,6 +22,7 @@ import {
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
   formatCanonicalUrn,
@@ -923,17 +924,12 @@ export async function getAccessibleMemoryIds(
   // memory by ID, this filter denies it. This is THE security boundary for
   // multi-user agents — checked FIRST, so it can't be widened by an ADMIN role
   // riding on a session context.
+  //
+  // #945: the admissibility rule (which memory the session may actually reach)
+  // lives in `sessionScopedMemoryIds` — ONE predicate shared with the MCP
+  // node-search scope, which used to carry its own copy of this branch.
   if (ctx.appId && ctx.sessionId) {
-    const session = await ctx.db.session.findUnique({
-      where: { id: ctx.sessionId },
-      select: {
-        memoryId: true,
-        agent: { select: { systemMemoryId: true } },
-      },
-    });
-    const ids: string[] = [];
-    if (session?.memoryId) ids.push(session.memoryId);
-    if (session?.agent?.systemMemoryId) ids.push(session.agent.systemMemoryId);
+    const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId);
     return onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
   }
 
