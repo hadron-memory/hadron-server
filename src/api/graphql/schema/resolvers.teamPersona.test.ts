@@ -438,6 +438,66 @@ describe('createTeamPersona — team scoping (#974, cor:agt:020:01/:02/:06)', ()
     expect(await db.agent.count({ where: { teamAppId: app.id } })).toBe(1);
   });
 
+  // ── PR #975 review: the gaps around team-boundness ────────────────────────
+
+  it('clearing personaName does NOT free the agent to join another team', async () => {
+    // The hole both install guards had: they tested `personaName`, and
+    // updateAgent's clear leaves `teamAppId` in place. Clear → found/join a
+    // second App → restore the name, and the persona sits on two rosters.
+    const dataTeam = await secondTeam('data-team');
+    const iris = await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    await M.updateAgent({}, { ref: iris.id, personaName: null }, ctx(admin.id));
+    const cleared = await db.agent.findUnique({ where: { id: iris.id } });
+    expect(cleared?.personaName).toBeNull();
+    expect(cleared?.teamAppId).toBe(app.id); // the binding survives the clear
+
+    await expectCode(
+      M.installAgentIntoApp({}, { appRef: dataTeam.id, agentRef: iris.id }, ctx(admin.id)),
+      'PERSONA_TEAM_BOUND',
+    );
+    await expectCode(
+      M.createApp({}, { orgRef: org.id, name: 'Hijacked', agentRef: iris.id }, ctx(admin.id)),
+      'PERSONA_TEAM_BOUND',
+    );
+    // Restoring the name is still fine — it never left its own team.
+    const restored = await M.updateAgent({}, { ref: iris.id, personaName: 'Iris' }, ctx(admin.id));
+    expect(restored.personaName).toBe('Iris');
+    expect(await db.appAgent.count({ where: { agentId: iris.id } })).toBe(1);
+  });
+
+  it('re-installing a persona into its OWN team App is still allowed', async () => {
+    // The predicate moved from personaName to teamAppId; the same-team leg
+    // must not become collateral damage.
+    const iris = await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: iris.id } } });
+    await M.installAgentIntoApp({}, { appRef: app.id, agentRef: iris.id }, ctx(admin.id));
+    expect(await db.appAgent.count({ where: { agentId: iris.id, appId: app.id } })).toBe(1);
+  });
+
+  it('a team App with personas cannot be renamed — its personas spell the old slug', async () => {
+    const iris = await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    expect(iris.urn).toBe(`${org.urn}:team.iris`);
+    await expectCode(
+      M.updateApp({}, { ref: app.id, urn: 'renamed-team' }, ctx(admin.id)),
+      'PERSONA_TEAM_BOUND',
+    );
+    const unchanged = await db.app.findUnique({ where: { id: app.id } });
+    expect(unchanged?.urn).toBe(`${org.urn}:team`);
+  });
+
+  it('a team App with NO personas renames freely, and a no-op rename is never refused', async () => {
+    // Guard the guard: it must not turn every App rename into a persona probe.
+    const plain = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Plain', urn: `${org.urn}:plain` },
+    });
+    const renamed = await M.updateApp({}, { ref: plain.id, urn: 'plain-renamed' }, ctx(admin.id));
+    expect(renamed.urn).toBe(`${org.urn}:plain-renamed`);
+
+    await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    const noop = await M.updateApp({}, { ref: app.id, urn: 'team' }, ctx(admin.id));
+    expect(noop.urn).toBe(`${org.urn}:team`);
+  });
+
   it('a persona name with a dot still derives a single-dot compound slug', async () => {
     const agent = await M.createTeamPersona(
       {},

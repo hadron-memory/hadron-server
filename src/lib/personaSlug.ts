@@ -5,9 +5,19 @@
 // `<team-app-slug>.<persona-name-slug>`, and the `.` is RESERVED to exactly
 // that position — user-supplied agent and App slugs must not contain one. With
 // the reservation in force a persona slug can only collide with another persona
-// slug of the same (team App, personaName), which the persona-name uniqueness
-// index already forbids: the derived slug is collision-free by construction, so
-// persona minting needs no bump/suffix machinery.
+// slug of the SAME team App, so persona minting needs no bump/suffix machinery
+// and never has to disambiguate against ordinary agents.
+//
+// It does NOT follow that name-distinctness implies slug-distinctness (PR #975
+// review, Copilot): `deriveSlugFromName` is many-to-one — "Mary Jane" and
+// "Mary-Jane" both slugify to `mary-jane`, as do two long names sharing a
+// prefix once truncated — while the persona-name uniqueness index compares raw
+// names. Two slug-equivalent names in one team are therefore NOT independently
+// allocatable: the second mint is refused by the agent-URN unique index, and
+// createTeamPersona reports that as PERSONA_NAME_TAKEN (naming the derived slug
+// that holds it, so the refusal is actionable). That is the intended answer —
+// the names are distinct spellings of one address — not a leak: the failure
+// direction is always "refuse", never "two personas share a slug".
 //
 // This is a REGISTRATION policy (enforced at create/rename), not a parse rule —
 // the v2 slug charset admits `.` in any name-part and is unchanged

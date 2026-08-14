@@ -182,13 +182,17 @@ const composePersonaPrompt = applyPersonaTemplate;
  * #974 / cor:agt:020:06 — the ONE refusal that means "this name is spoken for
  * in this team", which the register loop advances past.
  *
- * The derived compound slug made the second refusal impossible to reach
- * legitimately: with the dot reserved (cor:urn:010:03), a persona slug can only
- * collide with another persona slug of the same (team App, name), so an
- * `AGENT_URN_TAKEN` on a mint IS a name collision — {@link asNameTaken}
- * translates it before it can escape. Pre-#974 the two codes were genuinely
- * different situations (an ordinary agent named "Iris" squatted the flat slug
+ * With the dot reserved (cor:urn:010:03), a persona slug can only collide with
+ * another persona slug of the same team App — so an `AGENT_URN_TAKEN` on a mint
+ * IS a name collision in this team, and {@link asNameTaken} translates it
+ * before it can escape. Pre-#974 the two codes were genuinely different
+ * situations (an ordinary agent named "Iris" squatted the flat slug
  * `<org>:iris`); that leg is gone.
+ *
+ * The collision need not be with the SAME spelling: slugification is
+ * many-to-one, so "Mary Jane" and "Mary-Jane" address the same persona slot
+ * (see src/lib/personaSlug.ts). The refusal names the derived slug for exactly
+ * that reason — the register then advances past the whole slot, which is right.
  */
 function isNameOccupied(e: unknown): boolean {
   return e instanceof GraphQLError && e.extensions?.code === 'PERSONA_NAME_TAKEN';
@@ -348,9 +352,10 @@ export const teamPersonaMutations = {
     //    refusal IS the answer (cor:agt:020:02). Register mode: walk the
     //    pool relying on the uniqueness constraint as the atomic primitive —
     //    a P2002-mapped PERSONA_NAME_TAKEN advances to the next name. #974
-    //    dropped the AGENT_URN_TAKEN advance leg: the derived compound slug
-    //    is collision-free by construction (cor:agt:020:06), so a slug-level
-    //    refusal can only BE a name collision and is translated as one.
+    //    dropped the AGENT_URN_TAKEN advance leg: with the dot reserved
+    //    (cor:agt:020:06) a slug-level refusal on a mint can only BE a name
+    //    collision in this team — possibly against a slug-equivalent spelling —
+    //    so it is translated into one and advances the register the same way.
     const candidates = requestedName ? [requestedName] : register;
     if (candidates.length === 0) {
       throw new GraphQLError(

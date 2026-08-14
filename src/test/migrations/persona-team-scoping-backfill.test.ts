@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'fs';
 import { Client } from 'pg';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -208,5 +209,41 @@ describe('#974 migration — the dot guard (cor:urn:010:03)', () => {
   it('FIRES on a pre-existing dotted App slug', async () => {
     await createApp('eng.team');
     await expect(pgClient.query(DOT_GUARD)).rejects.toThrow(/cor:urn:010:03 guard: App slug/);
+  });
+});
+
+describe('#974 — post-push.sql carries the same backfill (PR #975 review)', () => {
+  // `pnpm db:dev-setup` runs `prisma db push` + post-push.sql, NOT the
+  // migration, so an established local database only gets `team_app_id`
+  // populated if post-push repeats this work. It shipped without it: the
+  // validated CHECK then aborted the push on every existing persona — after
+  // the index DROPs had already committed. These assertions are textual on
+  // purpose: they fail the moment one copy is edited and the other isn't.
+  const postPush = readFileSync(
+    new URL('../../../prisma/post-push.sql', import.meta.url),
+    'utf8',
+  );
+
+  it('repeats the roster backfill, scoped to rows still NULL (idempotent)', async () => {
+    expect(postPush).toContain('SELECT aa."app_id" FROM "app_agents" aa');
+    expect(postPush).toContain('ORDER BY aa."created_at" ASC');
+    expect(postPush).toMatch(
+      /WHERE a\."persona_name" IS NOT NULL AND a\."team_app_id" IS NULL/,
+    );
+  });
+
+  it('repeats the orphan guard, with the migration\'s message', async () => {
+    expect(postPush).toContain('cor:agt:020:01 backfill: persona agent(s) belong to no App');
+  });
+
+  it('orders backfill → guard → CHECK → index swap, as the migration does', async () => {
+    const backfill = postPush.indexOf('WHERE a."persona_name" IS NOT NULL AND a."team_app_id" IS NULL');
+    const guard = postPush.indexOf('cor:agt:020:01 backfill: persona agent(s)');
+    const check = postPush.indexOf('ADD CONSTRAINT "chk_agent_persona_team_app"');
+    const index = postPush.indexOf('CREATE UNIQUE INDEX IF NOT EXISTS agents_team_persona_name_uniq');
+    expect(backfill).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(backfill);
+    expect(check).toBeGreaterThan(guard);
+    expect(index).toBeGreaterThan(check);
   });
 });
