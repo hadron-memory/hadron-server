@@ -237,6 +237,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
 CREATE UNIQUE INDEX IF NOT EXISTS workers_app_name_uniq
   ON workers (app_id, lower(name));
 
+-- …and its MENTION TOKEN is unique per App too (PR #978 review — Copilot):
+-- the mention contract (cor:agt:020:04) addresses a worker by the slug of its
+-- name, and that map is many-to-one, so "Mary Jane" and "Mary-Jane" would be
+-- two legal castings sharing the one address `@mary-jane`. The expression
+-- MIRRORS mentionTokenOf (resolvers.teamChat.ts) step for step; empty tokens
+-- ("!!!") are unaddressable, not colliding, so they stay out of the index.
+-- Synced with the 20260814140000_worker_mention_token_uniq migration +
+-- src/test/globalSetup.ts — a change to mentionTokenOf must change all three.
+CREATE UNIQUE INDEX IF NOT EXISTS workers_app_mention_token_uniq
+  ON workers (
+    app_id,
+    regexp_replace(
+      regexp_replace(
+        regexp_replace(lower(name), '[^a-z0-9._-]+', '-', 'g'),
+        '^[^a-z0-9]+', ''),
+      '[^a-z0-9]+$', '')
+  )
+  WHERE regexp_replace(
+          regexp_replace(
+            regexp_replace(lower(name), '[^a-z0-9._-]+', '-', 'g'),
+            '^[^a-z0-9]+', ''),
+          '[^a-z0-9]+$', '') <> '';
+
 -- Cleanup for #975-pushed dev databases (`db push` does not run migrations):
 -- the superseded persona-as-agent name machinery. `persona_name` /
 -- `team_app_id` themselves are gone from schema.prisma, so `db push` drops

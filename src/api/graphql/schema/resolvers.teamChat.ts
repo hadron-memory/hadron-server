@@ -53,6 +53,7 @@ import {
   clampListTake,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
+import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 
 /** Canonical loc of the one team chat in a team App's shared memory (#939). */
@@ -91,22 +92,10 @@ export function extractMentions(body: string): string[] {
   return [...seen];
 }
 
-/**
- * Canonical mention token of a display name — the slug both sides of the
- * mention contract use (Codex P2 on PR #941): worker names may legally
- * contain spaces ("Mary Jane"), which the extraction atom cannot, so the
- * writer mentions `@mary-jane` and the reader slugs the resolved name the
- * same way. Lowercase; runs of out-of-atom characters collapse to `-`;
- * trimmed to alphanumeric ends. Returns null when nothing usable remains.
- */
-export function mentionTokenOf(name: string): string | null {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[^a-z0-9]+/, '')
-    .replace(/[^a-z0-9]+$/, '');
-  return slug.length > 0 ? slug : null;
-}
+// The mention token moved to src/lib/mentionToken.ts (PR #978 review): worker
+// casting has to refuse a name whose token is taken, and that resolver must not
+// import this one. Re-exported so existing importers are unchanged.
+export { mentionTokenOf };
 
 type AppRow = {
   id: string;

@@ -89,6 +89,30 @@ export const WORKLOG_COLLECTION_SCHEMA: MemorySchemaObjectType = {
   },
 };
 
+/**
+ * The pre-#974 canonical declaration (shipped by #947/#948), byte-identical
+ * except for the `personaName` field the Worker model renamed. A memory whose
+ * stored declaration deep-equals THIS shape was written by the server itself,
+ * so `ensureWorklogSchema` transparently converges it to the new canonical —
+ * otherwise every pre-#974 team memory would refuse all new records
+ * (`workerName` fails the stored `personaName: required`) until an org admin
+ * discovered updateTeamCollections (PR #978 review — codex P1). A declaration
+ * that does NOT equal this shape is a deployment decision and stays governed.
+ */
+const LEGACY_WORKLOG_COLLECTION_SCHEMA: MemorySchemaObjectType = {
+  description:
+    'Append-only team worklog — externally visible work milestones (#947, spec cor:agt:020). ref is the canonical equality-lookup key.',
+  fields: {
+    sessionId: { type: 'text', required: true },
+    personaName: { type: 'text', required: true },
+    tool: { type: 'text', required: true },
+    kind: { type: 'enum', required: true, values: [...WORK_KINDS] },
+    ref: { type: 'text', required: true },
+    action: { type: 'text', required: true },
+    at: { type: 'datetime', required: true },
+  },
+};
+
 const forbidden = (): GraphQLError =>
   new GraphQLError("You are not authorized to use this App's team worklog.", {
     extensions: { code: 'FORBIDDEN' },
@@ -188,14 +212,24 @@ async function locateWorklogRoot(ctx: Context, appId: string): Promise<WorklogRo
  * ensure re-declares it).
  */
 async function ensureWorklogSchema(ctx: Context, memoryId: string): Promise<void> {
+  // A stored declaration blocks the merge — UNLESS it deep-equals the
+  // pre-#974 canonical (server-written, never a deployment decision), which
+  // is converged to the Worker-model shape in place. See
+  // LEGACY_WORKLOG_COLLECTION_SCHEMA.
+  const isDeclared = (schema: MemorySchema | null): boolean => {
+    const current = schema?.objectTypes?.[WORKLOG_OBJECT_TYPE];
+    if (!current) return false;
+    return stableJson(current) !== stableJson(LEGACY_WORKLOG_COLLECTION_SCHEMA);
+  };
   const row = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { schema: true } });
-  if ((row?.schema as unknown as MemorySchema | null)?.objectTypes?.[WORKLOG_OBJECT_TYPE]) return;
+  if (isDeclared((row?.schema as unknown as MemorySchema | null) ?? null)) return;
   await ctx.db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
     const locked = await tx.memory.findUnique({ where: { id: memoryId }, select: { schema: true } });
     const schema = (locked?.schema as unknown as MemorySchema | null) ?? null;
-    if (schema?.objectTypes?.[WORKLOG_OBJECT_TYPE]) return;
+    if (isDeclared(schema)) return;
     const merged: MemorySchema = {
+      ...(schema ?? {}),
       objectTypes: { ...(schema?.objectTypes ?? {}), [WORKLOG_OBJECT_TYPE]: WORKLOG_COLLECTION_SCHEMA },
     };
     await tx.memory.update({

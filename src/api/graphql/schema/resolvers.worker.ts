@@ -25,9 +25,11 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { applyPersonaTemplate } from '../../../lib/personaDescription.js';
 import { resolveMemoryRoot } from './chat-scope.js';
+import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import {
   type Context,
   requireOrgRole,
+  requireOwnerOrOrgRole,
   isAppParticipant,
   isNonReaderAppMember,
   clampListTake,
@@ -225,20 +227,49 @@ async function resolveWorkerRef(ctx: Context, workerRef: string): Promise<Worker
   return worker;
 }
 
-/** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
+/**
+ * True when the refusal is one of the two per-App name uniques: the display
+ * name itself (`workers_app_name_uniq`) or its MENTION TOKEN
+ * (`workers_app_mention_token_uniq`, PR #978 review — Copilot). Both mean the
+ * same thing to an allocator — this name's slot is occupied — so both are the
+ * register loop's advance signal.
+ */
 function isNameTaken(e: unknown): boolean {
   return (
     e instanceof Prisma.PrismaClientKnownRequestError &&
     e.code === 'P2002' &&
-    /workers_app_name_uniq|app_id.*name|name/i.test(String(e.meta?.target ?? e.message))
+    /workers_app_name_uniq|workers_app_mention_token_uniq|app_id.*name|name/i.test(
+      String(e.meta?.target ?? e.message),
+    )
+  );
+}
+
+/**
+ * True when the refusal came from the mention-token unique specifically.
+ *
+ * Matches on `regexp_replace`, not on the index NAME: for an index Prisma
+ * doesn't know about, P2002's `meta.target` carries the index EXPRESSION, not
+ * its name — `["app_id", "regexp_replace(regexp_replace(...lower(name)", …]`
+ * here versus `["app_id", "lower(name)"]` for `workers_app_name_uniq`. The two
+ * are distinguishable, but only on the expression.
+ */
+function isMentionTokenTaken(e: unknown): boolean {
+  return (
+    e instanceof Prisma.PrismaClientKnownRequestError &&
+    e.code === 'P2002' &&
+    /regexp_replace|workers_app_mention_token_uniq/i.test(String(e.meta?.target ?? e.message))
   );
 }
 
 /** The typed WORKER_NAME_TAKEN refusal — the allocation contract's advance
- *  signal (cor:agt:020:02). */
-function nameTaken(name: string, appId: string): GraphQLError {
+ *  signal (cor:agt:020:02). A token collision says so explicitly: the caller's
+ *  name is NOT literally taken, and without the reason "Mary-Jane is taken"
+ *  reads like a server bug when the roster only shows "Mary Jane". */
+function nameTaken(name: string, appId: string, viaMentionToken = false): GraphQLError {
   return new GraphQLError(
-    `Worker name ${JSON.stringify(name)} is already taken in this App — a name binds to one casting forever, so pick another.`,
+    viaMentionToken
+      ? `Worker name ${JSON.stringify(name)} resolves to the same @mention as a worker already cast in this App (@${mentionTokenOf(name) ?? ''}) — mentions must address exactly one worker, so pick a name that differs by more than punctuation.`
+      : `Worker name ${JSON.stringify(name)} is already taken in this App — a name binds to one casting forever, so pick another.`,
     { extensions: { code: 'WORKER_NAME_TAKEN', name, appId } },
   );
 }
@@ -349,27 +380,34 @@ async function provisionWorkerMemory(
         authorRoot: worker.id.slice(0, 8),
       });
       try {
-        const created = await ctx.db.memory.create({
-          data: {
-            organizationId: app.organizationId,
-            // Owner XOR (`chk_memory_owner_xor`): follows the App's owner.
-            ownerUserId: app.organizationId === null ? app.ownerUserId : null,
-            urn,
-            name: `${app.name} — ${worker.name} — working memory`,
-            class: 'app',
-            // 035-visibility-enum-cleanup: app-class visibility is NULL.
-            visibility: null,
-            appId: app.id,
-            userId: null,
-            createdBy: ctx.userId ?? null,
-          },
-          select: { id: true },
+        // Memory create + Worker.memoryId attach in ONE transaction (PR #978
+        // review — Copilot): a concurrent deleteWorker can observe
+        // `memoryId: null`, hard-delete the never-used casting, and land the
+        // worker.update on a vanished row — the rollback then takes the
+        // just-created memory with it instead of leaving a permanent orphan.
+        return await ctx.db.$transaction(async (tx) => {
+          const created = await tx.memory.create({
+            data: {
+              organizationId: app.organizationId,
+              // Owner XOR (`chk_memory_owner_xor`): follows the App's owner.
+              ownerUserId: app.organizationId === null ? app.ownerUserId : null,
+              urn,
+              name: `${app.name} — ${worker.name} — working memory`,
+              class: 'app',
+              // 035-visibility-enum-cleanup: app-class visibility is NULL.
+              visibility: null,
+              appId: app.id,
+              userId: null,
+              createdBy: ctx.userId ?? null,
+            },
+            select: { id: true },
+          });
+          await tx.worker.update({
+            where: { id: worker.id },
+            data: { memoryId: created.id },
+          });
+          return created.id;
         });
-        await ctx.db.worker.update({
-          where: { id: worker.id },
-          data: { memoryId: created.id },
-        });
-        return created.id;
       } catch (err) {
         if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {
           throw err;
@@ -564,7 +602,7 @@ export const workerMutations = {
       } catch (e) {
         if (isNameTaken(e)) {
           if (!requestedName) continue;
-          throw nameTaken(candidate, appId);
+          throw nameTaken(candidate, appId, isMentionTokenTaken(e));
         }
         throw e;
       }
@@ -725,15 +763,44 @@ export const workerQueries = {
 
 export const workerFieldResolvers = {
   Worker: {
-    /** The role-agent behind the casting. Readable to anyone who could read
-     *  the Worker: installing an agent is a read grant on it
-     *  (findings:installing-an-agent-is-a-read-grant), and a Worker only
-     *  exists for an agent that was installed here. */
+    /**
+     * The role-agent behind the casting — behind Query.agent's OWN read gate
+     * (PUBLIC, else owner / org READER), masked to null on deny. The Worker
+     * read gate is WIDER than the Agent's (App participants, App keys), and a
+     * nested object hands the caller the Agent's field resolvers — systemPrompt
+     * included — which assume the outer query authorized them
+     * (findings:broadening-read-gate-leaks-nested-objects, #552). The
+     * installed-agent read grant cannot stand in for that gate either: Worker
+     * rows survive uninstall, so "a Worker exists" does not imply the grant
+     * still does (PR #978 review — codex P1 + Copilot).
+     */
     agent: async (worker: { agentId: string }, _: unknown, ctx: Context) => {
-      return ctx.db.agent.findUnique({ where: { id: worker.agentId } });
+      const agent = await ctx.db.agent.findUnique({ where: { id: worker.agentId } });
+      if (!agent || agent.deletedAt) return null;
+      if (agent.visibility !== 'PUBLIC') {
+        try {
+          await requireOwnerOrOrgRole(ctx, agent, 'READER');
+        } catch {
+          return null;
+        }
+      }
+      return agent;
     },
+    /**
+     * The App whose staff this casting fills — behind Query.app's OWN read
+     * gate (owner / org READER), masked to null on deny: an AppMember who is
+     * not an org member can read the Worker but must not reach App.keys /
+     * App.members through it (the same #552 class as `agent` above).
+     */
     app: async (worker: { appId: string }, _: unknown, ctx: Context) => {
-      return ctx.db.app.findUnique({ where: { id: worker.appId } });
+      const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
+      if (!app || app.deletedAt) return null;
+      try {
+        await requireOwnerOrOrgRole(ctx, app, 'READER');
+      } catch {
+        return null;
+      }
+      return app;
     },
     /**
      * The worker's boot prompt, resolved (cor:agt:020:01 — "how {{name}} and

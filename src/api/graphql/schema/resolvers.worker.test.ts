@@ -318,6 +318,44 @@ describe('castWorker — name allocation (the register)', () => {
     await expectCode(cast({ agentRef: roleAgent.id, name: 'IRIS' }), 'WORKER_NAME_TAKEN');
   });
 
+  it('a name that slugs to a taken @mention is refused, with the reason (PR #978 review)', async () => {
+    // "Mary Jane" and "Mary-Jane" are two distinct names under the
+    // case-insensitive name unique, but the mention contract addresses BOTH as
+    // @mary-jane — so the second casting would make every mention (and every
+    // mention-filtered read) ambiguous between two workers.
+    const mj = await cast({ agentRef: roleAgent.id, name: 'Mary Jane' });
+    expect(mj.name).toBe('Mary Jane');
+    try {
+      await cast({ agentRef: roleAgent.id, name: 'Mary-Jane' });
+      expect.fail('expected WORKER_NAME_TAKEN');
+    } catch (e) {
+      expect((e as GraphQLError).extensions?.code).toBe('WORKER_NAME_TAKEN');
+      // The message must say WHY — the roster shows no "Mary-Jane", so a bare
+      // "already taken" reads like a server bug.
+      expect((e as GraphQLError).message).toMatch(/@mary-jane/);
+    }
+    // …and a name that is genuinely a different address is fine.
+    const other = await cast({ agentRef: roleAgent.id, name: 'Mary Janet' });
+    expect(other.name).toBe('Mary Janet');
+  });
+
+  it('the register advances past a name whose @mention is taken', async () => {
+    // "iris" is free as a NAME here (nothing is named that), but @iris is
+    // already the address of "Iris!" — the register must move on to Henry.
+    await cast({ agentRef: roleAgent.id, name: 'Iris!' });
+    const next = await cast({ role: 'backend-engineer' });
+    expect(next.name).toBe('Henry');
+  });
+
+  it('two UNADDRESSABLE names do not collide — an empty token reserves nothing', async () => {
+    // Neither can ever be mentioned (mentionTokenOf → null), so they are not
+    // competing for an address; the index excludes them rather than letting
+    // the first one claim the empty slot for the whole App.
+    const a = await cast({ agentRef: roleAgent.id, name: '~~~' });
+    const b = await cast({ agentRef: roleAgent.id, name: '!!!' });
+    expect(a.id).not.toBe(b.id);
+  });
+
   it('a RETIRED worker keeps its name reserved forever (cor:agt:020:02)', async () => {
     const iris = await cast({ role: 'backend-engineer' });
     expect(iris.name).toBe('Iris');
