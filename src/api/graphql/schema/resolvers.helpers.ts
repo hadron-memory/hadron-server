@@ -1995,17 +1995,21 @@ export function mapToolDriveFile(f: ToolDriveFile) {
 export type ExtractionSpecEntry = { field: string; description?: string; shape?: string };
 
 /**
- * Build the respond() tool schema by merging extractionSpec from three
- * levels: agent (config node) → conversation → stage. Stage-level fields
- * win on conflict. Always includes onTrack + offTrackReason fields for
- * continuous routing.
+ * Merge extractionSpec from three levels: agent (config node) →
+ * conversation → stage. Stage-level fields win on conflict.
+ *
+ * Exported (#910) because the WRITE path needs the same list the tool schema
+ * was built from: a spec's `field` carries the destination prefix that says
+ * where each extracted value is filed, and the model answers with the bare
+ * last segment. Deriving the two from one function is what keeps the routing
+ * key and the schema property name in agreement.
  */
-export async function buildRespondToolSchema(
+export async function resolveExtractionSpec(
   db: PrismaClient,
   systemMemoryId: string,
   convName: string | null,
   stageData: Record<string, unknown>,
-): Promise<Array<{ name: string; description: string; parameters: unknown }> | null> {
+): Promise<ExtractionSpecEntry[]> {
   const allSpecs: ExtractionSpecEntry[] = [];
 
   // 1. Agent-level: config node with agentExtractionSpec
@@ -2040,6 +2044,24 @@ export async function buildRespondToolSchema(
       deduped.unshift(allSpecs[i]);
     }
   }
+  return deduped;
+}
+
+/**
+ * Build the respond() tool schema from the merged spec. Always includes
+ * onTrack + offTrackReason fields for continuous routing.
+ *
+ * The property name is the field's LAST dotted segment — the leading
+ * segment is the destination (#910) and is not something the model should
+ * see or answer with.
+ */
+export async function buildRespondToolSchema(
+  db: PrismaClient,
+  systemMemoryId: string,
+  convName: string | null,
+  stageData: Record<string, unknown>,
+): Promise<Array<{ name: string; description: string; parameters: unknown }> | null> {
+  const deduped = await resolveExtractionSpec(db, systemMemoryId, convName, stageData);
 
   const dataProps: Record<string, unknown> = {};
   for (const spec of deduped) {
