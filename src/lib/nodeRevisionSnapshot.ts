@@ -231,6 +231,11 @@ export const TRACKED_NODE_FIELDS = [
   'content',
   'tags',
   'nodeType',
+  // #725's collection discriminator. It was captured by the snapshot and
+  // restored by restorableNodeFields, but missing here — so an overwrite that
+  // changed ONLY objectType recorded an empty `changes` (PR #977 review,
+  // Copilot). Every diff caller already passes it.
+  'objectType',
   'isLink',
   'properties',
   'data',
