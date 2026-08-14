@@ -34,6 +34,7 @@ import {
   loadEdgeEndpointNode,
   isMemoryReadableCached,
   canReadMemoryRecord,
+  isAppParticipant,
   loadMemoryUrn,
   loadAppUrn,
   loadApp,
@@ -50,6 +51,7 @@ import {
   assetUrn,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import { findTeamMemoryId } from './resolvers.teamWork.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 
@@ -834,7 +836,76 @@ export const typeResolvers = {
       return safeCanonicalUrn('memory', urn);
     },
   },
+  /**
+   * #964 — the holder of a taken persona name, gated on the caller's own reach.
+   *
+   * Naming the holder is genuinely useful ("Iris is taken — by whom?"), but
+   * returning it unconditionally would turn the preview into an existence
+   * oracle for agents in orgs the caller cannot see. So the STATUS is always
+   * truthful (`taken` is computed from both uniques regardless) and only the
+   * IDENTITY is withheld: null here means "not yours to see", never "free".
+   */
+  TeamPersonaPreviewName: {
+    heldBy: async (p: { heldById: string | null }, _: unknown, ctx: Context) => {
+      if (!p.heldById) return null;
+      const agent = await ctx.db.agent.findUnique({ where: { id: p.heldById } });
+      if (!agent) return null;
+      if (agent.ownerUserId !== null) {
+        return ctx.userId && agent.ownerUserId === ctx.userId ? agent : null;
+      }
+      if (agent.organizationId === null) return null;
+      return (await isOrgMemberOrAdmin(ctx, agent.organizationId)) ? agent : null;
+    },
+  },
   App: {
+    /**
+     * #965 — the App's team space (see the SDL description for the resolution
+     * order and why it is not called `sharedMemory`).
+     *
+     * Gated on APP PARTICIPATION (`isAppParticipant`), the same predicate the
+     * team chat and worklog use — deliberately, and not on the generic memory
+     * read gates. `cor:acl:030:01` makes an app-class memory's audience the
+     * App's own membership, so participation IS this memory class's read
+     * predicate rather than a widening of one.
+     *
+     * The generic gates are both wrong here in opposite directions, which is
+     * worth recording because the first attempt used one:
+     * `isMemoryReadableCached` (node-content) does NOT admit a class='app'
+     * memory for a plain org member, so the field returned null for exactly the
+     * humans it exists to serve — a CONTRIBUTOR who may record work could not
+     * discover where it goes. `canReadMemoryRecord` would admit them, but by a
+     * route unrelated to the App, so it would also answer for Apps the caller
+     * has nothing to do with.
+     *
+     * Returning a Memory OBJECT hands the caller that type's field resolvers,
+     * which assume the outer query authorized them
+     * (findings:broadening-read-gate-leaks-nested-objects). That is sound here
+     * only because the audience is identical: a participant is already entitled
+     * to this memory's contents through the chat and worklog surfaces.
+     */
+    teamMemory: async (
+      a: {
+        id: string;
+        name: string;
+        urn: string;
+        organizationId: string | null;
+        ownerUserId: string | null;
+        uninstalledAt: Date | null;
+      },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      // A PURE App-key principal reads its OWN App's team space, exactly as it
+      // may read that App's worklog and chat — the location of a space you are
+      // already entitled to read is not a separate secret. Any other App's key
+      // gets null, and a hybrid user+selection principal falls through to be
+      // judged on the USER (findings:auth-appid-credential-vs-selection).
+      const viaOwnAppKey = !ctx.userId && !!ctx.appId && ctx.appId === a.id;
+      if (!viaOwnAppKey && !(await isAppParticipant(ctx, a))) return null;
+      const memoryId = await findTeamMemoryId(ctx, a);
+      if (!memoryId) return null;
+      return ctx.db.memory.findUnique({ where: { id: memoryId } });
+    },
     // 036-ai-service-config: registry-backed reads of the App's
     // 'default' config (legacy ai_* columns dropped).
     aiProvider: async (a: { id: string }, _: unknown, ctx: Context) =>

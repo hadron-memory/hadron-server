@@ -17,10 +17,12 @@
 //                   `description` is never copied onto the persona: it
 //                   describes the role-definition artifact, not the persona.
 import { GraphQLError } from 'graphql';
+import type { App as PrismaApp, Node as PrismaNode } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
+import { deriveSlugFromName } from '../../../lib/urn.js';
 import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
@@ -165,6 +167,40 @@ export async function locateTeamAgent(
 }
 
 /**
+ * {@link locateTeamAgent} with the single-installed-Agent fallback: an App with
+ * EXACTLY ONE live installed Agent is unambiguous without a `roles:` marker, so
+ * a single-agent team App can chat and record work before it has any role
+ * definitions.
+ *
+ * This is the resolution that decides WHERE a team App's shared space lives, so
+ * it must have exactly one implementation: the team chat, the worklog, and
+ * `App.teamMemory` (#965) all have to name the SAME memory or the field would
+ * send `team session start -m` at a memory the worklog doesn't use — the silent
+ * skip #965 exists to remove. It was duplicated byte-for-byte in
+ * `bootstrapTeamChat` and `bootstrapWorklog` before #965.
+ *
+ * Note this widens the fallback beyond TEAM_AGENT_NOT_FOUND deliberately not at
+ * all: TEAM_AGENT_AMBIGUOUS still throws, because two marker-carrying Agents is
+ * a real question only the caller can answer.
+ */
+export async function locateTeamAgentOrSole(ctx: Context, appId: string): Promise<TeamAgentRow> {
+  try {
+    return await locateTeamAgent(ctx, appId, null);
+  } catch (e) {
+    if (!(e instanceof GraphQLError) || e.extensions?.code !== 'TEAM_AGENT_NOT_FOUND') throw e;
+    const installed = await ctx.db.appAgent.findMany({
+      where: { appId },
+      select: {
+        agent: { select: { id: true, name: true, urn: true, systemMemoryId: true, deletedAt: true } },
+      },
+    });
+    const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
+    if (live.length !== 1) throw e;
+    return live[0]!;
+  }
+}
+
+/**
  * Substitute {{name}} / {{role}} into the role's PROMPT template — the raw
  * role, as it has always been. (#950's description string lives in
  * `src/lib/personaDescription.ts`, shared with the backfill sweep.)
@@ -177,6 +213,308 @@ function isNameOccupied(e: unknown): boolean {
   const code = e.extensions?.code;
   return code === 'PERSONA_NAME_TAKEN' || code === 'AGENT_URN_TAKEN';
 }
+
+/**
+ * The pre-write half of a persona mint, shared verbatim by `createTeamPersona`
+ * and the `teamPersonaPreview` dry run (#964).
+ *
+ * Everything a caller needs in order to DECIDE is computed here — the resolved
+ * Team Agent, the role definition (decrypted), the parsed register, the URN
+ * namespace, the derived visibility, and the composed prompt — and none of it
+ * writes. The extraction is the point: a preview that re-derived any of this
+ * would be a second implementation of the thing whose single-implementation-ness
+ * is why persona minting lives on the server at all (hadron-cli#369).
+ *
+ * The one thing it deliberately does NOT do is allocate. Allocation is the
+ * uniqueness constraint itself ("the constraint IS the allocation"), so the
+ *answer only exists after a write. The preview predicts instead — see
+ * `predictPersonaAllocation`.
+ */
+async function planTeamPersonaMint(
+  ctx: Context,
+  { appRef, role, teamAgentRef, name }: { appRef: string; role: string; teamAgentRef?: string | null; name?: string | null },
+): Promise<{
+  app: PrismaApp;
+  teamAgent: TeamAgentRow;
+  roleNode: PrismaNode;
+  roleNorm: string;
+  template: string;
+  register: string[];
+  namespace: string;
+  candidates: string[];
+  requestedName: string | null;
+  personaVisibility: 'PERSONAL' | 'ORGANIZATION';
+}> {
+  const roleNorm = (role ?? '').trim();
+  if (roleNorm === '' || roleNorm.includes(':')) {
+    throw new GraphQLError('role must be a single non-empty loc atom (no ":").', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  // cor:agt:020:02 blank-is-absent: a whitespace-only name is no name.
+  const requestedName = (name ?? '').trim() || null;
+
+  // 1. Resolve the team App (cor:api:140 — PK or URN) and gate.
+  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+  if (app.uninstalledAt) {
+    throw new GraphQLError('Cannot create a persona in an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId },
+    });
+  }
+  await requireTeamPersonaMintAccess(ctx, app);
+
+  // 2. Locate the Team Agent (explicit ref or the roles:-branch marker).
+  const teamAgent = await locateTeamAgent(ctx, appId, teamAgentRef);
+  if (!teamAgent.systemMemoryId) {
+    throw new GraphQLError(
+      `Team Agent ${teamAgent.name} has no system memory, so it carries no role definitions.`,
+      { extensions: { code: 'PERSONA_ROLE_NOT_FOUND', role: roleNorm } },
+    );
+  }
+
+  // 3. Read the role definition node (memory-scoped composite unique —
+  //    findings:unscoped-loc-lookup-crosses-memories).
+  const roleNode = await ctx.db.node.findUnique({
+    where: {
+      loc_memoryId: { loc: `${ROLES_BRANCH_PREFIX}${roleNorm}`, memoryId: teamAgent.systemMemoryId },
+    },
+  });
+  if (!roleNode || roleNode.deletedAt) {
+    const siblings = await ctx.db.node.findMany({
+      where: {
+        memoryId: teamAgent.systemMemoryId,
+        deletedAt: null,
+        loc: { startsWith: ROLES_BRANCH_PREFIX },
+      },
+      select: { loc: true },
+      orderBy: { loc: 'asc' },
+    });
+    const available = siblings
+      .map((s) => s.loc.slice(ROLES_BRANCH_PREFIX.length))
+      .filter((l) => l !== '' && !l.includes(':'));
+    throw new GraphQLError(
+      `Role "${roleNorm}" is not defined in ${teamAgent.name}'s system memory (no ${ROLES_BRANCH_PREFIX}${roleNorm} node).${available.length ? ` Available roles: ${available.join(', ')}.` : ''}`,
+      { extensions: { code: 'PERSONA_ROLE_NOT_FOUND', role: roleNorm, availableRoles: available } },
+    );
+  }
+  // Encrypted system memory: decrypt with the active session key (spec 041);
+  // without one, refuse with the typed SESSION_EXPIRED (the same code the
+  // encrypted node mutations emit — decryptNodeFields' bare Error would
+  // read INTERNAL_SERVER_ERROR on the wire).
+  const memInfo = await getMemoryEncryptionInfo(ctx.db, teamAgent.systemMemoryId);
+  try {
+    decryptNodeFields(roleNode, memInfo);
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith('SESSION_EXPIRED')) {
+      throw new GraphQLError(
+        `SESSION_EXPIRED: memory ${memInfo.id} is encrypted but no active session key is available.`,
+        { extensions: { code: 'SESSION_EXPIRED', memoryId: memInfo.id } },
+      );
+    }
+    throw e;
+  }
+  // The template is used VERBATIM (intentional leading/trailing whitespace
+  // survives); trim only decides blankness.
+  const template = typeof roleNode.content === 'string' ? roleNode.content : '';
+  if (template.trim() === '') {
+    throw new GraphQLError(
+      `Role "${roleNorm}" has no prompt template — the ${ROLES_BRANCH_PREFIX}${roleNorm} node's content is empty.`,
+      { extensions: { code: 'PERSONA_ROLE_INVALID', role: roleNorm } },
+    );
+  }
+  // Register order is the allocation order (first-to-last), and on a
+  // case-insensitive duplicate the FIRST spelling wins.
+  const rawNames = (roleNode.data as { names?: unknown } | null)?.names;
+  const register: string[] = [];
+  if (Array.isArray(rawNames)) {
+    const seen = new Set<string>();
+    for (const raw of rawNames) {
+      if (typeof raw !== 'string') continue;
+      const trimmed = raw.trim();
+      if (trimmed === '' || seen.has(trimmed.toLowerCase())) continue;
+      seen.add(trimmed.toLowerCase());
+      register.push(trimmed);
+    }
+  }
+
+  // 4. Owner + URN namespace: the minted persona is owned by the App's
+  //    owner (org XOR user), like every entity the App provisions.
+  let namespace: string;
+  if (app.organizationId !== null) {
+    const org = await ctx.db.organization.findUniqueOrThrow({
+      where: { id: app.organizationId },
+      select: { urn: true },
+    });
+    namespace = org.urn;
+  } else {
+    const owner = await ctx.db.user.findUniqueOrThrow({
+      where: { id: app.ownerUserId! },
+      select: { handle: true },
+    });
+    const handle = normalizeHandleOrNull(owner.handle);
+    if (!handle) {
+      throw new GraphQLError(
+        'The App owner needs a valid handle before a user-owned persona can be created.',
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
+    namespace = handle;
+  }
+
+  // 5. Allocate + create. Caller-supplied name: one attempt, the typed
+  //    refusal IS the answer (cor:agt:020:02). Register mode: walk the
+  //    pool relying on the uniqueness constraint as the atomic primitive —
+  //    a P2002-mapped PERSONA_NAME_TAKEN (or an AGENT_URN_TAKEN from a
+  //    non-persona Agent squatting the slug) advances to the next name.
+  const candidates = requestedName ? [requestedName] : register;
+  if (candidates.length === 0) {
+    throw new GraphQLError(
+      `The name register for role "${roleNorm}" is empty — add names to the ${ROLES_BRANCH_PREFIX}${roleNorm} node's data.names, or pass an explicit name.`,
+      { extensions: { code: 'PERSONA_REGISTER_EXHAUSTED', role: roleNorm } },
+    );
+  }
+  // #950: the roster is the team's shared view of who is on it
+  // (cor:agt:020:01 — "the AppAgent join is the roster"), so a persona in an
+  // ORG-owned team App is ORGANIZATION-visible; PERSONAL would make every
+  // teammate's persona invisible to the others. A user-owned team App stays
+  // PERSONAL — spec 047 keeps a user-owned agent owner-only, and
+  // createAgentCore refuses anything else.
+  const personaVisibility = app.ownerUserId !== null ? 'PERSONAL' : 'ORGANIZATION';
+  return {
+    app,
+    teamAgent,
+    roleNode,
+    roleNorm,
+    template,
+    register,
+    namespace,
+    candidates,
+    requestedName,
+    personaVisibility,
+  };
+}
+
+/**
+ * Read-only takenness for ONE candidate persona name — the preview's stand-in
+ * for the allocation loop (#964), and the same predicate `teamRoles` will
+ * report per register entry (#960).
+ *
+ * A name is unavailable when EITHER unique is occupied
+ * (findings:persona-name-allocation-two-uniques): the case-insensitive
+ * persona-name index scoped to the owner, OR the derived agent slug URN. Both
+ * are checked because a non-persona Agent squatting the slug blocks a mint just
+ * as effectively as a persona holding the name — that asymmetry is precisely
+ * what makes a client-side version of this wrong.
+ *
+ * A soft-deleted row still counts as taken UNLESS it is a non-persona tombstone,
+ * which `createAgentCore` reclaims; a retired PERSONA keeps its name forever
+ * (cor:agt:020:02).
+ *
+ * This is a PREDICTION, not a reservation: nothing here is transactional, so a
+ * concurrent mint can take the name between the preview and the real call. That
+ * is inherent to previewing an allocation whose atomicity IS the constraint, and
+ * it is why the preview does not promise the name — the mutation still decides.
+ */
+async function isPersonaNameTaken(
+  ctx: Context,
+  owner: { organizationId: string | null; ownerUserId: string | null; namespace: string },
+  name: string,
+): Promise<{ taken: boolean; holderId: string | null }> {
+  const holder = await ctx.db.agent.findFirst({
+    where: {
+      personaName: { equals: name, mode: 'insensitive' },
+      ...(owner.organizationId !== null
+        ? { organizationId: owner.organizationId }
+        : { ownerUserId: owner.ownerUserId }),
+    },
+    select: { id: true },
+  });
+  if (holder) return { taken: true, holderId: holder.id };
+
+  const urn = `${owner.namespace}:${deriveSlugFromName(name)}`;
+  const bySlug = await ctx.db.agent.findUnique({
+    where: { urn },
+    select: { id: true, deletedAt: true, personaName: true },
+  });
+  if (!bySlug) return { taken: false, holderId: null };
+  // The one reclaimable case: a NON-persona tombstone is hard-deleted and the
+  // slug reused, so it does not block.
+  if (bySlug.deletedAt && bySlug.personaName === null) return { taken: false, holderId: null };
+  return { taken: true, holderId: bySlug.id };
+}
+
+export const teamPersonaQueries = {
+  /**
+   * #964 — dry-run a persona mint. Runs `planTeamPersonaMint` (the mutation's
+   * own pre-write half, verbatim) and predicts the allocation, writing nothing:
+   * no Agent, no AppAgent row, no name reserved.
+   *
+   * Why a Query and not `createTeamPersona(dryRun:)`, which #964 proposed: the
+   * mutation returns `Agent!`, and an unsaved preview cannot BE an Agent —
+   * `Agent.id` is `ID!`, so the issue's suggested "return id: null" is not
+   * legal GraphQL, and returning a fake id is the failure the issue itself
+   * warns about. The alternative (changing the mutation's return type to a
+   * union or wrapper) breaks every existing caller for the benefit of a
+   * preview. The issue's actual requirement — that the preview cannot DRIFT
+   * from the real path — is a property of sharing the implementation, which
+   * `planTeamPersonaMint` provides, not of sharing the GraphQL field. And a
+   * dry run performs no writes, so a Query is where it belongs.
+   *
+   * Authorization is the MINT gate, not a read gate: a preview reveals a name
+   * the caller could mint anyway, and running the same gate keeps the two from
+   * diverging into "previewable but not mintable".
+   *
+   * Every typed refusal of the mint path fires here too and is MORE useful as a
+   * preview than as a failed mint (PERSONA_ROLE_NOT_FOUND, PERSONA_ROLE_INVALID,
+   * TEAM_AGENT_AMBIGUOUS, SESSION_EXPIRED, APP_UNINSTALLED) — with one
+   * deliberate exception: an exhausted register is REPORTED (`name: null`,
+   * `registerExhausted: true`), not thrown, because "every name is taken" is
+   * the single most useful thing a preview can tell you, and throwing would
+   * withhold the register listing that shows why.
+   */
+  teamPersonaPreview: async (
+    _: unknown,
+    { appRef, role, teamAgentRef, name }: { appRef: string; role: string; teamAgentRef?: string | null; name?: string | null },
+    ctx: Context,
+  ) => {
+    const plan = await planTeamPersonaMint(ctx, { appRef, role, teamAgentRef, name });
+    const owner = {
+      organizationId: plan.app.organizationId,
+      ownerUserId: plan.app.ownerUserId,
+      namespace: plan.namespace,
+    };
+
+    // Walk the candidates exactly as the mint loop does — first free wins — but
+    // by prediction rather than by writing.
+    const registerStatus: { name: string; taken: boolean; heldById: string | null }[] = [];
+    let allocated: string | null = null;
+    for (const candidate of plan.candidates) {
+      const { taken, holderId } = await isPersonaNameTaken(ctx, owner, candidate);
+      registerStatus.push({ name: candidate, taken, heldById: holderId });
+      if (!taken && allocated === null) allocated = candidate;
+    }
+
+    return {
+      role: plan.roleNorm,
+      teamAgent: plan.teamAgent,
+      name: allocated,
+      requestedName: plan.requestedName,
+      registerExhausted: allocated === null,
+      register: registerStatus,
+      // The persona's boot briefing, composed post-substitution — reviewing it
+      // BEFORE the name is permanent is the point of the whole preview, and it
+      // is where a template missing {{name}} becomes visible.
+      personaPrompt: allocated ? composePersonaPrompt(plan.template, allocated, plan.roleNorm) : null,
+      description: allocated
+        ? composePersonaDescription(plan.roleNode.data, allocated, plan.roleNorm)
+        : null,
+      visibility: plan.personaVisibility,
+      namespace: plan.namespace,
+      urn: allocated ? `${plan.namespace}:${deriveSlugFromName(allocated)}` : null,
+    };
+  },
+};
 
 export const teamPersonaMutations = {
   /**
@@ -196,142 +534,19 @@ export const teamPersonaMutations = {
     { appRef, role, teamAgentRef, name }: { appRef: string; role: string; teamAgentRef?: string | null; name?: string | null },
     ctx: Context,
   ) => {
-    const roleNorm = (role ?? '').trim();
-    if (roleNorm === '' || roleNorm.includes(':')) {
-      throw new GraphQLError('role must be a single non-empty loc atom (no ":").', {
-        extensions: { code: 'BAD_USER_INPUT' },
-      });
-    }
-    // cor:agt:020:02 blank-is-absent: a whitespace-only name is no name.
-    const requestedName = (name ?? '').trim() || null;
-
-    // 1. Resolve the team App (cor:api:140 — PK or URN) and gate.
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
-    if (app.uninstalledAt) {
-      throw new GraphQLError('Cannot create a persona in an uninstalled App.', {
-        extensions: { code: 'APP_UNINSTALLED', appId },
-      });
-    }
-    await requireTeamPersonaMintAccess(ctx, app);
-
-    // 2. Locate the Team Agent (explicit ref or the roles:-branch marker).
-    const teamAgent = await locateTeamAgent(ctx, appId, teamAgentRef);
-    if (!teamAgent.systemMemoryId) {
-      throw new GraphQLError(
-        `Team Agent ${teamAgent.name} has no system memory, so it carries no role definitions.`,
-        { extensions: { code: 'PERSONA_ROLE_NOT_FOUND', role: roleNorm } },
-      );
-    }
-
-    // 3. Read the role definition node (memory-scoped composite unique —
-    //    findings:unscoped-loc-lookup-crosses-memories).
-    const roleNode = await ctx.db.node.findUnique({
-      where: {
-        loc_memoryId: { loc: `${ROLES_BRANCH_PREFIX}${roleNorm}`, memoryId: teamAgent.systemMemoryId },
-      },
-    });
-    if (!roleNode || roleNode.deletedAt) {
-      const siblings = await ctx.db.node.findMany({
-        where: {
-          memoryId: teamAgent.systemMemoryId,
-          deletedAt: null,
-          loc: { startsWith: ROLES_BRANCH_PREFIX },
-        },
-        select: { loc: true },
-        orderBy: { loc: 'asc' },
-      });
-      const available = siblings
-        .map((s) => s.loc.slice(ROLES_BRANCH_PREFIX.length))
-        .filter((l) => l !== '' && !l.includes(':'));
-      throw new GraphQLError(
-        `Role "${roleNorm}" is not defined in ${teamAgent.name}'s system memory (no ${ROLES_BRANCH_PREFIX}${roleNorm} node).${available.length ? ` Available roles: ${available.join(', ')}.` : ''}`,
-        { extensions: { code: 'PERSONA_ROLE_NOT_FOUND', role: roleNorm, availableRoles: available } },
-      );
-    }
-    // Encrypted system memory: decrypt with the active session key (spec 041);
-    // without one, refuse with the typed SESSION_EXPIRED (the same code the
-    // encrypted node mutations emit — decryptNodeFields' bare Error would
-    // read INTERNAL_SERVER_ERROR on the wire).
-    const memInfo = await getMemoryEncryptionInfo(ctx.db, teamAgent.systemMemoryId);
-    try {
-      decryptNodeFields(roleNode, memInfo);
-    } catch (e) {
-      if (e instanceof Error && e.message.startsWith('SESSION_EXPIRED')) {
-        throw new GraphQLError(
-          `SESSION_EXPIRED: memory ${memInfo.id} is encrypted but no active session key is available.`,
-          { extensions: { code: 'SESSION_EXPIRED', memoryId: memInfo.id } },
-        );
-      }
-      throw e;
-    }
-    // The template is used VERBATIM (intentional leading/trailing whitespace
-    // survives); trim only decides blankness.
-    const template = typeof roleNode.content === 'string' ? roleNode.content : '';
-    if (template.trim() === '') {
-      throw new GraphQLError(
-        `Role "${roleNorm}" has no prompt template — the ${ROLES_BRANCH_PREFIX}${roleNorm} node's content is empty.`,
-        { extensions: { code: 'PERSONA_ROLE_INVALID', role: roleNorm } },
-      );
-    }
-    // Register order is the allocation order (first-to-last), and on a
-    // case-insensitive duplicate the FIRST spelling wins.
-    const rawNames = (roleNode.data as { names?: unknown } | null)?.names;
-    const register: string[] = [];
-    if (Array.isArray(rawNames)) {
-      const seen = new Set<string>();
-      for (const raw of rawNames) {
-        if (typeof raw !== 'string') continue;
-        const trimmed = raw.trim();
-        if (trimmed === '' || seen.has(trimmed.toLowerCase())) continue;
-        seen.add(trimmed.toLowerCase());
-        register.push(trimmed);
-      }
-    }
-
-    // 4. Owner + URN namespace: the minted persona is owned by the App's
-    //    owner (org XOR user), like every entity the App provisions.
-    let namespace: string;
-    if (app.organizationId !== null) {
-      const org = await ctx.db.organization.findUniqueOrThrow({
-        where: { id: app.organizationId },
-        select: { urn: true },
-      });
-      namespace = org.urn;
-    } else {
-      const owner = await ctx.db.user.findUniqueOrThrow({
-        where: { id: app.ownerUserId! },
-        select: { handle: true },
-      });
-      const handle = normalizeHandleOrNull(owner.handle);
-      if (!handle) {
-        throw new GraphQLError(
-          'The App owner needs a valid handle before a user-owned persona can be created.',
-          { extensions: { code: 'BAD_USER_INPUT' } },
-        );
-      }
-      namespace = handle;
-    }
-
-    // 5. Allocate + create. Caller-supplied name: one attempt, the typed
-    //    refusal IS the answer (cor:agt:020:02). Register mode: walk the
-    //    pool relying on the uniqueness constraint as the atomic primitive —
-    //    a P2002-mapped PERSONA_NAME_TAKEN (or an AGENT_URN_TAKEN from a
-    //    non-persona Agent squatting the slug) advances to the next name.
-    const candidates = requestedName ? [requestedName] : register;
-    if (candidates.length === 0) {
-      throw new GraphQLError(
-        `The name register for role "${roleNorm}" is empty — add names to the ${ROLES_BRANCH_PREFIX}${roleNorm} node's data.names, or pass an explicit name.`,
-        { extensions: { code: 'PERSONA_REGISTER_EXHAUSTED', role: roleNorm } },
-      );
-    }
-    // #950: the roster is the team's shared view of who is on it
-    // (cor:agt:020:01 — "the AppAgent join is the roster"), so a persona in an
-    // ORG-owned team App is ORGANIZATION-visible; PERSONAL would make every
-    // teammate's persona invisible to the others. A user-owned team App stays
-    // PERSONAL — spec 047 keeps a user-owned agent owner-only, and
-    // createAgentCore refuses anything else.
-    const personaVisibility = app.ownerUserId !== null ? 'PERSONAL' : 'ORGANIZATION';
+    const {
+      app,
+      teamAgent,
+      roleNode,
+      roleNorm,
+      template,
+      register: _register,
+      namespace,
+      candidates,
+      requestedName,
+      personaVisibility,
+    } = await planTeamPersonaMint(ctx, { appRef, role, teamAgentRef, name });
+    const appId = app.id;
     let created: Awaited<ReturnType<typeof createAgentCore>> | null = null;
     for (const candidate of candidates) {
       try {

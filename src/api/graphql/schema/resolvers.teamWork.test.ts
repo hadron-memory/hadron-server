@@ -654,3 +654,107 @@ describe('updateTeamCollections — explicit convergence (hadron-cli#401)', () =
     );
   });
 });
+
+describe('App.teamMemory (#965) — resolving the team space without provisioning it', () => {
+  const teamMemory = (c: Context) =>
+    (resolvers as any).App.teamMemory(
+      {
+        id: app.id,
+        name: 'Team App',
+        urn: app.urn,
+        organizationId: org.id,
+        ownerUserId: null,
+        uninstalledAt: null,
+      },
+      {},
+      c,
+    );
+
+  it('is null before the team space exists — a read never provisions one', async () => {
+    expect(await teamMemory(ctx(admin.id))).toBeNull();
+    // And nothing was created as a side effect of asking.
+    expect(await db.memory.count({ where: { appId: app.id, class: 'app' } })).toBe(0);
+  });
+
+  it('resolves the memory recordTeamWork actually wrote to', async () => {
+    await record(ctx(contrib.id));
+    const root = await findWorklogRoot();
+    const mem = await teamMemory(ctx(contrib.id));
+    // The whole point of the field: it must name the SAME memory the write
+    // path picked, or a client defaulting `-m` from it files work nobody reads.
+    expect(mem?.id).toBe(root!.memoryId);
+  });
+
+  it('falls back to the (App, Team Agent) pairing memory when no worklog exists yet', async () => {
+    const pairing = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        appId: app.id,
+        sharedMemoryOfAgentId: teamAgent.id,
+        urn: `${app.urn}-shared`,
+        name: 'Team App shared',
+        class: 'app',
+      },
+    });
+    expect((await teamMemory(ctx(admin.id)))?.id).toBe(pairing.id);
+  });
+
+  it('a soft-deleted pairing memory reads as null rather than being resurrected', async () => {
+    await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        appId: app.id,
+        sharedMemoryOfAgentId: teamAgent.id,
+        urn: `${app.urn}-shared`,
+        name: 'Team App shared',
+        class: 'app',
+        deletedAt: new Date(),
+      },
+    });
+    expect(await teamMemory(ctx(admin.id))).toBeNull();
+  });
+
+  it('an unresolvable Team Agent is null, NOT an error — App reads stay selectable', async () => {
+    // A second installed Agent carrying its own roles: branch makes the Team
+    // Agent ambiguous. locateTeamAgent throws TEAM_AGENT_AMBIGUOUS; the field
+    // must swallow it, or `app { teamMemory }` breaks for every such App.
+    const second = await M.createAgent({}, { orgId: org.id, name: 'Second Agent' }, ctx(admin.id));
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: second.systemMemoryId,
+        loc: 'roles:reviewer',
+        name: 'reviewer',
+        content: 'You are {{name}}, a {{role}}.',
+        data: { names: ['Ada'] },
+      },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: second.id } });
+    await expect(teamMemory(ctx(admin.id))).resolves.toBeNull();
+  });
+
+  it("a pure App-key principal reads its OWN App's team space, not another's", async () => {
+    await record(ctx(contrib.id));
+    // Parity with teamWorkItems: a key that may read the worklog may learn
+    // where it lives.
+    expect(await teamMemory(ctx(undefined, app.id))).not.toBeNull();
+    const otherApp = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other-tm` },
+    });
+    expect(await teamMemory(ctx(undefined, otherApp.id))).toBeNull();
+  });
+
+  it('a hybrid user+selection principal is judged on the USER', async () => {
+    await record(ctx(contrib.id));
+    expect(await teamMemory(ctx(outsider.id, app.id))).toBeNull();
+  });
+
+  it('a non-member gets null — the field cannot leak a memory they cannot read', async () => {
+    await record(ctx(contrib.id));
+    expect(await teamMemory(ctx(outsider.id))).toBeNull();
+    // ...while a participant still sees it, so this is the gate and not a bug.
+    expect(await teamMemory(ctx(appMember.id))).not.toBeNull();
+  });
+});

@@ -587,3 +587,117 @@ describe('createTeamPersona — install failure compensation', () => {
     expect(agent.personaName).toBe('Iris');
   });
 });
+
+describe('teamPersonaPreview (#964) — dry-run a mint', () => {
+  const Q = resolvers.Query as any;
+  const preview = (c: Context, args: Record<string, unknown> = {}) =>
+    Q.teamPersonaPreview({}, { appRef: app.id, role: 'backend-engineer', ...args }, c);
+
+  // The outer beforeEach already defines roles:backend-engineer.
+
+  it('previews the first free register name and writes NOTHING', async () => {
+    const agentsBefore = await db.agent.count();
+    const installsBefore = await db.appAgent.count();
+
+    const p = await preview(ctx(admin.id));
+    expect(p.name).toBe('Iris');
+    expect(p.registerExhausted).toBe(false);
+    expect(p.role).toBe('backend-engineer');
+    expect(p.teamAgent.id).toBe(teamAgent.id);
+
+    // The irreversible act must not have happened.
+    expect(await db.agent.count()).toBe(agentsBefore);
+    expect(await db.appAgent.count()).toBe(installsBefore);
+    expect(await db.agent.findFirst({ where: { personaName: 'Iris' } })).toBeNull();
+  });
+
+  it('composes the prompt the mint would compose — the reason to preview at all', async () => {
+    const p = await preview(ctx(admin.id));
+    expect(p.personaPrompt).toBe(
+      'You are Iris, a backend-engineer on this team.\nWork from your own memories.',
+    );
+    // The same value the real mint produces, verbatim.
+    const minted = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer' },
+      ctx(admin.id),
+    );
+    expect(minted.personaPrompt).toBe(p.personaPrompt);
+    expect(minted.name).toBe(p.name);
+    expect(minted.visibility).toBe(p.visibility);
+    expect(minted.description).toBe(p.description);
+    expect(minted.urn).toBe(p.urn);
+  });
+
+  it('advances past taken names exactly as the allocation loop does', async () => {
+    await M.createTeamPersona({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    const p = await preview(ctx(admin.id));
+    expect(p.name).toBe('Henry');
+    expect(p.register.map((r: any) => [r.name, r.taken])).toEqual([
+      ['Iris', true],
+      ['Henry', false],
+      ['Ada', false],
+    ]);
+  });
+
+  it('counts a non-persona Agent squatting the slug as taken (the second unique)', async () => {
+    // findings:persona-name-allocation-two-uniques — a name is unavailable if
+    // EITHER unique is occupied, which is why a client cannot compute this.
+    await M.createAgent({}, { orgId: org.id, name: 'Iris' }, ctx(admin.id));
+    const p = await preview(ctx(admin.id));
+    expect(p.register[0]).toMatchObject({ name: 'Iris', taken: true });
+    expect(p.name).toBe('Henry');
+  });
+
+  it('REPORTS an exhausted register rather than throwing — the listing is the answer', async () => {
+    await createRoleNode(teamAgent.systemMemoryId, 'solo', { names: ['Solo'] });
+    await M.createTeamPersona({}, { appRef: app.id, role: 'solo' }, ctx(admin.id));
+    const p = await preview(ctx(admin.id), { role: 'solo' });
+    expect(p.registerExhausted).toBe(true);
+    expect(p.name).toBeNull();
+    expect(p.personaPrompt).toBeNull();
+    expect(p.register).toEqual([{ name: 'Solo', taken: true, heldById: expect.any(String) }]);
+  });
+
+  it('an explicit name previews just that name', async () => {
+    const p = await preview(ctx(admin.id), { name: 'Zelda' });
+    expect(p.requestedName).toBe('Zelda');
+    expect(p.name).toBe('Zelda');
+    expect(p.register).toEqual([{ name: 'Zelda', taken: false, heldById: null }]);
+  });
+
+  it('raises the mint path\'s typed refusals — more useful as a preview', async () => {
+    await expectCode(preview(ctx(admin.id), { role: 'nope' }), 'PERSONA_ROLE_NOT_FOUND');
+    await createRoleNode(teamAgent.systemMemoryId, 'blank', { content: '' });
+    await expectCode(preview(ctx(admin.id), { role: 'blank' }), 'PERSONA_ROLE_INVALID');
+  });
+
+  it('takes the MINT gate, not a read gate', async () => {
+    // Whoever may preview may mint, and vice versa — the two cannot diverge
+    // into "previewable but not mintable".
+    await expectCode(preview(ctx(outsider.id)), 'FORBIDDEN');
+    await expectCode(preview(ctx()), 'FORBIDDEN');
+    await expectCode(preview(ctx(undefined, app.id)), 'FORBIDDEN');
+    expect((await preview(ctx(contrib.id))).name).toBe('Iris');
+  });
+
+  it('heldBy names the holder for a caller in the org, and withholds it otherwise', async () => {
+    const minted = await M.createTeamPersona(
+      {},
+      { appRef: app.id, role: 'backend-engineer' },
+      ctx(admin.id),
+    );
+    const held = (p: any) => p.register.find((r: any) => r.name === 'Iris');
+    const resolveHeldBy = (row: any, c: Context) =>
+      (resolvers as any).TeamPersonaPreviewName.heldBy(row, {}, c);
+
+    const asOrgMember = await resolveHeldBy(held(await preview(ctx(admin.id))), ctx(admin.id));
+    expect(asOrgMember?.id).toBe(minted.id);
+
+    // A caller outside the org sees taken:true but no identity — status stays
+    // truthful, only the holder is withheld (no existence oracle).
+    const row = held(await preview(ctx(admin.id)));
+    expect(row.taken).toBe(true);
+    expect(await resolveHeldBy(row, ctx(outsider.id))).toBeNull();
+  });
+});

@@ -952,6 +952,28 @@ export const typeDefs = `#graphql
     009).
     """
     installedAgentUrn: String
+    """
+    The shared app-class memory this App's team space lives in — the home of
+    the team chat (chats:team) and the worklog (#939/#947). Exists so a client
+    can DEFAULT a team-memory argument (hadron-cli#399: 'team session start -m'
+    was optional, and omitting it silently skipped the worklog) instead of
+    making the caller find it.
+
+    Resolution mirrors recordTeamWork's own write target in the same order: the
+    app-class memory that already holds the worklog root, else the (App, Team
+    Agent) pairing memory provisioned at install (#951/#723). Note an App may
+    hold SEVERAL class='app' memories — one runtime shared memory per installed
+    Agent, plus any number of name-addressable createMemoryInApp ones — so this
+    is a resolution, not a lookup, and it is deliberately not spelled
+    'sharedMemory'.
+
+    A read NEVER provisions: null means the team space does not exist yet, no
+    Team Agent could be resolved (no roles: branch and more than one installed
+    Agent), or the caller cannot read the memory. Null is 'cannot be defaulted
+    — pass it explicitly', never an error, so App reads stay selectable for
+    Apps that are not team Apps.
+    """
+    teamMemory: Memory
     trainingMode: Boolean!
     surfaces: [String!]!
     members: [AppMember!]!
@@ -1843,6 +1865,65 @@ export const typeDefs = `#graphql
     "The seq this message replies to, when it is a reply."
     replyToSeq: Int
     mentions: [String!]!
+  }
+
+  """
+  #964 — what a createTeamPersona call WOULD produce. A preview, not an Agent:
+  nothing here is persisted and no name is reserved, which is why this is its
+  own type rather than an unsaved Agent (Agent.id is ID!, and a fake id is
+  exactly the mistake a shared type would invite).
+  """
+  type TeamPersonaPreview {
+    "The role slug the preview was computed for."
+    role: String!
+    "The Team Agent that resolved — the same resolution the mint would use."
+    teamAgent: Agent!
+    """
+    The name that WOULD be allocated: the caller's explicit name, else the
+    register's first free entry. Null when every candidate is taken
+    (registerExhausted). Advisory — a concurrent mint can take it first.
+    """
+    name: String
+    "The explicit name the caller asked for, if any (null = register mode)."
+    requestedName: String
+    "True when no candidate is free. The mint would raise PERSONA_REGISTER_EXHAUSTED."
+    registerExhausted: Boolean!
+    """
+    Every candidate considered, in allocation order, with its availability.
+    In register mode this is the role's whole register; with an explicit name
+    it is that one name. 'taken' reflects BOTH uniques — the persona-name index
+    and the derived agent slug URN — since either blocks a mint.
+    """
+    register: [TeamPersonaPreviewName!]!
+    """
+    The composed persona prompt, post-{{name}}/{{role}} substitution — the
+    persona's boot briefing. Reviewing it BEFORE the name is permanent is the
+    point of the preview, and it is where a template missing {{name}} shows up.
+    Null when no name could be allocated.
+    """
+    personaPrompt: String
+    "The description the persona would carry (#950 defaults). Null when unallocated."
+    description: String
+    "The visibility the persona would be minted with (ORGANIZATION / PERSONAL)."
+    visibility: String!
+    "The URN owner atom the agent slug would be minted under (org URN or user handle)."
+    namespace: String!
+    "The agent URN that would be minted. Null when no name could be allocated."
+    urn: String
+  }
+
+  "One candidate name in a persona preview, with its availability (#964)."
+  type TeamPersonaPreviewName {
+    name: String!
+    "Taken when EITHER the persona-name index or the derived slug URN is occupied."
+    taken: Boolean!
+    """
+    The Agent holding it, when the caller can read that Agent — naming the
+    holder is useful, but it must not become an existence oracle for agents in
+    orgs the caller cannot see. Null does not mean free; 'taken' is always
+    truthful.
+    """
+    heldBy: Agent
   }
 
   type TeamChatMessagesPage {
@@ -4501,6 +4582,40 @@ export const typeDefs = `#graphql
       limit: Int
       offset: Int
     ): TeamChatMessagesPage!
+
+    """
+    #964 — dry-run a createTeamPersona call: what WOULD be minted, with nothing
+    written. No Agent, no AppAgent row, no name reserved.
+
+    Why a query rather than a dryRun argument on the mutation: createTeamPersona
+    returns Agent!, and an unsaved preview cannot be an Agent (Agent.id is ID!,
+    so a null id is not legal and a fake one is worse). The property that matters
+    — the preview cannot drift from the real path — comes from sharing the
+    implementation, which it does: this runs the mutation's own pre-write half
+    verbatim and only the ALLOCATION is predicted rather than performed.
+
+    That prediction is advisory. Allocation is the uniqueness constraint itself,
+    so a concurrent mint can take the name between this call and the real one;
+    the preview never reserves anything.
+
+    Authorization is the MINT gate, not a read gate — a preview only reveals a
+    name the caller could mint anyway.
+
+    Error codes: every refusal createTeamPersona raises (TEAM_AGENT_NOT_FOUND,
+    TEAM_AGENT_AMBIGUOUS, TEAM_AGENT_NOT_INSTALLED, PERSONA_ROLE_NOT_FOUND,
+    PERSONA_ROLE_INVALID, SESSION_EXPIRED, APP_UNINSTALLED, FORBIDDEN), each more
+    useful here than as a failed mint. An exhausted register is the exception: it
+    is REPORTED (name: null, registerExhausted: true) rather than thrown, because
+    the register listing is what explains why.
+
+    Accepts the entity's ID or URN for appRef and teamAgentRef.
+    """
+    teamPersonaPreview(
+      appRef: ID!
+      role: String!
+      teamAgentRef: ID
+      name: String
+    ): TeamPersonaPreview!
 
     """
     Read a team App's worklog (#947) — the provenance query: which sessions

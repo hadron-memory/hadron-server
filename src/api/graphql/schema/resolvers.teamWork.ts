@@ -55,7 +55,7 @@ import {
   clampListTake,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
-import { locateTeamAgent } from './resolvers.mutation.teamPersona.js';
+import { locateTeamAgentOrSole } from './resolvers.mutation.teamPersona.js';
 
 /** Canonical loc of the worklog collection root in a team App's shared memory. */
 export const WORKLOG_LOC = 'worklog';
@@ -171,6 +171,49 @@ async function locateWorklogRoot(ctx: Context, appId: string): Promise<WorklogRo
 }
 
 /**
+ * #965 — resolve, WITHOUT provisioning anything, the memory this App's team
+ * work lives in (or would land in on the next write). Backs `App.teamMemory`,
+ * which exists so a client can default `team session start -m` instead of
+ * leaving it optional and silently skipping the worklog (hadron-cli#399).
+ *
+ * It mirrors `recordTeamWork`'s own target — `locateWorklogRoot(...) ??
+ * bootstrapWorklog(...)` — in that exact order, and that ordering is the whole
+ * point rather than an implementation detail. Resolving straight to the (App,
+ * Team Agent) pairing would name a DIFFERENT memory than the write path picks
+ * whenever an already-bootstrapped worklog sits in a sibling app-class memory
+ * (the case `locateWorklogRoot` was deliberately written to tolerate), and a
+ * client defaulting `-m` from it would file work in a memory nothing reads.
+ *
+ * The difference from the write path is that a read never creates: where
+ * `bootstrapWorklog` would provision the pairing memory, this returns it only
+ * if it already exists, and null otherwise. Null means "cannot be defaulted" —
+ * an honest answer a client turns back into "pass -m explicitly", which is
+ * today's behaviour and no worse than it. Every typed team-agent refusal
+ * (TEAM_AGENT_NOT_FOUND / _AMBIGUOUS) collapses to null for the same reason: a
+ * nullable convenience field on `App` must not make `app { … }` unselectable
+ * for every App that is not a team App.
+ */
+export async function findTeamMemoryId(ctx: Context, app: AppRow): Promise<string | null> {
+  const root = await locateWorklogRoot(ctx, app.id);
+  if (root) return root.memoryId;
+
+  let teamAgent: { id: string };
+  try {
+    teamAgent = await locateTeamAgentOrSole(ctx, app.id);
+  } catch {
+    return null;
+  }
+  const pairing = await ctx.db.memory.findUnique({
+    where: { appId_sharedMemoryOfAgentId: { appId: app.id, sharedMemoryOfAgentId: teamAgent.id } },
+    select: { id: true, deletedAt: true },
+  });
+  // The unique spans soft-deleted rows by design (the provisioner REVIVES a
+  // tombstone rather than minting a second) — but a tombstone is not a memory
+  // anyone can use today, so a read reports null rather than resurrecting it.
+  return pairing && !pairing.deletedAt ? pairing.id : null;
+}
+
+/**
  * Ensure the memory's property schema declares the `worklog` collection
  * (#725 — this is what turns on server-side conformance for EVERY write
  * surface, the issue's "team init's client-side schema job retires" point).
@@ -219,19 +262,7 @@ async function ensureWorklogSchema(ctx: Context, memoryId: string): Promise<void
  * Agent needs no marker to be unambiguous.
  */
 async function bootstrapWorklog(ctx: Context, app: AppRow): Promise<WorklogRootRow> {
-  let teamAgent: { id: string; name: string; urn: string };
-  try {
-    teamAgent = await locateTeamAgent(ctx, app.id, null);
-  } catch (e) {
-    if (!(e instanceof GraphQLError) || e.extensions?.code !== 'TEAM_AGENT_NOT_FOUND') throw e;
-    const installed = await ctx.db.appAgent.findMany({
-      where: { appId: app.id },
-      select: { agent: { select: { id: true, name: true, urn: true, deletedAt: true } } },
-    });
-    const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
-    if (live.length !== 1) throw e;
-    teamAgent = live[0];
-  }
+  const teamAgent = await locateTeamAgentOrSole(ctx, app.id);
 
   const memoryId = await findOrCreateAppClassMemory({
     appId: app.id,

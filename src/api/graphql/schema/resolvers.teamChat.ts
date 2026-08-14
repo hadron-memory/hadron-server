@@ -54,7 +54,7 @@ import {
   clampListTake,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
-import { locateTeamAgent } from './resolvers.mutation.teamPersona.js';
+import { locateTeamAgentOrSole } from './resolvers.mutation.teamPersona.js';
 
 /** Canonical loc of the one team chat in a team App's shared memory (#939). */
 export const TEAM_CHAT_LOC = 'chats:team';
@@ -202,19 +202,7 @@ async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRoot
  * without role definitions can still chat.
  */
 async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow> {
-  let teamAgent: { id: string; name: string; urn: string };
-  try {
-    teamAgent = await locateTeamAgent(ctx, app.id, null);
-  } catch (e) {
-    if (!(e instanceof GraphQLError) || e.extensions?.code !== 'TEAM_AGENT_NOT_FOUND') throw e;
-    const installed = await ctx.db.appAgent.findMany({
-      where: { appId: app.id },
-      select: { agent: { select: { id: true, name: true, urn: true, deletedAt: true } } },
-    });
-    const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
-    if (live.length !== 1) throw e;
-    teamAgent = live[0];
-  }
+  const teamAgent = await locateTeamAgentOrSole(ctx, app.id);
 
   const memoryId = await findOrCreateAppClassMemory({
     appId: app.id,
