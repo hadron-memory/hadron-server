@@ -192,6 +192,56 @@ describe('hadron_create_node over an existing loc — revision history (#976)', 
     expect(revisions[0].content).toBe('Tombstoned content');
   });
 
+  it('records an objectType-only overwrite in `changes`', async () => {
+    // objectType is captured by the snapshot and restored on revert, but was
+    // missing from TRACKED_NODE_FIELDS — so this diff came back empty (PR #977
+    // review, Copilot).
+    const node = await seedNode('ops:collection', { objectType: 'competitor' });
+
+    await createTestableMcpServer(adminAuth()).callToolText('hadron_create_node', {
+      urn: `hrn:node:${fx.memory.urn}:${node.loc}`,
+      name: 'Original name',
+      description: 'Original description',
+      content: 'Original content',
+      tags: ['alpha'],
+      objectType: 'insight', // the ONLY difference
+    });
+
+    const [rev] = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
+    expect(rev.objectType).toBe('competitor');
+    expect(rev.changes).toContain('objectType');
+  });
+
+  it('two concurrent writes to one free loc still leave a revision of the loser', async () => {
+    // The create-vs-overwrite decision used to come from a probe taken BEFORE
+    // the transaction: both calls saw no row, so both took the create branch
+    // and the second silently overwrote the first with no snapshot (PR #977
+    // review, both bots). Under the loc write lock the two serialize, so the
+    // second ALWAYS sees the first's committed row — this is deterministic now,
+    // not a race the test hopes to catch.
+    const srv = createTestableMcpServer(adminAuth());
+    const write = (content: string) =>
+      srv.callToolText('hadron_create_node', {
+        urn: `hrn:node:${fx.memory.urn}:ops:contested`,
+        name: 'Contested',
+        content,
+      });
+
+    await Promise.all([write('content from A'), write('content from B')]);
+
+    const row = await db.node.findFirst({
+      where: { memoryId: fx.memory.id, loc: 'ops:contested' },
+    });
+    const revisions = await db.nodeRevision.findMany({ where: { nodeId: row!.id } });
+    expect(revisions).toHaveLength(1);
+    expect(row?.revSeq).toBe(1);
+    // Whichever landed first is the one preserved in history; the survivor is
+    // the other. Both are accounted for — nothing was destroyed silently.
+    const loser = revisions[0].content;
+    expect(['content from A', 'content from B']).toContain(loser);
+    expect(row?.content).not.toBe(loser);
+  });
+
   it('produces the same snapshot shape as hadron_update_node (parity)', async () => {
     // Two identical nodes, the same edit applied through each surface. The
     // snapshots must agree on everything but their own identity/timestamps —

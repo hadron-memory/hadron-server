@@ -36,7 +36,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
-import { ancestorLocs, lockAncestorsForCreate, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
+import { ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
@@ -2742,7 +2742,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_node',
-    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory. Writing to a loc that already holds a node OVERWRITES it — every field you omit is reset to its default, not preserved — so use hadron_update_node for a partial edit. The overwritten state is snapshotted to revision history first (#976), and encryption is honored.',
+    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory. Writing to a loc that already holds a node OVERWRITES it: an omitted `description`, `abstract`, `content` or `tags` is CLEARED, not preserved (the other fields — nodeType, objectType, isRunnable, seq, properties, data, llmModel, aiAgent — are kept when omitted). Use hadron_update_node for a partial edit. The overwritten state is snapshotted to revision history first (#976), and encryption is honored.',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports". Both bare and prefixed forms accepted, in either URN grammar. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
@@ -2972,18 +2972,24 @@ export function createMcpServerInstance(
        * destroyed the prior content with no recoverable history — while every
        * sibling surface snapshots (hadron_update_node, hadron_replace_text and
        * hadron_update_node_data via the resolver, hadron_move_node, and
-       * writeNodeCore's own `if (existing)` branch). The pre-write row is
-       * re-read from `tx`, not reused from the `existing` lookup above, so a
-       * write landing in between is captured rather than silently replaced by
-       * a stale snapshot. On an encrypted memory this stores the at-rest
-       * CIPHERTEXT row, deliberately — same contract as hadron_update_node.
-       * `changes` compares against the values this upsert will actually write,
-       * which for the clobber-semantics fields (description/abstract/content/
-       * tags) is the resolved `?? null` / `?? []` value, not the raw argument.
+       * writeNodeCore's own `if (existing)` branch).
+       *
+       * The create-vs-overwrite decision is made HERE, under the loc's write
+       * lock — never from the `existing` probe above, which is read before the
+       * transaction and can be stale by the time we write (PR #977 review, both
+       * bots: two concurrent calls both see no row, one creates, and the other
+       * would overwrite it believing it created it). Returns the pre-write row
+       * so the caller can also derive the resurrect decision from it.
+       *
+       * On an encrypted memory this stores the at-rest CIPHERTEXT row,
+       * deliberately — same contract as hadron_update_node. `changes` compares
+       * against the values this upsert will actually write, which for the
+       * clobber-semantics fields (description/abstract/content/tags) is the
+       * resolved `?? null` / `?? []` value, not the raw argument.
        */
       const snapshotOverwrittenNode = async (tx: Prisma.TransactionClient) => {
         const pre = await tx.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
-        if (!pre) return;
+        if (!pre) return null;
         await createNodeRevision(tx, {
           id: generateId(),
           ...buildNodeRevisionSnapshot(pre, editorFromAuth(auth), {
@@ -3004,26 +3010,40 @@ export function createMcpServerInstance(
             }),
           }),
         });
+        return pre;
       };
 
       // #664 (Model A — see nodeSubtreeLock.ts): serialize this create against a
       // concurrent ancestor-delete by holding advisory locks on the node's
       // ancestor path across the upsert, matching the GraphQL createNode path.
-      // A root-level loc has no ancestor to coordinate against, so it skips the
-      // transaction. READ COMMITTED (the default) is required so the delete's
-      // descendant count sees this row once our commit releases the lock.
-      // #976: an overwrite also needs the transaction — the revision snapshot
-      // and the write it records must commit together, or a failed upsert
-      // leaves an orphan revision (hadron_move_node is the precedent).
-      const needsAncestorLock = ancestorLocs(loc).length > 0;
-      const upserted =
-        !needsAncestorLock && !existing
-          ? await db.node.upsert(upsertArgs)
-          : await db.$transaction(async (tx) => {
-              if (needsAncestorLock) await lockAncestorsForCreate(tx, memoryId, loc);
-              if (existing) await snapshotOverwrittenNode(tx);
-              return tx.node.upsert(upsertArgs);
-            });
+      // READ COMMITTED (the default) is required so the delete's descendant
+      // count sees this row once our commit releases the lock.
+      //
+      // #976: EVERY write takes the transaction now, root-level locs included.
+      // Two reasons, both about the snapshot: it must commit with the write it
+      // records (else a failed upsert leaves an orphan revision —
+      // hadron_move_node is the precedent), and the create-vs-overwrite
+      // decision must be made under the loc's own write lock. Deciding from the
+      // pre-transaction `existing` probe lost a revision under concurrency: two
+      // calls both saw no row, one created it, the other overwrote it on the
+      // create branch (PR #977 review, both bots). lockLocForWrite takes the
+      // same key as an ancestor-create and as lockNodeForDelete, acquired after
+      // the ancestors so the root→leaf order stays deadlock-free.
+      const upserted = await db.$transaction(async (tx) => {
+        await lockAncestorsForCreate(tx, memoryId, loc); // no-op at a root-level loc
+        await lockLocForWrite(tx, memoryId, loc);
+        const pre = await snapshotOverwrittenNode(tx);
+        return tx.node.upsert({
+          ...upsertArgs,
+          // Resurrect (#543) on the authoritative row, not the stale probe: a
+          // tombstone that appeared after it would otherwise stay flagged
+          // deleted while taking the new content.
+          update: {
+            ...upsertArgs.update,
+            ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
+          } as any,
+        });
+      });
 
       if (resolvedEdges !== null) {
         await replaceOutgoingEdges({
