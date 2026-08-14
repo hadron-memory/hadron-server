@@ -680,6 +680,16 @@ export const typeDefs = `#graphql
     agentId: String
     "#974 / cor:agt:020:03: the Worker (named casting) this session works as."
     workerId: String
+    """
+    #980 / cor:agt:020:02: the Worker behind workerId, nested — so a session
+    list can render the app-qualified compound ('eng-team/Iris') without a
+    per-row worker(ref:) + app(ref:) round trip (Worker carries name and app).
+    Resolves for RETIRED workers too: retirement ends the casting, not the
+    history, so past sessions stay attributable. Worker.app and Worker.agent
+    run their OWN read gates and mask to null on deny (#552), so this nesting
+    never widens what the session read admits.
+    """
+    worker: Worker
     memoryId: String
     expiresAt: DateTime
     repo: String
@@ -3178,11 +3188,23 @@ export const typeDefs = `#graphql
     role-agent. The worker must belong to the session's App: with appRef (or an
     App-key credential) it must match the worker's App; without one, the
     worker's App becomes the session's, behind the same membership gate as
-    appRef. A retired worker refuses (WORKER_RETIRED). Binding a worker that
-    is already driven elsewhere is NOT refused - informed takeover is the
-    client's contract (show who last drove it, proceed on explicit override).
+    appRef. A retired worker refuses (WORKER_RETIRED). #940: a worker with an
+    ACTIVE session refuses WORKER_TAKEN — extensions carry workerId, sessionId,
+    lastDriver, lastSeenAt, everything the takeover prompt needs — unless
+    force is true (informed takeover, cor:agt:020:03: show who last drove it,
+    proceed only on explicit override, never silently).
     """
     workerRef: String
+    """
+    #940: take over a worker whose binding would otherwise refuse WORKER_TAKEN.
+    Only meaningful with workerRef. Clients must surface the WORKER_TAKEN
+    payload (who last drove it, when) before retrying with force - that IS the
+    informed-takeover contract; force exists so the override is explicit,
+    never the default.
+    """
+    force: Boolean
+    "The session's stated intent (Session.plan) - what this session is about. MCP's hadron_start_session description lands here."
+    plan: String
     """
     #943 / cor:api:140: the App this session is a unit of work for, as a PK or
     URN. Resolves to Session.appId - the pivot that was previously stamped ONLY

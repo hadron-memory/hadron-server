@@ -72,29 +72,76 @@ export async function resolveAuthContext(
   if (!authHeader?.startsWith('Bearer ')) return {};
 
   const token = authHeader.slice(7);
+  const sessionIdHeader = req.headers['x-hadron-session'];
+  const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
 
+  let ctx: AuthContext;
   if (token.startsWith(APP_KEY_PREFIX)) {
-    const sessionIdHeader = req.headers['x-hadron-session'];
-    const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
-    return resolveAppKey(token, db, sessionId);
+    ctx = await resolveAppKey(token, db);
+  } else if (token.startsWith(USER_API_KEY_PREFIX)) {
+    ctx = await resolveUserApiKey(token, db);
+  } else if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
+    // JWTs have the form header.payload.signature — three base64url segments.
+    ctx = await resolveJwt(token, db);
+  } else {
+    return {};
   }
 
-  if (token.startsWith(USER_API_KEY_PREFIX)) {
-    return resolveUserApiKey(token, db);
-  }
+  if (sessionId) await bindSession(db, ctx, sessionId);
+  return ctx;
+}
 
-  // JWTs have the form header.payload.signature — three base64url segments.
-  const isJwt = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token);
-  if (isJwt) {
-    return resolveJwt(token, db);
-  }
-  return {};
+/**
+ * Bind the `X-Hadron-Session` header to the resolved principal (#934, amending
+ * `cor:aut:020:02`) — ONE binding path for both principal shapes, so the honor
+ * conditions (active: not ended, not past a hard expiry) can never drift:
+ *
+ *   - **App-key** (pure — no userId by construction): the session must belong
+ *     to the App. The original cor:aut:020:02 rule, unchanged.
+ *   - **User credential** (hdr_user_ key or JWT): the session must be
+ *     ATTRIBUTED TO this user — strict `session.userId === ctx.userId`, no
+ *     platform-admin bypass, and never under impersonation (a support session
+ *     heartbeating the target's coding session would be attribution theater).
+ *     Ownership replaces App-membership as the predicate because the sessions
+ *     this exists for — user-credential MCP coding sessions — are
+ *     self-attributed with `appId: null`.
+ *
+ * Binding stays ATTRIBUTION, never a credential: it feeds the usage-event
+ * heartbeat the #930 reaper counts (#933 fixed the writers; this fixes the
+ * missing binding for user principals, whose continuously-busy MCP sessions
+ * otherwise read as idle and get reaped — freeing their Worker mid-work,
+ * cor:agt:020:03). It must never widen what the caller may do: the
+ * session-scope branch in `getAccessibleMemoryIds` (and its MCP twin) is
+ * gated on the PURE App-key shape, so a user principal's binding leaves their
+ * memory reach exactly their user reach (the #967 narrow-never-grant posture,
+ * mirrored for user principals).
+ *
+ * An invalid binding is silently dropped (the request proceeds unbound) —
+ * the pre-existing App-key behavior, kept identical for both shapes.
+ */
+async function bindSession(
+  db: PrismaClient,
+  ctx: AuthContext,
+  sessionId: string,
+): Promise<void> {
+  const isPureAppKey = !!ctx.appId && !ctx.userId;
+  const isUserPrincipal = !!ctx.userId && !ctx.impersonation;
+  if (!isPureAppKey && !isUserPrincipal) return;
+  const session = await db.session.findUnique({
+    where: { id: sessionId },
+    select: { id: true, appId: true, userId: true, expiresAt: true, endedAt: true },
+  });
+  if (!session || session.endedAt) return;
+  if (session.expiresAt && session.expiresAt <= new Date()) return;
+  const owned = isPureAppKey
+    ? session.appId === ctx.appId
+    : session.userId === ctx.userId;
+  if (owned) ctx.sessionId = session.id;
 }
 
 async function resolveAppKey(
   rawKey: string,
   db: PrismaClient,
-  sessionId?: string,
 ): Promise<AuthContext> {
   // App keys are hashed via SHA-256 (not bcrypt) because we look them up by
   // hash — bcrypt's per-hash salt makes that impossible at any useful scale.
@@ -112,7 +159,9 @@ async function resolveAppKey(
     .update({ where: { id: appKey.id }, data: { lastUsedAt: new Date() } })
     .catch(() => {});
 
-  const ctx: AuthContext = {
+  // Session binding (X-Hadron-Session) is applied by the caller via
+  // `bindSession` — #934 unified it across principal shapes.
+  return {
     appId: appKey.app.id,
     // A user-owned App (spec 047) has no organizationId — undefined
     // matches the field's existing "unscoped" convention.
@@ -121,24 +170,6 @@ async function resolveAppKey(
     // by the resolvers against the app's organization.
     roles: [],
   };
-
-  if (sessionId) {
-    // Validate the session belongs to this app and is still active.
-    const session = await db.session.findUnique({
-      where: { id: sessionId },
-      select: { id: true, appId: true, expiresAt: true, endedAt: true },
-    });
-    if (
-      session &&
-      session.appId === appKey.app.id &&
-      !session.endedAt &&
-      (!session.expiresAt || session.expiresAt > new Date())
-    ) {
-      ctx.sessionId = session.id;
-    }
-  }
-
-  return ctx;
 }
 
 // Valid runtime values for AuthContext.roles. Mirrors the Prisma `Role`

@@ -947,7 +947,15 @@ export async function getAccessibleMemoryIds(
   // #945: the admissibility rule (which memory the session may actually reach)
   // lives in `sessionScopedMemoryIds` — ONE predicate shared with the MCP
   // node-search scope, which used to carry its own copy of this branch.
-  if (ctx.appId && ctx.sessionId) {
+  //
+  // #934: PURE App-key shape only (`!ctx.userId`) — user principals can now
+  // carry a session binding too (the heartbeat attribution), and a hybrid
+  // user+selection principal entering this branch would swap their user reach
+  // for `sessionScopedMemoryIds`, which never consults the USER's rights: a
+  // narrowing at best, a grant (a bound agent's system memory the user cannot
+  // read) at worst. Same shape as `requireSessionWriteAccess`'s App branch
+  // (#932) and the #967 narrow-never-grant rule.
+  if (ctx.appId && ctx.sessionId && !ctx.userId) {
     const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId);
     return onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
   }
@@ -1385,7 +1393,16 @@ export const ORG_INCLUDE = {
   exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
 };
 
-export const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
+// #980: `worker: true` eager-loads the bound Worker so `Session.worker`
+// resolves list pages in one query — the repo has no DataLoader and
+// Query.sessions serves 200-row pages, so a per-row field resolver would be a
+// straight N+1. Full row (not a select): the Worker type's scalar fields all
+// come from it, and its OWN field resolvers (app/agent — which self-guard,
+// #552) fetch on demand.
+export const SESSION_INCLUDE = {
+  events: { orderBy: { createdAt: 'desc' as const }, take: 50 },
+  worker: true,
+};
 
 // 023-app-shape Phase 2b: APP_INCLUDE eager-loads the AppAgent rows
 // (with each Agent's memoryItems) so the GraphQL `App.agent` /
@@ -2505,8 +2522,14 @@ export interface SessionInput {
   appRef?: string;
   // #974 / cor:agt:020:03: the Worker (named casting) this session works as.
   // PK only — workers have no URN. Gated: the worker must belong to the
-  // session's App; a retired worker refuses.
+  // session's App; a retired worker refuses; a taken worker refuses
+  // WORKER_TAKEN unless force (#940).
   workerRef?: string;
+  // #940: explicit informed-takeover override for a WORKER_TAKEN refusal.
+  force?: boolean;
+  // The session's stated intent (Session.plan) — MCP's hadron_start_session
+  // description lands here since it delegates to startSession (#940 parity).
+  plan?: string;
 }
 
 export interface UsageEventInput {

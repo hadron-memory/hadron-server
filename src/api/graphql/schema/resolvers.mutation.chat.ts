@@ -245,7 +245,14 @@ export const chatMutations = {
           actingUserId: ctx.userId,
           db: ctx.db,
         });
-      } else if (ctx.appId && ctx.sessionId) {
+      } else if (ctx.appId && ctx.sessionId && !ctx.userId) {
+        // #934: PURE App-key shape only — user principals can now carry a
+        // session binding too (heartbeat attribution), and a hybrid
+        // user+selection principal entering this branch would write the chat
+        // to the bound session's memoryId (often null for a coding session —
+        // a hard failure) instead of taking the user-memory path below. Same
+        // guard as the getAccessibleMemoryIds session branch (PR #983 review,
+        // Codex/Copilot P1).
         const session = await ctx.db.session.findUnique({
           where: { id: ctx.sessionId },
           select: { memoryId: true },
