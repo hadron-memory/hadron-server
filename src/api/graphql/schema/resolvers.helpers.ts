@@ -14,7 +14,7 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
-import { canWriteToMemory } from '../../../mcp/access-control.js';
+import { canWriteToMemory, getAppMemoryAccess } from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
@@ -958,10 +958,21 @@ export async function getAccessibleMemoryIds(
     return all.map((m: { id: string }) => m.id);
   }
 
-  // App Key without an active session — management-only context, no memory
-  // access at all.
+  // App Key without an active session — the App's installed-agent reach:
+  // its agent's system memory + linked memories, via the SAME predicate the
+  // MCP read gates use (`getAppMemoryAccess`). This branch returned [] from
+  // its Station-era origin ("management-only context, no memory access") —
+  // written when App keys had no GraphQL node reads at all. Once the MCP
+  // search tools started delegating to Query.findNodes (#403), that stance
+  // made this the one gate that disagreed with the MCP layer: the same key
+  // could read every node via hadron_get_node / hadron_list_nodes but every
+  // findNodes-backed search intersected to empty (hadron_find_nodes returned
+  // "No nodes found" for all queries, survey mode included). One predicate,
+  // shared — the sessionScopedMemoryIds lesson (#945) again.
   if (ctx.appId) {
-    return [];
+    const access = await getAppMemoryAccess(ctx.db, ctx.appId);
+    const ids = [...access.keys()];
+    return onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
   }
 
   // JWT user — org/public/subscription memories + owner-only personal/private

@@ -133,9 +133,17 @@ describe('findNodes access control', () => {
     expect(nodes[0].loc).toBe('org-b.repo.nodeB');
   });
 
-  it('App-keyed caller (no session) sees no nodes via GraphQL — findNodes is a management-only path; App memory reads go through MCP', async () => {
+  it('App-keyed caller (no session) sees its agent-linked memories — same getAppMemoryAccess reach as the MCP read gates (the pre-fix [] made every MCP find_nodes delegation return empty)', async () => {
     const nodes = await listNodes(
       {}, ctx({ appId: appReader.id }),
+    );
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].loc).toBe('org-a.repo.nodeA');
+  });
+
+  it('App-keyed caller (no session) never reaches another org\'s memories', async () => {
+    const nodes = await listNodes(
+      { filter: { memoryIds: [graphB.id] } }, ctx({ appId: appReader.id }),
     );
     expect(nodes).toHaveLength(0);
   });
