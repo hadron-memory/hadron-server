@@ -48,7 +48,7 @@ import {
   type Subject,
   type EffectiveAccessResult,
 } from '@hadron-memory/access-control';
-import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../urnEmit.js';
+import { safeEntityUrnV2, safeNodeUrnV2 } from '../urnEmit.js';
 import { isId } from '../entityRef/shape.js';
 
 // Re-export the pure types so existing consumers of this module keep their
@@ -667,6 +667,21 @@ function userGrants(subject: Subject, user: { id: string }): InternalGrant[] {
  * Compute the subject's effective access to a resolved resource. The caller is
  * responsible for authorizing WHO may invoke this (see `callerCanAudit`) and
  * for resolving the resource ref first (see `resolveResource`).
+ *
+ * `resourceUrn` is EMITTED, never echoed (#966). The stored `urn` column is a
+ * BARE body by construction — the `chk_*_urn_not_prefixed` guardrails forbid
+ * persisting a rendered form — so returning it raw handed callers a string this
+ * server's own ref parsers reject, while the same row's `Memory.urn` field
+ * (which does emit) disagreed about the same memory's URN. Every kind now runs
+ * through the same emitter its entity's own `urn` field uses, so the value can
+ * be fed straight back into another query or CLI command. Two kinds have no
+ * emitter by nature and are documented exceptions: an AiServiceConfig has no URN
+ * (its id is the identifier) and a user's `hrn:user:<handle>` form is composed
+ * here because the core URN grammar does not address users.
+ *
+ * Emission is strict-then-raw (`safeEntityUrnV2` / `safeNodeUrnV2`): an
+ * un-emittable STORED urn logs and serves its best-effort form rather than
+ * failing the audit, which must keep answering even for a corrupt row.
  */
 export async function computeEffectiveAccess(
   db: PrismaClient,
@@ -680,7 +695,7 @@ export async function computeEffectiveAccess(
   switch (resolved.kind) {
     case 'memory': {
       const grants = await memoryGrants(db, subject, resolved.memory);
-      return assemble(subject.id, resolved.memory.urn, 'memory', grants);
+      return assemble(subject.id, safeEntityUrnV2('memory', resolved.memory.urn), 'memory', grants);
     }
     case 'node': {
       // A node's access IS its memory's access (memoryAccessFilter coupling).
@@ -693,25 +708,20 @@ export async function computeEffectiveAccess(
         via: resolved.memory.urn,
         caps: g.caps,
       }));
-      // emitNodeUrnV2 emits the flat v2 node URN; the resourceUrn is cosmetic,
-      // so fall back to a best-effort flat-v2 join (single colon, matching the
-      // emission grammar) rather than failing the whole query — or reverting to
-      // a v1 `::` form — on a non-emittable stored memory URN.
-      let nodeUrn: string;
-      try {
-        nodeUrn = emitNodeUrnV2(resolved.memory.urn, resolved.node.loc);
-      } catch {
-        nodeUrn = bestEffortFlatNodeUrn('node', resolved.memory.urn, resolved.node.loc);
-      }
-      return assemble(subject.id, nodeUrn, 'node', inherited);
+      return assemble(
+        subject.id,
+        safeNodeUrnV2(resolved.memory.urn, resolved.node.loc),
+        'node',
+        inherited,
+      );
     }
     case 'app': {
       const grants = await appGrants(db, subject, resolved.app);
-      return assemble(subject.id, resolved.app.urn, 'app', grants);
+      return assemble(subject.id, safeEntityUrnV2('app', resolved.app.urn), 'app', grants);
     }
     case 'agent': {
       const grants = await agentGrants(db, subject, resolved.agent, opts?.restrictOrgId);
-      return assemble(subject.id, resolved.agent.urn, 'agent', grants);
+      return assemble(subject.id, safeEntityUrnV2('agent', resolved.agent.urn), 'agent', grants);
     }
     case 'aiServiceConfig': {
       const grants = await aiServiceConfigGrants(db, subject, resolved.config);
@@ -720,7 +730,7 @@ export async function computeEffectiveAccess(
     }
     case 'organization': {
       const grants = await organizationGrants(db, subject, resolved.org);
-      return assemble(subject.id, resolved.org.urn, 'organization', grants);
+      return assemble(subject.id, safeEntityUrnV2('org', resolved.org.urn), 'organization', grants);
     }
     case 'user': {
       const grants = userGrants(subject, resolved.user);

@@ -28,7 +28,7 @@ import {
   formatCanonicalUrn,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
-import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
+import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
 import {
   validateEdgeCondition,
   validateNodeDataExtractionSpecs,
@@ -1162,13 +1162,16 @@ export async function resolveReadableNodeByLoc(
 // Fall back to the raw stored value so the row still renders; the corrupted
 // data is repaired separately and can't hold the rest of the response hostage.
 export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
+  // #697 Stage 2: EMIT flat grammar-v2 for the root entity types (`memory`
+  // renames to `mem`; single colon; no `@` sigil). Delegated to the shared
+  // safeEntityUrnV2 so this wrapper and every non-GraphQL emitter (e.g.
+  // effectiveAccess, #966) share ONE strict-then-raw fallback. Any other type
+  // word falls back to the v1 canonical form (unchanged surface until it too
+  // flips).
+  if (type === 'memory' || type === 'org' || type === 'agent' || type === 'app') {
+    return safeEntityUrnV2(type, raw);
+  }
   try {
-    // #697 Stage 2: EMIT flat grammar-v2 for the root entity types (`memory`
-    // renames to `mem`; single colon; no `@` sigil). Any other type word falls
-    // back to the v1 canonical form (unchanged surface until it too flips).
-    if (type === 'memory' || type === 'org' || type === 'agent' || type === 'app') {
-      return emitEntityUrnV2(type, raw);
-    }
     return formatCanonicalUrn(type, raw);
   } catch (err) {
     // Log so operators can locate + repair corrupted rows — the fallback keeps

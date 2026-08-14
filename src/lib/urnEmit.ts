@@ -56,6 +56,39 @@ export function emitEntityUrnV2(type: 'memory' | 'mem' | 'org' | 'agent' | 'app'
   return composeUrnV2(v2type, ...bareAtoms(bareUrn));
 }
 
+/**
+ * Read-path root-entity emission that CANNOT throw: byte-identical to
+ * {@link emitEntityUrnV2} for well-formed data, and on an un-v2-able stored form
+ * it logs the offending row and serves the RAW stored value instead.
+ *
+ * Same failure class and remedy as {@link safeNodeUrnV2} (#298): a single legacy
+ * or corrupted row must not take down the whole query — serve it, log it, repair
+ * the data separately. This is the one implementation of that fallback for root
+ * entities; `safeCanonicalUrn` (the GraphQL field-resolver wrapper) delegates
+ * here for exactly these four type words, so the two can't drift.
+ *
+ * Note the fallback differs from the node/edge one: a stored ENTITY urn is a bare
+ * `<root>:<slug>` body with no `hrn:` prefix, so there is no "v2-shaped" join to
+ * synthesize — the honest fallback is the stored value verbatim, which is what
+ * every pre-#697 caller already emitted.
+ */
+export function safeEntityUrnV2(
+  type: 'memory' | 'mem' | 'org' | 'agent' | 'app',
+  bareUrn: string,
+): string {
+  try {
+    return emitEntityUrnV2(type, bareUrn);
+  } catch (err) {
+    console.warn(
+      `[safeEntityUrnV2] stored ${type} urn ${JSON.stringify(bareUrn)} is not emittable as a v2 ` +
+        'URN; serving the raw stored value. The STORED value needs repair — this is not a ' +
+        'malformed caller request:',
+      err,
+    );
+    return bareUrn;
+  }
+}
+
 /** Emit `hrn:node:<root>:<mem>:<loc…>` from a memory's bare urn + a node loc. */
 export function emitNodeUrnV2(memBareUrn: string, loc: string): string {
   const [root, ...mem] = bareAtoms(memBareUrn);
