@@ -25,7 +25,6 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { applyPersonaTemplate } from '../../../lib/personaDescription.js';
 import { resolveMemoryRoot } from './chat-scope.js';
-import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import {
   type Context,
   requireOrgRole,
@@ -227,49 +226,20 @@ async function resolveWorkerRef(ctx: Context, workerRef: string): Promise<Worker
   return worker;
 }
 
-/**
- * True when the refusal is one of the two per-App name uniques: the display
- * name itself (`workers_app_name_uniq`) or its MENTION TOKEN
- * (`workers_app_mention_token_uniq`, PR #978 review — Copilot). Both mean the
- * same thing to an allocator — this name's slot is occupied — so both are the
- * register loop's advance signal.
- */
+/** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
 function isNameTaken(e: unknown): boolean {
   return (
     e instanceof Prisma.PrismaClientKnownRequestError &&
     e.code === 'P2002' &&
-    /workers_app_name_uniq|workers_app_mention_token_uniq|app_id.*name|name/i.test(
-      String(e.meta?.target ?? e.message),
-    )
-  );
-}
-
-/**
- * True when the refusal came from the mention-token unique specifically.
- *
- * Matches on `regexp_replace`, not on the index NAME: for an index Prisma
- * doesn't know about, P2002's `meta.target` carries the index EXPRESSION, not
- * its name — `["app_id", "regexp_replace(regexp_replace(...lower(name)", …]`
- * here versus `["app_id", "lower(name)"]` for `workers_app_name_uniq`. The two
- * are distinguishable, but only on the expression.
- */
-function isMentionTokenTaken(e: unknown): boolean {
-  return (
-    e instanceof Prisma.PrismaClientKnownRequestError &&
-    e.code === 'P2002' &&
-    /regexp_replace|workers_app_mention_token_uniq/i.test(String(e.meta?.target ?? e.message))
+    /workers_app_name_uniq|app_id.*name|name/i.test(String(e.meta?.target ?? e.message))
   );
 }
 
 /** The typed WORKER_NAME_TAKEN refusal — the allocation contract's advance
- *  signal (cor:agt:020:02). A token collision says so explicitly: the caller's
- *  name is NOT literally taken, and without the reason "Mary-Jane is taken"
- *  reads like a server bug when the roster only shows "Mary Jane". */
-function nameTaken(name: string, appId: string, viaMentionToken = false): GraphQLError {
+ *  signal (cor:agt:020:02). */
+function nameTaken(name: string, appId: string): GraphQLError {
   return new GraphQLError(
-    viaMentionToken
-      ? `Worker name ${JSON.stringify(name)} resolves to the same @mention as a worker already cast in this App (@${mentionTokenOf(name) ?? ''}) — mentions must address exactly one worker, so pick a name that differs by more than punctuation.`
-      : `Worker name ${JSON.stringify(name)} is already taken in this App — a name binds to one casting forever, so pick another.`,
+    `Worker name ${JSON.stringify(name)} is already taken in this App — a name binds to one casting forever, so pick another.`,
     { extensions: { code: 'WORKER_NAME_TAKEN', name, appId } },
   );
 }
@@ -602,7 +572,7 @@ export const workerMutations = {
       } catch (e) {
         if (isNameTaken(e)) {
           if (!requestedName) continue;
-          throw nameTaken(candidate, appId, isMentionTokenTaken(e));
+          throw nameTaken(candidate, appId);
         }
         throw e;
       }
