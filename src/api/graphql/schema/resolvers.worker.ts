@@ -35,7 +35,7 @@ import {
 } from './resolvers.helpers.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
-const ROLES_BRANCH_PREFIX = 'roles:';
+export const ROLES_BRANCH_PREFIX = 'roles:';
 
 type AppRow = {
   id: string;
@@ -98,7 +98,7 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
  * App's staff (team automation follows the roster); impersonation reads are
  * bounded to the support session's single org (#876 class).
  */
-async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
+export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
   if (ctx.impersonation) {
     if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
       throw forbidden();
@@ -302,7 +302,17 @@ async function readNameRegister(
     }
     throw e;
   }
-  const rawNames = (roleNode.data as { names?: unknown } | null)?.names;
+  return parseNameRegister((roleNode.data as { names?: unknown } | null)?.names);
+}
+
+/**
+ * Parse a raw `data.names` value into the canonical ordered register: strings
+ * only, trimmed, blanks dropped, case-insensitive dedup with first-spelling-
+ * wins ordering. ONE implementation — the cast-time allocation walk above and
+ * the teamRoles surface (#960) must agree on what "the register" is, or a
+ * name the read shows free could be one the cast never tries.
+ */
+export function parseNameRegister(rawNames: unknown): string[] {
   const register: string[] = [];
   if (Array.isArray(rawNames)) {
     const seen = new Set<string>();

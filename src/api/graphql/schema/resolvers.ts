@@ -50,6 +50,7 @@ import { appMemoryMutations } from './resolvers.mutation.appMemory.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
+import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { appMutations } from './resolvers.mutation.app.js';
@@ -80,6 +81,7 @@ export const resolvers = {
     ...teamChatQueries,
     ...teamWorkQueries,
     ...workerQueries,
+    ...teamRoleQueries,
     ...sessionQueries,
     ...slackQueries,
     ...mcpQueries,
@@ -108,6 +110,7 @@ export const resolvers = {
     ...orgMutations,
     ...agentMutations,
     ...workerMutations,
+    ...teamRoleMutations,
     ...teamChatMutations,
     ...teamWorkMutations,
     ...appMutations,

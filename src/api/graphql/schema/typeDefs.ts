@@ -1957,6 +1957,67 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  """
+  One entry of a role's name register (#960, cor:agt:020:02). Order is
+  allocation order — castWorker walks the register first-to-last.
+  """
+  type TeamRoleName {
+    name: String!
+    """
+    True when a Worker holds this name in the App (case-insensitive, retired
+    included — retirement never frees a name). Judged against the App's FULL
+    roster server-side, which is why a client cannot compute this column.
+    """
+    taken: Boolean!
+    "The Worker holding the name, when taken."
+    heldBy: Worker
+  }
+
+  """
+  A role definition (#960): the roles:<role> node in the Team Agent's system
+  memory, carrying the name register (data.names) and register conventions.
+  The persona prompt template is NOT here — with the Worker model (#974) it
+  lives on the role-agent as dressing (personaRole + personaPrompt); roleAgent
+  points at it.
+  """
+  type TeamRole {
+    "The role slug, e.g. backend-engineer."
+    role: String!
+    "The node loc: roles:<role>."
+    loc: String!
+    nodeId: ID!
+    description: String
+    "Ordered register = allocation order (trimmed, case-insensitive dedup, first spelling wins)."
+    register: [TeamRoleName!]!
+    freeCount: Int!
+    "True when no register name is free (empty registers included) — the next register-mode cast refuses WORKER_REGISTER_EXHAUSTED."
+    exhausted: Boolean!
+    "Register convention: initial-letter range like 'F-J' (data.nameRange). Writes validate added names against it."
+    nameRange: String
+    "Register convention prose (data.nameConvention)."
+    nameConvention: String
+    """
+    The single installed agent whose personaRole matches this role — exactly
+    the agent a role-mode castWorker would use (null when zero or ambiguous).
+    Runs Query.agent's own read gate and masks to null on deny (the #552
+    posture), like Worker.agent.
+    """
+    roleAgent: Agent
+    """
+    Whether the role-agent's personaPrompt binds {{name}} — the check that
+    finds templates which silently produce nameless workers (role-agents
+    authored before any guard existed). Null when no single role-agent
+    resolves. Computed even when roleAgent itself is masked: it discloses one
+    boolean about the caller's own App's casting default.
+    """
+    hasNamePlaceholder: Boolean
+  }
+
+  type TeamRolesPage {
+    items: [TeamRole!]!
+    total: Int!
+  }
+
   "Result of updateTeamCollections (hadron-cli#401)."
   type TeamCollectionsPayload {
     "The team App's shared memory the declaration was written to."
@@ -4646,6 +4707,18 @@ export const typeDefs = `#graphql
     """
     workers(appRef: ID!, includeRetired: Boolean, limit: Int, offset: Int): WorkersPage!
 
+    """
+    An App's role definitions (#960): every roles:<role> node in the Team
+    Agent's system memory, projected with the one answer a client cannot
+    compute — which register names are still FREE, judged against the App's
+    full worker roster (names are unique per App, case-insensitively, forever
+    — cor:agt:020:02). Ordered by role slug. Same read authorization as
+    workers. teamAgentRef disambiguates when more than one installed agent
+    carries a roles: branch (TEAM_AGENT_AMBIGUOUS otherwise); an encrypted
+    system memory without an active session key refuses SESSION_EXPIRED.
+    """
+    teamRoles(appRef: ID!, teamAgentRef: ID, limit: Int, offset: Int): TeamRolesPage!
+
     # ── Assets (spec 004-asset-upload + 006-asset-upload-redesign) ────
     # v1 — agent-addressed listing. Deprecated; use memoryAssets.
     agentAssets(
@@ -6274,6 +6347,55 @@ export const typeDefs = `#graphql
     the empty working memory. Same authorization as castWorker.
     """
     deleteWorker(workerRef: ID!): Boolean!
+
+    """
+    #960 — mint a roles:<role> definition in the Team Agent's system memory.
+    Owns the spec knowledge a hand-authoring caller had to carry: the loc is
+    roles:<role> (single atom), the register goes in data.names (ordered),
+    and the write runs the register invariants — an added name may not appear
+    in another of this App's registers (TEAM_ROLE_NAME_DUPLICATE) and must
+    fall inside nameRange when one is set (TEAM_ROLE_NAME_OUT_OF_RANGE,
+    override with allowOutOfRange). Refuses an existing role
+    (TEAM_ROLE_EXISTS — updateTeamRole is the edit path). Authorization is
+    the Team Agent's definition-edit gate: whoever may write the agent's
+    system memory through the generic node surface may write roles — the
+    write delegates to that same seam (encryption, revision snapshot, git
+    mirror included).
+    """
+    createTeamRole(
+      appRef: ID!
+      teamAgentRef: ID
+      role: String!
+      names: [String!]!
+      nameRange: String
+      nameConvention: String
+      description: String
+      allowOutOfRange: Boolean
+    ): TeamRole!
+
+    """
+    #960 — edit a roles:<role> definition. names is WHOLESALE (the natural
+    fit for 'team role names set') but the invariants run against the DIFF
+    between stored and submitted, so add/rm/mv sugar can never smuggle a
+    violation: a name MINTED in this App may never be removed
+    (TEAM_ROLE_NAME_MINTED — the register entry records the allocation), an
+    added name may not appear in another register (TEAM_ROLE_NAME_DUPLICATE),
+    and added names validate against nameRange (allowOutOfRange overrides).
+    Omitted fields preserve; explicit null clears a convention key. Sibling
+    data keys always survive (the single --data clobber hazard is unreachable
+    through this surface). Unknown role: WORKER_ROLE_NOT_FOUND. Same
+    authorization as createTeamRole.
+    """
+    updateTeamRole(
+      appRef: ID!
+      teamAgentRef: ID
+      role: String!
+      names: [String!]
+      nameRange: String
+      nameConvention: String
+      description: String
+      allowOutOfRange: Boolean
+    ): TeamRole!
 
     """
     Post a message into a team App's chat (#939) as a platform operation.
