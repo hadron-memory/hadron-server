@@ -52,6 +52,7 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
+import { WORKLOG_LOC } from './resolvers.teamWork.js';
 
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
@@ -928,6 +929,55 @@ export const typeResolvers = {
     },
     memberCount: async (a: { id: string }, _: unknown, ctx: Context) => {
       return ctx.db.appMember.count({ where: { appId: a.id } });
+    },
+    /**
+     * #965: the App's SHARED app-class memory — the App → memory hop that lets
+     * clients default a team-memory argument (hadron-cli#399) instead of
+     * scanning every readable memory for `Memory.appId`. Read-only: never
+     * provisions (that stays with createApp/#951 and the chat/worklog
+     * bootstraps).
+     *
+     * Resolution order, both deterministic (oldest wins):
+     *   1. The memory holding the App's `worklog` root — the ledger home,
+     *      located exactly like `locateWorklogRoot` (#947), so the answer
+     *      matches where `recordTeamWork` will actually write. This branch
+     *      also covers pre-#723 legacy shared rows the adoption sweep hasn't
+     *      keyed yet.
+     *   2. Else the oldest agent-keyed shared row (`sharedMemoryOfAgentId`
+     *      set — the #951 install-provisioned pairing). The key filter is
+     *      what excludes Worker working memories, which are ALSO app-class
+     *      rows carrying this App's appId (provisionWorkerMemory) but are
+     *      casting-scoped, never the team space.
+     *
+     * Gated by the RECORD-level memory read gate (`canReadMemoryRecord` — the
+     * same predicate Query.memory runs), so a caller who may see the App but
+     * not its memory gets null; denied and missing are indistinguishable.
+     */
+    sharedMemory: async (a: { id: string }, _: unknown, ctx: Context) => {
+      const worklogRoot = await ctx.db.node.findFirst({
+        // loc-scope-ok: deliberately spans the App's OWN app-class memories —
+        // the relation filter is the tenant scope (mirrors locateWorklogRoot).
+        where: {
+          loc: WORKLOG_LOC,
+          deletedAt: null,
+          memory: { appId: a.id, class: 'app', deletedAt: null },
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { memoryId: true },
+      });
+      const memory = worklogRoot
+        ? await ctx.db.memory.findUnique({ where: { id: worklogRoot.memoryId } })
+        : await ctx.db.memory.findFirst({
+            where: {
+              appId: a.id,
+              class: 'app',
+              deletedAt: null,
+              sharedMemoryOfAgentId: { not: null },
+            },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          });
+      if (!memory || memory.deletedAt) return null;
+      return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
     },
     keys: async (a: { id: string; keys?: unknown[] }, _: unknown, ctx: Context) => {
       if (a.keys) return a.keys;

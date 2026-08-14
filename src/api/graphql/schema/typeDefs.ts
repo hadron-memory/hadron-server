@@ -959,6 +959,21 @@ export const typeDefs = `#graphql
     surfaces: [String!]!
     members: [AppMember!]!
     memberCount: Int!
+    """
+    The App's SHARED app-class memory (#965) — the team space the shared/team
+    chat and the worklog live in, provisioned at install since #951. This is
+    the App → memory hop clients need to default a team-memory argument
+    (hadron-cli#399) instead of scanning every readable memory for
+    Memory.appId. Read-only resolution, never provisions: the memory holding
+    the App's 'worklog' root wins (the ledger home — oldest, mirroring the
+    worklog locator), else the oldest agent-keyed shared row
+    (sharedMemoryOfAgentId set; Worker working memories are also app-class
+    rows under this App and are never this answer). Null when nothing has
+    provisioned a shared memory yet (an App predating #951 with no team
+    activity), or when the caller cannot read the memory record (the ordinary
+    record read gate — denied and missing are indistinguishable).
+    """
+    sharedMemory: Memory
     appType: AppType!
     role: AppMembershipRole!
     description: String

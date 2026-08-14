@@ -1,0 +1,173 @@
+/**
+ * #965 — `App.sharedMemory`: the App → shared-memory hop.
+ *
+ * Before this field the reverse mapping existed (`Memory.appId`) but nothing
+ * answered "what is this App's shared app-class memory?", so a CLI client
+ * defaulting a team-memory argument (hadron-cli#399) had to list every
+ * readable memory and filter — a whole-corpus scan that is wrong under
+ * pagination. The field is read-only (never provisions) and resolves:
+ *   1. the memory holding the App's `worklog` root (oldest — mirrors
+ *      locateWorklogRoot, so the answer matches where recordTeamWork writes),
+ *   2. else the oldest agent-keyed shared row (`sharedMemoryOfAgentId` set —
+ *      the #951 install-provisioned pairing). Worker working memories are
+ *      also app-class rows under the App and must never be this answer.
+ * Gated by the RECORD-level memory read gate; null when unreadable or absent.
+ */
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { resolvers, type Context } from './resolvers.js';
+
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
+  syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }),
+}));
+
+const M = resolvers.Mutation as any;
+const A = (resolvers as any).App;
+
+function ctx(userId?: string, roles: string[] = ['READER']): Context {
+  return { db, userId, roles } as Context;
+}
+
+let org: { id: string; urn: string };
+let admin: { id: string };
+let member: { id: string };
+let outsider: { id: string };
+let agent: { id: string; urn: string };
+
+beforeEach(async () => {
+  await cleanDb(db);
+  const s = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+  org = await db.organization.create({
+    data: { id: generateId(), name: 'shared-mem-field-org', urn: `smf-${s}.com` },
+  });
+  const mkUser = async (n: number) =>
+    db.user.create({
+      data: {
+        id: generateId(),
+        githubId: 96000 + n,
+        githubUsername: `smf${n}-${s}`,
+        roles: ['READER'],
+      },
+    });
+  admin = await mkUser(1);
+  member = await mkUser(2);
+  outsider = await mkUser(3);
+  await db.orgMember.createMany({
+    data: [
+      { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' },
+      { id: generateId(), organizationId: org.id, userId: member.id, role: 'READER' },
+    ],
+  });
+  agent = await db.agent.create({
+    data: {
+      id: generateId(),
+      organizationId: org.id,
+      urn: `${org.urn}:team-agent`,
+      name: 'Team Agent',
+      visibility: 'ORGANIZATION',
+    },
+  });
+});
+
+async function createApp(name: string) {
+  return M.createApp(null, { orgRef: org.id, agentRef: agent.id, name }, ctx(admin.id));
+}
+
+describe('#965 — App.sharedMemory', () => {
+  it('resolves the #951-provisioned agent-keyed shared memory for an org member', async () => {
+    const app = await createApp('Eng Team');
+    const mem = await A.sharedMemory(app, {}, ctx(member.id));
+    expect(mem).not.toBeNull();
+    expect(mem.appId).toBe(app.id);
+    expect(mem.class).toBe('app');
+    expect(mem.sharedMemoryOfAgentId).toBe(agent.id);
+  });
+
+  it('never answers with a Worker working memory (app-class but unkeyed)', async () => {
+    const app = await createApp('Eng Team W');
+    const shared = await db.memory.findFirstOrThrow({
+      where: { appId: app.id, class: 'app' },
+    });
+    // A worker working memory: same class, same appId, NO sharedMemoryOfAgentId
+    // (provisionWorkerMemory's shape) — and force it OLDER than the shared row
+    // so "oldest wins" alone would pick it if the key filter were missing.
+    const workerMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:eng-team-w-iris`,
+        name: 'Eng Team W — Iris — working memory',
+        class: 'app',
+        visibility: null,
+        appId: app.id,
+        createdAt: new Date(Date.now() - 60_000),
+      },
+    });
+    const mem = await A.sharedMemory(app, {}, ctx(member.id));
+    expect(mem?.id).toBe(shared.id);
+    expect(mem?.id).not.toBe(workerMem.id);
+  });
+
+  it('prefers the memory holding the worklog root over an older keyed row', async () => {
+    const app = await createApp('Eng Team WL');
+    // A second installed agent's shared memory, younger, carrying the worklog
+    // root: the ledger home must win even though the founding pairing is older.
+    const second = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:second-agent`,
+        name: 'Second Agent',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    const teamMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:eng-team-wl-shared-second`,
+        name: 'Eng Team WL — Second Agent — shared chats',
+        class: 'app',
+        visibility: null,
+        appId: app.id,
+        sharedMemoryOfAgentId: second.id,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: teamMem.id,
+        loc: 'worklog',
+        name: 'worklog',
+        nodeType: 'info',
+      },
+    });
+    const mem = await A.sharedMemory(app, {}, ctx(member.id));
+    expect(mem?.id).toBe(teamMem.id);
+  });
+
+  it('returns null for an App with no shared memory (pre-#951 shape)', async () => {
+    const app = await createApp('Bare App');
+    await db.memory.deleteMany({ where: { appId: app.id, class: 'app' } });
+    expect(await A.sharedMemory(app, {}, ctx(member.id))).toBeNull();
+  });
+
+  it('returns null (not Forbidden) when the caller cannot read the memory record', async () => {
+    const app = await createApp('Gated App');
+    expect(await A.sharedMemory(app, {}, ctx(outsider.id))).toBeNull();
+  });
+
+  it('ignores a soft-deleted shared memory', async () => {
+    const app = await createApp('Deleted Mem App');
+    await db.memory.updateMany({
+      where: { appId: app.id, class: 'app' },
+      data: { deletedAt: new Date() },
+    });
+    expect(await A.sharedMemory(app, {}, ctx(member.id))).toBeNull();
+  });
+});
