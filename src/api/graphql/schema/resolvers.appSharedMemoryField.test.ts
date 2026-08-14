@@ -170,4 +170,52 @@ describe('#965 — App.sharedMemory', () => {
     });
     expect(await A.sharedMemory(app, {}, ctx(member.id))).toBeNull();
   });
+
+  it('an App-only member (not an org member) reads the shared memory (#982 review, Codex P1)', async () => {
+    // The external/B2C shape: an AppMember with no OrgMember row. They
+    // participate in the App's shared memory (team chat + worklog admit
+    // them), and the CLI defaulting this field exists for serves them too —
+    // the record gate must not send them the org-membership way.
+    const app = await createApp('External Member App');
+    await db.appMember.create({ data: { appId: app.id, userId: outsider.id, role: 'member' } });
+    const mem = await A.sharedMemory(app, {}, ctx(outsider.id));
+    expect(mem).not.toBeNull();
+    expect(mem.appId).toBe(app.id);
+  });
+
+  it('a worker memory carrying a hand-created worklog node never wins (#982 review, Copilot)', async () => {
+    const app = await createApp('Worklog Trap App');
+    const shared = await db.memory.findFirstOrThrow({ where: { appId: app.id, class: 'app' } });
+    // A worker working memory, OLDER than the shared row, with a worklog
+    // node planted via the generic node surface — without the workerOf
+    // exclusion the worklog-first branch would resolve here.
+    const workerMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:wlt-iris`,
+        name: 'Worklog Trap — Iris — working memory',
+        class: 'app',
+        visibility: null,
+        appId: app.id,
+        createdAt: new Date(Date.now() - 120_000),
+      },
+    });
+    await db.worker.create({
+      data: { appId: app.id, agentId: agent.id, name: 'Iris', memoryId: workerMem.id },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: workerMem.id,
+        loc: 'worklog',
+        name: 'worklog',
+        nodeType: 'info',
+        createdAt: new Date(Date.now() - 110_000),
+      },
+    });
+    const mem = await A.sharedMemory(app, {}, ctx(member.id));
+    expect(mem?.id).toBe(shared.id);
+    expect(mem?.id).not.toBe(workerMem.id);
+  });
 });

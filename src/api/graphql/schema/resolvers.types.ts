@@ -957,10 +957,15 @@ export const typeResolvers = {
       const worklogRoot = await ctx.db.node.findFirst({
         // loc-scope-ok: deliberately spans the App's OWN app-class memories —
         // the relation filter is the tenant scope (mirrors locateWorklogRoot).
+        // `workerOf: none` (#982 review, Copilot): a Worker's working memory
+        // is also an app-class row under this App, and a generic node write
+        // can plant a `worklog` loc in one — a casting-scoped memory is never
+        // the team space, here or in the worklog locator. Legacy unkeyed
+        // shared rows have no Worker pointing at them, so they still match.
         where: {
           loc: WORKLOG_LOC,
           deletedAt: null,
-          memory: { appId: a.id, class: 'app', deletedAt: null },
+          memory: { appId: a.id, class: 'app', deletedAt: null, workerOf: { none: {} } },
         },
         orderBy: { createdAt: 'asc' },
         select: { memoryId: true },

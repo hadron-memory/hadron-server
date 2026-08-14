@@ -372,9 +372,11 @@ export async function resolveReadableMemoryId(
  *   1. personal/private → strict owner, or a MemoryShare grantee (#778).
  *   2. spec 047 user-owned → strict owner, BEFORE the platform-admin path so an
  *      ADMIN never reads another user's user-owned record (#676).
- *   3. otherwise → platform ADMIN/OWNER, a live org membership, or whatever the
- *      shared node gate already admits (PUBLIC, subscription, App session) —
- *      the #362 fallback that keeps record reads in step with node reads.
+ *   3. otherwise → platform ADMIN/OWNER, a live org membership, a live
+ *      AppMember of an App-scoped row (#982 review — the external/B2C member
+ *      shape), or whatever the shared node gate already admits (PUBLIC,
+ *      subscription, App session) — the #362 fallback that keeps record reads
+ *      in step with node reads.
  */
 export async function canReadMemoryRecord(
   ctx: Context,
@@ -384,6 +386,7 @@ export async function canReadMemoryRecord(
     userId?: string | null;
     ownerUserId?: string | null;
     organizationId?: string | null;
+    appId?: string | null;
   },
 ): Promise<boolean> {
   if (memory.class === 'personal' || memory.class === 'private') {
@@ -415,6 +418,22 @@ export async function canReadMemoryRecord(
         })
       : null;
   if (member) return true;
+  // #982 review (Codex P1): an App-scoped memory's record is readable by the
+  // App's OWN members — the explicitly supported external/B2C shape where an
+  // AppMember is NOT an org member. Such a member participates in the App's
+  // shared memory (the team-chat and worklog gates both admit them, and the
+  // MCP getMemoryAccess unions their App-derived reach), so refusing them the
+  // RECORD here left App.sharedMemory null for exactly the CLI users it
+  // exists for, and Query.memory out of step with effectiveAccess. AppMember
+  // rows hard-delete on removal (no deletedAt column), so existence is
+  // liveness. Identity-scoped — never via impersonation (#876 class).
+  if (ctx.userId && memory.appId && !ctx.impersonation) {
+    const appMember = await ctx.db.appMember.findUnique({
+      where: { appId_userId: { appId: memory.appId, userId: ctx.userId } },
+      select: { userId: true },
+    });
+    if (appMember) return true;
+  }
   // Scope the shared gate to THIS memory so it stays an indexed point-read.
   const accessibleIds = await getAccessibleMemoryIds(ctx, memory.id);
   return accessibleIds === null || accessibleIds.includes(memory.id);
