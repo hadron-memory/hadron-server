@@ -3455,9 +3455,9 @@ export const typeDefs = `#graphql
   """
   type EffectiveAccess {
     user: User!
-    "Canonical URN of the resolved resource (the AiServiceConfig id when the resource is a config, which has no URN)."
+    "Canonical (grammar-v2, hrn:-prefixed) URN of the resolved resource, emitted the same way the entity's own urn field emits it — so it can be fed straight back into another query or command. Two exceptions have no URN by nature: an AiServiceConfig yields its id, and a user yields hrn:user:<handle>."
     resourceUrn: String!
-    "memory | node | app | agent | aiServiceConfig."
+    "memory | node | app | agent | aiServiceConfig | organization | user."
     resourceKind: String!
 
     canRead: Boolean!
