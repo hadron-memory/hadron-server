@@ -114,6 +114,8 @@ type DecryptedRoleNode = {
   loc: string;
   description: string | null;
   data: Record<string, unknown> | null;
+  /** Optimistic-concurrency anchor for the #989 guarded write (Node.revSeq). */
+  revSeq: number;
 };
 
 /**
@@ -157,6 +159,7 @@ async function loadRoleNodes(
       loc: row.loc,
       description: row.description,
       data: (row.data as Record<string, unknown> | null) ?? null,
+      revSeq: row.revSeq,
     });
   }
   return out;
@@ -374,6 +377,9 @@ type TeamRoleWriteArgs = {
   nameConvention?: string | null;
   description?: string | null;
   allowOutOfRange?: boolean | null;
+  // #987 — compare-and-swap precondition (update only): the write proceeds
+  // only while the stored register still equals this, else TEAM_ROLE_STALE.
+  expectedNames?: string[] | null;
 };
 
 /**
@@ -488,6 +494,37 @@ async function writeTeamRole(
     const storedData = existing?.data ?? null;
     const storedNames = parseNameRegister(storedData?.names);
 
+    // #987 — the compare-and-swap precondition, judged INSIDE the register
+    // lock so the comparison and the write are one atomic step. Why it
+    // exists: the diff invariants deliberately protect only MINTED names,
+    // so two concurrent read-modify-write clients composing wholesale lists
+    // silently drop each other's newly added FREE names — legal by design,
+    // invisible to every refusal. With expectedNames the later writer gets
+    // a typed TEAM_ROLE_STALE carrying the current register, and rebases.
+    // Both sides run through parseNameRegister, so a client that passes
+    // back exactly what teamRoles returned always compares clean; the
+    // comparison is ordered and exact-spelling (a reorder IS an edit, and
+    // spellings round-trip verbatim).
+    if (mode === 'update' && args.expectedNames != null) {
+      const expected = parseNameRegister(args.expectedNames);
+      const unchanged =
+        expected.length === storedNames.length &&
+        expected.every((n, i) => n === storedNames[i]);
+      if (!unchanged) {
+        throw new GraphQLError(
+          `The "${role}" register changed since you read it — rebase your edit onto the current register (in extensions.storedNames) and retry with it as expectedNames.`,
+          {
+            extensions: {
+              code: 'TEAM_ROLE_STALE',
+              role,
+              expectedNames: expected,
+              storedNames,
+            },
+          },
+        );
+      }
+    }
+
     // Omitted preserves (the omitted-vs-null contract): an update that sends
     // no `names` edits conventions without touching the register.
     const submitted =
@@ -528,23 +565,59 @@ async function writeTeamRole(
       else mergedData.nameConvention = args.nameConvention;
     }
 
-    await writeNodeCore(
-      {
-        memoryId: systemMemoryId,
-        loc,
-        // Node name defaults to the role slug; description is optional and
-        // preserve-on-omit via the shared seam's D4 semantics.
-        ...(mode === 'create' ? { name: role } : {}),
-        ...(args.description !== undefined && args.description !== null
-          ? { description: args.description }
-          : {}),
-        data: mergedData,
-        reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
-      },
-      ctx,
-      mode,
-      mode === 'update' ? { targetNodeId: existing!.id } : undefined,
-    );
+    try {
+      await writeNodeCore(
+        {
+          memoryId: systemMemoryId,
+          loc,
+          // Node name defaults to the role slug; description is optional and
+          // preserve-on-omit via the shared seam's D4 semantics.
+          ...(mode === 'create' ? { name: role } : {}),
+          ...(args.description !== undefined && args.description !== null
+            ? { description: args.description }
+            : {}),
+          data: mergedData,
+          reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
+        },
+        ctx,
+        mode,
+        mode === 'update'
+          ? {
+              targetNodeId: existing!.id,
+              // #989 (PR review, Codex/Copilot P1): when the caller staked a
+              // precondition, the WRITE itself is guarded at the DB predicate
+              // on the node's updatedAt — the register lock serializes every
+              // participant, but the generic node surfaces (updateNode,
+              // hadron_update_node_data) write this row without it, and an
+              // application-level compare alone leaves a TOCTOU window
+              // between the check and the write.
+              ...(args.expectedNames != null
+                ? { guardRevSeq: existing!.revSeq }
+                : {}),
+            }
+          : undefined,
+      );
+    } catch (e) {
+      // An off-road write interleaved between our locked read and the
+      // guarded write: surface it as the SAME staleness the precondition
+      // reports, with the CURRENT register so the client rebases identically.
+      if (e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
+        const fresh = await loadRoleNodes(ctx, systemMemoryId);
+        const freshNode = fresh.find((n) => n.loc === loc);
+        throw new GraphQLError(
+          `The "${role}" register changed since you read it — rebase your edit onto the current register (in extensions.storedNames) and retry with it as expectedNames.`,
+          {
+            extensions: {
+              code: 'TEAM_ROLE_STALE',
+              role,
+              expectedNames: parseNameRegister(args.expectedNames),
+              storedNames: parseNameRegister(freshNode?.data?.names),
+            },
+          },
+        );
+      }
+      throw e;
+    }
 
     // Return the fresh projection through the same builder the read uses.
     const nodes = await loadRoleNodes(ctx, systemMemoryId);

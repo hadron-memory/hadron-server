@@ -6463,6 +6463,18 @@ export const typeDefs = `#graphql
     data keys always survive (the single --data clobber hazard is unreachable
     through this surface). Unknown role: WORKER_ROLE_NOT_FOUND. Same
     authorization as createTeamRole.
+
+    #987 — expectedNames turns the wholesale write into COMPARE-AND-SWAP:
+    when supplied, the write refuses TEAM_ROLE_STALE unless the STORED
+    register still equals it (ordered, exact spellings, after the same
+    trim/dedup canonicalization the register itself gets — pass back the
+    register exactly as teamRoles returned it). The refusal's extensions
+    carry the current storedNames, so a client rebases its edit without a
+    second read. This is what makes read-modify-write sugar (names
+    add/rm/mv) safe: the diff invariants deliberately protect only MINTED
+    names, so without the precondition two concurrent composed writes
+    silently drop each other's newly added FREE names — no refusal fires,
+    because removing an unminted name is legal by design.
     """
     updateTeamRole(
       appRef: ID!
@@ -6473,6 +6485,7 @@ export const typeDefs = `#graphql
       nameConvention: String
       description: String
       allowOutOfRange: Boolean
+      expectedNames: [String!]
     ): TeamRole!
 
     """
