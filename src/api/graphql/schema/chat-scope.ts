@@ -77,6 +77,34 @@ export interface ChatScopeAttachments {
  *     memory id into `attachments` for the calling user, so it can't
  *     appear in the set.
  */
+/**
+ * Display name for an App's shared app-class memory (#995).
+ *
+ * Both segments carry information when the App and the Agent are named
+ * differently ("Eng Team WL — Second Agent — shared chats"). But for a **team**
+ * App they are normally identical: the Team Agent and the App it is installed
+ * as are one concept to a user, and `hadron team --help`'s getting-started
+ * sequence installs an agent called "MM Eng Team" under the name "MM Eng Team".
+ * Composing blindly then stutters — "MM Eng Team — MM Eng Team — shared chats" —
+ * which was the DEFAULT outcome for teams, not an edge case.
+ *
+ * Compared EXACTLY rather than case/whitespace-insensitively: exact match covers
+ * every observed case, and a fuzzy compare would silently collapse a distinction
+ * someone made on purpose. Easy to loosen later; a wrong collapse is harder to
+ * notice.
+ *
+ * Cosmetic only — nothing resolves by this name — and it is applied at the label
+ * level so any future app-class memory kind beyond "shared chats" inherits it.
+ */
+export function sharedMemoryName(
+  appName: string,
+  agentName: string,
+  kind = 'shared chats',
+): string {
+  const label = appName === agentName ? appName : `${appName} — ${agentName}`;
+  return `${label} — ${kind}`;
+}
+
 export function allowedReadSet(
   chat: ChatScopeContext,
   attachments: ChatScopeAttachments,
@@ -291,7 +319,7 @@ export async function findOrCreateAppClassMemory(args: {
           // is org-owned, a user-owned App's belongs to that user.
           ownerUserId: organizationId === null ? ownerUserId : null,
           urn,
-          name: `${appName} — ${agentName} — shared chats`,
+          name: sharedMemoryName(appName, agentName),
           class: 'app',
           // 035-visibility-enum-cleanup: app-class visibility is NULL.
           visibility: null,
