@@ -474,6 +474,113 @@ describe('#960 — updateTeamRole', () => {
     }
   });
 
+  // ── #987 — expectedNames: compare-and-swap for read-modify-write sugar ──
+  //
+  // The diff invariants deliberately protect only MINTED names, so two
+  // concurrent wholesale writes composed from the same read silently drop
+  // each other's newly added FREE names — legal, refusal-free, and exactly
+  // the lost update the precondition exists to catch.
+
+  it('a matching expectedNames passes; a stale one refuses TEAM_ROLE_STALE with the current register', async () => {
+    const ok = await M.updateTeamRole(
+      {},
+      {
+        appRef: app.id,
+        role: 'backend-engineer',
+        names: ['Fred', 'Gwen', 'Hans', 'Iris'],
+        expectedNames: ['Fred', 'Gwen', 'Hans'],
+      },
+      ctx(contrib.id),
+    );
+    expect(ok.register.map((n: any) => n.name)).toEqual(['Fred', 'Gwen', 'Hans', 'Iris']);
+    // A second writer still holding the ORIGINAL read is now stale.
+    try {
+      await M.updateTeamRole(
+        {},
+        {
+          appRef: app.id,
+          role: 'backend-engineer',
+          names: ['Fred', 'Gwen', 'Hans', 'Jane'],
+          expectedNames: ['Fred', 'Gwen', 'Hans'],
+        },
+        ctx(contrib.id),
+      );
+      expect.fail('expected TEAM_ROLE_STALE');
+    } catch (e) {
+      const ext = (e as GraphQLError).extensions as Record<string, unknown>;
+      expect(ext.code).toBe('TEAM_ROLE_STALE');
+      // The refusal carries the current register, so the client rebases
+      // without a second read.
+      expect(ext.storedNames).toEqual(['Fred', 'Gwen', 'Hans', 'Iris']);
+    }
+    // Nothing from the stale write landed.
+    const page = await teamRoles(ctx(contrib.id));
+    const be = page.items.find((r: any) => r.role === 'backend-engineer');
+    expect(be.register.map((n: any) => n.name)).toEqual(['Fred', 'Gwen', 'Hans', 'Iris']);
+  });
+
+  it('a reorder is an edit: expectedNames comparison is ordered', async () => {
+    await expectCode(
+      M.updateTeamRole(
+        {},
+        {
+          appRef: app.id,
+          role: 'backend-engineer',
+          names: ['Fred', 'Gwen', 'Hans', 'Iris'],
+          expectedNames: ['Gwen', 'Fred', 'Hans'],
+        },
+        ctx(contrib.id),
+      ),
+      'TEAM_ROLE_STALE',
+    );
+  });
+
+  it('expectedNames canonicalizes like the register (trim, case-insensitive dedup)', async () => {
+    // A client passing back exactly what teamRoles returned always compares
+    // clean — and raw spellings that PARSE to the stored register do too.
+    const ok = await M.updateTeamRole(
+      {},
+      {
+        appRef: app.id,
+        role: 'backend-engineer',
+        names: ['Fred', 'Gwen', 'Hans', 'Kilo'],
+        allowOutOfRange: true,
+        expectedNames: [' Fred ', 'fred', 'Gwen', '', 'Hans'],
+      },
+      ctx(contrib.id),
+    );
+    expect(ok.register.map((n: any) => n.name)).toContain('Kilo');
+  });
+
+  it('the lost-update race resolves to one winner and one typed refusal (#987)', async () => {
+    // Two admins read ['Fred','Gwen','Hans'], each composes a wholesale list
+    // adding a different FREE name. Without expectedNames the later write
+    // silently drops the earlier add; with it, the register lock serializes
+    // the two and the loser gets TEAM_ROLE_STALE.
+    const base = ['Fred', 'Gwen', 'Hans'];
+    const results = await Promise.allSettled([
+      M.updateTeamRole(
+        {},
+        { appRef: app.id, role: 'backend-engineer', names: [...base, 'Iris'], expectedNames: base },
+        ctx(contrib.id),
+      ),
+      M.updateTeamRole(
+        {},
+        { appRef: app.id, role: 'backend-engineer', names: [...base, 'Jane'], expectedNames: base },
+        ctx(contrib.id),
+      ),
+    ]);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0].reason as GraphQLError).extensions?.code).toBe('TEAM_ROLE_STALE');
+    // The winner's add survived — no silent drop.
+    const page = await teamRoles(ctx(contrib.id));
+    const be = page.items.find((r: any) => r.role === 'backend-engineer');
+    expect(be.register).toHaveLength(4);
+  });
+
   it('the whole flow feeds the cast: an added name is what castWorker allocates next', async () => {
     for (const name of ['Fred', 'Gwen', 'Hans']) {
       await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name } });

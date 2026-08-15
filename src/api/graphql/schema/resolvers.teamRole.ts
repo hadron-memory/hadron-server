@@ -374,6 +374,9 @@ type TeamRoleWriteArgs = {
   nameConvention?: string | null;
   description?: string | null;
   allowOutOfRange?: boolean | null;
+  // #987 — compare-and-swap precondition (update only): the write proceeds
+  // only while the stored register still equals this, else TEAM_ROLE_STALE.
+  expectedNames?: string[] | null;
 };
 
 /**
@@ -487,6 +490,37 @@ async function writeTeamRole(
 
     const storedData = existing?.data ?? null;
     const storedNames = parseNameRegister(storedData?.names);
+
+    // #987 — the compare-and-swap precondition, judged INSIDE the register
+    // lock so the comparison and the write are one atomic step. Why it
+    // exists: the diff invariants deliberately protect only MINTED names,
+    // so two concurrent read-modify-write clients composing wholesale lists
+    // silently drop each other's newly added FREE names — legal by design,
+    // invisible to every refusal. With expectedNames the later writer gets
+    // a typed TEAM_ROLE_STALE carrying the current register, and rebases.
+    // Both sides run through parseNameRegister, so a client that passes
+    // back exactly what teamRoles returned always compares clean; the
+    // comparison is ordered and exact-spelling (a reorder IS an edit, and
+    // spellings round-trip verbatim).
+    if (mode === 'update' && args.expectedNames != null) {
+      const expected = parseNameRegister(args.expectedNames);
+      const unchanged =
+        expected.length === storedNames.length &&
+        expected.every((n, i) => n === storedNames[i]);
+      if (!unchanged) {
+        throw new GraphQLError(
+          `The "${role}" register changed since you read it — rebase your edit onto the current register (in extensions.storedNames) and retry with it as expectedNames.`,
+          {
+            extensions: {
+              code: 'TEAM_ROLE_STALE',
+              role,
+              expectedNames: expected,
+              storedNames,
+            },
+          },
+        );
+      }
+    }
 
     // Omitted preserves (the omitted-vs-null contract): an update that sends
     // no `names` edits conventions without touching the register.
