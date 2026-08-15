@@ -221,6 +221,115 @@ describe('#1003 — App members can read the App team space', () => {
     expect(await canReadMemory(db, auth, scratch.id)).toBe(false);
   });
 
+  it('a session-bound App KEY does not reach the team space (Codex P1 on PR #1004)', async () => {
+    // A pure App-key principal with an active session is hard-isolated to
+    // sessionScopedMemoryIds — the session memory plus the bound agent's reach.
+    // Unlike the GraphQL getAccessibleMemoryIds, this module has no session
+    // branch (hadron_get_node gates on canReadMemory alone), so the team-space
+    // fold has to opt out for that shape or an anonymous end-user session could
+    // read chats:team by URN.
+    const { agent, app, shared } = await fixture();
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, agentId: agent.id },
+    });
+    const appKeyInSession = {
+      appId: app.id,
+      sessionId: session.id,
+      organizationId: orgId,
+      roles: [],
+      clientId: `app:${app.id}`,
+    } as AuthContext;
+
+    expect((await getMemoryAccess(db, appKeyInSession)).has(shared.id)).toBe(false);
+    expect(await canReadMemory(db, appKeyInSession, shared.id)).toBe(false);
+
+    const read = await createTestableMcpServer(appKeyInSession).callToolText('hadron_get_node', {
+      urn: `hrn:node:${orgId}:eng-team-shared:chats:team`,
+    });
+    expect(read).toContain('Memory not found');
+  });
+
+  it('an App key WITHOUT a session still reaches the team space', async () => {
+    // The complement of the guard above: the isolation is the session's, not
+    // the App key's, so an unbound key keeps the reach this issue restores.
+    const { app, shared } = await fixture();
+    const appKey = {
+      appId: app.id,
+      organizationId: orgId,
+      roles: [],
+      clientId: `app:${app.id}`,
+    } as AuthContext;
+
+    expect((await getMemoryAccess(db, appKey)).get(shared.id)).toBe('READ_ONLY');
+    expect(await canReadMemory(db, appKey, shared.id)).toBe(true);
+  });
+
+  it("a MEMBER's own session binding does not cost them the team space (#934)", async () => {
+    // A user credential's session binding is heartbeat attribution, never a
+    // scope change — so the guard above is narrowed to the pure App-key shape.
+    const { member, agent, app, shared } = await fixture();
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: member.id, agentId: agent.id },
+    });
+    const auth = { ...memberAuth(member.id, app.id), sessionId: session.id } as AuthContext;
+
+    expect((await getMemoryAccess(db, auth)).get(shared.id)).toBe('READ_ONLY');
+    expect(await canReadMemory(db, auth, shared.id)).toBe(true);
+  });
+
+  it('a USER-OWNED App: the owner reads its team space, another member does not (spec 047)', async () => {
+    // Copilot on PR #1004: every other fixture here is org-owned, so the
+    // spec-047 blocker-2 guard (`row.ownerUserId !== app.ownerUserId`) was
+    // never exercised. A user-owned App's team space is minted WITH the owner
+    // on it (chat-scope owner-XOR), and an owner-scoped memory must not reach
+    // a co-member's map or listing.
+    const owner = await db.user.create({ data: { id: generateId(), name: 'app-owner' } });
+    const coMember = await db.user.create({ data: { id: generateId(), name: 'co-member' } });
+    const agent = await db.agent.create({
+      data: { id: generateId(), name: 'Solo Agent', urn: `${orgId}:solo-agent`, ownerUserId: owner.id },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'solo-app', urn: `solo-app`, ownerUserId: owner.id },
+    });
+    await createDbAppAgent(db, app.id, agent.id);
+    await createDbAppMember(db, app.id, owner.id, 'owner');
+    await createDbAppMember(db, app.id, coMember.id, 'member');
+
+    const shared = await db.memory.create({
+      data: {
+        class: 'app',
+        id: generateId(),
+        name: 'solo-app-shared',
+        urn: `${owner.id}:solo-app-shared`,
+        ownerUserId: owner.id,
+        appId: app.id,
+        sharedMemoryOfAgentId: agent.id,
+      },
+    });
+
+    const ownerAuth = {
+      userId: owner.id, appId: app.id, roles: [], clientId: `user:${owner.id}`,
+    } as AuthContext;
+    const coMemberAuth = {
+      userId: coMember.id, appId: app.id, roles: [], clientId: `user:${coMember.id}`,
+    } as AuthContext;
+
+    // The owner reaches it (the App shares its owner, so the guard passes).
+    expect((await getMemoryAccess(db, ownerAuth)).has(shared.id)).toBe(true);
+    expect(await canReadMemory(db, ownerAuth, shared.id)).toBe(true);
+
+    // The co-member does not — not in the map, not listed, not readable. The
+    // strict owner-only branch of canReadMemory and the listing surface must
+    // agree; a leak in either is the spec-047 blocker.
+    expect((await getMemoryAccess(db, coMemberAuth)).has(shared.id)).toBe(false);
+    expect(await canReadMemory(db, coMemberAuth, shared.id)).toBe(false);
+    const listed = await createTestableMcpServer(coMemberAuth).callToolText(
+      'hadron_list_memories',
+      {},
+    );
+    expect(listed).not.toContain('solo-app-shared');
+  });
+
   it('a soft-deleted team space is not readable', async () => {
     const { member, app, shared } = await fixture();
     await db.memory.update({ where: { id: shared.id }, data: { deletedAt: new Date() } });

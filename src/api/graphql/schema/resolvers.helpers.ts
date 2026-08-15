@@ -997,7 +997,14 @@ export async function getAccessibleMemoryIds(
   // "No nodes found" for all queries, survey mode included). One predicate,
   // shared — the sessionScopedMemoryIds lesson (#945) again.
   if (ctx.appId) {
-    const access = await getAppMemoryAccess(ctx.db, ctx.appId);
+    // #1003: `callerUserId` gates only the App team-space fold — a user-owned
+    // App's team space is owner-only, and a HYBRID user+selection caller reaches
+    // this branch too (the session branch above catches only the pure App-key
+    // shape), so a co-member must not receive it. A pure App key passes null and
+    // acts for the App itself.
+    const access = await getAppMemoryAccess(ctx.db, ctx.appId, {
+      callerUserId: ctx.userId ?? null,
+    });
     const ids = [...access.keys()];
     return onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
   }

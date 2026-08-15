@@ -94,6 +94,7 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
 export async function getAppMemoryAccess(
   db: PrismaClient,
   appId: string,
+  opts: { includeTeamSpace?: boolean; callerUserId?: string | null } = {},
 ): Promise<Map<string, string>> {
   const app = await db.app.findUnique({
     where: { id: appId },
@@ -132,8 +133,18 @@ export async function getAppMemoryAccess(
   // uninstalled/soft-deleted primary Agent nor a lapsed cross-org grant on
   // someone else's Agent is a reason to withhold an App's own memory. Never
   // downgrades a level the agent path already granted.
-  for (const [memoryId, level] of await getAppTeamSpaceAccess(db, app)) {
-    if (!access.has(memoryId)) access.set(memoryId, level);
+  //
+  // `includeTeamSpace: false` is the session-isolation opt-out — see the
+  // caller in getMemoryAccess. Default ON, because every OTHER caller of this
+  // function is a non-session principal that should see the team space.
+  if (opts.includeTeamSpace ?? true) {
+    for (const [memoryId, level] of await getAppTeamSpaceAccess(
+      db,
+      app,
+      opts.callerUserId ?? null,
+    )) {
+      if (!access.has(memoryId)) access.set(memoryId, level);
+    }
   }
 
   return access;
@@ -212,6 +223,7 @@ type AppAccessRow = {
 async function getAppTeamSpaceAccess(
   db: PrismaClient,
   app: AppAccessRow,
+  callerUserId: string | null,
 ): Promise<Map<string, string>> {
   const rows = await db.memory.findMany({
     where: {
@@ -226,10 +238,25 @@ async function getAppTeamSpaceAccess(
 
   const access = new Map<string, string>();
   for (const row of rows) {
-    // spec 047 blocker 2 applies here too: a USER-owned App's team space is
-    // minted with the owner on it (chat-scope.ts owner-XOR), so a row owned by
-    // anyone other than this App's owner stays out of the listing surface.
-    if (row.ownerUserId != null && row.ownerUserId !== app.ownerUserId) continue;
+    // spec 047: a USER-owned App's team space is minted with the owner on it
+    // (chat-scope.ts owner-XOR), and a user-owned memory is STRICTLY owner-only.
+    // Two separate exclusions, both required:
+    //
+    //   1. blocker 2 (#676 review) — a row owned by someone other than this
+    //      App's owner never folds into the App's map at all.
+    //   2. Copilot on PR #1004 — nor does the App's OWN owner's row fold into a
+    //      CO-MEMBER's map. This map IS the listing surface: hadron_list_memories
+    //      re-checks canReadMemory only for the personal rows it folds in
+    //      separately, so a map entry is listed as-is. Leaving it in would
+    //      disclose the owner's memory name + urn to every co-member, even
+    //      though canReadMemory's strict owner-only branch denies the read —
+    //      the "never lean on the parent gate to protect a child's secrets"
+    //      rule (#552). A caller-less principal (an App KEY, callerUserId null)
+    //      acts for the App itself, whose owner exclusion 1 already matched.
+    if (row.ownerUserId != null) {
+      if (row.ownerUserId !== app.ownerUserId) continue;
+      if (callerUserId != null && callerUserId !== row.ownerUserId) continue;
+    }
     access.set(row.id, 'READ_ONLY');
   }
   return access;
@@ -303,14 +330,34 @@ export async function getMemoryAccess(
   // identity is a focusing concern, not access control; the user's App-derived
   // access is bounded by their AppMember rows regardless of which App is in
   // focus.
+  //
+  // #1003 (Codex P1) / #934: a PURE App-key principal bound to an active
+  // session is hard-isolated to `sessionScopedMemoryIds` — the session's own
+  // memory plus the bound agent's reach. That boundary is what keeps a
+  // multi-user agent's end-user session from reading anything else the App can
+  // see, and unlike the GraphQL `getAccessibleMemoryIds` (which checks it
+  // FIRST) this module has no session branch: `hadron_get_node` gates on
+  // `canReadMemory` alone. So the App's team space — never in the session
+  // scope — must NOT be folded in for that shape, or an anonymous end-user
+  // session could read `chats:team` and `worklog` by URN.
+  //
+  // Narrowed to the pure App-key shape (`!auth.userId`), mirroring #934: a user
+  // credential's session binding is heartbeat attribution, never a scope
+  // change, so a team member's own binding must not cost them their team space.
+  // Only the team-space fold is gated — the agent-derived half is left exactly
+  // as it was, so this change cannot narrow any pre-existing reach.
   if (auth.appId) {
-    for (const [memoryId, level] of await getAppMemoryAccess(db, auth.appId)) {
+    const sessionIsolated = Boolean(auth.sessionId) && !auth.userId;
+    for (const [memoryId, level] of await getAppMemoryAccess(db, auth.appId, {
+      includeTeamSpace: !sessionIsolated,
+      callerUserId: auth.userId ?? null,
+    })) {
       access.set(memoryId, level);
     }
   } else if (auth.userId) {
     const apps = await resolveUserApps(auth.userId, db);
     const perAppMaps = await Promise.all(
-      apps.map((app) => getAppMemoryAccess(db, app.id)),
+      apps.map((app) => getAppMemoryAccess(db, app.id, { callerUserId: auth.userId })),
     );
     for (const perApp of perAppMaps) {
       for (const [memoryId, level] of perApp) {
