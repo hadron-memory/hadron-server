@@ -3993,24 +3993,35 @@ export const typeDefs = `#graphql
     nodeBatch(refs: [ID!], memory: ID, locPrefix: String): NodeBatchResult!
 
     """
+    DEPRECATED: use usageEvents(loc: <loc>). Carried for source-compat;
+    there are no known callers (checked across portal / CLI / docs at #802).
+
     Usage events for a node loc, most recent first.
 
-    'loc' names no memory, so this is a cross-memory exact nodeLoc match — the
-    same bare-loc semantics as usageEvents(nodeId:). It is a filter, not a
-    lookup: an unknown loc yields an empty list, not NODE_NOT_FOUND.
+    The migration is a rename, not a rewrite — usageEvents' loc argument is
+    the SAME verbatim exact nodeLoc match under the same gate, so
+    nodeUsage(loc: "x", limit: n) becomes usageEvents(loc: "x", limit: n)
+    with identical results and identical access scoping:
 
-    Access control (#802): results are scoped to the memories the caller may
-    read (org membership / subscriptions / public / owned personal+private per
-    spec 034; ADMIN/OWNER see all EXCEPT another user's personal/private
-    memories and, per spec 047, another user's user-owned memories), so this is
-    never cross-tenant. An unreadable loc and a nonexistent one both return an
-    empty list (no existence disclosure).
+      nodeUsage(loc: 'cor:acl:010:01', limit: 20)
+      usageEvents(loc: 'cor:acl:010:01', limit: 20)
 
-    Equivalent to usageEvents(nodeId: <loc>), which additionally supports a PK
-    or fully-qualified URN, type filtering, and paging — prefer it for new
-    callers.
+    Do NOT migrate to usageEvents(nodeId: <loc>): nodeId is shape-classified,
+    and a hierarchical loc with 3+ colon-separated segments (like the spec
+    citation above) qualifies as node-URN shape and routes to ref resolution
+    instead — NODE_NOT_FOUND, or another node's events (PR-986 review). The
+    loc argument exists precisely so the migration needs no shape caveats.
+
+    usageEvents is a strict superset: nodeId accepts a PK or a fully-qualified
+    node URN (memory-precise — a bare loc cannot disambiguate the same loc in
+    two memories), plus type filtering, memoryId scoping and offset paging. It
+    is also the surface that gets extended; nodeUsage will not grow arguments.
+
+    Access control is identical and unchanged (#802) — see usageEvents below.
+    Deprecated for redundancy, NOT because this field is unsafe.
     """
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
+      @deprecated(reason: "Use usageEvents(loc: <loc>) — identical exact-match loc semantics and access scoping, plus PK/URN refs via nodeId, type filtering, memoryId scoping and paging (#802).")
 
     # Usage events (most recent first), optionally filtered by type, memoryId,
     # or nodeId.
@@ -4030,9 +4041,21 @@ export const typeDefs = `#graphql
     # loc (no memoryId needed):
     #   - PK / URN  → resolved to a single node; scoped via its exact nodeId FK
     #                 (memory-precise).
-    #   - bare loc  → exact nodeLoc match, bounded to readable memories (like
-    #                 nodeUsage but access-scoped); not existence-checked.
-    usageEvents(type: String, memoryId: ID, nodeId: ID, limit: Int, offset: Int): [UsageEvent!]!
+    #   - bare loc  → exact nodeLoc match, bounded to readable memories; not
+    #                 existence-checked. Shape-classified: a loc with 3+
+    #                 colon-separated segments qualifies as node-URN shape and
+    #                 takes the PK/URN branch instead — use loc for those.
+    #                 (This used to read "like nodeUsage but access-scoped" —
+    #                 a comment that named an ungated sibling without anyone
+    #                 following the pointer back. nodeUsage was gated in #802
+    #                 and deprecated as redundant in the same issue.)
+    #
+    # loc — the VERBATIM exact nodeLoc filter (never shape-sniffed, so every
+    # loc works, hierarchical spec citations included), bounded to readable
+    # memories; not existence-checked. The migration target for the deprecated
+    # nodeUsage(loc:) above — same match, same gate (PR-986 review, Codex P2).
+    # Mutually exclusive with nodeId (BAD_USER_INPUT when both are passed).
+    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, limit: Int, offset: Int): [UsageEvent!]!
 
     """
     Revision history for a node, most recent first.
