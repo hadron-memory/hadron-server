@@ -42,6 +42,13 @@ import {
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
 export const ROLES_BRANCH_PREFIX = 'roles:';
 
+/**
+ * Backstop on slug-race retries in `castWorker` (#991). Not an allocation
+ * budget — see `createWithSlug` for why it must sit far above any plausible
+ * concurrent-cast count rather than at a handful.
+ */
+const SLUG_RACE_RETRY_LIMIT = 50;
+
 type AppRow = {
   id: string;
   name: string;
@@ -682,15 +689,26 @@ export const workerMutations = {
      * One name's cast attempt. Mints the #991 URN atom from the name being
      * allocated: `nextFreeWorkerSlug` is advisory — `workers_app_slug_uniq`
      * arbitrates — so a lost race retries against a freshly-read taken set.
-     * Bounded: a retry storm on one base slug is not a real workload, and
-     * exhausting the attempts must surface as an error rather than a silent
-     * cast under a colliding URN.
+     *
+     * The retry budget is deliberately generous, because a SMALL cap would make
+     * cor:agt:020:02's "a derived identifier never refuses" observably false
+     * (PR #993 review): with N concurrent casts whose distinct names derive to
+     * one base, each round lets only one winner claim a candidate, so a cap of
+     * k turns the (k+1)-th caller away with a raw constraint error even though
+     * its NAME is free. Every round is guaranteed progress — a loser re-reads a
+     * taken set that has strictly grown — so the loop terminates on its own;
+     * the cap is only a backstop against a pathological storm, set far above
+     * any real concurrency on a single App's staffing.
+     *
+     * Exhausting it is an infrastructure failure, not an allocation refusal:
+     * it surfaces as its own typed code, never as WORKER_NAME_TAKEN, so a
+     * client's register-advance loop cannot mistake it for "pick another name"
+     * and burn through a register that was never the problem.
      */
     const createWithSlug = async (
       candidate: string,
     ): Promise<{ id: string; name: string; slug: string } | typeof NAME_TAKEN> => {
-      let lastSlugRace: unknown;
-      for (let attempt = 0; attempt < 5; attempt++) {
+      for (let attempt = 0; attempt < SLUG_RACE_RETRY_LIMIT; attempt++) {
         const slug = await nextFreeWorkerSlug(ctx.db, appId, candidate);
         try {
           return await ctx.db.worker.create({
@@ -708,15 +726,15 @@ export const workerMutations = {
         } catch (e) {
           // Order matters: a slug race is private and retried; a name
           // collision is the caller-visible allocation signal.
-          if (isSlugTaken(e)) {
-            lastSlugRace = e;
-            continue;
-          }
+          if (isSlugTaken(e)) continue;
           if (isNameTaken(e)) return NAME_TAKEN;
           throw e;
         }
       }
-      throw lastSlugRace;
+      throw new GraphQLError(
+        `Could not mint a URN slug for worker name ${JSON.stringify(candidate)} after ${SLUG_RACE_RETRY_LIMIT} attempts — too many casts are racing on the same derived slug. The name itself is not taken; retry.`,
+        { extensions: { code: 'WORKER_SLUG_RACE_EXHAUSTED', name: candidate, appId } },
+      );
     };
 
     // The uniqueness constraint IS the allocation primitive (cor:agt:020:02) —

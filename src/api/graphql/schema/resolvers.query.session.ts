@@ -48,9 +48,17 @@ export const sessionQueries = {
       // nothing rather than throwing, so it cannot be used to probe which
       // workers exist outside the caller's scope. `scopeFilter` — not the ref —
       // is what authorizes the rows either way.
+      //
+      // An OMITTED filter and a SUPPLIED-BUT-BLANK one are different requests:
+      // omitting it means "don't filter by worker", while `workerRef: "   "` is
+      // a filter that nothing satisfies. Collapsing the two would let a blank
+      // ref silently WIDEN the result to every session in scope — the opposite
+      // of what the caller asked for, and a regression against the pre-#991
+      // behaviour (which filtered on an empty id and matched nothing).
       let workerId: string | undefined;
-      const trimmedWorkerRef = workerRef?.trim();
-      if (trimmedWorkerRef) {
+      if (workerRef !== undefined && workerRef !== null) {
+        const trimmedWorkerRef = workerRef.trim();
+        if (trimmedWorkerRef === '') return [];
         try {
           ({ id: workerId } = await resolveWorkerRef(ctx.db, trimmedWorkerRef));
         } catch {

@@ -12,6 +12,7 @@
  *   - a retired worker still resolves (retirement frees nothing);
  *   - the migration's SQL backfill derives the same slug the runtime mints.
  */
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -207,6 +208,121 @@ describe('#991 — resolveUrn dispatch', () => {
     await M.retireWorker({}, { workerRef: w.id }, ctx(admin.id));
     const res = await Q.resolveUrn({}, { urn }, ctx(admin.id));
     expect(res).toMatchObject({ kind: 'worker', id: w.id });
+  });
+});
+
+describe('#991 — sessions(workerRef:) is a filter, never a widener', () => {
+  it('returns nothing for a supplied-but-BLANK ref, rather than every session', async () => {
+    // PR #993 review: trimming a whitespace ref to '' and treating that as
+    // "absent" drops the predicate entirely and returns the caller's whole
+    // scope — the opposite of the filter contract, and a widening.
+    const w = await cast('Iris');
+    await M.startSession(
+      {},
+      { input: { id: generateId(), appRef: app.id, workerRef: w.id, tool: 'vitest' } },
+      ctx(admin.id),
+    );
+    const all = await Q.sessions({}, {}, ctx(admin.id));
+    expect(all.length).toBeGreaterThan(0);
+
+    expect(await Q.sessions({}, { workerRef: '   ' }, ctx(admin.id))).toEqual([]);
+    expect(await Q.sessions({}, { workerRef: '' }, ctx(admin.id))).toEqual([]);
+  });
+
+  it('still returns the unfiltered scope when the ref is OMITTED', async () => {
+    const w = await cast('Iris');
+    await M.startSession(
+      {},
+      { input: { id: generateId(), appRef: app.id, workerRef: w.id, tool: 'vitest' } },
+      ctx(admin.id),
+    );
+    expect((await Q.sessions({}, {}, ctx(admin.id))).length).toBeGreaterThan(0);
+  });
+
+  it('returns nothing for a well-formed ref that names no worker', async () => {
+    expect(
+      await Q.sessions({}, { workerRef: `hrn:worker:${org.urn}:${appSlug}:ghost` }, ctx(admin.id)),
+    ).toEqual([]);
+  });
+});
+
+describe('#991 — migration backfill: cross-base collisions', () => {
+  // Runs the REAL DO block out of the migration file — not a copy — against
+  // rows whose derived bases overlap. PR #993 review found that ranking each
+  // (app, base) partition independently hands one slug to two rows: `Iris`,
+  // `Iris!`, and `Iris-2` derive bases `iris`, `iris`, `iris-2`, so the second
+  // row is numbered `iris-2` and the third claims `iris-2` as its bare base.
+  // The unique index then aborts the migration.
+  const migrationSql = readFileSync(
+    new URL(
+      '../../../../prisma/migrations/20260815120000_worker_slug/migration.sql',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  const backfillBlock = migrationSql.match(/DO \$\$[\s\S]*?END \$\$;/)?.[0];
+
+  it('the migration file still contains a DO-block backfill', () => {
+    expect(backfillBlock).toBeTruthy();
+  });
+
+  it.each([
+    [['Iris', 'Iris!', 'Iris-2'], 'suffix equals a later row\'s bare base'],
+    [['Mary Jane', 'Mary-Jane', 'Mary Jane 2'], 'the review\'s worked example'],
+    [['Iris-2', 'Iris', 'Iris!'], 'the colliding base is inserted FIRST'],
+    [['!!!', '???', '@@@'], 'every name falls back to the same base'],
+  ])('assigns distinct slugs for %j (%s)', async (names) => {
+    for (const [i, name] of names.entries()) {
+      await db.worker.create({
+        data: { appId: app.id, agentId: roleAgent.id, name, slug: `seed-${i}` },
+      });
+    }
+    // Re-run the backfill over these rows exactly as a migration would.
+    await db.$executeRawUnsafe('ALTER TABLE workers ALTER COLUMN slug DROP NOT NULL');
+    try {
+      await db.$executeRawUnsafe('UPDATE workers SET slug = NULL');
+      await db.$executeRawUnsafe(backfillBlock!);
+      const rows = await db.worker.findMany({
+        where: { appId: app.id },
+        select: { name: true, slug: true },
+      });
+      const slugs = rows.map((r) => r.slug);
+      expect(slugs).toHaveLength(names.length);
+      expect(new Set(slugs).size).toBe(names.length); // no duplicates
+      expect(slugs.every((s) => s && s.length <= 64)).toBe(true);
+      // And the index the migration creates would actually build.
+      await expect(
+        db.$executeRawUnsafe(
+          'CREATE UNIQUE INDEX wrk_slug_probe ON workers (app_id, slug)',
+        ),
+      ).resolves.toBeDefined();
+      await db.$executeRawUnsafe('DROP INDEX wrk_slug_probe');
+    } finally {
+      await db.$executeRawUnsafe('ALTER TABLE workers ALTER COLUMN slug SET NOT NULL');
+    }
+  });
+
+  it('gives the oldest casting the bare base', async () => {
+    await db.worker.create({
+      data: { appId: app.id, agentId: roleAgent.id, name: 'Iris', slug: 'seed-a' },
+    });
+    await db.worker.create({
+      data: { appId: app.id, agentId: roleAgent.id, name: 'Iris!', slug: 'seed-b' },
+    });
+    await db.$executeRawUnsafe('ALTER TABLE workers ALTER COLUMN slug DROP NOT NULL');
+    try {
+      await db.$executeRawUnsafe('UPDATE workers SET slug = NULL');
+      await db.$executeRawUnsafe(backfillBlock!);
+      const rows = await db.worker.findMany({
+        where: { appId: app.id },
+        orderBy: { createdAt: 'asc' },
+        select: { name: true, slug: true },
+      });
+      expect(rows[0]).toMatchObject({ name: 'Iris', slug: 'iris' });
+      expect(rows[1].slug).toBe('iris-2');
+    } finally {
+      await db.$executeRawUnsafe('ALTER TABLE workers ALTER COLUMN slug SET NOT NULL');
+    }
   });
 });
 

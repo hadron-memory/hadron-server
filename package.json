@@ -1,7 +1,7 @@
 {
   "name": "@hadron/controller",
   "version": "0.1.0",
-  "description": "Hadron Controller — GraphQL API, usage DB, and node collection",
+  "description": "Hadron Controller \u2014 GraphQL API, usage DB, and node collection",
   "type": "module",
   "main": "dist/index.js",
   "packageManager": "pnpm@11.5.2+sha512.71c631e382066efc25625d5cf029075de07b61b37f6e27350fbd84b1bda5864c8c1967adc280776b45c30a715c0359a3be08fef42d5bb09e2b99029979692916",
@@ -18,7 +18,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:dev-reset": "scripts/reset-db.sh",
     "db:dev-setup": "scripts/dev-setup.sh",
-    "db:test-setup": "DATABASE_URL=postgresql://holger@localhost:5432/hadron_test prisma db push --accept-data-loss --skip-generate && psql postgresql://holger@localhost:5432/hadron_test -v ON_ERROR_STOP=1 -f prisma/post-push.sql",
+    "db:test-setup": "psql postgresql://holger@localhost:5432/hadron_test -v ON_ERROR_STOP=1 -f prisma/pre-push.sql && DATABASE_URL=postgresql://holger@localhost:5432/hadron_test prisma db push --accept-data-loss --skip-generate && psql postgresql://holger@localhost:5432/hadron_test -v ON_ERROR_STOP=1 -f prisma/post-push.sql",
     "db:dev-from-prod": "scripts/dev-from-prod-snapshot.sh",
     "schema:export": "tsx scripts/export-graphql-sdl.mjs",
     "check:loc-scope": "node scripts/check-loc-scope.mjs",
