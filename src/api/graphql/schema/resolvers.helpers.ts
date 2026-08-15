@@ -2521,9 +2521,17 @@ export interface SessionInput {
   // gated on the caller's membership of that App.
   appRef?: string;
   // #974 / cor:agt:020:03: the Worker (named casting) this session works as.
-  // PK only — workers have no URN. Gated: the worker must belong to the
-  // session's App; a retired worker refuses; a taken worker refuses
-  // WORKER_TAKEN unless force (#940).
+  // THREE forms, told apart by shape (never a fallback chain): an id, a
+  // `hrn:worker:…` URN (#991), or the worker's NAME (#990).
+  //
+  // The NAME form is App-SCOPED — names are unique only within an App — so it
+  // requires App context (appRef, an App-key credential, or an MCP active-App
+  // selection) and refuses SESSION_WORKER_NAME_NEEDS_APP without one. It is
+  // gated on the staff read gate before the lookup, since resolving a name
+  // discloses roster membership that the id and URN forms never do.
+  //
+  // Gated for all three: the worker must belong to the session's App; a retired
+  // worker refuses; a taken worker refuses WORKER_TAKEN unless force (#940).
   workerRef?: string;
   // #940: explicit informed-takeover override for a WORKER_TAKEN refusal.
   force?: boolean;

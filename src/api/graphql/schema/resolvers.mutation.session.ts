@@ -15,6 +15,7 @@ import {
   parseUrnInput,
   assertFullyQualifiedUrn,
   UrnNotQualifiedError,
+  hasSchemePrefix,
   splitNodeUrn,
   normalizeUrnForLookup,
   legacyMemoryUrnToCanonical,
@@ -22,6 +23,8 @@ import {
 } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { requireWorkerReadAccess, resolveWorkerIdByName } from './resolvers.worker.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
@@ -172,8 +175,9 @@ export const sessionMutations = {
       }
 
       // #974: optional Worker binding (cor:agt:020:03) — the named identity
-      // this session works as. PK-only (workers have no URN — cor:agt:020:02
-      // keeps names out of URNs). Gated: the worker must belong to the
+      // this session works as. An id or a `hrn:worker:…` URN (#991), whose leaf
+      // is the derived slug — cor:agt:020:02 keeps the NAME out of URNs, and
+      // the derived identifier never refuses. Gated: the worker must belong to the
       // session's App; with no App context yet, the worker's App becomes the
       // session's — behind the SAME participant predicate the appRef path
       // runs, so binding a worker never widens who can attribute a session to
@@ -186,16 +190,93 @@ export const sessionMutations = {
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
         // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
-        // URN, via the shared ref helper. Identity only — every gate below
-        // (retirement, App match, participation, WORKER_TAKEN) still runs on
-        // the RESOLVED row, so the URN buys addressability, never access.
+        // URN, via the shared ref helper. #990 adds a third form: a worker
+        // NAME ("Iris"), resolved within this session's App. Identity only —
+        // every gate below (retirement, App match, participation,
+        // WORKER_TAKEN) still runs on the RESOLVED row, so a ref buys
+        // addressability, never access.
+        //
+        // The forms are told apart by SHAPE, not by trying each in turn: an id
+        // or a scheme-prefixed URN is self-describing, and anything else is a
+        // name. Falling back from URN-resolution failure to a name lookup would
+        // make a typo'd URN silently search the roster.
         let resolvedWorkerId: string;
-        try {
-          ({ id: resolvedWorkerId } = await resolveWorkerRefId(ctx.db, workerRef));
-        } catch {
-          throw new GraphQLError(`Worker not found: ${workerRef}`, {
-            extensions: { code: 'WORKER_NOT_FOUND' },
+        if (isId(workerRef) || hasSchemePrefix(workerRef)) {
+          try {
+            ({ id: resolvedWorkerId } = await resolveWorkerRefId(ctx.db, workerRef));
+          } catch {
+            throw new GraphQLError(`Worker not found: ${workerRef}`, {
+              extensions: { code: 'WORKER_NOT_FOUND' },
+            });
+          }
+        } else {
+          // NAME (#990). A name is unique only WITHIN an App, so this form
+          // needs App context — which a bare-name caller always has, since it
+          // comes from an App key, an explicit appRef, or an MCP active-App
+          // selection. Without one there is nothing to scope the lookup to, and
+          // guessing across the caller's Apps would resolve one name to
+          // several workers.
+          if (appId === null) {
+            throw new GraphQLError(
+              `workerRef "${workerRef}" is a worker name, which is only unique within an App — pass appRef (or select an App), or use the worker's id or URN.`,
+              { extensions: { code: 'SESSION_WORKER_NAME_NEEDS_APP', workerRef } },
+            );
+          }
+          // The staff read gate runs BEFORE the lookup, not after: resolving a
+          // name answers "does this App have an Iris?", a fact about the roster
+          // that the id/URN forms never have to disclose, so gating afterwards
+          // would leak roster membership to anyone who can guess a name. Same
+          // audience as the `workers` list and `teamRoles` — this discloses
+          // nothing the caller cannot already enumerate — and a denial reports
+          // WORKER_NOT_FOUND, indistinguishable from an App with no such worker.
+          //
+          // In practice a caller who reached here via `appRef` has ALREADY
+          // cleared `isAppParticipant` above, the same predicate this gate
+          // uses, so an outsider is refused FORBIDDEN before any name is looked
+          // up. This is therefore defense in depth, not the only barrier — and
+          // deliberately so: `appId` can also arrive from an App-key credential
+          // (which skips that membership branch), and the name branch must be
+          // self-sufficient rather than relying on an ordering above it that a
+          // later change could reshuffle.
+          const gateApp = await ctx.db.app.findUnique({
+            where: { id: appId },
+            select: {
+              id: true, name: true, urn: true, organizationId: true,
+              ownerUserId: true, uninstalledAt: true, deletedAt: true,
+            },
           });
+          // App lifecycle, checked here and not only at the gate (PR #996
+          // review, Copilot). When `appId` came from `appRef` these were
+          // already enforced above, and the worker-DERIVED path enforces them
+          // below — but when it came from `ctx.appId` (an MCP active-App
+          // SELECTION or an App key) this is the only lifecycle check before
+          // `session.create`. A stale selection pointing at a soft-deleted or
+          // uninstalled App must not be able to resolve a name and open a
+          // session there.
+          if (!gateApp || gateApp.deletedAt) {
+            throw new GraphQLError(`Worker not found: ${workerRef}`, {
+              extensions: { code: 'WORKER_NOT_FOUND' },
+            });
+          }
+          if (gateApp.uninstalledAt) {
+            throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+              extensions: { code: 'APP_UNINSTALLED', appId },
+            });
+          }
+          try {
+            await requireWorkerReadAccess(ctx, gateApp);
+          } catch {
+            throw new GraphQLError(`Worker not found: ${workerRef}`, {
+              extensions: { code: 'WORKER_NOT_FOUND' },
+            });
+          }
+          const byName = await resolveWorkerIdByName(ctx.db, appId, workerRef);
+          if (!byName) {
+            throw new GraphQLError(`Worker not found: ${workerRef}`, {
+              extensions: { code: 'WORKER_NOT_FOUND' },
+            });
+          }
+          resolvedWorkerId = byName;
         }
         const worker = await ctx.db.worker.findUnique({
           where: { id: resolvedWorkerId },

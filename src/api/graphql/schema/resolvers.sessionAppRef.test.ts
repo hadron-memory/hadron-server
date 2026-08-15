@@ -441,8 +441,30 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     await expectCode(startSession(ctx(contrib.id), { workerRef: worker.id }), 'WORKER_RETIRED');
   });
 
-  it('refuses an unknown workerRef → WORKER_NOT_FOUND', async () => {
-    await expectCode(startSession(ctx(contrib.id), { workerRef: 'no-such-worker' }), 'WORKER_NOT_FOUND');
+  it('refuses an unknown id-shaped workerRef → WORKER_NOT_FOUND', async () => {
+    // cuid-shaped: resolved as an ID, found nowhere.
+    await expectCode(
+      startSession(ctx(contrib.id), { workerRef: 'c' + 'a'.repeat(24) }),
+      'WORKER_NOT_FOUND',
+    );
+  });
+
+  it('refuses an unknown URN-shaped workerRef → WORKER_NOT_FOUND', async () => {
+    await expectCode(
+      startSession(ctx(contrib.id), { workerRef: `hrn:worker:${org.urn}:team:ghost` }),
+      'WORKER_NOT_FOUND',
+    );
+  });
+
+  it('a NAME-shaped ref with no App context → SESSION_WORKER_NAME_NEEDS_APP (#990)', async () => {
+    // Changed deliberately by #990: a bare string is now a worker NAME, and a
+    // name is only unique within an App. Answering WORKER_NOT_FOUND here would
+    // claim a lookup that never happened — this says which input is missing.
+    // The id and URN shapes above keep the original refusal.
+    await expectCode(
+      startSession(ctx(contrib.id), { workerRef: 'no-such-worker' }),
+      'SESSION_WORKER_NAME_NEEDS_APP',
+    );
   });
 
   it('gates the derived-App path on the same participant predicate (non-member → FORBIDDEN)', async () => {
