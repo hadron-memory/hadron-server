@@ -15,6 +15,7 @@ import {
   normalizeUrnForLookup,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
+import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
@@ -5191,16 +5192,64 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             })
           ).map((s: { workerId: string | null }) => s.workerId),
         );
+        // The App's URN once for the PAGE, not once per worker (PR #1000
+        // review, Copilot): every worker here belongs to the SAME App, so
+        // calling the `Worker.urn` field resolver per item repeated one
+        // identical App lookup up to the 200-item page cap — concurrently,
+        // which is how you saturate a pool. Composed from the shared value with
+        // the same helper the field resolver uses, so the spelling cannot
+        // drift; an App URN the fixed arity can't take degrades to no URN
+        // rather than throwing, exactly as the field resolver does.
+        const rosterApp = await db.app.findUnique({
+          where: { id: page.items[0].appId },
+          select: { urn: true },
+        });
+        const workerUrn = (slug: string): string | null => {
+          if (!rosterApp) return null;
+          try {
+            return composeWorkerUrn(normalizeUrnForLookup(rosterApp.urn), slug);
+          } catch {
+            return null;
+          }
+        };
+
+        // The role AGENT's name, resolved ONCE PER DISTINCT AGENT rather than
+        // per worker (a team commonly casts several workers onto one role
+        // agent). Goes through the `Worker.agent` field resolver, which applies
+        // the Agent's OWN read gate and masks to null on deny — the Worker read
+        // gate is wider than the Agent's, and #552 is precisely about not
+        // letting the wider gate hand out the narrower entity. Only the NAME is
+        // projected; the Agent object never reaches the caller.
+        const agentNames = new Map<string, Promise<string | null>>();
+        const agentNameFor = (agentId: string): Promise<string | null> => {
+          let pending = agentNames.get(agentId);
+          if (!pending) {
+            pending = (async () => {
+              const agent = await resolvers.Worker.agent({ agentId } as never, {}, ctx);
+              return (agent as { name?: string } | null)?.name ?? null;
+            })();
+            agentNames.set(agentId, pending);
+          }
+          return pending;
+        };
+
         const lines = await Promise.all(
-          page.items.map(async (w: { id: string; name: string; role: string | null; retiredAt: Date | null }) => {
-            // Through the field resolver, so a URN that cannot be composed
-            // (a legacy App urn) degrades to absent rather than throwing.
-            const urn = await resolvers.Worker.urn(w as never, {}, ctx);
-            const flags = [
-              w.retiredAt ? 'RETIRED' : taken.has(w.id) ? 'taken' : 'free',
-            ];
+          page.items.map(async (w: {
+            id: string; name: string; slug: string; role: string | null;
+            agentId: string; retiredAt: Date | null;
+          }) => {
+            const urn = workerUrn(w.slug);
+            const agentName = await agentNameFor(w.agentId);
+            // Retirement and liveness are INDEPENDENT (PR #1000 review,
+            // Copilot): `retireWorker` only stamps `retiredAt`, so a retired
+            // worker can still hold an unended session, and collapsing the two
+            // into one ternary dropped the taken/free state that
+            // `includeRetired` promises.
+            const flags = [taken.has(w.id) ? 'taken' : 'free'];
+            if (w.retiredAt) flags.unshift('RETIRED');
             return (
               `- ${w.name}${w.role ? ` (${w.role})` : ''} — ${flags.join(', ')}` +
+              (agentName ? `\n    agent: ${agentName}` : '') +
               (urn ? `\n    ${urn}` : '')
             );
           }),

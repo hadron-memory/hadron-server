@@ -166,6 +166,26 @@ describe('#997 — hadron_list_workers', () => {
     expect(countOnly).toContain('1 worker(s)');
   });
 
+  it('shows the role agent\'s name', async () => {
+    await worker('Iris', 'iris');
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
+    expect(out).toContain('agent: Backend');
+  });
+
+  it('reports RETIRED and taken/free INDEPENDENTLY', async () => {
+    // retireWorker only stamps retiredAt, so a retired worker can still hold an
+    // unended session. Collapsing the two into one flag dropped the liveness
+    // state that includeRetired promises.
+    const gone = await worker('Gone', 'gone', { retiredAt: new Date() });
+    await db.session.create({
+      data: { id: generateId(), workerId: gone.id, appId: app.id, userId: user.id },
+    });
+    const out = await createTestableMcpServer(hybridAuth()).callToolText(
+      'hadron_list_workers', { includeRetired: true },
+    );
+    expect(out).toMatch(/Gone.*RETIRED, taken/s);
+  });
+
   it('accepts an explicit app argument', async () => {
     await worker('Iris', 'iris');
     const out = await createTestableMcpServer(hybridAuth()).callToolText(
