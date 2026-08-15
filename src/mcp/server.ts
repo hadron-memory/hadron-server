@@ -13,6 +13,7 @@ import {
   splitNodeUrn,
   validateUrnType,
   normalizeUrnForLookup,
+  hasSchemePrefix,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
@@ -114,6 +115,10 @@ import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
 import { HADRON_SERVER_VERSION, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+// #1005: the SHARED App-participation predicate (#943) — reused here so
+// reconnect recovery admits exactly whom startSession admitted, rather than a
+// narrower member-row copy that would drift from it.
+import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 
@@ -909,6 +914,105 @@ export function createMcpServerInstance(
     return null; // zero-App or other path — fall through
   }
 
+  /**
+   * #1005 — make an App the session's active one, for both the in-process
+   * selection map and this closure's `auth`.
+   *
+   * Extracted from `hadron_set_active_app` so every pinning path writes the
+   * SAME two places. A path that set only `auth.appId` would work until the
+   * next tool call re-entered `requireAppScope` on a different code path, and
+   * one that set only the map would leave `auth.appId` unset for the delegating
+   * resolvers — both are silent half-fixes.
+   */
+  function pinActiveApp(
+    appId: string,
+    organizationId: string | null,
+    reason: 'selection' | 'worker_bind' | 'session',
+  ): void {
+    const sid = getSessionId();
+    if (sid) activeAppByMcpSession.set(sid, { appId, organizationId });
+    auth.appId = appId;
+    auth.organizationId = organizationId ?? undefined;
+    mcpLog('info', 'active_app_pinned', { userId: auth.userId, mcpSessionId: sid, appId, reason });
+  }
+
+  /**
+   * #1005 — recover App scope from a Hadron session the caller names.
+   *
+   * The active-App selection is per-MCP-TRANSPORT-session in-process state
+   * (`activeAppByMcpSession`, keyed on the transport's session id, cleared on
+   * close). MCP transport sessions are re-created transparently under the
+   * client — a server restart answers a stale id with the recoverable 404 and
+   * the client silently re-initializes (findings:mcp-stale-session-400-vs-404).
+   * The selection does NOT survive that, so a multi-App user's App-scoped calls
+   * succeed for a while and then start failing mid-conversation with
+   * `multiple_apps_resolved`, with nothing in the transcript to explain it.
+   *
+   * A Hadron `Session` row is the durable anchor the agent still holds across
+   * that reconnect: it carries `appId`, and the agent has its id because it
+   * started it. So when a tool is handed one, resolve the App from it rather
+   * than declaring the user's App set ambiguous.
+   *
+   * Gated, not inferred, on three things:
+   *
+   *   1. the session is the CALLER'S OWN (`session.userId === auth.userId` — an
+   *      App-key-created session has a null userId and never matches), so a
+   *      session id is not a capability someone else can quote;
+   *   2. the App is still live (not soft-deleted, not uninstalled — the same
+   *      lifecycle filter `resolveUserApps` applies);
+   *   3. the caller is STILL a participant, re-checked through
+   *      `isAppParticipant` — the SAME predicate `startSession` used to admit
+   *      them (#943). Re-checked rather than trusted from the session row,
+   *      because the row records where the session was attributed and outlives
+   *      the authorization that permitted it (#475 — revoked membership must
+   *      not authorize).
+   *
+   * Gate 3 is the shared predicate rather than a direct `AppMember` lookup on
+   * purpose (PR #1007 review, Codex + Copilot): participation also admits an
+   * org CONTRIBUTOR+ and the owner of a user-owned App, so a bespoke
+   * member-row check would let those callers start a session and pin an App,
+   * then silently refuse to restore it after a reconnect — a gate that drifts
+   * from the one beside it, which is the failure AGENTS.md's first
+   * authorization invariant names.
+   *
+   * So this can only re-establish scope the caller could have set by hand with
+   * `hadron_set_active_app`; it never widens reach. A no-op when App scope
+   * already exists, when there is no session argument, or when any gate fails —
+   * the caller then falls through to `requireAppScope`'s normal error.
+   */
+  async function adoptAppFromSession(sessionRef?: string | null): Promise<void> {
+    if (auth.appId || !auth.userId || !sessionRef) return;
+
+    const session = await db.session.findUnique({
+      where: { id: sessionRef.trim() },
+      select: { appId: true, userId: true },
+    });
+    if (!session?.appId || session.userId !== auth.userId) return;
+
+    const app = await db.app.findFirst({
+      where: { id: session.appId, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (!app) return;
+
+    // The participant check runs against the caller as they are NOW, with no
+    // App selection in hand — which is the state this function exists to
+    // repair, and exactly the shape isAppParticipant judges (the USER branch).
+    const participates = await isAppParticipant(
+      {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context,
+      app,
+    );
+    if (!participates) return;
+
+    pinActiveApp(app.id, app.organizationId, 'session');
+  }
+
   // ── hadron_search ─────────────────────────────────────────────────────────────
 
   server.tool(
@@ -1284,14 +1388,7 @@ export function createMcpServerInstance(
 
       switch (r.kind) {
         case 'resolved': {
-          if (sid) {
-            activeAppByMcpSession.set(sid, {
-              appId: r.app.id,
-              organizationId: r.app.organizationId,
-            });
-          }
-          auth.appId = r.app.id;
-          auth.organizationId = r.app.organizationId ?? undefined;
+          pinActiveApp(r.app.id, r.app.organizationId, 'selection');
           mcpLog('info', 'regime_c_selection_set', {
             userId: auth.userId,
             mcpSessionId: sid,
@@ -4779,7 +4876,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a new work session. All subsequent tool calls can reference this session ID for attribution. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of the session, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is already driving refuses WORKER_TAKEN with who last drove it and when (informed takeover, cor:agt:020:03); retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
+    'Start a new work session. All subsequent tool calls can reference this session ID for attribution. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of the session, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is already driving refuses WORKER_TAKEN with who last drove it and when (informed takeover, cor:agt:020:03); retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
     {
       description: z.string().describe("What this session is about"),
       type: z.string().optional().describe('Session type: DEVELOPER, CHATBOT, AUTOMATION, EDGE'),
@@ -4798,8 +4895,27 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
       // context to attribute the session. Errors with typed [no_active_app]
       // envelope for multi-App OAuth callers without selection.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
+      //
+      // #1005: EXCEPT when the workerRef is self-describing. A worker id or an
+      // `hrn:worker:<root>:<app-slug>:<slug>` URN names exactly one worker, and
+      // a worker belongs to exactly one App — so the App is already known, and
+      // demanding a prior `hadron_set_active_app` asks the caller to state
+      // something the argument settles. `startSession` already derives the App
+      // from the worker when it has no App context, behind the same participant
+      // predicate the appRef path runs, so this widens nothing: it lets the
+      // resolver's existing branch be reached instead of erroring above it.
+      //
+      // A bare NAME still requires App scope — a name is unique only WITHIN an
+      // App (#990), so without one there is nothing to resolve it against, and
+      // guessing across the caller's Apps would resolve one name to several
+      // workers. That caller gets the normal, actionable envelope.
+      const workerRefTrimmed = workerRef?.trim();
+      const workerRefNamesItsApp =
+        !!workerRefTrimmed && (isId(workerRefTrimmed) || hasSchemePrefix(workerRefTrimmed));
+      if (!workerRefNamesItsApp) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+      }
 
       // #940: delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement), so the worker
@@ -4843,6 +4959,43 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           },
           mcpCtx,
         );
+
+        // #1005: pin the session's App as this MCP session's active App.
+        //
+        // The App is settled the moment the session exists — `startSession`
+        // stamps `appId` from the worker's casting when it had no App context,
+        // and from the caller's scope otherwise — so every App-scoped tool
+        // afterwards has an unambiguous answer. Before this, a multi-App user
+        // following the documented path (start_session with workerRef → team
+        // chat read/post → record_work) had to have called
+        // `hadron_set_active_app` first, and the failure for not doing so was
+        // DEFERRED: it surfaced on whichever later call happened to need App
+        // scope, reading as a client limitation rather than a missed step.
+        //
+        // Gated on `auth.userId`: an App-key caller's App identity comes from
+        // its credential and must never be re-pointed by a session argument.
+        // A no-op when it already matches, which is the single-App case.
+        //
+        // BEST-EFFORT (PR #1007 review, Codex P1): this read runs AFTER
+        // startSession has committed, so a transient failure here must never be
+        // reported as a failed start. Falling through to the outer catch would
+        // return "Error: …" and withhold the session id — and the client's
+        // retry would then hit WORKER_TAKEN for the very session it was told
+        // had failed, unable to either continue or end it. Same reasoning, and
+        // the same remedy, as the briefing block below (PR #996 review). A
+        // missed pin costs one hadron_set_active_app; a withheld id is
+        // unrecoverable.
+        if (auth.userId && session.appId && session.appId !== auth.appId) {
+          try {
+            const boundApp = await db.app.findUnique({
+              where: { id: session.appId },
+              select: { id: true, organizationId: true },
+            });
+            if (boundApp) pinActiveApp(boundApp.id, boundApp.organizationId, 'worker_bind');
+          } catch {
+            // Swallowed deliberately — the session IS started and bound.
+          }
+        }
 
         // #990: when a worker is bound, ALWAYS return its resolved boot
         // briefing. Binding IS briefing — an MCP host has no discovery surface
@@ -5023,6 +5176,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // auth.appId so the omit-app flow honors hadron_set_active_app.
       let appRef = app;
       if (!appRef) {
+        // #1005: the session names its App — recover scope from it before
+        // declaring the caller's App set ambiguous.
+        await adoptAppFromSession(session);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
@@ -5064,11 +5220,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
+      session: z.string().optional().describe('Your session id — used only to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
-    async ({ sinceSeq, mentions, limit, offset, app }) => {
+    async ({ sinceSeq, mentions, limit, offset, session, app }) => {
       let appRef = app;
       if (!appRef) {
+        // #1005: this read is the one App-scoped team tool that took NEITHER an
+        // app nor a session, so it had no way to answer "which App?" other than
+        // the in-process selection — which is exactly why it was the call that
+        // failed first when that selection evaporated. `session` is accepted
+        // here purely as an App-resolution hint (the read itself is unchanged
+        // and is gated by team-App participation, not by the session).
+        await adoptAppFromSession(session);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
@@ -5285,6 +5449,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // auth.appId so the omit-app flow honors hadron_set_active_app.
       let appRef = app;
       if (!appRef) {
+        // #1005: the session names its App (here it is REQUIRED), so scope is
+        // recoverable without a prior hadron_set_active_app.
+        await adoptAppFromSession(session);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
@@ -5330,6 +5497,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     async ({ ref, session, tool, kind, limit, offset, app }) => {
       let appRef = app;
       if (!appRef) {
+        // #1005: the optional session filter doubles as an App-resolution hint.
+        await adoptAppFromSession(session);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
