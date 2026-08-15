@@ -75,7 +75,7 @@ beforeEach(async () => {
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name: 'Iris', role: 'backend-engineer' },
+    data: { appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', role: 'backend-engineer' },
   });
   session = await db.session.create({
     data: { id: generateId(), appId: app.id, userId: member.id, agentId: agent.id, workerId: worker.id },

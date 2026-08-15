@@ -18,7 +18,12 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
-import { deriveSlugFromName, normalizeUrnForLookup } from '../../../lib/urn.js';
+import { normalizeUrnForLookup } from '../../../lib/urn.js';
+import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
+import {
+  resolveWorkerRef as resolveWorkerRefId,
+  composeWorkerUrn,
+} from '../../../lib/entityRef/workerRef.js';
 import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
@@ -36,6 +41,13 @@ import {
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
 export const ROLES_BRANCH_PREFIX = 'roles:';
+
+/**
+ * Backstop on slug-race retries in `castWorker` (#991). Not an allocation
+ * budget — see `createWithSlug` for why it must sit far above any plausible
+ * concurrent-cast count rather than at a handful.
+ */
+const SLUG_RACE_RETRY_LIMIT = 50;
 
 type AppRow = {
   id: string;
@@ -193,6 +205,7 @@ type WorkerRow = {
   appId: string;
   agentId: string;
   name: string;
+  slug: string;
   role: string | null;
   promptOverride: string | null;
   memoryId: string | null;
@@ -200,18 +213,34 @@ type WorkerRow = {
 };
 
 /**
- * Resolve a workerRef to its row. Workers deliberately have NO URN — names
- * never appear in slugs or URNs (cor:agt:020:02), so unlike the other
- * `resolve<Entity>Ref` helpers (cor:api:140) this accepts the PK only.
+ * Resolve a workerRef to its row — a Worker id or an
+ * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991), via the shared
+ * `resolve<Entity>Ref` helper (cor:api:140) so the ref grammar has ONE
+ * definition rather than a per-resolver copy that drifts.
+ *
+ * Identity only. The App-membership gate is the caller's job, and every caller
+ * applies it to the RESOLVED row's `appId` — so a URN naming a worker in an App
+ * the caller cannot see still refuses there, not here.
  */
-async function resolveWorkerRef(ctx: Context, workerRef: string): Promise<WorkerRow> {
+async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<WorkerRow> {
+  let id: string;
+  try {
+    ({ id } = await resolveWorkerRefId(ctx.db, workerRef));
+  } catch {
+    // A malformed URN, an unresolvable App, and an absent worker collapse to
+    // one refusal — no existence oracle.
+    throw new GraphQLError('Worker not found.', {
+      extensions: { code: 'WORKER_NOT_FOUND', workerRef },
+    });
+  }
   const worker = await ctx.db.worker.findUnique({
-    where: { id: (workerRef ?? '').trim() },
+    where: { id },
     select: {
       id: true,
       appId: true,
       agentId: true,
       name: true,
+      slug: true,
       role: true,
       promptOverride: true,
       memoryId: true,
@@ -256,7 +285,26 @@ function isNameTaken(e: unknown): boolean {
   return (
     e instanceof Prisma.PrismaClientKnownRequestError &&
     e.code === 'P2002' &&
+    !isSlugTaken(e) &&
     /workers_app_name_uniq|app_id.*name|name/i.test(String(e.meta?.target ?? e.message))
+  );
+}
+
+/**
+ * True when the refusal is the per-App SLUG unique (`workers_app_slug_uniq`,
+ * #991) — a lost race between two casts that derived the same base slug.
+ *
+ * Checked BEFORE `isNameTaken`, whose pattern is loose enough (`.../name/i`)
+ * to also match a slug target: the slug column is derived from the name, so
+ * Prisma's target string mentions neither reliably. Getting the order wrong
+ * would report a private race as WORKER_NAME_TAKEN and make a caller abandon a
+ * name that is in fact free.
+ */
+function isSlugTaken(e: unknown): boolean {
+  return (
+    e instanceof Prisma.PrismaClientKnownRequestError &&
+    e.code === 'P2002' &&
+    /workers_app_slug_uniq|slug/i.test(String(e.meta?.target ?? e.message))
   );
 }
 
@@ -406,11 +454,15 @@ const MINT_RETRY_LIMIT = 3;
 async function provisionWorkerMemory(
   ctx: Context,
   app: AppRow,
-  worker: { id: string; name: string },
+  worker: { id: string; name: string; slug: string },
 ): Promise<string | null> {
   try {
     const appSlug = normalizeUrnForLookup(app.urn).split(':').pop() ?? app.urn;
-    const workerSlug = deriveSlugFromName(worker.name);
+    // #991: the STORED slug, not a re-derivation. Re-deriving would throw for a
+    // name that slugifies to nothing (losing the working memory for a legally
+    // cast worker), and could drift from the URN atom if the derivation ever
+    // changes.
+    const workerSlug = worker.slug;
     const root = await resolveMemoryRoot(ctx.db, {
       organizationId: app.organizationId,
       ownerUserId: app.ownerUserId,
@@ -629,35 +681,77 @@ export const workerMutations = {
     );
     const { teamAgentRef } = args;
 
-    // 3+4. Allocate + create: the uniqueness constraint IS the allocation
-    //    primitive (cor:agt:020:02) — a P2002 on workers_app_name_uniq maps
-    //    to WORKER_NAME_TAKEN; register mode advances past it.
-    const allocate = async (candidates: string[]): Promise<{ id: string; name: string } | null> => {
-      for (const candidate of candidates) {
+    // 3+4. Allocate + create.
+    /** Sentinel: this name is taken, so a register walk should advance. */
+    const NAME_TAKEN = Symbol('name-taken');
+
+    /**
+     * One name's cast attempt. Mints the #991 URN atom from the name being
+     * allocated: `nextFreeWorkerSlug` is advisory — `workers_app_slug_uniq`
+     * arbitrates — so a lost race retries against a freshly-read taken set.
+     *
+     * The retry budget is deliberately generous, because a SMALL cap would make
+     * cor:agt:020:02's "a derived identifier never refuses" observably false
+     * (PR #993 review): with N concurrent casts whose distinct names derive to
+     * one base, each round lets only one winner claim a candidate, so a cap of
+     * k turns the (k+1)-th caller away with a raw constraint error even though
+     * its NAME is free. Every round is guaranteed progress — a loser re-reads a
+     * taken set that has strictly grown — so the loop terminates on its own;
+     * the cap is only a backstop against a pathological storm, set far above
+     * any real concurrency on a single App's staffing.
+     *
+     * Exhausting it is an infrastructure failure, not an allocation refusal:
+     * it surfaces as its own typed code, never as WORKER_NAME_TAKEN, so a
+     * client's register-advance loop cannot mistake it for "pick another name"
+     * and burn through a register that was never the problem.
+     */
+    const createWithSlug = async (
+      candidate: string,
+    ): Promise<{ id: string; name: string; slug: string } | typeof NAME_TAKEN> => {
+      for (let attempt = 0; attempt < SLUG_RACE_RETRY_LIMIT; attempt++) {
+        const slug = await nextFreeWorkerSlug(ctx.db, appId, candidate);
         try {
           return await ctx.db.worker.create({
             data: {
               appId,
               agentId: agent.id,
               name: candidate,
+              slug,
               role: workerRole,
               promptOverride: override,
               createdBy: ctx.userId ?? null,
             },
-            select: { id: true, name: true },
+            select: { id: true, name: true, slug: true },
           });
         } catch (e) {
-          if (isNameTaken(e)) {
-            if (!requestedName) continue;
-            throw nameTaken(candidate, appId);
-          }
+          // Order matters: a slug race is private and retried; a name
+          // collision is the caller-visible allocation signal.
+          if (isSlugTaken(e)) continue;
+          if (isNameTaken(e)) return NAME_TAKEN;
           throw e;
         }
+      }
+      throw new GraphQLError(
+        `Could not mint a URN slug for worker name ${JSON.stringify(candidate)} after ${SLUG_RACE_RETRY_LIMIT} attempts — too many casts are racing on the same derived slug. The name itself is not taken; retry.`,
+        { extensions: { code: 'WORKER_SLUG_RACE_EXHAUSTED', name: candidate, appId } },
+      );
+    };
+
+    // The uniqueness constraint IS the allocation primitive (cor:agt:020:02) —
+    // a P2002 on workers_app_name_uniq maps to WORKER_NAME_TAKEN; register mode
+    // advances past it.
+    const allocate = async (
+      candidates: string[],
+    ): Promise<{ id: string; name: string; slug: string } | null> => {
+      for (const candidate of candidates) {
+        const row = await createWithSlug(candidate);
+        if (row !== NAME_TAKEN) return row;
+        if (requestedName) throw nameTaken(candidate, appId);
       }
       return null;
     };
 
-    let created: { id: string; name: string } | null;
+    let created: { id: string; name: string; slug: string } | null;
     if (requestedName) {
       // Explicit name: one attempt; the DB unique arbitrates atomically, so
       // no register lock is needed (nothing register-borne is consumed).
@@ -730,7 +824,7 @@ export const workerMutations = {
     { workerRef }: { workerRef: string },
     ctx: Context,
   ) => {
-    const worker = await resolveWorkerRef(ctx, workerRef);
+    const worker = await resolveWorkerRefRow(ctx, workerRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerStaffAccess(ctx, app);
     await ctx.db.worker.updateMany({
@@ -753,7 +847,7 @@ export const workerMutations = {
     { workerRef }: { workerRef: string },
     ctx: Context,
   ) => {
-    const worker = await resolveWorkerRef(ctx, workerRef);
+    const worker = await resolveWorkerRefRow(ctx, workerRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerStaffAccess(ctx, app);
 
@@ -809,9 +903,12 @@ export const workerMutations = {
 };
 
 export const workerQueries = {
-  /** Read one worker (cor:api:120 find-one; PK-only ref — workers have no URN). */
+  /**
+   * Read one worker (cor:api:120 find-one). The ref is a Worker id or an
+   * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991).
+   */
   worker: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-    const worker = await resolveWorkerRef(ctx, ref);
+    const worker = await resolveWorkerRefRow(ctx, ref);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerReadAccess(ctx, app);
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
@@ -980,6 +1077,34 @@ async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boole
 
 export const workerFieldResolvers = {
   Worker: {
+    /**
+     * The worker's URN, `hrn:worker:<root>:<app-slug>:<slug>` (#991) — COMPUTED
+     * from the App's URN plus the stored `slug`, never a column, so a worker is
+     * addressable context-free (`workerRef`, `resolveUrn`, a portal link)
+     * without the caller holding its cuid.
+     *
+     * An identity scalar, ungated like `name`: it discloses the App's slug, and
+     * the Worker read gate already requires participation in that App. Only the
+     * App's `urn` COLUMN is read — never the App object, which would hand the
+     * caller App.keys / App.members (findings:broadening-read-gate-leaks-
+     * nested-objects, #552).
+     *
+     * Null rather than an error when the App's URN isn't the flat `<root>:<slug>`
+     * pair the fixed arity needs (a legacy row the #697 backfill left behind) —
+     * an unaddressable worker is a gap, not a query failure.
+     */
+    urn: async (worker: { appId: string; slug: string }, _: unknown, ctx: Context) => {
+      const app = await ctx.db.app.findUnique({
+        where: { id: worker.appId },
+        select: { urn: true },
+      });
+      if (!app) return null;
+      try {
+        return composeWorkerUrn(normalizeUrnForLookup(app.urn), worker.slug);
+      } catch {
+        return null;
+      }
+    },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     promptOverride: async (
       worker: { appId: string; promptOverride: string | null },

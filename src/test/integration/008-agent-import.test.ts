@@ -382,7 +382,7 @@ describe('App-tombstone URN reclaim respects Worker castings (#974, cor:agt:020:
       },
     });
     await db.worker.create({
-      data: { appId: retired.id, agentId: suite.id, name: 'Iris' },
+      data: { appId: retired.id, agentId: suite.id, name: 'Iris', slug: 'iris' },
     });
 
     await expect(

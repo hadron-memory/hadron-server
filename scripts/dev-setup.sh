@@ -43,6 +43,15 @@ fi
 echo "→ Syncing schema (no wipe): $DATABASE_URL"
 echo
 
+# Pre-push transitions (#991). `db push` cannot add a REQUIRED column with no
+# default to a populated table, so any change a migration would handle with a
+# backfill has to be applied here first — otherwise this non-wiping path aborts.
+# Every block in pre-push.sql is idempotent and guards on the state it changes,
+# so this is a no-op on a fresh or already-current DB.
+echo "→ Applying pre-push.sql (transitions db push can't perform itself)"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/pre-push.sql
+echo
+
 # --accept-data-loss: the diff against an established dev DB always includes a
 # DROP of the HNSW index (Prisma can't model it; post-push.sql rebuilds it
 # below) and may re-propose the nullable users unique. Neither loses row data.

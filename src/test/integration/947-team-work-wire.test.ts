@@ -110,7 +110,7 @@ beforeAll(async () => {
   // #974: bind the session to a Worker casting so the wire test exercises the
   // workerName + workerId selection fields for a worker-bound record.
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: teamAgent.id, name: 'Iris' },
+    data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
   });
   session = await M.startSession(
     {},

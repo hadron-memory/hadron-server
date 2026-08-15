@@ -246,6 +246,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS workers_app_name_uniq
 -- migrated databases.
 DROP INDEX IF EXISTS workers_app_mention_token_uniq;
 
+-- #991 added a SECOND worker unique — `workers_app_slug_uniq` on (app_id, slug),
+-- the URN atom. It is deliberately NOT declared here: it is a plain column pair,
+-- so Prisma CAN model it, and it lives in schema.prisma's `@@unique`. Declaring
+-- it here too would make every `db push` see it as drift and drop it.
+--
+-- It is also not the mention-token unique returning. That one REFUSED a cast;
+-- this one never does — the slug mint iterates (`iris`, `iris-2`, …) until it
+-- finds a free atom, so the name collision above stays the only allocation
+-- primitive a caller can observe. The index is a race guard: two concurrent
+-- casts deriving one base slug must not end up sharing a URN.
+
 -- Cleanup for #975-pushed dev databases (`db push` does not run migrations):
 -- the superseded persona-as-agent name machinery. `persona_name` /
 -- `team_app_id` themselves are gone from schema.prisma, so `db push` drops

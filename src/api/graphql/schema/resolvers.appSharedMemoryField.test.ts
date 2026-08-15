@@ -202,7 +202,7 @@ describe('#965 — App.sharedMemory', () => {
       },
     });
     await db.worker.create({
-      data: { appId: app.id, agentId: agent.id, name: 'Iris', memoryId: workerMem.id },
+      data: { appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', memoryId: workerMem.id },
     });
     await db.node.create({
       data: {

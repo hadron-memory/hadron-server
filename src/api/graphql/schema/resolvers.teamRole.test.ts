@@ -17,6 +17,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { workerSlugBase } from '../../../lib/workerSlug.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -149,7 +150,7 @@ describe('#960 — teamRoles read', () => {
 
   it('taken is judged against the FULL roster, case-insensitively, retired included', async () => {
     const gwen = await db.worker.create({
-      data: { appId: app.id, agentId: roleAgent.id, name: 'gWeN', retiredAt: new Date() },
+      data: { appId: app.id, agentId: roleAgent.id, name: 'gWeN', slug: 'gwen', retiredAt: new Date() },
     });
     const page = await teamRoles(ctx(contrib.id));
     const be = page.items.find((r: any) => r.role === 'backend-engineer');
@@ -161,7 +162,7 @@ describe('#960 — teamRoles read', () => {
 
   it('exhausted flips when every name is taken (and for an empty register)', async () => {
     for (const name of ['Fred', 'Gwen', 'Hans']) {
-      await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name } });
+      await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name, slug: workerSlugBase(name) } });
     }
     const page = await teamRoles(ctx(contrib.id));
     const be = page.items.find((r: any) => r.role === 'backend-engineer');
@@ -425,7 +426,7 @@ describe('#960 — updateTeamRole', () => {
   });
 
   it('refuses removing a MINTED name → TEAM_ROLE_NAME_MINTED; an unminted one may go', async () => {
-    await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name: 'Fred' } });
+    await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: 'fred' } });
     await expectCode(
       M.updateTeamRole(
         {},
@@ -652,7 +653,7 @@ describe('#960 — updateTeamRole', () => {
 
   it('the whole flow feeds the cast: an added name is what castWorker allocates next', async () => {
     for (const name of ['Fred', 'Gwen', 'Hans']) {
-      await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name } });
+      await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name, slug: workerSlugBase(name) } });
     }
     await M.updateTeamRole(
       {},

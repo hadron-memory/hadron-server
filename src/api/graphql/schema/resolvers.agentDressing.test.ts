@@ -167,7 +167,7 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
     });
     // The casting (agent FK Restrict): its history keeps the URN reserved.
     await db.worker.create({
-      data: { appId: teamApp.id, agentId: cast.id, name: 'Iris' },
+      data: { appId: teamApp.id, agentId: cast.id, name: 'Iris', slug: 'iris' },
     });
     await M.deleteAgent({}, { ref: cast.id }, ctx(adminA.id));
 

@@ -4947,10 +4947,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           ctx,
         );
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
+        // #991: emit the URN alongside the id. It is the ref a human can read
+        // back later — the cast is a one-time mint, and before the URN existed
+        // an MCP-only client that did not record the cuid had no way back to
+        // the worker (hadron-cli#443).
+        const workerUrn = await resolvers.Worker.urn(worker, {}, ctx);
         return textResult(
           `Worker cast: **${worker.name}**${worker.role ? ` (${worker.role})` : ''}\n` +
-            `Worker id: ${worker.id}\n\n` +
-            `Boot briefing:\n\n${prompt ?? ''}`,
+            `Worker id: ${worker.id}\n` +
+            (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
+            `\nBoot briefing:\n\n${prompt ?? ''}`,
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'worker casting failed'}`);
