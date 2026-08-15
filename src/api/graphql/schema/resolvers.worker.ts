@@ -23,7 +23,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPersonaTemplate } from '../../../lib/personaDescription.js';
+import { applyPersonaTemplate, templateBindsName } from '../../../lib/personaDescription.js';
 import { resolveMemoryRoot } from './chat-scope.js';
 import {
   type Context,
@@ -224,6 +224,31 @@ async function resolveWorkerRef(ctx: Context, workerRef: string): Promise<Worker
     });
   }
   return worker;
+}
+
+/**
+ * Which of `names` are TAKEN in the App — judged by the DATABASE's `lower()`,
+ * the exact expression `workers_app_name_uniq` indexes (`(app_id,
+ * lower(name))`, post-push.sql), never ECMAScript `toLowerCase()` (#985
+ * review, Codex P2: the two diverge under locale-sensitive case folding —
+ * dotted capital I and friends — so a JS-folded set can call a name free
+ * that the very next cast refuses with WORKER_NAME_TAKEN, no race involved).
+ * Returns input spellings → holding worker id; retirement never frees a name,
+ * so retired workers count. ONE definition — the preview and the teamRoles
+ * free/taken column both consult it, so no verdict can disagree with the
+ * constraint.
+ */
+export async function takenWorkersByName(
+  db: Context['db'],
+  appId: string,
+  names: string[],
+): Promise<Map<string, string>> {
+  if (names.length === 0) return new Map();
+  const rows = await db.$queryRaw<{ cname: string; wid: string }[]>`
+    SELECT c.name AS cname, w.id AS wid
+    FROM unnest(${names}::text[]) AS c(name)
+    JOIN workers w ON w.app_id = ${appId} AND lower(w.name) = lower(c.name)`;
+  return new Map(rows.map((r) => [r.cname, r.wid]));
 }
 
 /** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
@@ -850,18 +875,13 @@ export const workerQueries = {
       ctx,
       args,
     );
-    // The App's full roster, case-insensitive — the same per-App uniqueness
-    // the allocation's constraint arbitrates (retired names stay taken).
-    const roster = await ctx.db.worker.findMany({
-      where: { appId },
-      select: { name: true },
-    });
-    const taken = new Set(roster.map((w) => w.name.toLowerCase()));
-
     let name: string;
     let teamAgent: TeamAgentRow | null = null;
     if (requestedName) {
-      if (taken.has(requestedName.toLowerCase())) {
+      // Taken-ness judged by the DB's lower() — the constraint's own
+      // expression (see takenWorkersByName).
+      const taken = await takenWorkersByName(ctx.db, appId, [requestedName]);
+      if (taken.has(requestedName)) {
         throw nameTaken(requestedName, appId);
       }
       name = requestedName;
@@ -888,7 +908,8 @@ export const workerQueries = {
           { extensions: { code: 'WORKER_REGISTER_EXHAUSTED', role: workerRole } },
         );
       }
-      const free = candidates.find((c) => !taken.has(c.toLowerCase()));
+      const taken = await takenWorkersByName(ctx.db, appId, candidates);
+      const free = candidates.find((c) => !taken.has(c));
       if (!free) {
         throw new GraphQLError(
           `Every name in the register for role "${workerRole}" is taken (${candidates.length} tried). Add names to the ${ROLES_BRANCH_PREFIX}${workerRole} node's data.names, or pass an explicit name.`,
@@ -920,7 +941,7 @@ export const workerQueries = {
       teamAgentId: teamAgent?.id ?? null,
       teamAgentName: teamAgent?.name ?? null,
       prompt,
-      hasNamePlaceholder: template ? /\{\{\s*name\s*\}\}/.test(template) : null,
+      hasNamePlaceholder: template ? templateBindsName(template) : null,
     };
   },
 };

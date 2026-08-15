@@ -4751,7 +4751,9 @@ export const typeDefs = `#graphql
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
     _NOT_INSTALLED, WORKER_ROLE_NOT_FOUND, WORKER_REGISTER_EXHAUSTED,
-    WORKER_NAME_TAKEN, TEAM_AGENT_AMBIGUOUS), same MINT gate — up to but not
+    WORKER_NAME_TAKEN, APP_UNINSTALLED, TEAM_AGENT_NOT_FOUND /
+    _NOT_INSTALLED / _AMBIGUOUS, and SESSION_EXPIRED for an encrypted
+    register without an active session key), same MINT gate — up to but not
     including the writes, and return what would be created. A Query, not a
     dryRun flag: casting a name is the one irreversible act in the team
     feature (cor:agt:020:02 — permanence), and previewing it must not need a

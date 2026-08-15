@@ -161,6 +161,19 @@ describe('#964 — castWorkerPreview', () => {
     expect(p.prompt).toBe('You are a backend-engineer.');
   });
 
+  it('detection shares the composer\'s exact token: "{{ name }}" is NOT bound (#985 review)', async () => {
+    // applyPersonaTemplate substitutes the exact token {{name}} only — a
+    // whitespace-tolerant probe would bless precisely the template that
+    // silently produces a nameless worker.
+    await db.agent.update({
+      where: { id: roleAgent.id },
+      data: { personaPrompt: 'You are {{ name }}, a {{role}}.' },
+    });
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer' });
+    expect(p.hasNamePlaceholder).toBe(false);
+    expect(p.prompt).toBe('You are {{ name }}, a backend-engineer.');
+  });
+
   it('takes the MINT gate, not a read gate: outsiders and pure App-key principals are refused', async () => {
     await expectCode(preview(ctx(outsider.id), { role: 'backend-engineer' }), 'FORBIDDEN');
     // Staffing is a human act — the pure App-key principal is denied for the
