@@ -5109,6 +5109,94 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
+  // ── hadron_list_workers ───────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_list_workers',
+    'List the team App\'s workers — its named staff (#997). THE roster read: use it when you need to work as a teammate but do not know the names, since hadron_start_session\'s workerRef takes a name. Returns each worker\'s name, URN, role, whether it is currently TAKEN (someone is driving it), and whether it is retired. Retired workers are excluded unless includeRetired — their names stay reserved forever, so they explain a WORKER_NAME_TAKEN refusal. Pick a FREE worker and pass its name to hadron_start_session, which returns its boot briefing.',
+    {
+      includeRetired: z.boolean().optional().describe('Include retired castings — historical staff whose names stay reserved.'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ includeRetired, limit, offset, app }) => {
+      // App default mirrors hadron_cast_worker / hadron_record_work:
+      // requireAppScope() runs BEFORE reading auth.appId so the omit-app flow
+      // honors hadron_set_active_app.
+      let appRef = app;
+      if (!appRef) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        // Delegate to the GraphQL resolver (findings:node-write-surface-
+        // invariants — MCP tools delegate, never re-implement), so the staff
+        // read gate is literally the same code path GraphQL runs and cannot
+        // drift. No authorization logic lives here.
+        const page = await resolvers.Query.workers(
+          {},
+          { appRef, includeRetired: includeRetired ?? null, limit: limit ?? null, offset: offset ?? null },
+          ctx,
+        );
+        if (page.items.length === 0) {
+          return textResult(
+            includeRetired
+              ? 'This App has no workers. Cast one with hadron_cast_worker.'
+              : 'This App has no active workers. Cast one with hadron_cast_worker, or pass includeRetired to see retired castings.',
+          );
+        }
+        // "Taken right now" in ONE query for the whole page rather than per
+        // worker: cor:agt:020:03 derives liveness from active sessions, and
+        // this is the same signal hadron_start_session refuses WORKER_TAKEN on.
+        // It names only THAT a worker is taken, never who is driving it — the
+        // driver's identity stays behind the takeover refusal, which is a
+        // deliberate act rather than a listing.
+        const taken = new Set(
+          (
+            await db.session.findMany({
+              where: { workerId: { in: page.items.map((w: { id: string }) => w.id) }, endedAt: null },
+              select: { workerId: true },
+            })
+          ).map((s: { workerId: string | null }) => s.workerId),
+        );
+        const lines = await Promise.all(
+          page.items.map(async (w: { id: string; name: string; role: string | null; retiredAt: Date | null }) => {
+            // Through the field resolver, so a URN that cannot be composed
+            // (a legacy App urn) degrades to absent rather than throwing.
+            const urn = await resolvers.Worker.urn(w as never, {}, ctx);
+            const flags = [
+              w.retiredAt ? 'RETIRED' : taken.has(w.id) ? 'taken' : 'free',
+            ];
+            return (
+              `- ${w.name}${w.role ? ` (${w.role})` : ''} — ${flags.join(', ')}` +
+              (urn ? `\n    ${urn}` : '')
+            );
+          }),
+        );
+        return textResult(
+          `${page.items.length} of ${page.total} worker(s):\n${lines.join('\n')}\n\n` +
+            'Work as one with hadron_start_session(workerRef: "<name>") — it returns that worker\'s boot briefing.',
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'listing workers failed'}`);
+      }
+    },
+  );
+
   // ── hadron_record_work / hadron_team_work_items ───────────────────────────────
 
   server.tool(
