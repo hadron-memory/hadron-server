@@ -23,7 +23,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPersonaTemplate } from '../../../lib/personaDescription.js';
+import { applyPersonaTemplate, templateBindsName } from '../../../lib/personaDescription.js';
 import { resolveMemoryRoot } from './chat-scope.js';
 import {
   type Context,
@@ -224,6 +224,31 @@ async function resolveWorkerRef(ctx: Context, workerRef: string): Promise<Worker
     });
   }
   return worker;
+}
+
+/**
+ * Which of `names` are TAKEN in the App — judged by the DATABASE's `lower()`,
+ * the exact expression `workers_app_name_uniq` indexes (`(app_id,
+ * lower(name))`, post-push.sql), never ECMAScript `toLowerCase()` (#985
+ * review, Codex P2: the two diverge under locale-sensitive case folding —
+ * dotted capital I and friends — so a JS-folded set can call a name free
+ * that the very next cast refuses with WORKER_NAME_TAKEN, no race involved).
+ * Returns input spellings → holding worker id; retirement never frees a name,
+ * so retired workers count. ONE definition — the preview and the teamRoles
+ * free/taken column both consult it, so no verdict can disagree with the
+ * constraint.
+ */
+export async function takenWorkersByName(
+  db: Context['db'],
+  appId: string,
+  names: string[],
+): Promise<Map<string, string>> {
+  if (names.length === 0) return new Map();
+  const rows = await db.$queryRaw<{ cname: string; wid: string }[]>`
+    SELECT c.name AS cname, w.id AS wid
+    FROM unnest(${names}::text[]) AS c(name)
+    JOIN workers w ON w.app_id = ${appId} AND lower(w.name) = lower(c.name)`;
+  return new Map(rows.map((r) => [r.cname, r.wid]));
 }
 
 /** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
@@ -444,6 +469,140 @@ async function provisionWorkerMemory(
   }
 }
 
+/** Argument shape shared by castWorker and its preview (#964). */
+type CastArgs = {
+  appRef: string;
+  agentRef?: string | null;
+  role?: string | null;
+  name?: string | null;
+  teamAgentRef?: string | null;
+  promptOverride?: string | null;
+};
+
+type CastTarget = {
+  appId: string;
+  app: AppRow & { deletedAt: Date | null };
+  agent: { id: string; name: string; personaRole: string | null; personaPrompt: string | null };
+  workerRole: string | null;
+  requestedName: string | null;
+  override: string | null;
+};
+
+/**
+ * The shared resolution HALF of casting (#964 — "single implementation" as a
+ * server-code property): normalize the request, resolve + gate the App
+ * (`requireWorkerStaffAccess` — the preview deliberately takes the SAME mint
+ * gate, since a preview reveals a name the caller could mint anyway), and
+ * resolve the agent being cast (explicit agentRef must be installed; else the
+ * role picks the single installed agent whose `personaRole` matches — zero or
+ * two-plus are typed refusals, never a guess). Everything after this —
+ * allocation vs. projection — is the caller's half, so every typed refusal up
+ * to allocation behaves identically under preview and cast.
+ */
+async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarget> {
+  const { appRef, agentRef, role, name, promptOverride } = args;
+  const roleNorm = (role ?? '').trim() || null;
+  if (roleNorm !== null && roleNorm.includes(':')) {
+    throw new GraphQLError('role must be a single loc atom (no ":").', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  // cor:agt:020:02 blank-is-absent: a whitespace-only name is no name.
+  const requestedName = (name ?? '').trim() || null;
+  const override = (promptOverride ?? '').trim() === '' ? null : (promptOverride as string);
+
+  // 1. Resolve the App (cor:api:140 — PK or URN) and gate.
+  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+  if (app.uninstalledAt) {
+    throw new GraphQLError('Cannot cast a worker in an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId },
+    });
+  }
+  await requireWorkerStaffAccess(ctx, app);
+
+  // 2. Resolve the agent being cast — installed in this App at cast time.
+  let agent: CastTarget['agent'];
+  if (agentRef && agentRef.trim() !== '') {
+    // resolveAgentRef throws a plain AgentNotFoundError (which would read
+    // INTERNAL_SERVER_ERROR on the wire) — translate to the typed refusal,
+    // matching startSession's agentRef handling.
+    let id: string;
+    try {
+      ({ id } = await resolveAgentRef(ctx.db, agentRef.trim()));
+    } catch (e) {
+      if (e instanceof AgentNotFoundError) {
+        throw new GraphQLError(`Agent not found: ${agentRef.trim()}`, {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      throw e;
+    }
+    const row = await ctx.db.appAgent.findUnique({
+      where: { appId_agentId: { appId, agentId: id } },
+      select: {
+        agent: {
+          select: { id: true, name: true, personaRole: true, personaPrompt: true, deletedAt: true },
+        },
+      },
+    });
+    if (!row || row.agent.deletedAt) {
+      throw new GraphQLError(
+        'agentRef must name an Agent installed in this App — casting requires the agent on the roster at cast time.',
+        { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId, agentId: id } },
+      );
+    }
+    agent = row.agent;
+  } else {
+    if (!roleNorm) {
+      throw new GraphQLError('Pass agentRef, or a role that identifies the installed agent to cast.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    const installed = await ctx.db.appAgent.findMany({
+      where: { appId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        agent: {
+          select: { id: true, name: true, urn: true, personaRole: true, personaPrompt: true, deletedAt: true },
+        },
+      },
+    });
+    // In-memory case-insensitive equality — never a LIKE-backed filter
+    // (findings:prisma-string-filters-are-unescaped-like).
+    const matches = installed
+      .map((r) => r.agent)
+      .filter(
+        (a) => a && !a.deletedAt && (a.personaRole ?? '').toLowerCase() === roleNorm.toLowerCase(),
+      );
+    if (matches.length === 0) {
+      throw new GraphQLError(
+        `No installed Agent carries personaRole "${roleNorm}" — install the role-agent first, or pass agentRef.`,
+        { extensions: { code: 'WORKER_AGENT_NOT_FOUND', appId, role: roleNorm } },
+      );
+    }
+    if (matches.length > 1) {
+      throw new GraphQLError(
+        `More than one installed Agent carries personaRole "${roleNorm}" — pass agentRef to pick one. Candidates: ${matches
+          .map((a) => `${a.name} (${a.urn})`)
+          .join(', ')}.`,
+        {
+          extensions: {
+            code: 'WORKER_AGENT_AMBIGUOUS',
+            appId,
+            role: roleNorm,
+            candidates: matches.map((a) => ({ id: a.id, name: a.name, urn: a.urn })),
+          },
+        },
+      );
+    }
+    agent = matches[0];
+  }
+  // The casting's role: explicit wins, else the agent's dressing.
+  const workerRole = roleNorm ?? agent.personaRole ?? null;
+  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedName, override };
+}
+
 export const workerMutations = {
   /**
    * castWorker — #974 (cor:dmo:050:11): cast an installed agent into the App
@@ -453,10 +612,9 @@ export const workerMutations = {
    * the App AT CAST TIME; the Worker row survives a later uninstall
    * (cor:agt:020:02 — the name binds forever).
    *
-   * Agent resolution: an explicit agentRef must be installed here; with no
-   * agentRef the role picks it — the single installed, non-deleted agent
-   * whose `personaRole` dressing equals the requested role (zero or two-plus
-   * matches are typed refusals, never a guess).
+   * Resolution (App gate, agent by ref or personaRole) is shared with
+   * `castWorkerPreview` via `resolveCastTarget` (#964), so preview and cast
+   * cannot drift.
    *
    * Name allocation: caller-supplied wins (one attempt — the typed
    * WORKER_NAME_TAKEN refusal IS the answer); else the Team Agent's cast-list
@@ -464,120 +622,12 @@ export const workerMutations = {
    * `workers_app_name_uniq` constraint as the atomic allocation primitive
    * (advance on WORKER_NAME_TAKEN, exhausted register is typed).
    */
-  castWorker: async (
-    _: unknown,
-    {
-      appRef,
-      agentRef,
-      role,
-      name,
-      teamAgentRef,
-      promptOverride,
-    }: {
-      appRef: string;
-      agentRef?: string | null;
-      role?: string | null;
-      name?: string | null;
-      teamAgentRef?: string | null;
-      promptOverride?: string | null;
-    },
-    ctx: Context,
-  ) => {
-    const roleNorm = (role ?? '').trim() || null;
-    if (roleNorm !== null && roleNorm.includes(':')) {
-      throw new GraphQLError('role must be a single loc atom (no ":").', {
-        extensions: { code: 'BAD_USER_INPUT' },
-      });
-    }
-    // cor:agt:020:02 blank-is-absent: a whitespace-only name is no name.
-    const requestedName = (name ?? '').trim() || null;
-    const override = (promptOverride ?? '').trim() === '' ? null : (promptOverride as string);
-
-    // 1. Resolve the App (cor:api:140 — PK or URN) and gate.
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
-    if (app.uninstalledAt) {
-      throw new GraphQLError('Cannot cast a worker in an uninstalled App.', {
-        extensions: { code: 'APP_UNINSTALLED', appId },
-      });
-    }
-    await requireWorkerStaffAccess(ctx, app);
-
-    // 2. Resolve the agent being cast — installed in this App at cast time.
-    let agent: { id: string; name: string; personaRole: string | null };
-    if (agentRef && agentRef.trim() !== '') {
-      // resolveAgentRef throws a plain AgentNotFoundError (which would read
-      // INTERNAL_SERVER_ERROR on the wire) — translate to the typed refusal,
-      // matching startSession's agentRef handling.
-      let id: string;
-      try {
-        ({ id } = await resolveAgentRef(ctx.db, agentRef.trim()));
-      } catch (e) {
-        if (e instanceof AgentNotFoundError) {
-          throw new GraphQLError(`Agent not found: ${agentRef.trim()}`, {
-            extensions: { code: 'BAD_USER_INPUT' },
-          });
-        }
-        throw e;
-      }
-      const row = await ctx.db.appAgent.findUnique({
-        where: { appId_agentId: { appId, agentId: id } },
-        select: {
-          agent: { select: { id: true, name: true, personaRole: true, deletedAt: true } },
-        },
-      });
-      if (!row || row.agent.deletedAt) {
-        throw new GraphQLError(
-          'agentRef must name an Agent installed in this App — casting requires the agent on the roster at cast time.',
-          { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId, agentId: id } },
-        );
-      }
-      agent = row.agent;
-    } else {
-      if (!roleNorm) {
-        throw new GraphQLError('Pass agentRef, or a role that identifies the installed agent to cast.', {
-          extensions: { code: 'BAD_USER_INPUT' },
-        });
-      }
-      const installed = await ctx.db.appAgent.findMany({
-        where: { appId },
-        orderBy: { createdAt: 'asc' },
-        select: {
-          agent: { select: { id: true, name: true, urn: true, personaRole: true, deletedAt: true } },
-        },
-      });
-      // In-memory case-insensitive equality — never a LIKE-backed filter
-      // (findings:prisma-string-filters-are-unescaped-like).
-      const matches = installed
-        .map((r) => r.agent)
-        .filter(
-          (a) => a && !a.deletedAt && (a.personaRole ?? '').toLowerCase() === roleNorm.toLowerCase(),
-        );
-      if (matches.length === 0) {
-        throw new GraphQLError(
-          `No installed Agent carries personaRole "${roleNorm}" — install the role-agent first, or pass agentRef.`,
-          { extensions: { code: 'WORKER_AGENT_NOT_FOUND', appId, role: roleNorm } },
-        );
-      }
-      if (matches.length > 1) {
-        throw new GraphQLError(
-          `More than one installed Agent carries personaRole "${roleNorm}" — pass agentRef to pick one. Candidates: ${matches
-            .map((a) => `${a.name} (${a.urn})`)
-            .join(', ')}.`,
-          {
-            extensions: {
-              code: 'WORKER_AGENT_AMBIGUOUS',
-              appId,
-              role: roleNorm,
-              candidates: matches.map((a) => ({ id: a.id, name: a.name, urn: a.urn })),
-            },
-          },
-        );
-      }
-      agent = matches[0];
-    }
-    // The casting's role: explicit wins, else the agent's dressing.
-    const workerRole = roleNorm ?? agent.personaRole ?? null;
+  castWorker: async (_: unknown, args: CastArgs, ctx: Context) => {
+    const { appId, app, agent, workerRole, requestedName, override } = await resolveCastTarget(
+      ctx,
+      args,
+    );
+    const { teamAgentRef } = args;
 
     // 3+4. Allocate + create: the uniqueness constraint IS the allocation
     //    primitive (cor:agt:020:02) — a P2002 on workers_app_name_uniq maps
@@ -799,6 +849,100 @@ export const workerQueries = {
       ctx.db.worker.count({ where }),
     ]);
     return { items, total };
+  },
+
+  /**
+   * castWorkerPreview — #964: the dry-run for the one IRREVERSIBLE act in the
+   * team feature (a cast name is permanent, cor:agt:020:02). A QUERY, not a
+   * dryRun flag: a Boolean argument cannot switch a GraphQL return type, and
+   * "single implementation" is a server-code property — the resolution half
+   * (`resolveCastTarget`: App gate, agent by ref or personaRole, typed
+   * refusals) is the SAME code castWorker runs, and the name projection
+   * consults the same roster the allocation's unique arbitrates. Returns what
+   * the caller needs to decide: the name the cast would allocate, the
+   * composed boot prompt (reviewable BEFORE the name is permanent — where a
+   * template missing {{name}} becomes visible), and which Team Agent
+   * resolved.
+   *
+   * THE PREVIEW RESERVES NOTHING. No lease exists by law (cor:agt:020:03 —
+   * liveness and allocation both derive from real rows, never a hold), so a
+   * previewed name may be gone at cast time, by design. Authorization is the
+   * MINT gate, not a looser read gate: a preview reveals a name the caller
+   * could mint anyway.
+   */
+  castWorkerPreview: async (_: unknown, args: CastArgs, ctx: Context) => {
+    const { appId, agent, workerRole, requestedName, override } = await resolveCastTarget(
+      ctx,
+      args,
+    );
+    let name: string;
+    let teamAgent: TeamAgentRow | null = null;
+    if (requestedName) {
+      // Taken-ness judged by the DB's lower() — the constraint's own
+      // expression (see takenWorkersByName).
+      const taken = await takenWorkersByName(ctx.db, appId, [requestedName]);
+      if (taken.has(requestedName)) {
+        throw nameTaken(requestedName, appId);
+      }
+      name = requestedName;
+    } else {
+      if (!workerRole) {
+        throw new GraphQLError(
+          'Pass a name, or a role whose cast-list register can allocate one.',
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+      }
+      teamAgent = await locateTeamAgent(ctx, appId, args.teamAgentRef);
+      if (!teamAgent.systemMemoryId) {
+        throw new GraphQLError(
+          `Team Agent ${teamAgent.name} has no system memory, so it carries no cast list.`,
+          { extensions: { code: 'WORKER_ROLE_NOT_FOUND', role: workerRole } },
+        );
+      }
+      // No register lock: this is a read, and the contract already disclaims
+      // reservation — a lock would only shrink a race it cannot close.
+      const candidates = await readNameRegister(ctx, teamAgent, workerRole);
+      if (candidates.length === 0) {
+        throw new GraphQLError(
+          `The name register for role "${workerRole}" is empty — add names to the ${ROLES_BRANCH_PREFIX}${workerRole} node's data.names, or pass an explicit name.`,
+          { extensions: { code: 'WORKER_REGISTER_EXHAUSTED', role: workerRole } },
+        );
+      }
+      const taken = await takenWorkersByName(ctx.db, appId, candidates);
+      const free = candidates.find((c) => !taken.has(c));
+      if (!free) {
+        throw new GraphQLError(
+          `Every name in the register for role "${workerRole}" is taken (${candidates.length} tried). Add names to the ${ROLES_BRANCH_PREFIX}${workerRole} node's data.names, or pass an explicit name.`,
+          {
+            extensions: {
+              code: 'WORKER_REGISTER_EXHAUSTED',
+              role: workerRole,
+              namesTried: candidates.length,
+            },
+          },
+        );
+      }
+      name = free;
+    }
+
+    // Prompt composition mirrors Worker.prompt exactly: the agent's template
+    // with {{name}}/{{role}} bound, then the override as its own paragraph.
+    const template = agent.personaPrompt ?? null;
+    const bound = template
+      ? applyPersonaTemplate(template, name, workerRole ?? agent.personaRole ?? '')
+      : null;
+    const prompt = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
+
+    return {
+      name,
+      role: workerRole,
+      agentId: agent.id,
+      agentName: agent.name,
+      teamAgentId: teamAgent?.id ?? null,
+      teamAgentName: teamAgent?.name ?? null,
+      prompt,
+      hasNamePlaceholder: template ? templateBindsName(template) : null,
+    };
   },
 };
 

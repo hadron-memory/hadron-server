@@ -25,9 +25,11 @@ import {
   locateTeamAgent,
   parseNameRegister,
   requireWorkerReadAccess,
+  takenWorkersByName,
   withRegisterLock,
   ROLES_BRANCH_PREFIX,
 } from './resolvers.worker.js';
+import { templateBindsName } from '../../../lib/personaDescription.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import {
   type Context,
@@ -36,20 +38,39 @@ import {
   clampListTake,
 } from './resolvers.helpers.js';
 
-type WorkerRosterRow = Record<string, unknown> & { name: string };
+type WorkerRosterRow = Record<string, unknown> & { id: string; name: string };
 
-/** Case-insensitive roster index: lower(worker name) → the Worker row. */
-async function loadRosterByName(
+/**
+ * Register spelling → the Worker holding it, judged by the DATABASE's
+ * lower() via `takenWorkersByName` — the constraint's own expression
+ * (`workers_app_name_uniq` on `(app_id, lower(name))`) — never ECMAScript
+ * toLowerCase (#985 review, Codex P2: the two diverge under locale-sensitive
+ * case folding, so a JS-folded verdict could disagree with the cast).
+ */
+async function loadHeldByName(
   ctx: Context,
   appId: string,
+  names: string[],
 ): Promise<Map<string, WorkerRosterRow>> {
-  const rows = await ctx.db.worker.findMany({ where: { appId } });
+  const takenIds = await takenWorkersByName(ctx.db, appId, names);
+  if (takenIds.size === 0) return new Map();
+  const rows = await ctx.db.worker.findMany({
+    where: { id: { in: [...new Set(takenIds.values())] } },
+  });
+  const byId = new Map(rows.map((w) => [w.id, w as WorkerRosterRow]));
   const byName = new Map<string, WorkerRosterRow>();
-  for (const w of rows) {
-    // The per-App unique is case-insensitive, so lower() can't collide.
-    byName.set(w.name.toLowerCase(), w as WorkerRosterRow);
+  for (const [name, wid] of takenIds) {
+    const row = byId.get(wid);
+    if (row) byName.set(name, row);
   }
   return byName;
+}
+
+/** Union of every register spelling across role nodes (heldBy lookup input). */
+function allRegisterNames(nodes: DecryptedRoleNode[]): string[] {
+  const out = new Set<string>();
+  for (const n of nodes) for (const name of parseNameRegister(n.data?.names)) out.add(name);
+  return [...out];
 }
 
 type RoleAgentEntry = {
@@ -160,13 +181,13 @@ function stringKey(data: Record<string, unknown> | null, key: string): string | 
 async function buildTeamRole(
   ctx: Context,
   node: DecryptedRoleNode,
-  rosterByName: Map<string, WorkerRosterRow>,
+  heldByName: Map<string, WorkerRosterRow>,
   roleAgentIndex: Map<string, RoleAgentEntry>,
 ) {
   const role = node.loc.slice(ROLES_BRANCH_PREFIX.length);
   const names = parseNameRegister(node.data?.names);
   const register = names.map((name) => {
-    const heldBy = rosterByName.get(name.toLowerCase()) ?? null;
+    const heldBy = heldByName.get(name) ?? null;
     return { name, taken: heldBy !== null, heldBy };
   });
   const freeCount = register.filter((r) => !r.taken).length;
@@ -179,7 +200,10 @@ async function buildTeamRole(
     // masked: it discloses one boolean about the caller's OWN App's casting
     // default, and it is exactly what an operator needs to find templates
     // authored before any write-path guard existed.
-    hasNamePlaceholder = /\{\{\s*name\s*\}\}/.test(entry.agent.personaPrompt ?? '');
+    // Shared with applyPersonaTemplate's exact token (#985 review): a
+    // whitespace-tolerant probe would bless `{{ name }}`, which the composer
+    // leaves literal.
+    hasNamePlaceholder = templateBindsName(entry.agent.personaPrompt);
     // The agent OBJECT runs Query.agent's own read gate, masked to null on
     // deny — the same #552 posture as Worker.agent: a nested Agent hands the
     // caller its field resolvers (systemPrompt included).
@@ -267,16 +291,19 @@ function checkRegisterInvariants(args: {
   role: string;
   submitted: string[];
   stored: string[];
-  rosterByName: Map<string, WorkerRosterRow>;
+  /** Stored spellings that are MINTED in the App — judged by the DB's lower()
+   *  (`loadHeldByName`), so a minted name can't slip removal via a JS/PG
+   *  case-folding disagreement (#985 review). */
+  mintedStored: Set<string>;
   otherRegisters: Map<string, string>; // lower(name) → role slug holding it
   nameRange: string | null;
   allowOutOfRange: boolean;
 }): void {
-  const { role, submitted, stored, rosterByName, otherRegisters, nameRange, allowOutOfRange } = args;
+  const { role, submitted, stored, mintedStored, otherRegisters, nameRange, allowOutOfRange } = args;
   const submittedLower = new Set(submitted.map((n) => n.toLowerCase()));
 
   const removedMinted = stored.filter(
-    (n) => !submittedLower.has(n.toLowerCase()) && rosterByName.has(n.toLowerCase()),
+    (n) => !submittedLower.has(n.toLowerCase()) && mintedStored.has(n),
   );
   if (removedMinted.length > 0) {
     throw new GraphQLError(
@@ -479,7 +506,9 @@ async function writeTeamRole(
       role,
       submitted,
       stored: storedNames,
-      rosterByName: await loadRosterByName(ctx, app.id),
+      mintedStored: new Set(
+        (await loadHeldByName(ctx, app.id, storedNames)).keys(),
+      ),
       otherRegisters: indexOtherRegisters(allNodes, loc),
       nameRange: effectiveRange,
       allowOutOfRange: args.allowOutOfRange === true,
@@ -528,7 +557,7 @@ async function writeTeamRole(
     return buildTeamRole(
       ctx,
       node,
-      await loadRosterByName(ctx, app.id),
+      await loadHeldByName(ctx, app.id, parseNameRegister(node.data?.names)),
       await loadRoleAgentIndex(ctx, app.id),
     );
   });
@@ -567,12 +596,12 @@ export const teamRoleQueries = {
       return { items: [], total: 0 };
     }
     const nodes = await loadRoleNodes(ctx, teamAgent.systemMemoryId);
-    const rosterByName = await loadRosterByName(ctx, app.id);
+    const heldByName = await loadHeldByName(ctx, app.id, allRegisterNames(nodes));
     const roleAgentIndex = await loadRoleAgentIndex(ctx, app.id);
     const page = nodes.slice(offset ?? 0, (offset ?? 0) + clampListTake(limit));
     return {
       items: await Promise.all(
-        page.map((n) => buildTeamRole(ctx, n, rosterByName, roleAgentIndex)),
+        page.map((n) => buildTeamRole(ctx, n, heldByName, roleAgentIndex)),
       ),
       total: nodes.length,
     };

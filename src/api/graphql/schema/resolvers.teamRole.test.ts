@@ -190,6 +190,18 @@ describe('#960 — teamRoles read', () => {
     expect(be.hasNamePlaceholder).toBe(false);
   });
 
+  it('detection shares the composer\'s exact token: "{{ name }}" is NOT bound (#985 review)', async () => {
+    await db.agent.update({
+      where: { id: roleAgent.id },
+      data: { personaPrompt: 'You are {{ name }}, a {{role}}.' },
+    });
+    const page = await teamRoles(ctx(contrib.id));
+    const be = page.items.find((r: any) => r.role === 'backend-engineer');
+    // applyPersonaTemplate leaves "{{ name }}" literal, so this template
+    // produces nameless workers — the flag must say so.
+    expect(be.hasNamePlaceholder).toBe(false);
+  });
+
   it('excludes role SUB-nodes and paginates deterministically', async () => {
     const page = await teamRoles(ctx(contrib.id), { limit: 1, offset: 1 });
     expect(page.total).toBe(2);

@@ -9,9 +9,25 @@
  * nothing synthesizes a persona description anymore.)
  */
 
+/** THE name token `applyPersonaTemplate` binds — exact, whitespace-sensitive. */
+export const PERSONA_NAME_TOKEN = '{{name}}';
+
 /** Substitute `{{name}}` / `{{role}}` into a template. split/join rather than
  * replaceAll so a name containing replacement-pattern characters ($&, $') is
  * inserted literally. */
 export function applyPersonaTemplate(template: string, name: string, role: string): string {
-  return template.split('{{name}}').join(name).split('{{role}}').join(role);
+  return template.split(PERSONA_NAME_TOKEN).join(name).split('{{role}}').join(role);
+}
+
+/**
+ * Does a template bind the worker's name? Detection MUST share the composer's
+ * exact token semantics (#985 review, Codex/Copilot): a whitespace-tolerant
+ * probe would report `{{ name }}` as bound while `applyPersonaTemplate`
+ * leaves it literal — flagging safe precisely the template that silently
+ * produces a nameless worker. Every surface answering "does this template
+ * name the worker?" (`TeamRole.hasNamePlaceholder`, `castWorkerPreview`)
+ * goes through here.
+ */
+export function templateBindsName(template: string | null | undefined): boolean {
+  return !!template && template.includes(PERSONA_NAME_TOKEN);
 }
