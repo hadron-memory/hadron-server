@@ -1920,7 +1920,8 @@ export const typeDefs = `#graphql
   The Agent carries the reusable persona dressing; the Worker is the local
   named identity that does attributable work. Names are unique per App,
   case-insensitively, forever (retirement and uninstall never free them —
-  cor:agt:020:02); rows survive the agent's uninstall. Workers have no URN.
+  cor:agt:020:02); rows survive the agent's uninstall. A Worker is addressable
+  by its id or by the computed \`urn\` below (#991).
   """
   type Worker {
     id: ID!
@@ -3287,8 +3288,23 @@ export const typeDefs = `#graphql
     """
     agentRef: String
     """
-    #974 / cor:agt:020:03: the Worker (named casting) this session works as -
-    the worker's id (workers have no URN; names never enter URNs, cor:agt:020:02).
+    #974 / cor:agt:020:03: the Worker (named casting) this session works as.
+    Three forms resolve, told apart by SHAPE (never by trying each in turn, so
+    a typo'd URN can't silently fall through to a roster search):
+
+    - the worker's NAME ("Iris") — #990. Unique per App, case-insensitively,
+      matched with the DATABASE's lower(), the expression
+      workers_app_name_uniq indexes. Requires App context (appRef, an App-key
+      credential, or an MCP active-App selection): a name means nothing without
+      one, so a nameless-App call refuses SESSION_WORKER_NAME_NEEDS_APP rather
+      than guessing across the caller's Apps. Gated on the STAFF READ GATE
+      before the lookup runs — resolving a name discloses roster membership,
+      which the id/URN forms never do — and a denial reports WORKER_NOT_FOUND,
+      indistinguishable from an App with no such worker.
+    - the worker's URN (hrn:worker:<root>:<app-slug>:<slug>, #991); the URN's
+      leaf is the derived slug, never the display name (cor:agt:020:02).
+    - the worker's id.
+
     Resolves to Session.workerId, and stamps Session.agentId with the worker's
     role-agent. The worker must belong to the session's App: with appRef (or an
     App-key credential) it must match the worker's App; without one, the
@@ -4760,7 +4776,7 @@ export const typeDefs = `#graphql
     ): TeamWorkItemsPage!
 
     """
-    One Worker by id (#974; workers have no URN, so ref is the PK only).
+    One Worker by ref (#974) — its id, or its URN (#991).
     Authorization: an AppMember of the worker's App (any role), an org member
     with CONTRIBUTOR+ on its org, the owner of a user-owned App, or the App's
     own key.
@@ -6428,7 +6444,7 @@ export const typeDefs = `#graphql
     and refuses new session bindings; the row and its name reservation
     survive. Idempotent — retiring an already-retired worker returns it
     unchanged. Same authorization as castWorker. workerRef is the worker's id
-    (workers have no URN).
+    or its URN (#991).
     """
     retireWorker(workerRef: ID!): Worker!
 

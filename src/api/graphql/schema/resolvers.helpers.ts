@@ -2521,7 +2521,7 @@ export interface SessionInput {
   // gated on the caller's membership of that App.
   appRef?: string;
   // #974 / cor:agt:020:03: the Worker (named casting) this session works as.
-  // PK only — workers have no URN. Gated: the worker must belong to the
+  // An id or a `hrn:worker:…` URN (#991). Gated: the worker must belong to the
   // session's App; a retired worker refuses; a taken worker refuses
   // WORKER_TAKEN unless force (#940).
   workerRef?: string;

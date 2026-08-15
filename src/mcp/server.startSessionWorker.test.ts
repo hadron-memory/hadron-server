@@ -78,7 +78,7 @@ describe('hadron_start_session workerRef parity (#940)', () => {
       workerRef: worker.id,
     });
     expect(out).toContain('Session started:');
-    expect(out).toContain(`Working as worker ${worker.id}`);
+    expect(out).toContain(`Working as Iris (${worker.id})`);
     const sessionId = out.match(/Session started: (\S+)/)?.[1];
     const row = await db.session.findUniqueOrThrow({ where: { id: sessionId! } });
     expect(row.workerId).toBe(worker.id);
@@ -150,5 +150,97 @@ describe('hadron_start_session workerRef parity (#940)', () => {
     expect(row.workerId).toBeNull();
     expect(row.appId).toBe(app.id);
     expect(row.plan).toBe('plain');
+  });
+});
+
+describe('#990 — workerRef by name, and the briefing always comes back', () => {
+  it('binds by NAME, scoped to the active App', async () => {
+    const srv = createTestableMcpServer(hybridAuth());
+    const out = await srv.callToolText('hadron_start_session', {
+      description: 'pick up Iris',
+      workerRef: 'Iris',
+    });
+    expect(out).toContain('Session started:');
+    expect(out).toContain(`Working as Iris (${worker.id})`);
+    const sessionId = out.match(/Session started: (\S+)/)?.[1];
+    const row = await db.session.findUniqueOrThrow({ where: { id: sessionId! } });
+    expect(row.workerId).toBe(worker.id);
+  });
+
+  it('the name is matched case-insensitively', async () => {
+    const srv = createTestableMcpServer(hybridAuth());
+    const out = await srv.callToolText('hadron_start_session', {
+      description: 'lowercase pickup',
+      workerRef: 'iris',
+    });
+    expect(out).toContain(`Working as Iris (${worker.id})`);
+  });
+
+  it('a name from ANOTHER App does not resolve in this one', async () => {
+    // Nadia is real, but staffs otherApp — the active App scopes the lookup.
+    const srv = createTestableMcpServer(hybridAuth());
+    const out = await srv.callToolText('hadron_start_session', {
+      description: 'wrong app',
+      workerRef: 'Nadia',
+    });
+    expect(out).toContain('Error:');
+    expect(out).toContain('Worker not found');
+    expect(otherAppWorker.id).toBeTruthy();
+  });
+
+  it('returns the RESOLVED briefing when the role agent carries a template', async () => {
+    await db.agent.update({
+      where: { id: agent.id },
+      data: { personaPrompt: 'You are {{name}}, a {{role}}. Ship carefully.', personaRole: 'backend-engineer' },
+    });
+    await db.worker.update({ where: { id: worker.id }, data: { role: 'backend-engineer' } });
+    const srv = createTestableMcpServer(hybridAuth());
+    const out = await srv.callToolText('hadron_start_session', {
+      description: 'brief me',
+      workerRef: 'Iris',
+    });
+    expect(out).toContain('Boot briefing');
+    // Rendered live from the template, with {{name}}/{{role}} bound — this is
+    // what removes the need for published briefing NODES (hadron-cli#443).
+    expect(out).toContain('You are Iris, a backend-engineer. Ship carefully.');
+    expect(out).not.toContain('{{name}}');
+  });
+
+  it('appends the per-worker override to the template', async () => {
+    await db.agent.update({
+      where: { id: agent.id },
+      data: { personaPrompt: 'You are {{name}}.', personaRole: 'backend-engineer' },
+    });
+    await db.worker.update({
+      where: { id: worker.id },
+      data: { promptOverride: 'You own the billing surface.' },
+    });
+    const srv = createTestableMcpServer(hybridAuth());
+    const out = await srv.callToolText('hadron_start_session', {
+      description: 'brief me',
+      workerRef: 'Iris',
+    });
+    expect(out).toContain('You are Iris.');
+    expect(out).toContain('You own the billing surface.');
+  });
+
+  it('says so explicitly when there is no briefing to give', async () => {
+    // The seeded agent carries no personaPrompt and the worker no override —
+    // emit a plain statement rather than a bare, confusing heading.
+    const srv = createTestableMcpServer(hybridAuth());
+    const out = await srv.callToolText('hadron_start_session', {
+      description: 'no template',
+      workerRef: 'Iris',
+    });
+    expect(out).toContain('No boot briefing');
+    expect(out).not.toContain('Boot briefing —');
+  });
+
+  it('says nothing about briefings when no worker is bound', async () => {
+    const srv = createTestableMcpServer(hybridAuth());
+    const out = await srv.callToolText('hadron_start_session', { description: 'solo work' });
+    expect(out).toContain('Session started:');
+    expect(out).not.toContain('Working as');
+    expect(out).not.toContain('briefing');
   });
 });

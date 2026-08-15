@@ -4778,7 +4778,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a new work session. All subsequent tool calls can reference this session ID for attribution. Pass workerRef (a worker id from hadron_cast_worker) to work AS that named casting — required for worker-attributed team chat posts and worklog records. Binding a worker someone is already driving refuses WORKER_TAKEN with who last drove it and when (informed takeover, cor:agt:020:03); retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
+    'Start a new work session. All subsequent tool calls can reference this session ID for attribution. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of the session, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is already driving refuses WORKER_TAKEN with who last drove it and when (informed takeover, cor:agt:020:03); retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
     {
       description: z.string().describe("What this session is about"),
       type: z.string().optional().describe('Session type: DEVELOPER, CHATBOT, AUTOMATION, EDGE'),
@@ -4790,7 +4790,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       llmModel: z.string().optional().describe('LLM model being used'),
       parentSessionId: z.string().optional().describe('Parent session ID'),
       prevSessionId: z.string().optional().describe('Previous session ID'),
-      workerRef: z.string().optional().describe('The Worker (named casting) this session works as — the worker id (workers have no URN). Must belong to this App; stamps the session\'s agentId from the casting.'),
+      workerRef: z.string().optional().describe('The Worker (named casting) this session works as. Three forms resolve: the worker\'s NAME ("Iris" — unique within the App, case-insensitive, and what a human will say), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its bare id. Prefer the name for a human-driven pickup; the URN when addressing a worker across App context. Must belong to this App; stamps the session\'s agentId from the casting and returns the worker\'s boot briefing.'),
       force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker. Use only on the user\'s explicit override, after showing who last drove it.'),
     },
     async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId, workerRef, force }) => {
@@ -4808,6 +4808,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // never drift from the GraphQL one. The direct db.session.create this
       // replaces predated the worker model; the resolver stamps the same
       // appId/userId attribution (#931) from the same ctx fields.
+      // Hoisted so the briefing lookup below resolves Worker.prompt under the
+      // SAME principal that started the session — the prompt is gated, and
+      // re-deriving a context risks the two diverging.
+      const mcpCtx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
       try {
         const session = await resolvers.Mutation.startSession(
           {},
@@ -4828,21 +4840,34 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               force: force ?? undefined,
             },
           },
-          {
-            db,
-            clientId: auth.clientId ?? undefined,
-            userId: auth.userId ?? undefined,
-            appId: auth.appId ?? undefined,
-            sessionId: auth.sessionId ?? undefined,
-            roles: auth.roles as Context['roles'],
-            organizationId: auth.organizationId ?? undefined,
-          },
+          mcpCtx,
         );
 
-        return textResult(
-          `Session started: ${session.id}\n> ${description}` +
-            (session.workerId ? `\nWorking as worker ${session.workerId}.` : ''),
-        );
+        // #990: when a worker is bound, ALWAYS return its resolved boot
+        // briefing. Binding IS briefing — an MCP host has no discovery surface
+        // to go looking for the prompt afterwards, and nothing routes it to one
+        // (hadron_server_info returns deployment identity only). Returning it
+        // live also removes the reason to publish briefing NODES into the Team
+        // Agent's memory (hadron-cli#443): those are copies of
+        // Agent.personaPrompt + Worker.promptOverride that nothing recomputes,
+        // so they go stale silently the moment a role agent's prompt changes.
+        //
+        // Resolved through the SAME field resolver GraphQL serves
+        // (Worker.prompt), so the two surfaces cannot drift — and that resolver
+        // self-guards behind the worker read gate, so this cannot widen access.
+        let workerLine = '';
+        if (session.workerId) {
+          const worker = await db.worker.findUnique({ where: { id: session.workerId } });
+          const prompt = worker ? await resolvers.Worker.prompt(worker, {}, mcpCtx) : null;
+          workerLine =
+            `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
+            // A worker whose agent carries no template and who has no override
+            // has no briefing — say so, rather than emitting a bare heading.
+            (prompt
+              ? `\n\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
+              : '\n\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)');
+        }
+        return textResult(`Session started: ${session.id}\n> ${description}${workerLine}`);
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'session start failed'}`);
       }
@@ -4904,7 +4929,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_cast_worker',
-    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the personaPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. A caller-supplied name wins; otherwise the next free name is allocated from the Team Agent\'s cast-list register (the roles:<role> node\'s data.names). Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). Returns the worker\'s id, name, and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the id as workerRef when starting sessions.',
+    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the personaPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. A caller-supplied name wins; otherwise the next free name is allocated from the Team Agent\'s cast-list register (the roles:<role> node\'s data.names). Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
     {
       role: z.string().optional().describe('The cast-list role ("backend-engineer") — picks the installed agent by its personaRole when agent is omitted, and names the roles:<role> register node for name allocation.'),
       name: z.string().optional().describe('Explicit worker name. Omit to allocate the next free name from the role\'s register.'),

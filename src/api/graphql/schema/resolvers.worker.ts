@@ -280,6 +280,41 @@ export async function takenWorkersByName(
   return new Map(rows.map((r) => [r.cname, r.wid]));
 }
 
+/**
+ * Resolve a worker NAME to its id within one App (#990) — the ergonomic handle
+ * a human already knows ("Iris"), for surfaces that carry App context.
+ *
+ * Judged with the DATABASE's `lower()`, the exact expression
+ * `workers_app_name_uniq` indexes — never ECMAScript `toLowerCase()`, whose
+ * locale-sensitive folding diverges on dotted capital I and friends, so a
+ * JS-folded lookup could miss the very row the constraint says owns the name
+ * (the `takenWorkersByName` rule, #985 review).
+ *
+ * Ambiguity is impossible: the name is unique per App, case-insensitively. A
+ * RETIRED worker resolves here — its name stays reserved (cor:agt:020:02), so
+ * the honest answer for "Iris" is that row; the caller then refuses the
+ * BINDING with the specific `WORKER_RETIRED`, which is far more useful than
+ * "not found" for a name the user can see in the roster.
+ *
+ * Identity only. This function answers "does this App have an Iris?", which is
+ * a fact about the roster — so every caller MUST apply the staff read gate
+ * (`requireWorkerReadAccess`) BEFORE calling it, or it becomes an existence
+ * oracle over another tenant's staff.
+ */
+export async function resolveWorkerIdByName(
+  db: Context['db'],
+  appId: string,
+  name: string,
+): Promise<string | null> {
+  const trimmed = name.trim();
+  if (trimmed === '') return null; // blank is absent (cor:agt:020:02)
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    SELECT id FROM workers
+    WHERE app_id = ${appId} AND lower(name) = lower(${trimmed})
+    LIMIT 1`;
+  return rows[0]?.id ?? null;
+}
+
 /** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
 function isNameTaken(e: unknown): boolean {
   return (
