@@ -56,28 +56,6 @@ export interface ChatScopeAttachments {
 }
 
 /**
- * Compute the set of memory ids a chat is permitted to read from.
- *
- * Invariants (spec 017 FR-013/014/015; data-model.md §I-3):
- *
- *   - `shared` chats MUST NOT include any personal-class memory in
- *     the result — not the author's, not anyone else's. Callers are
- *     responsible for never passing a personal-class memory id in
- *     `attachments`; this function's safety property is "never add
- *     a personal id for a shared chat" — which it satisfies
- *     trivially since it has no personal-class memory input for the
- *     shared branch.
- *
- *   - `private` chats MAY read the author's own personal memory
- *     (which IS `chat.memoryId` for the private branch), the App's
- *     app-class memory (if any), and the knowledge + system memories.
- *
- *   - Cross-user personal-memory reads are excluded by construction:
- *     the access-control layer never resolves another user's personal
- *     memory id into `attachments` for the calling user, so it can't
- *     appear in the set.
- */
-/**
  * Display name for an App's shared app-class memory (#995).
  *
  * Both segments carry information when the App and the Agent are named
@@ -105,6 +83,28 @@ export function sharedMemoryName(
   return `${label} — ${kind}`;
 }
 
+/**
+ * Compute the set of memory ids a chat is permitted to read from.
+ *
+ * Invariants (spec 017 FR-013/014/015; data-model.md §I-3):
+ *
+ *   - `shared` chats MUST NOT include any personal-class memory in
+ *     the result — not the author's, not anyone else's. Callers are
+ *     responsible for never passing a personal-class memory id in
+ *     `attachments`; this function's safety property is "never add
+ *     a personal id for a shared chat" — which it satisfies
+ *     trivially since it has no personal-class memory input for the
+ *     shared branch.
+ *
+ *   - `private` chats MAY read the author's own personal memory
+ *     (which IS `chat.memoryId` for the private branch), the App's
+ *     app-class memory (if any), and the knowledge + system memories.
+ *
+ *   - Cross-user personal-memory reads are excluded by construction:
+ *     the access-control layer never resolves another user's personal
+ *     memory id into `attachments` for the calling user, so it can't
+ *     appear in the set.
+ */
 export function allowedReadSet(
   chat: ChatScopeContext,
   attachments: ChatScopeAttachments,
