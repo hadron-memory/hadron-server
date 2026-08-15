@@ -28,6 +28,7 @@ import {
   mapToolDriveFile,
   runOwnedEmailOperation,
 } from './resolvers.helpers.js';
+import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 
 export const sessionQueries = {
     sessions: async (
@@ -38,17 +39,31 @@ export const sessionQueries = {
       // ADMIN/OWNER see all; App-keyed callers see their own sessions;
       // users see sessions for any App in an org they belong to.
       const scopeFilter = await sessionScopeFilter(ctx);
+      // #974 / cor:agt:020:03: the "taken right now" / "last driven by" reads —
+      // a worker's sessions, newest first, inside the caller's ordinary session
+      // scope. #994 widened the ref to a Worker id OR an
+      // hrn:worker:<root>:<app-slug>:<worker-slug> URN.
+      //
+      // This stays a FILTER, not a lookup: an unresolvable ref narrows to
+      // nothing rather than throwing, so it cannot be used to probe which
+      // workers exist outside the caller's scope. `scopeFilter` — not the ref —
+      // is what authorizes the rows either way.
+      let workerId: string | undefined;
+      const trimmedWorkerRef = workerRef?.trim();
+      if (trimmedWorkerRef) {
+        try {
+          ({ id: workerId } = await resolveWorkerRef(ctx.db, trimmedWorkerRef));
+        } catch {
+          return [];
+        }
+      }
       return ctx.db.session.findMany({
         where: {
           ...scopeFilter,
           ...(type ? { type: type as any } : {}),
           ...(repo ? { repo } : {}),
           ...(customerId ? { customerId } : {}),
-          // #974 / cor:agt:020:03: the "taken right now" / "last driven by"
-          // reads — a worker's sessions, newest first, inside the caller's
-          // ordinary session scope. PK-only (workers have no URN); an unknown
-          // id simply matches nothing (a filter, not a lookup).
-          ...(workerRef ? { workerId: workerRef.trim() } : {}),
+          ...(workerId ? { workerId } : {}),
         },
         orderBy: { startedAt: 'desc' },
         take: limit ?? 50,

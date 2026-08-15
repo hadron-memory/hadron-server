@@ -1928,6 +1928,22 @@ export const typeDefs = `#graphql
     agentId: ID!
     "The worker's name ('Iris') — the identity every surface renders."
     name: String!
+    """
+    The URN atom, derived from the name at cast time and permanent thereafter
+    (#994). Lowercased, sanitized to the URN slug charset, and iterated
+    ('iris', 'iris-2', …) until free within the App — so deriving it NEVER
+    refuses a cast, and the name collision stays the only allocation failure a
+    caller sees (cor:agt:020:02).
+    """
+    slug: String!
+    """
+    hrn:worker:<root>:<app-slug>:<slug> (#994) — computed from the App's URN
+    plus \`slug\`, not stored. Accepted anywhere a workerRef is taken, and
+    resolvable via Query.resolveUrn, so a client can address a worker without
+    holding its id. Null only when the App's URN predates the flat grammar-v2
+    shape this arity requires.
+    """
+    urn: String
     "The cast-list role this filling answers ('backend-engineer')."
     role: String
     "Per-worker individuality layered over the agent's template prompt."
@@ -3582,10 +3598,12 @@ export const typeDefs = `#graphql
   the resource's canonical page. Powers the portal's /app/u/<urn> redirect
   route (hadron-portal#262).
 
-  \`kind\` is the URN's type segment: memory | node | agent | org | app | user.
+  \`kind\` is the URN's type segment: memory | node | agent | org | app | user |
+  apprun | worker | noderev.
   \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
-  nodes (their owning memory), \`organizationId\` only for apps (their owning
-  org) — both are the extra ids those resources' canonical routes require.
+  nodes (their owning memory), \`organizationId\` for apps, app runs, and
+  workers (their owning org) — both are the extra ids those resources'
+  canonical routes require.
   """
   type UrnResolution {
     kind:           String!

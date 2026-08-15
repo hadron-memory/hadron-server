@@ -97,6 +97,18 @@ export class AppRunNotFoundError extends Error {
 }
 
 /**
+ * Surfaced by `resolveWorkerRef` when the inbound reference (a Worker ID or an
+ * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN, #994) does not name a
+ * worker — or when the URN is structurally malformed / its App doesn't resolve.
+ */
+export class WorkerNotFoundError extends Error {
+  constructor(public ref: string) {
+    super(`WORKER_NOT_FOUND: ${ref}`);
+    this.name = 'WorkerNotFoundError';
+  }
+}
+
+/**
  * Surfaced by `resolveNodeRevRef` when the inbound reference (a NodeRevision ID
  * or an end-anchored `hrn:noderev:<root>:<mem>:<loc...>:<rev>` URN, #696) does
  * not name a revision — or when the URN is malformed / its node doesn't resolve.

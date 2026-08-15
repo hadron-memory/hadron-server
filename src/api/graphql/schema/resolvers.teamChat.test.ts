@@ -24,6 +24,7 @@ import {
   TEAM_CHAT_MESSAGES_LOC,
   TEAM_CHAT_BODY_MAX_CHARS,
 } from './resolvers.teamChat.js';
+import { workerSlugBase } from '../../../lib/workerSlug.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -126,7 +127,7 @@ beforeEach(async () => {
  * named identity; `Session.agentId` still records the role-agent. */
 async function workerSession(userId: string, name = 'Iris'): Promise<{ workerId: string; workerName: string; sessionId: string }> {
   const worker = await db.worker.create({
-    data: { appId: app.id, agentId: teamAgent.id, name },
+    data: { appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
   });
   const sessionId = generateId();
   await db.session.create({
@@ -338,7 +339,7 @@ describe('createTeamChatMessage — sessionRef author derivation', () => {
     });
     await db.appAgent.create({ data: { appId: otherApp.id, agentId: teamAgent.id } });
     const foreignWorker = await db.worker.create({
-      data: { appId: otherApp.id, agentId: teamAgent.id, name: 'Iris' },
+      data: { appId: otherApp.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
     const sessionId = generateId();
     await db.session.create({
@@ -428,7 +429,7 @@ describe('teamChatMessages — mentions round trip', () => {
       },
     });
     const foreignWorker = await db.worker.create({
-      data: { appId: foreignApp.id, agentId: foreignAgent.id, name: 'Iris' },
+      data: { appId: foreignApp.id, agentId: foreignAgent.id, name: 'Iris', slug: 'iris' },
     });
     await post(ctx(appMember.id), { body: '@iris are you there' });
     const page = await read(ctx(appMember.id), { mentionsRef: foreignWorker.id });
@@ -453,7 +454,7 @@ describe('teamChatMessages — mentions round trip', () => {
     // Worker names may legally contain spaces; the mention contract slugs
     // them (mentionTokenOf) on both the write and the filter side.
     const mj = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Mary Jane' },
+      data: { appId: app.id, agentId: teamAgent.id, name: 'Mary Jane', slug: 'mary-jane' },
     });
     await post(ctx(appMember.id), { body: '@mary-jane please review' });
     const page = await read(ctx(appMember.id), { mentionsRef: mj.id });

@@ -13,6 +13,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { workerSlugBase } from '../../../lib/workerSlug.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -97,7 +98,7 @@ const preview = (c: Context, args: Record<string, unknown> = {}) =>
 
 describe('#964 — castWorkerPreview', () => {
   it('register mode: previews the next free name, the composed prompt, and the resolved Team Agent — writing NOTHING', async () => {
-    await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name: 'Fred' } });
+    await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: 'fred' } });
     const p = await preview(ctx(admin.id), { role: 'backend-engineer' });
     expect(p.name).toBe('Gwen');
     expect(p.role).toBe('backend-engineer');
@@ -118,7 +119,7 @@ describe('#964 — castWorkerPreview', () => {
   it('a previewed name is NOT reserved — someone else can take it first, by design', async () => {
     const p = await preview(ctx(admin.id), { role: 'backend-engineer' });
     expect(p.name).toBe('Fred');
-    await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name: 'Fred' } });
+    await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: 'fred' } });
     // The next preview simply moves on; the earlier one held no lease.
     expect((await preview(ctx(admin.id), { role: 'backend-engineer' })).name).toBe('Gwen');
   });
@@ -133,7 +134,7 @@ describe('#964 — castWorkerPreview', () => {
     expect(p.teamAgentId).toBeNull();
     expect(p.prompt).toBe('You are Zoe, a backend-engineer.\n\nBe terse.');
     await db.worker.create({
-      data: { appId: app.id, agentId: roleAgent.id, name: 'zoe', retiredAt: new Date() },
+      data: { appId: app.id, agentId: roleAgent.id, name: 'zoe', slug: 'zoe', retiredAt: new Date() },
     });
     await expectCode(
       preview(ctx(admin.id), { agentRef: roleAgent.id, name: 'Zoe' }),
@@ -146,7 +147,7 @@ describe('#964 — castWorkerPreview', () => {
     await expectCode(preview(ctx(admin.id), { role: 'no-such-role' }), 'WORKER_AGENT_NOT_FOUND');
     // Exhausted register.
     for (const name of ['Fred', 'Gwen', 'Hans']) {
-      await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name } });
+      await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name, slug: workerSlugBase(name) } });
     }
     await expectCode(preview(ctx(admin.id), { role: 'backend-engineer' }), 'WORKER_REGISTER_EXHAUSTED');
   });

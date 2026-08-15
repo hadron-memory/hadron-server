@@ -58,10 +58,10 @@ beforeEach(async () => {
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name: 'Iris' },
+    data: { appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
   });
   otherAppWorker = await db.worker.create({
-    data: { appId: otherApp.id, agentId: agent.id, name: 'Nadia' },
+    data: { appId: otherApp.id, agentId: agent.id, name: 'Nadia', slug: 'nadia' },
   });
 });
 

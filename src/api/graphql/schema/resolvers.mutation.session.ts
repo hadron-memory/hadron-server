@@ -21,6 +21,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
@@ -184,8 +185,20 @@ export const sessionMutations = {
       let workerId: string | undefined;
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
+        // #994: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
+        // URN, via the shared ref helper. Identity only — every gate below
+        // (retirement, App match, participation, WORKER_TAKEN) still runs on
+        // the RESOLVED row, so the URN buys addressability, never access.
+        let resolvedWorkerId: string;
+        try {
+          ({ id: resolvedWorkerId } = await resolveWorkerRefId(ctx.db, workerRef));
+        } catch {
+          throw new GraphQLError(`Worker not found: ${workerRef}`, {
+            extensions: { code: 'WORKER_NOT_FOUND' },
+          });
+        }
         const worker = await ctx.db.worker.findUnique({
-          where: { id: workerRef },
+          where: { id: resolvedWorkerId },
           select: { id: true, appId: true, agentId: true, retiredAt: true },
         });
         if (!worker) {

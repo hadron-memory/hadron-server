@@ -412,7 +412,7 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
 
   beforeEach(async () => {
     worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris' },
+      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
   });
 

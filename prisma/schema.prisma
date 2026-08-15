@@ -3113,6 +3113,19 @@ model Worker {
   agentId        String    @map("agent_id")
   /// The worker's name ("Iris") — the identity every surface renders.
   name           String
+  /// #994 — the URN atom: `hrn:worker:<root>:<app-slug>:<slug>`. DERIVED from
+  /// `name` at cast time (`deriveSlugFromName`, then `-2`/`-3`… until free in
+  /// the App) and permanent thereafter — there is no rename mutation, and the
+  /// name it was derived from is itself permanent (cor:agt:020:02).
+  ///
+  /// This is a SECOND stored uniqueness (`workers_app_slug_uniq`), which
+  /// cor:agt:020:02 otherwise forbids — the distinction that makes it legal is
+  /// that it NEVER REFUSES: the mint iterates instead of erroring, so the name
+  /// collision stays the single allocation primitive a caller can observe. That
+  /// is exactly what the reverted mention-token unique (PR #979) did not do.
+  /// The index exists so a race between two casts deriving one base slug cannot
+  /// produce two workers sharing a URN.
+  slug           String
   /// The cast-list role this filling answers ("backend-engineer").
   /// Free string with conventions; defaults to the agent's `personaRole`
   /// at cast time when the caller names none.
@@ -3140,6 +3153,9 @@ model Worker {
   memory   Memory?   @relation("WorkerMemory", fields: [memoryId], references: [id], onDelete: SetNull)
   sessions Session[] @relation("SessionWorker")
 
+  /// The URN atom's uniqueness. Unfiltered on retirement, like
+  /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
+  @@unique([appId, slug], map: "workers_app_slug_uniq")
   @@index([appId])
   @@index([agentId])
   @@map("workers")

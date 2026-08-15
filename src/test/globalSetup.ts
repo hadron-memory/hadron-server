@@ -149,6 +149,11 @@ export async function setup() {
       ON workers (app_id, lower(name));
   `);
 
+  // #994's second worker unique — workers_app_slug_uniq on (app_id, slug), the
+  // URN atom — is absent here on purpose: it is a plain column pair that Prisma
+  // models in schema.prisma's @@unique, so `db push` creates it. Only the
+  // inexpressible ones (functional/partial) are re-declared in this file.
+
   // The mention-token unique (workers_app_mention_token_uniq) was REMOVED by
   // decision (Holger, 2026-08-14): cor:agt:020:02 keeps ONE uniqueness layer.
   // The DROP keeps an already-provisioned template in step. Synced with

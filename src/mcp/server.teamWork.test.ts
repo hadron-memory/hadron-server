@@ -63,7 +63,7 @@ beforeEach(async () => {
   // #974: the named identity is a Worker casting bound via workerRef — the
   // record's workerName comes from this row.
   const worker = await db.worker.create({
-    data: { appId: app.id, agentId: teamAgent.id, name: 'Iris' },
+    data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
   });
   session = await M.startSession(
     {},

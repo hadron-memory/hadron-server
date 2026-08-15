@@ -39,6 +39,8 @@ import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
+import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
+import { requireWorkerReadAccess } from './resolvers.worker.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -441,6 +443,35 @@ export const nodeQueries = {
             organizationId: run.organizationId,
             ...(fragment ? { fragment } : {}),
           };
+        }
+        case 'worker': {
+          // #994: hrn:worker:<root>:<app-slug>:<worker-slug>.
+          let id: string;
+          try {
+            ({ id } = await resolveWorkerRef(ctx.db, baseUrn));
+          } catch {
+            return null;
+          }
+          const worker = await ctx.db.worker.findUnique({
+            where: { id },
+            select: { appId: true },
+          });
+          if (!worker) return null;
+          const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
+          if (!app || app.deletedAt) return null;
+          // The SHARED worker read gate, not a hand-rolled copy — a bespoke
+          // admin-or-member check here would drift from the `workers` query's
+          // (CLAUDE.md authorization invariants). App participants at any role,
+          // the App's own key, or the owner of a user-owned App.
+          try {
+            await requireWorkerReadAccess(ctx, app);
+          } catch {
+            return null;
+          }
+          // A RETIRED worker still resolves: retirement never frees the name or
+          // slug (cor:agt:020:02), and history — PR trailers, chat archives —
+          // must keep resolving.
+          return { kind: 'worker', id, organizationId: app.organizationId };
         }
         case 'noderev': {
           // #696: hrn:noderev:<root>:<mem>:<loc...>:<rev> (end-anchored).

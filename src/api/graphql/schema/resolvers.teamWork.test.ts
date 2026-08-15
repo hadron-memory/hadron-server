@@ -246,7 +246,7 @@ describe('recordTeamWork — session conditions', () => {
       data: { id: generateId(), organizationId: org.id, name: 'Other Team', urn: `${org.urn}:other-team` },
     });
     const foreignWorker = await db.worker.create({
-      data: { appId: otherApp.id, agentId: teamAgent.id, name: 'Iris' },
+      data: { appId: otherApp.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
     const s = await db.session.create({
       data: { id: generateId(), userId: contrib.id, appId: app.id, workerId: foreignWorker.id },
@@ -258,7 +258,7 @@ describe('recordTeamWork — session conditions', () => {
     // cor:agt:020:05 — retirement AFTER the bind still refuses: the check
     // runs at record time, unlike the ended-session case (late attribution).
     const worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Henry' },
+      data: { appId: app.id, agentId: teamAgent.id, name: 'Henry', slug: 'henry' },
     });
     const s = await M.startSession(
       {},
@@ -271,7 +271,7 @@ describe('recordTeamWork — session conditions', () => {
 
   it('a worker-bound session records under the worker name, with workerId stamped', async () => {
     const worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris' },
+      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
     const s = await M.startSession(
       {},
