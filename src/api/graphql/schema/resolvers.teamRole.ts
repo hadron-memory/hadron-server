@@ -114,6 +114,8 @@ type DecryptedRoleNode = {
   loc: string;
   description: string | null;
   data: Record<string, unknown> | null;
+  /** Optimistic-concurrency anchor for the #989 guarded write (Node.revSeq). */
+  revSeq: number;
 };
 
 /**
@@ -157,6 +159,7 @@ async function loadRoleNodes(
       loc: row.loc,
       description: row.description,
       data: (row.data as Record<string, unknown> | null) ?? null,
+      revSeq: row.revSeq,
     });
   }
   return out;
@@ -562,23 +565,59 @@ async function writeTeamRole(
       else mergedData.nameConvention = args.nameConvention;
     }
 
-    await writeNodeCore(
-      {
-        memoryId: systemMemoryId,
-        loc,
-        // Node name defaults to the role slug; description is optional and
-        // preserve-on-omit via the shared seam's D4 semantics.
-        ...(mode === 'create' ? { name: role } : {}),
-        ...(args.description !== undefined && args.description !== null
-          ? { description: args.description }
-          : {}),
-        data: mergedData,
-        reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
-      },
-      ctx,
-      mode,
-      mode === 'update' ? { targetNodeId: existing!.id } : undefined,
-    );
+    try {
+      await writeNodeCore(
+        {
+          memoryId: systemMemoryId,
+          loc,
+          // Node name defaults to the role slug; description is optional and
+          // preserve-on-omit via the shared seam's D4 semantics.
+          ...(mode === 'create' ? { name: role } : {}),
+          ...(args.description !== undefined && args.description !== null
+            ? { description: args.description }
+            : {}),
+          data: mergedData,
+          reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
+        },
+        ctx,
+        mode,
+        mode === 'update'
+          ? {
+              targetNodeId: existing!.id,
+              // #989 (PR review, Codex/Copilot P1): when the caller staked a
+              // precondition, the WRITE itself is guarded at the DB predicate
+              // on the node's updatedAt — the register lock serializes every
+              // participant, but the generic node surfaces (updateNode,
+              // hadron_update_node_data) write this row without it, and an
+              // application-level compare alone leaves a TOCTOU window
+              // between the check and the write.
+              ...(args.expectedNames != null
+                ? { guardRevSeq: existing!.revSeq }
+                : {}),
+            }
+          : undefined,
+      );
+    } catch (e) {
+      // An off-road write interleaved between our locked read and the
+      // guarded write: surface it as the SAME staleness the precondition
+      // reports, with the CURRENT register so the client rebases identically.
+      if (e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
+        const fresh = await loadRoleNodes(ctx, systemMemoryId);
+        const freshNode = fresh.find((n) => n.loc === loc);
+        throw new GraphQLError(
+          `The "${role}" register changed since you read it — rebase your edit onto the current register (in extensions.storedNames) and retry with it as expectedNames.`,
+          {
+            extensions: {
+              code: 'TEAM_ROLE_STALE',
+              role,
+              expectedNames: parseNameRegister(args.expectedNames),
+              storedNames: parseNameRegister(freshNode?.data?.names),
+            },
+          },
+        );
+      }
+      throw e;
+    }
 
     // Return the fresh projection through the same builder the read uses.
     const nodes = await loadRoleNodes(ctx, systemMemoryId);

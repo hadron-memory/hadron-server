@@ -581,6 +581,75 @@ describe('#960 — updateTeamRole', () => {
     expect(be.register).toHaveLength(4);
   });
 
+  it('the CAS holds against the GENERIC node surface — the cross-surface race (#989 review)', async () => {
+    // The register lock only serializes lock participants; updateNode writes
+    // the roles: node without it. This interleaves a REAL updateNode into
+    // the exact TOCTOU window (after the locked read + expectedNames
+    // compare, before the node write) by intercepting the first $queryRaw
+    // the write path makes after the compare (loadHeldByName's roster scan).
+    // The DB-level guard (the revSeq claim, #989) must catch it: updateNode
+    // revisions its write, which claims the next revSeq unconditionally.
+    let fired = false;
+    const trickyDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$queryRaw') {
+          return async (...qargs: unknown[]) => {
+            const res = await (target.$queryRaw as (...a: unknown[]) => Promise<unknown>).apply(
+              target,
+              qargs,
+            );
+            if (!fired) {
+              fired = true;
+              // The off-road write: a generic-surface register edit landing
+              // mid-window, adding Ophelia (out of range — the generic
+              // surface runs no register invariants, which is the point).
+              await M.updateNode(
+                {},
+                {
+                  input: {
+                    memoryId: teamAgent.systemMemoryId,
+                    loc: 'roles:backend-engineer',
+                    data: { names: ['Fred', 'Gwen', 'Hans', 'Ophelia'], nameRange: 'F-J' },
+                  },
+                },
+                ctx(contrib.id),
+              );
+            }
+            return res;
+          };
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    try {
+      await M.updateTeamRole(
+        {},
+        {
+          appRef: app.id,
+          role: 'backend-engineer',
+          names: ['Fred', 'Gwen', 'Hans', 'Iris'],
+          expectedNames: ['Fred', 'Gwen', 'Hans'],
+        },
+        { db: trickyDb, userId: contrib.id, roles: ['READER'] } as unknown as Context,
+      );
+      expect.fail('expected TEAM_ROLE_STALE');
+    } catch (e) {
+      const ext = (e as GraphQLError).extensions as Record<string, unknown>;
+      expect(ext.code).toBe('TEAM_ROLE_STALE');
+      // The refusal reports the interleaved state, so the rebase is honest…
+      expect(ext.storedNames).toContain('Ophelia');
+    }
+    expect(fired).toBe(true);
+    // …and the off-road write SURVIVED — the stale CAS write clobbered nothing.
+    const node = await db.node.findUniqueOrThrow({
+      where: {
+        loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId },
+      },
+    });
+    expect((node.data as any).names).toEqual(['Fred', 'Gwen', 'Hans', 'Ophelia']);
+  });
+
   it('the whole flow feeds the cast: an added name is what castWorker allocates next', async () => {
     for (const name of ['Fred', 'Gwen', 'Hans']) {
       await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name } });

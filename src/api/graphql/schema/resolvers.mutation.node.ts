@@ -114,7 +114,19 @@ export async function writeNodeCore(
   // instead of (loc, memoryId) — a concurrent move that frees the old loc
   // for another node can otherwise make the loc-keyed write hit the wrong
   // row (PR-460 review).
-  opts?: { targetNodeId?: string },
+  //
+  // guardRevSeq (#989): update-mode compare-and-swap on Node.revSeq — the
+  // per-node monotonic revision counter every revisioned write bumps
+  // (#696), which makes it THE optimistic-concurrency token (updatedAt is
+  // unusable: createNodeRevision's own revSeq increment fires @updatedAt
+  // before the main write, invalidating any timestamp anchor). The claim
+  // of the next revision number IS the compare-and-swap: it lands only
+  // while revSeq still equals this value, else the typed
+  // NODE_WRITE_CONFLICT refuses — BEFORE the revision snapshot, so a
+  // refused write leaves no artifact. For callers whose precondition must
+  // hold against writers outside their own locking discipline
+  // (updateTeamRole's expectedNames vs the generic node surfaces).
+  opts?: { targetNodeId?: string; guardRevSeq?: number },
 ) {
       // Keep the historical `input` name so the body below stays a
       // minimal-diff move from the upsertNode resolver it used to be.
@@ -366,6 +378,35 @@ export async function writeNodeCore(
         input.properties !== undefined ? input.properties : existing?.properties,
       );
 
+      // #989 — the guarded revNo claim, the FIRST node write of a guarded
+      // update: an atomic increment conditioned on revSeq still holding the
+      // caller's anchor. Count 0 ⇒ a revisioned write (any surface) landed
+      // since the caller read the node ⇒ typed refusal, before any
+      // side effect. The claimed number is handed to createNodeRevision so
+      // it skips its own (unconditional) bump, and the main update below is
+      // then guarded on the claimed value — so an interleaver in the
+      // claim-to-write window is caught there.
+      let claimedRevNo: number | undefined;
+      if (mode === 'update' && opts?.guardRevSeq !== undefined && existing) {
+        const claimed = await ctx.db.node.updateMany({
+          where: { id: existing.id, revSeq: opts.guardRevSeq },
+          data: { revSeq: { increment: 1 } },
+        });
+        if (claimed.count === 0) {
+          throw new GraphQLError(
+            `Node at loc "${input.loc}" changed since it was read — re-read and retry.`,
+            {
+              extensions: {
+                code: 'NODE_WRITE_CONFLICT',
+                loc: input.loc,
+                memoryId: input.memoryId,
+              },
+            },
+          );
+        }
+        claimedRevNo = opts.guardRevSeq + 1;
+      }
+
       if (existing) {
         // Snapshot the PRE-edit state (#620: shared builder — editedBy holds
         // the user PK, the #88 `reason` rationale lands in revLabel, and
@@ -376,13 +417,14 @@ export async function writeNodeCore(
         if (input.tags !== undefined) {
           supplied.tags = serializeTags(input.tags ?? []);
         }
-        await createNodeRevision(
-          ctx.db,
-          buildNodeRevisionSnapshot(existing, editorFromAuth(ctx), {
+        await createNodeRevision(ctx.db, {
+          ...buildNodeRevisionSnapshot(existing, editorFromAuth(ctx), {
             revLabel: input.reason,
             changes: diffNodeChanges(existing, supplied),
           }),
-        );
+          // #989: a guarded update already claimed its number atomically.
+          ...(claimedRevNo !== undefined ? { revNo: claimedRevNo } : {}),
+        });
       }
 
       // Tags partial-update semantics (hadron-cli#37). A create always
@@ -538,7 +580,44 @@ export async function writeNodeCore(
       } as Prisma.NodeUncheckedUpdateInput;
       let node;
       try {
-        if (mode === 'update') {
+        if (mode === 'update' && claimedRevNo !== undefined) {
+          // #989 — the write half of the compare-and-swap: guarded on the
+          // revSeq value the claim above just installed, so a revisioned
+          // write interleaving between claim and write is caught here
+          // (its own claim bumps revSeq past ours). This is what makes a
+          // caller-level precondition (updateTeamRole's expectedNames) hold
+          // against writers that do NOT share the caller's lock — the
+          // generic node surfaces write this row unguarded, so an
+          // application-level compare alone has a TOCTOU window between it
+          // and this write. updateMany because a unique `where` can't carry
+          // the extra predicate; the row is then re-read for the include
+          // shape.
+          const guardWhere: Prisma.NodeWhereInput = opts?.targetNodeId
+            ? { id: opts.targetNodeId, revSeq: claimedRevNo }
+            : { loc: input.loc, memoryId: input.memoryId, revSeq: claimedRevNo };
+          const guarded = await ctx.db.node.updateMany({
+            where: guardWhere,
+            data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
+          });
+          if (guarded.count === 0) {
+            throw new GraphQLError(
+              `Node at loc "${input.loc}" changed since it was read — re-read and retry.`,
+              {
+                extensions: {
+                  code: 'NODE_WRITE_CONFLICT',
+                  loc: input.loc,
+                  memoryId: input.memoryId,
+                },
+              },
+            );
+          }
+          node = await ctx.db.node.findUniqueOrThrow({
+            where: opts?.targetNodeId
+              ? { id: opts.targetNodeId }
+              : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+            include,
+          });
+        } else if (mode === 'update') {
           node = await ctx.db.node.update({
             where: opts?.targetNodeId
               ? { id: opts.targetNodeId }
