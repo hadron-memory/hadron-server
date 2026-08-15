@@ -202,3 +202,83 @@ describe('withChatRootLock', () => {
     ).rejects.toThrow(/not found/);
   });
 });
+
+describe('#992 — allocation is self-healing against direct message writes', () => {
+  /** Write a message node the way a bulk import / `node clone` does: directly,
+   *  at a chosen seq, without going through the allocator. */
+  async function directMessage(seq: number, nodeType = 'chat-message') {
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: chat.memoryId,
+        loc: `${chat.loc}:messages:${String(seq).padStart(3, '0')}-imported`,
+        name: `${String(seq).padStart(3, '0')}-imported`,
+        nodeType, content: `imported ${seq}`, seq,
+      },
+    });
+  }
+
+  it('does not reissue a seq an imported message already occupies', async () => {
+    // The reported repro, minimised: counter says 2, an archive occupies 1..142.
+    await appendChatMessage(db, chat, memEnc, insertMessage('a'));
+    await appendChatMessage(db, chat, memEnc, insertMessage('b'));
+    expect((await storedChatData()).messageCount).toBe(2);
+    for (const n of [3, 4, 5, 142]) await directMessage(n);
+
+    const next = await appendChatMessage(db, chat, memEnc, insertMessage('after-import'));
+    expect(next.seq).toBe(143);
+  });
+
+  it('heals the counter, so the jump happens once and not on every post', async () => {
+    await directMessage(142);
+    const first = await appendChatMessage(db, chat, memEnc, insertMessage('x'));
+    const second = await appendChatMessage(db, chat, memEnc, insertMessage('y'));
+    expect([first.seq, second.seq]).toEqual([143, 144]);
+    expect((await storedChatData()).messageCount).toBe(144);
+  });
+
+  it('never reuses a SOFT-DELETED message\'s seq', async () => {
+    // Monotonicity: a citation to seq N must mean one thing forever, which is
+    // also why the counter deliberately does not decrement on delete.
+    await appendChatMessage(db, chat, memEnc, insertMessage('doomed'));
+    await db.node.updateMany({
+      where: { memoryId: chat.memoryId, loc: { startsWith: `${chat.loc}:messages:` } },
+      data: { deletedAt: new Date() },
+    });
+    const next = await appendChatMessage(db, chat, memEnc, insertMessage('after-delete'));
+    expect(next.seq).toBe(2);
+  });
+
+  it('counts an off-road nodeType under the messages container', async () => {
+    // Invisible to the transcript (the reader filters nodeType), but it still
+    // occupies a number — over-estimating costs a gap, under-estimating costs
+    // a duplicate.
+    await directMessage(9, 'note');
+    const next = await appendChatMessage(db, chat, memEnc, insertMessage('z'));
+    expect(next.seq).toBe(10);
+  });
+
+  it('ignores a node OUTSIDE the messages container', async () => {
+    // Sibling branches of the chat root must not inflate the allocator.
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: chat.memoryId,
+        loc: `${chat.loc}:summary`, name: 'summary', nodeType: 'record', seq: 500,
+      },
+    });
+    const next = await appendChatMessage(db, chat, memEnc, insertMessage('q'));
+    expect(next.seq).toBe(1);
+  });
+
+  it('is unaffected by another chat in the same memory', async () => {
+    const otherLoc = 'chats:202608091200-ffff9999-other';
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: chat.memoryId,
+        loc: `${otherLoc}:messages:900-x`, name: '900-x',
+        nodeType: 'chat-message', seq: 900,
+      },
+    });
+    const next = await appendChatMessage(db, chat, memEnc, insertMessage('r'));
+    expect(next.seq).toBe(1);
+  });
+});

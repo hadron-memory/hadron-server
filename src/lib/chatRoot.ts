@@ -114,6 +114,54 @@ export async function withChatRootLock<T>(
 }
 
 /**
+ * The highest `seq` any message in this chat has EVER occupied — the number the
+ * next allocation must exceed (#992).
+ *
+ * `messageCount` alone is not that number. It is a denormalized counter that
+ * only `appendChatMessage` maintains, so any message node written through the
+ * generic node surface — a bulk import, a `node clone`, a repair script — leaves
+ * it behind, and the next post then re-allocates a seq that is already taken.
+ * The write SUCCEEDS and reports a plausible number, so the collision is silent;
+ * `cor:agt:020:04` marks per-chat seq uniqueness durable ("never duplicates"),
+ * and it was hit for real migrating a 142-message archive into a live chat.
+ *
+ * So the allocator takes the GREATER of the counter and the actual maximum, and
+ * a direct write is absorbed on the next post instead of poisoning it.
+ *
+ * Two deliberate choices about what the maximum ranges over:
+ *
+ * - **Soft-deleted messages COUNT.** A deleted message's seq must never be
+ *   reused — monotonicity is what keeps a citation to seq 12 meaning one thing
+ *   forever, and `cor:agt:020:04` leans on it for the delete/revive cycle. This
+ *   is also why the counter deliberately does not decrement on delete.
+ * - **Every nodeType counts**, not just the canonical one. Callers disagree on
+ *   it (team chat writes `chat-message`, the chatbot path writes `record`), and
+ *   an off-road node parked under the messages container is invisible to the
+ *   transcript but still occupies a number. Ranging over everything can only
+ *   OVER-estimate, which costs a gap — permitted, and already produced by
+ *   deletes. Under-estimating costs a duplicate, which breaks ordering, makes a
+ *   `replyToSeq` ambiguous, and makes a `sinceSeq` watermark non-monotonic.
+ *
+ * Runs on `tx`, inside the chat-root lock, so it cannot race an insert.
+ */
+async function highWaterSeq(
+  tx: Prisma.TransactionClient,
+  chat: ChatRootRef,
+  chatData: Record<string, unknown>,
+): Promise<number> {
+  const counter = (chatData.messageCount as number) ?? 0;
+  const top = await tx.node.aggregate({
+    where: {
+      memoryId: chat.memoryId,
+      loc: { startsWith: `${chat.loc}:messages:` },
+      seq: { not: null },
+    },
+    _max: { seq: true },
+  });
+  return Math.max(counter, top._max.seq ?? 0);
+}
+
+/**
  * Allocate the next message number for a chat and insert the message in the
  * same transaction — the ONLY way a chat message should be written.
  *
@@ -137,7 +185,7 @@ export async function appendChatMessage<T>(
   }) => Promise<T>,
 ): Promise<{ seq: number; chatData: Record<string, unknown>; inserted: T }> {
   return withChatRootLock(db, chat, memEncInfo, async ({ tx, chatData }) => {
-    const seq = ((chatData.messageCount as number) ?? 0) + 1;
+    const seq = (await highWaterSeq(tx, chat, chatData)) + 1;
     const inserted = await insert({
       tx,
       seq,
