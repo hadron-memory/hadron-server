@@ -178,3 +178,60 @@ describe('nodeUsage scopes on the memoryId COLUMN, not a node relation join', ()
     expect(await resolvers.Query.nodeUsage(null, { loc: 'orphan-loc' }, asAdmin())).toEqual([]);
   });
 });
+
+describe('nodeUsage ≡ usageEvents(nodeId: <loc>) — the #802 deprecation promise', () => {
+  // nodeUsage is deprecated in favour of usageEvents(nodeId:). The notice tells
+  // callers the rewrite is a rename, so these must agree ROW FOR ROW — including
+  // on who is denied. If they ever diverge, the deprecation is lying and callers
+  // who follow it silently change behaviour. (The schema-shape half of the
+  // promise is guarded in resolvers.nodeUsageDeprecation.test.ts.)
+  const bothFor = async (c: Context, loc: string, limit?: number) => {
+    const viaDeprecated = await resolvers.Query.nodeUsage(null, { loc, limit }, c);
+    const viaTarget = await resolvers.Query.usageEvents(null, { nodeId: loc, limit }, c);
+    return [viaDeprecated, viaTarget] as const;
+  };
+  const ids = (rows: { id: string }[]) => rows.map((r) => r.id).sort();
+
+  it('agrees for a member on a loc that collides across memories', async () => {
+    const [dep, target] = await bothFor(asMember(), SHARED_LOC);
+    expect(ids(dep)).toEqual(ids(target));
+    expect(dep).not.toHaveLength(0); // the comparison would be vacuous on []
+  });
+
+  it('agrees for ADMIN (the widest principal)', async () => {
+    const [dep, target] = await bothFor(asAdmin(), SHARED_LOC);
+    expect(ids(dep)).toEqual(ids(target));
+    expect(dep).not.toHaveLength(0);
+  });
+
+  it('agrees on DENIAL for an outsider, and on a loc only a foreign tenant has', async () => {
+    const [depOut, targetOut] = await bothFor(asOutsider(), SHARED_LOC);
+    expect(ids(depOut)).toEqual(ids(targetOut));
+    expect(depOut).toEqual([]);
+
+    const nodeBOnly = await db.node.create({
+      data: { id: generateId(), memoryId: memB.id, loc: 'b-only-eq', name: 'b-only-eq' },
+    });
+    await db.usageEvent.create({
+      data: { id: generateId(), type: 'read', nodeLoc: 'b-only-eq', nodeId: nodeBOnly.id, memoryId: memB.id },
+    });
+    const [depDenied, targetDenied] = await bothFor(asMember(), 'b-only-eq');
+    expect(ids(depDenied)).toEqual(ids(targetDenied));
+    expect(depDenied).toEqual([]);
+  });
+
+  it('agrees on a deleted-node event — both read the memoryId column, not the relation', async () => {
+    await db.usageEvent.create({
+      data: { id: generateId(), type: 'read', nodeLoc: 'gone-eq', nodeId: null, memoryId: memA.id },
+    });
+    const [dep, target] = await bothFor(asMember(), 'gone-eq');
+    expect(ids(dep)).toEqual(ids(target));
+    expect(dep).toHaveLength(1);
+  });
+
+  it('agrees under a limit', async () => {
+    const [dep, target] = await bothFor(asMember(), SHARED_LOC, 1);
+    expect(ids(dep)).toEqual(ids(target));
+    expect(dep).toHaveLength(1);
+  });
+});

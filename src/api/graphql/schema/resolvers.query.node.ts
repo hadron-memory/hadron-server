@@ -1536,10 +1536,24 @@ export const nodeQueries = {
     /**
      * Usage events for a node loc, most recent first.
      *
+     * @deprecated Use `usageEvents(nodeId: <loc>)` — see the `@deprecated`
+     * directive on the schema field. `usageEvents` routes an unprefixed,
+     * non-URN-shaped `nodeId` to the SAME exact `nodeLoc` match under the same
+     * gate, so the migration is a rename; it is additionally a strict superset
+     * (PK / fully-qualified URN refs, `type`, `memoryId`, `offset`).
+     *
+     * Deprecated for REDUNDANCY, not because it is unsafe — it is gated (below)
+     * and stays supported. Keep it working: the deprecation is a signpost for
+     * clients, and this resolver is the only thing standing behind any caller
+     * that hasn't migrated. Delete only after a deprecation window, and only
+     * once portal / CLI / docs are re-checked for callers.
+     *
      * `loc` names no memory, so this is a CROSS-MEMORY exact `nodeLoc` match —
      * the same bare-loc semantics as `usageEvents(nodeId: <loc>)`, bounded to
      * the memories the caller may read. It is a filter, not a lookup: an
-     * unknown loc yields `[]` rather than NODE_NOT_FOUND.
+     * unknown loc yields `[]` rather than NODE_NOT_FOUND. A bare loc cannot
+     * disambiguate the same loc in two memories; `usageEvents(nodeId: <PK|URN>)`
+     * is the memory-precise form.
      *
      * Access control (#802): this resolver previously had NO gate at all —
      * neither `requireRole` nor memory scoping — so any caller could read any
