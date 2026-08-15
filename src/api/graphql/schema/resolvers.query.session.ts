@@ -99,18 +99,29 @@ export const sessionQueries = {
         type,
         memoryId,
         nodeId,
+        loc,
         limit,
         offset,
       }: {
         type?: string;
         memoryId?: string;
         nodeId?: string;
+        loc?: string;
         limit?: number;
         offset?: number;
       },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+
+      // `loc` and `nodeId` are two different addressing modes for the same
+      // filter slot — a verbatim loc filter vs a shape-classified node token.
+      // Passing both is a contradiction we refuse rather than pick a winner.
+      if (loc !== undefined && nodeId !== undefined) {
+        throw new GraphQLError('Provide either nodeId or loc, not both', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
 
       // Per-node scoping (issue #249 follow-up): a single node addressed by a
       // node *token* — PK, URN, or bare loc — no memoryId required. Mirrors the
@@ -132,8 +143,20 @@ export const sessionQueries = {
       //     loc in EVERY readable memory (the memory scoping below still
       //     applies); it does NOT validate node existence (a filter, not a
       //     lookup, so an unknown loc yields [] rather than NODE_NOT_FOUND).
+      //
+      // The shape classification means nodeId CANNOT express a loc filter for
+      // a hierarchical loc: `cor:acl:010:01` has ≥3 segments, so it qualifies
+      // as node-URN shape and routes to resolveNodeRef — which throws
+      // NODE_NOT_FOUND unless an org literally named by its first segment
+      // exists (PR-986 review, Codex P2). The explicit `loc` argument below is
+      // the unambiguous loc-filter path — and the nodeUsage migration target.
       let nodeIdFilter: string | undefined;
       let nodeLocExact: string | undefined;
+      if (loc) {
+        // Verbatim — never shape-sniffed, so every loc works, including ones
+        // that happen to look like a URN. Exactly nodeUsage(loc:)'s semantics.
+        nodeLocExact = loc;
+      }
       if (nodeId) {
         // Scheme-prefixed inputs (`hrn:` / legacy `urn:`) are always node refs
         // (resolveNodeRef validates the type marker and throws on mismatch).

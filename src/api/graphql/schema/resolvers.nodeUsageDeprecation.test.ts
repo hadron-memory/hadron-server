@@ -27,13 +27,17 @@ const queryFields = () => {
 };
 
 describe('nodeUsage deprecation (#802)', () => {
-  it('is marked @deprecated and names usageEvents as the replacement', () => {
+  it('is marked @deprecated and names usageEvents(loc:) as the replacement', () => {
     const field = queryFields().nodeUsage;
     expect(field).toBeDefined();
     expect(field.deprecationReason).toBeTruthy();
     // The reason must actually name the target — "deprecated, use something
-    // else" with no destination is worse than no deprecation at all.
-    expect(field.deprecationReason).toContain('usageEvents');
+    // else" with no destination is worse than no deprecation at all. And the
+    // target must be the loc ARGUMENT, not nodeId: nodeId shape-classifies its
+    // input, so a hierarchical loc (≥3 colon segments, e.g. 'cor:acl:010:01')
+    // qualifies as node-URN shape and routes to ref resolution instead of the
+    // loc filter (PR-986 review, Codex P2).
+    expect(field.deprecationReason).toContain('usageEvents(loc:');
   });
 
   it('still exists and is still wired to a resolver (deprecated ≠ removed)', () => {
@@ -50,12 +54,13 @@ describe('nodeUsage deprecation (#802)', () => {
 
   it('usageEvents accepts the arguments the deprecation notice promises', () => {
     // The notice tells callers to rewrite nodeUsage(loc:, limit:) as
-    // usageEvents(nodeId:, limit:). If those args are ever renamed, the advice
+    // usageEvents(loc:, limit:). If those args are ever renamed, the advice
     // becomes wrong the moment a client follows it.
     const args = new Set(queryFields().usageEvents.args.map((a) => a.name));
-    expect(args).toContain('nodeId');
+    expect(args).toContain('loc');
     expect(args).toContain('limit');
     // The superset the notice advertises as the reason to migrate.
+    expect(args).toContain('nodeId');
     expect(args).toContain('type');
     expect(args).toContain('memoryId');
     expect(args).toContain('offset');
