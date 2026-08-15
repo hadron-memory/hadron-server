@@ -1958,6 +1958,34 @@ export const typeDefs = `#graphql
   }
 
   """
+  What castWorker WOULD do (#964) — an unsaved projection, deliberately not a
+  Worker (no fake id to mistake for a real row). Scalars only: the ids/names
+  here are attribution-level facts the mint-gate audience already sees, so no
+  nested entity hands out its field resolvers.
+  """
+  type CastWorkerPreview {
+    "The name the cast would allocate: the explicit name, or the first register entry free against the App's FULL roster (retired names stay taken)."
+    name: String!
+    "The casting's role: explicit, else the agent's personaRole dressing."
+    role: String
+    "The role-agent the casting would bind."
+    agentId: ID!
+    agentName: String!
+    "The Team Agent whose register resolved the name (register mode only; null with an explicit name)."
+    teamAgentId: ID
+    teamAgentName: String
+    """
+    The composed boot prompt, post {{name}}/{{role}} substitution with
+    promptOverride appended — the same composition Worker.prompt performs,
+    reviewable BEFORE the name is permanent. Null when the agent carries no
+    template and no override was given.
+    """
+    prompt: String
+    "Whether the agent's personaPrompt binds {{name}} — a nameless template silently produces workers whose prompt never names them. Null when the agent has no template."
+    hasNamePlaceholder: Boolean
+  }
+
+  """
   One entry of a role's name register (#960, cor:agt:020:02). Order is
   allocation order — castWorker walks the register first-to-last.
   """
@@ -4718,6 +4746,28 @@ export const typeDefs = `#graphql
     system memory without an active session key refuses SESSION_EXPIRED.
     """
     teamRoles(appRef: ID!, teamAgentRef: ID, limit: Int, offset: Int): TeamRolesPage!
+
+    """
+    Dry-run castWorker (#964): run the cast's exact resolution — same
+    arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
+    _NOT_INSTALLED, WORKER_ROLE_NOT_FOUND, WORKER_REGISTER_EXHAUSTED,
+    WORKER_NAME_TAKEN, TEAM_AGENT_AMBIGUOUS), same MINT gate — up to but not
+    including the writes, and return what would be created. A Query, not a
+    dryRun flag: casting a name is the one irreversible act in the team
+    feature (cor:agt:020:02 — permanence), and previewing it must not need a
+    mutation permission model or a fake Worker row. THE PREVIEW RESERVES
+    NOTHING: no lease exists by law (cor:agt:020:03), so a previewed name may
+    be gone at cast time — by design; the cast's uniqueness constraint
+    remains the only allocation primitive.
+    """
+    castWorkerPreview(
+      appRef: ID!
+      agentRef: ID
+      role: String
+      name: String
+      teamAgentRef: ID
+      promptOverride: String
+    ): CastWorkerPreview!
 
     # ── Assets (spec 004-asset-upload + 006-asset-upload-redesign) ────
     # v1 — agent-addressed listing. Deprecated; use memoryAssets.
