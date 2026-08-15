@@ -280,6 +280,70 @@ describe('#960 — createTeamRole', () => {
     );
   });
 
+  it('rejects a malformed nameRange instead of silently disabling the check (#984 review)', async () => {
+    await expectCode(
+      M.createTeamRole(
+        {},
+        { appRef: app.id, role: 'qa-engineer', names: ['Quinn'], nameRange: 'not-a-range' },
+        ctx(contrib.id),
+      ),
+      'BAD_USER_INPUT',
+    );
+  });
+
+  it('tolerates a legacy malformed STORED range when the argument is omitted', async () => {
+    // Hand-authored before this surface existed — the row must stay editable.
+    await db.node.update({
+      where: {
+        loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId },
+      },
+      data: { data: { names: ['Fred'], nameRange: 'whatever goes' } },
+    });
+    const role = await M.updateTeamRole(
+      {},
+      { appRef: app.id, role: 'backend-engineer', names: ['Fred', 'Bob'] },
+      ctx(contrib.id),
+    );
+    expect(role.register.map((n: any) => n.name)).toContain('Bob');
+  });
+
+  it('two concurrent creates cannot both claim one name — the register lock serializes (#984 review)', async () => {
+    const results = await Promise.allSettled([
+      M.createTeamRole({}, { appRef: app.id, role: 'ops-a', names: ['Vera'] }, ctx(contrib.id)),
+      M.createTeamRole({}, { appRef: app.id, role: 'ops-b', names: ['Vera'] }, ctx(contrib.id)),
+    ]);
+    const rejected = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0].reason as GraphQLError).extensions?.code).toBe('TEAM_ROLE_NAME_DUPLICATE');
+  });
+
+  it('locator errors are held behind the read-audience gate — no topology probe (#984 review)', async () => {
+    // A second installed agent with a roles: branch makes the locator
+    // ambiguous — TEAM_AGENT_AMBIGUOUS discloses candidate names + URNs.
+    const second = await M.createAgent({}, { orgId: org.id, name: 'TR Second Team Agent' }, ctx(admin.id));
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: second.systemMemoryId,
+        loc: 'roles:designer',
+        name: 'designer',
+        data: { names: ['Nia'] },
+      },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: second.id } });
+    // A participant sees the real refusal…
+    await expectCode(
+      M.createTeamRole({}, { appRef: app.id, role: 'ops', names: ['Uma'] }, ctx(contrib.id)),
+      'TEAM_AGENT_AMBIGUOUS',
+    );
+    // …an outsider gets FORBIDDEN, never the candidate list.
+    await expectCode(
+      M.createTeamRole({}, { appRef: app.id, role: 'ops', names: ['Uma'] }, ctx(outsider.id)),
+      'FORBIDDEN',
+    );
+  });
+
   it('write gate is the definition-edit gate: org READER refused, CONTRIBUTOR admitted', async () => {
     await expect(
       M.createTeamRole({}, { appRef: app.id, role: 'ops', names: ['Uma'] }, ctx(reader.id)),

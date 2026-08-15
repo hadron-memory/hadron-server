@@ -245,18 +245,56 @@ function nameTaken(name: string, appId: string): GraphQLError {
 }
 
 /**
+ * App-scoped critical section for REGISTER semantics (#984 review, Codex P1):
+ * `SELECT … FOR UPDATE` on the Team Agent's system-memory row serializes every
+ * register-consuming operation — role-definition writes (create/updateTeamRole,
+ * whose check-then-write invariant runs would otherwise interleave: two
+ * concurrent creates can each observe a name absent and both persist it) and
+ * register-mode casting (which reads the register and mints against it). The
+ * transaction is a LOCK BRACKET only: the work inside may run its own queries
+ * and transactions on other pool connections (`writeNodeCore` does), which is
+ * safe because the bracket commits — releasing the lock — only after `fn`
+ * resolves. The `ensureWorklogSchema` FOR-UPDATE pattern, held across the
+ * whole read-check-write window. Explicit-name casts deliberately do NOT take
+ * it: they touch no register, and `workers_app_name_uniq` already arbitrates
+ * the name itself atomically.
+ */
+export async function withRegisterLock<T>(
+  ctx: Context,
+  systemMemoryId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return ctx.db.$transaction(
+    async (tx) => {
+      // FOR NO KEY UPDATE, deliberately NOT FOR UPDATE: the bracketed work
+      // INSERTS child rows referencing this memory (nodes via writeNodeCore),
+      // and an FK check takes FOR KEY SHARE on the referenced row from a
+      // DIFFERENT connection — which FOR UPDATE blocks, deadlocking the
+      // bracket against its own work until timeout. NO KEY UPDATE conflicts
+      // with other NO KEY UPDATE / UPDATE lockers (the mutual exclusion we
+      // want) while admitting KEY SHARE (the FK checks we cause).
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${systemMemoryId} FOR NO KEY UPDATE`;
+      return fn();
+    },
+    // Generous: the bracket spans a full node write including the git mirror.
+    { timeout: 30_000 },
+  );
+}
+
+/**
  * Read the name register from the Team Agent's `roles:<role>` node
  * (`data.names`, ordered, first spelling wins on a case-insensitive dupe).
  * The node's CONTENT (the old prompt template) is no longer read: the persona
- * prompt lives on the role-agent as dressing (cor:agt:020:01).
+ * prompt lives on the role-agent as dressing (cor:agt:020:01). Takes the
+ * LOCATED Team Agent so callers can take `withRegisterLock` first (#984
+ * review — the register read and the allocation it feeds must share one
+ * critical section).
  */
 async function readNameRegister(
   ctx: Context,
-  appId: string,
+  teamAgent: TeamAgentRow,
   role: string,
-  teamAgentRef: string | null | undefined,
 ): Promise<string[]> {
-  const teamAgent = await locateTeamAgent(ctx, appId, teamAgentRef);
   if (!teamAgent.systemMemoryId) {
     throw new GraphQLError(
       `Team Agent ${teamAgent.name} has no system memory, so it carries no cast list.`,
@@ -541,10 +579,44 @@ export const workerMutations = {
     // The casting's role: explicit wins, else the agent's dressing.
     const workerRole = roleNorm ?? agent.personaRole ?? null;
 
-    // 3. Name candidates: explicit, or the cast-list register for the role.
-    let candidates: string[];
+    // 3+4. Allocate + create: the uniqueness constraint IS the allocation
+    //    primitive (cor:agt:020:02) — a P2002 on workers_app_name_uniq maps
+    //    to WORKER_NAME_TAKEN; register mode advances past it.
+    const allocate = async (candidates: string[]): Promise<{ id: string; name: string } | null> => {
+      for (const candidate of candidates) {
+        try {
+          return await ctx.db.worker.create({
+            data: {
+              appId,
+              agentId: agent.id,
+              name: candidate,
+              role: workerRole,
+              promptOverride: override,
+              createdBy: ctx.userId ?? null,
+            },
+            select: { id: true, name: true },
+          });
+        } catch (e) {
+          if (isNameTaken(e)) {
+            if (!requestedName) continue;
+            throw nameTaken(candidate, appId);
+          }
+          throw e;
+        }
+      }
+      return null;
+    };
+
+    let created: { id: string; name: string } | null;
     if (requestedName) {
-      candidates = [requestedName];
+      // Explicit name: one attempt; the DB unique arbitrates atomically, so
+      // no register lock is needed (nothing register-borne is consumed).
+      created = await allocate([requestedName]);
+      if (!created) {
+        // Unreachable in practice (allocate throws WORKER_NAME_TAKEN for an
+        // explicit name) — kept for the type narrowing.
+        throw nameTaken(requestedName, appId);
+      }
     } else {
       if (!workerRole) {
         throw new GraphQLError(
@@ -552,52 +624,41 @@ export const workerMutations = {
           { extensions: { code: 'BAD_USER_INPUT' } },
         );
       }
-      candidates = await readNameRegister(ctx, appId, workerRole, teamAgentRef);
-      if (candidates.length === 0) {
+      // Register mode: locate the Team Agent, then read the register AND
+      // walk the allocation inside the register lock (#984 review, Codex
+      // P1), so a concurrent role-definition write cannot interleave with
+      // the read-then-mint — e.g. remove a name after this cast read it but
+      // before the mint recorded it as taken.
+      const teamAgent = await locateTeamAgent(ctx, appId, teamAgentRef);
+      if (!teamAgent.systemMemoryId) {
         throw new GraphQLError(
-          `The name register for role "${workerRole}" is empty — add names to the ${ROLES_BRANCH_PREFIX}${workerRole} node's data.names, or pass an explicit name.`,
-          { extensions: { code: 'WORKER_REGISTER_EXHAUSTED', role: workerRole } },
+          `Team Agent ${teamAgent.name} has no system memory, so it carries no cast list.`,
+          { extensions: { code: 'WORKER_ROLE_NOT_FOUND', role: workerRole } },
         );
       }
-    }
-
-    // 4. Allocate + create: the uniqueness constraint IS the allocation
-    //    primitive (cor:agt:020:02) — a P2002 on workers_app_name_uniq maps
-    //    to WORKER_NAME_TAKEN; register mode advances past it.
-    let created: { id: string; name: string } | null = null;
-    for (const candidate of candidates) {
-      try {
-        created = await ctx.db.worker.create({
-          data: {
-            appId,
-            agentId: agent.id,
-            name: candidate,
-            role: workerRole,
-            promptOverride: override,
-            createdBy: ctx.userId ?? null,
-          },
-          select: { id: true, name: true },
-        });
-        break;
-      } catch (e) {
-        if (isNameTaken(e)) {
-          if (!requestedName) continue;
-          throw nameTaken(candidate, appId);
+      created = await withRegisterLock(ctx, teamAgent.systemMemoryId, async () => {
+        const candidates = await readNameRegister(ctx, teamAgent, workerRole);
+        if (candidates.length === 0) {
+          throw new GraphQLError(
+            `The name register for role "${workerRole}" is empty — add names to the ${ROLES_BRANCH_PREFIX}${workerRole} node's data.names, or pass an explicit name.`,
+            { extensions: { code: 'WORKER_REGISTER_EXHAUSTED', role: workerRole } },
+          );
         }
-        throw e;
-      }
-    }
-    if (!created) {
-      throw new GraphQLError(
-        `Every name in the register for role "${workerRole}" is taken (${candidates.length} tried). Add names to the ${ROLES_BRANCH_PREFIX}${workerRole} node's data.names, or pass an explicit name.`,
-        {
-          extensions: {
-            code: 'WORKER_REGISTER_EXHAUSTED',
-            role: workerRole,
-            namesTried: candidates.length,
-          },
-        },
-      );
+        const row = await allocate(candidates);
+        if (!row) {
+          throw new GraphQLError(
+            `Every name in the register for role "${workerRole}" is taken (${candidates.length} tried). Add names to the ${ROLES_BRANCH_PREFIX}${workerRole} node's data.names, or pass an explicit name.`,
+            {
+              extensions: {
+                code: 'WORKER_REGISTER_EXHAUSTED',
+                role: workerRole,
+                namesTried: candidates.length,
+              },
+            },
+          );
+        }
+        return row;
+      });
     }
 
     // 5. Working memory — best-effort; a failure leaves memoryId null.

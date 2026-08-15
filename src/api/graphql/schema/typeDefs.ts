@@ -6355,7 +6355,10 @@ export const typeDefs = `#graphql
     and the write runs the register invariants — an added name may not appear
     in another of this App's registers (TEAM_ROLE_NAME_DUPLICATE) and must
     fall inside nameRange when one is set (TEAM_ROLE_NAME_OUT_OF_RANGE,
-    override with allowOutOfRange). Refuses an existing role
+    override with allowOutOfRange; a supplied nameRange must parse as an
+    initial-letter range like 'F-J'). Register checks and the write run in
+    one App-scoped critical section, serialized with register-mode casting.
+    Refuses an existing role
     (TEAM_ROLE_EXISTS — updateTeamRole is the edit path). Authorization is
     the Team Agent's definition-edit gate: whoever may write the agent's
     system memory through the generic node surface may write roles — the

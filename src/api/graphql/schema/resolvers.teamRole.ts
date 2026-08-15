@@ -25,6 +25,7 @@ import {
   locateTeamAgent,
   parseNameRegister,
   requireWorkerReadAccess,
+  withRegisterLock,
   ROLES_BRANCH_PREFIX,
 } from './resolvers.worker.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
@@ -381,6 +382,16 @@ async function writeTeamRole(
   mode: 'create' | 'update',
 ) {
   const role = normalizeRoleSlug(args.role);
+  // A caller-supplied nameRange must PARSE, or the range validation it
+  // promises silently never runs (#984 review, Copilot). Legacy malformed
+  // STORED ranges (hand-authored before this surface) stay tolerated when the
+  // argument is omitted — checkRegisterInvariants skips an unparseable one.
+  if (typeof args.nameRange === 'string' && !parseNameRange(args.nameRange)) {
+    throw new GraphQLError(
+      `nameRange must be an initial-letter range like "F-J" (got ${JSON.stringify(args.nameRange)}). Pass null to clear it.`,
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
   const app = await resolveApp(ctx, args.appRef);
   if (app.deletedAt) {
     throw new GraphQLError(`App not found: ${args.appRef}`, {
@@ -392,7 +403,23 @@ async function writeTeamRole(
       extensions: { code: 'APP_UNINSTALLED', appId: app.id },
     });
   }
-  const teamAgent = await locateTeamAgent(ctx, app.id, args.teamAgentRef);
+  // Locate the Team Agent, HOLDING any locator error until an App-scoped
+  // gate has passed (#984 review, Copilot): TEAM_AGENT_NOT_FOUND /
+  // _AMBIGUOUS / _NOT_INSTALLED disclose the App's installed-agent topology
+  // (candidate names and URNs), and on this failure path there is no system
+  // memory to run the real write gate against — so the errors are shown only
+  // to the audience the teamRoles READ already grants them to
+  // (requireWorkerReadAccess); everyone else gets FORBIDDEN. On the success
+  // path the memory-write gate below remains the sole authority, so a
+  // generic-memory writer who is not an App participant (a cross-org
+  // subscription CONTRIBUTOR) is unaffected.
+  let teamAgent: Awaited<ReturnType<typeof locateTeamAgent>>;
+  try {
+    teamAgent = await locateTeamAgent(ctx, app.id, args.teamAgentRef);
+  } catch (e) {
+    await requireWorkerReadAccess(ctx, app);
+    throw e;
+  }
   if (!teamAgent.systemMemoryId) {
     throw new GraphQLError(
       `Team Agent ${teamAgent.name} has no system memory to hold role definitions.`,
@@ -406,96 +433,105 @@ async function writeTeamRole(
   await requireMemoryWriteAccess(ctx, teamAgent.systemMemoryId);
 
   const loc = `${ROLES_BRANCH_PREFIX}${role}`;
-  const allNodes = await loadRoleNodes(ctx, teamAgent.systemMemoryId);
-  const existing = allNodes.find((n) => n.loc === loc) ?? null;
+  const systemMemoryId = teamAgent.systemMemoryId;
 
-  if (mode === 'create' && existing) {
-    throw new GraphQLError(
-      `Role "${role}" already exists in ${teamAgent.name}'s system memory — updateTeamRole is the edit path.`,
-      { extensions: { code: 'TEAM_ROLE_EXISTS', role, nodeId: existing.id } },
-    );
-  }
-  if (mode === 'update' && !existing) {
-    const available = allNodes.map((n) => n.loc.slice(ROLES_BRANCH_PREFIX.length));
-    throw new GraphQLError(
-      `Role "${role}" is not defined in ${teamAgent.name}'s system memory.${available.length ? ` Available roles: ${available.join(', ')}.` : ''} createTeamRole is the create path.`,
-      { extensions: { code: 'WORKER_ROLE_NOT_FOUND', role, availableRoles: available } },
-    );
-  }
+  // Everything from the invariant reads through the node write runs inside
+  // the register lock (#984 review, Codex P1): without it, two concurrent
+  // role writes can each observe a name absent and both persist it, and a
+  // register-mode cast can interleave with a removal. castWorker's register
+  // mode takes the same lock, so cast-vs-edit serializes too.
+  return withRegisterLock(ctx, systemMemoryId, async () => {
+    const allNodes = await loadRoleNodes(ctx, systemMemoryId);
+    const existing = allNodes.find((n) => n.loc === loc) ?? null;
 
-  const storedData = existing?.data ?? null;
-  const storedNames = parseNameRegister(storedData?.names);
+    if (mode === 'create' && existing) {
+      throw new GraphQLError(
+        `Role "${role}" already exists in ${teamAgent.name}'s system memory — updateTeamRole is the edit path.`,
+        { extensions: { code: 'TEAM_ROLE_EXISTS', role, nodeId: existing.id } },
+      );
+    }
+    if (mode === 'update' && !existing) {
+      const available = allNodes.map((n) => n.loc.slice(ROLES_BRANCH_PREFIX.length));
+      throw new GraphQLError(
+        `Role "${role}" is not defined in ${teamAgent.name}'s system memory.${available.length ? ` Available roles: ${available.join(', ')}.` : ''} createTeamRole is the create path.`,
+        { extensions: { code: 'WORKER_ROLE_NOT_FOUND', role, availableRoles: available } },
+      );
+    }
 
-  // Omitted preserves (the omitted-vs-null contract): an update that sends no
-  // `names` edits conventions without touching the register.
-  const submitted =
-    args.names === undefined || args.names === null
-      ? storedNames
-      : parseNameRegister(args.names);
+    const storedData = existing?.data ?? null;
+    const storedNames = parseNameRegister(storedData?.names);
 
-  // The effective range for validating ADDED names: the one being written,
-  // else the stored one (explicit null clears — and with it, the check).
-  const effectiveRange =
-    args.nameRange === undefined
-      ? stringKey(storedData, 'nameRange')
-      : (args.nameRange ?? null);
+    // Omitted preserves (the omitted-vs-null contract): an update that sends
+    // no `names` edits conventions without touching the register.
+    const submitted =
+      args.names === undefined || args.names === null
+        ? storedNames
+        : parseNameRegister(args.names);
 
-  checkRegisterInvariants({
-    role,
-    submitted,
-    stored: storedNames,
-    rosterByName: await loadRosterByName(ctx, app.id),
-    otherRegisters: indexOtherRegisters(allNodes, loc),
-    nameRange: effectiveRange,
-    allowOutOfRange: args.allowOutOfRange === true,
-  });
+    // The effective range for validating ADDED names: the one being written,
+    // else the stored one (explicit null clears — and with it, the check).
+    const effectiveRange =
+      args.nameRange === undefined
+        ? stringKey(storedData, 'nameRange')
+        : (args.nameRange ?? null);
 
-  // Merge: replace only the keys this surface owns; every sibling `data` key
-  // survives (the hadron-cli#410 clobber hazard, unreachable through this
-  // surface by construction). Explicit null deletes the convention key.
-  const mergedData: Record<string, unknown> = { ...(storedData ?? {}) };
-  mergedData.names = submitted;
-  if (args.nameRange !== undefined) {
-    if (args.nameRange === null) delete mergedData.nameRange;
-    else mergedData.nameRange = args.nameRange;
-  }
-  if (args.nameConvention !== undefined) {
-    if (args.nameConvention === null) delete mergedData.nameConvention;
-    else mergedData.nameConvention = args.nameConvention;
-  }
-
-  await writeNodeCore(
-    {
-      memoryId: teamAgent.systemMemoryId,
-      loc,
-      // Node name defaults to the role slug; description is optional and
-      // preserve-on-omit via the shared seam's D4 semantics.
-      ...(mode === 'create' ? { name: role } : {}),
-      ...(args.description !== undefined && args.description !== null
-        ? { description: args.description }
-        : {}),
-      data: mergedData,
-      reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
-    },
-    ctx,
-    mode,
-    mode === 'update' ? { targetNodeId: existing!.id } : undefined,
-  );
-
-  // Return the fresh projection through the same builder the read uses.
-  const nodes = await loadRoleNodes(ctx, teamAgent.systemMemoryId);
-  const node = nodes.find((n) => n.loc === loc);
-  if (!node) {
-    throw new GraphQLError(`Role "${role}" write did not persist.`, {
-      extensions: { code: 'INTERNAL_SERVER_ERROR' },
+    checkRegisterInvariants({
+      role,
+      submitted,
+      stored: storedNames,
+      rosterByName: await loadRosterByName(ctx, app.id),
+      otherRegisters: indexOtherRegisters(allNodes, loc),
+      nameRange: effectiveRange,
+      allowOutOfRange: args.allowOutOfRange === true,
     });
-  }
-  return buildTeamRole(
-    ctx,
-    node,
-    await loadRosterByName(ctx, app.id),
-    await loadRoleAgentIndex(ctx, app.id),
-  );
+
+    // Merge: replace only the keys this surface owns; every sibling `data`
+    // key survives (the hadron-cli#410 clobber hazard, unreachable through
+    // this surface by construction). Explicit null deletes a convention key.
+    const mergedData: Record<string, unknown> = { ...(storedData ?? {}) };
+    mergedData.names = submitted;
+    if (args.nameRange !== undefined) {
+      if (args.nameRange === null) delete mergedData.nameRange;
+      else mergedData.nameRange = args.nameRange;
+    }
+    if (args.nameConvention !== undefined) {
+      if (args.nameConvention === null) delete mergedData.nameConvention;
+      else mergedData.nameConvention = args.nameConvention;
+    }
+
+    await writeNodeCore(
+      {
+        memoryId: systemMemoryId,
+        loc,
+        // Node name defaults to the role slug; description is optional and
+        // preserve-on-omit via the shared seam's D4 semantics.
+        ...(mode === 'create' ? { name: role } : {}),
+        ...(args.description !== undefined && args.description !== null
+          ? { description: args.description }
+          : {}),
+        data: mergedData,
+        reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
+      },
+      ctx,
+      mode,
+      mode === 'update' ? { targetNodeId: existing!.id } : undefined,
+    );
+
+    // Return the fresh projection through the same builder the read uses.
+    const nodes = await loadRoleNodes(ctx, systemMemoryId);
+    const node = nodes.find((n) => n.loc === loc);
+    if (!node) {
+      throw new GraphQLError(`Role "${role}" write did not persist.`, {
+        extensions: { code: 'INTERNAL_SERVER_ERROR' },
+      });
+    }
+    return buildTeamRole(
+      ctx,
+      node,
+      await loadRosterByName(ctx, app.id),
+      await loadRoleAgentIndex(ctx, app.id),
+    );
+  });
 }
 
 export const teamRoleQueries = {
