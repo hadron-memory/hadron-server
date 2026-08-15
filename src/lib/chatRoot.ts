@@ -50,6 +50,15 @@ import {
 } from './nodeCrypto.js';
 import { lockPathForCreateUnder } from './nodeSubtreeLock.js';
 
+/**
+ * The nodeTypes that ARE messages, and therefore occupy a seq the allocator
+ * must clear. Team chat writes `chat-message`; the chatbot path writes
+ * `record`. Deliberately excludes `abstract` — the auto-summary shares the
+ * `:messages:` prefix and carries a seq, but is not a message and must not
+ * enter the counter.
+ */
+const MESSAGE_NODE_TYPES: string[] = ['chat-message', 'record'];
+
 /** The chat-root node a write is serialized against. */
 export interface ChatRootRef {
   id: string;
@@ -134,13 +143,18 @@ export async function withChatRootLock<T>(
  *   reused — monotonicity is what keeps a citation to seq 12 meaning one thing
  *   forever, and `cor:agt:020:04` leans on it for the delete/revive cycle. This
  *   is also why the counter deliberately does not decrement on delete.
- * - **Every nodeType counts**, not just the canonical one. Callers disagree on
- *   it (team chat writes `chat-message`, the chatbot path writes `record`), and
- *   an off-road node parked under the messages container is invisible to the
- *   transcript but still occupies a number. Ranging over everything can only
- *   OVER-estimate, which costs a gap — permitted, and already produced by
- *   deletes. Under-estimating costs a duplicate, which breaks ordering, makes a
- *   `replyToSeq` ambiguous, and makes a `sinceSeq` watermark non-monotonic.
+ * - **Only MESSAGE nodeTypes count** — `chat-message` (team chat) and `record`
+ *   (the chatbot path). An allowlist, not a catch-all, because over-estimating
+ *   is NOT free here: the value written back becomes `messageCount`, which is a
+ *   routing operand, not just an allocator (it drives the summarization trigger
+ *   and the `chat.message_count` edge condition — see this module's header).
+ *   The concrete offender is the auto-summary: `saveChatSummary` writes an
+ *   `abstract` node under the SAME `:messages:` prefix carrying
+ *   `seq = messageCount + 1`, and deliberately leaves the counter alone because
+ *   a summary is not a message. Counting it would absorb its slot into the
+ *   counter on the next post, inflating `totalTurns` and shifting every
+ *   subsequent summarization and routing decision for that chat (PR #998
+ *   review, Codex P1).
  *
  * Runs on `tx`, inside the chat-root lock, so it cannot race an insert.
  */
@@ -154,11 +168,12 @@ async function highWaterSeq(
     where: {
       memoryId: chat.memoryId,
       loc: { startsWith: `${chat.loc}:messages:` },
+      nodeType: { in: MESSAGE_NODE_TYPES },
       seq: { not: null },
     },
     _max: { seq: true },
   });
-  return Math.max(counter, top._max.seq ?? 0);
+  return Math.max(counter, top._max?.seq ?? 0);
 }
 
 /**

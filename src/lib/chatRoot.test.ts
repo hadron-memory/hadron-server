@@ -248,13 +248,32 @@ describe('#992 — allocation is self-healing against direct message writes', ()
     expect(next.seq).toBe(2);
   });
 
-  it('counts an off-road nodeType under the messages container', async () => {
-    // Invisible to the transcript (the reader filters nodeType), but it still
-    // occupies a number — over-estimating costs a gap, under-estimating costs
-    // a duplicate.
+  it('does NOT count an auto-summary — it would inflate the routing counter', async () => {
+    // saveChatSummary writes an `abstract` node under the same :messages:
+    // prefix at seq = messageCount + 1, and deliberately leaves the counter
+    // alone because a summary is not a message. Counting it would absorb that
+    // slot into messageCount on the next post, and messageCount drives the
+    // summarization trigger and the chat.message_count edge condition — so the
+    // drift changes routing, not just numbering (PR #998 review, Codex P1).
+    await appendChatMessage(db, chat, memEnc, insertMessage('a'));
+    await directMessage(2, 'abstract'); // the summary's slot
+    const next = await appendChatMessage(db, chat, memEnc, insertMessage('b'));
+    expect(next.seq).toBe(2);
+    expect((await storedChatData()).messageCount).toBe(2);
+  });
+
+  it('does not count an off-road non-message nodeType', async () => {
+    // Same rule, generalized: only actual message types occupy a number.
     await directMessage(9, 'note');
     const next = await appendChatMessage(db, chat, memEnc, insertMessage('z'));
-    expect(next.seq).toBe(10);
+    expect(next.seq).toBe(1);
+  });
+
+  it('counts BOTH message nodeTypes — team chat and the chatbot path', async () => {
+    await directMessage(4, 'chat-message');
+    await directMessage(7, 'record');
+    const next = await appendChatMessage(db, chat, memEnc, insertMessage('z'));
+    expect(next.seq).toBe(8);
   });
 
   it('ignores a node OUTSIDE the messages container', async () => {
