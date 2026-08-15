@@ -1,4 +1,4 @@
--- #994 — Worker.slug: the URN atom for `hrn:worker:<root>:<app-slug>:<slug>`.
+-- #991 — Worker.slug: the URN atom for `hrn:worker:<root>:<app-slug>:<slug>`.
 --
 -- The slug is DERIVED from `Worker.name` and iterated to uniqueness within the
 -- App. It exists because a worker's NAME cannot be the URN atom: cor:agt:020:02

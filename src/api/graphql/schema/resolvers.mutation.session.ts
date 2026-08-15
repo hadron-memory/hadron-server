@@ -185,7 +185,7 @@ export const sessionMutations = {
       let workerId: string | undefined;
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
-        // #994: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
+        // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
         // URN, via the shared ref helper. Identity only — every gate below
         // (retirement, App match, participation, WORKER_TAKEN) still runs on
         // the RESOLVED row, so the URN buys addressability, never access.

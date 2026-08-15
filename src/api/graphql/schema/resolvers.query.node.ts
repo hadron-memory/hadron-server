@@ -445,7 +445,7 @@ export const nodeQueries = {
           };
         }
         case 'worker': {
-          // #994: hrn:worker:<root>:<app-slug>:<worker-slug>.
+          // #991: hrn:worker:<root>:<app-slug>:<worker-slug>.
           let id: string;
           try {
             ({ id } = await resolveWorkerRef(ctx.db, baseUrn));

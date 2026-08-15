@@ -207,7 +207,7 @@ type WorkerRow = {
 
 /**
  * Resolve a workerRef to its row — a Worker id or an
- * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#994), via the shared
+ * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991), via the shared
  * `resolve<Entity>Ref` helper (cor:api:140) so the ref grammar has ONE
  * definition rather than a per-resolver copy that drifts.
  *
@@ -285,7 +285,7 @@ function isNameTaken(e: unknown): boolean {
 
 /**
  * True when the refusal is the per-App SLUG unique (`workers_app_slug_uniq`,
- * #994) — a lost race between two casts that derived the same base slug.
+ * #991) — a lost race between two casts that derived the same base slug.
  *
  * Checked BEFORE `isNameTaken`, whose pattern is loose enough (`.../name/i`)
  * to also match a slug target: the slug column is derived from the name, so
@@ -451,7 +451,7 @@ async function provisionWorkerMemory(
 ): Promise<string | null> {
   try {
     const appSlug = normalizeUrnForLookup(app.urn).split(':').pop() ?? app.urn;
-    // #994: the STORED slug, not a re-derivation. Re-deriving would throw for a
+    // #991: the STORED slug, not a re-derivation. Re-deriving would throw for a
     // name that slugifies to nothing (losing the working memory for a legally
     // cast worker), and could drift from the URN atom if the derivation ever
     // changes.
@@ -679,7 +679,7 @@ export const workerMutations = {
     const NAME_TAKEN = Symbol('name-taken');
 
     /**
-     * One name's cast attempt. Mints the #994 URN atom from the name being
+     * One name's cast attempt. Mints the #991 URN atom from the name being
      * allocated: `nextFreeWorkerSlug` is advisory — `workers_app_slug_uniq`
      * arbitrates — so a lost race retries against a freshly-read taken set.
      * Bounded: a retry storm on one base slug is not a real workload, and
@@ -887,7 +887,7 @@ export const workerMutations = {
 export const workerQueries = {
   /**
    * Read one worker (cor:api:120 find-one). The ref is a Worker id or an
-   * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#994).
+   * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991).
    */
   worker: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
     const worker = await resolveWorkerRefRow(ctx, ref);
@@ -1060,7 +1060,7 @@ async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boole
 export const workerFieldResolvers = {
   Worker: {
     /**
-     * The worker's URN, `hrn:worker:<root>:<app-slug>:<slug>` (#994) — COMPUTED
+     * The worker's URN, `hrn:worker:<root>:<app-slug>:<slug>` (#991) — COMPUTED
      * from the App's URN plus the stored `slug`, never a column, so a worker is
      * addressable context-free (`workerRef`, `resolveUrn`, a portal link)
      * without the caller holding its cuid.

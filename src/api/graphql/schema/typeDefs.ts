@@ -1930,14 +1930,14 @@ export const typeDefs = `#graphql
     name: String!
     """
     The URN atom, derived from the name at cast time and permanent thereafter
-    (#994). Lowercased, sanitized to the URN slug charset, and iterated
+    (#991). Lowercased, sanitized to the URN slug charset, and iterated
     ('iris', 'iris-2', …) until free within the App — so deriving it NEVER
     refuses a cast, and the name collision stays the only allocation failure a
     caller sees (cor:agt:020:02).
     """
     slug: String!
     """
-    hrn:worker:<root>:<app-slug>:<slug> (#994) — computed from the App's URN
+    hrn:worker:<root>:<app-slug>:<slug> (#991) — computed from the App's URN
     plus \`slug\`, not stored. Accepted anywhere a workerRef is taken, and
     resolvable via Query.resolveUrn, so a client can address a worker without
     holding its id. Null only when the App's URN predates the flat grammar-v2

@@ -1,4 +1,4 @@
-// Worker slug minting — #994 (cor:dmo:050:11, cor:agt:020:02).
+// Worker slug minting — #991 (cor:dmo:050:11, cor:agt:020:02).
 //
 // A Worker's URN is `hrn:worker:<root>:<app-slug>:<slug>`, and `slug` is a
 // stored column DERIVED from the worker's name at cast time. The name itself

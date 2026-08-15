@@ -1,6 +1,6 @@
 /**
  * resolveWorkerRef — convert an entity-reference string to a definite Worker ID
- * (#994). A Worker is addressable two ways:
+ * (#991). A Worker is addressable two ways:
  *   - a bare Worker id (the `Worker.id` column — a cuid), or
  *   - a grammar-v2 URN `hrn:worker:<root>:<app-slug>:<worker-slug>`.
  *

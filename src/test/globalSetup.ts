@@ -149,7 +149,7 @@ export async function setup() {
       ON workers (app_id, lower(name));
   `);
 
-  // #994's second worker unique — workers_app_slug_uniq on (app_id, slug), the
+  // #991's second worker unique — workers_app_slug_uniq on (app_id, slug), the
   // URN atom — is absent here on purpose: it is a plain column pair that Prisma
   // models in schema.prisma's @@unique, so `db push` creates it. Only the
   // inexpressible ones (functional/partial) are re-declared in this file.

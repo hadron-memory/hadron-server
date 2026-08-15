@@ -41,7 +41,7 @@ export const sessionQueries = {
       const scopeFilter = await sessionScopeFilter(ctx);
       // #974 / cor:agt:020:03: the "taken right now" / "last driven by" reads —
       // a worker's sessions, newest first, inside the caller's ordinary session
-      // scope. #994 widened the ref to a Worker id OR an
+      // scope. #991 widened the ref to a Worker id OR an
       // hrn:worker:<root>:<app-slug>:<worker-slug> URN.
       //
       // This stays a FILTER, not a lookup: an unresolvable ref narrows to

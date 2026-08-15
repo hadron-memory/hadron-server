@@ -4947,7 +4947,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           ctx,
         );
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
-        // #994: emit the URN alongside the id. It is the ref a human can read
+        // #991: emit the URN alongside the id. It is the ref a human can read
         // back later — the cast is a one-time mint, and before the URN existed
         // an MCP-only client that did not record the cuid had no way back to
         // the worker (hadron-cli#443).

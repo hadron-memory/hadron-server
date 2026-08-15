@@ -98,7 +98,7 @@ export class AppRunNotFoundError extends Error {
 
 /**
  * Surfaced by `resolveWorkerRef` when the inbound reference (a Worker ID or an
- * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN, #994) does not name a
+ * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN, #991) does not name a
  * worker — or when the URN is structurally malformed / its App doesn't resolve.
  */
 export class WorkerNotFoundError extends Error {

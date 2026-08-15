@@ -246,7 +246,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS workers_app_name_uniq
 -- migrated databases.
 DROP INDEX IF EXISTS workers_app_mention_token_uniq;
 
--- #994 added a SECOND worker unique — `workers_app_slug_uniq` on (app_id, slug),
+-- #991 added a SECOND worker unique — `workers_app_slug_uniq` on (app_id, slug),
 -- the URN atom. It is deliberately NOT declared here: it is a plain column pair,
 -- so Prisma CAN model it, and it lives in schema.prisma's `@@unique`. Declaring
 -- it here too would make every `db push` see it as drift and drop it.

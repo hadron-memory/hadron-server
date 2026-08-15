@@ -3113,7 +3113,7 @@ model Worker {
   agentId        String    @map("agent_id")
   /// The worker's name ("Iris") — the identity every surface renders.
   name           String
-  /// #994 — the URN atom: `hrn:worker:<root>:<app-slug>:<slug>`. DERIVED from
+  /// #991 — the URN atom: `hrn:worker:<root>:<app-slug>:<slug>`. DERIVED from
   /// `name` at cast time (`deriveSlugFromName`, then `-2`/`-3`… until free in
   /// the App) and permanent thereafter — there is no rename mutation, and the
   /// name it was derived from is itself permanent (cor:agt:020:02).

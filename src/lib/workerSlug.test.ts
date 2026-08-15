@@ -1,4 +1,4 @@
-// #994 — worker slug derivation. Unit-level: the pure helpers plus the
+// #991 — worker slug derivation. Unit-level: the pure helpers plus the
 // iteration against a stubbed taken-set. The DB-backed race path and the
 // migration-backfill parity are covered in resolvers.workerUrn.test.ts.
 import { describe, it, expect } from 'vitest';

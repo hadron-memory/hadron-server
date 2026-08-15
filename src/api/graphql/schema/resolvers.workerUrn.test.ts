@@ -1,5 +1,5 @@
 /**
- * #994 — the Worker URN: `hrn:worker:<root>:<app-slug>:<slug>`.
+ * #991 — the Worker URN: `hrn:worker:<root>:<app-slug>:<slug>`.
  *
  * The contract lines under test:
  *   - the slug is DERIVED at cast time and never refuses a cast (it iterates),
@@ -86,7 +86,7 @@ beforeEach(async () => {
 const cast = (name: string, c: Context = ctx(admin.id)) =>
   M.castWorker({}, { appRef: app.id, agentRef: roleAgent.id, name }, c);
 
-describe('#994 — slug minting', () => {
+describe('#991 — slug minting', () => {
   it('derives the slug from the name at cast time', async () => {
     const worker = await cast('Iris');
     expect(worker.slug).toBe('iris');
@@ -142,7 +142,7 @@ describe('#994 — slug minting', () => {
   });
 });
 
-describe('#994 — the URN as a ref', () => {
+describe('#991 — the URN as a ref', () => {
   it('resolves through resolveWorkerRef, equivalently to the PK', async () => {
     const w = await cast('Iris');
     const urn = await W.urn(w, {}, ctx(admin.id));
@@ -182,7 +182,7 @@ describe('#994 — the URN as a ref', () => {
   });
 });
 
-describe('#994 — resolveUrn dispatch', () => {
+describe('#991 — resolveUrn dispatch', () => {
   it('resolves a worker URN for a caller who may read the App staff', async () => {
     const w = await cast('Iris');
     const urn = await W.urn(w, {}, ctx(admin.id));
@@ -210,7 +210,7 @@ describe('#994 — resolveUrn dispatch', () => {
   });
 });
 
-describe('#994 — migration backfill parity', () => {
+describe('#991 — migration backfill parity', () => {
   // The migration derives slugs in SQL; the runtime derives them in JS. They
   // must agree, or a migrated row gets a different URN than the one the same
   // name would mint today. Runs the migration's EXACT base expression against
