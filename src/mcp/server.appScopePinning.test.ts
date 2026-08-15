@@ -234,6 +234,19 @@ describe('#1005 — App scope is recoverable from the session after a reconnect'
     expect(recorded).toContain('Recorded:');
   });
 
+  it('hadron_team_work_items recovers the App from its optional session filter', async () => {
+    // The fourth recovery site (Copilot on PR #1007) — uncovered until now.
+    const sessionId = await startThenReconnect();
+    const after = coldServer('after');
+
+    expect(await after.callToolText('hadron_team_work_items', {})).toContain(
+      'multiple_apps_resolved',
+    );
+    const recovered = await after.callToolText('hadron_team_work_items', { session: sessionId });
+    expect(recovered).not.toContain('multiple_apps_resolved');
+    expect(recovered).not.toContain('No App context');
+  });
+
   it("does NOT adopt another user's session", async () => {
     // The gate that keeps this from being an App-scope oracle: a session id is
     // not a capability, so naming someone else's must change nothing.
@@ -250,11 +263,19 @@ describe('#1005 — App scope is recoverable from the session after a reconnect'
     expect(out).toContain('multiple_apps_resolved');
   });
 
-  it('does NOT adopt an App the caller has lost membership in (#475)', async () => {
+  it('does NOT adopt an App the caller has lost PARTICIPATION in (#475)', async () => {
     // The session row records where the session was attributed, which outlives
-    // the membership that authorized it. Membership is re-checked, not trusted.
+    // the authorization that permitted it. Participation is re-checked, not
+    // trusted from the row.
+    //
+    // Both grants have to go: `isAppParticipant` admits an AppMember OR an org
+    // CONTRIBUTOR+, so dropping the AppMember row alone leaves this fixture
+    // user a participant through the org. That is the shared predicate's
+    // documented semantics — the same one that let them start the session — not
+    // a hole in the recovery gate.
     const sessionId = await startThenReconnect();
     await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: user.id } } });
+    await db.orgMember.deleteMany({ where: { organizationId: org.id, userId: user.id } });
 
     const after = coldServer('after');
     const out = await after.callToolText('hadron_team_chat_read', {
@@ -274,6 +295,85 @@ describe('#1005 — App scope is recoverable from the session after a reconnect'
       session: sessionId,
     });
     expect(out).toContain('multiple_apps_resolved');
+  });
+
+  it('recovers for an org CONTRIBUTOR with no AppMember row (the shared participant gate)', async () => {
+    // PR #1007 review, Codex P2 + Copilot: `isAppParticipant` admits an
+    // AppMember at any role, an org CONTRIBUTOR+, OR the owner of a user-owned
+    // App. A recovery gate keyed on AppMember alone would let this caller start
+    // a session and pin an App, then refuse to restore it after a reconnect —
+    // a gate drifting from the one beside it.
+    const contributor = await db.user.create({
+      data: { id: generateId(), githubId: 97612, githubUsername: `mcp-contrib-${generateId().slice(-6)}`, roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: contributor.id, role: 'CONTRIBUTOR' },
+    });
+    // Multi-App WITHOUT any AppMember row: two Apps in an org they contribute
+    // to. The App set is ambiguous, so scope must come from the session.
+    const authOf = (): AuthContext =>
+      ({ userId: contributor.id, roles: ['READER'], clientId: `user:${contributor.id}` }) as AuthContext;
+    const mk = () =>
+      createTestableMcpServer(authOf(), {
+        sessionId: `mcp-contrib-${generateId()}`,
+        ...MULTI_APP,
+      });
+
+    const started = await mk().callToolText('hadron_start_session', {
+      description: 'contributor work',
+      workerRef: worker.id,
+    });
+    expect(started).toContain('Session started:');
+    const sessionId = started.match(/Session started: (\S+)/)?.[1];
+
+    const after = mk();
+    expect(await after.callToolText('hadron_team_chat_read', { sinceSeq: 0 })).toContain(
+      'multiple_apps_resolved',
+    );
+    const recovered = await after.callToolText('hadron_team_chat_read', {
+      sinceSeq: 0,
+      session: sessionId,
+    });
+    expect(recovered).not.toContain('multiple_apps_resolved');
+    expect(recovered).not.toContain('No App context');
+  });
+
+  it('recovers for the OWNER of a user-owned App with no AppMember row', async () => {
+    // The other non-AppMember participant path. A user-owned App admits its
+    // owner and nobody else (spec 047).
+    const owner = await db.user.create({
+      data: { id: generateId(), githubId: 97613, githubUsername: `mcp-owner-${generateId().slice(-6)}`, roles: ['READER'] },
+    });
+    const soloAgent = await db.agent.create({
+      data: { id: generateId(), ownerUserId: owner.id, urn: `solo-${generateId().slice(-8)}`, name: 'Solo' },
+    });
+    const soloApp = await db.app.create({
+      data: { id: generateId(), ownerUserId: owner.id, name: 'Solo App', urn: `solo-app-${generateId().slice(-8)}` },
+    });
+    await db.appAgent.create({ data: { appId: soloApp.id, agentId: soloAgent.id } });
+    const soloWorker = await db.worker.create({
+      data: { appId: soloApp.id, agentId: soloAgent.id, name: 'Solo Worker', slug: 'solo-worker' },
+    });
+
+    const authOf = (): AuthContext =>
+      ({ userId: owner.id, roles: ['READER'], clientId: `user:${owner.id}` }) as AuthContext;
+    const mk = () =>
+      createTestableMcpServer(authOf(), { sessionId: `mcp-owner-${generateId()}`, ...MULTI_APP });
+
+    const started = await mk().callToolText('hadron_start_session', {
+      description: 'owner work',
+      workerRef: soloWorker.id,
+    });
+    expect(started).toContain('Session started:');
+    const sessionId = started.match(/Session started: (\S+)/)?.[1];
+
+    const after = mk();
+    const recovered = await after.callToolText('hadron_team_chat_read', {
+      sinceSeq: 0,
+      session: sessionId,
+    });
+    expect(recovered).not.toContain('multiple_apps_resolved');
+    expect(recovered).not.toContain('No App context');
   });
 
   it('an explicit app argument still wins over the session hint', async () => {

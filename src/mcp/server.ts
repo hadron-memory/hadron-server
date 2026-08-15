@@ -115,6 +115,10 @@ import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
 import { HADRON_SERVER_VERSION, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+// #1005: the SHARED App-participation predicate (#943) — reused here so
+// reconnect recovery admits exactly whom startSession admitted, rather than a
+// narrower member-row copy that would drift from it.
+import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 
@@ -949,13 +953,32 @@ export function createMcpServerInstance(
    * started it. So when a tool is handed one, resolve the App from it rather
    * than declaring the user's App set ambiguous.
    *
-   * Gated, not inferred: the session must be the CALLER'S OWN (`session.userId
-   * === auth.userId` — an App-key-created session has a null userId and never
-   * matches), and the caller must still hold an active `AppMember` row on a
-   * live App. So this can only re-establish scope the caller could have set by
-   * hand with `hadron_set_active_app`; it never widens reach. A no-op when App
-   * scope already exists, when there is no session argument, or when any gate
-   * fails — the caller then falls through to `requireAppScope`'s normal error.
+   * Gated, not inferred, on three things:
+   *
+   *   1. the session is the CALLER'S OWN (`session.userId === auth.userId` — an
+   *      App-key-created session has a null userId and never matches), so a
+   *      session id is not a capability someone else can quote;
+   *   2. the App is still live (not soft-deleted, not uninstalled — the same
+   *      lifecycle filter `resolveUserApps` applies);
+   *   3. the caller is STILL a participant, re-checked through
+   *      `isAppParticipant` — the SAME predicate `startSession` used to admit
+   *      them (#943). Re-checked rather than trusted from the session row,
+   *      because the row records where the session was attributed and outlives
+   *      the authorization that permitted it (#475 — revoked membership must
+   *      not authorize).
+   *
+   * Gate 3 is the shared predicate rather than a direct `AppMember` lookup on
+   * purpose (PR #1007 review, Codex + Copilot): participation also admits an
+   * org CONTRIBUTOR+ and the owner of a user-owned App, so a bespoke
+   * member-row check would let those callers start a session and pin an App,
+   * then silently refuse to restore it after a reconnect — a gate that drifts
+   * from the one beside it, which is the failure AGENTS.md's first
+   * authorization invariant names.
+   *
+   * So this can only re-establish scope the caller could have set by hand with
+   * `hadron_set_active_app`; it never widens reach. A no-op when App scope
+   * already exists, when there is no session argument, or when any gate fails —
+   * the caller then falls through to `requireAppScope`'s normal error.
    */
   async function adoptAppFromSession(sessionRef?: string | null): Promise<void> {
     if (auth.appId || !auth.userId || !sessionRef) return;
@@ -966,22 +989,28 @@ export function createMcpServerInstance(
     });
     if (!session?.appId || session.userId !== auth.userId) return;
 
-    // Membership is re-checked rather than trusted from the session row: the
-    // row records where the session was attributed, which can outlive the
-    // membership that authorized it (#475 — revoked membership must not
-    // authorize). The App lifecycle filter matches resolveUserApps, so a
-    // soft-deleted or uninstalled App can't be adopted either.
-    const member = await db.appMember.findFirst({
-      where: {
-        appId: session.appId,
-        userId: auth.userId,
-        app: { is: { deletedAt: null, uninstalledAt: null } },
-      },
-      select: { app: { select: { id: true, organizationId: true } } },
+    const app = await db.app.findFirst({
+      where: { id: session.appId, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
     });
-    if (!member) return;
+    if (!app) return;
 
-    pinActiveApp(member.app.id, member.app.organizationId, 'session');
+    // The participant check runs against the caller as they are NOW, with no
+    // App selection in hand — which is the state this function exists to
+    // repair, and exactly the shape isAppParticipant judges (the USER branch).
+    const participates = await isAppParticipant(
+      {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context,
+      app,
+    );
+    if (!participates) return;
+
+    pinActiveApp(app.id, app.organizationId, 'session');
   }
 
   // ── hadron_search ─────────────────────────────────────────────────────────────
@@ -4946,12 +4975,26 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // Gated on `auth.userId`: an App-key caller's App identity comes from
         // its credential and must never be re-pointed by a session argument.
         // A no-op when it already matches, which is the single-App case.
+        //
+        // BEST-EFFORT (PR #1007 review, Codex P1): this read runs AFTER
+        // startSession has committed, so a transient failure here must never be
+        // reported as a failed start. Falling through to the outer catch would
+        // return "Error: …" and withhold the session id — and the client's
+        // retry would then hit WORKER_TAKEN for the very session it was told
+        // had failed, unable to either continue or end it. Same reasoning, and
+        // the same remedy, as the briefing block below (PR #996 review). A
+        // missed pin costs one hadron_set_active_app; a withheld id is
+        // unrecoverable.
         if (auth.userId && session.appId && session.appId !== auth.appId) {
-          const boundApp = await db.app.findUnique({
-            where: { id: session.appId },
-            select: { id: true, organizationId: true },
-          });
-          if (boundApp) pinActiveApp(boundApp.id, boundApp.organizationId, 'worker_bind');
+          try {
+            const boundApp = await db.app.findUnique({
+              where: { id: session.appId },
+              select: { id: true, organizationId: true },
+            });
+            if (boundApp) pinActiveApp(boundApp.id, boundApp.organizationId, 'worker_bind');
+          } catch {
+            // Swallowed deliberately — the session IS started and bound.
+          }
         }
 
         // #990: when a worker is bound, ALWAYS return its resolved boot
