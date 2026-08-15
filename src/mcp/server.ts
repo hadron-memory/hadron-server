@@ -5152,11 +5152,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           { appRef, includeRetired: includeRetired ?? null, limit: limit ?? null, offset: offset ?? null },
           ctx,
         );
-        if (page.items.length === 0) {
+        // An empty PAGE is not an empty ROSTER (PR #1000 review, Codex P2):
+        // `limit: 0` is the resolver's count-only mode, and an offset past the
+        // end also yields no items while `total` stays positive. Telling either
+        // caller to go cast a worker would be plainly wrong.
+        if (page.total === 0) {
           return textResult(
             includeRetired
               ? 'This App has no workers. Cast one with hadron_cast_worker.'
               : 'This App has no active workers. Cast one with hadron_cast_worker, or pass includeRetired to see retired castings.',
+          );
+        }
+        if (page.items.length === 0) {
+          return textResult(
+            `${page.total} worker(s) in this App, none on this page — offset ${offset ?? 0}` +
+              `${limit === 0 ? ' with limit 0 (count only)' : ''}.`,
           );
         }
         // "Taken right now" in ONE query for the whole page rather than per
@@ -5168,7 +5178,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const taken = new Set(
           (
             await db.session.findMany({
-              where: { workerId: { in: page.items.map((w: { id: string }) => w.id) }, endedAt: null },
+              // `deletedAt: null` matches startSession's WORKER_TAKEN predicate
+              // exactly (PR #1000 review, Codex P2). Without it the roster
+              // advertises a worker as unavailable whose only live session is
+              // soft-deleted — while binding it actually succeeds.
+              where: {
+                workerId: { in: page.items.map((w: { id: string }) => w.id) },
+                endedAt: null,
+                deletedAt: null,
+              },
               select: { workerId: true },
             })
           ).map((s: { workerId: string | null }) => s.workerId),

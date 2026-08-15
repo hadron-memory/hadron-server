@@ -137,6 +137,35 @@ describe('#997 — hadron_list_workers', () => {
     expect(out).not.toContain('Iris');
   });
 
+  it('a soft-deleted session does not hold a worker taken', async () => {
+    // Must match startSession's WORKER_TAKEN predicate exactly, or the roster
+    // says "taken" for a worker that binds fine.
+    const iris = await worker('Iris', 'iris');
+    await db.session.create({
+      data: {
+        id: generateId(), workerId: iris.id, appId: app.id, userId: user.id,
+        deletedAt: new Date(),
+      },
+    });
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
+    expect(out).toMatch(/Iris.*free/s);
+  });
+
+  it('distinguishes an empty PAGE from an empty ROSTER', async () => {
+    await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+
+    // Offset past the end: the roster is not empty, so don't say it is.
+    const past = await srv.callToolText('hadron_list_workers', { offset: 50 });
+    expect(past).not.toContain('no active workers');
+    expect(past).toContain('1 worker(s)');
+
+    // limit: 0 is the resolver's count-only mode.
+    const countOnly = await srv.callToolText('hadron_list_workers', { limit: 0 });
+    expect(countOnly).not.toContain('no active workers');
+    expect(countOnly).toContain('1 worker(s)');
+  });
+
   it('accepts an explicit app argument', async () => {
     await worker('Iris', 'iris');
     const out = await createTestableMcpServer(hybridAuth()).callToolText(
