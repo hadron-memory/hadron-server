@@ -242,12 +242,25 @@ export const sessionMutations = {
             where: { id: appId },
             select: {
               id: true, name: true, urn: true, organizationId: true,
-              ownerUserId: true, uninstalledAt: true,
+              ownerUserId: true, uninstalledAt: true, deletedAt: true,
             },
           });
-          if (!gateApp) {
+          // App lifecycle, checked here and not only at the gate (PR #996
+          // review, Copilot). When `appId` came from `appRef` these were
+          // already enforced above, and the worker-DERIVED path enforces them
+          // below — but when it came from `ctx.appId` (an MCP active-App
+          // SELECTION or an App key) this is the only lifecycle check before
+          // `session.create`. A stale selection pointing at a soft-deleted or
+          // uninstalled App must not be able to resolve a name and open a
+          // session there.
+          if (!gateApp || gateApp.deletedAt) {
             throw new GraphQLError(`Worker not found: ${workerRef}`, {
               extensions: { code: 'WORKER_NOT_FOUND' },
+            });
+          }
+          if (gateApp.uninstalledAt) {
+            throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+              extensions: { code: 'APP_UNINSTALLED', appId },
             });
           }
           try {

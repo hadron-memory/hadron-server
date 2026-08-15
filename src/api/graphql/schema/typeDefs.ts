@@ -3299,7 +3299,14 @@ export const typeDefs = `#graphql
       one, so a nameless-App call refuses SESSION_WORKER_NAME_NEEDS_APP rather
       than guessing across the caller's Apps. Gated on the STAFF READ GATE
       before the lookup runs — resolving a name discloses roster membership,
-      which the id/URN forms never do — and a denial reports WORKER_NOT_FOUND,
+      which the id/URN forms never do.
+
+      Which refusal you get depends on WHERE the denial happens, and clients
+      should not assume one code covers both: a caller who supplied appRef has
+      already been checked against the same participant predicate, so an
+      outsider is refused FORBIDDEN there, before any name is read. Only a
+      denial at the in-branch staff gate — reachable when the App came from an
+      App-key credential rather than appRef — is masked as WORKER_NOT_FOUND,
       indistinguishable from an App with no such worker.
     - the worker's URN (hrn:worker:<root>:<app-slug>:<slug>, #991); the URN's
       leaf is the derived slug, never the display name (cor:agt:020:02).

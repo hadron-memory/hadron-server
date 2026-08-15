@@ -197,15 +197,20 @@ describe('#990 — the staff read gate, and no roster oracle', () => {
 
   it('reports an EXISTING and a nonexistent name identically to an outsider', async () => {
     await cast('Iris');
-    const forReal = start({ appRef: app.id, workerRef: 'Iris' }, ctx(outsider.id));
-    const forGhost = start({ appRef: app.id, workerRef: 'Nobody' }, ctx(outsider.id));
+    // Thunks, not live promises: awaiting two in-flight rejections serially
+    // leaves the second floating until its turn, which vitest reports as an
+    // unhandled rejection.
+    const attempts = [
+      () => start({ appRef: app.id, workerRef: 'Iris' }, ctx(outsider.id)),
+      () => start({ appRef: app.id, workerRef: 'Nobody' }, ctx(outsider.id)),
+    ];
     // Same code AND same message — otherwise the pair is an existence oracle
     // over another tenant's roster.
     const codes: string[] = [];
     const messages: string[] = [];
-    for (const p of [forReal, forGhost]) {
+    for (const attempt of attempts) {
       try {
-        await p;
+        await attempt();
         expect.fail('expected rejection');
       } catch (e) {
         codes.push(String((e as GraphQLError).extensions?.code));
@@ -268,5 +273,38 @@ describe('#990 — resolution is not authorization', () => {
     // …and force still overrides it.
     const forced = await start({ appRef: app.id, workerRef: 'Iris', force: true });
     expect(forced.workerId).toBeTruthy();
+  });
+});
+
+describe('#990 — App lifecycle is checked on the ctx.appId path (PR #996 review)', () => {
+  // When appId comes from an App-key credential / MCP active-App SELECTION
+  // rather than appRef, the name branch is the ONLY lifecycle check before
+  // session.create. A stale selection must not open a session in a dead App.
+  const appKeyCtx = (): Context => ({ db, appId: app.id, roles: ['READER'] });
+
+  it('resolves a name on the App-key path while the App is healthy', async () => {
+    const w = await cast('Iris');
+    const s = await M.startSession(
+      {}, { input: { id: generateId(), tool: 'vitest', workerRef: 'Iris' } }, appKeyCtx(),
+    );
+    expect(s.workerId).toBe(w.id);
+  });
+
+  it('refuses when the selected App is soft-deleted', async () => {
+    await cast('Iris');
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    await expectCode(
+      M.startSession({}, { input: { id: generateId(), tool: 'vitest', workerRef: 'Iris' } }, appKeyCtx()),
+      'WORKER_NOT_FOUND',
+    );
+  });
+
+  it('refuses when the selected App is uninstalled', async () => {
+    await cast('Iris');
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    await expectCode(
+      M.startSession({}, { input: { id: generateId(), tool: 'vitest', workerRef: 'Iris' } }, appKeyCtx()),
+      'APP_UNINSTALLED',
+    );
   });
 });

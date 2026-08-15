@@ -12,6 +12,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
+import { resolvers } from '../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -242,5 +243,35 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
     expect(out).toContain('Session started:');
     expect(out).not.toContain('Working as');
     expect(out).not.toContain('briefing');
+  });
+});
+
+describe('#996 review — a briefing failure must not swallow the session', () => {
+  it('still returns the session id when the briefing lookup throws', async () => {
+    // The session is COMMITTED before the briefing is rendered. If a transient
+    // failure there surfaced as "Error: …", the caller would lose the id, and
+    // its retry would hit WORKER_TAKEN for the very session it was told had
+    // failed — unable to continue or to end it.
+    const spy = vi
+      .spyOn(resolvers.Worker as any, 'prompt')
+      .mockRejectedValueOnce(new Error('transient prompt failure'));
+    try {
+      const srv = createTestableMcpServer(hybridAuth());
+      const out = await srv.callToolText('hadron_start_session', {
+        description: 'briefing blows up',
+        workerRef: 'Iris',
+      });
+      expect(out).not.toContain('Error:');
+      expect(out).toContain('Session started:');
+      expect(out).toContain(worker.id);
+      expect(out).toContain('could not be rendered');
+      // …and the session really is there, bound, and recoverable by id.
+      const sessionId = out.match(/Session started: (\S+)/)?.[1];
+      const row = await db.session.findUniqueOrThrow({ where: { id: sessionId! } });
+      expect(row.workerId).toBe(worker.id);
+      expect(row.endedAt).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

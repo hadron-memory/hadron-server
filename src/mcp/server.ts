@@ -4855,17 +4855,32 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // Resolved through the SAME field resolver GraphQL serves
         // (Worker.prompt), so the two surfaces cannot drift — and that resolver
         // self-guards behind the worker read gate, so this cannot widen access.
+        //
+        // SELF-CONTAINED failure handling (PR #996 review, Codex P2): these are
+        // reads that run AFTER startSession has already committed the session,
+        // so a transient failure here must never be reported as a failed start.
+        // It used to fall through to the outer catch, which returned "Error: …"
+        // and withheld the id — and the client's retry would then hit
+        // WORKER_TAKEN for the very session it was told had failed, unable to
+        // either continue or end it. The session id is the thing the caller
+        // cannot recover on its own; the briefing it can ask for again.
         let workerLine = '';
         if (session.workerId) {
-          const worker = await db.worker.findUnique({ where: { id: session.workerId } });
-          const prompt = worker ? await resolvers.Worker.prompt(worker, {}, mcpCtx) : null;
-          workerLine =
-            `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
-            // A worker whose agent carries no template and who has no override
-            // has no briefing — say so, rather than emitting a bare heading.
-            (prompt
-              ? `\n\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
-              : '\n\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)');
+          try {
+            const worker = await db.worker.findUnique({ where: { id: session.workerId } });
+            const prompt = worker ? await resolvers.Worker.prompt(worker, {}, mcpCtx) : null;
+            workerLine =
+              `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
+              // A worker whose agent carries no template and who has no override
+              // has no briefing — say so, rather than emitting a bare heading.
+              (prompt
+                ? `\n\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
+                : '\n\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)');
+          } catch {
+            workerLine =
+              `\nWorking as worker ${session.workerId}.` +
+              '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
+          }
         }
         return textResult(`Session started: ${session.id}\n> ${description}${workerLine}`);
       } catch (e) {
