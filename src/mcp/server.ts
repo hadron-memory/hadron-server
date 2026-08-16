@@ -4259,8 +4259,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // it this is a literal no-op — writing a NodeRevision for it would
             // record a change that did not happen, and on a memory with a
             // maxRevCount cap it would evict real history to store nothing.
-            if (renameToLeaf === true) {
-              const newName = toLoc.split(':').pop()!;
+            //
+            // The rename is itself skipped when the name ALREADY equals the
+            // leaf (PR #1018 review, Copilot): re-stamping an identical value
+            // is the same no-op-history problem one line up, and a same-slot
+            // call is exactly where it is most likely — a caller normalizing a
+            // name that is already normalized.
+            const newName = toLoc.split(':').pop()!;
+            if (renameToLeaf === true && existing.name !== newName) {
               await createNodeRevision(tx, {
                 id: generateId(),
                 ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {

@@ -536,6 +536,30 @@ describe('hadron_move_node — name preservation (#1017)', () => {
 
     const moved = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
     expect(moved.name).toBe('src');
+    expect(await db.nodeRevision.count({ where: { nodeId: fx.nodes.moveSource.id } })).toBe(1);
+  });
+
+  it('renameToLeaf writes no revision when the name is already the leaf', async () => {
+    // PR review (Copilot): re-stamping an identical value is the same no-op-
+    // history problem the default same-slot path avoids — and a same-slot call
+    // is where it is likeliest, since a caller normalizing an already-normalized
+    // name is the natural way to reach it.
+    await db.node.update({
+      where: { id: fx.nodes.moveSource.id },
+      data: { name: 'src' },
+    });
+
+    const srv = createTestableMcpServer(adminAuth());
+    const sameUrn = `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`;
+    await srv.callToolText('hadron_move_node', {
+      urn: sameUrn,
+      targetUrn: sameUrn,
+      renameToLeaf: true,
+    });
+
+    const moved = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
+    expect(moved.name).toBe('src');
+    expect(await db.nodeRevision.count({ where: { nodeId: fx.nodes.moveSource.id } })).toBe(0);
   });
 });
 
