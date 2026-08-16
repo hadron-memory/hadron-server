@@ -5833,7 +5833,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read the worker with hadron_get_worker and amend the text under 'Prompt override', NOT the composed boot briefing below it (pasting the briefing back would fold the shared template into the override, and it would then be prepended again on every render). Omit it to change nothing; pass an empty string to clear it. Everything else about a casting is immutable: the name is permanent, and a different role is a different casting. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
     {
       workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN, or its id.'),
-      promptOverride: z.string().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it."),
+      // Optional, matching the description's "omit it to change nothing" and
+      // the GraphQL mutation's omitted-preserves convention (PR #1019 review,
+      // Copilot). It was REQUIRED while the description promised omission
+      // worked, so a model that read the contract and followed it hit a hard
+      // schema-validation error — the one failure mode worse than the tool not
+      // offering the option at all.
+      promptOverride: z.string().optional().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it; omit it to leave the override untouched."),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
       session: z.string().optional().describe('Your session id — used only to resolve which App a bare NAME belongs to when app is omitted.'),
     },
@@ -5877,20 +5883,31 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
         if (!target) return textResult(`Worker not found: ${workerRef}`);
 
-        const worker = await resolvers.Mutation.updateWorker(
-          {},
-          { workerRef: target.id, promptOverride },
-          ctx,
-        );
+        // Forward the key ONLY when the caller supplied it (PR #1019 review,
+        // Copilot): the resolver distinguishes omitted-preserves from
+        // null-clears by PRESENCE, so passing `promptOverride: undefined`
+        // unconditionally would land in the clear branch and silently wipe the
+        // override of every caller who omitted it. Making the zod arg optional
+        // without this would have converted a loud validation error into a
+        // silent data loss — strictly worse.
+        const mutationArgs: { workerRef: string; promptOverride?: string } = {
+          workerRef: target.id,
+        };
+        const changing = promptOverride !== undefined;
+        if (changing) mutationArgs.promptOverride = promptOverride;
+
+        const worker = await resolvers.Mutation.updateWorker({}, mutationArgs, ctx);
         // Echo the RESOLVED prompt, not the override alone: what the caller
         // actually cares about is what the worker will be told at its next
         // bind, and that is the template plus the override, composed.
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
         return textResult(
-          `Updated **${worker.name}**.\n` +
+          (changing ? `Updated **${worker.name}**.\n` : `**${worker.name}** — no change requested (promptOverride omitted).\n`) +
             (worker.promptOverride
-              ? `\nPrompt override now:\n\n${worker.promptOverride}\n`
-              : '\nPrompt override cleared.\n') +
+              ? `\nPrompt override${changing ? ' now' : ''}:\n\n${worker.promptOverride}\n`
+              : changing
+                ? '\nPrompt override cleared.\n'
+                : '\nThis worker has no prompt override.\n') +
             (prompt
               ? `\nResolved boot briefing (what ${worker.name} receives at its next bind):\n\n${prompt}`
               : ''),

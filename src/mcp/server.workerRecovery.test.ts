@@ -509,6 +509,24 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
     expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).promptOverride).toBeNull();
   });
 
+  it('omitting promptOverride preserves it rather than clearing it', async () => {
+    // PR review (Copilot): the tool description promised omission preserves,
+    // but the zod arg was REQUIRED — so a model that read the contract and
+    // followed it hit a hard validation error. Making the arg optional without
+    // fixing the forwarding would have been worse still: the resolver
+    // distinguishes omitted from null by PRESENCE, so an unconditionally
+    // forwarded `undefined` lands in the clear branch and wipes the override.
+    await worker('Iris', 'iris', { promptOverride: 'keep me' });
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
+      workerRef: 'Iris',
+    });
+    expect(out).toMatch(/no change requested/);
+    expect(out).toContain('keep me');
+    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).promptOverride).toBe(
+      'keep me',
+    );
+  });
+
   it('leaves the permanent facts of the casting alone', async () => {
     const iris = await worker('Iris', 'iris');
     await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
@@ -625,6 +643,57 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
         ctxFor(),
       );
       await expect(absent).rejects.toMatchObject({ extensions: { code: 'WORKER_NOT_FOUND' } });
+    });
+
+    it('propagates a DB failure instead of reporting it as a missing worker', async () => {
+      // PR review (Copilot): the gate reaches the database via isAppParticipant,
+      // so a blanket catch turned a connection failure into "no such worker" —
+      // an outage reported as a missing row, on the one surface whose contract
+      // is that absence and denial look identical. Hiding WHY a caller was
+      // refused is the point here; hiding THAT the database is down never is.
+      await worker('Iris', 'iris');
+      const boom = new Error('connection terminated unexpectedly');
+      const spy = vi
+        .spyOn(db.orgMember, 'findFirst')
+        .mockRejectedValueOnce(boom as never);
+      try {
+        await expect(
+          resolvers.Query.worker({}, { ref: 'Iris', appRef: app.id }, ctxFor()),
+        ).rejects.toThrow(/connection terminated/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('refuses when the worker is retired between the check and the write', async () => {
+      // PR review (Copilot): the refusal read retiredAt from a row resolved
+      // earlier, so a retireWorker landing in between let the write through and
+      // amended a retired casting the contract says it refuses. The write is now
+      // guarded on the state the check consumed.
+      const iris = await worker('Iris', 'iris');
+      const ctx = ctxFor();
+      // Simulate the race precisely: the resolver's own resolve step returns a
+      // live row, and retirement commits before the write.
+      const original = db.app.findUniqueOrThrow.bind(db.app);
+      const spy = vi.spyOn(db.app, 'findUniqueOrThrow').mockImplementationOnce((async (a: never) => {
+        const row = await original(a);
+        await db.worker.update({ where: { id: iris.id }, data: { retiredAt: new Date() } });
+        return row;
+      }) as never);
+      try {
+        await expect(
+          resolvers.Mutation.updateWorker(
+            {},
+            { workerRef: iris.id, promptOverride: 'slipped through' },
+            ctx,
+          ),
+        ).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED' } });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(
+        (await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).promptOverride,
+      ).toBeNull();
     });
 
     it('an id still wins over a supplied appRef', async () => {
