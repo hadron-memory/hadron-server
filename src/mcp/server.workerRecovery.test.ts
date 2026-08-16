@@ -198,6 +198,35 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
     expect(out).toContain('You authored the Academy history.');
   });
 
+  it('surfaces the RAW override separately, so an edit can round-trip', async () => {
+    // PR review (Codex): hadron_update_worker REPLACES the override, so a
+    // caller extending one needs the override ALONE. Returning only the
+    // composed briefing would have them paste template+override back into the
+    // override field, after which rendering prepends the template again — and
+    // every subsequent edit compounds the duplication.
+    await worker('Iris', 'iris', { promptOverride: 'You authored the Academy history.' });
+    const srv = createTestableMcpServer(hybridAuth());
+    const out = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
+    expect(out).toMatch(/Prompt override/);
+
+    // Round-trip it verbatim: the resolved briefing must be unchanged, i.e. the
+    // template appears exactly once and is not folded into the override.
+    await srv.callToolText('hadron_update_worker', {
+      workerRef: 'Iris',
+      promptOverride: 'You authored the Academy history.',
+    });
+    const after = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
+    expect(after.match(/You are Iris, the backend-engineer on this team\./g)).toHaveLength(1);
+  });
+
+  it('masks the raw override from a caller who may not see worker internals', async () => {
+    await worker('Iris', 'iris', { promptOverride: 'private individuality' });
+    const out = await createTestableMcpServer({
+      userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}`,
+    }).callToolText('hadron_get_worker', { workerRef: `hrn:worker:${org.urn}:team:iris` });
+    expect(out).not.toContain('private individuality');
+  });
+
   it('reports whether the worker is currently taken', async () => {
     const iris = await worker('Iris', 'iris');
     const free = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
@@ -572,6 +601,30 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
       await expect(resolvers.Query.worker({}, { ref: 'Iris' }, ctxFor())).rejects.toThrow(
         /Worker not found/,
       );
+    });
+
+    it('an unresolvable appRef collapses into WORKER_NOT_FOUND, not APP_NOT_FOUND', async () => {
+      // PR review (Codex): resolveAppRef throws before the gated helper's
+      // collapse, which would let a caller tell a nonexistent App apart from a
+      // live one with no such worker — an existence oracle over other tenants'
+      // App refs, reintroduced through the very argument that gates the lookup.
+      await worker('Iris', 'iris');
+      const bogus = resolvers.Query.worker(
+        {},
+        { ref: 'Iris', appRef: `${org.urn}:no-such-app` },
+        ctxFor(),
+      );
+      await expect(bogus).rejects.toThrow(/Worker not found/);
+      await expect(bogus).rejects.toMatchObject({ extensions: { code: 'WORKER_NOT_FOUND' } });
+    });
+
+    it('…the SAME refusal a live App with no such worker gives', async () => {
+      const absent = resolvers.Query.worker(
+        {},
+        { ref: 'NoSuchWorker', appRef: app.id },
+        ctxFor(),
+      );
+      await expect(absent).rejects.toMatchObject({ extensions: { code: 'WORKER_NOT_FOUND' } });
     });
 
     it('an id still wins over a supplied appRef', async () => {

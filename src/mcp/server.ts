@@ -5746,10 +5746,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // through it cannot widen access. Rendering live is the whole point:
         // a copied briefing goes stale silently the moment a role agent's
         // template changes, which is why the contract forbids caching it.
-        const [prompt, workerUrn, agent] = await Promise.all([
+        const [prompt, workerUrn, agent, override] = await Promise.all([
           resolvers.Worker.prompt(worker, {}, ctx),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
+          // The RAW override, separate from the composed briefing (PR #1019
+          // review, Codex P2). hadron_update_worker REPLACES the override, so a
+          // caller extending one needs the override alone; handing back only
+          // the composed text would have it paste template+override into the
+          // override field, after which rendering prepends the template again —
+          // and every subsequent edit compounds the duplication. Same gated
+          // field resolver GraphQL serves, so it masks to null on deny.
+          resolvers.Worker.promptOverride(worker, {}, ctx),
         ]);
         const agentName = (agent as { name?: string } | null)?.name ?? null;
 
@@ -5778,6 +5786,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             (driving && auth.userId && driving.userId === auth.userId
               ? `Your active session: ${driving.id} (since ${driving.startedAt.toISOString()})\n`
               : '') +
+            // Shown separately from the briefing, and labelled as the editable
+            // part, so hadron_update_worker's replace semantics have something
+            // correct to be given back.
+            (override
+              ? `\nPrompt override (the editable part — pass THIS text, amended, to hadron_update_worker; the briefing below is it composed with the shared template):\n\n${override}\n`
+              : '') +
             (prompt
               ? `\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
               : '\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)'),
@@ -5792,7 +5806,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_update_worker',
-    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read it with hadron_get_worker first. Omit it to change nothing; pass an empty string to clear it. Everything else about a casting is immutable: the name is permanent, and a different role is a different casting. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
+    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read the worker with hadron_get_worker and amend the text under 'Prompt override', NOT the composed boot briefing below it (pasting the briefing back would fold the shared template into the override, and it would then be prepended again on every render). Omit it to change nothing; pass an empty string to clear it. Everything else about a casting is immutable: the name is permanent, and a different role is a different casting. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
     {
       workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN, or its id.'),
       promptOverride: z.string().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it."),

@@ -1078,7 +1078,21 @@ export const workerQueries = {
     // test startSession uses, so a typo'd URN never silently degrades into a
     // roster search.
     if (appRef && trimmed !== '' && !isId(trimmed) && !hasSchemePrefix(trimmed)) {
-      const { id: appId } = await resolveAppRef(ctx.db, appRef);
+      // An unresolvable appRef collapses into WORKER_NOT_FOUND too (PR #1019
+      // review, Codex P2). `resolveAppRef` throws AppNotFoundError, which would
+      // escape BEFORE the gated helper's collapse and let a caller tell a
+      // nonexistent App apart from a live one with no such worker — an
+      // existence oracle over other tenants' App refs, reintroduced through the
+      // very argument that was supposed to be gated. The collapse has to cover
+      // every input to the lookup, not just the name.
+      let appId: string;
+      try {
+        ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+      } catch {
+        throw new GraphQLError('Worker not found.', {
+          extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
+        });
+      }
       // Gate-then-lookup, with denial and absence collapsed — see
       // resolveWorkerIdByNameGated for why the ordering is the contract.
       const byName = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
