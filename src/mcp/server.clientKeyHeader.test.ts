@@ -69,6 +69,26 @@ beforeEach(async () => {
   });
   await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'owner' } });
   await db.appMember.create({ data: { appId: appB.id, userId: user.id, role: 'owner' } });
+
+  // One distinctly-named worker per App, so a roster read names which App
+  // actually resolved rather than leaving it to be inferred.
+  const agent = await db.agent.create({
+    data: {
+      id: generateId(),
+      organizationId: org.id,
+      urn: `${org.urn}:backend`,
+      name: 'Backend',
+      visibility: 'ORGANIZATION',
+    },
+  });
+  await db.appAgent.create({ data: { appId: appA.id, agentId: agent.id } });
+  await db.appAgent.create({ data: { appId: appB.id, agentId: agent.id } });
+  await db.worker.create({
+    data: { appId: appA.id, agentId: agent.id, name: 'WorkerInAppA', slug: 'worker-in-app-a' },
+  });
+  await db.worker.create({
+    data: { appId: appB.id, agentId: agent.id, name: 'WorkerInAppB', slug: 'worker-in-app-b' },
+  });
   ({ rawKey } = await mintUserApiKey(db, {
     userId: user.id,
     label: 'test',
@@ -114,6 +134,23 @@ function mcpFetch(opts: {
   });
 }
 
+/**
+ * Issue a tool call and CONSUME the response body.
+ *
+ * Consuming is load-bearing, not tidiness: the transport streams its reply, so
+ * an un-read body means the handler may not have finished when the next
+ * statement runs — and these tests assert on writes the handler performs. A
+ * dropped body made the precedence test below flake as a phantom product bug.
+ */
+async function callAndRead(opts: {
+  sessionId: string;
+  clientId?: string;
+  body: unknown;
+}): Promise<string> {
+  const res = await mcpFetch(opts);
+  return res.text();
+}
+
 /** Open a session as this client instance, returning its MCP session id. */
 async function connect(clientId?: string): Promise<string> {
   const res = await mcpFetch({ body: initializeBody, clientId });
@@ -151,7 +188,7 @@ describe('#1012 — X-Hadron-Client-Id over the real boundary', () => {
   it('a connection sending NO header gets none of it back', async () => {
     const clientId = 'desktop-instance-1';
     const first = await connect(clientId);
-    await mcpFetch({
+    await callAndRead({
       sessionId: first,
       clientId,
       body: callBody('hadron_set_active_app', { app: appA.urn }),
@@ -170,7 +207,7 @@ describe('#1012 — X-Hadron-Client-Id over the real boundary', () => {
     // The multi-client guarantee, end to end: switching App in one client must
     // not reach into another. A per-user key would fail this.
     const first = await connect('desktop-instance-1');
-    await mcpFetch({
+    await callAndRead({
       sessionId: first,
       clientId: 'desktop-instance-1',
       body: callBody('hadron_set_active_app', { app: appA.urn }),
@@ -183,6 +220,41 @@ describe('#1012 — X-Hadron-Client-Id over the real boundary', () => {
       body: callBody('hadron_team_chat_read', { sinceSeq: 0 }),
     });
     expect(await read.text()).toContain('multiple_apps_resolved');
+  });
+
+  it('an explicit selection OUTRANKS the single-App default (Codex P1 on PR #1013)', async () => {
+    // A user picks App A while a member of both. Membership in A is later
+    // dropped, but they remain a valid participant through org CONTRIBUTOR —
+    // so `resolveAppForRequest` now sees exactly one AppMember row (App B) and
+    // resolves B as "their only App". Taking that over the choice they actually
+    // made would silently retarget the next App-scoped write.
+    const clientId = 'desktop-instance-1';
+    const first = await connect(clientId);
+    await callAndRead({
+      sessionId: first,
+      clientId,
+      body: callBody('hadron_set_active_app', { app: appA.urn }),
+    });
+
+    await db.appMember.delete({ where: { appId_userId: { appId: appA.id, userId: user.id } } });
+    // Sanity: they are now single-App by membership, and it is NOT App A.
+    const remaining = await db.appMember.findMany({ where: { userId: user.id } });
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].appId).not.toBe(appA.id);
+
+    // The reconnect resolves B by default, but A is still authorized via the
+    // org branch of isAppParticipant, so the stored choice must win.
+    const second = await connect(clientId);
+    const info = await mcpFetch({
+      sessionId: second,
+      clientId,
+      body: callBody('hadron_list_workers', {}),
+    });
+    const text = await info.text();
+    // Each App has one distinctly-named worker, so the roster names which App
+    // actually resolved — no inference required.
+    expect(text).toContain('WorkerInAppA');
+    expect(text).not.toContain('WorkerInAppB');
   });
 
   it('advertises the capability so a client can tell whether to send the header', async () => {

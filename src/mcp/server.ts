@@ -6603,11 +6603,17 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // safe — `auth` is local to handleMcpRequest and the closure inside
   // `createMcpServerInstance` reads the post-mutation state.
   let cachedAppResolution: AppResolution | null = null;
+  /** #1012 — did `auth.appId` come from the single-App default rather than a credential? */
+  let appIdFromSingleAppDefault = false;
   if (auth.userId && !auth.appId) {
     cachedAppResolution = await resolveAppForRequest(auth.userId, db);
     if (cachedAppResolution.kind === 'resolved') {
       auth.appId = cachedAppResolution.appId;
       auth.organizationId = cachedAppResolution.organizationId ?? undefined;
+      // #1012 (PR #1013 review, Codex P1): remember that this came from the
+      // regime-a DEFAULT, not from a credential — a stored explicit selection
+      // is allowed to override it below, but must never re-point an App key.
+      appIdFromSingleAppDefault = true;
     }
     if (cachedAppResolution.kind === 'multi-app') {
       mcpLog('warn', 'multi_app_session_opened_without_selection', {
@@ -6647,13 +6653,30 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // every downstream `if (!auth.appId)` sees the restored value with no
   // per-tool plumbing — the same shape requireAppScope already relies on.
   const restored = await loadMcpSessionState(db, auth, clientKey);
-  if (restored.appId && !auth.appId) {
+  // Precedence, strongest first (PR #1013 review, Codex P1):
+  //
+  //   1. an App-KEY credential — App identity IS the credential and a stored
+  //      selection must never re-point it (`appIdFromSingleAppDefault` is false
+  //      there, and `loadMcpSessionState` returns nothing for a userId-less
+  //      principal anyway);
+  //   2. this client's EXPLICIT stored selection, re-authorized above;
+  //   3. the regime-a single-App default.
+  //
+  // 2 outranking 3 is the fix: a user who explicitly chose App A can later drop
+  // to exactly one AppMember row (say App B) while remaining a valid
+  // participant in A by org CONTRIBUTOR or ownership. `resolveAppForRequest`
+  // then resolves B as "their only App", and taking that over the choice they
+  // actually made would silently retarget the next App-scoped write. A stated
+  // preference outranks an inferred default whenever it still authorizes.
+  if (restored.appId && (!auth.appId || appIdFromSingleAppDefault)) {
+    const overrodeDefault = auth.appId !== undefined && auth.appId !== restored.appId;
     auth.appId = restored.appId;
     auth.organizationId = restored.organizationId ?? undefined;
     mcpLog('info', 'mcp_session_state_restored', {
       userId: auth.userId,
       appId: restored.appId,
       restoredMemory: Boolean(restored.memoryUrn),
+      overrodeSingleAppDefault: overrodeDefault,
       reconnect: isReconnect,
     });
   }
