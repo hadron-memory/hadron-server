@@ -5211,6 +5211,133 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
+  // ── hadron_whoami ─────────────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_whoami',
+    'Answer "what am I driving right now?" — your own OPEN sessions, with the worker each is bound to, its App, and when it started (#1016). On the MCP surface the session id is the only handle that makes work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The loss is worst where it is quietest — hadron_team_chat_post takes the session as an OPTIONAL argument, so omitting it posts as the human instead of the worker, silently, with no error and the wrong authorship recorded. hadron_record_work and hadron_end_session at least fail loudly. Call this whenever you are unsure of your session id, or after any context loss, and pass the id it returns back to those tools. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    {
+      limit: z.number().int().optional().describe('Max sessions to return (default 10, cap 50). Newest first.'),
+      includeEnded: z.boolean().optional().describe('Also list recently ENDED sessions — useful to confirm you did end one, or to find the session a work record should have been attributed to.'),
+    },
+    async ({ limit, includeEnded }) => {
+      // Scoped by IDENTITY, deliberately narrower than the GraphQL `sessions`
+      // query's `sessionScopeFilter` — which also admits any org member, and so
+      // answers "sessions I may READ" rather than "sessions I am DRIVING". The
+      // question here is the latter, and the answer must not turn into a roster
+      // of colleagues' activity. Two principal shapes have an honest answer:
+      //
+      //   - a USER caller owns the sessions attributed to them (`userId`), which
+      //     is the same self branch sessionScopeFilter and hadron_end_session's
+      //     write gate use; and
+      //   - a PURE App-key caller (no userId) owns its App's sessions — again
+      //     exactly what hadron_end_session already lets it end.
+      //
+      // A hybrid user+App-selection principal is judged on the USER, never the
+      // selection: an active-App choice must not turn co-members' sessions into
+      // "mine" (the #932 Codex P1 rule that hadron_end_session encodes).
+      //
+      // Impersonation is a read-only support view of someone else's work, so
+      // "what am I driving" has no meaning there — and answering with the
+      // target's sessions would hand a support session the ids needed to post
+      // as their workers. Refused outright. Belt and braces: /mcp already
+      // rejects an impersonation JWT at session init, so this is unreachable
+      // today — it is here so the identity scoping stays self-sufficient rather
+      // than depending on a gate two layers up (the #876 sweep's lesson:
+      // ctx.userId = target fails OPEN against identity-keyed predicates, and
+      // `{ userId: auth.userId }` below is exactly such a predicate).
+      if (auth.impersonation) {
+        return textResult(
+          'Not available in an impersonation session — this answers what YOU are driving, and a support view drives nothing.',
+        );
+      }
+      const scope = auth.userId
+        ? { userId: auth.userId }
+        : auth.appId
+          ? { appId: auth.appId, userId: null }
+          : null;
+      if (!scope) return textResult('Not authenticated — no sessions to report.');
+
+      // createTestableMcpServer bypasses zod — normalize defensively (a NaN
+      // would reach Prisma's `take` as a raw driver error rather than a clamp).
+      const take = Math.max(1, Math.min(typeof limit === 'number' && Number.isFinite(limit) ? limit : 10, 50));
+      const sessions = await db.session.findMany({
+        where: {
+          ...scope,
+          deletedAt: null,
+          // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
+          // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
+          // together precisely so this stays a single test).
+          ...(includeEnded ? {} : { endedAt: null }),
+        },
+        orderBy: { startedAt: 'desc' },
+        take,
+        select: {
+          id: true, startedAt: true, endedAt: true, type: true, plan: true,
+          appId: true, workerId: true,
+        },
+      });
+      if (sessions.length === 0) {
+        return textResult(
+          includeEnded
+            ? 'You have no sessions. Start one with hadron_start_session(workerRef: "<name>") to work as a teammate.'
+            : 'You have no open sessions. Start one with hadron_start_session(workerRef: "<name>"); pass includeEnded to see recent ended ones.',
+        );
+      }
+
+      // Resolve each distinct worker and App ONCE — a caller with several open
+      // sessions on one App would otherwise repeat identical lookups.
+      const workerRows = new Map(
+        (
+          await db.worker.findMany({
+            where: { id: { in: [...new Set(sessions.map((s) => s.workerId).filter((w): w is string => !!w))] } },
+            select: { id: true, name: true, slug: true, role: true, appId: true },
+          })
+        ).map((w) => [w.id, w]),
+      );
+      const appRows = new Map(
+        (
+          await db.app.findMany({
+            where: { id: { in: [...new Set(sessions.map((s) => s.appId).filter((a): a is string => !!a))] } },
+            select: { id: true, name: true, urn: true },
+          })
+        ).map((a) => [a.id, a]),
+      );
+
+      const lines = sessions.map((s) => {
+        const worker = s.workerId ? workerRows.get(s.workerId) : null;
+        const app = s.appId ? appRows.get(s.appId) : null;
+        let urn: string | null = null;
+        if (worker && app) {
+          try {
+            urn = composeWorkerUrn(normalizeUrnForLookup(app.urn), worker.slug);
+          } catch {
+            // An App URN the fixed arity can't take degrades to no URN rather
+            // than failing the whole read (the Worker.urn field resolver's rule).
+            urn = null;
+          }
+        }
+        return (
+          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}\n` +
+          // The un-bound case is the one worth calling out: it is the shape in
+          // which a team-chat post silently lands under the human's name.
+          (worker
+            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''}${urn ? `\n    ${urn}` : ''}\n`
+            : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
+          (app ? `    app: ${app.name}\n` : '') +
+          `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
+          (s.plan ? `\n    plan: ${s.plan}` : '')
+        );
+      });
+
+      return textResult(
+        `${sessions.length} session(s):\n${lines.join('\n')}\n\n` +
+          'Pass the session id to hadron_team_chat_post (to post AS the worker rather than as yourself), ' +
+          'hadron_record_work, and hadron_end_session. Re-fetch a worker\'s boot briefing with hadron_get_worker.',
+      );
+    },
+  );
+
   // ── hadron_cast_worker ────────────────────────────────────────────────────────
 
   server.tool(
@@ -5548,6 +5675,190 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'listing workers failed'}`);
+      }
+    },
+  );
+
+  // ── hadron_get_worker ─────────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_get_worker',
+    'Read ONE worker, including its resolved BOOT BRIEFING (#1015). THE recovery read: hadron_start_session returns the briefing once, at bind time, and the briefing must never be cached — so an agent whose context was compacted has no copy and no legitimate way back to it. This is that way. It is a pure read: it reserves nothing, mints nothing, and does not touch the session, so recovering costs neither a second session nor a force-takeover of yourself (both of which corrupt the provenance record the Worker model exists to produce). workerRef takes the same three forms as hadron_start_session — the worker\'s NAME ("Iris"), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id; an id or URN names its own App, a bare NAME needs one selected (or passed as app/session). Re-read this whenever you are unsure you are still working as the worker you bound.',
+    {
+      workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
+      session: z.string().optional().describe('Your session id — used only to resolve which App a bare NAME belongs to when app is omitted.'),
+    },
+    async ({ workerRef, app, session }) => {
+      // createTestableMcpServer bypasses zod — normalize defensively so the
+      // test surface and production agree on malformed input.
+      const trimmed = typeof workerRef === 'string' ? workerRef.trim() : '';
+      if (trimmed === '') return textResult('Pass workerRef — a worker name, URN, or id.');
+
+      // The NAME form is the only one that needs App context — a name is unique
+      // only WITHIN an App (#990), while an id or URN names exactly one worker
+      // and therefore exactly one App. Same shape test, and the same reasoning,
+      // as hadron_start_session's #1005 branch: demanding a prior
+      // hadron_set_active_app for a self-describing ref asks the caller to
+      // state what the argument already settles.
+      const refNamesItsApp = isId(trimmed) || hasSchemePrefix(trimmed);
+
+      let appRef = app;
+      if (!refNamesItsApp && !appRef) {
+        // #1016's other half: the session is the durable anchor that survives a
+        // transparent MCP reconnect, so try it before declaring the caller's
+        // App set ambiguous.
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult(
+            `"${trimmed}" is a worker name, which is only unique within an App — pass app, pass your session, or select one with hadron_set_active_app. A worker id or URN needs none of that.`,
+          );
+        }
+      }
+
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        // Delegate to the GraphQL resolver (findings:node-write-surface-
+        // invariants — MCP tools delegate, never re-implement): the staff read
+        // gate, the name-form gate ordering, and the WORKER_NOT_FOUND collapse
+        // are all literally the code GraphQL runs. No authorization here.
+        const worker = await resolvers.Query.worker(
+          {},
+          { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
+          ctx,
+        );
+        if (!worker) return textResult(`Worker not found: ${workerRef}`);
+
+        // Resolved through the SAME field resolvers GraphQL serves, so this
+        // surface and the briefing hadron_start_session prints cannot drift —
+        // and `prompt` self-guards behind the worker read gate, so routing
+        // through it cannot widen access. Rendering live is the whole point:
+        // a copied briefing goes stale silently the moment a role agent's
+        // template changes, which is why the contract forbids caching it.
+        const [prompt, workerUrn, agent] = await Promise.all([
+          resolvers.Worker.prompt(worker, {}, ctx),
+          resolvers.Worker.urn(worker, {}, ctx),
+          resolvers.Worker.agent(worker, {}, ctx),
+        ]);
+        const agentName = (agent as { name?: string } | null)?.name ?? null;
+
+        // Liveness is derived from real rows, never a lease (cor:agt:020:03) —
+        // the same predicate hadron_start_session refuses WORKER_TAKEN on, and
+        // hadron_list_workers reports. It answers "is someone driving this?",
+        // which is what an agent unsure of its own state needs to see.
+        const driving = await db.session.findFirst({
+          where: { workerId: worker.id, endedAt: null, deletedAt: null },
+          orderBy: { startedAt: 'desc' },
+          select: { id: true, userId: true, startedAt: true },
+        });
+
+        const flags: string[] = [];
+        if (worker.retiredAt) flags.push('RETIRED');
+        flags.push(driving ? 'taken' : 'free');
+
+        return textResult(
+          `**${worker.name}**${worker.role ? ` (${worker.role})` : ''} — ${flags.join(', ')}\n` +
+            `Worker id: ${worker.id}\n` +
+            (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
+            (agentName ? `Role agent: ${agentName}\n` : '') +
+            // Only the caller's OWN driving session is named. Whose session it
+            // is otherwise stays behind the takeover refusal, which is a
+            // deliberate act rather than a listing (hadron_list_workers' rule).
+            (driving && auth.userId && driving.userId === auth.userId
+              ? `Your active session: ${driving.id} (since ${driving.startedAt.toISOString()})\n`
+              : '') +
+            (prompt
+              ? `\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
+              : '\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)'),
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`);
+      }
+    },
+  );
+
+  // ── hadron_update_worker ──────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_update_worker',
+    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read it with hadron_get_worker first. Omit it to change nothing; pass an empty string to clear it. Everything else about a casting is immutable: the name is permanent, and a different role is a different casting. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
+    {
+      workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN, or its id.'),
+      promptOverride: z.string().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it."),
+      app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
+      session: z.string().optional().describe('Your session id — used only to resolve which App a bare NAME belongs to when app is omitted.'),
+    },
+    async ({ workerRef, promptOverride, app, session }) => {
+      // Name-vs-self-describing ref handling, identical to hadron_get_worker.
+      // The MUTATION takes a worker id, so a name is resolved to one FIRST
+      // through the read surface — which applies the staff READ gate; the
+      // staffing gate that authorizes the edit itself then runs in the
+      // resolver, on the resolved row. Neither stands in for the other.
+      const trimmed = typeof workerRef === 'string' ? workerRef.trim() : '';
+      if (trimmed === '') return textResult('Pass workerRef — a worker name, URN, or id.');
+      const refNamesItsApp = isId(trimmed) || hasSchemePrefix(trimmed);
+
+      let appRef = app;
+      if (!refNamesItsApp && !appRef) {
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult(
+            `"${trimmed}" is a worker name, which is only unique within an App — pass app, pass your session, or select one with hadron_set_active_app.`,
+          );
+        }
+      }
+
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        const target = await resolvers.Query.worker(
+          {},
+          { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
+          ctx,
+        );
+        if (!target) return textResult(`Worker not found: ${workerRef}`);
+
+        const worker = await resolvers.Mutation.updateWorker(
+          {},
+          { workerRef: target.id, promptOverride },
+          ctx,
+        );
+        // Echo the RESOLVED prompt, not the override alone: what the caller
+        // actually cares about is what the worker will be told at its next
+        // bind, and that is the template plus the override, composed.
+        const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
+        return textResult(
+          `Updated **${worker.name}**.\n` +
+            (worker.promptOverride
+              ? `\nPrompt override now:\n\n${worker.promptOverride}\n`
+              : '\nPrompt override cleared.\n') +
+            (prompt
+              ? `\nResolved boot briefing (what ${worker.name} receives at its next bind):\n\n${prompt}`
+              : ''),
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'updating the worker failed'}`);
       }
     },
   );

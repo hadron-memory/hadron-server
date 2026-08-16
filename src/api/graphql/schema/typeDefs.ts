@@ -4805,12 +4805,24 @@ export const typeDefs = `#graphql
     ): TeamWorkItemsPage!
 
     """
-    One Worker by ref (#974) — its id, or its URN (#991).
+    One Worker by ref (#974) — its id, its URN (#991), or (with appRef) its
+    NAME (#1015), the ergonomic handle a human already knows. The name form is
+    ADDITIVE: it is activated by appRef, since a name is unique only within an
+    App. Without appRef the ref must be an id or URN, and anything else refuses
+    WORKER_NOT_FOUND as before. An id or URN wins over appRef rather than being
+    checked against it, so a typo'd URN never degrades into a roster search.
+
+    Selecting \`prompt\` re-renders the worker's boot briefing live from the
+    role agent's template — the read that lets an agent recover a briefing it
+    lost to a context compaction, instead of opening a second session or
+    forcing a takeover of itself.
+
     Authorization: an AppMember of the worker's App (any role), an org member
     with CONTRIBUTOR+ on its org, the owner of a user-owned App, or the App's
-    own key.
+    own key. For the NAME form the gate runs BEFORE the lookup and a denial is
+    reported as WORKER_NOT_FOUND, so the roster is not an existence oracle.
     """
-    worker(ref: ID!): Worker
+    worker(ref: ID!, appRef: ID): Worker
 
     """
     A team App's STAFF (#974, cor:agt:020:01 — Workers are the staff; the
@@ -6476,6 +6488,29 @@ export const typeDefs = `#graphql
     or its URN (#991).
     """
     retireWorker(workerRef: ID!): Worker!
+
+    """
+    #1010 — amend a casting's individuality after the fact.
+
+    \`promptOverride\` is the per-worker escape hatch (cor:agt:020:01), but it
+    could only be set at CASTING time — fixing a casting's individuality at the
+    one moment nobody yet knows what makes it individual. The role agent's
+    \`personaPrompt\` cannot stand in (it is SHARED by every casting of that
+    role), and re-casting is barred by \`WORKER_IN_USE\` for any worker that has
+    done work — precisely the ones with an identity to record.
+
+    Scope is one field on purpose: \`name\` is permanent by law (cor:agt:020:02)
+    and \`role\`/\`agent\` define the casting itself. OMITTING promptOverride
+    preserves it; explicit \`null\` or a blank string CLEARS it, matching the
+    nullable column and castWorker's blank-is-absent normalization.
+
+    Refuses WORKER_RETIRED for a retired worker: an override is briefing text
+    delivered at bind time, and a retired worker takes no new bindings, so the
+    edit could never reach anyone.
+
+    Same authorization as castWorker. workerRef is the worker's id or URN (#991).
+    """
+    updateWorker(workerRef: ID!, promptOverride: String): Worker!
 
     """
     #974 — hard-delete a NEVER-USED miscast (cor:dmo:050:11's only removal

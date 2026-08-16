@@ -18,7 +18,8 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
-import { normalizeUrnForLookup } from '../../../lib/urn.js';
+import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
+import { isId } from '../../../lib/entityRef/shape.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
 import {
   resolveWorkerRef as resolveWorkerRefId,
@@ -313,6 +314,47 @@ export async function resolveWorkerIdByName(
     WHERE app_id = ${appId} AND lower(name) = lower(${trimmed})
     LIMIT 1`;
   return rows[0]?.id ?? null;
+}
+
+/**
+ * Resolve a worker NAME within an App, with the staff read gate applied FIRST
+ * (#990's ordering, extracted in #1015 so it has ONE definition).
+ *
+ * Returns the worker id, or `null` for every failure shape — App absent, App
+ * soft-deleted, caller not admitted, no such name. Collapsing them is the
+ * contract, not laziness: resolving a name answers "does this App have an
+ * Iris?", a fact about the roster that the id/URN forms never have to disclose.
+ * Gating AFTER the lookup, or distinguishing "forbidden" from "no such worker",
+ * would leak roster membership to anyone who can guess a name. Callers map
+ * `null` onto their own refusal, which must be the same one they emit for an
+ * absent worker.
+ *
+ * Extracted because `startSession` and `Query.worker` both need it and a
+ * hand-rolled copy in either would drift — the failure the first authorization
+ * invariant names. What deliberately stays with the CALLER is the App LIFECYCLE
+ * posture: starting a session in an uninstalled App is refused
+ * (`APP_UNINSTALLED`), while READING a worker there is not — Worker rows outlive
+ * their App's uninstall (cor:agt:020:02), so the roster stays legible.
+ */
+export async function resolveWorkerIdByNameGated(
+  ctx: Context,
+  appId: string,
+  name: string,
+): Promise<string | null> {
+  const app = await ctx.db.app.findUnique({
+    where: { id: appId },
+    select: {
+      id: true, name: true, urn: true, organizationId: true,
+      ownerUserId: true, uninstalledAt: true, deletedAt: true,
+    },
+  });
+  if (!app || app.deletedAt) return null;
+  try {
+    await requireWorkerReadAccess(ctx, app);
+  } catch {
+    return null;
+  }
+  return resolveWorkerIdByName(ctx.db, appId, name);
 }
 
 /** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
@@ -870,6 +912,68 @@ export const workerMutations = {
   },
 
   /**
+   * updateWorker — #1010: amend a casting's individuality after the fact.
+   *
+   * `promptOverride` is the platform's designated per-worker escape hatch
+   * (cor:agt:020:01), but it could only be set at CASTING time and was
+   * immutable thereafter — which inverts the natural order, fixing a casting's
+   * individuality at the one moment nobody yet knows what makes it individual.
+   * Neither escape hatch covered it: the role agent's `personaPrompt` is SHARED
+   * by every casting of that role (cor:agt:020:01 explicitly allows several), so
+   * anything individual written there is claimed by all of them; and
+   * `deleteWorker` + re-cast refuses `WORKER_IN_USE` the moment a session was
+   * bound — so exactly the workers that have accumulated an identity are the
+   * ones that could not be re-cast.
+   *
+   * Scope is deliberately ONE field. `name` is permanent by law
+   * (cor:agt:020:02 — the allocation contract), and `role`/`agent` define the
+   * casting itself: a different role is a different casting, not an edit.
+   *
+   * Argument semantics: OMITTED preserves (the partial-update convention every
+   * other surface follows), explicit `null` or blank CLEARS — matching both the
+   * nullable column and `castWorker`'s own blank-is-absent normalization, so a
+   * value that castWorker would have stored as null cannot be reintroduced here.
+   *
+   * A RETIRED worker refuses. An override is briefing text, delivered at bind
+   * time — and a retired worker takes no new bindings (`startSession` refuses
+   * WORKER_RETIRED), so the edit could never reach anyone. Silently accepting a
+   * write with no possible effect is worse than a typed refusal that says why.
+   *
+   * Authorization is castWorker's gate: this edits the App's staff.
+   */
+  updateWorker: async (
+    _: unknown,
+    args: { workerRef: string; promptOverride?: string | null },
+    ctx: Context,
+  ) => {
+    const worker = await resolveWorkerRefRow(ctx, args.workerRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    await requireWorkerStaffAccess(ctx, app);
+
+    if (worker.retiredAt) {
+      throw new GraphQLError(
+        'This worker is retired — it takes no new session bindings, so a prompt override would never be delivered. Cast a new worker instead.',
+        { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
+      );
+    }
+
+    // Presence, not truthiness: `promptOverride: null` is a request to CLEAR,
+    // while omitting it is a request to leave it alone. A `?? undefined` here
+    // would collapse the two and make clearing impossible.
+    if (!('promptOverride' in args)) {
+      return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    }
+    const next = args.promptOverride;
+    return ctx.db.worker.update({
+      where: { id: worker.id },
+      // castWorker's normalization, verbatim: blank is absent, and a non-blank
+      // value is stored RAW (not trimmed) — the override is prose whose leading
+      // and trailing whitespace is the author's to choose.
+      data: { promptOverride: (next ?? '').trim() === '' ? null : (next as string) },
+    });
+  },
+
+  /**
    * deleteWorker — the ONLY removal escape (cor:dmo:050:11): the hard delete
    * of a never-used miscast. "Never did anything" is checked, not asserted:
    * no session was EVER bound (ended ones included — chat authorship and
@@ -939,10 +1043,52 @@ export const workerMutations = {
 
 export const workerQueries = {
   /**
-   * Read one worker (cor:api:120 find-one). The ref is a Worker id or an
-   * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991).
+   * Read one worker (cor:api:120 find-one). The ref is a Worker id, an
+   * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991), or — with
+   * `appRef` — the worker's NAME ("Iris", #990/#1015).
+   *
+   * The forms are told apart by SHAPE, never by trying each in turn: an id or a
+   * scheme-prefixed URN is self-describing, anything else is a name. Falling
+   * back from a failed URN resolution to a name lookup would make a typo'd URN
+   * silently search the roster (startSession's rule).
+   *
+   * This read is what makes a boot briefing RE-FETCHABLE (#1015): `Worker.prompt`
+   * renders live from the role agent's template, so an agent that lost its
+   * briefing to a compaction can recover it here instead of opening a second
+   * session or forcing a takeover of itself — both of which corrupt the
+   * provenance record the Worker model exists to produce.
    */
-  worker: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+  worker: async (
+    _: unknown,
+    { ref, appRef }: { ref: string; appRef?: string | null },
+    ctx: Context,
+  ) => {
+    const trimmed = ref?.trim() ?? '';
+    // The NAME form is activated by `appRef`, not by shape alone — it is
+    // strictly ADDITIVE. Without an appRef the resolver behaves exactly as it
+    // did before #1015, including for a name-shaped ref: an unresolvable ref of
+    // any shape refuses WORKER_NOT_FOUND, which is the standing no-oracle
+    // contract. Branching on shape alone would have re-labelled that refusal
+    // and told a caller which of their guesses merely lacked App context.
+    //
+    // A name is unique only WITHIN an App (cor:agt:020:02), so appRef is what
+    // makes the lookup well-defined; guessing across the caller's Apps would
+    // resolve one name to several workers. An id or URN is self-describing and
+    // wins over appRef rather than being checked against it — the same shape
+    // test startSession uses, so a typo'd URN never silently degrades into a
+    // roster search.
+    if (appRef && trimmed !== '' && !isId(trimmed) && !hasSchemePrefix(trimmed)) {
+      const { id: appId } = await resolveAppRef(ctx.db, appRef);
+      // Gate-then-lookup, with denial and absence collapsed — see
+      // resolveWorkerIdByNameGated for why the ordering is the contract.
+      const byName = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
+      if (!byName) {
+        throw new GraphQLError('Worker not found.', {
+          extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
+        });
+      }
+      return ctx.db.worker.findUniqueOrThrow({ where: { id: byName } });
+    }
     const worker = await resolveWorkerRefRow(ctx, ref);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerReadAccess(ctx, app);
