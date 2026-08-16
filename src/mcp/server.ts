@@ -113,7 +113,7 @@ import {
 import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
-import { HADRON_SERVER_VERSION, getDeploymentInfo } from './deploymentInfo.js';
+import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
@@ -157,12 +157,18 @@ export interface TestableMcpServer {
 
 export function createTestableMcpServer(
   auth: AuthContext,
-  opts?: { sessionId?: string; cachedAppResolution?: AppResolution | null },
+  opts?: {
+    sessionId?: string;
+    cachedAppResolution?: AppResolution | null;
+    /** #1009 — simulate a session rebuilt from a stale id (a client reconnect). */
+    isReconnect?: boolean;
+  },
 ): TestableMcpServer {
   const server = createMcpServerInstance(
     auth,
     () => opts?.sessionId,
     opts?.cachedAppResolution ?? null,
+    { isReconnect: opts?.isReconnect },
   );
   const tools = (server as unknown as {
     _registeredTools: Record<
@@ -839,7 +845,34 @@ export function createMcpServerInstance(
   auth: AuthContext,
   getSessionId: () => string | undefined,
   cachedAppResolution: AppResolution | null,
+  opts: { isReconnect?: boolean } = {},
 ): McpServer {
+  /**
+   * #1009 — this MCP session replaced one the client had already been using
+   * (it presented a session id this server did not know and re-initialized).
+   *
+   * Every piece of per-session state below was reset by that, and the client
+   * does not surface the reconnect to the agent driving it. So a refusal that
+   * follows one is not the same event as a refusal on a genuinely fresh
+   * session, and saying which it is turns "this tool is broken" into "say that
+   * one thing again".
+   */
+  const isReconnect = opts.isReconnect ?? false;
+
+  /**
+   * Appended to per-session-state refusals so the cause is never guessed at.
+   *
+   * Phrased conditionally ("any … you had selected") because the detection
+   * behind it is a deliberate over-approximation — see `isLikelyReconnect`.
+   * Under a false positive this still says nothing untrue to a caller who had
+   * no selection to lose.
+   */
+  const RECONNECT_NOTE =
+    ' Note: this MCP connection was re-established (the previous session ended, ' +
+    'typically because the server restarted). That RESET any active App or active ' +
+    'memory you had selected — selections live only for the current connection, ' +
+    'and clients re-connect without mentioning it. This is not a client ' +
+    'limitation and nothing you did is wrong: re-select and continue.';
   const server = new McpServer(
     { name: 'hadron', version: HADRON_SERVER_VERSION },
     { capabilities: { tools: {} } },
@@ -897,8 +930,21 @@ export function createMcpServerInstance(
       // place to add a per-call re-resolve OR an invalidation hook on
       // AppMember mutations.
       if (engagedWithNewSurface) {
-        const message = `No active Hadron App. Call hadron_list_apps to see options, then hadron_set_active_app with the one you want. If you're calling from a project directory, set 'app' in '.hadron/config.json'.`;
-        mcpLog('warn', 'no_active_app_typed_error', { userId: auth.userId, mcpSessionId: sid });
+        const message =
+          `No active Hadron App. Call hadron_list_apps to see options, then hadron_set_active_app with the one you want. If you're calling from a project directory, set 'app' in '.hadron/config.json'.` +
+          (isReconnect ? RECONNECT_NOTE : '');
+        mcpLog('warn', 'no_active_app_typed_error', {
+          userId: auth.userId,
+          mcpSessionId: sid,
+          // #1009: `engaged` is emitted as a FIELD on both branches so SC-003's
+          // adoption metric can be read off structured logs. Inferring it from
+          // which error TEXT fired is biased: `engagedWithNewSurface` is
+          // per-transport-session and a reconnect resets it, so a migrated
+          // client that reconnects is counted as un-migrated — and the longer a
+          // client runs, the more often it is miscounted.
+          engaged: true,
+          reconnect: isReconnect,
+        });
         return appSelectionError(APP_SELECTION_ERROR_CODES.NO_ACTIVE_APP, message);
       }
       // FR-016 fall-through for un-engaged callers. The MULTIPLE_APPS_RESOLVED
@@ -906,8 +952,19 @@ export function createMcpServerInstance(
       // envelope's `[<code>]` prefix so SC-003's production-log grep
       // continues to work even when the legacy spec-025 HTTP 409 path is
       // gone.
-      const message = `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance. Or call hadron_list_apps to see your accessible Apps and hadron_set_active_app to pick one.`;
-      mcpLog('warn', 'multiple_apps_resolved_fallthrough', { userId: auth.userId, mcpSessionId: sid });
+      const message =
+        `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance. Or call hadron_list_apps to see your accessible Apps and hadron_set_active_app to pick one.` +
+        (isReconnect ? RECONNECT_NOTE : '');
+      mcpLog('warn', 'multiple_apps_resolved_fallthrough', {
+        userId: auth.userId,
+        mcpSessionId: sid,
+        // See the sibling branch: `engaged` is the metric, not the phrase. On a
+        // RECONNECT this false is untrustworthy as an adoption signal — the
+        // flag was reset with the session, not by an un-migrated client — so
+        // SC-003 should read `engaged` and exclude `reconnect: true` rows.
+        engaged: false,
+        reconnect: isReconnect,
+      });
       return appSelectionError(APP_SELECTION_ERROR_CODES.MULTIPLE_APPS_RESOLVED, message);
     }
 
@@ -1207,7 +1264,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_set_active_memory',
-    'Set the active memory for this session. Subsequent tree tools will use this as the default scope.',
+    'Set the active memory for this session. Subsequent tree tools will use this as the default scope. Scoped to THIS MCP connection and not persisted: if the connection is re-established (which clients do transparently, e.g. after a server restart), the selection is reset and must be set again — tools will behave as though none was ever chosen rather than erroring.',
     {
       memoryUrn: z.string().describe('Memory URN, e.g. hrn:mem:hadronmemory.com:dev (bare hadronmemory.com:dev also accepted). Legacy hrn:memory: and :: forms still resolve.'),
     },
@@ -1288,14 +1345,23 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_server_info',
-    'Returns the identity of the hadron-server this MCP session is bound to: the deployment URL and server version. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (see #190 for context). No arguments. Returns plain key:value pairs. Does NOT require an active App or any memory access.',
+    'Returns the identity of the hadron-server this MCP session is bound to: deployment URL, server version, the CAPABILITY tokens this build supports, and whether this connection was re-established. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (#190), and to check a feature is actually present BEFORE relying on it — a deployment behind the docs silently ignores arguments it does not know (#1006). Test for a capability token, not a version number; if the capabilities line is missing entirely the server predates this field and should not be trusted to bind workers. No arguments. Returns plain key:value pairs. Does NOT require an active App or any memory access.',
     {},
     async () => {
       const dep = getDeploymentInfo();
       const lines = [
         `server: ${dep.baseUrl}`,
         `version: ${dep.version}`,
+        `capabilities: ${MCP_SURFACE_CAPABILITIES.join(', ')}`,
       ];
+      // #1009: the one place an agent can ASK whether its bearings were reset,
+      // rather than inferring it from a tool that stopped working.
+      if (isReconnect) {
+        lines.push(
+          'connection: re-established (the previous MCP session ended; any active App ' +
+            'or active memory selection was reset)',
+        );
+      }
       return textResult(lines.join('\n'));
     },
   );
@@ -4686,7 +4752,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     const names = mems.slice(0, RUN_TASK_PICK_CAP).map((m) => m.name).join(', ');
     return {
       done: textResult(
-        `Pass a \`memory\` hint (or set an active memory with hadron_set_active_memory). You can reach: ${names}.`,
+        `Pass a \`memory\` hint (or set an active memory with hadron_set_active_memory). You can reach: ${names}.` +
+          // #1009: the active-memory selection is per-connection, so after a
+          // transparent reconnect this refusal appears for a caller who DID set
+          // one. Without this line the only reading available is "the tool
+          // forgot for no reason".
+          (isReconnect
+            ? ' Note: this connection was re-established, which reset any active memory you had selected.'
+            : ''),
       ),
     };
   }
@@ -5058,6 +5131,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
     async ({ id, summary, inputTokens, outputTokens, turnCount, errorCount }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: paired with hadron_start_session.
+      //
+      // #1009: `id` IS the session, so scope is recoverable here with no new
+      // argument at all. This is the tool the gap stranded most sharply — after
+      // a reconnect a multi-App caller could neither continue the session nor
+      // END it, leaving the worker TAKEN until the reaper or a --force takeover.
+      await adoptAppFromSession(id);
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
 
@@ -5106,8 +5185,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       teamAgent: z.string().optional().describe('The Team Agent (Agent URN or ID) carrying the cast-list register. Omit to auto-detect: the single installed Agent whose system memory has a roles: branch.'),
       promptOverride: z.string().optional().describe('Per-worker individuality layered over the agent\'s template prompt — appended to the bound template in the worker\'s resolved prompt.'),
+      session: z.string().optional().describe('Your session id — used only to resolve which App to cast in when app is omitted.'),
     },
-    async ({ role, name, agent, app, teamAgent, promptOverride }) => {
+    async ({ role, name, agent, app, teamAgent, promptOverride, session }) => {
       // Delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement). Auth semantics
       // live in the resolver's gate: a hybrid user+selection principal is
@@ -5118,6 +5198,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // hadron_set_active_app selection into auth.appId.
       let appRef = app;
       if (!appRef) {
+        // #1009: same session-as-App-hint recovery as the team tools.
+        await adoptAppFromSession(session);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
@@ -5283,14 +5365,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       includeRetired: z.boolean().optional().describe('Include retired castings — historical staff whose names stay reserved.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
+      session: z.string().optional().describe('Your session id — used only to resolve which team App to list when app is omitted.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
-    async ({ includeRetired, limit, offset, app }) => {
+    async ({ includeRetired, limit, offset, session, app }) => {
       // App default mirrors hadron_cast_worker / hadron_record_work:
       // requireAppScope() runs BEFORE reading auth.appId so the omit-app flow
       // honors hadron_set_active_app.
       let appRef = app;
       if (!appRef) {
+        // #1009: the roster read is what an agent reaches for FIRST after
+        // losing its bearings, so it must be recoverable from a session too.
+        await adoptAppFromSession(session);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
@@ -6310,6 +6396,47 @@ const transports = new Map<string, StreamableHTTPServerTransport>();
  * §Clarifications Q3; horizontal scale-out requires either sticky
  * sessions or persistent `McpSessionState` first.
  */
+/**
+ * #1009 — when this process last answered a stale `Mcp-Session-Id` with the
+ * recovery 404, or `null` if it never has.
+ *
+ * The reconnect that matters is a two-request exchange with nothing linking its
+ * halves: the stale call carries a session id we reject, and the client's
+ * re-`initialize` deliberately carries NO session header. The 404 is answered
+ * before auth is resolved (by design — learning "session not found" needs no
+ * credential), so there is no principal to correlate on either.
+ *
+ * So the correlation is at PROCESS level: if this server has recently had to
+ * tell someone their session is gone, it is serving clients that had sessions
+ * before — the post-restart state — and a session opened inside that window is
+ * very likely a revival.
+ *
+ * A HEURISTIC, and deliberately biased toward false POSITIVES: the cost of
+ * wrongly mentioning a reconnect is one extra sentence to a caller who had no
+ * selection to lose, while the cost of missing one is the original bug, where
+ * the agent concludes its client is broken. The reconnect note is worded to
+ * stay true under a false positive ("if you had selected…"), which is what
+ * makes that trade safe.
+ */
+let lastStaleSessionAt: number | null = null;
+
+/** How long after a stale-session 404 a new session still reads as a revival. */
+const RECONNECT_CORRELATION_WINDOW_MS = 5 * 60 * 1000;
+
+/** Whether a session opening right now plausibly replaces one this process lost. */
+function isLikelyReconnect(presentedStaleSessionId: string | undefined): boolean {
+  // A client that re-initialized while still sending its old session id is
+  // certain, not heuristic — a known session returned long before this point.
+  if (presentedStaleSessionId) return true;
+  if (lastStaleSessionAt === null) return false;
+  return Date.now() - lastStaleSessionAt <= RECONNECT_CORRELATION_WINDOW_MS;
+}
+
+/** Test seam: forget any observed stale-session 404 (see the heuristic above). */
+export function __resetReconnectCorrelationForTests(): void {
+  lastStaleSessionAt = null;
+}
+
 const activeAppByMcpSession = new Map<
   string,
   { appId: string; organizationId: string | null }
@@ -6350,6 +6477,15 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       ? body.some((m) => isInitializeRequest(m))
       : isInitializeRequest(body);
     if (!hasInitialize) {
+      // #1009 (PR #1011 review, Codex P1 + Copilot): remember that THIS PROCESS
+      // has just told a client its session is gone. A spec-compliant client
+      // reacts to this 404 by re-initializing WITHOUT a session header
+      // (server.session-revival.test.ts), so the next request carries nothing
+      // to correlate on — `Boolean(sessionId)` alone catches only the minority
+      // of clients that re-init while still sending the stale id, which would
+      // have left the primary post-restart path reporting a fresh connection.
+      // This timestamp is the only signal that survives the gap.
+      lastStaleSessionAt = Date.now();
       mcpLog('info', 'stale_mcp_session_404', { mcpSessionId: sessionId, method: req.method });
       res.status(404).json({
         jsonrpc: '2.0',
@@ -6453,10 +6589,19 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       : () => randomUUID(),
   });
 
+  // #1009: is this session replacing one the client had already been using?
+  // Two shapes — a re-initialize still carrying the stale id (certain), or a
+  // headerless re-initialize shortly after this process 404'd someone's session
+  // (the spec-compliant path, correlated at process level). See
+  // `isLikelyReconnect`. Everything per-session was just reset underneath a
+  // client that will not mention it, so the tools need to be able to say so.
+  const isReconnect = isLikelyReconnect(sessionId);
+
   const mcpServer = createMcpServerInstance(
     auth,
     () => transport.sessionId,
     cachedAppResolution,
+    { isReconnect },
   );
 
   transport.onclose = () => {
