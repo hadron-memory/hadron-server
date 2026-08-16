@@ -2063,6 +2063,28 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  "Result of deleteTeamRole (#1002)."
+  type DeleteTeamRolePayload {
+    "The role slug that was retired."
+    role: String!
+    """
+    Nodes tombstoned — the roles:<role> definition plus any sub-nodes under it
+    (a roles:<role>:notes is content OF the role and retires with it). Soft,
+    so the subtree is recoverable.
+    """
+    nodesDeleted: Int!
+    """
+    Register spellings handed to the successor, in the order they were added to
+    it. Empty when no transferTo was given.
+    """
+    transferredNames: [String!]!
+    """
+    The successor role AFTER the transfer, so a client can render the new
+    register without a second read. Null when no transferTo was given.
+    """
+    transferredTo: TeamRole
+  }
+
   "Result of updateTeamCollections (hadron-cli#401)."
   type TeamCollectionsPayload {
     "The team App's shared memory the declaration was written to."
@@ -6528,6 +6550,43 @@ export const typeDefs = `#graphql
       allowOutOfRange: Boolean
       expectedNames: [String!]
     ): TeamRole!
+
+    """
+    #1002 — retire a roles:<role> definition. Soft-deletes the role node and
+    any sub-nodes under it (roles:<role>:notes is content OF the role), so the
+    subtree is recoverable. Unknown role: WORKER_ROLE_NOT_FOUND. Same
+    authorization and same App-scoped critical section as createTeamRole, so a
+    retirement serializes with register-mode casting.
+
+    MINTED names decide whether a bare delete is allowed. A minted register
+    entry is what records that a name was allocated to this role; dropping the
+    register without rehoming it would erase that ledger, so a role holding
+    minted names refuses TEAM_ROLE_IN_USE unless transferTo names a successor.
+    A role whose register is entirely free deletes with no ceremony.
+
+    Note this does NOT free the names themselves: a Worker's name is permanent
+    per App (cor:agt:020:02, enforced by workers_app_name_uniq irrespective of
+    any register), so retiring a role can never make a taken name castable
+    again. The register is bookkeeping about ALLOCATION, not identity — which
+    is exactly why moving it between roles is safe.
+
+    transferTo performs the supersede as ONE step: the old definition is
+    retired and its whole register is appended to the successor's, preserving
+    order and skipping spellings the successor already lists. This removes the
+    ordering trap a hand-run sequence has to rediscover (a name may not sit in
+    two of an App's registers, so the old role must be gone BEFORE the
+    successor can claim its names — TEAM_ROLE_NAME_DUPLICATE otherwise).
+    Transferred names are EXEMPT from the successor's nameRange: they are
+    re-homed allocations, not new ones, and the range governs what may be
+    allocated next. The successor's own conventions are left untouched —
+    changing them is updateTeamRole's job, not a side effect of a delete.
+    """
+    deleteTeamRole(
+      appRef: ID!
+      teamAgentRef: ID
+      role: String!
+      transferTo: String
+    ): DeleteTeamRolePayload!
 
     """
     Post a message into a team App's chat (#939) as a platform operation.
