@@ -990,9 +990,23 @@ export const workerMutations = {
       data: { promptOverride: (next ?? '').trim() === '' ? null : (next as string) },
     });
     if (count === 0) {
-      // Lost the race: the only predicate that can have changed is retirement
-      // (the id came from a row that existed a moment ago, and workers are
-      // hard-deleted only when never used — which this one now is not).
+      // Zero rows has TWO causes, and guessing retirement is wrong (PR #1020
+      // review, Codex P2): a concurrent `deleteWorker` can also have removed the
+      // row. It is permitted to — its "never used" test is about bound sessions
+      // and working-memory content, and setting an override makes a worker
+      // neither. Reporting WORKER_RETIRED for a worker that was actually DELETED
+      // would be actively misleading, since deletion frees the name to be cast
+      // again while retirement reserves it forever (cor:agt:020:02) — opposite
+      // advice for the caller. So ask which happened rather than assume.
+      const still = await ctx.db.worker.findUnique({
+        where: { id: worker.id },
+        select: { retiredAt: true },
+      });
+      if (!still) {
+        throw new GraphQLError('Worker not found.', {
+          extensions: { code: 'WORKER_NOT_FOUND', workerRef: args.workerRef },
+        });
+      }
       throw new GraphQLError(
         'This worker was retired while the update was in flight — it takes no new session bindings, so a prompt override would never be delivered.',
         { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },

@@ -696,6 +696,32 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
       ).toBeNull();
     });
 
+    it('reports NOT_FOUND, not RETIRED, when the worker is deleted mid-flight', async () => {
+      // PR review (Codex): a concurrent deleteWorker also yields zero rows, and
+      // it is permitted to — its "never used" test is about bound sessions and
+      // working-memory content, and setting an override makes a worker neither.
+      // The two answers point opposite ways for the caller: deletion FREES the
+      // name to be cast again, retirement reserves it forever.
+      const iris = await worker('Iris', 'iris');
+      const original = db.app.findUniqueOrThrow.bind(db.app);
+      const spy = vi.spyOn(db.app, 'findUniqueOrThrow').mockImplementationOnce((async (a: never) => {
+        const row = await original(a);
+        await db.worker.delete({ where: { id: iris.id } });
+        return row;
+      }) as never);
+      try {
+        await expect(
+          resolvers.Mutation.updateWorker(
+            {},
+            { workerRef: iris.id, promptOverride: 'too late' },
+            ctxFor(),
+          ),
+        ).rejects.toMatchObject({ extensions: { code: 'WORKER_NOT_FOUND' } });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('an id still wins over a supplied appRef', async () => {
       const iris = await worker('Iris', 'iris');
       const found = await resolvers.Query.worker({}, { ref: iris.id, appRef: app.id }, ctxFor());
