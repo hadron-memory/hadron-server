@@ -787,45 +787,105 @@ async function deleteTeamRoleImpl(
     // recursive because roles:<role>:notes is content OF this role. Delegated
     // to the shared node seam (resolvers.object.ts does the same), so the
     // descendant handling, tombstone semantics and write gate stay in one place.
-    const beforeCount = await ctx.db.node.count({
-      where: {
-        memoryId: systemMemoryId,
-        deletedAt: null,
-        OR: [{ loc }, { loc: { startsWith: `${loc}:` } }],
-      },
-    });
+    //
+    // The exact ids are captured first so the compensation below restores
+    // precisely what THIS delete tombstoned — a loc-prefix restore would also
+    // resurrect nodes that were already tombstoned before we ran.
+    const tombstoned = (
+      await ctx.db.node.findMany({
+        where: {
+          memoryId: systemMemoryId,
+          deletedAt: null,
+          OR: [{ loc }, { loc: { startsWith: `${loc}:` } }],
+        },
+        select: { id: true },
+      })
+    ).map((n) => n.id);
     await nodeMutations.deleteNode(null, { nodeRef: existing.id, recursive: true }, ctx);
 
     let transferredTo: Awaited<ReturnType<typeof buildTeamRole>> | null = null;
-    if (successor && transferTo) {
-      const mergedData: Record<string, unknown> = { ...(successor.data ?? {}) };
-      mergedData.names = successorMerged;
-      await writeNodeCore(
-        {
-          memoryId: systemMemoryId,
-          loc: successor.loc,
-          data: mergedData,
-          reason: `deleteTeamRole transfer ${role} → ${transferTo} (#1002)`,
-        },
-        ctx,
-        'update',
-        { targetNodeId: successor.id },
-      );
-      const fresh = await loadRoleNodes(ctx, systemMemoryId);
-      const node = fresh.find((n) => n.loc === successor!.loc);
-      if (node) {
-        transferredTo = await buildTeamRole(
-          ctx,
-          node,
-          await loadHeldByName(ctx, app.id, parseNameRegister(node.data?.names)),
-          await loadRoleAgentIndex(ctx, app.id),
-        );
+    try {
+      // ── The post-delete recheck (PR #1014 review, Codex P1) ───────────────
+      // castWorker takes the register lock in REGISTER mode only; an
+      // EXPLICIT-name cast mints without it. So a name can become minted
+      // between the pre-check above and this delete, and a bare delete would
+      // then erase the ledger of a freshly minted name — the exact invariant
+      // this mutation claims to hold. Rechecking AFTER the delete is what
+      // closes it: a cast either lands before this read (we see it and undo)
+      // or after (it mints against a role that is already gone, which is the
+      // ordinary WORKER_ROLE_NOT_FOUND it would get anyway).
+      //
+      // Transfers are exempt — a name minted mid-flight is carried to the
+      // successor like any other, so the ledger survives either way.
+      if (!transferTo) {
+        const mintedNow = await loadHeldByName(ctx, app.id, storedNames);
+        if (mintedNow.size > 0) {
+          const raced = storedNames.filter((n) => mintedNow.has(n));
+          throw new GraphQLError(
+            `Cannot delete the "${role}" role: ${raced.map((n) => JSON.stringify(n)).join(', ')} was minted while this deletion ran, and the register entry is what records that allocation. Retry with transferTo to hand the register to a successor role.`,
+            { extensions: { code: 'TEAM_ROLE_IN_USE', role, names: raced } },
+          );
+        }
       }
+
+      if (successor && transferTo) {
+        const mergedData: Record<string, unknown> = { ...(successor.data ?? {}) };
+        mergedData.names = successorMerged;
+        await writeNodeCore(
+          {
+            memoryId: systemMemoryId,
+            loc: successor.loc,
+            data: mergedData,
+            reason: `deleteTeamRole transfer ${role} → ${transferTo} (#1002)`,
+          },
+          ctx,
+          'update',
+          { targetNodeId: successor.id },
+        );
+        const fresh = await loadRoleNodes(ctx, systemMemoryId);
+        const node = fresh.find((n) => n.loc === successor!.loc);
+        if (node) {
+          transferredTo = await buildTeamRole(
+            ctx,
+            node,
+            await loadHeldByName(ctx, app.id, parseNameRegister(node.data?.names)),
+            await loadRoleAgentIndex(ctx, app.id),
+          );
+        }
+      }
+    } catch (e) {
+      // ── Compensation (PR #1014 review, Codex P1) ─────────────────────────
+      // The delete and the successor write are two operations that cannot
+      // share one transaction: the register lock's own transaction runs its
+      // bracketed work on the outer client by design (nested node inserts
+      // would deadlock against the memory row it holds — see withRegisterLock),
+      // and the generic node surface does not take that lock at all, so a
+      // concurrent deleteNode on the SUCCESSOR can make the write below fail
+      // after the source is already gone.
+      //
+      // So the source is RESTORED rather than left half-superseded. This is
+      // only possible because the delete is soft — the tombstone still holds
+      // the register verbatim, so undoing it loses nothing.
+      await ctx.db.node
+        .updateMany({
+          where: { id: { in: tombstoned } },
+          data: { deletedAt: null, deletedBy: null },
+        })
+        .catch((restoreErr: unknown) => {
+          // A failed compensation is worse than the original failure, because
+          // the caller would otherwise retry against a role that is silently
+          // gone. Say so explicitly instead of reporting only the first error.
+          throw new GraphQLError(
+            `deleteTeamRole failed AND could not restore the "${role}" role definition — it is soft-deleted at ${loc} in ${teamAgent.name}'s system memory and must be restored by hand. Original error: ${e instanceof Error ? e.message : String(e)}. Restore error: ${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`,
+            { extensions: { code: 'TEAM_ROLE_DELETE_NOT_COMPENSATED', role, loc, memoryId: systemMemoryId } },
+          );
+        });
+      throw e;
     }
 
     return {
       role,
-      nodesDeleted: beforeCount,
+      nodesDeleted: tombstoned.length,
       transferredNames,
       transferredTo,
     };

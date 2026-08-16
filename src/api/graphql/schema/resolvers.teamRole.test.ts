@@ -838,6 +838,91 @@ describe('deleteTeamRole (#1002)', () => {
     );
   });
 
+  it('catches a name minted DURING the delete, and undoes the delete', async () => {
+    // castWorker takes the register lock in REGISTER mode only — an
+    // EXPLICIT-name cast mints without it (PR #1014 review, Codex P1). So a
+    // name can become minted after the pre-check and before the delete lands,
+    // and a bare delete would erase the ledger of a freshly minted name. The
+    // recheck AFTER the delete is what closes it.
+    //
+    // The mint is injected at the id-capture query — after the pre-check read
+    // the register, before the delete commits — which is precisely the window
+    // an unlocked cast occupies.
+    const realFindMany = db.node.findMany.bind(db.node);
+    const spy = vi
+      .spyOn(db.node, 'findMany')
+      .mockImplementation(((args: Record<string, unknown> | undefined) => {
+        const select = args?.select as Record<string, unknown> | undefined;
+        if (select && Object.keys(select).length === 1 && select.id === true) {
+          return (async () => {
+            const rows = await realFindMany(args as never);
+            await db.worker.create({
+              data: { appId: app.id, agentId: roleAgent.id, name: 'Liam', slug: 'liam' },
+            });
+            return rows;
+          })();
+        }
+        return realFindMany(args as never);
+      }) as never);
+
+    try {
+      await expectCode(del(ctx(contrib.id), { role: 'frontend-engineer' }), 'TEAM_ROLE_IN_USE');
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The role is back, register intact — the raced mint's ledger survives.
+    const restored = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:frontend-engineer' },
+    });
+    expect(restored.deletedAt).toBeNull();
+    expect((restored.data as { names: string[] }).names).toEqual(['Kira', 'Liam']);
+  });
+
+  it('RESTORES the source role when the transfer write fails', async () => {
+    // The delete and the transfer cannot share one transaction, and the generic
+    // node surface does not take the register lock — so a concurrent delete of
+    // the SUCCESSOR can fail the write after the source is already gone (PR
+    // #1014 review, Codex P1). Simulated by vanishing the successor at the
+    // id-capture step, which runs after the successor was loaded and before the
+    // transfer write reaches it. Keyed on the QUERY SHAPE (`select: {id:true}`,
+    // unique to that capture in this flow) rather than a call index, so the
+    // test does not break the next time a query is added upstream of it.
+    const successorNode = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer' },
+    });
+    const realFindMany = db.node.findMany.bind(db.node);
+    const spy = vi
+      .spyOn(db.node, 'findMany')
+      .mockImplementation(((args: Record<string, unknown> | undefined) => {
+        const select = args?.select as Record<string, unknown> | undefined;
+        if (select && Object.keys(select).length === 1 && select.id === true) {
+          return (async () => {
+            const rows = await realFindMany(args as never);
+            await db.node.deleteMany({ where: { id: successorNode.id } });
+            return rows;
+          })();
+        }
+        return realFindMany(args as never);
+      }) as never);
+
+    try {
+      await expect(
+        del(ctx(contrib.id), { role: 'frontend-engineer', transferTo: 'backend-engineer' }),
+      ).rejects.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The source survives — half-superseded is not an acceptable resting state.
+    const restored = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:frontend-engineer' },
+    });
+    expect(restored.deletedAt).toBeNull();
+    expect((restored.data as { names: string[] }).names).toEqual(['Kira', 'Liam']);
+    expect(await roleLocs()).toContain('roles:frontend-engineer');
+  });
+
   it('runs the definition-edit gate — a reader App member may not retire a role', async () => {
     // requireMemoryWriteAccess signals denial with a plain Error('Forbidden…'),
     // matching how the create/update auth tests above assert it.

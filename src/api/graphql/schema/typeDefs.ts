@@ -6580,6 +6580,15 @@ export const typeDefs = `#graphql
     re-homed allocations, not new ones, and the range governs what may be
     allocated next. The successor's own conventions are left untouched —
     changing them is updateTeamRole's job, not a side effect of a delete.
+
+    The delete and the transfer are two operations that cannot share one
+    transaction, so the source role is RESTORED if the transfer fails — the
+    delete is soft, and the tombstone still holds the register verbatim. The
+    minted check is also re-run AFTER the delete, because an explicit-name
+    castWorker mints without taking the register lock and could otherwise slip
+    a freshly minted name past the pre-check. Should the restore itself fail,
+    TEAM_ROLE_DELETE_NOT_COMPENSATED reports the loc to recover by hand rather
+    than leaving the caller to retry against a role that is silently gone.
     """
     deleteTeamRole(
       appRef: ID!
