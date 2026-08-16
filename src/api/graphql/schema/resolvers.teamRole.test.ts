@@ -668,3 +668,266 @@ describe('#960 — updateTeamRole', () => {
     expect(worker.name).toBe('Ivy');
   });
 });
+
+// ---------------------------------------------------------------------------
+// deleteTeamRole — #1002 (client: hadron-cli#441)
+// ---------------------------------------------------------------------------
+
+/**
+ * Retiring a role definition. The rule the surface enforces: a MINTED register
+ * entry records that a name was allocated to this role, so it may never simply
+ * vanish — but it MAY move to a successor. That is what `transferTo` is for,
+ * and it also removes the ordering trap a hand-run supersede has to rediscover
+ * (delete before claim, or TEAM_ROLE_NAME_DUPLICATE; range before names, or
+ * TEAM_ROLE_NAME_OUT_OF_RANGE).
+ */
+describe('deleteTeamRole (#1002)', () => {
+  const del = (c: Context, args: Record<string, unknown>) =>
+    M.deleteTeamRole({}, { appRef: app.id, ...args }, c);
+
+  /** Mint a worker holding `name`, as a real cast would. */
+  const mintWorker = (name: string) =>
+    db.worker.create({
+      data: { appId: app.id, agentId: roleAgent.id, name, slug: workerSlugBase(name) },
+    });
+
+  const roleLocs = async () =>
+    (
+      await db.node.findMany({
+        where: { memoryId: teamAgent.systemMemoryId, deletedAt: null, loc: { startsWith: 'roles:' } },
+        select: { loc: true },
+      })
+    ).map((n) => n.loc);
+
+  it('deletes a role whose register is entirely free, with its sub-nodes', async () => {
+    // backend-engineer carries a `roles:backend-engineer:notes` child — content
+    // OF the role, which retires with it. Soft, so it stays recoverable.
+    const out = await del(ctx(contrib.id), { role: 'backend-engineer' });
+
+    expect(out.role).toBe('backend-engineer');
+    expect(out.nodesDeleted).toBe(2); // the definition + its notes
+    expect(out.transferredNames).toEqual([]);
+    expect(out.transferredTo).toBeNull();
+
+    expect(await roleLocs()).not.toContain('roles:backend-engineer');
+    expect(await roleLocs()).not.toContain('roles:backend-engineer:notes');
+    // Soft: the tombstone is still there to recover from.
+    expect(
+      await db.node.count({
+        where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer', deletedAt: { not: null } },
+      }),
+    ).toBe(1);
+  });
+
+  it('REFUSES a bare delete while a register name is minted', async () => {
+    await mintWorker('Gwen');
+    await expectCode(del(ctx(contrib.id), { role: 'backend-engineer' }), 'TEAM_ROLE_IN_USE');
+    // Nothing was deleted — the refusal is total, not partial.
+    expect(await roleLocs()).toContain('roles:backend-engineer');
+  });
+
+  it('names the minted entries, and points at the supersede that is allowed', async () => {
+    await mintWorker('Gwen');
+    try {
+      await del(ctx(contrib.id), { role: 'backend-engineer' });
+      expect.fail('expected TEAM_ROLE_IN_USE');
+    } catch (e) {
+      const err = e as GraphQLError;
+      expect(err.extensions?.names).toEqual(['Gwen']);
+      expect(err.message).toContain('transferTo');
+    }
+  });
+
+  it('transferTo hands the whole register over and retires the old role — one step', async () => {
+    const out = await del(ctx(contrib.id), {
+      role: 'frontend-engineer',
+      transferTo: 'backend-engineer',
+    });
+
+    expect(out.transferredNames).toEqual(['Kira', 'Liam']);
+    expect(await roleLocs()).not.toContain('roles:frontend-engineer');
+
+    // The successor's own names come first, the transferred ones follow in
+    // their original order.
+    expect(out.transferredTo.role).toBe('backend-engineer');
+    expect(out.transferredTo.register.map((r: { name: string }) => r.name)).toEqual([
+      'Fred', 'Gwen', 'Hans', 'Kira', 'Liam',
+    ]);
+  });
+
+  it('transfers a MINTED name — the supersede the bare delete refuses', async () => {
+    // The reported case (hadron-cli#441): frontend-engineer had cast workers,
+    // and its register moves to svelte-app-engineer rather than being dropped.
+    const worker = await mintWorker('Kira');
+    const out = await del(ctx(contrib.id), {
+      role: 'frontend-engineer',
+      transferTo: 'backend-engineer',
+    });
+
+    expect(out.transferredNames).toContain('Kira');
+    // The worker is untouched: a name lives on the Worker, not the register.
+    const after = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect(after.name).toBe('Kira');
+    // And the allocation is still recorded — now against the successor.
+    const kira = out.transferredTo.register.find((r: { name: string }) => r.name === 'Kira');
+    expect(kira.taken).toBe(true);
+  });
+
+  it('transferred names are EXEMPT from the successor nameRange', async () => {
+    // backend-engineer is "F-J"; Kira and Liam are outside it. A range check
+    // here would refuse exactly the supersede this argument exists for — the
+    // range governs what may be allocated NEXT, not what is being re-homed.
+    const out = await del(ctx(contrib.id), {
+      role: 'frontend-engineer',
+      transferTo: 'backend-engineer',
+    });
+    expect(out.transferredNames).toEqual(['Kira', 'Liam']);
+    // The successor's own convention is untouched — changing it is
+    // updateTeamRole's job, not a side effect of a delete.
+    expect(out.transferredTo.nameRange).toBe('F-J');
+  });
+
+  it('does not duplicate a spelling the successor already lists', async () => {
+    // This state is UNREACHABLE through the write surface — updateTeamRole
+    // refuses TEAM_ROLE_NAME_DUPLICATE for exactly this — so the register is
+    // planted directly, the way a hand-authored node could. The dedupe is
+    // therefore defensive, and this test is what keeps it from being dead code
+    // that silently rots into a real duplicate.
+    await db.node.updateMany({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer' },
+      data: { data: { names: ['Fred', 'Gwen', 'Hans', 'Kira'], nameRange: 'F-J' } },
+    });
+    const out = await del(ctx(contrib.id), {
+      role: 'frontend-engineer',
+      transferTo: 'backend-engineer',
+    });
+    expect(out.transferredNames).toEqual(['Liam']);
+    expect(out.transferredTo.register.map((r: { name: string }) => r.name)).toEqual([
+      'Fred', 'Gwen', 'Hans', 'Kira', 'Liam',
+    ]);
+  });
+
+  it('deleting a role NEVER makes a minted name castable again', async () => {
+    // The property that makes moving a register safe at all: name permanence
+    // is enforced by workers_app_name_uniq, not by the register, so no
+    // bookkeeping edit can resurrect a taken name.
+    await mintWorker('Kira');
+    await del(ctx(contrib.id), { role: 'frontend-engineer', transferTo: 'backend-engineer' });
+
+    await expect(
+      db.worker.create({
+        data: { appId: app.id, agentId: roleAgent.id, name: 'Kira', slug: 'kira-2' },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('refuses an unknown role, and an unknown transferTo', async () => {
+    await expectCode(del(ctx(contrib.id), { role: 'nope' }), 'WORKER_ROLE_NOT_FOUND');
+    await expectCode(
+      del(ctx(contrib.id), { role: 'frontend-engineer', transferTo: 'nope' }),
+      'WORKER_ROLE_NOT_FOUND',
+    );
+    // The failed transfer left the source role alone.
+    expect(await roleLocs()).toContain('roles:frontend-engineer');
+  });
+
+  it('refuses transferring a role to itself', async () => {
+    await expectCode(
+      del(ctx(contrib.id), { role: 'frontend-engineer', transferTo: 'frontend-engineer' }),
+      'BAD_USER_INPUT',
+    );
+  });
+
+  it('catches a name minted DURING the delete, and undoes the delete', async () => {
+    // castWorker takes the register lock in REGISTER mode only — an
+    // EXPLICIT-name cast mints without it (PR #1014 review, Codex P1). So a
+    // name can become minted after the pre-check and before the delete lands,
+    // and a bare delete would erase the ledger of a freshly minted name. The
+    // recheck AFTER the delete is what closes it.
+    //
+    // The mint is injected at the id-capture query — after the pre-check read
+    // the register, before the delete commits — which is precisely the window
+    // an unlocked cast occupies.
+    const realFindMany = db.node.findMany.bind(db.node);
+    const spy = vi
+      .spyOn(db.node, 'findMany')
+      .mockImplementation(((args: Record<string, unknown> | undefined) => {
+        const select = args?.select as Record<string, unknown> | undefined;
+        if (select && Object.keys(select).length === 1 && select.id === true) {
+          return (async () => {
+            const rows = await realFindMany(args as never);
+            await db.worker.create({
+              data: { appId: app.id, agentId: roleAgent.id, name: 'Liam', slug: 'liam' },
+            });
+            return rows;
+          })();
+        }
+        return realFindMany(args as never);
+      }) as never);
+
+    try {
+      await expectCode(del(ctx(contrib.id), { role: 'frontend-engineer' }), 'TEAM_ROLE_IN_USE');
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The role is back, register intact — the raced mint's ledger survives.
+    const restored = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:frontend-engineer' },
+    });
+    expect(restored.deletedAt).toBeNull();
+    expect((restored.data as { names: string[] }).names).toEqual(['Kira', 'Liam']);
+  });
+
+  it('RESTORES the source role when the transfer write fails', async () => {
+    // The delete and the transfer cannot share one transaction, and the generic
+    // node surface does not take the register lock — so a concurrent delete of
+    // the SUCCESSOR can fail the write after the source is already gone (PR
+    // #1014 review, Codex P1). Simulated by vanishing the successor at the
+    // id-capture step, which runs after the successor was loaded and before the
+    // transfer write reaches it. Keyed on the QUERY SHAPE (`select: {id:true}`,
+    // unique to that capture in this flow) rather than a call index, so the
+    // test does not break the next time a query is added upstream of it.
+    const successorNode = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer' },
+    });
+    const realFindMany = db.node.findMany.bind(db.node);
+    const spy = vi
+      .spyOn(db.node, 'findMany')
+      .mockImplementation(((args: Record<string, unknown> | undefined) => {
+        const select = args?.select as Record<string, unknown> | undefined;
+        if (select && Object.keys(select).length === 1 && select.id === true) {
+          return (async () => {
+            const rows = await realFindMany(args as never);
+            await db.node.deleteMany({ where: { id: successorNode.id } });
+            return rows;
+          })();
+        }
+        return realFindMany(args as never);
+      }) as never);
+
+    try {
+      await expect(
+        del(ctx(contrib.id), { role: 'frontend-engineer', transferTo: 'backend-engineer' }),
+      ).rejects.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The source survives — half-superseded is not an acceptable resting state.
+    const restored = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:frontend-engineer' },
+    });
+    expect(restored.deletedAt).toBeNull();
+    expect((restored.data as { names: string[] }).names).toEqual(['Kira', 'Liam']);
+    expect(await roleLocs()).toContain('roles:frontend-engineer');
+  });
+
+  it('runs the definition-edit gate — a reader App member may not retire a role', async () => {
+    // requireMemoryWriteAccess signals denial with a plain Error('Forbidden…'),
+    // matching how the create/update auth tests above assert it.
+    await expect(del(ctx(appMember.id), { role: 'frontend-engineer' })).rejects.toThrow(/Forbidden/);
+    await expect(del(ctx(outsider.id), { role: 'frontend-engineer' })).rejects.toThrow(/Forbidden/);
+    expect(await roleLocs()).toContain('roles:frontend-engineer');
+  });
+});

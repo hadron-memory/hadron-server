@@ -30,7 +30,7 @@ import {
   ROLES_BRANCH_PREFIX,
 } from './resolvers.worker.js';
 import { templateBindsName } from '../../../lib/personaDescription.js';
-import { writeNodeCore } from './resolvers.mutation.node.js';
+import { writeNodeCore, nodeMutations } from './resolvers.mutation.node.js';
 import {
   type Context,
   requireMemoryWriteAccess,
@@ -636,6 +636,262 @@ async function writeTeamRole(
   });
 }
 
+/**
+ * deleteTeamRole — #1002: retire a `roles:<role>` definition, optionally
+ * handing its register to a successor in the same step.
+ *
+ * ## Why MINTED names gate a bare delete
+ *
+ * The register entry is what records that a name was allocated to this role
+ * (`TEAM_ROLE_NAME_MINTED` protects exactly this on the edit path). Deleting a
+ * role that holds minted entries erases that ledger, so a bare delete refuses
+ * `TEAM_ROLE_IN_USE`; naming a `transferTo` rehomes the ledger instead of
+ * dropping it. The rule this generalizes: a minted name may never leave the
+ * App's registers — but it MAY move between them.
+ *
+ * What deletion emphatically does NOT do is free the names. A Worker's name is
+ * permanent per App (`cor:agt:020:02`), enforced by `workers_app_name_uniq` on
+ * `(app_id, lower(name))` irrespective of any register — so a retired role can
+ * never make a taken name castable again, whatever the register says. That is
+ * the fact that makes moving a register between roles safe at all: the register
+ * governs ALLOCATION bookkeeping, the unique governs identity.
+ *
+ * ## Ordering — the trap this exists to remove
+ *
+ * A name may not sit in two of one App's registers, so a hand-run supersede has
+ * to delete the old role BEFORE the successor can claim its names, and must set
+ * the successor's range before adding out-of-range names. Both orderings are
+ * invisible until they fail (hadron-cli#441). Here it is one operation inside
+ * the register lock: delete first, then extend the successor.
+ *
+ * Everything that can be validated is validated BEFORE the delete, so the only
+ * way to fail between the two writes is an infrastructure error — and the
+ * delete is SOFT, so even that is recoverable rather than lossy.
+ */
+async function deleteTeamRoleImpl(
+  args: { appRef: string; teamAgentRef?: string | null; role: string; transferTo?: string | null },
+  ctx: Context,
+) {
+  const role = normalizeRoleSlug(args.role);
+  const transferTo =
+    args.transferTo == null || args.transferTo.trim() === ''
+      ? null
+      : normalizeRoleSlug(args.transferTo);
+  if (transferTo && transferTo.toLowerCase() === role.toLowerCase()) {
+    throw new GraphQLError('transferTo must name a DIFFERENT role than the one being deleted.', {
+      extensions: { code: 'BAD_USER_INPUT', role },
+    });
+  }
+
+  const app = await resolveApp(ctx, args.appRef);
+  if (app.deletedAt) {
+    throw new GraphQLError(`App not found: ${args.appRef}`, {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  if (app.uninstalledAt) {
+    throw new GraphQLError('Cannot edit team roles of an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId: app.id },
+    });
+  }
+  // Same hold-the-locator-error posture as writeTeamRole: TEAM_AGENT_* names
+  // the App's installed-agent topology, so it is shown only to the audience
+  // the teamRoles read already grants it to.
+  let teamAgent: Awaited<ReturnType<typeof locateTeamAgent>>;
+  try {
+    teamAgent = await locateTeamAgent(ctx, app.id, args.teamAgentRef);
+  } catch (e) {
+    await requireWorkerReadAccess(ctx, app);
+    throw e;
+  }
+  if (!teamAgent.systemMemoryId) {
+    throw new GraphQLError(
+      `Team Agent ${teamAgent.name} has no system memory to hold role definitions.`,
+      { extensions: { code: 'TEAM_AGENT_NOT_FOUND', appId: app.id } },
+    );
+  }
+  // The definition-edit gate up front — ahead of any refusal that would
+  // disclose register or roster contents to a caller who may not edit them.
+  await requireMemoryWriteAccess(ctx, teamAgent.systemMemoryId);
+
+  const systemMemoryId = teamAgent.systemMemoryId;
+  const loc = `${ROLES_BRANCH_PREFIX}${role}`;
+
+  return withRegisterLock(ctx, systemMemoryId, async () => {
+    const allNodes = await loadRoleNodes(ctx, systemMemoryId);
+    const existing = allNodes.find((n) => n.loc === loc) ?? null;
+    if (!existing) {
+      const available = allNodes.map((n) => n.loc.slice(ROLES_BRANCH_PREFIX.length));
+      throw new GraphQLError(
+        `Role "${role}" is not defined in ${teamAgent.name}'s system memory.${available.length ? ` Available roles: ${available.join(', ')}.` : ''}`,
+        { extensions: { code: 'WORKER_ROLE_NOT_FOUND', role, availableRoles: available } },
+      );
+    }
+
+    const storedNames = parseNameRegister(existing.data?.names);
+    const minted = new Set((await loadHeldByName(ctx, app.id, storedNames)).keys());
+
+    let successor: DecryptedRoleNode | null = null;
+    let successorMerged: string[] = [];
+    let transferredNames: string[] = [];
+
+    if (transferTo) {
+      const successorLoc = `${ROLES_BRANCH_PREFIX}${transferTo}`;
+      successor = allNodes.find((n) => n.loc === successorLoc) ?? null;
+      if (!successor) {
+        const available = allNodes.map((n) => n.loc.slice(ROLES_BRANCH_PREFIX.length));
+        throw new GraphQLError(
+          `transferTo role "${transferTo}" is not defined in ${teamAgent.name}'s system memory.${available.length ? ` Available roles: ${available.join(', ')}.` : ''} Create it with createTeamRole first.`,
+          { extensions: { code: 'WORKER_ROLE_NOT_FOUND', role: transferTo, availableRoles: available } },
+        );
+      }
+      const successorNames = parseNameRegister(successor.data?.names);
+      const have = new Set(successorNames.map((n) => n.toLowerCase()));
+      // Append in the source register's order; a spelling the successor already
+      // lists is skipped rather than duplicated (the register is deduped
+      // case-insensitively by parseNameRegister, so re-adding would be a no-op
+      // at best and an ordering surprise at worst).
+      transferredNames = storedNames.filter((n) => !have.has(n.toLowerCase()));
+      successorMerged = [...successorNames, ...transferredNames];
+
+      // Defensive: a transferred name must not already live in a THIRD
+      // register. The one-name-one-register invariant makes this unreachable,
+      // but the check costs one map lookup and the alternative is silently
+      // creating the ambiguity the invariant exists to prevent.
+      const others = indexOtherRegisters(
+        allNodes.filter((n) => n.loc !== loc && n.loc !== successorLoc),
+        '',
+      );
+      const clashing = transferredNames.filter((n) => others.has(n.toLowerCase()));
+      if (clashing.length > 0) {
+        throw new GraphQLError(
+          `Cannot transfer ${clashing.map((n) => JSON.stringify(n)).join(', ')} to "${transferTo}": already in this App's "${others.get(clashing[0].toLowerCase())}" register.`,
+          { extensions: { code: 'TEAM_ROLE_NAME_DUPLICATE', role: transferTo, names: clashing } },
+        );
+      }
+      // NOTE: no nameRange check. Transferred names are re-homed allocations,
+      // not new ones — the range governs what may be allocated NEXT, and
+      // range-checking a supersede would refuse exactly the case this argument
+      // exists for (hadron-cli#441 superseded frontend-engineer with
+      // svelte-app-engineer, whose ranges differ).
+    } else if (minted.size > 0) {
+      const mintedList = storedNames.filter((n) => minted.has(n));
+      throw new GraphQLError(
+        `Cannot delete the "${role}" role: ${mintedList.map((n) => JSON.stringify(n)).join(', ')} ${mintedList.length === 1 ? 'is' : 'are'} minted in this App (a Worker holds the name — retirement never frees one), and the register entry is what records that allocation. Pass transferTo to hand the register to a successor role, which is the supersede this refusal is protecting.`,
+        { extensions: { code: 'TEAM_ROLE_IN_USE', role, names: mintedList } },
+      );
+    }
+
+    // Delete FIRST: a name may not sit in two registers, so the successor
+    // cannot claim these spellings while the old definition still lists them.
+    // recursive because roles:<role>:notes is content OF this role. Delegated
+    // to the shared node seam (resolvers.object.ts does the same), so the
+    // descendant handling, tombstone semantics and write gate stay in one place.
+    //
+    // The exact ids are captured first so the compensation below restores
+    // precisely what THIS delete tombstoned — a loc-prefix restore would also
+    // resurrect nodes that were already tombstoned before we ran.
+    const tombstoned = (
+      await ctx.db.node.findMany({
+        where: {
+          memoryId: systemMemoryId,
+          deletedAt: null,
+          OR: [{ loc }, { loc: { startsWith: `${loc}:` } }],
+        },
+        select: { id: true },
+      })
+    ).map((n) => n.id);
+    await nodeMutations.deleteNode(null, { nodeRef: existing.id, recursive: true }, ctx);
+
+    let transferredTo: Awaited<ReturnType<typeof buildTeamRole>> | null = null;
+    try {
+      // ── The post-delete recheck (PR #1014 review, Codex P1) ───────────────
+      // castWorker takes the register lock in REGISTER mode only; an
+      // EXPLICIT-name cast mints without it. So a name can become minted
+      // between the pre-check above and this delete, and a bare delete would
+      // then erase the ledger of a freshly minted name — the exact invariant
+      // this mutation claims to hold. Rechecking AFTER the delete is what
+      // closes it: a cast either lands before this read (we see it and undo)
+      // or after (it mints against a role that is already gone, which is the
+      // ordinary WORKER_ROLE_NOT_FOUND it would get anyway).
+      //
+      // Transfers are exempt — a name minted mid-flight is carried to the
+      // successor like any other, so the ledger survives either way.
+      if (!transferTo) {
+        const mintedNow = await loadHeldByName(ctx, app.id, storedNames);
+        if (mintedNow.size > 0) {
+          const raced = storedNames.filter((n) => mintedNow.has(n));
+          throw new GraphQLError(
+            `Cannot delete the "${role}" role: ${raced.map((n) => JSON.stringify(n)).join(', ')} was minted while this deletion ran, and the register entry is what records that allocation. Retry with transferTo to hand the register to a successor role.`,
+            { extensions: { code: 'TEAM_ROLE_IN_USE', role, names: raced } },
+          );
+        }
+      }
+
+      if (successor && transferTo) {
+        const mergedData: Record<string, unknown> = { ...(successor.data ?? {}) };
+        mergedData.names = successorMerged;
+        await writeNodeCore(
+          {
+            memoryId: systemMemoryId,
+            loc: successor.loc,
+            data: mergedData,
+            reason: `deleteTeamRole transfer ${role} → ${transferTo} (#1002)`,
+          },
+          ctx,
+          'update',
+          { targetNodeId: successor.id },
+        );
+        const fresh = await loadRoleNodes(ctx, systemMemoryId);
+        const node = fresh.find((n) => n.loc === successor!.loc);
+        if (node) {
+          transferredTo = await buildTeamRole(
+            ctx,
+            node,
+            await loadHeldByName(ctx, app.id, parseNameRegister(node.data?.names)),
+            await loadRoleAgentIndex(ctx, app.id),
+          );
+        }
+      }
+    } catch (e) {
+      // ── Compensation (PR #1014 review, Codex P1) ─────────────────────────
+      // The delete and the successor write are two operations that cannot
+      // share one transaction: the register lock's own transaction runs its
+      // bracketed work on the outer client by design (nested node inserts
+      // would deadlock against the memory row it holds — see withRegisterLock),
+      // and the generic node surface does not take that lock at all, so a
+      // concurrent deleteNode on the SUCCESSOR can make the write below fail
+      // after the source is already gone.
+      //
+      // So the source is RESTORED rather than left half-superseded. This is
+      // only possible because the delete is soft — the tombstone still holds
+      // the register verbatim, so undoing it loses nothing.
+      await ctx.db.node
+        .updateMany({
+          where: { id: { in: tombstoned } },
+          data: { deletedAt: null, deletedBy: null },
+        })
+        .catch((restoreErr: unknown) => {
+          // A failed compensation is worse than the original failure, because
+          // the caller would otherwise retry against a role that is silently
+          // gone. Say so explicitly instead of reporting only the first error.
+          throw new GraphQLError(
+            `deleteTeamRole failed AND could not restore the "${role}" role definition — it is soft-deleted at ${loc} in ${teamAgent.name}'s system memory and must be restored by hand. Original error: ${e instanceof Error ? e.message : String(e)}. Restore error: ${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`,
+            { extensions: { code: 'TEAM_ROLE_DELETE_NOT_COMPENSATED', role, loc, memoryId: systemMemoryId } },
+          );
+        });
+      throw e;
+    }
+
+    return {
+      role,
+      nodesDeleted: tombstoned.length,
+      transferredNames,
+      transferredTo,
+    };
+  });
+}
+
 export const teamRoleQueries = {
   /**
    * teamRoles — #960: the role definitions of an App's Team Agent, with the
@@ -700,4 +956,15 @@ export const teamRoleMutations = {
    */
   updateTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) =>
     writeTeamRole(args, ctx, 'update'),
+
+  /**
+   * deleteTeamRole — #1002: retire a role definition, optionally handing its
+   * register to a successor in one step. See {@link deleteTeamRoleImpl} for
+   * the minted-name rule and why the ordering trap disappears here.
+   */
+  deleteTeamRole: async (
+    _: unknown,
+    args: { appRef: string; teamAgentRef?: string | null; role: string; transferTo?: string | null },
+    ctx: Context,
+  ) => deleteTeamRoleImpl(args, ctx),
 };
