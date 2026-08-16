@@ -26,24 +26,47 @@ export interface AbstractVectorRow {
 }
 
 /**
- * Replace a node's abstract vector (delete existing kind='abstract', insert one).
+ * Replace a node's abstract vector — a REAL upsert (#1025).
  *
- * Wrapped in a transaction so a failed INSERT (transient network, constraint,
- * etc.) rolls back the DELETE — otherwise the node would briefly carry no
- * abstract vector and reads would miss until the next successful sweep
- * (PR-219 review).
+ * A node carries at most one abstract vector, enforced by the PARTIAL unique
+ * `node_embeddings_abstract_uniq ON node_embeddings (node_id) WHERE kind =
+ * 'abstract'` (post-push.sql). Postgres can infer that index for conflict
+ * resolution when the conflict target restates its predicate, which is what the
+ * `WHERE kind = 'abstract'` after the column list is doing — it is the INDEX
+ * PREDICATE for inference, not a filter on the row being written.
+ *
+ * This replaced a DELETE-then-INSERT pair wrapped in a transaction, which was
+ * not an upsert and raced (#1025). Under READ COMMITTED two concurrent
+ * re-embeds of one node — a write-path re-embed interleaving with the
+ * `embedding_pending_at` sweep is the ordinary way this happens — deadlocked on
+ * the unique instead: A deletes and inserts; B's delete blocks on A's lock,
+ * then re-evaluates and finds the row already gone so deletes NOTHING; B's
+ * insert then collides with A's row and the whole re-embed fails 23505. The
+ * node is left flagged `embedding_failed_at` and, until a retry succeeds,
+ * absent from vector search — indistinguishable from "no hits matched", which
+ * is what made it invisible until a corpus validate surfaced it.
+ *
+ * The transaction is gone with it, deliberately. Its documented purpose
+ * (PR-219 review) was to roll the DELETE back if the INSERT failed, so the node
+ * never briefly carried no abstract vector. A single upserting statement has no
+ * such window to protect: the row is never deleted, only overwritten in place.
  */
 export async function upsertAbstractVector(
   db: PrismaClient,
   row: AbstractVectorRow,
 ): Promise<void> {
-  await db.$transaction(async (tx) => {
-    await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${row.nodeId} AND kind = 'abstract'`;
-    await tx.$executeRaw`
-      INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, embedding, created_at)
-      VALUES (${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now())
-    `;
-  });
+  await db.$executeRaw`
+    INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, embedding, created_at)
+    VALUES (${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now())
+    ON CONFLICT (node_id) WHERE kind = 'abstract'
+    DO UPDATE SET
+      memory_id  = EXCLUDED.memory_id,
+      provider   = EXCLUDED.provider,
+      model      = EXCLUDED.model,
+      dim        = EXCLUDED.dim,
+      embedding  = EXCLUDED.embedding,
+      created_at = now()
+  `;
 }
 
 /** Delete all of a node's vectors (re-index / disable / cleared abstract). */
@@ -73,12 +96,33 @@ export interface ChunkVectorRow {
  * Spec 033 US2 (T039) — replace a node's chunk vectors atomically.
  *
  * delete-all-then-insert-all inside a single transaction so a failed
- * insert rolls back the delete (same posture as upsertAbstractVector).
- * Per FR-017, every content edit re-derives the full chunk set — there's
- * no per-chunk update path, just a clean rebuild.
+ * insert rolls back the delete. Per FR-017, every content edit re-derives the
+ * full chunk set — there's no per-chunk update path, just a clean rebuild.
  *
  * `rows` may be empty (content cleared); the delete still fires so any
  * prior chunks vanish.
+ *
+ * ## Why the row lock (#1025)
+ *
+ * The same race as the abstract path, and it fails the same way: loudly, on
+ * `node_embeddings_node_id_kind_chunk_index_key`. Under READ COMMITTED, writer
+ * A deletes the old rows and inserts its set; writer B's DELETE blocks on A's
+ * locks and, when it resumes, removes only what was in ITS statement snapshot
+ * — A's brand-new rows were never in that snapshot, so they are neither
+ * scanned nor removed. B then inserts `chunk_index = 0`, collides with A's, and
+ * the whole rebuild fails 23505, leaving the node flagged
+ * `embedding_failed_at`.
+ *
+ * An `ON CONFLICT` upsert is NOT the fix here, unlike the abstract path: the
+ * chunk set is rebuilt wholesale and the new set may be SHORTER than the old
+ * one, so upserting by index would silently strand the tail (`chunk_index` 5..9
+ * of a set that is now 5 long) as vectors of content that no longer exists.
+ * Delete-then-insert is the right shape; it just has to be serialized.
+ *
+ * `FOR NO KEY UPDATE`, not `FOR UPDATE`, deliberately — the inserts below
+ * FK-reference this same row, and an FK check takes `FOR KEY SHARE`, which `NO
+ * KEY UPDATE` admits and `UPDATE` would block against (the deadlock class
+ * already documented on `withRegisterLock`).
  */
 export async function upsertChunkVectors(
   db: PrismaClient,
@@ -86,6 +130,7 @@ export async function upsertChunkVectors(
   rows: ChunkVectorRow[],
 ): Promise<void> {
   await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${nodeId} FOR NO KEY UPDATE`;
     await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId} AND kind = 'chunk'`;
     for (const row of rows) {
       // One INSERT per chunk (no multi-row pgvector parameter syntax via
