@@ -1431,6 +1431,13 @@ model Session {
   @@index([appId, userId])
   @@index([expiresAt])
   @@index([workerId])
+  /// #1016 — the "what am I driving?" read (`hadron_whoami`), which filters
+  /// `userId` alone and orders by `startedAt`. `[appId, userId]` cannot serve
+  /// it: Postgres will not seek on a composite index's SECOND column, so the
+  /// planner fell back to the `[startedAt]` index and scanned the global
+  /// session history backwards — worst for the caller with NO open session,
+  /// which is exactly the compaction-recovery case the tool exists for.
+  @@index([userId, startedAt])
   @@map("sessions")
 }
 

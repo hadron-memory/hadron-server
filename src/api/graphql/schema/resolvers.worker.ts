@@ -351,7 +351,17 @@ export async function resolveWorkerIdByNameGated(
   if (!app || app.deletedAt) return null;
   try {
     await requireWorkerReadAccess(ctx, app);
-  } catch {
+  } catch (e) {
+    // NARROW catch (PR #1019 review, Copilot; review:narrow-catch-blocks, the
+    // convention requireWorkerStaffAccess above already follows): collapse ONLY
+    // the expected denial. `requireWorkerReadAccess` reaches the database via
+    // `isAppParticipant`, so a blanket catch turns a connection failure inside
+    // that lookup into "no such worker" — an outage reported as a missing row,
+    // on the exact surface whose whole contract is that absence and denial look
+    // identical. Deliberately opposite reasoning to the collapse this function
+    // exists for: hiding WHY a caller was refused is the point; hiding THAT the
+    // database is down never is.
+    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
     return null;
   }
   return resolveWorkerIdByName(ctx.db, appId, name);
@@ -964,13 +974,45 @@ export const workerMutations = {
       return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     }
     const next = args.promptOverride;
-    return ctx.db.worker.update({
-      where: { id: worker.id },
+    // Guarded on the state the refusal above consumed (PR #1019 review,
+    // Copilot): the check read `retiredAt` from a row resolved earlier, so a
+    // `retireWorker` landing in between would let this write through and amend
+    // a retired casting the contract says it refuses. `updateMany` re-applies
+    // the predicate at write time — the same shape `retireWorker` itself uses
+    // for its idempotent claim, and the lighter sibling of `deleteWorker`'s
+    // SERIALIZABLE count-then-act (this write cannot corrupt anything, it just
+    // must not contradict its own stated refusal).
+    const { count } = await ctx.db.worker.updateMany({
+      where: { id: worker.id, retiredAt: null },
       // castWorker's normalization, verbatim: blank is absent, and a non-blank
       // value is stored RAW (not trimmed) — the override is prose whose leading
       // and trailing whitespace is the author's to choose.
       data: { promptOverride: (next ?? '').trim() === '' ? null : (next as string) },
     });
+    if (count === 0) {
+      // Zero rows has TWO causes, and guessing retirement is wrong (PR #1020
+      // review, Codex P2): a concurrent `deleteWorker` can also have removed the
+      // row. It is permitted to — its "never used" test is about bound sessions
+      // and working-memory content, and setting an override makes a worker
+      // neither. Reporting WORKER_RETIRED for a worker that was actually DELETED
+      // would be actively misleading, since deletion frees the name to be cast
+      // again while retirement reserves it forever (cor:agt:020:02) — opposite
+      // advice for the caller. So ask which happened rather than assume.
+      const still = await ctx.db.worker.findUnique({
+        where: { id: worker.id },
+        select: { retiredAt: true },
+      });
+      if (!still) {
+        throw new GraphQLError('Worker not found.', {
+          extensions: { code: 'WORKER_NOT_FOUND', workerRef: args.workerRef },
+        });
+      }
+      throw new GraphQLError(
+        'This worker was retired while the update was in flight — it takes no new session bindings, so a prompt override would never be delivered.',
+        { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
+      );
+    }
+    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
   /**
