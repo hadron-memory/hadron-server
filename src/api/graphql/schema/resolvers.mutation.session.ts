@@ -24,7 +24,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { requireWorkerReadAccess, resolveWorkerIdByName } from './resolvers.worker.js';
+import { resolveWorkerIdByNameGated } from './resolvers.worker.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
@@ -222,55 +222,43 @@ export const sessionMutations = {
               { extensions: { code: 'SESSION_WORKER_NAME_NEEDS_APP', workerRef } },
             );
           }
-          // The staff read gate runs BEFORE the lookup, not after: resolving a
-          // name answers "does this App have an Iris?", a fact about the roster
-          // that the id/URN forms never have to disclose, so gating afterwards
-          // would leak roster membership to anyone who can guess a name. Same
-          // audience as the `workers` list and `teamRoles` — this discloses
-          // nothing the caller cannot already enumerate — and a denial reports
-          // WORKER_NOT_FOUND, indistinguishable from an App with no such worker.
-          //
-          // In practice a caller who reached here via `appRef` has ALREADY
-          // cleared `isAppParticipant` above, the same predicate this gate
-          // uses, so an outsider is refused FORBIDDEN before any name is looked
-          // up. This is therefore defense in depth, not the only barrier — and
-          // deliberately so: `appId` can also arrive from an App-key credential
-          // (which skips that membership branch), and the name branch must be
-          // self-sufficient rather than relying on an ordering above it that a
-          // later change could reshuffle.
-          const gateApp = await ctx.db.app.findUnique({
-            where: { id: appId },
-            select: {
-              id: true, name: true, urn: true, organizationId: true,
-              ownerUserId: true, uninstalledAt: true, deletedAt: true,
-            },
-          });
           // App lifecycle, checked here and not only at the gate (PR #996
           // review, Copilot). When `appId` came from `appRef` these were
           // already enforced above, and the worker-DERIVED path enforces them
           // below — but when it came from `ctx.appId` (an MCP active-App
           // SELECTION or an App key) this is the only lifecycle check before
-          // `session.create`. A stale selection pointing at a soft-deleted or
-          // uninstalled App must not be able to resolve a name and open a
-          // session there.
-          if (!gateApp || gateApp.deletedAt) {
-            throw new GraphQLError(`Worker not found: ${workerRef}`, {
-              extensions: { code: 'WORKER_NOT_FOUND' },
-            });
-          }
-          if (gateApp.uninstalledAt) {
+          // `session.create`. A stale selection pointing at an uninstalled App
+          // must not be able to resolve a name and open a session there.
+          //
+          // This stays HERE rather than inside the shared resolver (#1015):
+          // uninstall bars starting a session, but not READING the roster —
+          // Worker rows outlive their App's uninstall — so the two callers
+          // genuinely differ, and only on this point.
+          const lifecycle = await ctx.db.app.findUnique({
+            where: { id: appId },
+            select: { uninstalledAt: true },
+          });
+          if (lifecycle?.uninstalledAt) {
             throw new GraphQLError('Cannot start a session in an uninstalled App.', {
               extensions: { code: 'APP_UNINSTALLED', appId },
             });
           }
-          try {
-            await requireWorkerReadAccess(ctx, gateApp);
-          } catch {
-            throw new GraphQLError(`Worker not found: ${workerRef}`, {
-              extensions: { code: 'WORKER_NOT_FOUND' },
-            });
-          }
-          const byName = await resolveWorkerIdByName(ctx.db, appId, workerRef);
+          // The staff read gate runs BEFORE the lookup, not after, and a denial
+          // is reported as WORKER_NOT_FOUND — the shared
+          // `resolveWorkerIdByNameGated` owns that ordering (#1015) so this
+          // resolver and `Query.worker` cannot drift on it. A missing App, a
+          // soft-deleted App, a refused caller and an absent name all return
+          // null there and collapse into the one refusal below.
+          //
+          // In practice a caller who reached here via `appRef` has ALREADY
+          // cleared `isAppParticipant` above, the same predicate that gate
+          // uses, so an outsider is refused FORBIDDEN before any name is looked
+          // up. The gate is therefore defense in depth, not the only barrier —
+          // and deliberately so: `appId` can also arrive from an App-key
+          // credential (which skips that membership branch), so the name branch
+          // must be self-sufficient rather than relying on an ordering above it
+          // that a later change could reshuffle.
+          const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
           if (!byName) {
             throw new GraphQLError(`Worker not found: ${workerRef}`, {
               extensions: { code: 'WORKER_NOT_FOUND' },
