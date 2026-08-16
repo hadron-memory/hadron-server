@@ -6,13 +6,20 @@
  *
  *   - the ABSTRACT path was a DELETE-then-INSERT pair, not an upsert, racing
  *     the partial unique `node_embeddings_abstract_uniq (node_id) WHERE kind =
- *     'abstract'`. The loser failed 23505 and the node was left flagged
- *     `embedding_failed_at` and absent from vector search — which reads
- *     identically to "no hits matched";
+ *     'abstract'`. The loser failed 23505; its transaction rolled back, so the
+ *     WINNER's row stayed committed and the node kept a vector — just a stale
+ *     one, on whichever text won. Vector search does not filter on
+ *     `embedding_failed_at`, so nothing about a search result revealed it;
  *   - the CHUNK path fails the same way, on the composite unique
  *     (node_id, kind, chunk_index). The second writer's DELETE removes only
  *     what was in its own statement snapshot — the first writer's brand-new
  *     rows were never in it — so its insert of chunk_index 0 collides.
+ *
+ * The third describe covers the latest-wins guard added in review: the pipeline
+ * re-checked `embedding_pending_at` in a separate statement before writing,
+ * leaving a window in which a newer worker could commit AND clear the marker,
+ * after which the stale write landed last and won. The guard is now evaluated
+ * inside the write itself.
  *
  * The races are driven for real — two overlapping writers against the same
  * node — rather than asserting the SQL text. A test that only called each
@@ -26,6 +33,7 @@ import { generateId } from '../../lib/id.js';
 import {
   upsertAbstractVector,
   upsertChunkVectors,
+  deleteNodeChunkVectors,
   type ChunkVectorRow,
 } from './vectors.js';
 
@@ -156,5 +164,72 @@ describe('#1025 — upsertChunkVectors', () => {
     await upsertChunkVectors(db, nodeId, chunkRows([1, 1]));
     await upsertChunkVectors(db, nodeId, []);
     expect(await countKind('chunk')).toBe(0);
+  });
+});
+
+describe('#1025 — latest-wins guard (PR review)', () => {
+  const markerOf = async (): Promise<Date | null> =>
+    (await db.node.findUniqueOrThrow({ where: { id: nodeId } })).embeddingPendingAt;
+
+  it('abstract: a stale worker cannot overwrite a newer vector', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: new Date() } });
+    const stale = await markerOf();
+
+    // A newer edit re-stamps the marker and writes its vector.
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: new Date(Date.now() + 5_000) } });
+    expect(await upsertAbstractVector(db, abstractRow(9), await markerOf())).toBe(true);
+
+    // The stale worker finishes late, still holding the OLD marker. Before the
+    // guard it would have won by arriving last.
+    expect(await upsertAbstractVector(db, abstractRow(1), stale)).toBe(false);
+
+    const rows = await db.$queryRaw<{ model: string }[]>`
+      SELECT model FROM node_embeddings WHERE node_id = ${nodeId} AND kind = 'abstract'`;
+    expect(rows[0].model).toBe('stub-9');
+  });
+
+  it('abstract: a matching marker still writes', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: new Date() } });
+    expect(await upsertAbstractVector(db, abstractRow(3), await markerOf())).toBe(true);
+    expect(await countKind('abstract')).toBe(1);
+  });
+
+  it('abstract: a cleared marker (null) is a real value, not "no guard"', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: null } });
+    expect(await upsertAbstractVector(db, abstractRow(4), null)).toBe(true);
+
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: new Date() } });
+    expect(await upsertAbstractVector(db, abstractRow(5), null)).toBe(false);
+  });
+
+  it('chunks: a stale worker cannot overwrite a newer set', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: new Date() } });
+    const stale = await markerOf();
+
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: new Date(Date.now() + 5_000) } });
+    expect(await upsertChunkVectors(db, nodeId, chunkRows([9, 9]), await markerOf())).toBe(true);
+
+    expect(await upsertChunkVectors(db, nodeId, chunkRows([1, 1, 1]), stale)).toBe(false);
+    expect(await countKind('chunk')).toBe(2);
+  });
+
+  it('chunk CLEAR is guarded too — an empty rebuild cannot wipe a newer set', async () => {
+    // The sibling hole: the content-cleared arm went through an unlocked,
+    // unguarded delete, so a stale clear could erase a newer worker's chunks.
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: new Date() } });
+    const stale = await markerOf();
+
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: new Date(Date.now() + 5_000) } });
+    await upsertChunkVectors(db, nodeId, chunkRows([9, 9]), await markerOf());
+
+    expect(await deleteNodeChunkVectors(db, nodeId, stale)).toBe(false);
+    expect(await countKind('chunk')).toBe(2);
+  });
+
+  it('no guard supplied means write unconditionally (non-sweep callers)', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: new Date() } });
+    expect(await upsertAbstractVector(db, abstractRow(7))).toBe(true);
+    expect(await upsertChunkVectors(db, nodeId, chunkRows([7]))).toBe(true);
+    expect(await deleteNodeChunkVectors(db, nodeId)).toBe(true);
   });
 });

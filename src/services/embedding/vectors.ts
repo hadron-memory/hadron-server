@@ -26,6 +26,37 @@ export interface AbstractVectorRow {
 }
 
 /**
+ * The latest-wins precondition (#1025, PR review).
+ *
+ * `embedNode` captures `nodes.embedding_pending_at` when it claims work and
+ * re-checks it before writing, so a slower worker holding an older vector does
+ * not overwrite a newer one. That check was a separate statement, leaving a
+ * TOCTOU window: a newer worker could commit its vector AND clear the marker
+ * between the check and the write, after which the stale write landed last and
+ * won. Passing the captured marker down closes it — the guard is evaluated as
+ * part of the write itself.
+ *
+ * `undefined` means "no precondition" (callers outside the sweep, and tests).
+ * `null` is a real value: it matches a node whose marker is cleared, which is
+ * why the comparison is `IS NOT DISTINCT FROM` rather than `=`.
+ */
+export type PendingAtGuard = Date | null | undefined;
+
+/**
+ * `AT TIME ZONE 'UTC'` is load-bearing, not decoration. The column is
+ * `timestamp(3)` (no zone) holding UTC, while Prisma binds a JS `Date` as
+ * `timestamptz` — so a bare comparison makes Postgres coerce one side using the
+ * SESSION time zone and the two silently disagree wherever that is not UTC.
+ * Lifting the column to `timestamptz` as UTC compares the instants both sides
+ * actually mean. `IS NOT DISTINCT FROM` (not `=`) so a cleared marker — NULL on
+ * both sides — matches.
+ */
+const pendingGuard = (expected: PendingAtGuard) =>
+  expected === undefined
+    ? Prisma.sql`TRUE`
+    : Prisma.sql`(n.embedding_pending_at AT TIME ZONE 'UTC') IS NOT DISTINCT FROM ${expected}`;
+
+/**
  * Replace a node's abstract vector — a REAL upsert (#1025).
  *
  * A node carries at most one abstract vector, enforced by the PARTIAL unique
@@ -36,28 +67,42 @@ export interface AbstractVectorRow {
  * PREDICATE for inference, not a filter on the row being written.
  *
  * This replaced a DELETE-then-INSERT pair wrapped in a transaction, which was
- * not an upsert and raced (#1025). Under READ COMMITTED two concurrent
- * re-embeds of one node — a write-path re-embed interleaving with the
- * `embedding_pending_at` sweep is the ordinary way this happens — deadlocked on
- * the unique instead: A deletes and inserts; B's delete blocks on A's lock,
- * then re-evaluates and finds the row already gone so deletes NOTHING; B's
- * insert then collides with A's row and the whole re-embed fails 23505. The
- * node is left flagged `embedding_failed_at` and, until a retry succeeds,
- * absent from vector search — indistinguishable from "no hits matched", which
- * is what made it invisible until a corpus validate surfaced it.
+ * not an upsert and raced. Under READ COMMITTED two concurrent re-embeds of one
+ * node — a write-path re-embed interleaving with the `embedding_pending_at`
+ * sweep is the ordinary way they meet — collided on that unique: A deletes and
+ * inserts; B's delete WAITS on A's lock, then re-evaluates, finds the row
+ * already gone and deletes NOTHING; B's insert then violates the unique and the
+ * whole re-embed fails 23505. (Lock-wait then unique violation — not a
+ * deadlock, which Postgres reports as 40P01.)
  *
- * The transaction is gone with it, deliberately. Its documented purpose
+ * What that costs is a STALE vector, not a missing one: the loser's transaction
+ * rolls back, so the winner's row stays committed and the node remains
+ * searchable — on whichever text won. The node is left flagged
+ * `embedding_failed_at`, and since vector search does not filter on that flag,
+ * nothing about the search result reveals it. That is what made it invisible
+ * until a corpus validate surfaced it.
+ *
+ * The transaction is gone with the DELETE, deliberately. Its documented purpose
  * (PR-219 review) was to roll the DELETE back if the INSERT failed, so the node
  * never briefly carried no abstract vector. A single upserting statement has no
  * such window to protect: the row is never deleted, only overwritten in place.
+ *
+ * @returns whether a row was written — `false` means the latest-wins guard
+ *   rejected it because a newer edit has since claimed the node.
  */
 export async function upsertAbstractVector(
   db: PrismaClient,
   row: AbstractVectorRow,
-): Promise<void> {
-  await db.$executeRaw`
+  expectedPendingAt?: PendingAtGuard,
+): Promise<boolean> {
+  // INSERT ... SELECT rather than VALUES so the guard is part of the same
+  // statement: if the marker has moved, the SELECT yields no row and nothing
+  // is written. A separate pre-check could not promise that.
+  const written = await db.$executeRaw(Prisma.sql`
     INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, embedding, created_at)
-    VALUES (${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now())
+    SELECT ${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now()
+    FROM nodes n
+    WHERE n.id = ${row.nodeId} AND ${pendingGuard(expectedPendingAt)}
     ON CONFLICT (node_id) WHERE kind = 'abstract'
     DO UPDATE SET
       memory_id  = EXCLUDED.memory_id,
@@ -66,7 +111,8 @@ export async function upsertAbstractVector(
       dim        = EXCLUDED.dim,
       embedding  = EXCLUDED.embedding,
       created_at = now()
-  `;
+  `);
+  return written > 0;
 }
 
 /** Delete all of a node's vectors (re-index / disable / cleared abstract). */
@@ -74,9 +120,34 @@ export async function deleteNodeVectors(db: PrismaClient, nodeId: string): Promi
   await db.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId}`;
 }
 
-/** Delete just the chunk vectors for a node (kind='chunk'). Used when content cleared. */
-export async function deleteNodeChunkVectors(db: PrismaClient, nodeId: string): Promise<void> {
-  await db.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId} AND kind = 'chunk'`;
+/**
+ * Delete just the chunk vectors for a node (kind='chunk'). Used when content is
+ * cleared — the empty-set arm of a rebuild.
+ *
+ * Takes the SAME node lock and the SAME latest-wins guard as
+ * {@link upsertChunkVectors} (#1025, PR review). It is the other half of one
+ * operation — "rebuild this node's chunks, where the new set happens to be
+ * empty" — so leaving it unlocked would let a clear race a populated rebuild
+ * and strand whichever landed first, which is exactly the hole locking the
+ * other arm was meant to close.
+ *
+ * @returns whether the delete ran — `false` means the guard rejected it.
+ */
+export async function deleteNodeChunkVectors(
+  db: PrismaClient,
+  nodeId: string,
+  expectedPendingAt?: PendingAtGuard,
+): Promise<boolean> {
+  return db.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT n.id FROM nodes n
+      WHERE n.id = ${nodeId} AND ${pendingGuard(expectedPendingAt)}
+      FOR NO KEY UPDATE
+    `);
+    if (locked.length === 0) return false;
+    await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId} AND kind = 'chunk'`;
+    return true;
+  });
 }
 
 export interface ChunkVectorRow {
@@ -99,8 +170,12 @@ export interface ChunkVectorRow {
  * insert rolls back the delete. Per FR-017, every content edit re-derives the
  * full chunk set — there's no per-chunk update path, just a clean rebuild.
  *
- * `rows` may be empty (content cleared); the delete still fires so any
- * prior chunks vanish.
+ * `rows` may be empty; the delete still fires so any prior chunks vanish.
+ * (`embedNode` routes the content-cleared case through
+ * {@link deleteNodeChunkVectors}, which now takes the same lock and guard.)
+ *
+ * @returns whether the rebuild ran — `false` means the latest-wins guard
+ *   rejected it because a newer edit has since claimed the node.
  *
  * ## Why the row lock (#1025)
  *
@@ -128,9 +203,18 @@ export async function upsertChunkVectors(
   db: PrismaClient,
   nodeId: string,
   rows: ChunkVectorRow[],
-): Promise<void> {
-  await db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${nodeId} FOR NO KEY UPDATE`;
+  expectedPendingAt?: PendingAtGuard,
+): Promise<boolean> {
+  return db.$transaction(async (tx) => {
+    // Lock and guard in ONE statement, so the marker is judged under the lock:
+    // checking it first and locking after would reopen the TOCTOU the guard
+    // exists to close.
+    const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT n.id FROM nodes n
+      WHERE n.id = ${nodeId} AND ${pendingGuard(expectedPendingAt)}
+      FOR NO KEY UPDATE
+    `);
+    if (locked.length === 0) return false;
     await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId} AND kind = 'chunk'`;
     for (const row of rows) {
       // One INSERT per chunk (no multi-row pgvector parameter syntax via
@@ -141,6 +225,7 @@ export async function upsertChunkVectors(
         VALUES (${generateId()}, ${row.nodeId}, ${row.memoryId}, 'chunk', ${row.provider}, ${row.model}, ${row.dim}, ${row.chunkIndex}, ${row.charStart}, ${row.charEnd}, ${row.chunkText}, ${toVectorLiteral(row.embedding)}::vector, now())
       `;
     }
+    return true;
   });
 }
 
