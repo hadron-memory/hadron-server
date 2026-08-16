@@ -175,9 +175,14 @@ export async function moveNodeSubtree(
     destMemoryId?: string;
     editor: SnapshotEditor;
     /**
-     * Also set the moved SOURCE node's `name` to destLoc's leaf atom (the MCP
-     * `hadron_move_node` behavior). The GraphQL `moveNode` leaves name untouched.
+     * Also set the moved SOURCE node's `name` to destLoc's leaf atom.
      * Descendants' names are never rewritten — only their loc prefix changes.
+     *
+     * OFF by default, and both surfaces now leave it off unless the caller asks
+     * (#1017): a move changes an address, not a display title. `hadron_move_node`
+     * used to pass `true` unconditionally, so the MCP and GraphQL surfaces of one
+     * operation disagreed about whether `name` survives — it is now that tool's
+     * opt-in `renameToLeaf` argument, and GraphQL `moveNode` still never sets it.
      */
     renameSourceLeaf?: boolean;
   },
