@@ -64,7 +64,12 @@
 // response gains `capabilities:` plus a `connection:` line. The capabilities
 // line is itself the "how old is this surface?" probe (#1006), so the build
 // that introduces it must not share a version with the builds that lack it.
-export const HADRON_SERVER_VERSION = '0.14.0';
+// 0.15.0: #1012 — durable per-client MCP selections. A caller sending the new
+// `X-Hadron-Client-Id` header has its active App / active memory restored on the
+// next connection instead of losing them to a reconnect; the `client-session-state`
+// capability token advertises it. Caller-detectable: the header is new input, and
+// the same client now observes different post-reconnect behaviour.
+export const HADRON_SERVER_VERSION = '0.15.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
@@ -108,6 +113,12 @@ export const MCP_SURFACE_CAPABILITIES = [
   'session-app-recovery',
   /** #1009 — refusals caused by a reconnect say so instead of reading as a client limit. */
   'reconnect-notice',
+  /**
+   * #1012 — a client sending `X-Hadron-Client-Id` gets its active App and
+   * active memory restored after a reconnect. Absent ⇒ selections are
+   * per-connection only, and the header is ignored.
+   */
+  'client-session-state',
 ] as const;
 
 /**

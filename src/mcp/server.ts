@@ -119,6 +119,14 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
+// #1012 — durable per-client MCP selections (active App / active memory).
+import {
+  CLIENT_KEY_HEADER,
+  normalizeClientKey,
+  loadMcpSessionState,
+  saveActiveApp,
+  saveActiveMemory,
+} from '../lib/mcpSessionState.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 
@@ -162,13 +170,21 @@ export function createTestableMcpServer(
     cachedAppResolution?: AppResolution | null;
     /** #1009 — simulate a session rebuilt from a stale id (a client reconnect). */
     isReconnect?: boolean;
+    /** #1012 — the client instance id whose durable selections apply. */
+    clientKey?: string | null;
+    /** #1012 — a pre-authorized active-memory URN, as the boundary restores it. */
+    restoredMemoryUrn?: string;
   },
 ): TestableMcpServer {
   const server = createMcpServerInstance(
     auth,
     () => opts?.sessionId,
     opts?.cachedAppResolution ?? null,
-    { isReconnect: opts?.isReconnect },
+    {
+      isReconnect: opts?.isReconnect,
+      clientKey: opts?.clientKey,
+      restoredMemoryUrn: opts?.restoredMemoryUrn,
+    },
   );
   const tools = (server as unknown as {
     _registeredTools: Record<
@@ -845,8 +861,19 @@ export function createMcpServerInstance(
   auth: AuthContext,
   getSessionId: () => string | undefined,
   cachedAppResolution: AppResolution | null,
-  opts: { isReconnect?: boolean } = {},
+  opts: {
+    isReconnect?: boolean;
+    clientKey?: string | null;
+    /** #1012 — an already-re-authorized active-memory URN to start from. */
+    restoredMemoryUrn?: string;
+  } = {},
 ): McpServer {
+  /**
+   * #1012 — this client instance's stable id (`X-Hadron-Client-Id`), or null
+   * when the client did not send one. Null means "do not persist": that client
+   * keeps the pre-#1012 in-memory-only behaviour, so opting out costs nothing.
+   */
+  const clientKey = opts.clientKey ?? null;
   /**
    * #1009 — this MCP session replaced one the client had already been using
    * (it presented a session id this server did not know and re-initialized).
@@ -885,7 +912,10 @@ export function createMcpServerInstance(
   // consuming it as the default memory scope when a by-name run gives no
   // `memory` hint. Spec-022 URN-input tools still MUST NOT fall back to it —
   // they require a fully-qualified URN.
-  let activeMemoryUrn: string | undefined;
+  // #1012: seeded from this client's durable selection when it sent an
+  // X-Hadron-Client-Id and the memory still passes the read gate. Undefined
+  // otherwise, which is the pre-#1012 behaviour.
+  let activeMemoryUrn: string | undefined = opts.restoredMemoryUrn;
 
   // Spec 026 — has the session called `hadron_list_apps` or `hadron_set_active_app`,
   // or had a regime-(b) `initialize` envelope attempted? Toggles which
@@ -1302,6 +1332,11 @@ export function createMcpServerInstance(
       // Store the bare URN from the DB row (the canonical form for downstream
       // findFirst({urn:activeMemoryUrn}) lookups).
       activeMemoryUrn = mem.urn;
+      // #1012: persist by PK, not URN — a rename must not strand the selection.
+      // This is the surface with no other remedy: unlike the App selection,
+      // active-memory has no Hadron session to recover from (#1009), so before
+      // this a reconnect meant re-selecting, every restart, forever.
+      await saveActiveMemory(db, auth, clientKey, mem.id);
 
       // #187 / #190 — include the bound deployment URL + server version
       // in the success message so an agent (or a transcript reader) can
@@ -1455,6 +1490,9 @@ export function createMcpServerInstance(
       switch (r.kind) {
         case 'resolved': {
           pinActiveApp(r.app.id, r.app.organizationId, 'selection');
+          // #1012: remember it for this client instance, so the next reconnect
+          // restores it instead of silently dropping it.
+          await saveActiveApp(db, auth, clientKey, r.app.id);
           mcpLog('info', 'regime_c_selection_set', {
             userId: auth.userId,
             mcpSessionId: sid,
@@ -6597,11 +6635,34 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // client that will not mention it, so the tools need to be able to say so.
   const isReconnect = isLikelyReconnect(sessionId);
 
+  // #1012: the client's stable instance id, if it opted in. Read here — at
+  // session construction — because that is the one moment a restore is useful:
+  // the selections must be in place before the first tool call, not after one
+  // has already been refused.
+  const clientKey = normalizeClientKey(req.headers[CLIENT_KEY_HEADER]);
+
+  // Restore this client's durable selections, re-authorized (see
+  // loadMcpSessionState — a stored selection is a cache of a choice, never a
+  // grant). Applied to `auth` before the server instance closes over it, so
+  // every downstream `if (!auth.appId)` sees the restored value with no
+  // per-tool plumbing — the same shape requireAppScope already relies on.
+  const restored = await loadMcpSessionState(db, auth, clientKey);
+  if (restored.appId && !auth.appId) {
+    auth.appId = restored.appId;
+    auth.organizationId = restored.organizationId ?? undefined;
+    mcpLog('info', 'mcp_session_state_restored', {
+      userId: auth.userId,
+      appId: restored.appId,
+      restoredMemory: Boolean(restored.memoryUrn),
+      reconnect: isReconnect,
+    });
+  }
+
   const mcpServer = createMcpServerInstance(
     auth,
     () => transport.sessionId,
     cachedAppResolution,
-    { isReconnect },
+    { isReconnect, clientKey, restoredMemoryUrn: restored.memoryUrn },
   );
 
   transport.onclose = () => {

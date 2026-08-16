@@ -395,49 +395,50 @@ model User {
   deletedAt        DateTime?         @map("deleted_at")
   deletedBy        String?           @map("deleted_by")
 
-  memberships               OrgMember[]
-  sentInvitations           UserInvitation[]           @relation("SentInvitations")
-  invitationActivations     UserInvitationActivation[]
-  receivedMemberInvitations OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
-  pendingSetup              PendingSetup?
-  exchangeConnections       ExchangeConnection[]
-  connectionGrantsByUser    ConnectionGrant[]          @relation("ConnectionGrantsByUser")
-  principalGrants           PrincipalGrant[]           @relation("UserPrincipalGrants")
-  externalApp               App?                       @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
-  sessions                  Session[]                  @relation("SessionUser")
-  ownedMemories             Memory[]                   @relation("UserMemoriesOwned")
+  memberships                   OrgMember[]
+  sentInvitations               UserInvitation[]           @relation("SentInvitations")
+  invitationActivations         UserInvitationActivation[]
+  receivedMemberInvitations     OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
+  pendingSetup                  PendingSetup?
+  exchangeConnections           ExchangeConnection[]
+  connectionGrantsByUser        ConnectionGrant[]          @relation("ConnectionGrantsByUser")
+  principalGrants               PrincipalGrant[]           @relation("UserPrincipalGrants")
+  externalApp                   App?                       @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
+  sessions                      Session[]                  @relation("SessionUser")
+  mcpSessionStates              McpSessionState[]
+  ownedMemories                 Memory[]                   @relation("UserMemoriesOwned")
   // spec 047 (Phase 2b): entities this user is the TENANT owner of (user-owned
   // App/Agent/Memory). `ownedMemories` above is the personal/private strict
   // owner (Memory.userId) — a DIFFERENT relation from `tenantMemories` here.
-  ownedApps                 App[]                      @relation("AppOwner")
-  ownedAgents               Agent[]                    @relation("AgentOwner")
-  tenantMemories            Memory[]                   @relation("MemoryTenantOwner")
-  agentSubscriptions        AgentSubscription[]        @relation("UserAgentSubscriptions")
-  appMemberships            AppMember[]                @relation("UserAppMemberships")
+  ownedApps                     App[]                      @relation("AppOwner")
+  ownedAgents                   Agent[]                    @relation("AgentOwner")
+  tenantMemories                Memory[]                   @relation("MemoryTenantOwner")
+  agentSubscriptions            AgentSubscription[]        @relation("UserAgentSubscriptions")
+  appMemberships                AppMember[]                @relation("UserAppMemberships")
   // 023-app-shape: per-Memory authorization back-relations.
-  memorySharesGranted       MemoryShare[]              @relation("MemorySharesGranted")
-  memorySharesByGrantor     MemoryShare[]              @relation("MemorySharesByGrantor")
-  memoryMemberships         MemoryMember[]             @relation("MemoryMemberships")
+  memorySharesGranted           MemoryShare[]              @relation("MemorySharesGranted")
+  memorySharesByGrantor         MemoryShare[]              @relation("MemorySharesByGrantor")
+  memoryMemberships             MemoryMember[]             @relation("MemoryMemberships")
   // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
-  userApiKeys               UserApiKey[]
-  authCodes                 AuthCode[]
-  authHandoffCodes          AuthHandoffCode[]
+  userApiKeys                   UserApiKey[]
+  authCodes                     AuthCode[]
+  authHandoffCodes              AuthHandoffCode[]
   // #620: revisions this user approved (NodeRevision.approvedBy).
-  approvedNodeRevisions     NodeRevision[]             @relation("NodeRevisionApprover")
+  approvedNodeRevisions         NodeRevision[]             @relation("NodeRevisionApprover")
   // 046-usage-metering: billing attribution back-relation.
-  usageEvents               UsageEvent[]
+  usageEvents                   UsageEvent[]
   // #772: the user's placed /app/dashboard widgets (user-scoped layout config).
-  dashboardWidgets          DashboardWidget[]
+  dashboardWidgets              DashboardWidget[]
   // #806: the user's SAVED widget configurations (a palette, not a placement).
-  dashboardWidgetPresets    DashboardWidgetPreset[]
+  dashboardWidgetPresets        DashboardWidgetPreset[]
   // Admin impersonation (read-only support sessions): sessions this user
   // started as the admin actor / was the target of.
-  impersonationSessionsAsAdmin  ImpersonationSession[] @relation("ImpersonationSessionsAsAdmin")
-  impersonationSessionsAsTarget ImpersonationSession[] @relation("ImpersonationSessionsAsTarget")
+  impersonationSessionsAsAdmin  ImpersonationSession[]     @relation("ImpersonationSessionsAsAdmin")
+  impersonationSessionsAsTarget ImpersonationSession[]     @relation("ImpersonationSessionsAsTarget")
   // #692 — the user's root principal in the unified pool (handle is the
   // denormalized read source-of-truth, kept in sync at mint).
-  principalId               String?                    @unique @map("principal_id")
-  principal                 Principal?                 @relation("UserPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
+  principalId                   String?                    @unique @map("principal_id")
+  principal                     Principal?                 @relation("UserPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -665,8 +666,8 @@ model OrgMember {
 /// rotation: re-encrypt all stored tokens with the new key in a
 /// single migration.
 model Memory {
-  id                  String  @id @default(cuid())
-  organizationId      String? @map("organization_id")
+  id                    String  @id @default(cuid())
+  organizationId        String? @map("organization_id")
   /// The user TENANT owner of a user-owned Memory (rooted on the bare
   /// `<handle>` — #697 v2, no `@` sigil). DISTINCT from `userId` (the
   /// personal/private strict-owner). The exactly-one-of
@@ -674,8 +675,8 @@ model Memory {
   /// post-push.sql: `(organization_id IS NULL) <> (owner_user_id IS NULL)` — so
   /// exactly one is non-null (the URN backfill dispatches owner KIND off it;
   /// don't add a redundant ambiguity branch).
-  ownerUserId         String? @map("owner_user_id")
-  ownerUser           User?   @relation("MemoryTenantOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  ownerUserId           String? @map("owner_user_id")
+  ownerUser             User?   @relation("MemoryTenantOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   // 008-agent-installation (2026-05-02), relaxed by 034-memory-class-access and
   // #653: App pivot. Required for class='app'; OPTIONAL for knowledge/group/
   // personal/private (set when app-scoped, NULL when free-standing); forbidden
@@ -684,19 +685,19 @@ model Memory {
   /// for `knowledge`/`group`/`personal`/`private` (set when app-scoped, NULL
   /// when free-standing); NULL for `system`. Enforced by chk_memory_class_app_id
   /// (#653 allowed knowledge + group to attach to an App).
-  appId               String? @map("app_id")
+  appId                 String? @map("app_id")
   // 005-agent-subscription (2026-04-30), re-keyed onto class by 034: explicit
   // User owner for personal/private-class memories. NULL otherwise. Postgres
   // CHECK enforces: class IN ('personal','private') ⇔ userId IS NOT NULL.
   /// Owning user for personal/private-class memories. Bidirectional invariant
   /// (CHECK chk_personal_visibility_user): `class IN ('personal','private')`
   /// ⇔ `userId IS NOT NULL`.
-  userId              String? @map("user_id")
+  userId                String? @map("user_id")
   /// Legacy 005 Agent-pivot for personal memories. **Retained for
   /// backward-compat queries** (008 R-3); not consulted by post-008
   /// access-control, which uses `appId` directly. A future cleanup
   /// spec may collapse it.
-  userMemoryOfAgentId String? @map("user_memory_of_agent_id")
+  userMemoryOfAgentId   String? @map("user_memory_of_agent_id")
   /// #723 — the IDENTITY of an App's `shared` app-class memory: the Agent whose
   /// shared space this is, under `appId`. Set ONLY on that runtime memory (NULL
   /// on every other row, including the name-addressable `createMemoryInApp`
@@ -867,8 +868,8 @@ model Memory {
   /// migration; TODO(#697-cleanup): drop once every reference is v2-native.
   legacyUrn                String?              @map("legacy_urn")
 
-  logEntries        MemoryLogEntry[]
-  userMemoryOfAgent Agent?           @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
+  logEntries          MemoryLogEntry[]
+  userMemoryOfAgent   Agent?            @relation("UserMemoriesOfAgent", fields: [userMemoryOfAgentId], references: [id], onDelete: SetNull)
   // #723: SetNull mirrors userMemoryOfAgent — a hard-deleted Agent leaves the
   // shared memory's content intact (orphan retention, cor:dmo:050:03); the row
   // simply stops being the find-or-create target for that pairing. Restrict was
@@ -880,27 +881,34 @@ model Memory {
   // pre-#723 compound urn (a post-#723 row's flat `<app>-shared` never matches
   // the legacy key), and user-account deletion cascades the App's memories away
   // in the same pass, so the window is narrow and self-closing.
-  sharedMemoryOfAgent Agent?         @relation("SharedMemoriesOfAgent", fields: [sharedMemoryOfAgentId], references: [id], onDelete: SetNull)
-  user              User?            @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
+  sharedMemoryOfAgent Agent?            @relation("SharedMemoriesOfAgent", fields: [sharedMemoryOfAgentId], references: [id], onDelete: SetNull)
+  user                User?             @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
   // 008-agent-installation: hard App deletion cascades to its personal/app
   // memories (per data-model.md "Cascade behavior"). The CHECK constraint
   // prohibits app_id IS NULL for class IN ('app', 'personal'), so SET NULL
   // would leave the row in an invalid state on delete. AppMember removal
   // (orphan retention per FR-015) is independent — that's a row delete in
   // app_members, not in apps.
-  app               App?             @relation("AppMemories", fields: [appId], references: [id], onDelete: Cascade)
-  sessions          Session[]        @relation("SessionMemory")
+  app                 App?              @relation("AppMemories", fields: [appId], references: [id], onDelete: Cascade)
+  sessions            Session[]         @relation("SessionMemory")
+  mcpSessionStates    McpSessionState[]
   /// #974 — the Workers whose casting-scoped working memory this is (at most
   /// one in practice; identity lives on `Worker.memoryId`, cor:dmo:050:11).
-  workerOf          Worker[]         @relation("WorkerMemory")
+  workerOf            Worker[]          @relation("WorkerMemory")
   // 023-app-shape: per-Memory authorization primitives.
   // `shares`      — populated only when `class = 'personal'` (FR-018);
   //                 cross-user grants (asymmetric).
   // `memberships` — populated only when `class = 'group'` (FR-027);
   //                 symmetric team membership.
-  shares            MemoryShare[]
-  memberships       MemoryMember[]
+  shares              MemoryShare[]
+  memberships         MemoryMember[]
 
+  // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
+  // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
+  // provisioner RESTORES a tombstoned row rather than creating a second one),
+  // and NULL `sharedMemoryOfAgentId` rows are unconstrained (Postgres NULLs are
+  // distinct), so it binds only the runtime shared memories.
+  @@unique([appId, sharedMemoryOfAgentId])
   @@index([organizationId])
   @@index([userMemoryOfAgentId])
   @@index([anonymousExpiresAt])
@@ -908,12 +916,6 @@ model Memory {
   @@index([appId])
   @@index([ownerUserId])
   @@index([legacyUrn])
-  // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
-  // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
-  // provisioner RESTORES a tombstoned row rather than creating a second one),
-  // and NULL `sharedMemoryOfAgentId` rows are unconstrained (Postgres NULLs are
-  // distinct), so it binds only the runtime shared memories.
-  @@unique([appId, sharedMemoryOfAgentId])
   @@map("memories")
 }
 
@@ -939,58 +941,58 @@ model Memory {
 /// `Node.attachedAssetId?` (one-asset case) or a `node_assets` join
 /// (many-to-many). Not in v1.
 model Asset {
-  id          String          @id @default(cuid())
+  id            String          @id @default(cuid())
   // 006-asset-upload-redesign (2026-05-01): nullable to support staging.
   // An asset with memoryId IS NULL is "staged" — uploaded but not yet
   // attached to a memory. Janitor sweeps staged assets past the 24h TTL.
   /// The Memory this asset belongs to; NULL while the asset is staged
   /// (uploaded but not yet attached). Janitor sweeps staged assets
   /// past the 24h TTL.
-  memoryId    String?         @map("memory_id")
+  memoryId      String?         @map("memory_id")
   /// Original filename as supplied by the user. Never appears in
   /// `storageKey`.
-  filename    String
+  filename      String
   /// RFC 6838 type/subtype.
-  mimeType    String          @map("mime_type")
+  mimeType      String          @map("mime_type")
   /// Verified at complete-upload time against `HeadObject.contentLength`.
-  sizeBytes   Int             @map("size_bytes")
+  sizeBytes     Int             @map("size_bytes")
   // Object-store key. Encrypted at rest (AES-256-GCM under
   // HADRON_ENCRYPTION_KEY) when the memory is encrypted; plaintext
   // otherwise. See src/lib/asset/encryption.ts.
   /// Object-store key shape: `{orgUrn}/{memoryUrn-segment}/{assetId}.{ext}`.
   /// Encrypted at rest when the memory is encrypted; plaintext otherwise.
-  storageKey  String          @unique @map("storage_key")
+  storageKey    String          @unique @map("storage_key")
   /// Virus scan state. Downloads gated on CLEAN.
-  scanStatus  AssetScanStatus @default(PENDING) @map("scan_status")
+  scanStatus    AssetScanStatus @default(PENDING) @map("scan_status")
   /// Engine signature name recorded when the scan verdict was BLOCKED
   /// (e.g. "Eicar-Signature"). A BLOCKED row is kept as an audit
   /// tombstone; its object bytes are deleted (#896).
-  scanSignature String? @map("scan_signature")
+  scanSignature String?         @map("scan_signature")
   /// Number of scan attempts so far (inline at complete-upload plus
   /// sweep retries). Drives the retry sweep's exponential backoff.
-  scanAttempts Int @default(0) @map("scan_attempts")
+  scanAttempts  Int             @default(0) @map("scan_attempts")
   /// When the last scan attempt ran (whether or not it produced a
   /// verdict). NULL = never attempted. Informational; the sweep
   /// selects on `scan_due_at`, not this.
-  scannedAt DateTime? @map("scanned_at")
+  scannedAt     DateTime?       @map("scanned_at")
   /// When the next background scan action is due (the #882
   /// embedding-queue pattern: a future-dated stamp IS the queue).
   /// PENDING rows: next scan retry. BLOCKED rows: next purge retry
   /// for object bytes that survived a failed delete. NULL = nothing
   /// pending (CLEAN, or BLOCKED with bytes confirmed gone). Every
   /// sweep touch pushes it forward, so no row can monopolize a batch.
-  scanDueAt DateTime? @map("scan_due_at")
+  scanDueAt     DateTime?       @map("scan_due_at")
   /// Optional; agent- or user-provided.
-  description String?
-  uploadedAt  DateTime        @default(now()) @map("uploaded_at")
+  description   String?
+  uploadedAt    DateTime        @default(now()) @map("uploaded_at")
   /// fk to User.id — who uploaded. NULL when the asset was created
   /// server-side by an app run with no on-behalf-of user
   /// (hadron_store_file); the run id is recorded on the asset's
   /// reference node and in the audit log.
-  uploadedBy  String?         @map("uploaded_by")
+  uploadedBy    String?         @map("uploaded_by")
   /// Soft-delete marker. Janitor sweeps R2 object + hard-deletes
   /// after 24h.
-  deletedAt   DateTime?       @map("deleted_at")
+  deletedAt     DateTime?       @map("deleted_at")
 
   memory Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
@@ -2738,6 +2740,7 @@ model App {
   /// Agent is installed here; a Worker is who, by name, does attributable
   /// work.
   workers          Worker[]
+  mcpSessionStates McpSessionState[]
   keys             AppKey[]
   members          AppMember[]
   memories         Memory[]          @relation("AppMemories")
@@ -3530,47 +3533,47 @@ enum AppRunTriggerKind {
 /// the run at its next action (the kill switch). Also the outbox row for
 /// run.requested.v1 (publishedAt NULL ⇒ sweep republishes).
 model AppRun {
-  id             String            @id
-  organizationId String            @map("organization_id")
-  appId          String            @map("app_id")
-  agentId        String?           @map("agent_id")
+  id                   String            @id
+  organizationId       String            @map("organization_id")
+  appId                String            @map("app_id")
+  agentId              String?           @map("agent_id")
   /// On-behalf-of user (cor:agt:010:01, D-2026-07-04-C). NULL ⇒ pure App
   /// service identity — no personal/private reach.
-  userId         String?           @map("user_id")
-  triggerKind    AppRunTriggerKind @map("trigger_kind")
-  triggerId      String?           @map("trigger_id")
-  entryNodeUrn   String            @map("entry_node_urn")
-  eventData      Json?             @map("event_data")
+  userId               String?           @map("user_id")
+  triggerKind          AppRunTriggerKind @map("trigger_kind")
+  triggerId            String?           @map("trigger_id")
+  entryNodeUrn         String            @map("entry_node_urn")
+  eventData            Json?             @map("event_data")
   /// Run envelope (D-2026-05-09-013): the mutable bag of fields extracted
   /// by flow nodes as the walker advances. Bare field names — conditions
   /// address them through the evaluator's `message.data.*` scope prefix
   /// (plan-multi-node D-MN-1). `eventData` stays the immutable trigger
   /// payload; on key collision the envelope wins.
-  data           Json?
+  data                 Json?
   /// Per-hop trail (#538): the walked path, one element per COMPLETED hop,
   /// appended in the same checkpoint/finish UPDATE the runner already
   /// writes. `[{node, edgeOut, startedAt, finishedAt, tokensSpent}]` —
   /// edgeOut is the routing edge taken FROM the hop (null on the last).
   /// Bounded by RUN_MAX_HOPS. A hop that FAILS mid-execution has no
   /// element; `curNodeUrn` + `failure` identify it.
-  hops           Json?
+  hops                 Json?
   /// PARENT-side fan-out state (plan-spawn D-SP-1): set by hadron_spawn —
   /// {processItem, itemKey, callback?, itemCallback?, total, dispatching?,
   /// callbackFiredAt?}. Its own column, NOT `data`: the parent's envelope
   /// checkpoint would clobber a mid-hop write there. callbackFiredAt is the
   /// exactly-once claim (D-SP-4, atomic SQL).
-  spawn          Json?
+  spawn                Json?
   /// Run-layer allow-list snapshot (the narrowest chain link; plan §4).
-  policy         Json?
+  policy               Json?
   /// Remaining LLM tokens — live-decrement kill switch.
-  budgetTokens   Int?              @map("budget_tokens")
+  budgetTokens         Int?              @map("budget_tokens")
   /// Remaining tool/write actions — live-decrement kill switch.
-  budgetActions  Int?              @map("budget_actions")
+  budgetActions        Int?              @map("budget_actions")
   /// #832 — the budget this run was MINTED with, so a client can render
   /// "spent vs budget". `budgetTokens` above is what REMAINS. NULL on runs
   /// minted before the column existed.
-  budgetTokensInitial  Int?        @map("budget_tokens_initial")
-  budgetActionsInitial Int?        @map("budget_actions_initial")
+  budgetTokensInitial  Int?              @map("budget_tokens_initial")
+  budgetActionsInitial Int?              @map("budget_actions_initial")
   /// #832 — cumulative spend, incremented in the same write as the budget
   /// decrement. Deliberately NOT derived:
   ///   * a `hops` sum under-reports — a hop that failed mid-execution has no
@@ -3591,19 +3594,19 @@ model AppRun {
   /// call, but generateWithTools discards the accumulated usage when a tool
   /// throws, so the number is not available at the failure site. Tracked
   /// separately; see the GraphQL field docs.
-  tokensSpent    Int?              @default(0) @map("tokens_spent")
-  actionsSpent   Int?              @default(0) @map("actions_spent")
-  status         AppRunStatus      @default(PENDING)
-  curNodeUrn     String?           @map("cur_node_urn")
-  parentRunId    String?           @map("parent_run_id")
-  failure        Json?
-  timeoutMs      Int?              @map("timeout_ms")
-  attempts       Int               @default(0)
-  publishedAt    DateTime?         @map("published_at")
-  startedAt      DateTime?         @map("started_at")
-  finishedAt     DateTime?         @map("finished_at")
-  createdAt      DateTime          @default(now()) @map("created_at")
-  createdBy      String?           @map("created_by")
+  tokensSpent          Int?              @default(0) @map("tokens_spent")
+  actionsSpent         Int?              @default(0) @map("actions_spent")
+  status               AppRunStatus      @default(PENDING)
+  curNodeUrn           String?           @map("cur_node_urn")
+  parentRunId          String?           @map("parent_run_id")
+  failure              Json?
+  timeoutMs            Int?              @map("timeout_ms")
+  attempts             Int               @default(0)
+  publishedAt          DateTime?         @map("published_at")
+  startedAt            DateTime?         @map("started_at")
+  finishedAt           DateTime?         @map("finished_at")
+  createdAt            DateTime          @default(now()) @map("created_at")
+  createdBy            String?           @map("created_by")
 
   webFetchPollBindings  WebFetchPollBinding[]  @relation("WebFetchPollSourceRun")
   webFetchEventReceipts WebFetchEventReceipt[] @relation("WebFetchEventRoutedRun")
@@ -3813,4 +3816,56 @@ model AgentWebhook {
 
   @@index([appId, deletedAt])
   @@map("agent_webhooks")
+}
+
+/// #1012 — a client's DURABLE MCP selections (active App, active memory).
+///
+/// The in-process selection maps in `src/mcp/server.ts` live for exactly one MCP
+/// TRANSPORT session, and clients re-initialize transparently after a server
+/// restart — so a selection silently evaporated mid-conversation (#1005). #1009
+/// made that loss legible and recoverable for callers holding a Hadron session
+/// id; this table is the remedy for everyone else, including plain memory work
+/// with no session at all.
+///
+/// Keyed on (userId, clientKey), NOT on the MCP session id — which is exactly
+/// the thing that does not survive. `clientKey` is the caller's own stable
+/// instance id, supplied per request via the `X-Hadron-Client-Id` header. A
+/// client that sends none is not persisted at all and keeps the pre-#1012
+/// in-memory behaviour, so nothing regresses for clients that never opt in.
+///
+/// Per-CLIENT rather than per-USER on purpose: one person may drive Claude
+/// Desktop, Cursor and the CLI at once, and a per-user row would let one switch
+/// the others' active App mid-conversation — turning a lost selection into a
+/// silently wrong one, which is worse than the bug being fixed.
+///
+/// This is a CACHE of a choice, never a grant. Both pointers are re-authorized
+/// on read (`isAppParticipant` for the App, the memory read gate for the
+/// memory), because a stored selection outlives the membership that justified
+/// it (#475 / the #1007 review finding). Both are nullable and `SetNull`, so a
+/// deleted App or memory degrades to "nothing selected" rather than dangling.
+model McpSessionState {
+  id        String @id @default(cuid())
+  userId    String @map("user_id")
+  /// Caller-supplied stable client-instance id (`X-Hadron-Client-Id`). Opaque
+  /// to the server; length-capped and trimmed at the boundary.
+  clientKey String @map("client_key")
+
+  /// The active App selection, or NULL if none. Re-authorized on every read.
+  appId    String? @map("app_id")
+  /// The active memory selection, stored as the PK rather than the URN so a
+  /// rename cannot strand it. The URN is resolved on read.
+  memoryId String? @map("memory_id")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime? @updatedAt @map("updated_at")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  app    App?    @relation(fields: [appId], references: [id], onDelete: SetNull)
+  memory Memory? @relation(fields: [memoryId], references: [id], onDelete: SetNull)
+
+  /// One row per (user, client instance) — the upsert target.
+  @@unique([userId, clientKey], map: "mcp_session_state_user_client_uniq")
+  @@index([appId])
+  @@index([memoryId])
+  @@map("mcp_session_state")
 }
