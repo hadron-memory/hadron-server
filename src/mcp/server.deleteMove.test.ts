@@ -438,6 +438,107 @@ describe('hadron_move_node — return record (#185 F1)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// #1017 — a move changes the ADDRESS, not the display title.
+//
+// hadron_move_node used to pass `renameSourceLeaf: true` unconditionally, so it
+// silently overwrote `name` with the target loc's terminal atom while the
+// GraphQL `moveNode` resolver — the same operation, the same shared helper —
+// left it alone. These tests pin both halves: the default preserves, the
+// opt-in still renames, and the two surfaces now agree.
+// ---------------------------------------------------------------------------
+
+describe('hadron_move_node — name preservation (#1017)', () => {
+  it('preserves the human-authored name by default', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
+      targetUrn: `urn:node:${fx.memory.urn}:relocated`,
+    });
+
+    expect(text).toMatch(/Moved/);
+    const moved = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
+    expect(moved.loc).toBe('relocated');
+    expect(moved.name).toBe('Relocate source');
+  });
+
+  it('renames to the target loc leaf when renameToLeaf is true', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    await srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
+      targetUrn: `urn:node:${fx.memory.urn}:section:renamed-leaf`,
+      renameToLeaf: true,
+    });
+
+    const moved = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
+    expect(moved.loc).toBe('section:renamed-leaf');
+    expect(moved.name).toBe('renamed-leaf');
+  });
+
+  it('agrees with the GraphQL moveNode resolver on what happens to name', async () => {
+    // The divergence #1017 reports is between SURFACES, so assert them against
+    // each other rather than against a literal: same input, same outcome.
+    const ctx = { db, roles: ['ADMIN'], userId: fx.admin.id } as Context;
+    await resolvers.Mutation.moveNode(
+      {},
+      { sourceRef: fx.nodes.leaf.id, targetUrn: `urn:node:${fx.memory.urn}:moved-via-graphql` },
+      ctx,
+    );
+    const viaGraphql = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.leaf.id } });
+
+    const srv = createTestableMcpServer(adminAuth());
+    await srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
+      targetUrn: `urn:node:${fx.memory.urn}:moved-via-mcp`,
+    });
+    const viaMcp = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
+
+    expect(viaGraphql.name).toBe('Leaf');
+    expect(viaMcp.name).toBe('Relocate source');
+  });
+
+  it('descendants keep their names, and only the loc prefix is rebased', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    await srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.nodes.parent.loc}`,
+      targetUrn: `urn:node:${fx.memory.urn}:archive:section`,
+      renameToLeaf: true,
+    });
+
+    // The opt-in rewrites the SOURCE's name only — never a descendant's.
+    const child = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.childA.id } });
+    expect(child.loc).toBe('archive:section:a');
+    expect(child.name).toBe('Child A');
+  });
+
+  it('a same-slot move with no rename is a no-op and writes no revision', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const sameUrn = `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`;
+    await srv.callToolText('hadron_move_node', { urn: sameUrn, targetUrn: sameUrn });
+
+    const moved = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
+    expect(moved.name).toBe('Relocate source');
+    expect(moved.loc).toBe('relocate:src');
+    // Nothing changed, so nothing is recorded — a revision here would claim a
+    // change that never happened, and on a maxRevCount-capped memory it would
+    // evict real history to store it.
+    expect(await db.nodeRevision.count({ where: { nodeId: fx.nodes.moveSource.id } })).toBe(0);
+  });
+
+  it('a same-slot move with renameToLeaf still normalizes the name to the leaf', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const sameUrn = `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`;
+    await srv.callToolText('hadron_move_node', {
+      urn: sameUrn,
+      targetUrn: sameUrn,
+      renameToLeaf: true,
+    });
+
+    const moved = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
+    expect(moved.name).toBe('src');
+  });
+});
+
 describe('hadron_move_node — collision policy (#185 F2)', () => {
   it('refuses with URN_ALREADY_EXISTS when a live node occupies the target', async () => {
     const srv = createTestableMcpServer(adminAuth());

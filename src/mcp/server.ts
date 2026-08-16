@@ -4163,6 +4163,8 @@ Collision policy: if a live node already occupies \`targetUrn\`, the call refuse
 
 Descendants move WITH the node (#768): a node's loc-subtree (every node whose loc is prefixed by \`<loc>:\`) is rebased onto the new loc, so children's URNs follow the parent. This works within one memory OR across memories (#781) — a different memory in \`targetUrn\` relocates the whole subtree there, carrying the moved nodes' embeddings and rewriting the edges whose source moved to the destination memory. A boundary edge to a node left behind becomes a cross-memory edge (its far endpoint is access-gated on read). A same-memory move leaves edge locs untouched (a derived denormalization; keep addressing those edges by their existing URN). A collision at any DESCENDANT slot refuses the whole move (overwrite only evicts the explicitly-named target loc).
 
+The node's \`name\` (its human-authored display title) is PRESERVED — a move changes the address, not the title, exactly as the GraphQL \`moveNode\` mutation does (#1017). Pass \`renameToLeaf: true\` if you want the name re-derived from the new loc's terminal atom instead. Descendants' names are never rewritten either way.
+
 Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move all run inside a single db.$transaction so a partial failure cannot leave the URN slot empty.
 
 On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted).`,
@@ -4170,8 +4172,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       urn: z.string().describe('Current node fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper"'),
       targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
       overwrite: z.boolean().optional().describe('Default false (refuses on collision). Pass true to soft-delete an existing live target node before moving; the move then proceeds into the freed URN slot.'),
+      renameToLeaf: z.boolean().optional().describe("Default false — the node keeps its name. Pass true to also overwrite the moved node's name with the target loc's terminal atom (\"services:db-helper\" → \"db-helper\"). Destroys the existing display title, so only pass it when the name is meant to track the loc."),
     },
-    async ({ urn: rawFrom, targetUrn: rawTo, overwrite }) => {
+    async ({ urn: rawFrom, targetUrn: rawTo, overwrite, renameToLeaf }) => {
       // Spec 022: qualification at the API boundary for both source and target.
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
@@ -4251,19 +4254,24 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           await lockAncestorsForCreate(tx, toMemory.id, toLoc);
 
           if (isSameSlot) {
-            // Same-slot "move" — normalize the node's name to the loc leaf, as
-            // before. Nothing to cascade (destLoc === the current loc).
-            const newName = toLoc.split(':').pop()!;
-            await createNodeRevision(tx, {
-              id: generateId(),
-              ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
-                changes: diffNodeChanges(existing, { loc: toLoc, name: newName, memoryId: toMemory.id }),
-              }),
-            });
-            await tx.node.update({
-              where: { id: existing.id },
-              data: { loc: toLoc, name: newName, memoryId: toMemory.id },
-            });
+            // Same-slot "move": source and target address are identical, so the
+            // ONLY thing left to do is the opt-in leaf rename (#1017). Without
+            // it this is a literal no-op — writing a NodeRevision for it would
+            // record a change that did not happen, and on a memory with a
+            // maxRevCount cap it would evict real history to store nothing.
+            if (renameToLeaf === true) {
+              const newName = toLoc.split(':').pop()!;
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
+                  changes: diffNodeChanges(existing, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+                }),
+              });
+              await tx.node.update({
+                where: { id: existing.id },
+                data: { loc: toLoc, name: newName, memoryId: toMemory.id },
+              });
+            }
           } else {
             const crossMemory = toMemory.id !== fromMemory.id;
 
@@ -4297,15 +4305,25 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // #768/#781: rebase the whole loc-subtree via the shared helper (the
             // ONE implementation the GraphQL moveNode resolver also uses) — SAME-
             // memory or CROSS-memory (destMemoryId carries nodes + embeddings +
-            // outgoing edges across). renameSourceLeaf sets the moved node's name
-            // to the loc leaf (this tool's long-standing behavior); it locks +
-            // revalidates the source and writes a NodeRevision per moved node.
+            // outgoing edges across). It locks + revalidates the source and
+            // writes a NodeRevision per moved node.
+            //
+            // #1017: renameSourceLeaf is now the CALLER's choice, defaulting off.
+            // It used to be hardcoded true, which silently overwrote the moved
+            // node's human-authored `name` with the target loc's terminal atom —
+            // unconditional, undocumented, and the opposite of what the GraphQL
+            // `moveNode` resolver does with the same helper. Two surfaces of one
+            // operation disagreeing is bad enough; the tool's own description
+            // enumerated what survives a move (id, edges, descendants) and never
+            // mentioned `name`, so the contract actively taught the wrong thing.
+            // The damage was quiet, too — loc and name are usually similar
+            // enough that a clobbered title still reads plausibly.
             await moveNodeSubtree(tx, {
               source: existing,
               destLoc: toLoc,
               destMemoryId: crossMemory ? toMemory.id : undefined,
               editor: editorFromAuth(auth),
-              renameSourceLeaf: true,
+              renameSourceLeaf: renameToLeaf === true,
             });
           }
 
