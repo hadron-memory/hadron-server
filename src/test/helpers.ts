@@ -43,6 +43,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.resendSender.deleteMany();
   // General secret store (#677) — polymorphic owner, FK-free.
   await db.secret.deleteMany();
+  // #1012 — durable per-client MCP selections. FKs user/app/memory, all of
+  // which are deleted below, so it has to go first.
+  await db.mcpSessionState.deleteMany();
   // Webfetch polling: receipts + origin bindings both FK AppRun.
   await db.webFetchEventReceipt.deleteMany();
   await db.webFetchPollBinding.deleteMany();
