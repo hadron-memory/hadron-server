@@ -57,7 +57,14 @@
 // cross-memory asset list (spec cor:api:120), plus the `AssetFilter` input and
 // `AssetsPage` type. A caller-detectable addition: `memoryAssets(memoryId:)`
 // remains, but "every asset I can reach" was previously unanswerable.
-export const HADRON_SERVER_VERSION = '0.13.0';
+// 0.14.0: #1009/#1006 — caller-detectable MCP surface additions. New optional
+// `session` argument on hadron_list_workers / hadron_cast_worker /
+// hadron_team_chat_read (an App-resolution hint, so those tools work after a
+// reconnect without a prior hadron_set_active_app), and hadron_server_info's
+// response gains `capabilities:` plus a `connection:` line. The capabilities
+// line is itself the "how old is this surface?" probe (#1006), so the build
+// that introduces it must not share a version with the builds that lack it.
+export const HADRON_SERVER_VERSION = '0.14.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

@@ -859,12 +859,20 @@ export function createMcpServerInstance(
    */
   const isReconnect = opts.isReconnect ?? false;
 
-  /** Appended to per-session-state refusals so the cause is never guessed at. */
+  /**
+   * Appended to per-session-state refusals so the cause is never guessed at.
+   *
+   * Phrased conditionally ("any … you had selected") because the detection
+   * behind it is a deliberate over-approximation — see `isLikelyReconnect`.
+   * Under a false positive this still says nothing untrue to a caller who had
+   * no selection to lose.
+   */
   const RECONNECT_NOTE =
-    ' Note: this connection was re-established (the previous MCP session ended, ' +
-    'typically because the server restarted), which RESET any active App or ' +
-    'active memory you had selected. This is not a client limitation and nothing ' +
-    'you did is wrong — re-select and continue.';
+    ' Note: this MCP connection was re-established (the previous session ended, ' +
+    'typically because the server restarted). That RESET any active App or active ' +
+    'memory you had selected — selections live only for the current connection, ' +
+    'and clients re-connect without mentioning it. This is not a client ' +
+    'limitation and nothing you did is wrong: re-select and continue.';
   const server = new McpServer(
     { name: 'hadron', version: HADRON_SERVER_VERSION },
     { capabilities: { tools: {} } },
@@ -6388,6 +6396,47 @@ const transports = new Map<string, StreamableHTTPServerTransport>();
  * §Clarifications Q3; horizontal scale-out requires either sticky
  * sessions or persistent `McpSessionState` first.
  */
+/**
+ * #1009 — when this process last answered a stale `Mcp-Session-Id` with the
+ * recovery 404, or `null` if it never has.
+ *
+ * The reconnect that matters is a two-request exchange with nothing linking its
+ * halves: the stale call carries a session id we reject, and the client's
+ * re-`initialize` deliberately carries NO session header. The 404 is answered
+ * before auth is resolved (by design — learning "session not found" needs no
+ * credential), so there is no principal to correlate on either.
+ *
+ * So the correlation is at PROCESS level: if this server has recently had to
+ * tell someone their session is gone, it is serving clients that had sessions
+ * before — the post-restart state — and a session opened inside that window is
+ * very likely a revival.
+ *
+ * A HEURISTIC, and deliberately biased toward false POSITIVES: the cost of
+ * wrongly mentioning a reconnect is one extra sentence to a caller who had no
+ * selection to lose, while the cost of missing one is the original bug, where
+ * the agent concludes its client is broken. The reconnect note is worded to
+ * stay true under a false positive ("if you had selected…"), which is what
+ * makes that trade safe.
+ */
+let lastStaleSessionAt: number | null = null;
+
+/** How long after a stale-session 404 a new session still reads as a revival. */
+const RECONNECT_CORRELATION_WINDOW_MS = 5 * 60 * 1000;
+
+/** Whether a session opening right now plausibly replaces one this process lost. */
+function isLikelyReconnect(presentedStaleSessionId: string | undefined): boolean {
+  // A client that re-initialized while still sending its old session id is
+  // certain, not heuristic — a known session returned long before this point.
+  if (presentedStaleSessionId) return true;
+  if (lastStaleSessionAt === null) return false;
+  return Date.now() - lastStaleSessionAt <= RECONNECT_CORRELATION_WINDOW_MS;
+}
+
+/** Test seam: forget any observed stale-session 404 (see the heuristic above). */
+export function __resetReconnectCorrelationForTests(): void {
+  lastStaleSessionAt = null;
+}
+
 const activeAppByMcpSession = new Map<
   string,
   { appId: string; organizationId: string | null }
@@ -6428,6 +6477,15 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       ? body.some((m) => isInitializeRequest(m))
       : isInitializeRequest(body);
     if (!hasInitialize) {
+      // #1009 (PR #1011 review, Codex P1 + Copilot): remember that THIS PROCESS
+      // has just told a client its session is gone. A spec-compliant client
+      // reacts to this 404 by re-initializing WITHOUT a session header
+      // (server.session-revival.test.ts), so the next request carries nothing
+      // to correlate on — `Boolean(sessionId)` alone catches only the minority
+      // of clients that re-init while still sending the stale id, which would
+      // have left the primary post-restart path reporting a fresh connection.
+      // This timestamp is the only signal that survives the gap.
+      lastStaleSessionAt = Date.now();
       mcpLog('info', 'stale_mcp_session_404', { mcpSessionId: sessionId, method: req.method });
       res.status(404).json({
         jsonrpc: '2.0',
@@ -6531,13 +6589,13 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       : () => randomUUID(),
   });
 
-  // #1009: reaching here with a session id in hand means the client presented
-  // one this server does not know AND asked to initialize — i.e. a RECONNECT.
-  // (A known session returned at the top; an unknown id without an initialize
-  // got the 404.) The boundary has always known this and thrown it away; the
-  // tools need it, because everything per-session was just reset underneath a
-  // client that will not mention it.
-  const isReconnect = Boolean(sessionId);
+  // #1009: is this session replacing one the client had already been using?
+  // Two shapes — a re-initialize still carrying the stale id (certain), or a
+  // headerless re-initialize shortly after this process 404'd someone's session
+  // (the spec-compliant path, correlated at process level). See
+  // `isLikelyReconnect`. Everything per-session was just reset underneath a
+  // client that will not mention it, so the tools need to be able to say so.
+  const isReconnect = isLikelyReconnect(sessionId);
 
   const mcpServer = createMcpServerInstance(
     auth,
