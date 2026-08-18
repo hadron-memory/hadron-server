@@ -25,6 +25,7 @@ import {
   TEAM_CHAT_BODY_MAX_CHARS,
 } from './resolvers.teamChat.js';
 import { workerSlugBase } from '../../../lib/workerSlug.js';
+import { writeSessionHandoff } from './resolvers.mutation.session.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -943,6 +944,28 @@ describe('#1029 — worker handoff', () => {
     const continuity = await resolvers.Worker.continuity(fresh as any, {}, ctx(appMember.id));
     expect(continuity!.status).toBe('CURRENT');
     expect(continuity!.handoff!.content).toBe('stint two');
+  });
+
+  it('a handoff already written for this stint is not written twice (Codex P2)', async () => {
+    // The handoff write and the session close are separate commits, so a crash
+    // between them — or two ends racing past the endedAt check — leaves a
+    // handoff written against a session still marked open. A retry must not
+    // append a duplicate for one stint.
+    const worker = await castOne('Sten');
+    const s1 = await startAs(appMember.id, worker.id);
+    await writeSessionHandoff(ctx(appMember.id) as any, s1.id, worker.id, 'written, not yet closed');
+    // The session is still open — exactly the partial-failure state.
+    expect((await db.session.findUniqueOrThrow({ where: { id: s1.id } })).endedAt).toBeNull();
+
+    await M.endSession({}, { id: s1.id, handoff: 'written, not yet closed' }, ctx(appMember.id));
+
+    const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const children = await db.node.findMany({
+      where: { memoryId: fresh.memoryId!, loc: { startsWith: 'handoffs:' }, deletedAt: null },
+      select: { content: true },
+    });
+    expect(children).toHaveLength(1);
+    expect((await db.session.findUniqueOrThrow({ where: { id: s1.id } })).endedAt).not.toBeNull();
   });
 
   it('previousSession is a sanitized projection, not the Session row (Codex P1)', async () => {

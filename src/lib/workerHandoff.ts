@@ -73,8 +73,9 @@ export function handoffLocFor(at: Date): string {
  * The loc to write next, disambiguated only if the minute is already taken.
  *
  * The common case keeps the exact shape the convention documents, so nothing
- * already written becomes irregular; a second handoff in the same minute gets
- * a suffix that still sorts after its predecessor.
+ * already written becomes irregular; a second handoff in the same minute gets a
+ * ZERO-PADDED suffix (`-02`, `-03`, … `-50`) that still sorts after its
+ * predecessor.
  *
  * The suffix is ZERO-PADDED (PR #1045 review, Codex P2). Unpadded, `-10` sorts
  * BEFORE `-9`, so once ten handoffs landed in one minute the newest-by-loc read

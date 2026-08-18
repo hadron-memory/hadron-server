@@ -729,3 +729,132 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// #1029 — handoff delivery on the MCP surface
+// ---------------------------------------------------------------------------
+
+describe('#1029 — the handoff arrives at bind, and recovery re-fetches it', () => {
+  it('hadron_start_session renders the previous stint\'s handoff after the briefing', async () => {
+    const w = await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+    const started = await srv.callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint one',
+    });
+    const sessionId = started.match(/Session started: (\S+)/)![1];
+    await srv.callToolText('hadron_end_session', {
+      id: sessionId,
+      handoff: 'PR #1045 is open. Do NOT rerun the backfill.',
+    });
+
+    // A fresh bind — the acceptance narrative's step 6. Nothing asks for the
+    // handoff; the bind delivers it.
+    const rebound = await srv.callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint two',
+    });
+    expect(rebound).toContain('Boot briefing');
+    expect(rebound).toContain('Handoff from the previous session');
+    expect(rebound).toContain('Do NOT rerun the backfill');
+    expect(w.id).toBeTruthy();
+  });
+
+  it('hadron_get_worker carries it too — the post-compaction reader', async () => {
+    await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+    const started = await srv.callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint one',
+    });
+    await srv.callToolText('hadron_end_session', {
+      id: started.match(/Session started: (\S+)/)![1],
+      handoff: 'the migration is half-applied',
+    });
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
+      workerRef: 'Iris',
+    });
+    expect(out).toContain('the migration is half-applied');
+  });
+
+  it('names an auto-expired stint rather than presenting stale prose as current', async () => {
+    const w = await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+    const s1 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'one' }))
+      .match(/Session started: (\S+)/)![1];
+    await srv.callToolText('hadron_end_session', { id: s1, handoff: 'state as of stint one' });
+
+    // Stint two is REAPED — the #930 reaper stamps both columns and writes no
+    // handoff, because nobody closed it deliberately.
+    const s2 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'two' }))
+      .match(/Session started: (\S+)/)![1];
+    const now = new Date();
+    await db.session.update({ where: { id: s2 }, data: { endedAt: now, autoExpiredAt: now } });
+
+    const out = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
+    expect(out).toContain('No current handoff');
+    expect(out).toContain('auto-expired by the server');
+    // Still handed over, but framed as history.
+    expect(out).toContain('state as of stint one');
+    expect(out).toContain('history, not as the current state of play');
+    expect(w.id).toBeTruthy();
+  });
+
+  it('a retried hadron_end_session writes no second handoff and does not move endedAt', async () => {
+    // The MCP tool reimplements the end with its own raw update, which is how
+    // the guard ended up on the GraphQL resolver only (PR #1045 review, Codex
+    // P1). Both now come from the shared writer plus first-end-wins here.
+    await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+    const s1 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'one' }))
+      .match(/Session started: (\S+)/)![1];
+    await srv.callToolText('hadron_end_session', { id: s1, handoff: 'stint one' });
+    const endedAt = (await db.session.findUniqueOrThrow({ where: { id: s1 } })).endedAt;
+
+    const s2 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'two' }))
+      .match(/Session started: (\S+)/)![1];
+    await srv.callToolText('hadron_end_session', { id: s2, handoff: 'stint two' });
+
+    // The retry of the OLDER session.
+    const retried = await srv.callToolText('hadron_end_session', { id: s1, handoff: 'stint one' });
+    expect(retried).toContain('STILL OPEN');
+
+    const fresh = await db.worker.findUniqueOrThrow({
+      where: { appId_slug: { appId: app.id, slug: 'iris' } },
+    });
+    const children = await db.node.findMany({
+      where: { memoryId: fresh.memoryId!, loc: { startsWith: 'handoffs:' }, deletedAt: null },
+      orderBy: { loc: 'asc' },
+      select: { content: true },
+    });
+    expect(children.map((c) => c.content)).toEqual(['stint one', 'stint two']);
+    expect((await db.session.findUniqueOrThrow({ where: { id: s1 } })).endedAt).toEqual(endedAt);
+  });
+
+  it('a plain re-end does not move endedAt — it orders the whole continuity chain', async () => {
+    // The handoff-carrying retry is refused earlier by the shared guard, so
+    // this is the path that actually exercises first-end-wins: ending again
+    // with no handoff, e.g. to attach late metrics. `endedAt` decides which
+    // stint is "previous" for both Worker.continuity and prevSessionId, so
+    // re-stamping it re-orders a worker's history around a stint that finished
+    // long ago.
+    await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+    const s1 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'one' }))
+      .match(/Session started: (\S+)/)![1];
+    await srv.callToolText('hadron_end_session', { id: s1, summary: 'first' });
+    const endedAt = (await db.session.findUniqueOrThrow({ where: { id: s1 } })).endedAt;
+    expect(endedAt).not.toBeNull();
+
+    await srv.callToolText('hadron_end_session', { id: s1, summary: 'late metrics', turnCount: 9 });
+    const after = await db.session.findUniqueOrThrow({ where: { id: s1 } });
+    expect(after.endedAt).toEqual(endedAt);
+    expect(after.turnCount).toBe(9);
+  });
+
+  it('refuses a handoff on a session with no worker rather than dropping it', async () => {
+    const srv = createTestableMcpServer(hybridAuth());
+    const bare = (await srv.callToolText('hadron_start_session', { description: 'no worker' }))
+      .match(/Session started: (\S+)/)![1];
+    const out = await srv.callToolText('hadron_end_session', { id: bare, handoff: 'nowhere to go' });
+    expect(out).toContain('not bound to a worker');
+    expect((await db.session.findUniqueOrThrow({ where: { id: bare } })).endedAt).toBeNull();
+  });
+});

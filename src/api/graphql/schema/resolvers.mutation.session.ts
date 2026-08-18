@@ -30,6 +30,8 @@ import {
   HANDOFFS_PARENT_LOC,
   HANDOFF_SESSION_KEY,
   nextHandoffLoc,
+  newestHandoff,
+  handoffSessionId,
 } from '../../../lib/workerHandoff.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
@@ -98,6 +100,56 @@ export async function writeSessionHandoff(
   workerId: string,
   body: string,
 ): Promise<void> {
+  // Both guards live HERE, ahead of the try, rather than in either caller (PR
+  // #1045 review, Codex P1 + P2). The GraphQL resolver had them and the MCP
+  // tool — which reimplements the end with its own raw update — did not, so the
+  // bug stayed live on the surface this team actually uses. A guard in the
+  // shared writer is inherited by both, which is the only version of this that
+  // cannot drift. They throw typed and are NOT wrapped in
+  // HANDOFF_WRITE_FAILED: a refusal is an answer, not a failure to write.
+  const session = await ctx.db.session.findUniqueOrThrow({
+    where: { id: sessionId },
+    select: { id: true, endedAt: true, workerId: true },
+  });
+
+  // Ending is retry-tolerant, the sequence is append-only. A retry of a call
+  // that already succeeded would append a SECOND node — newest by loc, stamped
+  // with this older session — and make a stale account read as CURRENT.
+  if (session.endedAt) {
+    throw new GraphQLError(
+      `Session ${sessionId} already ended at ${session.endedAt.toISOString()}, and its handoff is already written. ` +
+        'The sequence is append-only, so a second handoff for the same stint is refused — start a new session to record new state.',
+      {
+        extensions: {
+          code: 'SESSION_ALREADY_ENDED',
+          sessionId,
+          endedAt: session.endedAt.toISOString(),
+        },
+      },
+    );
+  }
+
+  // IDEMPOTENCE by session id, for the window the check above cannot see: the
+  // handoff write and the session close are separate commits, so a crash
+  // between them (or two ends racing past the `endedAt` check) leaves a handoff
+  // written against a session still marked open. A retry would then append a
+  // duplicate for one stint, which contradicts the retry-safety this
+  // operation's whole ordering exists to provide.
+  //
+  // Checking the NEWEST child is sufficient: a retry lands immediately after
+  // its own predecessor, so if this stint already wrote one it is the newest.
+  // (An encrypted working memory would hide the envelope and re-write — worker
+  // memories are provisioned unencrypted, and the same limitation already
+  // applies to the continuity status.)
+  const worker = await ctx.db.worker.findUniqueOrThrow({
+    where: { id: workerId },
+    select: { memoryId: true },
+  });
+  if (worker.memoryId) {
+    const newest = await newestHandoff(ctx.db, worker.memoryId);
+    if (newest && handoffSessionId(newest.data) === sessionId) return;
+  }
+
   try {
     const worker = await ctx.db.worker.findUniqueOrThrow({
       where: { id: workerId },
@@ -649,22 +701,9 @@ export const sessionMutations = {
             { extensions: { code: 'SESSION_NOT_WORKER_BOUND', sessionId: id } },
           );
         }
-        // An ALREADY-ended session writes no second handoff (PR #1045 review,
-        // Codex P1). Ending is retry-tolerant by design — a client that times
-        // out on a call that actually succeeded will send it again — but the
-        // handoff sequence is append-only, so a retry would append a SECOND
-        // node, newest by loc and stamped with this older session. Combined
-        // with the re-stamped `endedAt` below that made the retried stint the
-        // "previous" one AND the author of the newest handoff, so a stale
-        // account read as CURRENT while a later stint's real one was buried.
-        // Refusing typed keeps the retry safe and says why.
-        if (session.endedAt) {
-          throw new GraphQLError(
-            `Session ${id} already ended at ${session.endedAt.toISOString()}, and its handoff is already written. ` +
-              'The sequence is append-only, so a second handoff for the same stint is refused — start a new session to record new state.',
-            { extensions: { code: 'SESSION_ALREADY_ENDED', sessionId: id, endedAt: session.endedAt.toISOString() } },
-          );
-        }
+        // The already-ended refusal and the per-session idempotence both live
+        // in writeSessionHandoff, so the MCP end path inherits them instead of
+        // reimplementing them (PR #1045 review).
         await writeSessionHandoff(ctx, session.id, session.workerId, handoffBody);
       }
 

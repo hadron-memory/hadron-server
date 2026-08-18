@@ -5280,7 +5280,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       await db.session.update({
         where: { id },
         data: {
-          endedAt: new Date(),
+          // FIRST END WINS (PR #1045 review, Codex P1). `endedAt` orders the
+          // whole continuity chain — Worker.continuity's "previous" and
+          // startSession's prevSessionId derivation both key on it — so a late
+          // retry of an old session must not re-order a worker's history
+          // around a stint that finished long ago. This tool reimplements the
+          // end rather than delegating to the GraphQL resolver, which is
+          // exactly how the two came apart on the first pass: the resolver got
+          // the guard and this path, the one this team actually uses, did not.
+          endedAt: session.endedAt ?? new Date(),
           summary: summary ?? null,
           inputTokens: inputTokens ?? null,
           outputTokens: outputTokens ?? null,
