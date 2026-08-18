@@ -24,7 +24,13 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated } from './resolvers.worker.js';
+import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
+import { writeNodeCore } from './resolvers.mutation.node.js';
+import {
+  HANDOFFS_PARENT_LOC,
+  HANDOFF_SESSION_KEY,
+  nextHandoffLoc,
+} from '../../../lib/workerHandoff.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
@@ -66,6 +72,136 @@ function dropNulls(t: { dateTime?: string | null; date?: string | null; timeZone
     date: t.date ?? undefined,
     timeZone: t.timeZone ?? undefined,
   };
+}
+
+/**
+ * Write a worker session's closing handoff (#1029).
+ *
+ * The agent supplies prose; this owns the ADDRESS — which is the whole reason
+ * it is server-side rather than a `hadron_create_node` call the client
+ * composes. Three things would otherwise be re-derived by every client (MCP,
+ * CLI, portal): which memory, the `handoffs` parent, and the lexically-ordered
+ * loc. That is #1028's finding — domain logic accreting on clients because the
+ * server exposed a primitive instead of the intent.
+ *
+ * Delegates the node writes to `writeNodeCore`, never `db.node` directly, per
+ * `findings:node-write-surface-invariants`: encryption, the revision snapshot,
+ * the abstract-hash recompute and re-embedding all live there, and a bespoke
+ * insert would silently skip every one of them.
+ *
+ * Throws typed `HANDOFF_WRITE_FAILED` on any failure, and the caller has NOT
+ * ended the session at that point — see `endSession`.
+ */
+export async function writeSessionHandoff(
+  ctx: Context,
+  sessionId: string,
+  workerId: string,
+  body: string,
+): Promise<void> {
+  try {
+    const worker = await ctx.db.worker.findUniqueOrThrow({
+      where: { id: workerId },
+      select: { id: true, name: true, slug: true, memoryId: true, appId: true },
+    });
+
+    // AUTHORITY. The caller has already cleared `requireSessionWriteAccess` on
+    // the session being ended, and the target memory is DERIVED from the worker
+    // that session is bound to — the caller names no memory, so this elevation
+    // cannot be steered anywhere. Without it the operation refuses the very
+    // principal it exists for: `requireMemoryWriteAccess` grants an org-owned
+    // app-class memory to org CONTRIBUTORs, and an AppMember who is not an org
+    // member is most of this team. That is the same gap `createTeamChatMessage`
+    // meets and answers the same way (gate on the operation's own predicate,
+    // then write); the difference is that it writes rows by hand, while this
+    // delegates to `writeNodeCore` so encryption, the revision snapshot, the
+    // abstract hash and re-embedding all still happen
+    // (findings:node-write-surface-invariants).
+    //
+    // Deliberately does NOT reach a user-owned App's worker memory: strict
+    // ownership (spec 047) refuses even a platform admin there, and it needs no
+    // help — a user-owned App's workers are driven by its owner.
+    const writerCtx: Context = { ...ctx, roles: ['ADMIN'] as Context['roles'] };
+
+    // Provisioning is best-effort at cast time (the spec allows it lazily), so
+    // a legally cast worker can reach here with no memory. Provision it now
+    // rather than refusing: refusing would mean a worker unlucky at cast can
+    // NEVER write a handoff, which is a permanent gap created by a transient
+    // failure.
+    let memoryId = worker.memoryId;
+    if (!memoryId) {
+      const app = await ctx.db.app.findUniqueOrThrow({
+        where: { id: worker.appId },
+        select: {
+          id: true, name: true, urn: true,
+          organizationId: true, ownerUserId: true, uninstalledAt: true,
+        },
+      });
+      memoryId = await provisionWorkerMemory(ctx, app, worker);
+      if (!memoryId) {
+        throw new Error(`worker ${worker.id} has no working memory and provisioning it failed`);
+      }
+    }
+
+    // The parent carries the convention for a human reading the sequence in the
+    // portal. Created on first handoff, like the team chat's own root — and
+    // `create` mode resurrects a soft-deleted one rather than colliding on
+    // (loc, memoryId).
+    // loc-scope-ok: scoped to one memory by id.
+    const parent = await ctx.db.node.findFirst({
+      where: { memoryId, loc: HANDOFFS_PARENT_LOC, deletedAt: null },
+      select: { id: true },
+    });
+    if (!parent) {
+      await writeNodeCore(
+        {
+          memoryId,
+          loc: HANDOFFS_PARENT_LOC,
+          name: 'handoffs',
+          nodeType: 'record',
+          description: `Handoff records for ${worker.name}, newest last — one per closed worker session.`,
+          content:
+            `# Handoffs — ${worker.name}\n\n` +
+            'One child per closed worker session, newest last, written by ' +
+            '`endSession(handoff:)`.\n\n' +
+            'Starting a session as this worker returns the newest child ' +
+            'automatically — binding is briefing, so binding is handoff. ' +
+            'Reading the sequence by hand is for history, not for resuming.\n\n' +
+            '**Never edit a child.** The sequence is the point, and an amended ' +
+            'handoff destroys the record of what was believed at the time.\n\n' +
+            'Ordering comes from the loc (`handoffs:<yyyy-mm-dd>-<hhmm>`, UTC, ' +
+            'lexically sortable) — never from `seq`, which is a 32-bit Int a ' +
+            'timestamp overflows.\n',
+        },
+        writerCtx,
+        'create',
+      );
+    }
+
+    const at = new Date();
+    const loc = await nextHandoffLoc(ctx.db, memoryId, at);
+    await writeNodeCore(
+      {
+        memoryId,
+        loc,
+        name: loc.slice(HANDOFFS_PARENT_LOC.length + 1),
+        nodeType: 'record',
+        description: `Handoff from ${worker.name}'s session ${sessionId.slice(0, 8)}.`,
+        content: body,
+        // The writing session, which is what lets a later bind tell a CURRENT
+        // handoff from a stale one it never replaced.
+        data: { [HANDOFF_SESSION_KEY]: sessionId },
+      },
+      writerCtx,
+      'create',
+    );
+  } catch (e) {
+    throw new GraphQLError(
+      `The handoff could not be written, so the session was NOT ended — retry, or end without a handoff. Cause: ${
+        e instanceof Error ? e.message : 'unknown'
+      }`,
+      { extensions: { code: 'HANDOFF_WRITE_FAILED', sessionId } },
+    );
+  }
 }
 
 export const sessionMutations = {
@@ -187,6 +323,9 @@ export const sessionMutations = {
       // thin-client directive; before this it was the CLI's contract only,
       // and this mutation was an ungated second surface in waiting).
       let workerId: string | undefined;
+      // #1029 — the worker's previous stint, derived below when the caller
+      // supplies no explicit chain link.
+      let derivedPrevSessionId: string | undefined;
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
         // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
@@ -391,6 +530,25 @@ export const sessionMutations = {
         }
         agentId = worker.agentId;
         workerId = worker.id;
+        // #1029: wire the continuity chain. `prevSessionId` and
+        // `parentSessionId` have been in the schema since the beginning and
+        // unused, so the chain primitive existed with nothing writing it —
+        // walking a worker's stints meant sorting sessions by time and hoping.
+        // An explicit input still wins: a caller stitching a sub-agent chain
+        // knows something this default does not.
+        //
+        // Deliberately the most recent ENDED session, matching
+        // Worker.continuity's definition of "previous" — with `force`, two
+        // stints can overlap, and chaining to a still-open one would record
+        // that a session succeeded another that had not finished.
+        if (input.prevSessionId === undefined || input.prevSessionId === null) {
+          const previous = await ctx.db.session.findFirst({
+            where: { workerId: worker.id, endedAt: { not: null }, deletedAt: null },
+            orderBy: { endedAt: 'desc' as const },
+            select: { id: true },
+          });
+          if (previous) derivedPrevSessionId = previous.id;
+        }
       }
 
       return ctx.db.session.create({
@@ -415,7 +573,7 @@ export const sessionMutations = {
           language: input.language,
           llmModel: input.llmModel,
           parentSessionId: input.parentSessionId,
-          prevSessionId: input.prevSessionId,
+          prevSessionId: input.prevSessionId ?? derivedPrevSessionId,
           // #928 coding-session provenance.
           transcriptPath: input.transcriptPath,
           host: input.host,
@@ -460,11 +618,12 @@ export const sessionMutations = {
       {
         id,
         summary,
+        handoff,
         inputTokens,
         outputTokens,
         turnCount,
         errorCount,
-      }: { id: string; summary?: string; inputTokens?: number; outputTokens?: number; turnCount?: number; errorCount?: number },
+      }: { id: string; summary?: string; handoff?: string; inputTokens?: number; outputTokens?: number; turnCount?: number; errorCount?: number },
       ctx: Context,
     ) => {
       // #931: same write gate as updateSession — this was previously ungated,
@@ -476,6 +635,23 @@ export const sessionMutations = {
         throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
       }
       requireSessionWriteAccess(ctx, session);
+
+      // #1029: the closing handoff, written BEFORE the end and only for a
+      // worker-bound session. Ordering is the whole safety property here — if
+      // this throws, the session is still open and the caller can retry or end
+      // without a handoff deliberately. Ending first and losing the prose is
+      // unrecoverable: the context that composed it is gone with the stint.
+      const handoffBody = handoff?.trim();
+      if (handoffBody) {
+        if (!session.workerId) {
+          throw new GraphQLError(
+            'A handoff belongs to a worker\'s continuity sequence, and this session is not bound to a worker.',
+            { extensions: { code: 'SESSION_NOT_WORKER_BOUND', sessionId: id } },
+          );
+        }
+        await writeSessionHandoff(ctx, session.id, session.workerId, handoffBody);
+      }
+
       return ctx.db.session.update({
         where: { id },
         data: { endedAt: new Date(), summary, inputTokens, outputTokens, turnCount, errorCount },

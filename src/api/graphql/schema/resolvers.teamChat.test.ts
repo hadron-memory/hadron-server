@@ -765,3 +765,155 @@ describe('#1030 — the team chat is not an agent chat', () => {
     ]);
   });
 });
+
+/**
+ * #1029 — session handoff, end to end.
+ *
+ * The acceptance narrative from the issue: one driver ends a stint with a
+ * handoff, a DIFFERENT driver binds the same worker, and the handoff arrives
+ * through the bind's own return value with no human copying anything. These
+ * run against the real cast/bind/end path rather than planted nodes, because
+ * the thing under test is precisely that the pieces meet.
+ */
+describe('#1029 — worker handoff', () => {
+  const startAs = (userId: string, workerId: string) =>
+    M.startSession({}, { input: { workerRef: workerId, description: 'stint', appRef: app.id } }, ctx(userId));
+
+  async function castOne(name = 'Iris') {
+    const worker = await db.worker.create({
+      data: { appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
+    });
+    return worker;
+  }
+
+  it('a second driver receives the first driver\'s handoff at bind — nothing is copied', async () => {
+    const worker = await castOne();
+    const first = await startAs(appMember.id, worker.id);
+    await M.endSession(
+      {},
+      { id: first.id, summary: 'stint one', handoff: 'PR #1042 is open and awaiting review. Do not re-run the migration.' },
+      ctx(appMember.id),
+    );
+
+    // A DIFFERENT human binds the same worker.
+    const second = await startAs(appReader.id, worker.id);
+    expect(second.id).not.toBe(first.id);
+
+    const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const continuity = await resolvers.Worker.continuity(fresh as any, {}, ctx(appReader.id));
+    expect(continuity!.status).toBe('CURRENT');
+    expect(continuity!.handoff!.content).toContain('PR #1042 is open');
+    expect(continuity!.previousSession!.id).toBe(first.id);
+    // The chain is walkable, which it was not before: prevSessionId has been in
+    // the schema since the beginning with nothing writing it.
+    expect(second.prevSessionId).toBe(first.id);
+  });
+
+  it('stores the handoff as an ordered child in the worker\'s own working memory', async () => {
+    const worker = await castOne('Henry');
+    const s1 = await startAs(appMember.id, worker.id);
+    await M.endSession({}, { id: s1.id, handoff: 'first' }, ctx(appMember.id));
+    const s2 = await startAs(appMember.id, worker.id);
+    await M.endSession({}, { id: s2.id, handoff: 'second' }, ctx(appMember.id));
+
+    const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect(fresh.memoryId).not.toBeNull();
+    const nodes = await db.node.findMany({
+      where: { memoryId: fresh.memoryId!, deletedAt: null },
+      orderBy: { loc: 'asc' },
+      select: { loc: true, content: true, data: true },
+    });
+    // The parent carries the convention; the children are the sequence.
+    expect(nodes[0].loc).toBe('handoffs');
+    const children = nodes.slice(1);
+    expect(children).toHaveLength(2);
+    expect(children.every((n) => n.loc.startsWith('handoffs:'))).toBe(true);
+    // Append-only, oldest first by loc — the ordering contract.
+    expect(children.map((n) => n.content)).toEqual(['first', 'second']);
+    // Each stamps its writing session, which is what separates CURRENT from stale.
+    expect((children[0].data as any).sessionId).toBe(s1.id);
+    expect((children[1].data as any).sessionId).toBe(s2.id);
+    // And nothing put the timestamp in seq, where it would overflow Int32.
+    const seqs = await db.node.findMany({
+      where: { memoryId: fresh.memoryId!, loc: { startsWith: 'handoffs:' } },
+      select: { seq: true },
+    });
+    for (const n of seqs) expect(n.seq === null || n.seq < 2_147_483_647).toBe(true);
+  });
+
+  it('an auto-expired stint degrades honestly — MISSING, with the older handoff still handed over', async () => {
+    const worker = await castOne('Mara');
+    const s1 = await startAs(appMember.id, worker.id);
+    await M.endSession({}, { id: s1.id, handoff: 'the state as of stint one' }, ctx(appMember.id));
+
+    // Stint two is REAPED: the #930 reaper stamps endedAt and autoExpiredAt
+    // together, and writes no handoff because nobody closed it.
+    const s2 = await startAs(appMember.id, worker.id);
+    const reapedAt = new Date();
+    await db.session.update({
+      where: { id: s2.id },
+      data: { endedAt: reapedAt, autoExpiredAt: reapedAt },
+    });
+
+    const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const continuity = await resolvers.Worker.continuity(fresh as any, {}, ctx(appMember.id));
+    expect(continuity!.status).toBe('MISSING');
+    // Still handed over — a stale handoff is the best available account.
+    expect(continuity!.handoff!.content).toBe('the state as of stint one');
+    expect(continuity!.previousSession!.id).toBe(s2.id);
+    expect(continuity!.previousSession!.autoExpiredAt).not.toBeNull();
+  });
+
+  it('FIRST_STINT on a worker nobody has driven', async () => {
+    const worker = await castOne('Nils');
+    const continuity = await resolvers.Worker.continuity(worker as any, {}, ctx(appMember.id));
+    expect(continuity!.status).toBe('FIRST_STINT');
+    expect(continuity!.handoff).toBeNull();
+    expect(continuity!.previousSession).toBeNull();
+  });
+
+  it('a failed handoff write does NOT end the session', async () => {
+    const worker = await castOne('Olav');
+    const s1 = await startAs(appMember.id, worker.id);
+    // Point the worker at a USER-OWNED memory belonging to someone else.
+    // Strict ownership (spec 047) refuses the write even to a platform admin,
+    // so this exercises a real refusal rather than a synthetic one — and the
+    // contract is that the stint stays OPEN, so the prose can be retried
+    // rather than lost with the context that composed it.
+    const foreign = await db.memory.create({
+      data: {
+        id: generateId(), ownerUserId: outsider.id, organizationId: null,
+        urn: `hf-foreign-${generateId()}`, name: 'someone else', class: 'app', appId: app.id,
+      },
+    });
+    await db.worker.update({ where: { id: worker.id }, data: { memoryId: foreign.id } });
+
+    await expectCode(
+      M.endSession({}, { id: s1.id, handoff: 'work in progress' }, ctx(appMember.id)),
+      'HANDOFF_WRITE_FAILED',
+    );
+    const after = await db.session.findUniqueOrThrow({ where: { id: s1.id } });
+    expect(after.endedAt).toBeNull();
+  });
+
+  it('refuses a handoff on a session with no worker rather than dropping it', async () => {
+    const bare = await M.startSession({}, { input: { description: 'no worker', appRef: app.id } }, ctx(appMember.id));
+    await expectCode(
+      M.endSession({}, { id: bare.id, handoff: 'nowhere to put this' }, ctx(appMember.id)),
+      'SESSION_NOT_WORKER_BOUND',
+    );
+    const after = await db.session.findUniqueOrThrow({ where: { id: bare.id } });
+    expect(after.endedAt).toBeNull();
+  });
+
+  it('continuity is a working-state field — masked to null for a caller outside the App', async () => {
+    // Same posture as prompt/memoryId (#983): it returns a node out of the
+    // worker's memory and a Session row, either of which would otherwise hand
+    // an outsider that entity's field resolvers.
+    const worker = await castOne('Petra');
+    const s1 = await startAs(appMember.id, worker.id);
+    await M.endSession({}, { id: s1.id, handoff: 'internal state' }, ctx(appMember.id));
+    const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect(await resolvers.Worker.continuity(fresh as any, {}, ctx(outsider.id))).toBeNull();
+  });
+});

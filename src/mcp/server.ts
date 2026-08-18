@@ -113,6 +113,11 @@ import {
 import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
+import {
+  renderWorkerContinuity,
+  type RenderableContinuity,
+} from '../lib/workerHandoff.js';
+import { writeSessionHandoff } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
@@ -5158,13 +5163,23 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           try {
             const worker = await db.worker.findUnique({ where: { id: session.workerId } });
             const prompt = worker ? await resolvers.Worker.prompt(worker, {}, mcpCtx) : null;
+            // #1029: the previous stint's handoff, delivered with the briefing
+            // rather than left to be discovered. A fresh session does not know
+            // there is anything to look for, so a design that requires it to go
+            // looking fails — binding is briefing, so binding is handoff. The
+            // session just created is still open and so is never its own
+            // "previous" (Worker.continuity keys on ENDED sessions).
+            const continuity = worker
+              ? await resolvers.Worker.continuity(worker, {}, mcpCtx)
+              : null;
             workerLine =
               `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
               // A worker whose agent carries no template and who has no override
               // has no briefing — say so, rather than emitting a bare heading.
               (prompt
                 ? `\n\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
-                : '\n\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)');
+                : '\n\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)') +
+              renderWorkerContinuity(continuity as RenderableContinuity | null);
           } catch {
             workerLine =
               `\nWorking as worker ${session.workerId}.` +
@@ -5182,16 +5197,22 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_end_session',
-    'End a session. Records summary and final metrics.',
+    'End a session, and for a worker-bound one write its closing HANDOFF (#1029) — the record the next stint of this worker inherits automatically at bind. Pass `handoff` whenever you are stopping deliberately: what landed, what is open, what is blocked, what the next driver should not repeat. Route rather than restate — point at the live artifacts instead of summarizing them, since a restatement drifts while a pointer does not. The server owns where it goes; you supply the prose. A failed handoff write REFUSES the end and leaves the session open, so retrying is safe; ending with no handoff is a deliberate choice, and the next driver is told the stint ended without one.',
     {
       id: z.string().describe('Session ID to end'),
       summary: z.string().optional().describe('Summary of what was accomplished'),
+      handoff: z
+        .string()
+        .optional()
+        .describe(
+          'The closing handoff for this worker: prose the NEXT session of this worker receives at bind. Worker-bound sessions only.',
+        ),
       inputTokens: z.number().optional().describe('Total input tokens used'),
       outputTokens: z.number().optional().describe('Total output tokens used'),
       turnCount: z.number().optional().describe('Number of conversation turns'),
       errorCount: z.number().optional().describe('Number of errors encountered'),
     },
-    async ({ id, summary, inputTokens, outputTokens, turnCount, errorCount }) => {
+    async ({ id, summary, handoff, inputTokens, outputTokens, turnCount, errorCount }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: paired with hadron_start_session.
       //
       // #1009: `id` IS the session, so scope is recoverable here with no new
@@ -5219,6 +5240,43 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return textResult(`Forbidden: session "${id}" belongs to a different App or user.`);
       }
 
+      // #1029: the handoff goes through the SAME writer the GraphQL endSession
+      // uses, so the loc convention, the parent bootstrap and the session
+      // stamping cannot drift between the two surfaces. This tool does its own
+      // raw update rather than delegating to that resolver, which is exactly
+      // how two surfaces come apart — sharing the writer is what stops it here.
+      //
+      // Ordering is the safety property: written BEFORE the end, so a failure
+      // leaves the session open and retryable. Ending first and losing the
+      // prose is unrecoverable — the context that composed it ends with the
+      // stint.
+      const handoffBody = handoff?.trim();
+      if (handoffBody) {
+        if (!session.workerId) {
+          return textResult(
+            `Session "${id}" is not bound to a worker, so there is no continuity sequence to write a handoff to. ` +
+              'End it without one, or bind a worker next time.',
+          );
+        }
+        const mcpCtx: Context = {
+          db,
+          clientId: auth.clientId ?? undefined,
+          userId: auth.userId ?? undefined,
+          appId: auth.appId ?? undefined,
+          sessionId: auth.sessionId ?? undefined,
+          roles: auth.roles as Context['roles'],
+          organizationId: auth.organizationId ?? undefined,
+        };
+        try {
+          await writeSessionHandoff(mcpCtx, session.id, session.workerId, handoffBody);
+        } catch (e) {
+          return textResult(
+            `The handoff could not be written, so the session is STILL OPEN and was not ended — retry, or end without a handoff. ` +
+              `Cause: ${e instanceof Error ? e.message : 'unknown'}`,
+          );
+        }
+      }
+
       await db.session.update({
         where: { id },
         data: {
@@ -5231,7 +5289,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         },
       });
 
-      return textResult(`Session ended: ${id}`);
+      return textResult(
+        `Session ended: ${id}` +
+          (handoffBody
+            ? '\nHandoff written — the next session bound to this worker receives it automatically.'
+            : session.workerId
+              ? '\n(No handoff written. The next driver will be told this stint ended without one.)'
+              : ''),
+      );
     },
   );
 
@@ -5770,7 +5835,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // through it cannot widen access. Rendering live is the whole point:
         // a copied briefing goes stale silently the moment a role agent's
         // template changes, which is why the contract forbids caching it.
-        const [prompt, workerUrn, agent, override] = await Promise.all([
+        const [prompt, workerUrn, agent, override, continuity] = await Promise.all([
           resolvers.Worker.prompt(worker, {}, ctx),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -5782,6 +5847,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // and every subsequent edit compounds the duplication. Same gated
           // field resolver GraphQL serves, so it masks to null on deny.
           resolvers.Worker.promptOverride(worker, {}, ctx),
+          // #1029: this tool IS the post-compaction recovery read, so it must
+          // carry the handoff for the same reason the bind does — an agent that
+          // lost its context lost the handoff with it, and is the least likely
+          // reader to know one exists.
+          resolvers.Worker.continuity(worker, {}, ctx),
         ]);
         const agentName = (agent as { name?: string } | null)?.name ?? null;
 
@@ -5818,7 +5888,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               : '') +
             (prompt
               ? `\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
-              : '\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)'),
+              : '\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)') +
+            renderWorkerContinuity(continuity as RenderableContinuity | null),
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`);

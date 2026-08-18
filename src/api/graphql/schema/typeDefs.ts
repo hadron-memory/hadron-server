@@ -1962,11 +1962,60 @@ export const typeDefs = `#graphql
     override.
     """
     prompt: String
+    """
+    #1029 — what a fresh binding of this worker inherits from the last one.
+
+    Returned by startSession alongside the boot briefing (binding is briefing,
+    so binding is handoff) and by the worker read, which is the recovery path
+    after a context compaction — the reader who has most lost the handoff and
+    least knows one exists. Working-state field: behind the worker read gate,
+    masked to null on deny, like prompt/promptOverride/memoryId.
+    """
+    continuity: WorkerContinuity
     createdAt: DateTime!
     createdBy: String
     "Retirement instant — a retired worker stops authoring and takes no new sessions; the name stays reserved."
     retiredAt: DateTime
     retiredBy: String
+  }
+
+  """
+  #1029 — the continuity a worker carries between stints.
+
+  Handoffs are ordinary nodes in the worker's working memory, so a client walks
+  the whole sequence through the node surface. This type exists for the ONE
+  handoff that cannot be discovered: the newest, which a fresh session does not
+  know to look for.
+  """
+  type WorkerContinuity {
+    status: WorkerContinuityStatus!
+    """
+    The newest handoff node, or null when the worker has none. Present even
+    when status is MISSING — a stale handoff is still the best available
+    account of where this worker got to, and withholding it helps nobody.
+    """
+    handoff: Node
+    """
+    The worker's most recent ENDED session. Carries endedAt and autoExpiredAt,
+    so a client can say WHY there is no current handoff — a reaped stint and a
+    clean end that skipped one are different facts about the previous driver.
+    """
+    previousSession: Session
+  }
+
+  """
+  #1029. MISSING is deliberately not "no handoff": it means the PREVIOUS stint
+  did not write one, while \`handoff\` may still carry an older record. Silently
+  presenting a stale handoff as current is the failure this distinction exists
+  to prevent.
+  """
+  enum WorkerContinuityStatus {
+    "No previous ended session — nothing to inherit, and that is not a gap."
+    FIRST_STINT
+    "The previous session wrote the handoff returned here."
+    CURRENT
+    "The previous session ended, or was auto-expired, without writing one."
+    MISSING
   }
 
   type WorkersPage {
@@ -5419,8 +5468,26 @@ export const typeDefs = `#graphql
     """
     updateSession(id: ID!, prNumber: Int, branch: String): Session!
 
-    "Gate (#931): platform admin, the session's App, or the attributed user (not via impersonation)."
-    endSession(id: ID!, summary: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
+    """
+    End a session, and — for a worker-bound one — write its closing handoff
+    (#1029).
+
+    Gate (#931): platform admin, the session's App, or the attributed user
+    (not via impersonation).
+
+    \`handoff\` is agent-composed prose: what landed, what is open, what is
+    blocked, what the next driver should not repeat. The server owns where it
+    goes (the worker's working memory, under the \`handoffs\` parent, at a
+    lexically-ordered loc), so no client re-derives the convention.
+
+    Written BEFORE the session ends, and a failed write REFUSES the end
+    (HANDOFF_WRITE_FAILED) rather than ending anyway: a still-bound worker is
+    recoverable — retry, or end without a handoff deliberately — while an ended
+    session whose handoff evaporated is not, because the context that composed
+    it is gone. Passing \`handoff\` on a session with no worker is refused rather
+    than dropped; there is no sequence to write it to.
+    """
+    endSession(id: ID!, summary: String, handoff: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
 
     # Record a usage event
     recordUsage(event: UsageEventInput!): Boolean!
