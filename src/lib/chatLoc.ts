@@ -43,12 +43,24 @@
  */
 
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { isTeamChatLoc } from './teamChatLoc.js';
 
 /** The fields of a GraphQL `Context` / MCP `AuthContext` this needs. */
 export interface ChatLocPrincipal {
   userId?: string | null;
   roles?: readonly string[] | null;
 }
+
+/**
+ * A filter that matches no row, for the two cases where the answer is "nothing"
+ * rather than "everything": a principal with no identity to match on, and the
+ * team chat (#1030). Returning it — rather than throwing — keeps each call site
+ * on its own not-found path, exactly as an unknown chat id already behaves.
+ */
+const matchesNothing = (base: Prisma.NodeWhereInput): Prisma.NodeWhereInput => ({
+  ...base,
+  id: '__no_principal__',
+});
 
 /**
  * Build the `where` for a chat-loc lookup, narrowed to nodes this principal
@@ -67,6 +79,18 @@ export async function chatLocFilter(
     ...(opts.includeDeleted ? {} : { deletedAt: null }),
   };
 
+  // #1030: the team chat is NOT an agent chat, and this is the one gate every
+  // surface that addresses a chat by loc already runs — sendChatMessage,
+  // processChatResponse, saveChatSummary, updateChatTitle, deleteChat,
+  // chatHistory, and their MCP twins. Refusing here means none of them can
+  // reach `chats:team`, and a chat surface added later inherits the refusal
+  // instead of having to remember it. It sits ABOVE the admin branch on
+  // purpose: platform admins skip entitlement narrowing, so the one principal
+  // who could delete another team's chat outright would otherwise be the only
+  // one still able to. The team chat's own operations are unaffected — they
+  // never come through here.
+  if (isTeamChatLoc(chatId)) return matchesNothing(base);
+
   const isAdmin = !!principal.roles?.some((r) => r === 'ADMIN' || r === 'OWNER');
   if (isAdmin) return base;
 
@@ -74,7 +98,7 @@ export async function chatLocFilter(
   // No user identity (e.g. a bare App-key caller) — entitlement can only come
   // from an app-class memory, and we have no AppMember rows to match. Return a
   // filter that matches nothing rather than one that matches everything.
-  if (!userId) return { ...base, id: '__no_principal__' };
+  if (!userId) return matchesNothing(base);
 
   // App-class chats are shared with every member of the owning App — the branch
   // the generic read gate deliberately does not cover.

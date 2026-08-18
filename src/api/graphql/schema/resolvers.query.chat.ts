@@ -5,6 +5,7 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
+import { excludeTeamChat } from '../../../lib/teamChatLoc.js';
 import {
   type Context,
   deriveChatTitle,
@@ -75,12 +76,21 @@ export const chatQueries = {
 
       if (readableMemoryIds.length === 0) return [];
 
-      // Top-level chat nodes live at loc "chats:<id>" (depth 2). The only
-      // sub-shapes today are `chats:UUID:messages` (container) and
-      // `chats:UUID:messages:NNN-*` (message rows) — both contain
-      // ':messages', and chat-root locs do not, so we can filter them out
-      // at the DB layer instead of pulling every message body just to
-      // discard it.
+      // Top-level chat nodes live at loc "chats:<id>" (depth 2). Message
+      // shapes — `chats:<id>:messages` (container) and
+      // `chats:<id>:messages:NNN-*` (rows) — both contain ':messages', and
+      // chat-root locs do not, so we can filter them out at the DB layer
+      // instead of pulling every message body just to discard it.
+      //
+      // #1030: `chats:` is NOT an agent-chat-only namespace, which the
+      // previous version of this comment asserted. Since #939 the team chat
+      // lives at `chats:team` in a team App's shared app-class memory — one of
+      // the very memories collected above — and it is an agent chat in no
+      // respect except its address. `excludeTeamChat` keeps it out; it is
+      // read through `teamChatMessages`, which renders its authors and
+      // applies the team-membership gate. The exclusion matches the root
+      // exactly and its subtree under ':' only, so a user's own
+      // `chats:team-retro` still lists.
       //
       // Sort by Node.updatedAt (Prisma's @updatedAt) — bumped automatically
       // each time sendChatMessage / processChatResponse writes the new
@@ -94,6 +104,7 @@ export const chatQueries = {
           loc: { startsWith: 'chats:' },
           NOT: { loc: { contains: ':messages' } },
           deletedAt: null,
+          ...excludeTeamChat,
         },
         orderBy: { updatedAt: 'desc' as const },
         take: limit ?? 100,
