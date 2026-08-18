@@ -54,12 +54,14 @@ import {
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
+import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 
-/** Canonical loc of the one team chat in a team App's shared memory (#939). */
-export const TEAM_CHAT_LOC = 'chats:team';
-/** Loc of the message container under the team chat root. */
-export const TEAM_CHAT_MESSAGES_LOC = `${TEAM_CHAT_LOC}:messages`;
+// The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
+// listing and the shared chat-loc gate both have to exclude `chats:team`, and
+// neither may import this resolver — same move as `mentionTokenOf` below.
+// Re-exported so existing importers are unchanged.
+export { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC };
 /**
  * Body size cap (#939 — documented decision): 64 KiB of text. Generous enough
  * for pasted diffs/logs (the working currency of a coding team), small enough

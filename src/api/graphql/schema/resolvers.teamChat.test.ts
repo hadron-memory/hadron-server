@@ -649,3 +649,119 @@ describe('auth matrix — one case per principal shape', () => {
     await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ctx(admin.id)), 'FORBIDDEN');
   });
 });
+
+/**
+ * #1030 — the team chat lives inside the `chats:` namespace the AGENT-chat
+ * surface enumerates and addresses by loc, so it was returned by `myChats` as
+ * one of the caller's chatbot conversations and carried every affordance one
+ * has: an LLM composer that bypasses this file's seq allocator, mention
+ * extraction and authorship gate, and a delete that soft-deletes the root and
+ * every message on it.
+ *
+ * These run against a REAL bootstrapped team chat rather than a planted node,
+ * because the shapes that made it indistinguishable — the `chats:` prefix,
+ * `data.scope='shared'`, `createdBy` = the human who posted first — are the
+ * bootstrap's own output, and a fixture asserting them by hand would keep
+ * passing if the bootstrap changed.
+ */
+describe('#1030 — the team chat is not an agent chat', () => {
+  it('myChats does not list it, though the caller can read the memory holding it', async () => {
+    await post(ctx(appMember.id), { body: 'first!' });
+
+    // Precondition, so a green test cannot mean "the query found nothing
+    // because nothing was reachable": this caller IS an AppMember of an App
+    // with this agent installed, which is exactly the branch myChats collects
+    // shared chats through.
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+      select: { memoryId: true, createdBy: true },
+    });
+    expect(root).not.toBeNull();
+    const sharedMem = await db.memory.findUniqueOrThrow({
+      where: { id: root!.memoryId },
+      select: { appId: true, class: true },
+    });
+    expect(sharedMem).toEqual({ appId: app.id, class: 'app' });
+
+    const chats = await Q.myChats({}, { agentRef: teamAgent.id }, ctx(appMember.id));
+    expect(chats.map((c: { loc: string }) => c.loc)).not.toContain(TEAM_CHAT_LOC);
+    expect(chats).toEqual([]);
+  });
+
+  it('the composer cannot append an LLM turn to it', async () => {
+    await post(ctx(appMember.id), { body: 'first!' });
+    await expect(
+      M.sendChatMessage({}, { chatId: TEAM_CHAT_LOC, userMessage: 'hi' }, ctx(appMember.id)),
+    ).rejects.toThrow(`Chat "${TEAM_CHAT_LOC}" not found`);
+
+    // The record is untouched: still one message, still allocated by this
+    // file's allocator rather than the agent-chat path.
+    const page = await read(ctx(appMember.id));
+    expect(page.total).toBe(1);
+    expect(page.items[0].seq).toBe(1);
+  });
+
+  it('deleteChat cannot destroy it — not by its author, and not by a platform admin', async () => {
+    const msg = await post(ctx(appMember.id), { body: 'first!' });
+    expect(msg.seq).toBe(1);
+
+    // The author gate would admit the first poster: bootstrap stamps
+    // `createdBy` with the human driver (#914), so before this fix the person
+    // who opened the team chat could delete it and every message on it.
+    const root = await db.node.findFirstOrThrow({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+      select: { id: true, createdBy: true },
+    });
+    expect(root.createdBy).toBe(appMember.id);
+
+    await expect(
+      M.deleteChat({}, { chatId: TEAM_CHAT_LOC }, ctx(appMember.id)),
+    ).rejects.toThrow(`Chat "${TEAM_CHAT_LOC}" not found`);
+    await expect(
+      M.deleteChat({}, { chatId: TEAM_CHAT_LOC }, { db, userId: admin.id, roles: ['ADMIN'] } as Context),
+    ).rejects.toThrow(`Chat "${TEAM_CHAT_LOC}" not found`);
+
+    // Root and messages both survive, and the surface that owns them still
+    // reads them.
+    const after = await db.node.findMany({
+      where: { memoryId: (await db.node.findUniqueOrThrow({ where: { id: root.id }, select: { memoryId: true } })).memoryId },
+      select: { loc: true, deletedAt: true },
+    });
+    for (const n of after.filter((n) => n.loc.startsWith(TEAM_CHAT_LOC))) {
+      expect(n.deletedAt).toBeNull();
+    }
+    expect((await read(ctx(appMember.id))).total).toBe(1);
+  });
+
+  it('updateChatTitle cannot rename it', async () => {
+    await post(ctx(appMember.id), { body: 'first!' });
+    await expect(
+      M.updateChatTitle({}, { chatId: TEAM_CHAT_LOC, title: 'renamed' }, ctx(appMember.id)),
+    ).rejects.toThrow(`Chat "${TEAM_CHAT_LOC}" not found`);
+  });
+
+  it("an ordinary agent chat in the same memory still lists — the exclusion is the team chat, not the App", async () => {
+    await post(ctx(appMember.id), { body: 'first!' });
+    const root = await db.node.findFirstOrThrow({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+      select: { memoryId: true },
+    });
+    // A shared agent chat, in the same app-class memory, minted in startChat's
+    // own loc shape.
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: root.memoryId, loc: 'chats:202608181200-abcd1234-research',
+        name: '202608181200-abcd1234-research', nodeType: 'record',
+        createdBy: appMember.id, data: { scope: 'shared', messageCount: 0 },
+      },
+    });
+
+    const chats = await Q.myChats({}, { agentRef: teamAgent.id }, ctx(appMember.id));
+    expect(chats.map((c: { loc: string }) => c.loc)).toEqual([
+      'chats:202608181200-abcd1234-research',
+    ]);
+  });
+});

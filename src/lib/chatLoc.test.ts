@@ -20,6 +20,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { chatLocFilter, pickChatNode } from './chatLoc.js';
+import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC, isTeamChatLoc } from './teamChatLoc.js';
 
 const CHAT_LOC = 'chats:202607281200-deadbeef-shared';
 
@@ -200,6 +201,111 @@ describe('chatLocFilter — entitlement is the UNION of the chat gates', () => {
 
   it('a principal with no user identity matches nothing', async () => {
     expect(await resolve({ roles: ['READER'] })).toBeNull();
+  });
+});
+
+describe('chatLocFilter — the team chat is not addressable as an agent chat (#1030)', () => {
+  /**
+   * Every agent-chat surface that names a chat by loc resolves it through this
+   * filter — sendChatMessage, processChatResponse, saveChatSummary,
+   * updateChatTitle, deleteChat, chatHistory, and their MCP twins. So refusing
+   * `chats:team` here is what stops an LLM turn being appended to a team's
+   * attribution record, and a `deleteChat` soft-deleting the root and every
+   * message on it.
+   */
+  beforeEach(async () => {
+    // The team chat as `createTeamChatMessage` bootstraps it: root + message
+    // container in the App's app-class memory. `createdBy` is the human who
+    // posted first (#914) — which is exactly what makes deleteChat's
+    // author-only gate admit them today.
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: appMem.id, loc: TEAM_CHAT_LOC,
+        name: 'team', nodeType: 'chat', createdBy: appMember.id,
+        data: { scope: 'shared', messageCount: 1 },
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: appMem.id, loc: TEAM_CHAT_MESSAGES_LOC,
+        name: 'messages', nodeType: 'record', createdBy: appMember.id,
+      },
+    });
+  });
+
+  it('refuses the AppMember who bootstrapped it — the principal deleteChat would otherwise admit', async () => {
+    expect(await resolve({ userId: appMember.id, roles: ['READER'] }, TEAM_CHAT_LOC)).toBeNull();
+  });
+
+  it('refuses the owner of the holding memory', async () => {
+    expect(await resolve({ userId: victim.id, roles: ['READER'] }, TEAM_CHAT_LOC)).toBeNull();
+  });
+
+  it('refuses a PLATFORM ADMIN — the branch that skips entitlement narrowing', async () => {
+    // The refusal sits above the admin early-return on purpose. An admin is
+    // the one principal who reaches every tenant's chat root by loc alone, so
+    // leaving them on the old path would leave the destructive route open to
+    // exactly the account that can use it against any team.
+    expect(await resolve({ userId: 'ops', roles: ['ADMIN'] }, TEAM_CHAT_LOC)).toBeNull();
+  });
+
+  it('refuses nodes BENEATH the team chat, not just the root', async () => {
+    // chatLocFilter takes a chat-root loc, but nothing stops a caller passing
+    // the message container: appending a turn under it corrupts the same
+    // record by a longer route.
+    expect(await resolve({ userId: appMember.id, roles: ['READER'] }, TEAM_CHAT_MESSAGES_LOC)).toBeNull();
+  });
+
+  it("does NOT refuse a user's own chat whose name merely starts with 'team'", async () => {
+    // The trap this exclusion is written to avoid: a bare
+    // startsWith('chats:team') swallows chats:team-retro, which is an ordinary
+    // agent chat and none of the platform's business.
+    const retro = await db.node.create({
+      data: {
+        id: generateId(), memoryId: victimMem.id, loc: 'chats:team-retro',
+        name: 'team-retro', createdBy: victim.id,
+      },
+    });
+    const node = await resolve({ userId: victim.id, roles: ['READER'] }, 'chats:team-retro');
+    expect(node?.id).toBe(retro.id);
+  });
+
+  it('a node whose PK IS the old sentinel value does not slip through the refusal', async () => {
+    // Codex P2 on PR #1042. The refusal used to be expressed as
+    // `id: '__no_principal__'`, which reads unsatisfiable and is not:
+    // `Node.id` is a forced primary key a caller supplies verbatim through
+    // `CreateNodeInput.id`, so a row can simply BE that value. Planting one at
+    // `chats:team` in a team memory you can write, then letting the first real
+    // post adopt it as the root, put the agent-chat operations back on the
+    // team's own record.
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `cl-sentinel-${generateId()}`,
+        name: 'sentinel-mem', class: 'knowledge', createdBy: attacker.id,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: '__no_principal__', memoryId: mem.id, loc: TEAM_CHAT_LOC,
+        name: 'planted', createdBy: attacker.id,
+      },
+    });
+    // Its own author is the strongest case: every per-site gate downstream
+    // (deleteChat and updateChatTitle are author-only) would admit them.
+    expect(await resolve({ userId: attacker.id, roles: ['READER'] }, TEAM_CHAT_LOC)).toBeNull();
+    expect(await resolve({ userId: 'ops', roles: ['ADMIN'] }, TEAM_CHAT_LOC)).toBeNull();
+    // The no-identity branch shares the predicate, so it regained the same
+    // property — assert it here rather than trusting that it did.
+    expect(await resolve({ roles: ['READER'] }, TEAM_CHAT_LOC)).toBeNull();
+  });
+
+  it('isTeamChatLoc matches the root and its subtree, and nothing adjacent', () => {
+    expect(isTeamChatLoc(TEAM_CHAT_LOC)).toBe(true);
+    expect(isTeamChatLoc(TEAM_CHAT_MESSAGES_LOC)).toBe(true);
+    expect(isTeamChatLoc(`${TEAM_CHAT_MESSAGES_LOC}:001-hello`)).toBe(true);
+    expect(isTeamChatLoc('chats:team-retro')).toBe(false);
+    expect(isTeamChatLoc('chats:teamwork')).toBe(false);
+    expect(isTeamChatLoc('chats:202607281200-deadbeef-team')).toBe(false);
   });
 });
 
