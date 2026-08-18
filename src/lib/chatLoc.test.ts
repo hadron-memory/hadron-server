@@ -270,6 +270,35 @@ describe('chatLocFilter — the team chat is not addressable as an agent chat (#
     expect(node?.id).toBe(retro.id);
   });
 
+  it('a node whose PK IS the old sentinel value does not slip through the refusal', async () => {
+    // Codex P2 on PR #1042. The refusal used to be expressed as
+    // `id: '__no_principal__'`, which reads unsatisfiable and is not:
+    // `Node.id` is a forced primary key a caller supplies verbatim through
+    // `CreateNodeInput.id`, so a row can simply BE that value. Planting one at
+    // `chats:team` in a team memory you can write, then letting the first real
+    // post adopt it as the root, put the agent-chat operations back on the
+    // team's own record.
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `cl-sentinel-${generateId()}`,
+        name: 'sentinel-mem', class: 'knowledge', createdBy: attacker.id,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: '__no_principal__', memoryId: mem.id, loc: TEAM_CHAT_LOC,
+        name: 'planted', createdBy: attacker.id,
+      },
+    });
+    // Its own author is the strongest case: every per-site gate downstream
+    // (deleteChat and updateChatTitle are author-only) would admit them.
+    expect(await resolve({ userId: attacker.id, roles: ['READER'] }, TEAM_CHAT_LOC)).toBeNull();
+    expect(await resolve({ userId: 'ops', roles: ['ADMIN'] }, TEAM_CHAT_LOC)).toBeNull();
+    // The no-identity branch shares the predicate, so it regained the same
+    // property — assert it here rather than trusting that it did.
+    expect(await resolve({ roles: ['READER'] }, TEAM_CHAT_LOC)).toBeNull();
+  });
+
   it('isTeamChatLoc matches the root and its subtree, and nothing adjacent', () => {
     expect(isTeamChatLoc(TEAM_CHAT_LOC)).toBe(true);
     expect(isTeamChatLoc(TEAM_CHAT_MESSAGES_LOC)).toBe(true);

@@ -56,10 +56,24 @@ export interface ChatLocPrincipal {
  * rather than "everything": a principal with no identity to match on, and the
  * team chat (#1030). Returning it — rather than throwing — keeps each call site
  * on its own not-found path, exactly as an unknown chat id already behaves.
+ *
+ * `id: { in: [] }` compiles to a false condition. It replaces the earlier
+ * `id: '__no_principal__'` sentinel, which was NOT unsatisfiable: `Node.id` is
+ * a forced primary key a caller supplies verbatim through `CreateNodeInput.id`
+ * (the importer/sync case), so the sentinel is an ordinary, guessable value and
+ * a row could simply BE it (Codex P2 on PR #1042 — verified by planting one).
+ * That made the refusal above bypassable exactly where it matters: plant
+ * `chats:team` with that PK in a team memory you can write, let the first real
+ * post adopt it as the team-chat root, and the agent-chat operations reach the
+ * team's own record again. It cost the no-identity branch the same property,
+ * which is why the fix belongs here rather than in the team-chat branch alone.
+ *
+ * Keep this predicate logically contradictory. A specific value — however
+ * unlikely-looking — is a value someone can write.
  */
 const matchesNothing = (base: Prisma.NodeWhereInput): Prisma.NodeWhereInput => ({
   ...base,
-  id: '__no_principal__',
+  id: { in: [] },
 });
 
 /**
