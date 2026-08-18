@@ -1447,9 +1447,18 @@ export const workerFieldResolvers = {
       ctx: Context,
     ) => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      // SANITIZED projection, never the Session row (PR #1045 review, Codex
+      // P1). The gate above is App PARTICIPATION; the session read gate
+      // (`sessionScopeFilter`) needs ORG membership or self-attribution — so an
+      // AppMember who is not an org member passes this field and would fail a
+      // direct session read. Returning the object would hand them the previous
+      // driver's transcriptPath, host, repo and summary through Session's own
+      // field resolvers, which assume the outer query authorized them. Selected
+      // narrowly so a later field on Session cannot silently join the payload.
       const previousSession = await ctx.db.session.findFirst({
         where: { workerId: worker.id, endedAt: { not: null }, deletedAt: null },
         orderBy: { endedAt: 'desc' as const },
+        select: { id: true, endedAt: true, autoExpiredAt: true },
       });
       // No working memory means no sequence to have written to — which is a
       // real state (provisioning is best-effort at cast), not an error. The

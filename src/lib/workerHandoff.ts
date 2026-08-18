@@ -74,8 +74,16 @@ export function handoffLocFor(at: Date): string {
  *
  * The common case keeps the exact shape the convention documents, so nothing
  * already written becomes irregular; a second handoff in the same minute gets
- * `-2`, `-3`, … which still sorts after its predecessor. Bounded rather than
- * unbounded: a caller looping here is a bug, and a loud failure beats a spin.
+ * a suffix that still sorts after its predecessor.
+ *
+ * The suffix is ZERO-PADDED (PR #1045 review, Codex P2). Unpadded, `-10` sorts
+ * BEFORE `-9`, so once ten handoffs landed in one minute the newest-by-loc read
+ * would silently return the ninth — a correctness bug in the ordering contract
+ * that only appears under load, which is the worst time to discover it. Two
+ * digits cover the bound below.
+ *
+ * Bounded rather than unbounded: a caller looping here is a bug, and a loud
+ * failure beats a spin.
  */
 export async function nextHandoffLoc(
   db: Pick<PrismaClient, 'node'>,
@@ -84,7 +92,7 @@ export async function nextHandoffLoc(
 ): Promise<string> {
   const base = handoffLocFor(at);
   for (let n = 1; n <= 50; n++) {
-    const loc = n === 1 ? base : `${base}-${n}`;
+    const loc = n === 1 ? base : `${base}-${String(n).padStart(2, '0')}`;
     // loc-scope-ok: scoped to one memory by id.
     const taken = await db.node.findFirst({
       where: { memoryId, loc },

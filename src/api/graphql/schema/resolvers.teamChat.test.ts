@@ -906,6 +906,69 @@ describe('#1029 — worker handoff', () => {
     expect(after.endedAt).toBeNull();
   });
 
+  it('re-ending an already-ended session writes no second handoff (Codex P1)', async () => {
+    // Ending is retry-tolerant, but the sequence is append-only: a retry of a
+    // call that actually succeeded would append a SECOND node, newest by loc
+    // and stamped with the older session — which, with a re-stamped endedAt,
+    // made a stale account read as CURRENT while a later stint's real one was
+    // buried.
+    const worker = await castOne('Quinn');
+    const s1 = await startAs(appMember.id, worker.id);
+    await M.endSession({}, { id: s1.id, handoff: 'stint one' }, ctx(appMember.id));
+    const endedAt = (await db.session.findUniqueOrThrow({ where: { id: s1.id } })).endedAt;
+
+    const s2 = await startAs(appMember.id, worker.id);
+    await M.endSession({}, { id: s2.id, handoff: 'stint two' }, ctx(appMember.id));
+
+    // The retry of the OLDER session.
+    await expectCode(
+      M.endSession({}, { id: s1.id, handoff: 'stint one' }, ctx(appMember.id)),
+      'SESSION_ALREADY_ENDED',
+    );
+
+    const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const children = await db.node.findMany({
+      where: { memoryId: fresh.memoryId!, loc: { startsWith: 'handoffs:' }, deletedAt: null },
+      orderBy: { loc: 'asc' },
+      select: { content: true },
+    });
+    expect(children.map((c) => c.content)).toEqual(['stint one', 'stint two']);
+
+    // And a plain re-end does not move when the stint finished — endedAt
+    // orders the whole continuity chain.
+    await M.endSession({}, { id: s1.id, summary: 'late metrics' }, ctx(appMember.id));
+    const after = await db.session.findUniqueOrThrow({ where: { id: s1.id } });
+    expect(after.endedAt).toEqual(endedAt);
+
+    const continuity = await resolvers.Worker.continuity(fresh as any, {}, ctx(appMember.id));
+    expect(continuity!.status).toBe('CURRENT');
+    expect(continuity!.handoff!.content).toBe('stint two');
+  });
+
+  it('previousSession is a sanitized projection, not the Session row (Codex P1)', async () => {
+    // The worker gate is App PARTICIPATION; the session gate needs ORG
+    // membership. Returning the row would hand an AppMember the previous
+    // driver's transcriptPath, host, repo and summary.
+    const worker = await castOne('Rune');
+    const s1 = await M.startSession(
+      {},
+      {
+        input: {
+          workerRef: worker.id, description: 'stint', appRef: app.id,
+          repo: 'secret/repo', transcriptPath: '/Users/someone/private.jsonl',
+        },
+      },
+      ctx(appMember.id),
+    );
+    await M.endSession({}, { id: s1.id, summary: 'private summary', handoff: 'h' }, ctx(appMember.id));
+
+    const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const continuity = await resolvers.Worker.continuity(fresh as any, {}, ctx(appMember.id));
+    expect(Object.keys(continuity!.previousSession!).sort()).toEqual([
+      'autoExpiredAt', 'endedAt', 'id',
+    ]);
+  });
+
   it('continuity is a working-state field — masked to null for a caller outside the App', async () => {
     // Same posture as prompt/memoryId (#983): it returns a node out of the
     // worker's memory and a Session row, either of which would otherwise hand

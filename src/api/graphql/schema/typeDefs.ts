@@ -1996,11 +1996,28 @@ export const typeDefs = `#graphql
     """
     handoff: Node
     """
-    The worker's most recent ENDED session. Carries endedAt and autoExpiredAt,
-    so a client can say WHY there is no current handoff — a reaped stint and a
-    clean end that skipped one are different facts about the previous driver.
+    The worker's most recent ENDED session, as a SANITIZED projection — the
+    three facts continuity needs, and deliberately not the Session object.
+
+    The worker read gate that admits this field is WIDER than the session read
+    gate: an AppMember who is not an org member passes the first and fails the
+    second. Returning a Session here would hand them another driver's
+    transcriptPath, host, repo and summary through its field resolvers, which
+    assume the outer query authorized them (#552 / #983).
     """
-    previousSession: Session
+    previousSession: WorkerContinuitySession
+  }
+
+  """
+  #1029 — the previous stint, reduced to what a successor needs to know: which
+  session it was, when it ended, and whether the server reaped it. Not a
+  Session, on purpose (see WorkerContinuity.previousSession).
+  """
+  type WorkerContinuitySession {
+    id: ID!
+    endedAt: DateTime
+    "Set when the #930 reaper ended it — nobody closed this stint deliberately."
+    autoExpiredAt: DateTime
   }
 
   """

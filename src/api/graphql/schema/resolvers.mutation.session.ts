@@ -649,12 +649,40 @@ export const sessionMutations = {
             { extensions: { code: 'SESSION_NOT_WORKER_BOUND', sessionId: id } },
           );
         }
+        // An ALREADY-ended session writes no second handoff (PR #1045 review,
+        // Codex P1). Ending is retry-tolerant by design — a client that times
+        // out on a call that actually succeeded will send it again — but the
+        // handoff sequence is append-only, so a retry would append a SECOND
+        // node, newest by loc and stamped with this older session. Combined
+        // with the re-stamped `endedAt` below that made the retried stint the
+        // "previous" one AND the author of the newest handoff, so a stale
+        // account read as CURRENT while a later stint's real one was buried.
+        // Refusing typed keeps the retry safe and says why.
+        if (session.endedAt) {
+          throw new GraphQLError(
+            `Session ${id} already ended at ${session.endedAt.toISOString()}, and its handoff is already written. ` +
+              'The sequence is append-only, so a second handoff for the same stint is refused — start a new session to record new state.',
+            { extensions: { code: 'SESSION_ALREADY_ENDED', sessionId: id, endedAt: session.endedAt.toISOString() } },
+          );
+        }
         await writeSessionHandoff(ctx, session.id, session.workerId, handoffBody);
       }
 
       return ctx.db.session.update({
         where: { id },
-        data: { endedAt: new Date(), summary, inputTokens, outputTokens, turnCount, errorCount },
+        data: {
+          // Ending twice must not move the record of WHEN it ended: `endedAt`
+          // orders the continuity chain (both `Worker.continuity`'s "previous"
+          // and startSession's `prevSessionId` derivation key on it), so a
+          // late retry of an old session would re-order a worker's history
+          // around a stint that finished long ago. First end wins.
+          endedAt: session.endedAt ?? new Date(),
+          summary,
+          inputTokens,
+          outputTokens,
+          turnCount,
+          errorCount,
+        },
         include: SESSION_INCLUDE,
       });
     },

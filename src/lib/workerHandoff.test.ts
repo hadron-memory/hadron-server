@@ -12,6 +12,7 @@ import {
   handoffSessionId,
   continuityStatusOf,
   renderWorkerContinuity,
+  nextHandoffLoc,
   HANDOFF_SESSION_KEY,
 } from './workerHandoff.js';
 
@@ -123,5 +124,52 @@ describe('renderWorkerContinuity — what the agent actually reads', () => {
     expect(out).toContain('without writing one');
     expect(out).not.toContain('auto-expired');
     expect(out).toContain('no earlier handoff either');
+  });
+});
+
+describe('nextHandoffLoc — the collision suffix must not break the ordering', () => {
+  /**
+   * Stubbed `findFirst` — the function only needs "is this loc taken?", so this
+   * exercises the REAL allocator without a database.
+   */
+  const dbWith = (taken: Set<string>) => ({
+    node: {
+      // loc-scope-ok: a stub, not a query — the real call site scopes by memoryId.
+      findFirst: async ({ where }: { where: { loc: string } }) =>
+        (taken.has(where.loc) ? { id: 'x' } : null),
+    },
+  }) as unknown as Parameters<typeof nextHandoffLoc>[0];
+
+  const at = new Date('2026-08-18T10:30:00Z');
+  const base = 'handoffs:2026-08-18-1030';
+
+  it('returns the bare loc when the minute is free', async () => {
+    expect(await nextHandoffLoc(dbWith(new Set()), 'mem', at)).toBe(base);
+  });
+
+  it('keeps every allocated loc in lexical order past the ninth collision (Codex P2)', async () => {
+    // Unpadded, "-10" sorts BEFORE "-9", so `newestHandoff`'s ORDER BY loc DESC
+    // returns the ninth collision instead of the newest — a correctness bug in
+    // the ordering contract that only appears once ten land in one minute.
+    //
+    // Allocate 12 in sequence through the real function, feeding each result
+    // back as taken, then assert the sequence is already sorted.
+    const taken = new Set<string>();
+    const allocated: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const loc = await nextHandoffLoc(dbWith(taken), 'mem', at);
+      allocated.push(loc);
+      taken.add(loc);
+    }
+    expect(allocated).toHaveLength(12);
+    expect([...allocated].sort()).toEqual(allocated);
+    // And the tenth-and-later are the ones that would have broken it.
+    expect(allocated[9]).toBe(`${base}-10`);
+    expect(allocated[8] < allocated[9]).toBe(true);
+  });
+
+  it('fails loudly rather than spinning when the minute is exhausted', async () => {
+    const taken = new Set([base, ...Array.from({ length: 49 }, (_, i) => `${base}-${String(i + 2).padStart(2, '0')}`)]);
+    await expect(nextHandoffLoc(dbWith(taken), 'mem', at)).rejects.toThrow(/50 already exist/);
   });
 });
