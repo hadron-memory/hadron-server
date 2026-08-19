@@ -1099,12 +1099,20 @@ export function createMcpServerInstance(
       select: { appId: true, userId: true },
     });
     if (!session?.appId || session.userId !== auth.userId) return false;
-    // Already pinned where the session says — nothing to do, and no log line
-    // implying a switch that did not happen. This is the single-App case, which
-    // is every call for most callers. Reported as SUCCESS: scope is established
-    // and it is the session's.
-    if (session.appId === auth.appId) return true;
 
+    // NO early return for "the pin already matches the session" (PR #1051
+    // review, Codex P2). It was a harmless short-circuit while this function
+    // returned void; the moment it reports whether scope is ESTABLISHED, that
+    // shortcut asserts something it never checked. A long-lived connection
+    // pinned to App A whose caller has since lost membership — or whose App was
+    // uninstalled — would report success on the strength of the stale pin
+    // alone, skipping both checks below, suppressing the worker-derived
+    // fallback, and running the query against an App the caller may no longer
+    // read. "Revoked membership must not authorize" is the invariant, and a
+    // matching pin is not evidence of anything.
+    //
+    // The cost is two queries on the common single-App path. The saving they
+    // replace was a log line.
     const app = await db.app.findFirst({
       where: { id: session.appId, deletedAt: null, uninstalledAt: null },
       select: { id: true, organizationId: true, ownerUserId: true },
@@ -1126,7 +1134,10 @@ export function createMcpServerInstance(
     );
     if (!participates) return false;
 
-    pinActiveApp(app.id, app.organizationId, 'session');
+    // Only pin when it actually changes — no log line implying a switch that
+    // did not happen. Success is reported either way: scope is established and
+    // it is the session's, now VERIFIED rather than assumed.
+    if (app.id !== auth.appId) pinActiveApp(app.id, app.organizationId, 'session');
     return true;
   }
 

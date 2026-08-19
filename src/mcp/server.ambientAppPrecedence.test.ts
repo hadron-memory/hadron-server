@@ -292,6 +292,41 @@ describe('#1037 — the team tools', () => {
     expect(out).not.toContain('No App context');
   });
 
+  it('a STALE pin matching the session does not count as established scope (Codex P2)', async () => {
+    // Codex's primary scenario: a long-lived connection pinned to App B whose
+    // caller has since LOST membership. The pin still MATCHES the session's App
+    // — and matching is not evidence. Reporting success on that basis skipped
+    // the participation check and suppressed the worker fallback, so the query
+    // ran against an App the caller may no longer read.
+    //
+    // The caller here is an AppMember ONLY — not an org member — so revoking
+    // the membership genuinely removes participation. (The org-member fixture
+    // user keeps access through their org role, which is why this needs its
+    // own principal.)
+    const memberOnly = await db.user.create({
+      data: { id: generateId(), githubId: 77199, githubUsername: `ap-mo-${Date.now()}`, roles: ['READER'] },
+    });
+    await db.appMember.create({ data: { appId: appA.id, userId: memberOnly.id, role: 'member' } });
+    const inB = await db.appMember.create({
+      data: { appId: appB.id, userId: memberOnly.id, role: 'member' },
+    });
+    const sessionInB = await db.session.create({
+      data: { id: generateId(), userId: memberOnly.id, appId: appB.id },
+    });
+
+    // Membership in B is revoked; the connection stays pinned there.
+    await db.appMember.delete({
+      where: { appId_userId: { appId: inB.appId, userId: inB.userId } },
+    });
+
+    const out = await createTestableMcpServer(pinnedToB(memberOnly.id)).callToolText(
+      'hadron_team_work_items', { session: sessionInB.id, worker: DARA_URN() },
+    );
+    // Falls through to the worker's App, which this caller CAN read — rather
+    // than refusing under an App whose membership is gone.
+    expect(out).not.toMatch(/not authorized|Forbidden/i);
+  });
+
   it('a DATABASE failure while deriving scope from a worker ref propagates', async () => {
     // The third instance of the blanket-catch class in this PR, and the second
     // I wrote while fixing the first. An outage must not be reported as "no
