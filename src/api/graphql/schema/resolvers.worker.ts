@@ -30,6 +30,11 @@ import {
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
 import { applyPersonaTemplate, templateBindsName } from '../../../lib/personaDescription.js';
+import {
+  newestHandoff,
+  handoffSessionId,
+  continuityStatusOf,
+} from '../../../lib/workerHandoff.js';
 import { resolveMemoryRoot } from './chat-scope.js';
 import {
   type Context,
@@ -538,7 +543,7 @@ const MINT_RETRY_LIMIT = 3;
  * break node-URN round-tripping and 404 every portal link (the #723 lesson;
  * the slug convention is tunable per cor:agt:020:01).
  */
-async function provisionWorkerMemory(
+export async function provisionWorkerMemory(
   ctx: Context,
   app: AppRow,
   worker: { id: string; name: string; slug: string },
@@ -1419,6 +1424,59 @@ export const workerFieldResolvers = {
       const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
       if (bound && worker.promptOverride) return `${bound}\n\n${worker.promptOverride}`;
       return worker.promptOverride ?? bound;
+    },
+    /**
+     * #1029 — what a fresh binding inherits from the previous stint.
+     *
+     * Working-state field, so it sits behind the same worker read gate as
+     * `prompt` / `memoryId` and masks to null on deny: it returns a node out of
+     * the worker's working memory and a Session row, and a nested object hands
+     * the caller that entity's field resolvers
+     * (findings:broadening-read-gate-leaks-nested-objects, #552).
+     *
+     * "Previous session" is the most recent ENDED one, deliberately not the
+     * most recent session outright: the session doing the reading is typically
+     * this worker's newest and is still open, and a session that inherits its
+     * own handoff is a loop, not continuity. Ordered by `endedAt` rather than
+     * `startedAt` because with `force` two stints can overlap, and the one that
+     * finished last is the one whose account is current.
+     */
+    continuity: async (
+      worker: { appId: string; id: string; memoryId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      // SANITIZED projection, never the Session row (PR #1045 review, Codex
+      // P1). The gate above is App PARTICIPATION; the session read gate
+      // (`sessionScopeFilter`) needs ORG membership or self-attribution — so an
+      // AppMember who is not an org member passes this field and would fail a
+      // direct session read. Returning the object would hand them the previous
+      // driver's transcriptPath, host, repo and summary through Session's own
+      // field resolvers, which assume the outer query authorized them. Selected
+      // narrowly so a later field on Session cannot silently join the payload.
+      const previousSession = await ctx.db.session.findFirst({
+        where: { workerId: worker.id, endedAt: { not: null }, deletedAt: null },
+        orderBy: { endedAt: 'desc' as const },
+        select: { id: true, endedAt: true, autoExpiredAt: true },
+      });
+      // No working memory means no sequence to have written to — which is a
+      // real state (provisioning is best-effort at cast), not an error. The
+      // status still reports honestly on the previous stint.
+      const handoffRow = worker.memoryId
+        ? await newestHandoff(ctx.db, worker.memoryId)
+        : null;
+      const status = continuityStatusOf({
+        previousSessionId: previousSession?.id ?? null,
+        handoffSessionId: handoffRow ? handoffSessionId(handoffRow.data) : null,
+      });
+      // Re-read through the node surface so the Node field resolvers see a full
+      // row (and an encrypted memory decrypts through the same path every other
+      // node read uses) rather than the projection newestHandoff selects.
+      const handoff = handoffRow
+        ? await ctx.db.node.findUnique({ where: { id: handoffRow.id } })
+        : null;
+      return { status, handoff, previousSession };
     },
   },
 };
