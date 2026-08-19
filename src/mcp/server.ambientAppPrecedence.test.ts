@@ -246,6 +246,44 @@ describe('#1037 — the team tools', () => {
     expect(out).toContain('posted from team A');
   });
 
+  it('team_work_items derives App scope from a self-describing worker ref (Codex P2)', async () => {
+    // The #1037 convention reappearing in a tool that grew a worker argument
+    // afterwards — which is how a convention decays one tool at a time. An
+    // id/URN names its own App, so advertising id/URN support while resolving
+    // scope from the pin returns "No App context" unpinned, or the WRONG App's
+    // empty page when pinned elsewhere.
+    const sid = await boundSession();
+    await createTestableMcpServer(unpinned()).callToolText('hadron_record_work', {
+      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#9', action: 'opened',
+    });
+    const dara = await db.worker.findFirstOrThrow({ where: { appId: appA.id } });
+
+    // Unpinned: no ambient scope at all, and no session argument to lean on.
+    const unscoped = await createTestableMcpServer(unpinned()).callToolText(
+      'hadron_team_work_items', { worker: DARA_URN() },
+    );
+    expect(unscoped).not.toContain('No App context');
+    expect(unscoped).toContain('acme/repo#9');
+
+    // Pinned to the WRONG App: the ref outranks the pin, as it does at bind.
+    const misPinned = await createTestableMcpServer(pinnedToB()).callToolText(
+      'hadron_team_work_items', { worker: dara.id },
+    );
+    expect(misPinned).toContain('acme/repo#9');
+  });
+
+  it('a bare worker NAME still yields no scope — it needs one rather than providing it', async () => {
+    // A name is unique only within an App, so there is nothing to derive scope
+    // FROM. Documents the CONTRACT rather than proving the shape check: the ref
+    // resolver rejects a name regardless, so this stays green with that check
+    // removed. Kept because the contract is what a caller relies on, and worth
+    // saying plainly rather than implying a proof it does not carry.
+    const out = await createTestableMcpServer(unpinned()).callToolText(
+      'hadron_team_work_items', { worker: 'Dara' },
+    );
+    expect(out).toContain('No App context');
+  });
+
   it('an explicit app argument still wins over the session', async () => {
     // The caller who names an App outranks the one who names a session: both
     // are deliberate, and the more specific statement is the one just made.

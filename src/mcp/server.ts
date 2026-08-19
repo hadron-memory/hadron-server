@@ -114,6 +114,7 @@ import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
+import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
 import {
   renderWorkerContinuity,
   type RenderableContinuity,
@@ -1111,6 +1112,71 @@ export function createMcpServerInstance(
     // The participant check runs against the caller as they are NOW, with no
     // App selection in hand — which is the state this function exists to
     // repair, and exactly the shape isAppParticipant judges (the USER branch).
+    const participates = await isAppParticipant(
+      {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context,
+      app,
+    );
+    if (!participates) return;
+
+    pinActiveApp(app.id, app.organizationId, 'session');
+  }
+
+  /**
+   * `adoptAppFromSession`'s sibling for a SELF-DESCRIBING worker ref (#1037,
+   * extended by PR #1051 review — Codex P2).
+   *
+   * A worker id or `hrn:worker:…` URN names its own App, exactly as it does at
+   * bind. A tool that takes one and still resolves scope from the ambient pin
+   * therefore answers "No App context" for an unpinned caller, or an empty page
+   * from the WRONG App for a pinned one — while advertising id/URN support.
+   * That is the same defect #1037 fixed for `hadron_start_session` and
+   * `hadron_get_worker`, reappearing in a tool that grew a worker argument
+   * afterwards, which is precisely how a convention decays one tool at a time.
+   *
+   * A bare NAME is deliberately NOT adopted: a name is unique only within an
+   * App, so there is nothing to derive scope FROM — it needs scope to resolve.
+   * The shape test below is a FAST PATH and a statement of intent, not a
+   * load-bearing guard: `resolveWorkerRef` rejects a name anyway, so removing
+   * it changes no outcome (verified by mutation — it stays green). It earns its
+   * place by matching the shape dispatch the resolver itself uses, so the two
+   * cannot disagree about what counts as self-describing.
+   *
+   * Same gates as the session sibling, so this can only re-establish scope the
+   * caller could have set by hand: the App must be live, and the caller must
+   * still be a participant. Confined to `auth.userId` callers — an App key's
+   * `appId` is a CREDENTIAL and is never re-pointed by an argument.
+   */
+  async function adoptAppFromWorker(workerRef?: string | null): Promise<void> {
+    if (!auth.userId || !workerRef) return;
+    const trimmed = workerRef.trim();
+    if (!isId(trimmed) && !hasSchemePrefix(trimmed)) return;
+
+    let workerId: string;
+    try {
+      ({ id: workerId } = await resolveWorkerRef(db, trimmed));
+    } catch {
+      // An unresolvable ref leaves scope alone; the tool's own not-found or
+      // empty-page path then answers, rather than this helper inventing one.
+      return;
+    }
+    const worker = await db.worker.findUnique({
+      where: { id: workerId },
+      select: { appId: true },
+    });
+    if (!worker || worker.appId === auth.appId) return;
+
+    const app = await db.app.findFirst({
+      where: { id: worker.appId, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (!app) return;
+
     const participates = await isAppParticipant(
       {
         db,
@@ -6109,6 +6175,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!appRef) {
         // #1005: the optional session filter doubles as an App-resolution hint.
         await adoptAppFromSession(session);
+        // #1037/PR #1051 review: so does a SELF-DESCRIBING worker ref, which
+        // names its own App. Only when no session was passed — a session is the
+        // caller's own binding and the more specific statement of scope, and if
+        // the two named different Apps the filters could not both match anyway.
+        if (!session) await adoptAppFromWorker(worker);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
