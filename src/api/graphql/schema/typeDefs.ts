@@ -1951,6 +1951,21 @@ export const typeDefs = `#graphql
     promptOverride: String
     "The worker-scoped working memory in the App's container (null until provisioned)."
     memoryId: ID
+    """
+    #1050 — the human HOLDING this name, or null when nobody does.
+
+    A name is held by a person, not by a live session: expiry, a reap, or a
+    closed chat session never free it, and only an explicit release does. This
+    is what separates the two meanings of \"taken\" — HELD is whose name it is,
+    while a live session is only ever a question about your own worker.
+
+    Identity scalar, ungated like \`name\`: knowing a teammate holds a name is
+    the point, and the Worker read gate already requires participation in the
+    App.
+    """
+    heldByUserId: ID
+    "When the current hold was taken. Null exactly when heldByUserId is."
+    heldAt: DateTime
     "The role-agent behind the casting."
     agent: Agent
     "The App whose staff this casting fills."
@@ -6586,6 +6601,29 @@ export const typeDefs = `#graphql
     or its URN (#991).
     """
     retireWorker(workerRef: ID!): Worker!
+
+    """
+    #1050 — release a HELD name, so somebody else can hold it.
+
+    A name is held by a person until released; nothing else frees one, which
+    is what makes availability a fact rather than a judgement about whether an
+    idle driver is really gone. Two principals may call this, and they are
+    different acts: the HOLDER, releasing their own name and owing nobody
+    notice; or an App/org ADMIN, force-releasing somebody else's — the path
+    that exists so a departed colleague's names are not held forever.
+
+    An admin force-release POSTS TO THE TEAM CHAT, naming who released what
+    and from whom, because the incident this model answers is exactly the one
+    where notice was owed and there was no way to give it. Best-effort: an
+    unreachable chat never blocks the release.
+
+    Releasing does NOT retire the worker, free the name for a different
+    casting, or touch its history — the name stays permanently allocated to
+    this casting, and the handoff sequence and worklog travel with the worker
+    to whoever holds it next. Idempotent: releasing an unheld worker returns
+    it unchanged.
+    """
+    releaseWorker(workerRef: ID!): Worker!
 
     """
     #1010 — amend a casting's individuality after the fact.

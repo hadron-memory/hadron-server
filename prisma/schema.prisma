@@ -405,6 +405,9 @@ model User {
   principalGrants               PrincipalGrant[]           @relation("UserPrincipalGrants")
   externalApp                   App?                       @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
   sessions                      Session[]                  @relation("SessionUser")
+  /// #1050 — worker names this person HOLDS. Held until released, never freed
+  /// by a session ending; one human may hold many.
+  heldWorkers                   Worker[]                   @relation("WorkerHolder")
   mcpSessionStates              McpSessionState[]
   ownedMemories                 Memory[]                   @relation("UserMemoriesOwned")
   // spec 047 (Phase 2b): entities this user is the TENANT owner of (user-owned
@@ -3152,6 +3155,25 @@ model Worker {
   createdBy      String?   @map("created_by")
   updatedAt      DateTime? @updatedAt @map("updated_at")
   updatedBy      String?   @map("updated_by")
+  /// #1050 — the HUMAN holding this name. A name is held by a person, not by a
+  /// live session: expiry, a reap, or a closed chat session never free it, and
+  /// only an explicit release does.
+  ///
+  /// This is what separates the two meanings of "taken" that used to share one
+  /// word (hadron-cli#487). HELD = the name belongs to someone; the answer to a
+  /// second person wanting it is to cast their own, never to adjudicate whether
+  /// the first is "really gone". TAKEN = a live session exists, which is only
+  /// ever a question about your OWN worker. Deriving availability from session
+  /// liveness is what let an agent end a mid-PR driver's session and bind as
+  /// them, every step following the documented procedure (hadron-cli#492).
+  ///
+  /// Nullable because a released worker is genuinely unheld — and because a
+  /// worker cast before this column existed has a holder only by backfill from
+  /// `createdBy`. The next bind of an unheld worker holds it.
+  heldByUserId   String?   @map("held_by_user_id")
+  /// When the current hold was taken — provenance for a release decision, and
+  /// what an admin force-release reports. Null exactly when `heldByUserId` is.
+  heldAt         DateTime? @map("held_at")
   /// Retirement instant — the name stays reserved forever (cor:agt:020:02).
   /// A retired worker stops authoring (team chat's worker-App pin checks
   /// retirement at post time) and refuses new session bindings.
@@ -3161,6 +3183,9 @@ model Worker {
   app      App       @relation(fields: [appId], references: [id], onDelete: Cascade)
   agent    Agent     @relation(fields: [agentId], references: [id], onDelete: Restrict)
   memory   Memory?   @relation("WorkerMemory", fields: [memoryId], references: [id], onDelete: SetNull)
+  /// SetNull, not Cascade: a deleted user's held names must be RELEASED, never
+  /// take the castings (and their worklog and handoff history) with them.
+  heldBy   User?     @relation("WorkerHolder", fields: [heldByUserId], references: [id], onDelete: SetNull)
   sessions Session[] @relation("SessionWorker")
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
@@ -3168,6 +3193,8 @@ model Worker {
   @@unique([appId, slug], map: "workers_app_slug_uniq")
   @@index([appId])
   @@index([agentId])
+  /// #1050 — "what does this person hold", across Apps.
+  @@index([heldByUserId])
   @@map("workers")
 }
 

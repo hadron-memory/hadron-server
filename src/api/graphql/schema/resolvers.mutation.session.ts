@@ -482,7 +482,10 @@ export const sessionMutations = {
         }
         const worker = await ctx.db.worker.findUnique({
           where: { id: resolvedWorkerId },
-          select: { id: true, appId: true, agentId: true, retiredAt: true },
+          select: {
+            id: true, appId: true, agentId: true, retiredAt: true,
+            name: true, heldByUserId: true, heldAt: true,
+          },
         });
         if (!worker) {
           throw new GraphQLError(`Worker not found: ${workerRef}`, {
@@ -574,6 +577,46 @@ export const sessionMutations = {
           }
           appId = worker.appId;
         }
+        // #1050 — a NAME is HELD by a person until released. This gate runs
+        // before the liveness one below and is not forceable, because the two
+        // answer different questions and only one of them is a judgement call:
+        //
+        //   HELD   — "this name is someone's." The remedy is to cast your own
+        //            worker, never to adjudicate whether the holder is really
+        //            gone. There is no correct way to make that call from a
+        //            session row, which is exactly what hadron-cli#492 proved:
+        //            an agent judged a session abandoned, ENDED it, and bound
+        //            as that worker while its driver was mid-PR — every step
+        //            following the documented procedure.
+        //   TAKEN  — "a live session already exists." Only ever a question
+        //            about your OWN worker now, and still forceable, because
+        //            the driver deciding is the driver affected.
+        //
+        // The hold does not depend on session state, so expiry, a reap, or a
+        // closed chat session never free it. That also removes the asymmetry
+        // in #1036/#484 where a timer could silently de-authorise a live
+        // driver.
+        if (worker.heldByUserId && ctx.userId && worker.heldByUserId !== ctx.userId) {
+          const holder = await ctx.db.user.findUnique({
+            where: { id: worker.heldByUserId },
+            select: { handle: true, githubUsername: true },
+          });
+          const who = holder?.handle ?? holder?.githubUsername ?? worker.heldByUserId;
+          throw new GraphQLError(
+            `The name "${worker.name}" is held by ${who}. A held name is not freed by a session ending, ` +
+              'and this cannot be forced — cast your own worker instead ' +
+              '(the holder, or an App/org admin, can release it).',
+            {
+              extensions: {
+                code: 'WORKER_HELD',
+                workerId: worker.id,
+                heldBy: worker.heldByUserId,
+                heldByName: who,
+                heldAt: worker.heldAt?.toISOString() ?? null,
+              },
+            },
+          );
+        }
         // #940 (cor:agt:020:03 — informed takeover, never silent): binding a
         // worker that already has an ACTIVE session refuses typed, carrying
         // who last drove it and when — everything the takeover prompt needs
@@ -653,6 +696,20 @@ export const sessionMutations = {
         }
         agentId = worker.agentId;
         workerId = worker.id;
+        // #1050 — an UNHELD name is held by the person who binds it. That is
+        // the claim path: casting holds what you cast, and binding holds what
+        // nobody holds — so a released name, or one cast by an App key, finds
+        // its holder without a separate step. Best-effort and guarded on the
+        // column still being null, so two simultaneous binds cannot each
+        // believe they took it; the loser simply proceeds unheld-by-them,
+        // which the gate above then treats as somebody else's name on their
+        // NEXT bind rather than mid-session.
+        if (!worker.heldByUserId && ctx.userId) {
+          await ctx.db.worker.updateMany({
+            where: { id: worker.id, heldByUserId: null },
+            data: { heldByUserId: ctx.userId, heldAt: new Date() },
+          });
+        }
         // #1029: wire the continuity chain. `prevSessionId` and
         // `parentSessionId` have been in the schema since the beginning and
         // unused, so the chain primitive existed with nothing writing it —

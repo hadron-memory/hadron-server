@@ -83,8 +83,10 @@ describe('#997 — hadron_list_workers', () => {
       data: { id: generateId(), workerId: iris.id, appId: app.id, userId: user.id },
     });
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
-    expect(out).toMatch(/Iris.*taken/s);
-    expect(out).toMatch(/Alex.*free/s);
+    // #1050: 'taken' split into HOLDING (whose name) and liveness (is a
+    // session running) — the conflation hadron-cli#487 is about.
+    expect(out).toMatch(/Iris.*session live/s);
+    expect(out).toMatch(/Alex.*no live session/s);
   });
 
   it('does not name the driver — that stays behind the takeover refusal', async () => {
@@ -105,7 +107,7 @@ describe('#997 — hadron_list_workers', () => {
       },
     });
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
-    expect(out).toMatch(/Iris.*free/s);
+    expect(out).toMatch(/Iris.*no live session/s);
   });
 
   it('hides retired workers by default and marks them under includeRetired', async () => {
@@ -148,7 +150,7 @@ describe('#997 — hadron_list_workers', () => {
       },
     });
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
-    expect(out).toMatch(/Iris.*free/s);
+    expect(out).toMatch(/Iris.*no live session/s);
   });
 
   it('distinguishes an empty PAGE from an empty ROSTER', async () => {
@@ -183,7 +185,7 @@ describe('#997 — hadron_list_workers', () => {
     const out = await createTestableMcpServer(hybridAuth()).callToolText(
       'hadron_list_workers', { includeRetired: true },
     );
-    expect(out).toMatch(/Gone.*RETIRED, taken/s);
+    expect(out).toMatch(/Gone.*RETIRED.*session live/s);
   });
 
   it('accepts an explicit app argument', async () => {

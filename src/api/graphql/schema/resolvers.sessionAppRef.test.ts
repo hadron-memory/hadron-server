@@ -503,10 +503,14 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
   });
 
   it('refuses binding a taken worker → WORKER_TAKEN, carrying the takeover-prompt payload (#940)', async () => {
+    // #1050: WORKER_TAKEN is now only ever a question about your OWN worker.
+    // A DIFFERENT driver is refused earlier and harder — see the WORKER_HELD
+    // case below — so the takeover-prompt payload is exercised on the same
+    // driver, which is the only principal still allowed to force.
     const first = await startSession(ctx(contrib.id), { workerRef: worker.id });
     expect(first.endedAt).toBeNull();
     try {
-      await startSession(ctx(appMember.id), { workerRef: worker.id });
+      await startSession(ctx(contrib.id), { workerRef: worker.id });
       expect.fail('expected WORKER_TAKEN');
     } catch (e) {
       const ext = (e as GraphQLError).extensions as Record<string, unknown>;
@@ -523,23 +527,51 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
   });
 
   it('force: true takes over — the explicit override, never the default (#940)', async () => {
+    // Same driver, second live session: the person deciding is the person
+    // affected, which is what still makes this forceable under #1050.
     await startSession(ctx(contrib.id), { workerRef: worker.id });
-    const second = await startSession(ctx(appMember.id), { workerRef: worker.id, force: true });
+    const second = await startSession(ctx(contrib.id), { workerRef: worker.id, force: true });
     expect(second.workerId).toBe(worker.id);
   });
 
-  it('an ENDED session frees the worker — no refusal, no force needed (#940)', async () => {
+  it('#1050 — a DIFFERENT driver is refused WORKER_HELD, and force does not help', async () => {
+    // SUPERSEDES the pre-#1050 shape of these two tests, which had appMember
+    // take over contrib's worker on the strength of a session row. That is the
+    // incident (hadron-cli#492): a name is held by a person, so the remedy for
+    // wanting someone else's is to cast your own, never to adjudicate whether
+    // they are really gone.
+    await startSession(ctx(contrib.id), { workerRef: worker.id });
+    for (const force of [false, true]) {
+      try {
+        await startSession(ctx(appMember.id), { workerRef: worker.id, force });
+        expect.fail('expected WORKER_HELD');
+      } catch (e) {
+        const ext = (e as GraphQLError).extensions as Record<string, unknown>;
+        expect(ext.code).toBe('WORKER_HELD');
+        expect(ext.heldBy).toBe(contrib.id);
+      }
+    }
+  });
+
+  it('an ENDED session frees the worker for ITS HOLDER — but never for anyone else (#940, #1050)', async () => {
+    // The #940 half stands: ending a session lifts WORKER_TAKEN. The #1050
+    // half is what changed — it does NOT free the NAME, which is the entire
+    // point: expiry, a reap, or a closed chat session used to make a held name
+    // look available to a stranger.
     const first = await startSession(ctx(contrib.id), { workerRef: worker.id });
     await db.session.update({ where: { id: first.id }, data: { endedAt: new Date() } });
-    const second = await startSession(ctx(appMember.id), { workerRef: worker.id });
+    const second = await startSession(ctx(contrib.id), { workerRef: worker.id });
     expect(second.workerId).toBe(worker.id);
   });
 
   it('lastDriver names the most recently ACTIVE session, not the newest-created (#983 review)', async () => {
     // force allows several active sessions to coexist; the takeover prompt
     // must name whoever actually drove the worker last.
+    // #1050: several active sessions can still coexist via force, but only
+    // for the HOLDER — a different driver is refused WORKER_HELD before the
+    // liveness check runs. So the coexisting sessions are contrib's own.
     const first = await startSession(ctx(contrib.id), { workerRef: worker.id });
-    await startSession(ctx(admin.id), { workerRef: worker.id, force: true });
+    await startSession(ctx(contrib.id), { workerRef: worker.id, force: true });
     // The OLDER session heartbeats after the takeover — a usage event lands
     // on it, making contrib the most recent driver despite admin's newer row.
     await db.usageEvent.create({
@@ -551,7 +583,7 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
       },
     });
     try {
-      await startSession(ctx(appMember.id), { workerRef: worker.id });
+      await startSession(ctx(contrib.id), { workerRef: worker.id });
       expect.fail('expected WORKER_TAKEN');
     } catch (e) {
       const ext = (e as GraphQLError).extensions as Record<string, unknown>;

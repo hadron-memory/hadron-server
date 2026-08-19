@@ -717,3 +717,158 @@ describe('Worker field resolvers', () => {
     expect(prompt).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #1050 — a NAME is held by a person until released
+// ---------------------------------------------------------------------------
+
+/**
+ * Availability used to be derived from session liveness, which conflated two
+ * unrelated questions behind one word (hadron-cli#487): "is this name
+ * someone's?" and "is a session live right now?". The second is a timer — so
+ * expiry, a reap, or a closed chat session silently freed a name, and an agent
+ * following the documented procedure ended a mid-PR driver's session and bound
+ * as them (hadron-cli#492).
+ *
+ * Holding replaces a judgement that cannot be made correctly with a fact.
+ */
+describe('#1050 — worker name holding', () => {
+  const bind = (userId: string, workerId: string, force = false) =>
+    M.startSession(
+      {}, { input: { id: generateId(), workerRef: workerId, appRef: app.id, force } }, ctx(userId),
+    );
+
+  /** Cast a worker and have `userId` claim it by binding — the real sequence. */
+  async function heldBy(userId: string, name = 'Iris') {
+    const w = await cast({ agentRef: roleAgent.id, name }, ctx(admin.id));
+    const s = await bind(userId, w.id);
+    await M.endSession({}, { id: s.id }, ctx(userId));
+    return w;
+  }
+
+  it('casting does NOT hold — a coordinator may staff a roster others claim', async () => {
+    // The canonical setup flow is one person casting the team's names and
+    // other people binding them. If the caster held, every one of them would
+    // be blocked on a release they should never have needed.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldByUserId).toBeNull();
+    expect(row.heldAt).toBeNull();
+  });
+
+  it('binding an UNHELD worker holds it — that is the claim path', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    await bind(appMember.id, w.id);
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldByUserId).toBe(appMember.id);
+  });
+
+  it("refuses a name held by someone else — and force does NOT bypass it", async () => {
+    // The incident: every step of the documented procedure was followed, and
+    // the remedy it advertised was --force. Under holding there is no remedy
+    // but casting your own worker, which is the point.
+    const w = await heldBy(contrib.id);
+
+    await expectCode(bind(appMember.id, w.id), 'WORKER_HELD');
+    await expectCode(bind(appMember.id, w.id, true), 'WORKER_HELD');
+
+    // The refused binds created nothing — only the holder's own claim session
+    // exists — and the hold did not move.
+    expect(await db.session.count({ where: { workerId: w.id } })).toBe(1);
+    expect(await db.session.count({ where: { workerId: w.id, userId: appMember.id } })).toBe(0);
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldByUserId).toBe(contrib.id);
+  });
+
+  it('the refusal names the holder, so the caller knows who to ask', async () => {
+    const w = await heldBy(contrib.id);
+    try {
+      await bind(appMember.id, w.id);
+      expect.fail('expected WORKER_HELD');
+    } catch (e) {
+      const err = e as GraphQLError;
+      expect(err.extensions?.heldBy).toBe(contrib.id);
+      expect(err.message).toMatch(/cast your own worker/);
+    }
+  });
+
+  it('ENDING the session does not free the name — the core of the fix', async () => {
+    // The old model: availability was a timer. A reap, an expiry, or a closed
+    // chat session made a name look free while its holder was mid-PR.
+    const w = await heldBy(contrib.id);
+    const s = await bind(contrib.id, w.id);
+    await M.endSession({}, { id: s.id }, ctx(contrib.id));
+
+    // Reaped, for good measure — the #930 reaper stamps both columns.
+    const now = new Date();
+    await db.session.updateMany({
+      where: { id: s.id }, data: { endedAt: now, autoExpiredAt: now },
+    });
+
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldByUserId).toBe(contrib.id);
+    await expectCode(bind(appMember.id, w.id), 'WORKER_HELD');
+  });
+
+  it('your OWN held worker still refuses WORKER_TAKEN on a live session, and force still works', async () => {
+    // The two gates stay distinct: HELD is whose name it is, TAKEN is whether
+    // a session is live — and the second is forceable because the driver
+    // deciding is the driver affected.
+    const w = await heldBy(contrib.id);
+    await bind(contrib.id, w.id);
+    await expectCode(bind(contrib.id, w.id), 'WORKER_TAKEN');
+    const forced = await bind(contrib.id, w.id, true);
+    expect(forced.workerId).toBe(w.id);
+  });
+
+  it('the holder can release, and the next binder holds it', async () => {
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+
+    const released = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(released.heldByUserId).toBeNull();
+    expect(released.heldAt).toBeNull();
+    // Not retired, and the name is still this casting's.
+    expect(released.retiredAt).toBeNull();
+    expect(released.name).toBe('Iris');
+
+    await bind(appMember.id, w.id);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(appMember.id);
+  });
+
+  it('a non-holder who is not staff cannot release', async () => {
+    const w = await heldBy(contrib.id);
+    await expectCode(M.releaseWorker({}, { workerRef: w.id }, ctx(appMember.id)), 'FORBIDDEN');
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(contrib.id);
+  });
+
+  it('an ADMIN force-release works and POSTS TO THE TEAM CHAT', async () => {
+    // hadron-cli#492 is exactly the case where notice was owed and there was
+    // no way to give it. A silent override would rebuild that.
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+
+    const page = await Q.teamChatMessages({}, { appRef: app.id }, ctx(admin.id));
+    expect(page.total).toBe(1);
+    expect(page.items[0].body).toContain('Iris');
+    expect(page.items[0].body).toMatch(/released/i);
+  });
+
+  it('a holder releasing their OWN name posts nothing — no notice is owed', async () => {
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+    const page = await Q.teamChatMessages({}, { appRef: app.id }, ctx(contrib.id));
+    expect(page.total).toBe(0);
+  });
+
+  it('releasing an unheld worker is idempotent, not an error', async () => {
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+    const again = await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+    expect(again.heldByUserId).toBeNull();
+  });
+});

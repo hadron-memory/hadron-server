@@ -5747,7 +5747,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_list_workers',
-    'List the team App\'s workers — its named staff (#997). THE roster read: use it when you need to work as a teammate but do not know the names, since hadron_start_session\'s workerRef takes a name. Returns each worker\'s name, URN, role, whether it is currently TAKEN (someone is driving it), and whether it is retired. Retired workers are excluded unless includeRetired — their names stay reserved forever, so they explain a WORKER_NAME_TAKEN refusal. Pick a FREE worker and pass its name to hadron_start_session, which returns its boot briefing.',
+    'List the team App\'s workers — its named staff (#997). THE roster read: use it when you need to work as a teammate but do not know the names, since hadron_start_session\'s workerRef takes a name. Returns each worker\'s name, URN, role, WHO HOLDS IT, whether a session is live, and whether it is retired. #1050: a name is HELD by a person until released — a held name is not yours to take however idle it looks, and the remedy is to cast your own worker, never to end someone\'s session. An UNHELD worker is held by whoever binds it next. "session live" is a separate fact and only ever a question about your own worker. Retired workers are excluded unless includeRetired — their names stay reserved forever, so they explain a WORKER_NAME_TAKEN refusal.',
     {
       includeRetired: z.boolean().optional().describe('Include retired castings — historical staff whose names stay reserved.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
@@ -5857,6 +5857,27 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // gate is wider than the Agent's, and #552 is precisely about not
         // letting the wider gate hand out the narrower entity. Only the NAME is
         // projected; the Agent object never reaches the caller.
+        // Holder display names for the whole PAGE in one query, same reasoning
+        // as the App URN above. Only a NAME is projected — the roster shows
+        // whose a name is, never anything else about them.
+        const holderIds = [
+          ...new Set(
+            page.items
+              .map((w: { heldByUserId: string | null }) => w.heldByUserId)
+              .filter((id: string | null): id is string => !!id),
+          ),
+        ];
+        const holders = new Map<string, string>();
+        if (holderIds.length > 0) {
+          for (const u of await db.user.findMany({
+            where: { id: { in: holderIds } },
+            select: { id: true, handle: true, githubUsername: true },
+          })) {
+            holders.set(u.id, u.handle ?? u.githubUsername ?? u.id);
+          }
+        }
+        const holderName = (id: string): string => holders.get(id) ?? id;
+
         const agentNames = new Map<string, Promise<string | null>>();
         const agentNameFor = (agentId: string): Promise<string | null> => {
           let pending = agentNames.get(agentId);
@@ -5874,6 +5895,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           page.items.map(async (w: {
             id: string; name: string; slug: string; role: string | null;
             agentId: string; retiredAt: Date | null;
+            heldByUserId: string | null;
           }) => {
             const urn = workerUrn(w.slug);
             const agentName = await agentNameFor(w.agentId);
@@ -5882,8 +5904,23 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // worker can still hold an unended session, and collapsing the two
             // into one ternary dropped the taken/free state that
             // `includeRetired` promises.
-            const flags = [taken.has(w.id) ? 'taken' : 'free'];
-            if (w.retiredAt) flags.unshift('RETIRED');
+            // #1050 — HELD and TAKEN are different facts and the roster must
+            // not blur them, which is the whole of hadron-cli#487. HELD says
+            // whose name it is and is what decides whether you may bind;
+            // taken/free says whether a session is live right now, which is
+            // only ever a question about your OWN worker. Held-by-someone-else
+            // reads as unavailable regardless of liveness — that is the point:
+            // an idle held worker is not up for adjudication.
+            const flags: string[] = [];
+            if (w.retiredAt) flags.push('RETIRED');
+            if (w.heldByUserId && w.heldByUserId !== auth.userId) {
+              flags.push(`held by ${holderName(w.heldByUserId)}`);
+            } else if (w.heldByUserId) {
+              flags.push('held by YOU');
+            } else {
+              flags.push('unheld — binding it holds it');
+            }
+            flags.push(taken.has(w.id) ? 'session live' : 'no live session');
             return (
               `- ${w.name}${w.role ? ` (${w.role})` : ''} — ${flags.join(', ')}` +
               (agentName ? `\n    agent: ${agentName}` : '') +
