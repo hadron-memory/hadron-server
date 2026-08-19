@@ -301,6 +301,15 @@ export const sessionMutations = {
       // Same shape as `agentRef` above (cor:api:140, PK or URN): resolution is
       // NOT authorization (#554) — the gate runs on the RESOLVED App.
       let appId: string | null = ctx.appId ?? null;
+      // #1037: WHERE the App came from decides what may override it. The same
+      // `ctx.appId` field carries two different trust levels
+      // (findings:auth-appid-credential-vs-selection): for a pure App-key
+      // principal it is a CREDENTIAL — the caller IS that App — while for a
+      // user it is the MCP active-App SELECTION, a convenience that a later
+      // bind in another App silently re-points. An explicitly-qualified ref
+      // must beat a selection; nothing beats a credential.
+      let appSource: 'credential' | 'selection' | 'argument' | 'worker' | null =
+        ctx.appId ? (ctx.userId ? 'selection' : 'credential') : null;
       const appRef = input.appRef?.trim();
       if (appRef) {
         let resolvedAppId: string;
@@ -338,7 +347,18 @@ export const sessionMutations = {
         // over a caller-supplied ref. A pure App-key principal IS an App, so a
         // ref naming a different App is a client bug, not a widening — refuse
         // it typed rather than silently honouring one or the other.
-        if (ctx.appId && ctx.appId !== resolvedAppId) {
+        //
+        // #1037: keyed on the ABSENCE of a userId, not on `ctx.appId` alone.
+        // The comment always said "credential"; the check caught the MCP
+        // active-App SELECTION too, so a user whose connection was pinned to B
+        // could not deliberately start a session in A — the exact precedence
+        // this PR promises, contradicted one level above where it is granted.
+        // The distinction is spelled out in the very next comment block, which
+        // is a good measure of how easily this field name misleads
+        // (findings:auth-appid-credential-vs-selection). A user's selection
+        // yields to the argument; the participant gate below still runs on the
+        // resolved App, so yielding never widens reach.
+        if (ctx.appId && !ctx.userId && ctx.appId !== resolvedAppId) {
           throw new GraphQLError(
             `appRef "${appRef}" does not name the App this request is authenticated for.`,
             { extensions: { code: 'SESSION_APP_MISMATCH', appId: ctx.appId } },
@@ -360,6 +380,9 @@ export const sessionMutations = {
           }
         }
         appId = resolvedAppId;
+        // An explicit argument outranks a selection but not a credential — the
+        // credential branch above already refused a disagreeing ref.
+        if (appSource !== 'credential') appSource = 'argument';
       }
 
       // #974: optional Worker binding (cor:agt:020:03) — the named identity
@@ -472,10 +495,58 @@ export const sessionMutations = {
             { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
           );
         }
+        // #1037: an explicitly-qualified ref beats connection state.
+        //
+        // An id or a `hrn:worker:…` URN NAMES ITS OWN App — that is the whole
+        // reason the URN form exists, and both the tool description and
+        // `tasks:start-worker-session-desktop` promise it needs no
+        // `hadron_set_active_app` first. But `appId` may already hold the MCP
+        // active-App SELECTION, which any earlier bind in another App silently
+        // re-points — so a worker following the documented path, from a
+        // connection that has ever touched a second App, was refused on account
+        // of state it never set and could not see. That also defeats the
+        // premise #1038 was closed on: that a URN is safe BECAUSE its meaning
+        // cannot be changed by someone else's action.
+        //
+        // A selection therefore yields to the ref; a CREDENTIAL never does (a
+        // pure App-key principal IS its App, so a ref naming another is a
+        // client bug), and neither does an explicit `appRef` argument, where
+        // two deliberate statements genuinely disagree.
+        const refNamesItsOwnApp = isId(workerRef) || hasSchemePrefix(workerRef);
+        if (appId !== null && appId !== worker.appId && refNamesItsOwnApp && appSource === 'selection') {
+          // Re-gate on the App we are adopting rather than the one we are
+          // leaving: yielding to the ref must never widen who may attribute a
+          // session to an App. The `appId === null` branch below runs the same
+          // predicate, so clearing this makes the two paths converge.
+          appId = null;
+          appSource = 'worker';
+        }
         if (appId !== null && appId !== worker.appId) {
+          const held = await ctx.db.app.findUnique({
+            where: { id: appId },
+            select: { urn: true },
+          });
+          const source =
+            appSource === 'credential'
+              ? 'the App key this request is authenticated with'
+              : appSource === 'argument'
+                ? 'the appRef argument'
+                : 'the active-App selection on this connection';
           throw new GraphQLError(
-            'workerRef names a worker of a different App than this session is attributed to.',
-            { extensions: { code: 'SESSION_WORKER_NOT_IN_APP', workerId: worker.id, appId } },
+            `workerRef "${workerRef}" names a worker of a different App than this session is attributed to. ` +
+              `This session is being attributed to ${held?.urn ?? appId}, from ${source}. ` +
+              (appSource === 'credential'
+                ? 'An App key can only open sessions in its own App.'
+                : 'Pass an appRef naming the worker\'s App, or drop it and let the worker\'s own App decide.'),
+            {
+              extensions: {
+                code: 'SESSION_WORKER_NOT_IN_APP',
+                workerId: worker.id,
+                appId,
+                appSource,
+                workerAppId: worker.appId,
+              },
+            },
           );
         }
         if (appId === null) {

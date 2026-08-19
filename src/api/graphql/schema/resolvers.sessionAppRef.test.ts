@@ -292,11 +292,24 @@ describe('#943 — App-key precedence', () => {
     );
     const s = await startSession(ctx(contrib.id, app.id), { appRef: app.id });
     expect(s.appId).toBe(app.id);
-    // A mismatch is refused for the hybrid shape too — one rule, no ambiguity
-    // about which App the session belongs to.
+
+    // SUPERSEDED BY #1037 (review:convention-ratchets-must-be-flipped). This
+    // asserted that a MISMATCH is refused for the hybrid shape too — "one rule,
+    // no ambiguity" (#943). That rule conflated the two meanings of ctx.appId:
+    // for the hybrid shape it is the active-App SELECTION, which any later bind
+    // in another App silently re-points, so refusing here meant a multi-App
+    // caller could not deliberately open a session in another App without
+    // re-pinning first. An explicit argument now beats connection state; a
+    // CREDENTIAL still does not (the App-key case above is unchanged, and is
+    // what "one rule" was actually protecting).
+    //
+    // The membership gate is what still bounds this, and it is asserted above:
+    // the outsider is FORBIDDEN whether or not their selection agrees.
+    const elsewhere = await startSession(ctx(contrib.id, app.id), { appRef: otherApp.id });
+    expect(elsewhere.appId).toBe(otherApp.id);
     await expectCode(
-      startSession(ctx(contrib.id, app.id), { appRef: otherApp.id }),
-      'SESSION_APP_MISMATCH',
+      startSession(ctx(outsider.id, app.id), { appRef: otherApp.id }),
+      'FORBIDDEN',
     );
   });
 });

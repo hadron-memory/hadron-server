@@ -132,14 +132,26 @@ describe('hadron_start_session workerRef parity (#940)', () => {
     expect(out).toContain('retired');
   });
 
-  it("a worker of a DIFFERENT App than the selection refuses (SESSION_WORKER_NOT_IN_APP path)", async () => {
+  it("a worker of a DIFFERENT App than the selection now BINDS — the ref wins (#1037)", async () => {
+    // FLIPPED by #1037 (review:convention-ratchets-must-be-flipped): this
+    // asserted the refusal that issue exists to remove. A worker id names its
+    // own App, and the active-App selection is connection state any later bind
+    // silently re-points — so refusing here meant a worker following the
+    // documented procedure could not bind at all from a connection that had
+    // touched a second App. The selection yields; the participant gate does
+    // not, and it is what still bounds this (the caller is an org CONTRIBUTOR,
+    // so they genuinely participate in otherApp).
     const srv = createTestableMcpServer(hybridAuth());
     const out = await srv.callToolText('hadron_start_session', {
-      description: 'wrong app',
+      description: 'other app',
       workerRef: otherAppWorker.id,
     });
-    expect(out).toContain('Error:');
-    expect(out).toContain('different App');
+    expect(out).toContain('Session started:');
+    const sessionId = out.match(/Session started: (\S+)/)![1];
+    const row = await db.session.findUniqueOrThrow({ where: { id: sessionId } });
+    // Attributed to the WORKER's App, not the one that was selected.
+    expect(row.appId).toBe(otherApp.id);
+    expect(row.workerId).toBe(otherAppWorker.id);
   });
 
   it('without workerRef the tool still starts a plain session (the pre-#940 shape)', async () => {
