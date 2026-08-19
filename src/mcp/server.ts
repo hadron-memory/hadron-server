@@ -1068,18 +1068,38 @@ export function createMcpServerInstance(
    * authorization invariant names.
    *
    * So this can only re-establish scope the caller could have set by hand with
-   * `hadron_set_active_app`; it never widens reach. A no-op when App scope
-   * already exists, when there is no session argument, or when any gate fails —
-   * the caller then falls through to `requireAppScope`'s normal error.
+   * `hadron_set_active_app`; it never widens reach. A no-op when there is no
+   * session argument, when the session already names the pinned App, or when
+   * any gate fails — the caller then falls through to `requireAppScope`'s
+   * normal error.
+   *
+   * #1037: it also OVERRIDES an existing pin, which it previously deferred to.
+   * The pin is the user's active-App SELECTION, and any later bind in another
+   * App silently re-points it — so `hadron_record_work` compared a Hadron Dev
+   * Team session against Micromentor Eng Team and refused, blaming the session,
+   * which was the one part that was correct. An explicitly-passed session names
+   * its App unambiguously through its worker; connection state is the fallback
+   * for callers who named nothing, and must never outrank a caller who did.
+   * Every gate below still runs, so adopting the session's App cannot reach an
+   * App the caller could not have selected by hand.
+   *
+   * Deliberately confined to `auth.userId` callers. For a pure App-key
+   * principal `auth.appId` is a CREDENTIAL, not a selection
+   * (findings:auth-appid-credential-vs-selection) — it IS that App, and no
+   * session argument may re-point it.
    */
   async function adoptAppFromSession(sessionRef?: string | null): Promise<void> {
-    if (auth.appId || !auth.userId || !sessionRef) return;
+    if (!auth.userId || !sessionRef) return;
 
     const session = await db.session.findUnique({
       where: { id: sessionRef.trim() },
       select: { appId: true, userId: true },
     });
     if (!session?.appId || session.userId !== auth.userId) return;
+    // Already pinned where the session says — nothing to do, and no log line
+    // implying a switch that did not happen. This is the single-App case, which
+    // is every call for most callers.
+    if (session.appId === auth.appId) return;
 
     const app = await db.app.findFirst({
       where: { id: session.appId, deletedAt: null, uninstalledAt: null },
@@ -5547,8 +5567,26 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const extras: string[] = [];
         if (msg.mentions.length > 0) extras.push(`mentions: ${msg.mentions.map((m: string) => `@${m}`).join(', ')}`);
         if (msg.replyToSeq != null) extras.push(`in reply to #${msg.replyToSeq}`);
+        // #1037: the receipt NAMES the team it posted into. With a session
+        // passed, the App is unambiguous and a mismatch refuses — but posting
+        // as yourself names no App at all, so the ambient selection decides and
+        // nothing tells you which team heard you. The old receipt printed the
+        // author and the seq, the two things never in doubt, and read as
+        // confirmation whichever team it reached. This is hadron-cli#470's
+        // answer on the surface that has no worktree to warn from: put the
+        // resolved scope in the reader's path rather than add a check.
+        // `appRef` is what the mutation resolved against, and it is already an
+        // id here (the omit-app path fills it from auth.appId; an explicit one
+        // may be a URN, which findFirst matches on either column).
+        const postedTo = await db.app
+          .findFirst({
+            where: { OR: [{ id: appRef }, { urn: appRef }] },
+            select: { urn: true, name: true },
+          })
+          .catch(() => null);
+        const where = postedTo ? ` in ${postedTo.urn}${postedTo.name ? ` — ${postedTo.name}` : ''}` : '';
         return textResult(
-          `Posted team-chat message #${msg.seq} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
+          `Posted team-chat message #${msg.seq}${where} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`);
