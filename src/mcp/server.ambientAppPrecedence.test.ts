@@ -272,6 +272,55 @@ describe('#1037 — the team tools', () => {
     expect(misPinned).toContain('acme/repo#9');
   });
 
+  it("a teammate's session does not suppress the worker fallback (Codex P2)", async () => {
+    // adoptAppFromSession deliberately does nothing for a session that is not
+    // the caller's — but the mere PRESENCE of the argument used to suppress the
+    // worker fallback, leaving a caller who may read this worklog with "no
+    // active App" while holding a ref that names it unambiguously.
+    const sid = await boundSession();
+    await createTestableMcpServer(unpinned()).callToolText('hadron_record_work', {
+      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#11', action: 'opened',
+    });
+    // A session belonging to somebody else entirely.
+    const theirs = await db.session.create({
+      data: { id: generateId(), userId: outsider.id, appId: appA.id },
+    });
+
+    const out = await createTestableMcpServer(unpinned()).callToolText(
+      'hadron_team_work_items', { worker: DARA_URN(), session: theirs.id },
+    );
+    expect(out).not.toContain('No App context');
+  });
+
+  it('a DATABASE failure while deriving scope from a worker ref propagates', async () => {
+    // The third instance of the blanket-catch class in this PR, and the second
+    // I wrote while fixing the first. An outage must not be reported as "no
+    // active App", which sends the caller to fix their selection while the
+    // server is down. Spied on the real client, which is the same instance the
+    // MCP closure holds.
+    const boom = new Error('connection terminated unexpectedly');
+    // findFirst, not findUnique: the URN path inside `resolveWorkerRef` uses
+    // findFirst, and that is the call INSIDE the try/catch under test. Spying
+    // on findUnique instead made this pass for the wrong reason — the helper's
+    // own later findUnique throws outside the catch, so the mutation stayed
+    // green. Targeting the wrong call is how a test asserts the right outcome
+    // via the wrong mechanism.
+    const spy = vi.spyOn(db.worker, 'findFirst').mockRejectedValue(boom as never);
+    try {
+      // Propagates rather than resolving to text: the scope derivation runs
+      // before the tool's own try/catch, so the failure surfaces as a failure.
+      // What matters is that it is NOT reported as "no active App", which would
+      // send the caller to fix their selection while the server is down.
+      await expect(
+        createTestableMcpServer(unpinned()).callToolText(
+          'hadron_team_work_items', { worker: DARA_URN() },
+        ),
+      ).rejects.toThrow(/connection terminated/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('a bare worker NAME still yields no scope — it needs one rather than providing it', async () => {
     // A name is unique only within an App, so there is nothing to derive scope
     // FROM. Documents the CONTRACT rather than proving the shape check: the ref

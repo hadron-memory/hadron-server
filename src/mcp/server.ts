@@ -115,6 +115,7 @@ import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
+import { WorkerNotFoundError } from '../lib/entityRef/errors.js';
 import {
   renderWorkerContinuity,
   type RenderableContinuity,
@@ -1090,24 +1091,25 @@ export function createMcpServerInstance(
    * (findings:auth-appid-credential-vs-selection) — it IS that App, and no
    * session argument may re-point it.
    */
-  async function adoptAppFromSession(sessionRef?: string | null): Promise<void> {
-    if (!auth.userId || !sessionRef) return;
+  async function adoptAppFromSession(sessionRef?: string | null): Promise<boolean> {
+    if (!auth.userId || !sessionRef) return false;
 
     const session = await db.session.findUnique({
       where: { id: sessionRef.trim() },
       select: { appId: true, userId: true },
     });
-    if (!session?.appId || session.userId !== auth.userId) return;
+    if (!session?.appId || session.userId !== auth.userId) return false;
     // Already pinned where the session says — nothing to do, and no log line
     // implying a switch that did not happen. This is the single-App case, which
-    // is every call for most callers.
-    if (session.appId === auth.appId) return;
+    // is every call for most callers. Reported as SUCCESS: scope is established
+    // and it is the session's.
+    if (session.appId === auth.appId) return true;
 
     const app = await db.app.findFirst({
       where: { id: session.appId, deletedAt: null, uninstalledAt: null },
       select: { id: true, organizationId: true, ownerUserId: true },
     });
-    if (!app) return;
+    if (!app) return false;
 
     // The participant check runs against the caller as they are NOW, with no
     // App selection in hand — which is the state this function exists to
@@ -1122,9 +1124,10 @@ export function createMcpServerInstance(
       } as Context,
       app,
     );
-    if (!participates) return;
+    if (!participates) return false;
 
     pinActiveApp(app.id, app.organizationId, 'session');
+    return true;
   }
 
   /**
@@ -1160,9 +1163,14 @@ export function createMcpServerInstance(
     let workerId: string;
     try {
       ({ id: workerId } = await resolveWorkerRef(db, trimmed));
-    } catch {
-      // An unresolvable ref leaves scope alone; the tool's own not-found or
-      // empty-page path then answers, rather than this helper inventing one.
+    } catch (e) {
+      // NARROW (review:narrow-catch-blocks; PR #1051 review, Codex — the THIRD
+      // instance of this class in one PR, and the second one I wrote while
+      // fixing the first). A ref that names nothing leaves scope alone, and the
+      // tool's own not-found path answers. A DATABASE failure must not be
+      // reported as "no active App", which sends the caller to fix their
+      // selection while the server is down.
+      if (!(e instanceof WorkerNotFoundError)) throw e;
       return;
     }
     const worker = await db.worker.findUnique({
@@ -6174,12 +6182,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let appRef = app;
       if (!appRef) {
         // #1005: the optional session filter doubles as an App-resolution hint.
-        await adoptAppFromSession(session);
-        // #1037/PR #1051 review: so does a SELF-DESCRIBING worker ref, which
-        // names its own App. Only when no session was passed — a session is the
-        // caller's own binding and the more specific statement of scope, and if
-        // the two named different Apps the filters could not both match anyway.
-        if (!session) await adoptAppFromWorker(worker);
+        const scopedBySession = await adoptAppFromSession(session);
+        // #1037/PR #1051 review: a SELF-DESCRIBING worker ref names its own App
+        // too. Gated on whether the session ACTUALLY established scope, not on
+        // whether a session string was supplied (Codex P2): `adoptAppFromSession`
+        // deliberately does nothing for a stale session, or one belonging to a
+        // teammate, and the mere presence of the argument then suppressed the
+        // worker fallback — leaving a caller who may read this worklog with "no
+        // active App" while holding a ref that identifies the App unambiguously.
+        // A session that DID establish scope still wins: it is the caller's own
+        // binding and the more specific statement.
+        if (!scopedBySession) await adoptAppFromWorker(worker);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
