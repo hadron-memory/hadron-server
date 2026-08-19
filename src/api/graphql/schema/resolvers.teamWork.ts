@@ -40,6 +40,7 @@ import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { hasSchemePrefix } from '../../../lib/urn.js';
 import { resolveWorkerIdByNameGated } from './resolvers.worker.js';
 import { enforceNodeSchemaOnWrite } from '../../../lib/enforceNodeSchema.js';
@@ -855,19 +856,44 @@ export const teamWorkQueries = {
       if (isId(trimmed) || hasSchemePrefix(trimmed)) {
         try {
           ({ id: resolved } = await resolveWorkerRefId(ctx.db, trimmed));
-        } catch {
+        } catch (e) {
+          // NARROW catch (review:narrow-catch-blocks; PR #1051 review, Codex +
+          // Copilot). `resolveWorkerRefId` reaches the database, so a blanket
+          // catch reports an OUTAGE as "no matching worklog records" — an empty
+          // page a caller has every reason to believe. Collapsing the expected
+          // not-found into an empty page is the contract; hiding that the
+          // database is down never is. The same reasoning, and the same
+          // comment, as `resolveWorkerIdByNameGated`.
+          if (!(e instanceof WorkerNotFoundError)) throw e;
           resolved = null;
         }
       } else {
         resolved = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
       }
-      // No same-App re-check on the resolved id, deliberately: the query is
-      // already confined to THIS App's worklog root (`memoryId: root.memoryId`
-      // below), so another App's worker id matches nothing here by
-      // construction. A confinement check would be a guard that cannot fail —
-      // removing it was proven by mutation, which is the point of running the
-      // mutation on your own additions too. The NAME path is App-scoped
-      // separately, because a name is only unique within one.
+      if (resolved) {
+        // Confirm the resolved worker belongs to THIS App (PR #1051 review,
+        // Codex P2 — restoring a check I had removed on bad reasoning).
+        //
+        // I argued the root scoping made this redundant: the query is confined
+        // to this App's worklog memory, so a foreign worker id "matches nothing
+        // by construction". That is wrong. Root scoping constrains the node's
+        // MEMORY, not its denormalized `properties.workerId` — and off-road
+        // writes into this collection are legal by design (see this file's
+        // header), while `workerId` is not even in the declared collection
+        // schema, so nothing validates it. A worklog-shaped node in this App
+        // naming another App's worker would therefore be returned, breaking
+        // the empty-page promise this filter makes.
+        //
+        // The mutation check that "proved" the guard redundant only proved my
+        // test was too weak: it created a foreign worker but no record naming
+        // one. A guard that survives a mutation is a guard whose test does not
+        // reach it, which is not the same as a guard that cannot fail.
+        const owned = await ctx.db.worker.findFirst({
+          where: { id: resolved, appId },
+          select: { id: true },
+        });
+        resolved = owned?.id ?? null;
+      }
       if (!resolved) return { items: [], total: 0 };
       workerIdFilter = resolved;
     }

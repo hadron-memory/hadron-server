@@ -715,6 +715,75 @@ describe('teamWorkItems — the workerRef filter (#1035)', () => {
     });
     expect((await items(ctx(contrib.id), { workerRef: foreign.id })).total).toBe(0);
   });
+
+  it('a DATABASE failure during ref resolution propagates — an outage is not an empty page', async () => {
+    // review:narrow-catch-blocks. The blanket catch this replaces reported an
+    // outage as "no matching worklog records", which a caller has every reason
+    // to believe — the one surface whose empty page is a legitimate answer.
+    // Driven by a db whose WORKER lookup fails while everything else works, so
+    // the failure lands exactly where resolveWorkerRef reaches the database.
+    await workerWithRecords('Iris', 'iris', ['o/r#1']);
+    const boom = new Error('connection terminated unexpectedly');
+    const brokenDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'worker') {
+          return {
+            ...Reflect.get(target, prop, receiver),
+            findUnique: async () => { throw boom; },
+            findFirst: async () => { throw boom; },
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as typeof db;
+    const brokenCtx = { ...ctx(contrib.id), db: brokenDb } as Context;
+
+    await expect(
+      Q.teamWorkItems({}, { appRef: app.id, workerRef: generateId() }, brokenCtx),
+    ).rejects.toThrow(/connection terminated/);
+  });
+
+  it("an OFF-ROAD record naming another App's worker is still not returned (Codex P2)", async () => {
+    // The case that proves the same-App check is load-bearing, and that my
+    // first mutation of it was too weak to reach. Root scoping constrains the
+    // node's MEMORY, not its denormalized properties.workerId — and off-road
+    // writes into this collection are legal by design, while `workerId` is not
+    // in the declared collection schema, so nothing validates it.
+    const { worker } = await workerWithRecords('Iris', 'iris', ['o/r#1']);
+    const elsewhere = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other2-${Date.now()}` },
+    });
+    const foreign = await db.worker.create({
+      data: { appId: elsewhere.id, agentId: teamAgent.id, name: 'Nadia', slug: 'nadia' },
+    });
+    const root = await db.node.findFirstOrThrow({
+      // loc-scope-ok: scoped to the fixture App's worklog root by memory.
+      where: { loc: WORKLOG_LOC, memory: { appId: app.id, class: 'app' } },
+      select: { memoryId: true },
+    });
+    // A conforming worklog record written through the generic node surface,
+    // carrying a FOREIGN workerId.
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: root.memoryId, loc: `${WORKLOG_LOC}:off-road-1`,
+        name: 'off-road-1', objectType: WORKLOG_OBJECT_TYPE,
+        properties: {
+          sessionId: 'someone-elses', workerName: 'Nadia', workerId: foreign.id,
+          tool: 'github', kind: 'pr', ref: 'o/r#500', action: 'opened',
+          at: new Date().toISOString(),
+        },
+      },
+    });
+
+    // It IS in this App's worklog — visible unfiltered, which is correct: an
+    // App member may read their own App's worklog whatever is in it.
+    expect((await items(ctx(contrib.id))).total).toBe(2);
+    // But filtering BY that foreign worker must still answer nothing, or the
+    // filter's meaning becomes "records that happen to name them".
+    expect((await items(ctx(contrib.id), { workerRef: foreign.id })).total).toBe(0);
+    // And the real worker's filter is unaffected.
+    expect((await items(ctx(contrib.id), { workerRef: worker.id })).total).toBe(1);
+  });
 });
 
 describe('updateTeamCollections — explicit convergence (hadron-cli#401)', () => {
