@@ -246,6 +246,128 @@ describe('#1037 — the team tools', () => {
     expect(out).toContain('posted from team A');
   });
 
+  it('team_work_items derives App scope from a self-describing worker ref (Codex P2)', async () => {
+    // The #1037 convention reappearing in a tool that grew a worker argument
+    // afterwards — which is how a convention decays one tool at a time. An
+    // id/URN names its own App, so advertising id/URN support while resolving
+    // scope from the pin returns "No App context" unpinned, or the WRONG App's
+    // empty page when pinned elsewhere.
+    const sid = await boundSession();
+    await createTestableMcpServer(unpinned()).callToolText('hadron_record_work', {
+      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#9', action: 'opened',
+    });
+    const dara = await db.worker.findFirstOrThrow({ where: { appId: appA.id } });
+
+    // Unpinned: no ambient scope at all, and no session argument to lean on.
+    const unscoped = await createTestableMcpServer(unpinned()).callToolText(
+      'hadron_team_work_items', { worker: DARA_URN() },
+    );
+    expect(unscoped).not.toContain('No App context');
+    expect(unscoped).toContain('acme/repo#9');
+
+    // Pinned to the WRONG App: the ref outranks the pin, as it does at bind.
+    const misPinned = await createTestableMcpServer(pinnedToB()).callToolText(
+      'hadron_team_work_items', { worker: dara.id },
+    );
+    expect(misPinned).toContain('acme/repo#9');
+  });
+
+  it("a teammate's session does not suppress the worker fallback (Codex P2)", async () => {
+    // adoptAppFromSession deliberately does nothing for a session that is not
+    // the caller's — but the mere PRESENCE of the argument used to suppress the
+    // worker fallback, leaving a caller who may read this worklog with "no
+    // active App" while holding a ref that names it unambiguously.
+    const sid = await boundSession();
+    await createTestableMcpServer(unpinned()).callToolText('hadron_record_work', {
+      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#11', action: 'opened',
+    });
+    // A session belonging to somebody else entirely.
+    const theirs = await db.session.create({
+      data: { id: generateId(), userId: outsider.id, appId: appA.id },
+    });
+
+    const out = await createTestableMcpServer(unpinned()).callToolText(
+      'hadron_team_work_items', { worker: DARA_URN(), session: theirs.id },
+    );
+    expect(out).not.toContain('No App context');
+  });
+
+  it('a STALE pin matching the session does not count as established scope (Codex P2)', async () => {
+    // Codex's primary scenario: a long-lived connection pinned to App B whose
+    // caller has since LOST membership. The pin still MATCHES the session's App
+    // — and matching is not evidence. Reporting success on that basis skipped
+    // the participation check and suppressed the worker fallback, so the query
+    // ran against an App the caller may no longer read.
+    //
+    // The caller here is an AppMember ONLY — not an org member — so revoking
+    // the membership genuinely removes participation. (The org-member fixture
+    // user keeps access through their org role, which is why this needs its
+    // own principal.)
+    const memberOnly = await db.user.create({
+      data: { id: generateId(), githubId: 77199, githubUsername: `ap-mo-${Date.now()}`, roles: ['READER'] },
+    });
+    await db.appMember.create({ data: { appId: appA.id, userId: memberOnly.id, role: 'member' } });
+    const inB = await db.appMember.create({
+      data: { appId: appB.id, userId: memberOnly.id, role: 'member' },
+    });
+    const sessionInB = await db.session.create({
+      data: { id: generateId(), userId: memberOnly.id, appId: appB.id },
+    });
+
+    // Membership in B is revoked; the connection stays pinned there.
+    await db.appMember.delete({
+      where: { appId_userId: { appId: inB.appId, userId: inB.userId } },
+    });
+
+    const out = await createTestableMcpServer(pinnedToB(memberOnly.id)).callToolText(
+      'hadron_team_work_items', { session: sessionInB.id, worker: DARA_URN() },
+    );
+    // Falls through to the worker's App, which this caller CAN read — rather
+    // than refusing under an App whose membership is gone.
+    expect(out).not.toMatch(/not authorized|Forbidden/i);
+  });
+
+  it('a DATABASE failure while deriving scope from a worker ref propagates', async () => {
+    // The third instance of the blanket-catch class in this PR, and the second
+    // I wrote while fixing the first. An outage must not be reported as "no
+    // active App", which sends the caller to fix their selection while the
+    // server is down. Spied on the real client, which is the same instance the
+    // MCP closure holds.
+    const boom = new Error('connection terminated unexpectedly');
+    // findFirst, not findUnique: the URN path inside `resolveWorkerRef` uses
+    // findFirst, and that is the call INSIDE the try/catch under test. Spying
+    // on findUnique instead made this pass for the wrong reason — the helper's
+    // own later findUnique throws outside the catch, so the mutation stayed
+    // green. Targeting the wrong call is how a test asserts the right outcome
+    // via the wrong mechanism.
+    const spy = vi.spyOn(db.worker, 'findFirst').mockRejectedValue(boom as never);
+    try {
+      // Propagates rather than resolving to text: the scope derivation runs
+      // before the tool's own try/catch, so the failure surfaces as a failure.
+      // What matters is that it is NOT reported as "no active App", which would
+      // send the caller to fix their selection while the server is down.
+      await expect(
+        createTestableMcpServer(unpinned()).callToolText(
+          'hadron_team_work_items', { worker: DARA_URN() },
+        ),
+      ).rejects.toThrow(/connection terminated/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a bare worker NAME still yields no scope — it needs one rather than providing it', async () => {
+    // A name is unique only within an App, so there is nothing to derive scope
+    // FROM. Documents the CONTRACT rather than proving the shape check: the ref
+    // resolver rejects a name regardless, so this stays green with that check
+    // removed. Kept because the contract is what a caller relies on, and worth
+    // saying plainly rather than implying a proof it does not carry.
+    const out = await createTestableMcpServer(unpinned()).callToolText(
+      'hadron_team_work_items', { worker: 'Dara' },
+    );
+    expect(out).toContain('No App context');
+  });
+
   it('an explicit app argument still wins over the session', async () => {
     // The caller who names an App outranks the one who names a session: both
     // are deliberate, and the more specific statement is the one just made.

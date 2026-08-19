@@ -114,6 +114,8 @@ import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
+import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
+import { WorkerNotFoundError } from '../lib/entityRef/errors.js';
 import {
   renderWorkerContinuity,
   type RenderableContinuity,
@@ -1089,28 +1091,111 @@ export function createMcpServerInstance(
    * (findings:auth-appid-credential-vs-selection) — it IS that App, and no
    * session argument may re-point it.
    */
-  async function adoptAppFromSession(sessionRef?: string | null): Promise<void> {
-    if (!auth.userId || !sessionRef) return;
+  async function adoptAppFromSession(sessionRef?: string | null): Promise<boolean> {
+    if (!auth.userId || !sessionRef) return false;
 
     const session = await db.session.findUnique({
       where: { id: sessionRef.trim() },
       select: { appId: true, userId: true },
     });
-    if (!session?.appId || session.userId !== auth.userId) return;
-    // Already pinned where the session says — nothing to do, and no log line
-    // implying a switch that did not happen. This is the single-App case, which
-    // is every call for most callers.
-    if (session.appId === auth.appId) return;
+    if (!session?.appId || session.userId !== auth.userId) return false;
 
+    // NO early return for "the pin already matches the session" (PR #1051
+    // review, Codex P2). It was a harmless short-circuit while this function
+    // returned void; the moment it reports whether scope is ESTABLISHED, that
+    // shortcut asserts something it never checked. A long-lived connection
+    // pinned to App A whose caller has since lost membership — or whose App was
+    // uninstalled — would report success on the strength of the stale pin
+    // alone, skipping both checks below, suppressing the worker-derived
+    // fallback, and running the query against an App the caller may no longer
+    // read. "Revoked membership must not authorize" is the invariant, and a
+    // matching pin is not evidence of anything.
+    //
+    // The cost is two queries on the common single-App path. The saving they
+    // replace was a log line.
     const app = await db.app.findFirst({
       where: { id: session.appId, deletedAt: null, uninstalledAt: null },
       select: { id: true, organizationId: true, ownerUserId: true },
     });
-    if (!app) return;
+    if (!app) return false;
 
     // The participant check runs against the caller as they are NOW, with no
     // App selection in hand — which is the state this function exists to
     // repair, and exactly the shape isAppParticipant judges (the USER branch).
+    const participates = await isAppParticipant(
+      {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context,
+      app,
+    );
+    if (!participates) return false;
+
+    // Only pin when it actually changes — no log line implying a switch that
+    // did not happen. Success is reported either way: scope is established and
+    // it is the session's, now VERIFIED rather than assumed.
+    if (app.id !== auth.appId) pinActiveApp(app.id, app.organizationId, 'session');
+    return true;
+  }
+
+  /**
+   * `adoptAppFromSession`'s sibling for a SELF-DESCRIBING worker ref (#1037,
+   * extended by PR #1051 review — Codex P2).
+   *
+   * A worker id or `hrn:worker:…` URN names its own App, exactly as it does at
+   * bind. A tool that takes one and still resolves scope from the ambient pin
+   * therefore answers "No App context" for an unpinned caller, or an empty page
+   * from the WRONG App for a pinned one — while advertising id/URN support.
+   * That is the same defect #1037 fixed for `hadron_start_session` and
+   * `hadron_get_worker`, reappearing in a tool that grew a worker argument
+   * afterwards, which is precisely how a convention decays one tool at a time.
+   *
+   * A bare NAME is deliberately NOT adopted: a name is unique only within an
+   * App, so there is nothing to derive scope FROM — it needs scope to resolve.
+   * The shape test below is a FAST PATH and a statement of intent, not a
+   * load-bearing guard: `resolveWorkerRef` rejects a name anyway, so removing
+   * it changes no outcome (verified by mutation — it stays green). It earns its
+   * place by matching the shape dispatch the resolver itself uses, so the two
+   * cannot disagree about what counts as self-describing.
+   *
+   * Same gates as the session sibling, so this can only re-establish scope the
+   * caller could have set by hand: the App must be live, and the caller must
+   * still be a participant. Confined to `auth.userId` callers — an App key's
+   * `appId` is a CREDENTIAL and is never re-pointed by an argument.
+   */
+  async function adoptAppFromWorker(workerRef?: string | null): Promise<void> {
+    if (!auth.userId || !workerRef) return;
+    const trimmed = workerRef.trim();
+    if (!isId(trimmed) && !hasSchemePrefix(trimmed)) return;
+
+    let workerId: string;
+    try {
+      ({ id: workerId } = await resolveWorkerRef(db, trimmed));
+    } catch (e) {
+      // NARROW (review:narrow-catch-blocks; PR #1051 review, Codex — the THIRD
+      // instance of this class in one PR, and the second one I wrote while
+      // fixing the first). A ref that names nothing leaves scope alone, and the
+      // tool's own not-found path answers. A DATABASE failure must not be
+      // reported as "no active App", which sends the caller to fix their
+      // selection while the server is down.
+      if (!(e instanceof WorkerNotFoundError)) throw e;
+      return;
+    }
+    const worker = await db.worker.findUnique({
+      where: { id: workerId },
+      select: { appId: true },
+    });
+    if (!worker || worker.appId === auth.appId) return;
+
+    const app = await db.app.findFirst({
+      where: { id: worker.appId, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (!app) return;
+
     const participates = await isAppParticipant(
       {
         db,
@@ -6093,21 +6178,32 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_work_items',
-    'Read the team App\'s worklog (#947) — the provenance query: which sessions produced this PR/artifact? Newest first. Pass ref in ANY accepted spelling (github URL, owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) — it is normalized before matching. Filter further by session, tool, or kind. Each item carries the sessionId; read the session for its transcript path.',
+    'Read the team App\'s worklog (#947) — the provenance query. Two directions: which sessions produced this PR/artifact (pass ref, in ANY accepted spelling — github URL, owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo — normalized before matching), and what has one WORKER done (pass worker, by name, id or URN — #1035; a retired worker still resolves, because retirement ends the casting, not the history). Newest first. Filter further by session, tool, or kind, and combine filters freely. Each item carries the sessionId; read the session for its transcript path.',
     {
       ref: z.string().optional().describe('The artifact to look up, in any accepted spelling (e.g. a PR URL or owner/repo#371).'),
       session: z.string().optional().describe('Filter to records of this session id.'),
+      worker: z.string().optional().describe('Filter to ONE worker\'s records — its name ("Iris"), id, or URN. Everything that worker has done, across all of their sessions. A retired worker still resolves.'),
       tool: z.string().optional().describe('Filter by tool (e.g. "github").'),
       kind: z.string().optional().describe('Filter by kind: pr | issue | commit | branch | repo.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
-    async ({ ref, session, tool, kind, limit, offset, app }) => {
+    async ({ ref, session, worker, tool, kind, limit, offset, app }) => {
       let appRef = app;
       if (!appRef) {
         // #1005: the optional session filter doubles as an App-resolution hint.
-        await adoptAppFromSession(session);
+        const scopedBySession = await adoptAppFromSession(session);
+        // #1037/PR #1051 review: a SELF-DESCRIBING worker ref names its own App
+        // too. Gated on whether the session ACTUALLY established scope, not on
+        // whether a session string was supplied (Codex P2): `adoptAppFromSession`
+        // deliberately does nothing for a stale session, or one belonging to a
+        // teammate, and the mere presence of the argument then suppressed the
+        // worker fallback — leaving a caller who may read this worklog with "no
+        // active App" while holding a ref that identifies the App unambiguously.
+        // A session that DID establish scope still wins: it is the caller's own
+        // binding and the more specific statement.
+        if (!scopedBySession) await adoptAppFromWorker(worker);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
@@ -6122,6 +6218,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             appRef,
             ref: ref ?? null,
             sessionRef: session ?? null,
+            workerRef: worker ?? null,
             tool: tool ?? null,
             kind: kind ?? null,
             limit: limit ?? null,
