@@ -347,7 +347,18 @@ export const sessionMutations = {
         // over a caller-supplied ref. A pure App-key principal IS an App, so a
         // ref naming a different App is a client bug, not a widening — refuse
         // it typed rather than silently honouring one or the other.
-        if (ctx.appId && ctx.appId !== resolvedAppId) {
+        //
+        // #1037: keyed on the ABSENCE of a userId, not on `ctx.appId` alone.
+        // The comment always said "credential"; the check caught the MCP
+        // active-App SELECTION too, so a user whose connection was pinned to B
+        // could not deliberately start a session in A — the exact precedence
+        // this PR promises, contradicted one level above where it is granted.
+        // The distinction is spelled out in the very next comment block, which
+        // is a good measure of how easily this field name misleads
+        // (findings:auth-appid-credential-vs-selection). A user's selection
+        // yields to the argument; the participant gate below still runs on the
+        // resolved App, so yielding never widens reach.
+        if (ctx.appId && !ctx.userId && ctx.appId !== resolvedAppId) {
           throw new GraphQLError(
             `appRef "${appRef}" does not name the App this request is authenticated for.`,
             { extensions: { code: 'SESSION_APP_MISMATCH', appId: ctx.appId } },

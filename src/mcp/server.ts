@@ -113,6 +113,7 @@ import {
 import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
+import { resolveAppRef } from '../lib/entityRef/appRef.js';
 import {
   renderWorkerContinuity,
   type RenderableContinuity,
@@ -5575,14 +5576,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // confirmation whichever team it reached. This is hadron-cli#470's
         // answer on the surface that has no worktree to warn from: put the
         // resolved scope in the reader's path rather than add a check.
-        // `appRef` is what the mutation resolved against, and it is already an
-        // id here (the omit-app path fills it from auth.appId; an explicit one
-        // may be a URN, which findFirst matches on either column).
-        const postedTo = await db.app
-          .findFirst({
-            where: { OR: [{ id: appRef }, { urn: appRef }] },
-            select: { urn: true, name: true },
-          })
+        // Resolved through the SHARED ref helper, not a hand-rolled column
+        // match (PR #1049 review, Copilot): `app` accepts every ref form, and
+        // `App.urn` stores the BARE `<root>:<slug>` — so an explicit
+        // `hrn:app:…` matched neither column and the receipt silently dropped
+        // the team name in exactly the case where the caller named an App by
+        // hand. Best-effort: a receipt decorating a post that already succeeded
+        // must never turn it into an error.
+        const postedTo = await resolveAppRef(db, appRef)
+          .then(({ id }: { id: string }) => db.app.findUnique({ where: { id }, select: { urn: true, name: true } }))
           .catch(() => null);
         const where = postedTo ? ` in ${postedTo.urn}${postedTo.name ? ` — ${postedTo.name}` : ''}` : '';
         return textResult(

@@ -141,6 +141,30 @@ describe('#1037 — the bind', () => {
     }
   });
 
+  it('an explicit appRef beats a user SELECTION too (Codex P1)', async () => {
+    // The precedence this PR promises was contradicted one level above where it
+    // is granted: the #943 SESSION_APP_MISMATCH check keyed on ctx.appId alone,
+    // so a user pinned to B could not deliberately open a session in A — even
+    // though its own comment said the rule was about an App-key CREDENTIAL.
+    const ctx = {
+      db, userId: user.id, appId: appB.id, roles: ['READER'], clientId: `user:${user.id}`,
+    } as unknown as Context;
+    const session = await resolvers.Mutation.startSession(
+      {}, { input: { id: generateId(), appRef: appA.id } }, ctx,
+    );
+    expect(session.appId).toBe(appA.id);
+  });
+
+  it('but an App KEY still refuses a disagreeing appRef', async () => {
+    // The same check, for the principal shape it was actually written for.
+    const keyCtx = { db, appId: appB.id, roles: [] } as unknown as Context;
+    await expect(
+      resolvers.Mutation.startSession(
+        {}, { input: { id: generateId(), appRef: appA.id } }, keyCtx,
+      ),
+    ).rejects.toThrow(/does not name the App this request is authenticated for/);
+  });
+
   it('a pure App-KEY principal is never re-pointed by a ref — a credential is not a selection', async () => {
     // The principal shape most likely to be skipped, and the one where getting
     // it wrong widens access: for an App key, auth.appId IS the App
@@ -198,6 +222,17 @@ describe('#1037 — the team tools', () => {
       where: { memory: { appId: appB.id }, loc: { startsWith: 'chats:team:messages:' } },
     });
     expect([inA, inB]).toEqual([1, 0]);
+  });
+
+  it('the receipt names the team even when app is passed as a full hrn:app URN (Copilot)', async () => {
+    // App.urn stores the BARE <root>:<slug>, so a hand-rolled column match
+    // dropped the team name in exactly the case where the caller named an App
+    // explicitly. Routed through the shared ref resolver instead.
+    const out = await createTestableMcpServer(unpinned()).callToolText('hadron_team_chat_post', {
+      app: `hrn:app:${appA.urn}`, body: 'posted by full URN',
+    });
+    expect(out).toContain('Posted team-chat message');
+    expect(out).toContain(appA.urn);
   });
 
   it('team_chat_read follows the session too', async () => {
