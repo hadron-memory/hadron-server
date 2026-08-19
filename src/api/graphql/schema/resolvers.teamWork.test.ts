@@ -628,6 +628,95 @@ describe('teamWorkItems — the provenance read surface', () => {
   });
 });
 
+describe('teamWorkItems — the workerRef filter (#1035)', () => {
+  /**
+   * "What has this worker done" had no direct read path: a client had to fan
+   * out over sessions(workerRef:) and merge, which cannot reproduce this
+   * operation's `total` or a stable offset — on the one surface whose whole
+   * point is completeness. Blocks the worklog section of hadron-portal#737.
+   */
+  async function workerWithRecords(name: string, slug: string, refs: string[]) {
+    const worker = await db.worker.create({
+      data: { appId: app.id, agentId: teamAgent.id, name, slug },
+    });
+    const session = await db.session.create({
+      data: { id: generateId(), userId: contrib.id, appId: app.id, agentId: teamAgent.id, workerId: worker.id },
+    });
+    for (const ref of refs) {
+      await record(ctx(contrib.id), { sessionRef: session.id, ref });
+    }
+    return { worker, session };
+  }
+
+  it('returns only that worker\'s records — across ALL their sessions, with a correct total', async () => {
+    const iris = await workerWithRecords('Iris', 'iris', ['o/r#1', 'o/r#2']);
+    await workerWithRecords('Henry', 'henry', ['o/r#3']);
+    // A SECOND session for Iris: the fan-out this filter replaces is exactly
+    // the client-side merge over these.
+    const second = await db.session.create({
+      data: { id: generateId(), userId: contrib.id, appId: app.id, agentId: teamAgent.id, workerId: iris.worker.id },
+    });
+    await record(ctx(contrib.id), { sessionRef: second.id, ref: 'o/r#4' });
+
+    const page = await items(ctx(contrib.id), { workerRef: iris.worker.id });
+    expect(page.total).toBe(3);
+    expect(page.items.map((i: { ref: string }) => i.ref).sort()).toEqual(['o/r#1', 'o/r#2', 'o/r#4']);
+  });
+
+  it('accepts a NAME and a URN, not just an id', async () => {
+    const { worker } = await workerWithRecords('Iris', 'iris', ['o/r#1']);
+    expect((await items(ctx(contrib.id), { workerRef: 'Iris' })).total).toBe(1);
+    // Case-insensitively, the way a human types it.
+    expect((await items(ctx(contrib.id), { workerRef: 'iris' })).total).toBe(1);
+    const urn = `hrn:worker:${app.urn}:${worker.slug}`;
+    expect((await items(ctx(contrib.id), { workerRef: urn })).total).toBe(1);
+  });
+
+  it('a RETIRED worker still resolves — retirement ends the casting, not the history', async () => {
+    const { worker } = await workerWithRecords('Iris', 'iris', ['o/r#1', 'o/r#2']);
+    await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
+    // The record path refuses a retired worker; the READ must not, or a worker
+    // page for a retired teammate goes blank and their merged PRs stop tracing.
+    expect((await items(ctx(contrib.id), { workerRef: 'Iris' })).total).toBe(2);
+    expect((await items(ctx(contrib.id), { workerRef: worker.id })).total).toBe(2);
+  });
+
+  it('records from a session that was never worker-bound do not match', async () => {
+    await workerWithRecords('Iris', 'iris', ['o/r#1']);
+    await record(ctx(contrib.id), { ref: 'o/r#99' }); // contribSession: no worker
+    expect((await items(ctx(contrib.id))).total).toBe(2);
+    expect((await items(ctx(contrib.id), { workerRef: 'Iris' })).total).toBe(1);
+  });
+
+  it('composes with the other filters rather than replacing them', async () => {
+    const { worker } = await workerWithRecords('Iris', 'iris', ['o/r#1']);
+    const session = await db.session.create({
+      data: { id: generateId(), userId: contrib.id, appId: app.id, agentId: teamAgent.id, workerId: worker.id },
+    });
+    await record(ctx(contrib.id), { sessionRef: session.id, kind: 'branch', ref: 'o/r:main', action: 'pushed' });
+
+    expect((await items(ctx(contrib.id), { workerRef: 'Iris' })).total).toBe(2);
+    const narrowed = await items(ctx(contrib.id), { workerRef: 'Iris', kind: 'branch' });
+    expect(narrowed.total).toBe(1);
+    expect(narrowed.items[0].ref).toBe('o/r:main');
+  });
+
+  it('an unknown ref, and another App\'s worker, both yield an EMPTY page — never an error', async () => {
+    await workerWithRecords('Iris', 'iris', ['o/r#1']);
+    // Erroring here would make this surface an existence oracle for another
+    // App's roster (cor:agt:020:08), and a read filter that names nothing is a
+    // filter that matches nothing.
+    expect((await items(ctx(contrib.id), { workerRef: 'Nobody' })).total).toBe(0);
+    const elsewhere = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other-${Date.now()}` },
+    });
+    const foreign = await db.worker.create({
+      data: { appId: elsewhere.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+    });
+    expect((await items(ctx(contrib.id), { workerRef: foreign.id })).total).toBe(0);
+  });
+});
+
 describe('updateTeamCollections — explicit convergence (hadron-cli#401)', () => {
   it('is idempotent — a matching declaration reports changed:false', async () => {
     await record(ctx(contrib.id));

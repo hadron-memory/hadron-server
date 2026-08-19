@@ -38,6 +38,10 @@ import type { InputJsonValue } from '../../../generated/prisma/runtime/library.j
 import { generateId } from '../../../lib/id.js';
 import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { hasSchemePrefix } from '../../../lib/urn.js';
+import { resolveWorkerIdByNameGated } from './resolvers.worker.js';
 import { enforceNodeSchemaOnWrite } from '../../../lib/enforceNodeSchema.js';
 import type { MemorySchema, MemorySchemaObjectType } from '../../../lib/memorySchema.js';
 import {
@@ -767,6 +771,7 @@ export const teamWorkQueries = {
       appRef,
       ref,
       sessionRef,
+      workerRef,
       tool,
       kind,
       limit,
@@ -775,6 +780,7 @@ export const teamWorkQueries = {
       appRef: string;
       ref?: string | null;
       sessionRef?: string | null;
+      workerRef?: string | null;
       tool?: string | null;
       kind?: string | null;
       limit?: number | null;
@@ -821,6 +827,51 @@ export const teamWorkQueries = {
           : { OR: candidates.map((c) => propEq('ref', c)) };
     }
 
+    // #1035: filter by WORKER — "what has this worker done", which otherwise
+    // needs an N+1 over `sessions(workerRef:)` plus a client-side merge that
+    // cannot reproduce this operation's `total` or a stable offset.
+    //
+    // Resolution accepts the same three forms as `workerRef` everywhere else
+    // (id, `hrn:worker:…` URN, or NAME within this App), told apart by SHAPE
+    // rather than by trying each in turn — a typo'd URN must not silently
+    // search the roster. Scoped to THIS App: a name is unique only within one,
+    // and an id or URN naming another App's worker is a caller mistake that
+    // should return nothing rather than quietly widen the read.
+    //
+    // A RETIRED worker still resolves. Retirement ends the casting, not the
+    // history, and a worker page for a retired worker is a legitimate read —
+    // the same posture `Session.worker` and `resolveUrn` already take. So this
+    // deliberately does NOT reuse the bind-time resolution, which refuses
+    // WORKER_RETIRED.
+    //
+    // An unresolvable ref yields an EMPTY page rather than an error, matching
+    // the `ref` filter's posture above: a read filter that names nothing is a
+    // filter that matches nothing, and erroring would make this surface an
+    // existence oracle for another App's roster (cor:agt:020:08).
+    let workerIdFilter: string | undefined;
+    if (workerRef != null && workerRef.trim() !== '') {
+      const trimmed = workerRef.trim();
+      let resolved: string | null = null;
+      if (isId(trimmed) || hasSchemePrefix(trimmed)) {
+        try {
+          ({ id: resolved } = await resolveWorkerRefId(ctx.db, trimmed));
+        } catch {
+          resolved = null;
+        }
+      } else {
+        resolved = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
+      }
+      // No same-App re-check on the resolved id, deliberately: the query is
+      // already confined to THIS App's worklog root (`memoryId: root.memoryId`
+      // below), so another App's worker id matches nothing here by
+      // construction. A confinement check would be a guard that cannot fail —
+      // removing it was proven by mutation, which is the point of running the
+      // mutation on your own additions too. The NAME path is App-scoped
+      // separately, because a name is only unique within one.
+      if (!resolved) return { items: [], total: 0 };
+      workerIdFilter = resolved;
+    }
+
     const where = {
       deletedAt: null,
       objectType: WORKLOG_OBJECT_TYPE,
@@ -828,6 +879,10 @@ export const teamWorkQueries = {
       AND: [
         ...(refClause !== undefined ? [refClause] : []),
         ...(sessionRef != null && sessionRef !== '' ? [propEq('sessionId', sessionRef)] : []),
+        // Records from a session that was never worker-bound carry a null
+        // workerId and simply do not match — stated so the omission does not
+        // read as a bug.
+        ...(workerIdFilter !== undefined ? [propEq('workerId', workerIdFilter)] : []),
         ...(toolFilter !== undefined ? [propEq('tool', toolFilter)] : []),
         ...(kind != null ? [propEq('kind', kind)] : []),
       ],

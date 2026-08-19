@@ -4864,6 +4864,20 @@ export const typeDefs = `#graphql
       appRef: ID!
       ref: String
       sessionRef: ID
+      """
+      #1035 — everything ONE worker has done, filtered server-side so the page
+      envelope stays correct. Without it a client must fan out over
+      sessions(workerRef:) and merge, which cannot reproduce \`total\` or a
+      stable offset on the one surface whose whole point is completeness.
+
+      Accepts a worker id, its URN, or its NAME within this App. A RETIRED
+      worker still resolves — retirement ends the casting, not the history.
+      Records from a session that was never worker-bound carry no worker and
+      do not match. A ref that names nothing readable in this App yields an
+      EMPTY page rather than an error, so this is never an existence oracle
+      for another App's roster.
+      """
+      workerRef: ID
       tool: String
       kind: String
       limit: Int

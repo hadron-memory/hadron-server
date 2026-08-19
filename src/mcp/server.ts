@@ -6093,17 +6093,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_work_items',
-    'Read the team App\'s worklog (#947) — the provenance query: which sessions produced this PR/artifact? Newest first. Pass ref in ANY accepted spelling (github URL, owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) — it is normalized before matching. Filter further by session, tool, or kind. Each item carries the sessionId; read the session for its transcript path.',
+    'Read the team App\'s worklog (#947) — the provenance query. Two directions: which sessions produced this PR/artifact (pass ref, in ANY accepted spelling — github URL, owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo — normalized before matching), and what has one WORKER done (pass worker, by name, id or URN — #1035; a retired worker still resolves, because retirement ends the casting, not the history). Newest first. Filter further by session, tool, or kind, and combine filters freely. Each item carries the sessionId; read the session for its transcript path.',
     {
       ref: z.string().optional().describe('The artifact to look up, in any accepted spelling (e.g. a PR URL or owner/repo#371).'),
       session: z.string().optional().describe('Filter to records of this session id.'),
+      worker: z.string().optional().describe('Filter to ONE worker\'s records — its name ("Iris"), id, or URN. Everything that worker has done, across all of their sessions. A retired worker still resolves.'),
       tool: z.string().optional().describe('Filter by tool (e.g. "github").'),
       kind: z.string().optional().describe('Filter by kind: pr | issue | commit | branch | repo.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
-    async ({ ref, session, tool, kind, limit, offset, app }) => {
+    async ({ ref, session, worker, tool, kind, limit, offset, app }) => {
       let appRef = app;
       if (!appRef) {
         // #1005: the optional session filter doubles as an App-resolution hint.
@@ -6122,6 +6123,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             appRef,
             ref: ref ?? null,
             sessionRef: session ?? null,
+            workerRef: worker ?? null,
             tool: tool ?? null,
             kind: kind ?? null,
             limit: limit ?? null,
