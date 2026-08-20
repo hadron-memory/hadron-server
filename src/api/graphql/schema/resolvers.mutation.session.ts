@@ -401,6 +401,9 @@ export const sessionMutations = {
       // #1029 — the worker's previous stint, derived below when the caller
       // supplies no explicit chain link.
       let derivedPrevSessionId: string | undefined;
+      // #1050 — set when this bind should claim an unheld name; executed inside
+      // the session-creating transaction so the two commit together.
+      let claimWorkerId: string | undefined;
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
         // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
@@ -703,56 +706,20 @@ export const sessionMutations = {
         agentId = worker.agentId;
         workerId = worker.id;
         // #1050 — an UNHELD name is held by the person who binds it. That is
-        // the claim path: casting holds what you cast, and binding holds what
-        // nobody holds — so a released name, or one cast by an App key, finds
-        // its holder without a separate step. Best-effort and guarded on the
-        // column still being null, so two simultaneous binds cannot each
-        // believe they took it; the loser simply proceeds unheld-by-them,
-        // which the gate above then treats as somebody else's name on their
-        // NEXT bind rather than mid-session.
-        if (!worker.heldByUserId && ctx.userId) {
-          const claimed = await ctx.db.worker.updateMany({
-            where: { id: worker.id, heldByUserId: null },
-            data: { heldByUserId: ctx.userId, heldAt: new Date() },
-          });
-          // LOSING the race must refuse, not proceed (PR #1052 review, Codex +
-          // Copilot P1). Both callers read `heldByUserId: null` and cleared the
-          // liveness check; the compare-and-set decides which of them actually
-          // took the name, and ignoring its result let the loser open a session
-          // as a name somebody else now holds — recreating the exact
-          // attribution problem the hold exists to prevent, in the one window
-          // where two people genuinely raced for it.
-          if (claimed.count === 0) {
-            const winner = await ctx.db.worker.findUnique({
-              where: { id: worker.id },
-              select: { heldByUserId: true },
-            });
-            if (winner?.heldByUserId && winner.heldByUserId !== ctx.userId) {
-              const holder = await ctx.db.user.findUnique({
-                where: { id: winner.heldByUserId },
-                select: { handle: true, githubUsername: true },
-              });
-              throw new GraphQLError(
-                `The name "${worker.name}" was claimed by ` +
-                  `${holder?.handle ?? holder?.githubUsername ?? winner.heldByUserId} ` +
-                  'a moment before this bind. Cast your own worker instead.',
-                {
-                  extensions: {
-                    code: 'WORKER_HELD',
-                    workerId: worker.id,
-                    heldBy: winner.heldByUserId,
-                  },
-                },
-              );
-            }
-          }
-        }
+        // the claim path: casting holds nothing, so a fresh roster, a released
+        // name, or one cast by an App key all find their holder here.
+        //
+        // DEFERRED into the session-creating transaction below rather than done
+        // here (PR #1052 review, Codex P2): as a separate write it committed
+        // before `session.create` ran, so a create that then failed — a retried
+        // duplicate id, an invalid relation — left the caller holding a name
+        // they never bound. Claim and bind are one act and now commit together.
+        claimWorkerId = worker.id;
         // #1029: wire the continuity chain. `prevSessionId` and
         // `parentSessionId` have been in the schema since the beginning and
-        // unused, so the chain primitive existed with nothing writing it —
-        // walking a worker's stints meant sorting sessions by time and hoping.
-        // An explicit input still wins: a caller stitching a sub-agent chain
-        // knows something this default does not.
+        // unused, so the chain primitive existed with nothing writing it. An
+        // explicit input still wins: a caller stitching a sub-agent chain knows
+        // something this default does not.
         //
         // Deliberately the most recent ENDED session, matching
         // Worker.continuity's definition of "previous" — with `force`, two
@@ -768,7 +735,44 @@ export const sessionMutations = {
         }
       }
 
-      return ctx.db.session.create({
+      return ctx.db.$transaction(async (tx) => {
+        if (claimWorkerId && ctx.userId) {
+          const claimed = await tx.worker.updateMany({
+            where: { id: claimWorkerId, heldByUserId: null },
+            data: { heldByUserId: ctx.userId, heldAt: new Date() },
+          });
+          // LOSING the race must refuse, not proceed. Both callers read
+          // `heldByUserId: null` and cleared the liveness check; the
+          // compare-and-set is what decides which of them took the name, and
+          // ignoring its result let the loser open a session as a name someone
+          // else now holds — recreating the attribution problem the hold exists
+          // to prevent, in the one window where two people genuinely raced.
+          if (claimed.count === 0) {
+            const winner = await tx.worker.findUnique({
+              where: { id: claimWorkerId },
+              select: { name: true, heldByUserId: true },
+            });
+            if (winner?.heldByUserId && winner.heldByUserId !== ctx.userId) {
+              const holder = await tx.user.findUnique({
+                where: { id: winner.heldByUserId },
+                select: { handle: true, githubUsername: true },
+              });
+              throw new GraphQLError(
+                `The name "${winner.name}" was claimed by ` +
+                  `${holder?.handle ?? holder?.githubUsername ?? winner.heldByUserId} ` +
+                  'a moment before this bind. Cast your own worker instead.',
+                {
+                  extensions: {
+                    code: 'WORKER_HELD',
+                    workerId: claimWorkerId,
+                    heldBy: winner.heldByUserId,
+                  },
+                },
+              );
+            }
+          }
+        }
+        return tx.session.create({
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
@@ -797,6 +801,7 @@ export const sessionMutations = {
           tool: input.tool,
         },
         include: SESSION_INCLUDE,
+        });
       });
     },
 

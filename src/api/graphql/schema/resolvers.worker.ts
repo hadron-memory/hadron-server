@@ -1496,6 +1496,33 @@ export const workerFieldResolvers = {
       _: unknown,
       ctx: Context,
     ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.promptOverride : null),
+    /**
+     * #1050 — the holder, behind the worker read gate and masked to null on
+     * deny (PR #1052 review, Codex P2).
+     *
+     * I first shipped these as ungated identity scalars, reasoning that the
+     * Worker read gate already requires App participation. It does not always:
+     * `Session.worker` reaches a Worker row through `sessionScopeFilter`, which
+     * admits any org member AND leaves a self-attributed session readable after
+     * its user has left the App — the #983 finding, which I cited in this same
+     * file while making the same mistake in the opposite direction. A former
+     * member could therefore read current staffing off a historical session.
+     *
+     * Who holds a name is working state, not identity: `name`, `role` and `urn`
+     * describe the casting, while the holder describes who is working as it
+     * right now.
+     */
+    heldByUserId: async (
+      worker: { appId: string; heldByUserId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.heldByUserId : null),
+    /** Working-state field — worker read gate, masked to null (see heldByUserId). */
+    heldAt: async (
+      worker: { appId: string; heldAt: Date | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.heldAt : null),
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     memoryId: async (
       worker: { appId: string; memoryId: string | null },

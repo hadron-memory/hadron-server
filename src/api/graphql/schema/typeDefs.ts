@@ -1959,12 +1959,14 @@ export const typeDefs = `#graphql
     is what separates the two meanings of \"taken\" — HELD is whose name it is,
     while a live session is only ever a question about your own worker.
 
-    Identity scalar, ungated like \`name\`: knowing a teammate holds a name is
-    the point, and the Worker read gate already requires participation in the
-    App.
+    WORKING-STATE field, behind the worker read gate and masked to null on
+    deny — like promptOverride and memoryId, and NOT like name/role/urn.
+    Session.worker reaches a Worker row through a wider gate that admits any
+    org member and survives a user leaving the App, so an ungated holder would
+    let a former member read current staffing off a historical session.
     """
     heldByUserId: ID
-    "When the current hold was taken. Null exactly when heldByUserId is."
+    "When the current hold was taken. Null exactly when heldByUserId is — and likewise masked on deny."
     heldAt: DateTime
     "The role-agent behind the casting."
     agent: Agent

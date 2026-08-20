@@ -291,6 +291,17 @@ export async function mergeUsers(
     // A share can become self-directed when either its owner or grantee moves.
     await tx.$executeRaw`DELETE FROM memory_shares WHERE grantee_id = ${targetUserId} AND grantor_id = ${targetUserId}`;
 
+    // #1050 — worker HOLDS move to the surviving account. Unlike most rows
+    // here there is no uniqueness to collide on (one user may hold many names),
+    // so this is a plain retarget with no pre-delete pass.
+    //
+    // It has to be explicit for the same reason the deletion path does: the
+    // source User is SOFT-deleted, so `held_by_user_id`'s ON DELETE SET NULL
+    // never fires. Left out, the surviving account would be refused
+    // WORKER_HELD on names held by what is, by construction, the same person
+    // (PR #1052 review, Codex P1).
+    await tx.$executeRaw`UPDATE workers SET held_by_user_id = ${targetUserId} WHERE held_by_user_id = ${sourceUserId}`;
+
     await tx.$executeRaw`DELETE FROM pending_setups s USING pending_setups t
       WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId}`;
     await tx.$executeRaw`UPDATE pending_setups SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
