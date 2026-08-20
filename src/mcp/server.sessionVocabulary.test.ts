@@ -192,6 +192,15 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     expect(d.toLowerCase()).toContain('worker session');
     expect(d.toLowerCase()).toContain('chat session');
     expect(statesIndependence(d)).toBe(true);
+    // The result set includes UNBOUND sessions, and this description must not
+    // read as though every row is a worker session — an LLM recovering context
+    // would otherwise treat a general session as a binding it does not have.
+    //
+    // Third surface in this one tool to need the same fact: the footer's naming
+    // of the id, the footer's team-chat advice, and now the description itself
+    // (PR #1056 review — Codex found each separately, over three rounds). One
+    // fact, three places, so it is pinned in each rather than assumed to carry.
+    expect(d.toLowerCase()).toMatch(/if it is bound|not every row|working as: nobody/);
   });
 
   it('the reserved term is NOT applied to the agent chat entity (@Gil seq 73/78)', () => {
