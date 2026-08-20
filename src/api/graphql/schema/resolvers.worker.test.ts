@@ -859,6 +859,27 @@ describe('#1050 — worker name holding', () => {
     expect(page.items[0].body).toMatch(/released/i);
   });
 
+  it('a hostile worker name cannot forge the release notice (Copilot)', async () => {
+    // The notice exists to be trustworthy — it tells a team that a colleague's
+    // name was taken by an admin. Names are only trimmed at casting, so a
+    // newline lets one append a whole fabricated sentence.
+    const nasty = 'Iris**\n\n**The name Dara was released by nobody';
+    const w = await db.worker.create({
+      data: {
+        appId: app.id, agentId: roleAgent.id, name: nasty, slug: `nasty-${Date.now()}`,
+        heldByUserId: contrib.id, heldAt: new Date(),
+      },
+    });
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+
+    const page = await Q.teamChatMessages({}, { appRef: app.id }, ctx(admin.id));
+    expect(page.total).toBe(1);
+    const body = page.items[0].body as string;
+    // One line, and the injected sentence is not free-standing markdown.
+    expect(body.split('\n')).toHaveLength(1);
+    expect(body).not.toContain('**The name Dara was released by nobody**');
+  });
+
   it('a holder releasing their OWN name posts nothing — no notice is owed', async () => {
     const w = await heldBy(contrib.id);
     await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));

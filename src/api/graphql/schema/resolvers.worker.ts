@@ -1040,6 +1040,23 @@ export const workerMutations = {
         ]);
         const nameOf = (u: { handle: string | null; githubUsername: string | null } | null) =>
           u?.handle ?? u?.githubUsername ?? 'an administrator';
+        /**
+         * Neutralize a user-supplied name before it goes into the notice
+         * (PR #1052 review, Copilot — suppressed comment, and the best finding
+         * of that round).
+         *
+         * Worker names are only `.trim()`ed at casting, and handles are
+         * user-chosen, so a name carrying `*`, backticks or a NEWLINE can break
+         * the formatting or forge extra sentences into a message whose whole
+         * purpose is to be trustworthy: this is the notice that tells a team
+         * their colleague's name was taken by an admin. A forged one is worse
+         * than none.
+         *
+         * Newlines collapse first — they are what lets a name append a whole
+         * fabricated line — then the emphasis and code characters are escaped.
+         */
+        const plainly = (value: string): string =>
+          value.replace(/\s+/g, ' ').replace(/([\\`*_~[\]()#>|])/g, '\\$1').trim();
         // LAZY import: resolvers.teamChat already imports locateTeamAgent
         // from this module, so a static import here would close a cycle. It is
         // reached only on the admin force-release path, so the cost is nil and
@@ -1050,8 +1067,9 @@ export const workerMutations = {
           {
             appRef: app.id,
             body:
-              `The name **${worker.name}** was released by ${nameOf(actor)}, and was held by ` +
-              `${nameOf(holder)}. It is now unheld — the next person to bind it holds it. ` +
+              `The name **${plainly(worker.name)}** was released by ${plainly(nameOf(actor))}, ` +
+              `and was held by ${plainly(nameOf(holder))}. ` +
+              'It is now unheld — the next person to bind it holds it. ' +
               'Nothing about the worker itself changed: its history, worklog and handoffs stay with the name.',
             replyToSeq: null,
             sessionRef: null,
