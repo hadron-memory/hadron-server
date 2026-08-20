@@ -5570,9 +5570,9 @@ export const typeDefs = `#graphql
 
     The binding is held server-side and is independent of the caller's CHAT
     SESSION (the human's Desktop window, Claude Code session or IDE chat).
-    **Ending one does not end the other** (#1034): a chat session that closes
-    leaves this session open and its worker taken until endSession or the #930
-    reaper. A client that ties its lifetime to a conversation must call
+    **Ending your chat session does not end a worker session** (#1034): a chat
+    session that closes leaves this session open and its worker taken until
+    endSession or the #930 reaper. A client that ties its lifetime to a conversation must call
     endSession itself; nothing about closing a window reaches this server.
     """
     startSession(input: SessionInput!): Session!

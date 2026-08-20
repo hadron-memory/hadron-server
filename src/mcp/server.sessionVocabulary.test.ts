@@ -69,28 +69,35 @@ const flat = (s: string) => s.replace(/\s+/g, ' ').toLowerCase();
  *  4. Requiring subject/negation/action/object IN ORDER still accepted the
  *     REVERSED claim, "a chat session does not end when a worker session ends"
  *     — every token present, correct order, opposite direction (Codex).
+ *  5. A second arm accepting the symmetric phrasing "ending one does not end
+ *     the other" was satisfied by "a session and its hold are independent;
+ *     ending one does not end the other" — a sentence about two entirely
+ *     different things (Codex).
  *
- * Four failures, one cause, and the fourth sharpens it: each version asserted
- * that some tokens were NEAR each other, never that they were ABOUT each other.
- * A claim has a subject, a negation, an action and an object — and (4) shows
- * that even all four in order is not enough, because it does not fix WHICH noun
- * is the thing being ended.
+ * Five failures, one cause, and (5) is the one that ended the arms race.
+ * "One" and "the other" are PRONOUNS: their antecedent lives in a neighbouring
+ * clause, and no regex can verify an antecedent. That arm was unfixable in
+ * principle, not merely underspecified — so it was removed, and the four
+ * descriptions relying on it were reworded to name both kinds outright.
  *
- * So the chat session must be marked as the thing that ENDS: either "ending /
- * closing / archiving ... chat session" or "chat session ending". That is the
- * load-bearing direction — close your window and the worker stays held — and
- * the reverse reading, though also true, is not what a driver has to know.
+ * Which leaves ONE arm, asserting the whole claim with no anaphora: the chat
+ * session marked as the thing that ENDS ("ending / closing / archiving ... chat
+ * session", or "chat session ending"), then the negation, then `end`, then the
+ * worker session. Direction is load-bearing — close your window and the worker
+ * stays held — and the reverse reading, though also true, is not what a driver
+ * has to know.
  *
- * The descriptions were reworded to state the object outright rather than elide
- * it, which is what made a well-formed assertion possible at all: the regex was
- * hard to write because the prose was elliptical.
+ * The through-line across all five: every version matched a larger SUBSET of
+ * the sentence while still not matching its MEANING. What finally worked was
+ * fixing the prose so the claim was stated outright, rather than growing the
+ * regex to chase an elliptical one. A hard-to-write assertion is usually
+ * evidence about the text, not about the assertion.
  *
  * Re-wording stays free: add an arm deliberately, and add its counterexample
  * below. What must not happen is an arm satisfiable by a sentence making a
- * different point.
+ * different point — or one that depends on a pronoun.
  */
 const statesIndependence = (s: string) =>
-  /ending one (does not end|never ends) the other/.test(flat(s)) ||
   /(?:(?:ending|closing|archiving)[^.!?]{0,20}?chat session|chat session ending)[^.!?]{0,20}?(?:does not|never)[^.!?]{0,20}?\bends?\b[^.!?]{0,30}?worker session/.test(
     flat(s),
   );
@@ -108,8 +115,11 @@ describe('the statesIndependence helper itself', () => {
   const ACCEPTS: Array<[string, string]> = [
     ['the object stated outright', 'Ending your CHAT SESSION does not end a worker session (#1034).'],
     ['the subject as a gerund', "A client's chat session ending **does not end a worker session**, and never reaches this server."],
-    ['the symmetric form', 'Two different things are called a session and ENDING ONE DOES NOT END THE OTHER.'],
-    ['the symmetric form, "never" voice', 'the two are independent and ending one never ends the other (#1034)'],
+    ['the "never" voice', 'the two are independent, and ending a chat session never ends a worker session (#1034)'],
+    [
+      'closing rather than ending',
+      'Closing your chat session does not end a worker session — the binding stays open.',
+    ],
   ];
   const REJECTS: Array<[string, string]> = [
     [
@@ -127,6 +137,10 @@ describe('the statesIndependence helper itself', () => {
     [
       'the REVERSED direction — every token, right order, opposite meaning (Codex, round 4)',
       'A chat session does not end when a worker session ends.',
+    ],
+    [
+      'the symmetric form with an unrelated antecedent — pronouns cannot be checked (Codex, round 5)',
+      'A session and its hold are independent; ending one does not end the other. worker session, chat session.',
     ],
   ];
 
