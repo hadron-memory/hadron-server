@@ -3172,7 +3172,15 @@ model Worker {
   /// `createdBy`. The next bind of an unheld worker holds it.
   heldByUserId   String?   @map("held_by_user_id")
   /// When the current hold was taken — provenance for a release decision, and
-  /// what an admin force-release reports. Null exactly when `heldByUserId` is.
+  /// what an admin force-release reports.
+  ///
+  /// Both platform write paths (`releaseWorker`, `deleteUserAccount`) clear
+  /// this together with `heldByUserId`, but the FK's ON DELETE SET NULL clears
+  /// only the id, so a RAW hard delete of a user can leave a vestigial
+  /// timestamp here. `Worker.heldAt` therefore masks it to null whenever there
+  /// is no holder, so the API invariant — heldAt is set exactly when
+  /// heldByUserId is — holds because it is enforced rather than remembered. A
+  /// CHECK cannot do that job: it would make the FK's own SET NULL violate it.
   heldAt         DateTime? @map("held_at")
   /// Retirement instant — the name stays reserved forever (cor:agt:020:02).
   /// A retired worker stops authoring (team chat's worker-App pin checks

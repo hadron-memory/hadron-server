@@ -955,6 +955,17 @@ describe('#1050 — worker name holding', () => {
     expect(await W.heldAt(row, {}, ctx(outsider.id))).toBeNull();
   });
 
+  it('heldAt reads null when there is no holder, even if the column lags', async () => {
+    // The FK is ON DELETE SET NULL and Postgres clears only the id column, so
+    // a raw hard delete of a user leaves a vestigial timestamp. The invariant
+    // holds because the field enforces it.
+    const w = await heldBy(contrib.id);
+    await db.worker.update({ where: { id: w.id }, data: { heldByUserId: null } });
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldAt).not.toBeNull(); // the column still carries it
+    expect(await W.heldAt(row, {}, ctx(contrib.id))).toBeNull();
+  });
+
   it('releaseWorker is not a read surface for workers you may not see', async () => {
     // The idempotent "already unheld" return sat ABOVE every access check, so a
     // caller holding an id or URN could confirm a foreign worker exists and

@@ -1517,12 +1517,30 @@ export const workerFieldResolvers = {
       _: unknown,
       ctx: Context,
     ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.heldByUserId : null),
-    /** Working-state field — worker read gate, masked to null (see heldByUserId). */
+    /**
+     * Working-state field — worker read gate, masked to null (see heldByUserId).
+     *
+     * Also null whenever there is no holder, which the COLUMN alone does not
+     * guarantee (PR #1052 review, Codex P2): the FK is ON DELETE SET NULL and
+     * Postgres clears only `held_by_user_id`, so a hard-deleted user leaves
+     * `held_at` behind. Both write paths in the platform (`releaseWorker`,
+     * `deleteUserAccount`) clear the pair together, so this covers a raw
+     * database delete rather than any operation — but the API invariant
+     * "`heldAt` is null exactly when `heldByUserId` is" should hold because it
+     * is enforced, not because every path remembered.
+     *
+     * Enforced HERE rather than as a CHECK constraint on purpose: a CHECK would
+     * make the FK's own SET NULL violate it, turning a user deletion into an
+     * error.
+     */
     heldAt: async (
-      worker: { appId: string; heldAt: Date | null },
+      worker: { appId: string; heldAt: Date | null; heldByUserId: string | null },
       _: unknown,
       ctx: Context,
-    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.heldAt : null),
+    ) =>
+      worker.heldByUserId && (await maySeeWorkerInternals(ctx, worker.appId))
+        ? worker.heldAt
+        : null,
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     memoryId: async (
       worker: { appId: string; memoryId: string | null },
