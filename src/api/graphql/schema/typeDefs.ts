@@ -5590,14 +5590,17 @@ export const typeDefs = `#graphql
     """
     End a session, and — for a worker-bound one — write its closing handoff
     (#1029). This is the CLIENT operation that ends a worker session — the #930
-    reaper ends one too, without a client — while a client's chat session ending
-    does **not**, and never reaches this server (#1034).
+    reaper ends one too, without a client. A client's chat session ending **does
+    not end a worker session**, and never reaches this server (#1034).
 
     It ends the SESSION, not any HOLD. Where a person bound the worker the name
     stays theirs until explicitly released (#1050,
     [\`cor:agt:020:09\`](hrn:node:hadronmemory.com:specs:cor:agt:020:09)), so
-    only that holder can bind it again; a pure App-key caller takes no hold, so
-    ending its session leaves the worker free for anyone eligible.
+    only that holder can bind it again. A pure App-key **bind takes no hold** —
+    which is a fact about the bind, not a promise about the worker's state when
+    this returns: an eligible user may have forced a binding meanwhile and taken
+    the name, and ending the App-key session leaves that hold and that session
+    untouched.
 
     Gate (#931): platform admin, the session's App, or the attributed user
     (not via impersonation).

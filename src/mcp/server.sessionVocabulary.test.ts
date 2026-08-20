@@ -52,20 +52,28 @@ const flat = (s: string) => s.replace(/\s+/g, ' ').toLowerCase();
  * Does this text state the INDEPENDENCE — that ending a chat session does not
  * end a worker session — rather than merely mentioning both nouns?
  *
- * The negation has to be tied to the chat session to mean anything. A bare
- * `/does not|never/` is satisfied by any unrelated negative sentence that
- * happens to share the string: `hadron_end_session`'s description contains "a
- * restatement drifts while a pointer does not", which passed this assertion
- * while proving nothing (PR #1056 review, Copilot).
+ * Third version of this helper, and the two it replaces are why it is written
+ * as an explicit whitelist rather than a proximity match:
  *
- * Both accepted phrasings say the same thing, and neither is privileged — the
- * fact is pinned, the wording stays free.
+ *  1. A bare `/does not|never/` was satisfied by an unrelated negative
+ *     elsewhere in the same string — `hadron_end_session` contains "a
+ *     restatement drifts while a pointer does not" (Copilot).
+ *  2. Tying the negation to "chat session" by proximity was satisfied by "chat
+ *     session ending ... NEVER REACHES THIS SERVER" — a true sentence that is
+ *     not this claim, so deleting the real clause still passed (Codex).
+ *
+ * The lesson both share: a proximity match asserts that two tokens are NEAR
+ * each other, never that they are ABOUT each other. So each arm below names a
+ * complete claim, and the descriptions were reworded to state the object
+ * outright rather than elide it ("does not end a worker session", not "does
+ * not"). Pinning the fact was easier once the prose actually said it.
+ *
+ * Re-wording stays free: add an arm deliberately. What must not happen is an
+ * arm that can be satisfied by a sentence making a different point.
  */
 const statesIndependence = (s: string) =>
   /ending one does not end the other/.test(flat(s)) ||
-  /chat session[^.!?]{0,80}?(does not|never)|(does not|never)[^.!?]{0,80}?end (a |the |its |your )?worker session/.test(
-    flat(s),
-  );
+  /(does not|never) end (a |the |its |your )?worker session/.test(flat(s));
 
 describe('#1034 — MCP tool descriptions distinguish a worker session from a chat session', () => {
   it('hadron_start_session says both terms exist and that ending one does not end the other', () => {

@@ -374,15 +374,25 @@ describe('#1016 — hadron_whoami recovers the session id', () => {
   });
 
   it('flags a session bound to NO worker — the silent-misattribution shape', async () => {
-    // This is the state in which hadron_team_chat_post quietly posts as the
-    // human instead of the worker, so it must be visible rather than inferred
-    // from an absent line.
+    // This is the state a driver is in when they BELIEVE they are bound and are
+    // not, so it must be visible rather than inferred from an absent line.
+    // Two distinct failures live here and the row has to serve both: OMITTING
+    // the session on hadron_team_chat_post posts as the human, silently;
+    // PASSING this unbound id refuses SESSION_NOT_WORKER_BOUND. Neither
+    // produces a worker-attributed message.
     const session = await db.session.create({
       data: { id: generateId(), appId: app.id, userId: user.id },
     });
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_whoami', {});
     expect(out).toContain(session.id);
     expect(out).toMatch(/NOT bound to a worker/);
+    // #1034 (PR #1056 review, Codex): the closing guidance must not tell the
+    // caller to post THIS row to team chat. The list deliberately includes
+    // unbound sessions, so unconditional "pass the session id to
+    // hadron_team_chat_post" advice contradicts the line directly above it and
+    // promises a call that is refused. Scoped advice, or none.
+    expect(out).toMatch(/bound row|SESSION_NOT_WORKER_BOUND/i);
+    expect(out).not.toMatch(/^\s*Pass the session id to hadron_team_chat_post/m);
   });
 
   it('excludes ended sessions by default, and includes them on request', async () => {

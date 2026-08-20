@@ -5319,7 +5319,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_end_session',
-    'End a session, and for a worker-bound one write its closing HANDOFF (#1029) — the record the next stint of this worker inherits automatically at bind. This is the CLIENT operation that ends a WORKER SESSION; ending your CHAT SESSION does not (#1034), and the server\'s reaper can also end one without you. It ends the SESSION, not any HOLD: if a person bound the worker, the name stays theirs until released (#1050) and only they can bind it again — but an App-key caller is not a person and holds nothing, so there the worker is left free for anyone eligible. Archiving the Desktop window, closing the Claude Code session, or losing the conversation any other way leaves this binding open server-side and the worker taken until you call this tool or the reaper claims it. Call it deliberately when you stop working, not when the window closes — by then it is too late to write a handoff, because the context that would compose one has gone. Pass `handoff` whenever you are stopping deliberately: what landed, what is open, what is blocked, what the next driver should not repeat. Route rather than restate — point at the live artifacts instead of summarizing them, since a restatement drifts while a pointer does not. The server owns where it goes; you supply the prose. A failed handoff write REFUSES the end and leaves the session open, so retrying is safe; ending with no handoff is a deliberate choice, and the next driver is told the stint ended without one.',
+    'End a session, and for a worker-bound one write its closing HANDOFF (#1029) — the record the next stint of this worker inherits automatically at bind. This is the CLIENT operation that ends a WORKER SESSION, and the server\'s reaper can end one without you. Ending your CHAT SESSION does not end a worker session (#1034). It ends the SESSION, not any HOLD: if a person bound the worker, the name stays theirs until released (#1050) and only they can bind it again. An App-key BIND takes no hold — a fact about the bind, not a promise about the worker afterwards, since an eligible user may have forced a binding meanwhile and taken the name. Archiving the Desktop window, closing the Claude Code session, or losing the conversation any other way leaves this binding open server-side and the worker taken until you call this tool or the reaper claims it. Call it deliberately when you stop working, not when the window closes — by then it is too late to write a handoff, because the context that would compose one has gone. Pass `handoff` whenever you are stopping deliberately: what landed, what is open, what is blocked, what the next driver should not repeat. Route rather than restate — point at the live artifacts instead of summarizing them, since a restatement drifts while a pointer does not. The server owns where it goes; you supply the prose. A failed handoff write REFUSES the end and leaves the session open, so retrying is safe; ending with no handoff is a deliberate choice, and the next driver is told the stint ended without one.',
     {
       id: z.string().describe('Id of the session to end — a Hadron session id (the worker session id, when one is bound), never anything about your chat session'),
       summary: z.string().optional().describe('Summary of what was accomplished'),
@@ -5567,11 +5567,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // every id a worker session id would contradict the line above it and
           // invite a reader to infer a binding that does not exist. The
           // worker-session fact below is scoped to the rows it is true of.
-          'Pass the session id to hadron_team_chat_post (to post AS the worker rather than as yourself), ' +
-          'hadron_record_work, and hadron_end_session. Re-fetch a worker\'s boot briefing with hadron_get_worker. ' +
-          'Any row above that IS bound to a worker is a worker session, and it stays open — with its worker ' +
-          'taken — until hadron_end_session or the reaper, no matter what happened to the chat session that ' +
-          'started it (#1034).',
+          // #1034: every clause here is scoped to the rows it is TRUE of. This
+          // list deliberately includes unbound sessions, and team chat REFUSES
+          // one (SESSION_NOT_WORKER_BOUND) — so unconditional "post as the
+          // worker" advice contradicts the "working as: nobody" row directly
+          // above it, and promises a call that cannot succeed.
+          'Pass a BOUND row\'s session id to hadron_team_chat_post to post AS that worker — an unbound one is ' +
+          'refused (SESSION_NOT_WORKER_BOUND), not silently posted as you. Any session id works for ' +
+          'hadron_record_work and hadron_end_session. Re-fetch a worker\'s boot briefing with hadron_get_worker. ' +
+          'A bound row is a worker session, and it stays open — with its worker taken — until ' +
+          'hadron_end_session or the reaper, no matter what happened to the chat session that started it.',
       );
     },
   );
