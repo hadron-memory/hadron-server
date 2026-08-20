@@ -201,6 +201,13 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     // (PR #1056 review — Codex found each separately, over three rounds). One
     // fact, three places, so it is pinned in each rather than assumed to carry.
     expect(d.toLowerCase()).toMatch(/if it is bound|not every row|working as: nobody/);
+    // BOTH properties, because they drifted apart once: the description was
+    // corrected for boundness in one round and silently lost the OPEN half that
+    // the footer already had, so a row could be bound, [ENDED] via
+    // includeEnded, and recommended anyway — refused SESSION_ENDED. The two
+    // surfaces state one rule and are asserted against the same pair.
+    expect(d.toLowerCase()).toMatch(/\bopen\b/);
+    expect(d.toLowerCase()).toMatch(/session_ended|\[ended\]/);
   });
 
   it('the reserved term is NOT applied to the agent chat entity (@Gil seq 73/78)', () => {
