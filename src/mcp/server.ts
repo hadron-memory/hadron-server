@@ -5418,7 +5418,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_whoami',
-    'Answer "what am I driving right now?" — your own OPEN sessions, with the worker each is bound to, its App, and when it started (#1016). On the MCP surface the session id is the only handle that makes work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The loss is worst where it is quietest — hadron_team_chat_post takes the session as an OPTIONAL argument, so omitting it posts as the human instead of the worker, silently, with no error and the wrong authorship recorded. hadron_record_work and hadron_end_session at least fail loudly. Call this whenever you are unsure of your session id, or after any context loss, and pass the id it returns back to those tools. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    'Answer "what am I driving right now?" — your own OPEN sessions, with the worker each is bound to, its App, and when it started (#1016). On the MCP surface the session id is the only handle that makes work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The loss is worst where it is quietest — hadron_team_chat_post takes the session as an OPTIONAL argument, so omitting it posts as the human instead of the worker, silently, with no error and the wrong authorship recorded. hadron_record_work does NOT refuse an ended session either — late attribution is deliberate (cor:agt:020:05), so a clean receipt is not evidence your binding is alive; it now SAYS when the session has ended, but the loud refusal comes only from hadron_end_session and the team chat. Call this whenever you are unsure of your session id, or after any context loss, and pass the id it returns back to those tools. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
     {
       limit: z.number().int().optional().describe('Max sessions to return (default 10, cap 50). Newest first.'),
       includeEnded: z.boolean().optional().describe('Also list recently ENDED sessions — useful to confirm you did end one, or to find the session a work record should have been attributed to.'),
@@ -6204,8 +6204,48 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             organizationId: auth.organizationId ?? undefined,
           },
         );
+        // #1053 — SAY when the session has already ended.
+        //
+        // Recording against an ended session is deliberate and durable law
+        // (cor:agt:020:05: "an ended session may be recorded against — late
+        // attribution is the worklog's point: a merge lands after the session
+        // ends"). The chat refuses the same session because speech needs a live
+        // speaker; the worklog is record-keeping. Both are right.
+        //
+        // What was wrong is that this tool said NOTHING. A worker whose binding
+        // had been reaped recorded two milestones, got two clean receipts, and
+        // would have finished the stint believing it was still bound — the only
+        // thing that revealed the loss was a chat post it happened to make
+        // afterwards. Worse, the guidance in every briefing named THIS tool as
+        // one that "at least fails loudly", so a successful receipt read as
+        // positive evidence the binding was alive.
+        //
+        // So the fix is the signal, not a refusal: keep the record, and put the
+        // state in the reader's path at the one moment they would otherwise be
+        // misled. Best-effort — a receipt must never turn a committed record
+        // into an error.
+        let endedNote = '';
+        try {
+          const s = await db.session.findUnique({
+            where: { id: item.sessionId },
+            select: { endedAt: true, autoExpiredAt: true },
+          });
+          if (s?.endedAt) {
+            endedNote =
+              `\n\n⚠ This session ALREADY ENDED at ${s.endedAt.toISOString()}` +
+              (s.autoExpiredAt
+                ? ' — it was auto-expired by the server, so nobody closed it deliberately.'
+                : ' — it was closed deliberately.') +
+              ' The record is kept (late attribution is what the worklog is for), but you are NOT bound' +
+              ' any more: further work will not be attributed to you until you rebind.' +
+              ' hadron_whoami lists what you are actually driving.';
+          }
+        } catch {
+          // Swallowed: the record is committed and the receipt is decoration.
+        }
         return textResult(
-          `Recorded: ${item.kind} ${item.action} ${item.ref} — session ${item.sessionId} (${item.workerName}) at ${item.at.toISOString()}.`,
+          `Recorded: ${item.kind} ${item.action} ${item.ref} — session ${item.sessionId} (${item.workerName}) at ${item.at.toISOString()}.` +
+            endedNote,
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'work record failed'}`);

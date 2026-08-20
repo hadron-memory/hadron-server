@@ -858,3 +858,58 @@ describe('#1029 — the handoff arrives at bind, and recovery re-fetches it', ()
     expect((await db.session.findUniqueOrThrow({ where: { id: bare } })).endedAt).toBeNull();
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// #1053 — recording against an ended session says so
+// ---------------------------------------------------------------------------
+
+describe('#1053 — hadron_record_work names an ended session', () => {
+  async function boundSession(): Promise<string> {
+    await worker('Iris', 'iris');
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint',
+    });
+    return out.match(/Session started: (\S+)/)![1];
+  }
+
+  it('a live session records with a clean receipt and no warning', async () => {
+    const sid = await boundSession();
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_record_work', {
+      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#1', action: 'opened',
+    });
+    expect(out).toContain('Recorded');
+    expect(out).not.toContain('ALREADY ENDED');
+  });
+
+  it('a REAPED session still records — and the receipt says the binding is gone', async () => {
+    // The observed incident: two milestones recorded twelve minutes after the
+    // reap, both with clean receipts, and the worker would have finished the
+    // stint believing it was still bound.
+    const sid = await boundSession();
+    const now = new Date();
+    await db.session.update({ where: { id: sid }, data: { endedAt: now, autoExpiredAt: now } });
+
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_record_work', {
+      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#2', action: 'merged',
+    });
+    // The record is KEPT — late attribution is the worklog's point
+    // (cor:agt:020:05), so refusing here would invalidate durable law.
+    expect(out).toContain('Recorded');
+    expect(out).toContain('ALREADY ENDED');
+    expect(out).toContain('auto-expired by the server');
+    expect(out).toContain('hadron_whoami');
+  });
+
+  it('distinguishes a deliberate close from a reap — they mean different things', async () => {
+    const sid = await boundSession();
+    await createTestableMcpServer(hybridAuth()).callToolText('hadron_end_session', { id: sid });
+
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_record_work', {
+      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#3', action: 'merged',
+    });
+    expect(out).toContain('Recorded');
+    expect(out).toContain('closed deliberately');
+    expect(out).not.toContain('auto-expired');
+  });
+});
