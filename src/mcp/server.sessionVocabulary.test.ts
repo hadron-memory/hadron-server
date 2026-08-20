@@ -62,18 +62,70 @@ const flat = (s: string) => s.replace(/\s+/g, ' ').toLowerCase();
  *     session ending ... NEVER REACHES THIS SERVER" — a true sentence that is
  *     not this claim, so deleting the real clause still passed (Codex).
  *
- * The lesson both share: a proximity match asserts that two tokens are NEAR
- * each other, never that they are ABOUT each other. So each arm below names a
- * complete claim, and the descriptions were reworded to state the object
- * outright rather than elide it ("does not end a worker session", not "does
- * not"). Pinning the fact was easier once the prose actually said it.
+ *  3. Requiring only the negated OBJECT — `/(does not|never) end a worker
+ *     session/` — was satisfied by "the reaper does not end a worker session",
+ *     which is true, is IN these descriptions, and is a different claim
+ *     entirely (Codex).
+ *
+ * Three failures, one cause: each version asserted that some tokens were NEAR
+ * each other, never that they were ABOUT each other. A claim has a subject, a
+ * negation, an action and an object, and checking a subset of those admits
+ * every sentence that shares the subset.
+ *
+ * So the second arm now requires the whole relationship IN ORDER — chat session
+ * → negation → end → worker session, within one sentence. The descriptions were
+ * reworded to state it outright rather than elide the object, which is what
+ * made a well-formed assertion possible at all: the regex was hard to write
+ * because the prose was elliptical.
  *
  * Re-wording stays free: add an arm deliberately. What must not happen is an
- * arm that can be satisfied by a sentence making a different point.
+ * arm satisfiable by a sentence making a different point.
  */
 const statesIndependence = (s: string) =>
-  /ending one does not end the other/.test(flat(s)) ||
-  /(does not|never) end (a |the |its |your )?worker session/.test(flat(s));
+  /ending one (does not end|never ends) the other/.test(flat(s)) ||
+  /chat session[^.!?]{0,60}?(does not|never)[^.!?]{0,20}?\bends?\b[^.!?]{0,30}?worker session/.test(
+    flat(s),
+  );
+
+describe('the statesIndependence helper itself', () => {
+  // Three review rounds found three different ways this helper accepted text
+  // that did not make the claim. Each is kept as a case, so a future
+  // "simplification" of the regex cannot quietly reintroduce one — a guard
+  // that has been wrong three times has earned a guard of its own.
+  //
+  // The general shape, worth more than the three instances: a claim has a
+  // SUBJECT, a NEGATION, an ACTION and an OBJECT, and matching any subset of
+  // those admits every sentence sharing the subset. All three near-misses below
+  // are true sentences that appear in these very descriptions.
+  const ACCEPTS: Array<[string, string]> = [
+    ['the object stated outright', 'Ending your CHAT SESSION does not end a worker session (#1034).'],
+    ['the subject as a gerund', "A client's chat session ending **does not end a worker session**, and never reaches this server."],
+    ['the symmetric form', 'Two different things are called a session and ENDING ONE DOES NOT END THE OTHER.'],
+    ['the symmetric form, "never" voice', 'the two are independent and ending one never ends the other (#1034)'],
+  ];
+  const REJECTS: Array<[string, string]> = [
+    [
+      'an unrelated negative sharing the words (Copilot, round 1)',
+      'This ends a WORKER SESSION. Your CHAT SESSION is separate. A restatement drifts while a pointer does not.',
+    ],
+    [
+      'a true chat-session sentence making a different point (Codex, round 2)',
+      "This ends a worker session. A client's chat session ending never reaches this server. worker session.",
+    ],
+    [
+      'the negated object with the wrong subject (Codex, round 3)',
+      'The #930 reaper does not end a worker session on its own. Your chat session is a separate thing.',
+    ],
+  ];
+
+  it.each(ACCEPTS)('accepts %s', (_label, text) => {
+    expect(statesIndependence(text)).toBe(true);
+  });
+
+  it.each(REJECTS)('rejects %s', (_label, text) => {
+    expect(statesIndependence(text)).toBe(false);
+  });
+});
 
 describe('#1034 — MCP tool descriptions distinguish a worker session from a chat session', () => {
   it('hadron_start_session says both terms exist and that ending one does not end the other', () => {
@@ -109,9 +161,11 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     const d = srv().toolDescription('hadron_whoami');
 
     // whoami is where a compacted agent lands, so it is the one place the
-    // distinction has to be learnable cold rather than assumed known.
+    // distinction has to be learnable cold rather than assumed known — which
+    // means naming both terms is not enough here either.
     expect(d.toLowerCase()).toContain('worker session');
     expect(d.toLowerCase()).toContain('chat session');
+    expect(statesIndependence(d)).toBe(true);
   });
 
   it('the reserved term is NOT applied to the agent chat entity (@Gil seq 73/78)', () => {

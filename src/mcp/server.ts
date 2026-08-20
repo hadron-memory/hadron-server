@@ -5572,8 +5572,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // one (SESSION_NOT_WORKER_BOUND) — so unconditional "post as the
           // worker" advice contradicts the "working as: nobody" row directly
           // above it, and promises a call that cannot succeed.
-          'Pass a BOUND row\'s session id to hadron_team_chat_post to post AS that worker — an unbound one is ' +
-          'refused (SESSION_NOT_WORKER_BOUND), not silently posted as you. Any session id works for ' +
+          'Pass a row that is BOUND and still OPEN to hadron_team_chat_post to post AS that worker — an ' +
+          'unbound row is refused SESSION_NOT_WORKER_BOUND and an [ENDED] one SESSION_ENDED, neither ' +
+          'silently posted as you. Any session id works for ' +
           'hadron_record_work and hadron_end_session. Re-fetch a worker\'s boot briefing with hadron_get_worker. ' +
           'A bound row is a worker session, and it stays open — with its worker taken — until ' +
           'hadron_end_session or the reaper, no matter what happened to the chat session that started it.',

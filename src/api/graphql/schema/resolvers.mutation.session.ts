@@ -756,11 +756,23 @@ export const sessionMutations = {
             // message meant to prevent it. Both possibilities, then the
             // confirmation step (PR #1056 review, Copilot + Codex).
             const isOwnSession = !!ctx.userId && active.userId === ctx.userId;
+            // Three arms, because "who is driving it" has three different
+            // answers and two of them were previously collapsed into the
+            // wrong one (PR #1056 review, Codex + Copilot). A pure App-key
+            // bind attaches NO person, so `lastDriver` is null and telling the
+            // caller to go ask the driver names somebody who does not exist —
+            // the same defect as the old self-case wording, one arm over.
+            const takenBy = isOwnSession
+              ? 'That worker session is YOUR OWN and is still open — either you are still working in it from another chat session, or it was left behind by one that ended (ending a chat session never ends a worker session). The server cannot tell which. Confirm with the user that nothing is still running in it, then pass force: true.'
+              : lastDriver
+                ? 'Show the user who is driving it, and pass force: true only on their explicit override.'
+                : 'No person is attached to that worker session — it was opened by an App key, so there is nobody to ask. Confirm with the user that the automation holding it is not mid-task, then pass force: true.';
             throw new GraphQLError(
               `This worker is taken: worker session ${active.id}${lastDriver ? ` (last driven by ${lastDriver})` : ''}, last seen ${lastSeenAt.toISOString()}. ` +
+                takenBy +
                 (isOwnSession
-                  ? 'That worker session is YOUR OWN and is still open — either you are still working in it from another chat session, or it was left behind by one that ended (ending a chat session never ends a worker session). The server cannot tell which. Confirm with the user that nothing is still running in it, then pass force: true.'
-                  : 'Show the user who is driving it, and pass force: true only on their explicit override. Note "last seen" is worker-session activity, not presence: a worker session outlives the chat session that started it, so an idle-looking one may still have someone behind it.'),
+                  ? ''
+                  : ' Note "last seen" is worker-session activity, not presence: a worker session outlives the chat session that started it, so an idle-looking one may still have someone behind it.'),
               {
                 extensions: {
                   code: 'WORKER_TAKEN',
