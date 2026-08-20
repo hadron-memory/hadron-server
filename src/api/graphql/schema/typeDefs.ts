@@ -1986,7 +1986,14 @@ export const typeDefs = `#graphql
     let a former member read current staffing off a historical session.
     """
     heldByUserId: ID
-    "When the current hold was taken. Null exactly when heldByUserId is — and likewise masked on deny."
+    """
+    When the current hold was taken. Null exactly when heldByUserId is — and
+    likewise masked on deny.
+
+    #1034: "taken" here is the HOLD's timestamp, unrelated to \`WORKER_TAKEN\`
+    (a live worker session) and to \`TeamRoleName.taken\` (a name allocated in
+    the register). Three senses of one word across two types.
+    """
     heldAt: DateTime
     "The role-agent behind the casting."
     agent: Agent
@@ -2115,9 +2122,27 @@ export const typeDefs = `#graphql
     True when a Worker holds this name in the App (case-insensitive, retired
     included — retirement never frees a name). Judged against the App's FULL
     roster server-side, which is why a client cannot compute this column.
+
+    #1034: REGISTER sense — "this name is already allocated to some casting".
+    NOT \`WORKER_TAKEN\`, which means a worker has a live worker session. A name
+    can be taken here while nobody is driving it, and a worker can be
+    WORKER_TAKEN under a name this column knows nothing about (a
+    caller-supplied name never passes through a register). Conflating the two
+    is hadron-cli#487.
     """
     taken: Boolean!
-    "The Worker holding the name, when taken."
+    """
+    The Worker holding the name, when taken.
+
+    #1034: this is the REGISTER's holder — which *casting* owns this name —
+    and is a different relation from \`Worker.heldByUserId\`, which is the
+    *person* holding that worker (#1050). Same word, two referents: this one
+    answers "which worker got this name", the other "whose name is this".
+
+    Consequence for anything added later: a resolved holder on Worker must NOT
+    be spelled \`Worker.heldBy\`, because a reader who met this field first will
+    read it as the register sense (@Gil, team chat seq 129).
+    """
     heldBy: Worker
   }
 
