@@ -66,24 +66,32 @@ const flat = (s: string) => s.replace(/\s+/g, ' ').toLowerCase();
  *     session/` — was satisfied by "the reaper does not end a worker session",
  *     which is true, is IN these descriptions, and is a different claim
  *     entirely (Codex).
+ *  4. Requiring subject/negation/action/object IN ORDER still accepted the
+ *     REVERSED claim, "a chat session does not end when a worker session ends"
+ *     — every token present, correct order, opposite direction (Codex).
  *
- * Three failures, one cause: each version asserted that some tokens were NEAR
- * each other, never that they were ABOUT each other. A claim has a subject, a
- * negation, an action and an object, and checking a subset of those admits
- * every sentence that shares the subset.
+ * Four failures, one cause, and the fourth sharpens it: each version asserted
+ * that some tokens were NEAR each other, never that they were ABOUT each other.
+ * A claim has a subject, a negation, an action and an object — and (4) shows
+ * that even all four in order is not enough, because it does not fix WHICH noun
+ * is the thing being ended.
  *
- * So the second arm now requires the whole relationship IN ORDER — chat session
- * → negation → end → worker session, within one sentence. The descriptions were
- * reworded to state it outright rather than elide the object, which is what
- * made a well-formed assertion possible at all: the regex was hard to write
- * because the prose was elliptical.
+ * So the chat session must be marked as the thing that ENDS: either "ending /
+ * closing / archiving ... chat session" or "chat session ending". That is the
+ * load-bearing direction — close your window and the worker stays held — and
+ * the reverse reading, though also true, is not what a driver has to know.
  *
- * Re-wording stays free: add an arm deliberately. What must not happen is an
- * arm satisfiable by a sentence making a different point.
+ * The descriptions were reworded to state the object outright rather than elide
+ * it, which is what made a well-formed assertion possible at all: the regex was
+ * hard to write because the prose was elliptical.
+ *
+ * Re-wording stays free: add an arm deliberately, and add its counterexample
+ * below. What must not happen is an arm satisfiable by a sentence making a
+ * different point.
  */
 const statesIndependence = (s: string) =>
   /ending one (does not end|never ends) the other/.test(flat(s)) ||
-  /chat session[^.!?]{0,60}?(does not|never)[^.!?]{0,20}?\bends?\b[^.!?]{0,30}?worker session/.test(
+  /(?:(?:ending|closing|archiving)[^.!?]{0,20}?chat session|chat session ending)[^.!?]{0,20}?(?:does not|never)[^.!?]{0,20}?\bends?\b[^.!?]{0,30}?worker session/.test(
     flat(s),
   );
 
@@ -115,6 +123,10 @@ describe('the statesIndependence helper itself', () => {
     [
       'the negated object with the wrong subject (Codex, round 3)',
       'The #930 reaper does not end a worker session on its own. Your chat session is a separate thing.',
+    ],
+    [
+      'the REVERSED direction — every token, right order, opposite meaning (Codex, round 4)',
+      'A chat session does not end when a worker session ends.',
     ],
   ];
 
