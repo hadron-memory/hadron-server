@@ -899,6 +899,11 @@ describe('#1053 — hadron_record_work names an ended session', () => {
     expect(out).toContain('ALREADY ENDED');
     expect(out).toContain('auto-expired by the server');
     expect(out).toContain('hadron_whoami');
+    // The warning must NOT claim attribution stops — that is the behaviour
+    // this change exists to defend, and saying otherwise would send a worker
+    // rebinding to recover records it never lost (PR #1055 review, both bots).
+    expect(out).toContain('further records against it will be too');
+    expect(out).not.toMatch(/will not be attributed/);
   });
 
   it('distinguishes a deliberate close from a reap — they mean different things', async () => {
@@ -911,5 +916,43 @@ describe('#1053 — hadron_record_work names an ended session', () => {
     expect(out).toContain('Recorded');
     expect(out).toContain('closed deliberately');
     expect(out).not.toContain('auto-expired');
+  });
+});
+
+
+describe('#1053 — hadron_end_session does not read as a fresh close when it was not', () => {
+  it('an ALREADY-ended session says so rather than reporting a clean end', async () => {
+    // end_session is idempotent (first end wins, #1050), so a plain
+    // "Session ended" on a session that closed hours ago is a second false
+    // liveness signal — in the very tool the old guidance called the loud one.
+    await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+    const started = await srv.callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint',
+    });
+    const sid = started.match(/Session started: (\S+)/)![1];
+    const now = new Date();
+    await db.session.update({ where: { id: sid }, data: { endedAt: now, autoExpiredAt: now } });
+
+    const out = await srv.callToolText('hadron_end_session', { id: sid, turnCount: 3 });
+    expect(out).toContain('had ALREADY ended');
+    expect(out).toContain('auto-expired by the server');
+    expect(out).toContain('hadron_whoami');
+    // Metrics still land; the original end time stands (#1050 first-end-wins).
+    const after = await db.session.findUniqueOrThrow({ where: { id: sid } });
+    expect(after.turnCount).toBe(3);
+    expect(after.endedAt).toEqual(now);
+  });
+
+  it('a genuine close still reads as one', async () => {
+    await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+    const started = await srv.callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint',
+    });
+    const sid = started.match(/Session started: (\S+)/)![1];
+    const out = await srv.callToolText('hadron_end_session', { id: sid });
+    expect(out).toContain('Session ended');
+    expect(out).not.toContain('ALREADY ended');
   });
 });

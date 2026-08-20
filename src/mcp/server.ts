@@ -5403,11 +5403,23 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         },
       });
 
+      // #1053: an ALREADY-ended session must not read as a fresh close. This
+      // call is idempotent (first end wins, #1050), so without saying so the
+      // receipt is a second false liveness signal — the same defect as the
+      // silent worklog write, in the tool the guidance names as the loud one.
+      const wasAlreadyEnded = !!session.endedAt;
       return textResult(
-        `Session ended: ${id}` +
+        (wasAlreadyEnded
+          ? `Session ${id} had ALREADY ended at ${session.endedAt!.toISOString()}` +
+            (session.autoExpiredAt
+              ? ' (auto-expired by the server, so nobody closed it deliberately).'
+              : ' (closed deliberately).') +
+            ' Metrics were updated; the original end time stands. You were not bound when you' +
+            ' made this call — hadron_whoami lists what you are actually driving.'
+          : `Session ended: ${id}`) +
           (handoffBody
             ? '\nHandoff written — the next session bound to this worker receives it automatically.'
-            : session.workerId
+            : session.workerId && !wasAlreadyEnded
               ? '\n(No handoff written. The next driver will be told this stint ended without one.)'
               : ''),
       );
@@ -5418,7 +5430,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_whoami',
-    'Answer "what am I driving right now?" — your own OPEN sessions, with the worker each is bound to, its App, and when it started (#1016). On the MCP surface the session id is the only handle that makes work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The loss is worst where it is quietest — hadron_team_chat_post takes the session as an OPTIONAL argument, so omitting it posts as the human instead of the worker, silently, with no error and the wrong authorship recorded. hadron_record_work does NOT refuse an ended session either — late attribution is deliberate (cor:agt:020:05), so a clean receipt is not evidence your binding is alive; it now SAYS when the session has ended, but the loud refusal comes only from hadron_end_session and the team chat. Call this whenever you are unsure of your session id, or after any context loss, and pass the id it returns back to those tools. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    'Answer "what am I driving right now?" — your own OPEN sessions, with the worker each is bound to, its App, and when it started (#1016). On the MCP surface the session id is the only handle that makes work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The loss is worst where it is quietest — hadron_team_chat_post takes the session as an OPTIONAL argument, so omitting it posts as the human instead of the worker, silently, with no error and the wrong authorship recorded. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure of your session id, or after any context loss, and pass the id it returns back to those tools. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
     {
       limit: z.number().int().optional().describe('Max sessions to return (default 10, cap 50). Newest first.'),
       includeEnded: z.boolean().optional().describe('Also list recently ENDED sessions — useful to confirm you did end one, or to find the session a work record should have been attributed to.'),
@@ -6236,8 +6248,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               (s.autoExpiredAt
                 ? ' — it was auto-expired by the server, so nobody closed it deliberately.'
                 : ' — it was closed deliberately.') +
-              ' The record is kept (late attribution is what the worklog is for), but you are NOT bound' +
-              ' any more: further work will not be attributed to you until you rebind.' +
+              ' The record is kept, and further records against it will be too:' +
+              ' late attribution is what the worklog is for.' +
+              ' What you no longer have is a LIVE binding — the team chat will refuse to author' +
+              ' as this worker through it, and nothing new is being attributed to you as a' +
+              ' driver. Start a new session before doing more work as this worker.' +
               ' hadron_whoami lists what you are actually driving.';
           }
         } catch {
