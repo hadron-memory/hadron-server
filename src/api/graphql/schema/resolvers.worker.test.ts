@@ -865,6 +865,64 @@ describe('#1050 — worker name holding', () => {
     expect(page.total).toBe(0);
   });
 
+  it('an APP KEY cannot bind a held name either — a hold refuses every non-holder', async () => {
+    // PR #1052 review, Codex + Copilot P1. The gate was written
+    // `heldByUserId && ctx.userId && heldByUserId !== ctx.userId`, so a pure
+    // App-key principal — whose ctx.userId is undefined — sailed past it and
+    // could open a session as a name held by a human, forceable or not.
+    const w = await heldBy(contrib.id);
+    const keyCtx = { db, appId: app.id, roles: [] } as unknown as Context;
+    for (const force of [false, true]) {
+      await expectCode(
+        M.startSession(
+          {}, { input: { id: generateId(), workerRef: w.id, force } }, keyCtx,
+        ),
+        'WORKER_HELD',
+      );
+    }
+    expect(await db.session.count({ where: { workerId: w.id, userId: null } })).toBe(0);
+  });
+
+  it('the LOSER of a concurrent claim is refused, not silently attributed', async () => {
+    // Both callers read heldByUserId: null and clear the liveness check; the
+    // compare-and-set decides which actually took the name. Ignoring its result
+    // let the loser open a session as a name someone else now holds — the exact
+    // attribution problem the hold exists to prevent.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+
+    // Simulate losing: the claim's updateMany finds the row already taken.
+    const spy = vi
+      .spyOn(db.worker, 'updateMany')
+      .mockImplementationOnce((async () => {
+        await db.worker.update({
+          where: { id: w.id },
+          data: { heldByUserId: contrib.id, heldAt: new Date() },
+        });
+        return { count: 0 };
+      }) as never);
+    try {
+      await expectCode(bind(appMember.id, w.id), 'WORKER_HELD');
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The winner holds it, and the loser has no session.
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(contrib.id);
+    expect(await db.session.count({ where: { workerId: w.id, userId: appMember.id } })).toBe(0);
+  });
+
+  it('releaseWorker is not a read surface for workers you may not see', async () => {
+    // The idempotent "already unheld" return sat ABOVE every access check, so a
+    // caller holding an id or URN could confirm a foreign worker exists and
+    // collect its scalars through a mutation, while Query.worker would refuse
+    // them. A shortcut placed above an authorization check is an authorization
+    // hole whatever the shortcut is for.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+    await expectCode(M.releaseWorker({}, { workerRef: w.id }, ctx(outsider.id)), 'FORBIDDEN');
+  });
+
   it('releasing an unheld worker is idempotent, not an error', async () => {
     const w = await heldBy(contrib.id);
     await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));

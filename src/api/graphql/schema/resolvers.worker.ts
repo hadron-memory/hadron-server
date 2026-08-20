@@ -972,6 +972,15 @@ export const workerMutations = {
     const worker = await resolveWorkerRefRow(ctx, workerRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
 
+    // The READ gate runs FIRST, before the idempotent return below (PR #1052
+    // review, Codex + Copilot P1). Without it this mutation was a read surface:
+    // an unheld worker returned its row before any check, so anyone holding an
+    // id or URN could confirm a foreign worker exists and collect its scalars —
+    // through a mutation, while `Query.worker` would have refused them. A
+    // shortcut placed above an authorization check is an authorization hole
+    // whatever the shortcut is for.
+    await requireWorkerReadAccess(ctx, app);
+
     if (!worker.heldByUserId) {
       // Idempotent rather than an error: "nobody holds this" is the state the
       // caller asked for, and a release racing another release is not a fault.

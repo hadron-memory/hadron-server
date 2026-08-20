@@ -596,7 +596,13 @@ export const sessionMutations = {
         // closed chat session never free it. That also removes the asymmetry
         // in #1036/#484 where a timer could silently de-authorise a live
         // driver.
-        if (worker.heldByUserId && ctx.userId && worker.heldByUserId !== ctx.userId) {
+        // Note the absence of a `ctx.userId &&` guard (PR #1052 review, Codex +
+        // Copilot P1): with one, a pure App-key principal — whose `ctx.userId`
+        // is undefined — sailed straight past this and could bind a name held
+        // by a human. A hold is the single source of truth for whose name it
+        // is, so it refuses EVERY principal but the holder; an App key is not
+        // a person and can hold nothing, so it is always the wrong one.
+        if (worker.heldByUserId && worker.heldByUserId !== ctx.userId) {
           const holder = await ctx.db.user.findUnique({
             where: { id: worker.heldByUserId },
             select: { handle: true, githubUsername: true },
@@ -705,10 +711,41 @@ export const sessionMutations = {
         // which the gate above then treats as somebody else's name on their
         // NEXT bind rather than mid-session.
         if (!worker.heldByUserId && ctx.userId) {
-          await ctx.db.worker.updateMany({
+          const claimed = await ctx.db.worker.updateMany({
             where: { id: worker.id, heldByUserId: null },
             data: { heldByUserId: ctx.userId, heldAt: new Date() },
           });
+          // LOSING the race must refuse, not proceed (PR #1052 review, Codex +
+          // Copilot P1). Both callers read `heldByUserId: null` and cleared the
+          // liveness check; the compare-and-set decides which of them actually
+          // took the name, and ignoring its result let the loser open a session
+          // as a name somebody else now holds — recreating the exact
+          // attribution problem the hold exists to prevent, in the one window
+          // where two people genuinely raced for it.
+          if (claimed.count === 0) {
+            const winner = await ctx.db.worker.findUnique({
+              where: { id: worker.id },
+              select: { heldByUserId: true },
+            });
+            if (winner?.heldByUserId && winner.heldByUserId !== ctx.userId) {
+              const holder = await ctx.db.user.findUnique({
+                where: { id: winner.heldByUserId },
+                select: { handle: true, githubUsername: true },
+              });
+              throw new GraphQLError(
+                `The name "${worker.name}" was claimed by ` +
+                  `${holder?.handle ?? holder?.githubUsername ?? winner.heldByUserId} ` +
+                  'a moment before this bind. Cast your own worker instead.',
+                {
+                  extensions: {
+                    code: 'WORKER_HELD',
+                    workerId: worker.id,
+                    heldBy: winner.heldByUserId,
+                  },
+                },
+              );
+            }
+          }
         }
         // #1029: wire the continuity chain. `prevSessionId` and
         // `parentSessionId` have been in the schema since the beginning and
