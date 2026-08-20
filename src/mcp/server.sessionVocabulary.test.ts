@@ -48,6 +48,25 @@ const srv = () => createTestableMcpServer(anyAuth);
  */
 const flat = (s: string) => s.replace(/\s+/g, ' ').toLowerCase();
 
+/**
+ * Does this text state the INDEPENDENCE — that ending a chat session does not
+ * end a worker session — rather than merely mentioning both nouns?
+ *
+ * The negation has to be tied to the chat session to mean anything. A bare
+ * `/does not|never/` is satisfied by any unrelated negative sentence that
+ * happens to share the string: `hadron_end_session`'s description contains "a
+ * restatement drifts while a pointer does not", which passed this assertion
+ * while proving nothing (PR #1056 review, Copilot).
+ *
+ * Both accepted phrasings say the same thing, and neither is privileged — the
+ * fact is pinned, the wording stays free.
+ */
+const statesIndependence = (s: string) =>
+  /ending one does not end the other/.test(flat(s)) ||
+  /chat session[^.!?]{0,80}?(does not|never)|(does not|never)[^.!?]{0,80}?end (a |the |its |your )?worker session/.test(
+    flat(s),
+  );
+
 describe('#1034 — MCP tool descriptions distinguish a worker session from a chat session', () => {
   it('hadron_start_session says both terms exist and that ending one does not end the other', () => {
     const d = srv().toolDescription('hadron_start_session');
@@ -57,7 +76,7 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     expect(d.toLowerCase()).toContain('worker session');
     expect(d.toLowerCase()).toContain('chat session');
     // The independence fact, not merely the two nouns.
-    expect(d.toLowerCase()).toMatch(/ending one does not end the other|never ends/);
+    expect(statesIndependence(d)).toBe(true);
     // The consequence a driver actually needs: the worker stays taken.
     expect(d.toLowerCase()).toMatch(/taken|still open|leaves the worker session open/);
   });
@@ -67,10 +86,15 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
 
     expect(d.toLowerCase()).toContain('worker session');
     expect(d.toLowerCase()).toContain('chat session');
-    // The whole point of the tool, stated as an exclusive: this ends it, the
-    // window closing does not. A description that dropped this would leave
+    // The whole point of the tool: this ends the worker session, the window
+    // closing does not. A description that dropped this would leave
     // `end_session` reading as optional bookkeeping.
-    expect(d.toLowerCase()).toMatch(/does not|never/);
+    expect(statesIndependence(d)).toBe(true);
+    // ...and that it is the CLIENT operation, not the only mechanism — the
+    // #930 reaper ends worker sessions too, which the Session and startSession
+    // descriptions both say. "ONLY" here made the contract self-contradictory
+    // (PR #1056 review, Copilot).
+    expect(d.toLowerCase()).not.toMatch(/only thing that ends/);
   });
 
   it('hadron_whoami — the recovery surface — explains that a listed binding may have outlived its chat session', () => {
@@ -134,13 +158,17 @@ describe('#1034 — the GraphQL schema carries the distinction for every client'
     for (const [name, block] of [['startSession', start], ['endSession', end]] as const) {
       expect(block, `${name} must name the worker session`).toContain('worker session');
       expect(block, `${name} must name the chat session`).toContain('chat session');
+      // Naming both nouns is not stating the fact — this test's own title
+      // claimed the independence while asserting only the vocabulary
+      // (PR #1056 review, Copilot).
+      expect(statesIndependence(block), `${name} must state the independence`).toBe(true);
     }
   });
 
   it('the sessions query does not present itself as a list of worker sessions', () => {
     const q = flat(
       typeDefs.slice(
-        typeDefs.indexOf('Sessions recorded against the caller'),
+        typeDefs.indexOf('Sessions VISIBLE to the caller'),
         typeDefs.indexOf('sessions(type: String'),
       ),
     );
@@ -151,5 +179,12 @@ describe('#1034 — the GraphQL schema carries the distinction for every client'
     // unverified-quantitative-claim defect (@Gil seq 78), which this very
     // description is the natural place to reintroduce.
     expect(q).not.toMatch(/most sessions|usually not|rarely/);
+    // Nor "the caller's own", which is an AUTHORIZATION misstatement rather
+    // than a vocabulary one: sessionScopeFilter admits every session of every
+    // App in any org the caller belongs to, and everything for a platform
+    // ADMIN/OWNER. A generated client doc saying "your activity" would
+    // understate the scope (PR #1056 review, Codex + Copilot).
+    expect(q).toMatch(/visible to the caller/);
+    expect(q).toMatch(/not only the caller's own|other users or apps/);
   });
 });

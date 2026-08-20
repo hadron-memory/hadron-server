@@ -4313,9 +4313,16 @@ export const typeDefs = `#graphql
 
     # Sessions, most recent first
     """
-    Sessions recorded against the caller, newest first — unfiltered, this is
-    the GENERAL row of every \`type\`, worker-bound or not (#1034), so a client
-    rendering it must not label it a list of worker sessions.
+    Sessions VISIBLE to the caller, newest first — not only the caller's own.
+    The scope is authorization-derived (\`sessionScopeFilter\`): a platform
+    ADMIN/OWNER sees every session, an App key sees its own App's, and an
+    ordinary user sees those of Apps in any org they belong to **plus** every
+    session attributed to them (the self branch is identity-scoped, so it does
+    not apply through impersonation). So a client must not present these as "my
+    activity" — many rows may be attributed to other users or Apps.
+
+    Unfiltered, this is also the GENERAL row of every \`type\`, worker-bound or
+    not (#1034), so it is equally not a list of worker sessions.
 
     workerRef (#974): only sessions bound to that Worker (by id), newest first
     - the 'taken right now' / 'last driven by' read (cor:agt:020:03). That
@@ -5582,11 +5589,15 @@ export const typeDefs = `#graphql
 
     """
     End a session, and — for a worker-bound one — write its closing handoff
-    (#1029). This is the ONLY thing that ends a worker session; a client's chat
-    session ending does not, and never reaches this server (#1034). It ends the
-    SESSION, not the HOLD — the name stays held by its holder until explicitly
-    released (#1050, cor:agt:020:09), so this frees the worker to be bound
-    again by that holder, not by anyone else.
+    (#1029). This is the CLIENT operation that ends a worker session — the #930
+    reaper ends one too, without a client — while a client's chat session ending
+    does **not**, and never reaches this server (#1034).
+
+    It ends the SESSION, not any HOLD. Where a person bound the worker the name
+    stays theirs until explicitly released (#1050,
+    [\`cor:agt:020:09\`](hrn:node:hadronmemory.com:specs:cor:agt:020:09)), so
+    only that holder can bind it again; a pure App-key caller takes no hold, so
+    ending its session leaves the worker free for anyone eligible.
 
     Gate (#931): platform admin, the session's App, or the attributed user
     (not via impersonation).

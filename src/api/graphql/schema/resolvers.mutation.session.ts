@@ -743,17 +743,23 @@ export const sessionMutations = {
             // team new to the surface walks into — archive the window, assume
             // the worker came free, meet a takeover prompt with no way to read
             // it. Two things the old wording left the reader to infer wrongly:
-            // that the open session belongs to someone else (post-#1050 the
-            // commonest case is that it is their own, left behind by a chat
-            // session that ended without ending it), and that `last seen` says
-            // whether anyone is actually there (it does not — it is worker-
-            // session activity, and a worker session outlives its chat
-            // session).
+            // WHOSE the open session is (it may be the caller's own, which the
+            // old "show the user who is driving it" sent them hunting a
+            // colleague for), and that `last seen` says whether anyone is
+            // actually there (it does not — it is worker-session activity, and
+            // a worker session outlives its chat session).
+            //
+            // What the server must NOT do is guess WHY it is open. It knows the
+            // row exists; it has no signal tying that row to a closed chat
+            // session, so "probably abandoned" would be an unsupported claim
+            // pushing the reader toward force — the hadron-cli#492 harm, in the
+            // message meant to prevent it. Both possibilities, then the
+            // confirmation step (PR #1056 review, Copilot + Codex).
             const isOwnSession = !!ctx.userId && active.userId === ctx.userId;
             throw new GraphQLError(
               `This worker is taken: worker session ${active.id}${lastDriver ? ` (last driven by ${lastDriver})` : ''}, last seen ${lastSeenAt.toISOString()}. ` +
                 (isOwnSession
-                  ? 'That worker session is YOUR OWN and is still open. Ending a chat session never ends a worker session, so this is most likely a stint left behind when an earlier conversation closed. Check with the user that nothing is still running in it, then pass force: true.'
+                  ? 'That worker session is YOUR OWN and is still open — either you are still working in it from another chat session, or it was left behind by one that ended (ending a chat session never ends a worker session). The server cannot tell which. Confirm with the user that nothing is still running in it, then pass force: true.'
                   : 'Show the user who is driving it, and pass force: true only on their explicit override. Note "last seen" is worker-session activity, not presence: a worker session outlives the chat session that started it, so an idle-looking one may still have someone behind it.'),
               {
                 extensions: {
