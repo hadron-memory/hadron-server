@@ -670,7 +670,7 @@ export const sessionMutations = {
           });
           const who = holder?.handle ?? holder?.githubUsername ?? worker.heldByUserId;
           throw new GraphQLError(
-            `The name "${worker.name}" is held by ${who}. A held name is not freed by a session ending, ` +
+            `The name "${worker.name}" is held by ${who}. A held name is not freed by a worker session ending, ` +
               'and this cannot be forced — cast your own worker instead ' +
               '(the holder, or an App/org admin, can release it).',
             {
@@ -738,8 +738,23 @@ export const sessionMutations = {
                 })
               : null;
             const lastDriver = driver?.handle ?? driver?.githubUsername ?? active.userId ?? null;
+            // #1034: this refusal is where the worker-session/chat-session
+            // collision surfaces to a human, and it is the specific failure a
+            // team new to the surface walks into — archive the window, assume
+            // the worker came free, meet a takeover prompt with no way to read
+            // it. Two things the old wording left the reader to infer wrongly:
+            // that the open session belongs to someone else (post-#1050 the
+            // commonest case is that it is their own, left behind by a chat
+            // session that ended without ending it), and that `last seen` says
+            // whether anyone is actually there (it does not — it is worker-
+            // session activity, and a worker session outlives its chat
+            // session).
+            const isOwnSession = !!ctx.userId && active.userId === ctx.userId;
             throw new GraphQLError(
-              `This worker is taken: session ${active.id}${lastDriver ? ` (last driven by ${lastDriver})` : ''}, last seen ${lastSeenAt.toISOString()}. Show the user who is driving it, and pass force: true only on their explicit override.`,
+              `This worker is taken: worker session ${active.id}${lastDriver ? ` (last driven by ${lastDriver})` : ''}, last seen ${lastSeenAt.toISOString()}. ` +
+                (isOwnSession
+                  ? 'That worker session is YOUR OWN and is still open. Ending a chat session never ends a worker session, so this is most likely a stint left behind when an earlier conversation closed. Check with the user that nothing is still running in it, then pass force: true.'
+                  : 'Show the user who is driving it, and pass force: true only on their explicit override. Note "last seen" is worker-session activity, not presence: a worker session outlives the chat session that started it, so an idle-looking one may still have someone behind it.'),
               {
                 extensions: {
                   code: 'WORKER_TAKEN',

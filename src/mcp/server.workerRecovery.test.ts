@@ -955,7 +955,11 @@ describe('#1053 — hadron_end_session does not read as a fresh close when it wa
     });
     const sid = started.match(/Session started: (\S+)/)![1];
     const out = await srv.callToolText('hadron_end_session', { id: sid });
-    expect(out).toContain('Session ended');
+    // #1034: this session IS worker-bound, so the receipt names the KIND that
+    // ended — a strictly stronger assertion than the bare "Session ended" this
+    // pinned before, and the distinction the driver needs at exactly the moment
+    // they are about to close the window.
+    expect(out).toContain('Worker session ended');
     expect(out).not.toContain('ALREADY ended');
   });
 });

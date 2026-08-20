@@ -671,8 +671,28 @@ export const typeDefs = `#graphql
     data: JSON
   }
 
+  """
+  A unit of work recorded against a user or App: the general row, and what the
+  bare word "session" means throughout this schema (#1034). \`type\` says which
+  kind — DEVELOPER, CHATBOT, AUTOMATION, EDGE — and \`workerId\` is optional.
+
+  A **worker session** is the subtype with \`workerId\` set: a Worker (named
+  casting) bound to a driver, which is what makes work attributable to a
+  teammate and what a merged PR traces back through. Binding is optional, so a
+  list of these is not a staff view and may hold no worker sessions at all —
+  read \`workerId\` per row rather than assuming either way.
+
+  A **chat session** is NOT one of these and has no row here: it is the
+  conversation a human is in — the Claude Desktop window, the Claude Code
+  session, the IDE chat. The two are independent and **ending one does not end
+  the other**: a chat session that closes leaves its worker session open, and
+  its worker taken, until endSession or the #930 reaper. Do not use "chat
+  session" for a Chat (the agent conversation entity) — that is an **agent
+  chat**, a third concept.
+  """
   type Session {
     id: ID!
+    "Which kind of session this is: DEVELOPER, CHATBOT, AUTOMATION or EDGE."
     type: String!
     appId: String
     userId: String
@@ -4267,7 +4287,15 @@ export const typeDefs = `#graphql
     ): [UsageActivityBucket!]!
 
     # Sessions, most recent first
-    "workerRef (#974): only sessions bound to that Worker (by id), newest first - the 'taken right now' / 'last driven by' read (cor:agt:020:03)."
+    """
+    Sessions recorded against the caller, newest first — unfiltered, this is
+    the GENERAL row of every \`type\`, worker-bound or not (#1034), so a client
+    rendering it must not label it a list of worker sessions.
+
+    workerRef (#974): only sessions bound to that Worker (by id), newest first
+    - the 'taken right now' / 'last driven by' read (cor:agt:020:03). That
+    filter is what narrows this to worker sessions.
+    """
     sessions(type: String, repo: String, customerId: String, workerRef: String, limit: Int, offset: Int): [Session!]!
     session(id: ID!): Session
 
@@ -5504,6 +5532,17 @@ export const typeDefs = `#graphql
     createAssetReferenceNode(input: CreateAssetReferenceNodeInput!): Node!
 
     # Session lifecycle
+    """
+    Open a session — and, when \`input.workerRef\` is given, a WORKER SESSION:
+    the binding that makes the work attributable to that named teammate.
+
+    The binding is held server-side and is independent of the caller's CHAT
+    SESSION (the human's Desktop window, Claude Code session or IDE chat).
+    **Ending one does not end the other** (#1034): a chat session that closes
+    leaves this session open and its worker taken until endSession or the #930
+    reaper. A client that ties its lifetime to a conversation must call
+    endSession itself; nothing about closing a window reaches this server.
+    """
     startSession(input: SessionInput!): Session!
     """
     #931: update a live session's mutable provenance fields (a PR is usually
@@ -5518,7 +5557,11 @@ export const typeDefs = `#graphql
 
     """
     End a session, and — for a worker-bound one — write its closing handoff
-    (#1029).
+    (#1029). This is the ONLY thing that ends a worker session; a client's chat
+    session ending does not, and never reaches this server (#1034). It ends the
+    SESSION, not the HOLD — the name stays held by its holder until explicitly
+    released (#1050, cor:agt:020:09), so this frees the worker to be bound
+    again by that holder, not by anyone else.
 
     Gate (#931): platform admin, the session's App, or the attributed user
     (not via impersonation).
@@ -6262,10 +6305,14 @@ export const typeDefs = `#graphql
 
     # ── Chat API ──────────────────────────────────────────────────────
     """
-    Start a chat session (creates chat nodes, loads conversation, returns
-    compiled prompt). When called by a JWT user, the chat is created in
+    Start an AGENT CHAT (creates chat nodes, loads conversation, returns
+    compiled prompt). When called by a JWT user, the agent chat is created in
     that user's personal memory for the agent (provisioned lazily if
     needed).
+
+    #1034: an **agent chat** — deliberately not "chat session", which is
+    reserved for the human's own conversation and names no row in this schema,
+    and not the **team chat**, which is the App's shared channel.
 
     Accepts the entity's ID or URN.
     """
