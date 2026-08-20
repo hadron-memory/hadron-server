@@ -120,7 +120,10 @@ import {
   renderWorkerContinuity,
   type RenderableContinuity,
 } from '../lib/workerHandoff.js';
-import { writeSessionHandoff } from '../api/graphql/schema/resolvers.mutation.session.js';
+import {
+  writeSessionHandoff,
+  endSessionFirstWins,
+} from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
@@ -5383,35 +5386,30 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
       }
 
-      await db.session.update({
-        where: { id },
-        data: {
-          // FIRST END WINS (PR #1045 review, Codex P1). `endedAt` orders the
-          // whole continuity chain — Worker.continuity's "previous" and
-          // startSession's prevSessionId derivation both key on it — so a late
-          // retry of an old session must not re-order a worker's history
-          // around a stint that finished long ago. This tool reimplements the
-          // end rather than delegating to the GraphQL resolver, which is
-          // exactly how the two came apart on the first pass: the resolver got
-          // the guard and this path, the one this team actually uses, did not.
-          endedAt: session.endedAt ?? new Date(),
-          summary: summary ?? null,
-          inputTokens: inputTokens ?? null,
-          outputTokens: outputTokens ?? null,
-          turnCount: turnCount ?? null,
-          errorCount: errorCount ?? null,
-        },
+      // FIRST END WINS, through the SHARED writer the GraphQL resolver uses
+      // (#1050, hardened by PR #1055 review). Two reasons it is shared rather
+      // than reimplemented here: this tool having its own raw update is exactly
+      // how the guard ended up on one surface last time, and the decision
+      // cannot be made from the row read above — the reaper claims sessions
+      // with its own atomic update, so between that read and this write a
+      // session can go from live to reaped. Deciding from the stale read would
+      // report a clean end for a session the server had already expired AND
+      // overwrite the reaper's endedAt while leaving autoExpiredAt set.
+      const closed = await endSessionFirstWins(db as unknown as Context['db'], id, {
+        summary: summary ?? null,
+        inputTokens: inputTokens ?? null,
+        outputTokens: outputTokens ?? null,
+        turnCount: turnCount ?? null,
+        errorCount: errorCount ?? null,
       });
 
-      // #1053: an ALREADY-ended session must not read as a fresh close. This
-      // call is idempotent (first end wins, #1050), so without saying so the
-      // receipt is a second false liveness signal — the same defect as the
-      // silent worklog write, in the tool the guidance names as the loud one.
-      const wasAlreadyEnded = !!session.endedAt;
+      // #1053: an ALREADY-ended session must not read as a fresh close —
+      // otherwise the receipt is a second false liveness signal, in the tool
+      // the guidance names as the loud one.
       return textResult(
-        (wasAlreadyEnded
-          ? `Session ${id} had ALREADY ended at ${session.endedAt!.toISOString()}` +
-            (session.autoExpiredAt
+        (!closed.endedByThisCall
+          ? `Session ${id} had ALREADY ended${closed.endedAt ? ` at ${closed.endedAt.toISOString()}` : ''}` +
+            (closed.autoExpiredAt
               ? ' (auto-expired by the server, so nobody closed it deliberately).'
               : ' (closed deliberately).') +
             ' Metrics were updated; the original end time stands. You were not bound when you' +
@@ -5419,7 +5417,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           : `Session ended: ${id}`) +
           (handoffBody
             ? '\nHandoff written — the next session bound to this worker receives it automatically.'
-            : session.workerId && !wasAlreadyEnded
+            : session.workerId && closed.endedByThisCall
               ? '\n(No handoff written. The next driver will be told this stint ended without one.)'
               : ''),
       );
@@ -6250,9 +6248,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 : ' — it was closed deliberately.') +
               ' The record is kept, and further records against it will be too:' +
               ' late attribution is what the worklog is for.' +
-              ' What you no longer have is a LIVE binding — the team chat will refuse to author' +
-              ' as this worker through it, and nothing new is being attributed to you as a' +
-              ' driver. Start a new session before doing more work as this worker.' +
+              ' What you no longer have is a LIVE binding: the team chat will refuse to author' +
+              ' as this worker through it. Start a new session before doing more work as this' +
+              ' worker.' +
               ' hadron_whoami lists what you are actually driving.';
           }
         } catch {

@@ -903,7 +903,10 @@ describe('#1053 — hadron_record_work names an ended session', () => {
     // this change exists to defend, and saying otherwise would send a worker
     // rebinding to recover records it never lost (PR #1055 review, both bots).
     expect(out).toContain('further records against it will be too');
+    // No clause may read as "attribution stops" — the third wording of this
+    // one sentence, each earlier draft caught by review (PR #1055).
     expect(out).not.toMatch(/will not be attributed/);
+    expect(out).not.toMatch(/nothing new is being attributed/);
   });
 
   it('distinguishes a deliberate close from a reap — they mean different things', async () => {
@@ -954,5 +957,46 @@ describe('#1053 — hadron_end_session does not read as a fresh close when it wa
     const out = await srv.callToolText('hadron_end_session', { id: sid });
     expect(out).toContain('Session ended');
     expect(out).not.toContain('ALREADY ended');
+  });
+});
+
+
+describe('#1053 — the reaper racing an end must not produce a fresh-close receipt', () => {
+  it('reports an already-ended session when the reap lands mid-call, and keeps the reaper\'s instant', async () => {
+    // The reaper claims sessions with its own atomic update, so between a
+    // handler's read and its write a session can go from live to reaped.
+    // Deciding from the stale read reported a clean end AND overwrote the
+    // reaper's endedAt while leaving autoExpiredAt set — a row claiming it
+    // auto-expired at one instant and ended at a later one.
+    await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+    const started = await srv.callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint',
+    });
+    const sid = started.match(/Session started: (\S+)/)![1];
+
+    const reapedAt = new Date(Date.now() - 60_000);
+    const spy = vi
+      .spyOn(db.session, 'updateMany')
+      .mockImplementationOnce((async (args: { where: Record<string, unknown> }) => {
+        // The reap lands after the handler read the row and before it writes.
+        await db.session.update({
+          where: { id: sid },
+          data: { endedAt: reapedAt, autoExpiredAt: reapedAt },
+        });
+        return db.session.updateMany(args as never);
+      }) as never);
+    try {
+      const out = await srv.callToolText('hadron_end_session', { id: sid });
+      expect(out).toContain('had ALREADY ended');
+      expect(out).toContain('auto-expired by the server');
+      expect(out).not.toContain('Session ended: ');
+    } finally {
+      spy.mockRestore();
+    }
+
+    const after = await db.session.findUniqueOrThrow({ where: { id: sid } });
+    expect(after.endedAt).toEqual(reapedAt);
+    expect(after.autoExpiredAt).toEqual(reapedAt);
   });
 });

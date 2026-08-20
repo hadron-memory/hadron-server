@@ -94,6 +94,64 @@ function dropNulls(t: { dateTime?: string | null; date?: string | null; timeZone
  * Throws typed `HANDOFF_WRITE_FAILED` on any failure, and the caller has NOT
  * ended the session at that point — see `endSession`.
  */
+/**
+ * Close a session, FIRST END WINS, and report what actually happened (#1053).
+ *
+ * Shared by both end paths — the GraphQL resolver and the MCP tool, which does
+ * its own raw update — because a read-then-write here is racy against the
+ * session reaper, and fixing that at one call site is fixing it on one surface
+ * (`review:fix-at-the-call-site-is-a-fix-on-one-surface`).
+ *
+ * The race, which is why the guard is not decoration (PR #1055 review, Codex):
+ * the reaper claims a session with its own atomic update, so between a caller's
+ * `findUnique` and its `update` a session can go from live to reaped. Deciding
+ * from the stale read then does two wrong things at once — it reports a clean
+ * "ended" for a session the server had already expired, and it overwrites the
+ * reaper's `endedAt` while leaving `autoExpiredAt` set, leaving a row that says
+ * it auto-expired at one instant and ended at a later one.
+ *
+ * So the close is a guarded `updateMany` on `endedAt: null` — winning it IS the
+ * proof this call did the ending — and the receipt is decided from the row as
+ * it stands afterwards, never from the row as it was before.
+ */
+export async function endSessionFirstWins(
+  db: Context['db'],
+  id: string,
+  metrics: {
+    summary?: string | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    turnCount?: number | null;
+    errorCount?: number | null;
+  },
+): Promise<{ endedByThisCall: boolean; endedAt: Date | null; autoExpiredAt: Date | null }> {
+  const data = {
+    ...(metrics.summary !== undefined ? { summary: metrics.summary } : {}),
+    ...(metrics.inputTokens !== undefined ? { inputTokens: metrics.inputTokens } : {}),
+    ...(metrics.outputTokens !== undefined ? { outputTokens: metrics.outputTokens } : {}),
+    ...(metrics.turnCount !== undefined ? { turnCount: metrics.turnCount } : {}),
+    ...(metrics.errorCount !== undefined ? { errorCount: metrics.errorCount } : {}),
+  };
+  const claimed = await db.session.updateMany({
+    where: { id, endedAt: null },
+    data: { ...data, endedAt: new Date() },
+  });
+  if (claimed.count === 0) {
+    // Already ended — by an earlier call, or by the reaper a moment ago. The
+    // metrics still land; the original end instant stands.
+    await db.session.updateMany({ where: { id }, data });
+  }
+  const after = await db.session.findUnique({
+    where: { id },
+    select: { endedAt: true, autoExpiredAt: true },
+  });
+  return {
+    endedByThisCall: claimed.count > 0,
+    endedAt: after?.endedAt ?? null,
+    autoExpiredAt: after?.autoExpiredAt ?? null,
+  };
+}
+
 export async function writeSessionHandoff(
   ctx: Context,
   sessionId: string,
@@ -939,23 +997,16 @@ export const sessionMutations = {
         await writeSessionHandoff(ctx, session.id, session.workerId, handoffBody);
       }
 
-      return ctx.db.session.update({
-        where: { id },
-        data: {
-          // Ending twice must not move the record of WHEN it ended: `endedAt`
-          // orders the continuity chain (both `Worker.continuity`'s "previous"
-          // and startSession's `prevSessionId` derivation key on it), so a
-          // late retry of an old session would re-order a worker's history
-          // around a stint that finished long ago. First end wins.
-          endedAt: session.endedAt ?? new Date(),
-          summary,
-          inputTokens,
-          outputTokens,
-          turnCount,
-          errorCount,
-        },
-        include: SESSION_INCLUDE,
+      // FIRST END WINS, decided by a guarded write rather than by the row read
+      // above: `endedAt` orders the continuity chain (both `Worker.continuity`'s
+      // "previous" and startSession's `prevSessionId` derivation key on it), so
+      // a late retry — or the reaper landing between this handler's read and
+      // its write — must not re-order a worker's history around a stint that
+      // finished long ago.
+      await endSessionFirstWins(ctx.db, id, {
+        summary, inputTokens, outputTokens, turnCount, errorCount,
       });
+      return ctx.db.session.findUniqueOrThrow({ where: { id }, include: SESSION_INCLUDE });
     },
 
     recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
