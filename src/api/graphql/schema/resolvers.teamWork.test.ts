@@ -628,6 +628,88 @@ describe('teamWorkItems — the provenance read surface', () => {
   });
 });
 
+describe('#1053 — an ENDED session may still be recorded against', () => {
+  /**
+   * @Gil observed `record_work` accepting a reaped session twelve minutes after
+   * it expired, while `chat_post` refused the same id, and flagged two things
+   * nobody had checked — deliberately not probing them against the live App,
+   * because the probe writes a row into an append-only log.
+   *
+   * Both are answered here instead, in a throwaway database. And the answer to
+   * the headline is that the acceptance is CORRECT: cor:agt:020:05 makes late
+   * attribution durable law, in the Rule and again in Durable-vs-tunable —
+   * "an ended session may be recorded against ... a merge lands after the
+   * session ends". The two writers SHOULD differ: the chat is worker SPEECH
+   * (cor:agt:020:04 requires an active session, because a closed session cannot
+   * speak) and the worklog is RECORD-KEEPING.
+   */
+  it("accepts a session ended DELIBERATELY, not just one that was reaped (@Gil's Q1)", async () => {
+    await M.endSession({}, { id: contribSession.id }, ctx(contrib.id));
+    const ended = await db.session.findUniqueOrThrow({ where: { id: contribSession.id } });
+    expect(ended.endedAt).not.toBeNull();
+    expect(ended.autoExpiredAt).toBeNull(); // deliberate, not a reap
+
+    const item = await record(ctx(contrib.id), { ref: 'o/r#1' });
+    expect(item.ref).toBe('o/r#1');
+  });
+
+  it('accepts a REAPED session too — the observed case', async () => {
+    const now = new Date();
+    await db.session.update({
+      where: { id: contribSession.id },
+      data: { endedAt: now, autoExpiredAt: now },
+    });
+    const item = await record(ctx(contrib.id), { ref: 'o/r#2' });
+    expect(item.ref).toBe('o/r#2');
+  });
+
+  it("validates the session well beyond ownership (@Gil's Q2)", async () => {
+    // Everything except liveness is checked, which is the point: the omission
+    // is deliberate and narrow, not a gap in the gate.
+    await expectCode(record(ctx(contrib.id), { sessionRef: 'nope' }), 'SESSION_NOT_FOUND');
+    await expectCode(record(ctx(admin.id), { sessionRef: contribSession.id }), 'FORBIDDEN');
+
+    const otherApp = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:o-${Date.now()}` },
+    });
+    const foreign = await db.session.create({
+      data: { id: generateId(), userId: contrib.id, appId: otherApp.id },
+    });
+    await expectCode(record(ctx(contrib.id), { sessionRef: foreign.id }), 'SESSION_NOT_IN_APP');
+
+    // And a soft-deleted session is not a session at all.
+    const gone = await db.session.create({
+      data: { id: generateId(), userId: contrib.id, appId: app.id, deletedAt: new Date() },
+    });
+    await expectCode(record(ctx(contrib.id), { sessionRef: gone.id }), 'SESSION_NOT_FOUND');
+  });
+
+  it('the chat refuses the very session the worklog accepts — the divergence is by design', async () => {
+    // Same id, two writers, opposite answers, and both correct. Asserted
+    // together so the pair cannot drift into agreement by accident: making the
+    // worklog refuse would invalidate cor:agt:020:05's durable late-attribution
+    // clause, and making the chat accept would invalidate cor:agt:020:04's
+    // authorship condition (c).
+    const worker = await db.worker.create({
+      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+    });
+    const s = await db.session.create({
+      data: { id: generateId(), userId: contrib.id, appId: app.id, agentId: teamAgent.id, workerId: worker.id },
+    });
+    await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+
+    const item = await record(ctx(contrib.id), { sessionRef: s.id, ref: 'o/r#7' });
+    expect(item.workerName).toBe('Iris');
+
+    await expectCode(
+      M.createTeamChatMessage(
+        {}, { appRef: app.id, body: 'speaking from the grave', sessionRef: s.id }, ctx(contrib.id),
+      ),
+      'SESSION_ENDED',
+    );
+  });
+});
+
 describe('teamWorkItems — the workerRef filter (#1035)', () => {
   /**
    * "What has this worker done" had no direct read path: a client had to fan

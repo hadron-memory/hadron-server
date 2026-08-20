@@ -453,6 +453,21 @@ async function resolveWorkSession(
     }
     // cor:agt:020:05: a RETIRED worker refuses too — unlike late attribution
     // on an ended session (fine), a retired identity takes no new records.
+    //
+    // #1053, stated where the next reader will meet it: liveness is NOT checked
+    // here and that is durable law, not an omission — "an ended session may be
+    // recorded against ... a merge lands after the session ends". The team CHAT
+    // refuses the very session this accepts (cor:agt:020:04 condition (c)), and
+    // the two are right to disagree: the chat is worker SPEECH, which needs a
+    // live speaker, and the worklog is RECORD-KEEPING, whose whole point is
+    // that the artifact outlives the stint. Making them agree in either
+    // direction invalidates one of the two specs.
+    //
+    // What this cost, and what was fixed instead: a worker recorded two
+    // milestones against a reaped binding, got clean receipts, and had no way
+    // to know — so `hadron_record_work` now SAYS the session has ended while
+    // still keeping the record. The answer was the missing signal, never a
+    // refusal.
     if (worker.retiredAt) {
       throw new GraphQLError(
         `Session "${sessionRef}" is bound to a retired worker — a retired identity takes no new work records.`,
