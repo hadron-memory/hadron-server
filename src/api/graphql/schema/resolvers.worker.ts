@@ -216,6 +216,9 @@ type WorkerRow = {
   promptOverride: string | null;
   memoryId: string | null;
   retiredAt: Date | null;
+  /** #1050 — the human holding this name, and since when. */
+  heldByUserId: string | null;
+  heldAt: Date | null;
 };
 
 /**
@@ -251,6 +254,8 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
       promptOverride: true,
       memoryId: true,
       retiredAt: true,
+      heldByUserId: true,
+      heldAt: true,
     },
   });
   if (!worker) {
@@ -812,6 +817,12 @@ export const workerMutations = {
               role: workerRole,
               promptOverride: override,
               createdBy: ctx.userId ?? null,
+              // #1050 — casting does NOT hold. A name is held by the person
+              // who WORKS as it, and the canonical setup flow is a coordinator
+              // casting a roster that other people then bind: making the
+              // caster the holder would block every one of them on a release
+              // they should never have needed. So a cast worker is born UNHELD
+              // and the first bind claims it.
             },
             select: { id: true, name: true, slug: true },
           });
@@ -923,6 +934,156 @@ export const workerMutations = {
       where: { id: worker.id, retiredAt: null },
       data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
     });
+    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+  },
+
+  /**
+   * releaseWorker — #1050: give up a held name, or take one back.
+   *
+   * Holding is what makes a name a person's rather than a session's, so the
+   * release is the ONLY thing that frees one. Two principals may call it, and
+   * they are different acts:
+   *
+   * - **The holder**, releasing their own name. No notice owed; they are the
+   *   only party losing anything.
+   * - **An App/org admin**, force-releasing somebody else's. This exists for
+   *   the case the holding model otherwise strands — a person leaves and their
+   *   names are held forever — and it is the ONE path by which a name changes
+   *   hands without its holder acting.
+   *
+   * That second path posts to the team chat, naming who released what and from
+   * whom. hadron-cli#492 is precisely the case where notice was owed and there
+   * was no way to give it: the displaced driver learned nothing, and could not
+   * have. A silent admin override would rebuild that. The notification is
+   * best-effort — a chat that cannot be posted to must not prevent an admin
+   * from recovering a departed colleague's names.
+   *
+   * Releasing does NOT retire the worker, free the name for a different
+   * casting, or touch its history: the name stays permanently allocated to
+   * this casting (cor:agt:020:02), and the handoff sequence and worklog travel
+   * with the worker to whoever holds it next (Holger, 2026-08-19). Release is
+   * about WHO holds it, never about what it is.
+   */
+  releaseWorker: async (
+    _: unknown,
+    { workerRef }: { workerRef: string },
+    ctx: Context,
+  ) => {
+    const worker = await resolveWorkerRefRow(ctx, workerRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+
+    // The READ gate runs FIRST, before the idempotent return below (PR #1052
+    // review, Codex + Copilot P1). Without it this mutation was a read surface:
+    // an unheld worker returned its row before any check, so anyone holding an
+    // id or URN could confirm a foreign worker exists and collect its scalars —
+    // through a mutation, while `Query.worker` would have refused them. A
+    // shortcut placed above an authorization check is an authorization hole
+    // whatever the shortcut is for.
+    await requireWorkerReadAccess(ctx, app);
+
+    if (!worker.heldByUserId) {
+      // Idempotent rather than an error: "nobody holds this" is the state the
+      // caller asked for, and a release racing another release is not a fault.
+      return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    }
+
+    const isHolder = !!ctx.userId && worker.heldByUserId === ctx.userId;
+    if (!isHolder) {
+      // ADMIN, deliberately narrower than the staff gate that governs casting
+      // and retirement. `requireWorkerStaffAccess` admits any non-reader
+      // AppMember — right for "may staff this App", far too wide for "may take
+      // a name off a colleague", which is the one path by which a name changes
+      // hands without its holder acting. My own test caught this being the
+      // looser gate; the decision was App/org ADMIN.
+      if (ctx.impersonation) throw forbidden();
+      if (!ctx.userId) throw forbidden();
+      if (app.ownerUserId !== null) {
+        // spec 047 strict ownership, branching on the ownership CLASS before
+        // comparing owner columns (findings:org-xor-owner-null-comparison-bypass).
+        if (ctx.userId !== app.ownerUserId) throw forbidden();
+      } else if (app.organizationId !== null) {
+        try {
+          await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+        } catch (e) {
+          // Narrow: requireOrgRole signals denial with Error('Forbidden'); a DB
+          // failure inside the membership lookup must propagate rather than
+          // read as "not an admin" (review:narrow-catch-blocks).
+          if (!(e instanceof Error && e.message === 'Forbidden')) throw e;
+          throw forbidden();
+        }
+      } else {
+        throw forbidden();
+      }
+    }
+
+    const released = await ctx.db.worker.updateMany({
+      where: { id: worker.id, heldByUserId: worker.heldByUserId },
+      data: { heldByUserId: null, heldAt: null, updatedBy: ctx.userId ?? null },
+    });
+
+    if (released.count > 0 && !isHolder) {
+      // Best-effort: an unreachable chat must not block an admin recovering a
+      // departed colleague's names. Narrow enough to be honest — this is the
+      // notification, not the operation.
+      try {
+        const [holder, actor] = await Promise.all([
+          ctx.db.user.findUnique({
+            where: { id: worker.heldByUserId },
+            select: { handle: true, githubUsername: true },
+          }),
+          ctx.userId
+            ? ctx.db.user.findUnique({
+                where: { id: ctx.userId },
+                select: { handle: true, githubUsername: true },
+              })
+            : Promise.resolve(null),
+        ]);
+        const nameOf = (u: { handle: string | null; githubUsername: string | null } | null) =>
+          u?.handle ?? u?.githubUsername ?? 'an administrator';
+        /**
+         * Neutralize a user-supplied name before it goes into the notice
+         * (PR #1052 review, Copilot — suppressed comment, and the best finding
+         * of that round).
+         *
+         * Worker names are only `.trim()`ed at casting, and handles are
+         * user-chosen, so a name carrying `*`, backticks or a NEWLINE can break
+         * the formatting or forge extra sentences into a message whose whole
+         * purpose is to be trustworthy: this is the notice that tells a team
+         * their colleague's name was taken by an admin. A forged one is worse
+         * than none.
+         *
+         * Newlines collapse first — they are what lets a name append a whole
+         * fabricated line — then the emphasis and code characters are escaped.
+         */
+        const plainly = (value: string): string =>
+          value.replace(/\s+/g, ' ').replace(/([\\`*_~[\]()#>|])/g, '\\$1').trim();
+        // LAZY import: resolvers.teamChat already imports locateTeamAgent
+        // from this module, so a static import here would close a cycle. It is
+        // reached only on the admin force-release path, so the cost is nil and
+        // the module graph stays acyclic.
+        const { teamChatMutations } = await import('./resolvers.teamChat.js');
+        await teamChatMutations.createTeamChatMessage(
+          {},
+          {
+            appRef: app.id,
+            body:
+              `The name **${plainly(worker.name)}** was released by ${plainly(nameOf(actor))}, ` +
+              `and was held by ${plainly(nameOf(holder))}. ` +
+              'It is now unheld — the next person to bind it holds it. ' +
+              'Nothing about the worker itself changed: its history, worklog and handoffs stay with the name.',
+            replyToSeq: null,
+            sessionRef: null,
+          },
+          ctx,
+        );
+      } catch (e) {
+        console.warn(
+          `[releaseWorker] force-release of ${worker.id} succeeded but the team-chat notice failed:`,
+          e,
+        );
+      }
+    }
+
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
@@ -1353,6 +1514,51 @@ export const workerFieldResolvers = {
       _: unknown,
       ctx: Context,
     ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.promptOverride : null),
+    /**
+     * #1050 — the holder, behind the worker read gate and masked to null on
+     * deny (PR #1052 review, Codex P2).
+     *
+     * I first shipped these as ungated identity scalars, reasoning that the
+     * Worker read gate already requires App participation. It does not always:
+     * `Session.worker` reaches a Worker row through `sessionScopeFilter`, which
+     * admits any org member AND leaves a self-attributed session readable after
+     * its user has left the App — the #983 finding, which I cited in this same
+     * file while making the same mistake in the opposite direction. A former
+     * member could therefore read current staffing off a historical session.
+     *
+     * Who holds a name is working state, not identity: `name`, `role` and `urn`
+     * describe the casting, while the holder describes who is working as it
+     * right now.
+     */
+    heldByUserId: async (
+      worker: { appId: string; heldByUserId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.heldByUserId : null),
+    /**
+     * Working-state field — worker read gate, masked to null (see heldByUserId).
+     *
+     * Also null whenever there is no holder, which the COLUMN alone does not
+     * guarantee (PR #1052 review, Codex P2): the FK is ON DELETE SET NULL and
+     * Postgres clears only `held_by_user_id`, so a hard-deleted user leaves
+     * `held_at` behind. Both write paths in the platform (`releaseWorker`,
+     * `deleteUserAccount`) clear the pair together, so this covers a raw
+     * database delete rather than any operation — but the API invariant
+     * "`heldAt` is null exactly when `heldByUserId` is" should hold because it
+     * is enforced, not because every path remembered.
+     *
+     * Enforced HERE rather than as a CHECK constraint on purpose: a CHECK would
+     * make the FK's own SET NULL violate it, turning a user deletion into an
+     * error.
+     */
+    heldAt: async (
+      worker: { appId: string; heldAt: Date | null; heldByUserId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) =>
+      worker.heldByUserId && (await maySeeWorkerInternals(ctx, worker.appId))
+        ? worker.heldAt
+        : null,
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     memoryId: async (
       worker: { appId: string; memoryId: string | null },

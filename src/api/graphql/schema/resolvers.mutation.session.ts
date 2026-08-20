@@ -401,6 +401,9 @@ export const sessionMutations = {
       // #1029 — the worker's previous stint, derived below when the caller
       // supplies no explicit chain link.
       let derivedPrevSessionId: string | undefined;
+      // #1050 — set when this bind should claim an unheld name; executed inside
+      // the session-creating transaction so the two commit together.
+      let claimWorkerId: string | undefined;
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
         // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
@@ -482,7 +485,10 @@ export const sessionMutations = {
         }
         const worker = await ctx.db.worker.findUnique({
           where: { id: resolvedWorkerId },
-          select: { id: true, appId: true, agentId: true, retiredAt: true },
+          select: {
+            id: true, appId: true, agentId: true, retiredAt: true,
+            name: true, heldByUserId: true, heldAt: true,
+          },
         });
         if (!worker) {
           throw new GraphQLError(`Worker not found: ${workerRef}`, {
@@ -574,6 +580,52 @@ export const sessionMutations = {
           }
           appId = worker.appId;
         }
+        // #1050 — a NAME is HELD by a person until released. This gate runs
+        // before the liveness one below and is not forceable, because the two
+        // answer different questions and only one of them is a judgement call:
+        //
+        //   HELD   — "this name is someone's." The remedy is to cast your own
+        //            worker, never to adjudicate whether the holder is really
+        //            gone. There is no correct way to make that call from a
+        //            session row, which is exactly what hadron-cli#492 proved:
+        //            an agent judged a session abandoned, ENDED it, and bound
+        //            as that worker while its driver was mid-PR — every step
+        //            following the documented procedure.
+        //   TAKEN  — "a live session already exists." Only ever a question
+        //            about your OWN worker now, and still forceable, because
+        //            the driver deciding is the driver affected.
+        //
+        // The hold does not depend on session state, so expiry, a reap, or a
+        // closed chat session never free it. That also removes the asymmetry
+        // in #1036/#484 where a timer could silently de-authorise a live
+        // driver.
+        // Note the absence of a `ctx.userId &&` guard (PR #1052 review, Codex +
+        // Copilot P1): with one, a pure App-key principal — whose `ctx.userId`
+        // is undefined — sailed straight past this and could bind a name held
+        // by a human. A hold is the single source of truth for whose name it
+        // is, so it refuses EVERY principal but the holder; an App key is not
+        // a person and can hold nothing, so it is always the wrong one.
+        if (worker.heldByUserId && worker.heldByUserId !== ctx.userId) {
+          const holder = await ctx.db.user.findUnique({
+            where: { id: worker.heldByUserId },
+            select: { handle: true, githubUsername: true },
+          });
+          const who = holder?.handle ?? holder?.githubUsername ?? worker.heldByUserId;
+          throw new GraphQLError(
+            `The name "${worker.name}" is held by ${who}. A held name is not freed by a session ending, ` +
+              'and this cannot be forced — cast your own worker instead ' +
+              '(the holder, or an App/org admin, can release it).',
+            {
+              extensions: {
+                code: 'WORKER_HELD',
+                workerId: worker.id,
+                heldBy: worker.heldByUserId,
+                heldByName: who,
+                heldAt: worker.heldAt?.toISOString() ?? null,
+              },
+            },
+          );
+        }
         // #940 (cor:agt:020:03 — informed takeover, never silent): binding a
         // worker that already has an ACTIVE session refuses typed, carrying
         // who last drove it and when — everything the takeover prompt needs
@@ -653,12 +705,25 @@ export const sessionMutations = {
         }
         agentId = worker.agentId;
         workerId = worker.id;
+        // #1050 — an UNHELD name is held by the person who binds it. That is
+        // the claim path: casting holds nothing, so a fresh roster, a released
+        // name, or one cast by an App key all find their holder here.
+        //
+        // DEFERRED into the session-creating transaction below rather than done
+        // here (PR #1052 review, Codex P2): as a separate write it committed
+        // before `session.create` ran, so a create that then failed — a retried
+        // duplicate id, an invalid relation — left the caller holding a name
+        // they never bound. Claim and bind are one act and now commit together.
+        //
+        // Set for an App-KEY binder too, which claims nothing: it marks the
+        // worker as needing a re-check inside the transaction, so a key cannot
+        // bind a name a human claimed in the meantime.
+        if (!worker.heldByUserId) claimWorkerId = worker.id;
         // #1029: wire the continuity chain. `prevSessionId` and
         // `parentSessionId` have been in the schema since the beginning and
-        // unused, so the chain primitive existed with nothing writing it —
-        // walking a worker's stints meant sorting sessions by time and hoping.
-        // An explicit input still wins: a caller stitching a sub-agent chain
-        // knows something this default does not.
+        // unused, so the chain primitive existed with nothing writing it. An
+        // explicit input still wins: a caller stitching a sub-agent chain knows
+        // something this default does not.
         //
         // Deliberately the most recent ENDED session, matching
         // Worker.continuity's definition of "previous" — with `force`, two
@@ -674,7 +739,102 @@ export const sessionMutations = {
         }
       }
 
-      return ctx.db.session.create({
+      return ctx.db.$transaction(async (tx) => {
+        // Everything about the hold is settled INSIDE this transaction, so the
+        // decision and the session insert commit together. The row read far
+        // above is a snapshot; by now another bind may have claimed the name.
+        if (claimWorkerId) {
+          const refuseHeld = async (heldByUserId: string, note: string): Promise<never> => {
+            const [worker, holder] = await Promise.all([
+              tx.worker.findUnique({ where: { id: claimWorkerId! }, select: { name: true } }),
+              tx.user.findUnique({
+                where: { id: heldByUserId },
+                select: { handle: true, githubUsername: true },
+              }),
+            ]);
+            throw new GraphQLError(
+              `The name "${worker?.name ?? claimWorkerId}" ${note} ` +
+                `${holder?.handle ?? holder?.githubUsername ?? heldByUserId}. ` +
+                'Cast your own worker instead.',
+              {
+                extensions: {
+                  code: 'WORKER_HELD',
+                  workerId: claimWorkerId,
+                  heldBy: heldByUserId,
+                },
+              },
+            );
+          };
+
+          if (ctx.userId) {
+            // PARTICIPATION is rechecked immediately before the hold is granted
+            // (PR #1052 review, Codex P1). When `appId` came from an MCP
+            // active-App SELECTION and the worker is of that same App, neither
+            // gate above re-runs `isAppParticipant` — so a member whose access
+            // was revoked while their connection stayed open could still take a
+            // name and block the people who do belong. That is #1037's own rule
+            // ("deriving scope re-authorizes, it never assumes") applied to the
+            // write this PR adds, and a hold is standing, not just scope.
+            const app = await tx.app.findUnique({
+              where: { id: appId! },
+              select: { id: true, organizationId: true, ownerUserId: true },
+            });
+            if (!app || !(await isAppParticipant({ ...ctx, db: tx as unknown as Context['db'] }, app))) {
+              throw new GraphQLError(
+                'You are not a member of this worker\'s App, so you cannot take one of its names.',
+                { extensions: { code: 'FORBIDDEN' } },
+              );
+            }
+
+            // A SOFT-DELETED claimant must not take a name (Codex P2): a start
+            // already in flight when `deleteUserAccount` runs could otherwise
+            // land its claim after the deletion released everything, leaving an
+            // unauthenticatable tombstone holding the worker. The User row
+            // survives a soft delete, so the FK cannot catch this.
+            const claimant = await tx.user.findUnique({
+              where: { id: ctx.userId },
+              select: { deletedAt: true },
+            });
+            if (claimant?.deletedAt) {
+              throw new GraphQLError('This account is deleted and cannot take a worker name.', {
+                extensions: { code: 'FORBIDDEN' },
+              });
+            }
+
+            const claimed = await tx.worker.updateMany({
+              where: { id: claimWorkerId, heldByUserId: null },
+              data: { heldByUserId: ctx.userId, heldAt: new Date() },
+            });
+            // LOSING the race must refuse, not proceed. Both callers read
+            // `heldByUserId: null` and cleared the liveness check; the
+            // compare-and-set is what decides which took the name, and ignoring
+            // its result let the loser open a session as a name someone else
+            // now holds.
+            if (claimed.count === 0) {
+              const winner = await tx.worker.findUnique({
+                where: { id: claimWorkerId },
+                select: { heldByUserId: true },
+              });
+              if (winner?.heldByUserId && winner.heldByUserId !== ctx.userId) {
+                await refuseHeld(winner.heldByUserId, 'was claimed a moment before this bind by');
+              }
+            }
+          } else {
+            // An App-KEY binder claims nothing — it is not a person and can
+            // hold no name — but it must still lose the race rather than sit
+            // outside it (Codex P1). Without this re-read, a human claiming
+            // between the snapshot above and this transaction left the App key
+            // free to bind a name that had just become held.
+            const now = await tx.worker.findUnique({
+              where: { id: claimWorkerId },
+              select: { heldByUserId: true },
+            });
+            if (now?.heldByUserId) {
+              await refuseHeld(now.heldByUserId, 'was claimed before this bind by');
+            }
+          }
+        }
+        return tx.session.create({
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
@@ -703,6 +863,7 @@ export const sessionMutations = {
           tool: input.tool,
         },
         include: SESSION_INCLUDE,
+        });
       });
     },
 

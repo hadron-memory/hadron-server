@@ -22,6 +22,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -715,5 +716,400 @@ describe('Worker field resolvers', () => {
     const worker = await cast({ agentRef: teamAgent.id, role: 'coordinator', name: 'Zoe' });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
     expect(prompt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1050 — a NAME is held by a person until released
+// ---------------------------------------------------------------------------
+
+/**
+ * Availability used to be derived from session liveness, which conflated two
+ * unrelated questions behind one word (hadron-cli#487): "is this name
+ * someone's?" and "is a session live right now?". The second is a timer — so
+ * expiry, a reap, or a closed chat session silently freed a name, and an agent
+ * following the documented procedure ended a mid-PR driver's session and bound
+ * as them (hadron-cli#492).
+ *
+ * Holding replaces a judgement that cannot be made correctly with a fact.
+ */
+describe('#1050 — worker name holding', () => {
+  const bind = (userId: string, workerId: string, force = false) =>
+    M.startSession(
+      {}, { input: { id: generateId(), workerRef: workerId, appRef: app.id, force } }, ctx(userId),
+    );
+
+  /** Cast a worker and have `userId` claim it by binding — the real sequence. */
+  async function heldBy(userId: string, name = 'Iris') {
+    const w = await cast({ agentRef: roleAgent.id, name }, ctx(admin.id));
+    const s = await bind(userId, w.id);
+    await M.endSession({}, { id: s.id }, ctx(userId));
+    return w;
+  }
+
+  it('casting does NOT hold — a coordinator may staff a roster others claim', async () => {
+    // The canonical setup flow is one person casting the team's names and
+    // other people binding them. If the caster held, every one of them would
+    // be blocked on a release they should never have needed.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldByUserId).toBeNull();
+    expect(row.heldAt).toBeNull();
+  });
+
+  it('binding an UNHELD worker holds it — that is the claim path', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    await bind(appMember.id, w.id);
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldByUserId).toBe(appMember.id);
+  });
+
+  it("refuses a name held by someone else — and force does NOT bypass it", async () => {
+    // The incident: every step of the documented procedure was followed, and
+    // the remedy it advertised was --force. Under holding there is no remedy
+    // but casting your own worker, which is the point.
+    const w = await heldBy(contrib.id);
+
+    await expectCode(bind(appMember.id, w.id), 'WORKER_HELD');
+    await expectCode(bind(appMember.id, w.id, true), 'WORKER_HELD');
+
+    // The refused binds created nothing — only the holder's own claim session
+    // exists — and the hold did not move.
+    expect(await db.session.count({ where: { workerId: w.id } })).toBe(1);
+    expect(await db.session.count({ where: { workerId: w.id, userId: appMember.id } })).toBe(0);
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldByUserId).toBe(contrib.id);
+  });
+
+  it('the refusal names the holder, so the caller knows who to ask', async () => {
+    const w = await heldBy(contrib.id);
+    try {
+      await bind(appMember.id, w.id);
+      expect.fail('expected WORKER_HELD');
+    } catch (e) {
+      const err = e as GraphQLError;
+      expect(err.extensions?.heldBy).toBe(contrib.id);
+      expect(err.message).toMatch(/cast your own worker/);
+    }
+  });
+
+  it('ENDING the session does not free the name — the core of the fix', async () => {
+    // The old model: availability was a timer. A reap, an expiry, or a closed
+    // chat session made a name look free while its holder was mid-PR.
+    const w = await heldBy(contrib.id);
+    const s = await bind(contrib.id, w.id);
+    await M.endSession({}, { id: s.id }, ctx(contrib.id));
+
+    // Reaped, for good measure — the #930 reaper stamps both columns.
+    const now = new Date();
+    await db.session.updateMany({
+      where: { id: s.id }, data: { endedAt: now, autoExpiredAt: now },
+    });
+
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldByUserId).toBe(contrib.id);
+    await expectCode(bind(appMember.id, w.id), 'WORKER_HELD');
+  });
+
+  it('your OWN held worker still refuses WORKER_TAKEN on a live session, and force still works', async () => {
+    // The two gates stay distinct: HELD is whose name it is, TAKEN is whether
+    // a session is live — and the second is forceable because the driver
+    // deciding is the driver affected.
+    const w = await heldBy(contrib.id);
+    await bind(contrib.id, w.id);
+    await expectCode(bind(contrib.id, w.id), 'WORKER_TAKEN');
+    const forced = await bind(contrib.id, w.id, true);
+    expect(forced.workerId).toBe(w.id);
+  });
+
+  it('the holder can release, and the next binder holds it', async () => {
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+
+    const released = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(released.heldByUserId).toBeNull();
+    expect(released.heldAt).toBeNull();
+    // Not retired, and the name is still this casting's.
+    expect(released.retiredAt).toBeNull();
+    expect(released.name).toBe('Iris');
+
+    await bind(appMember.id, w.id);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(appMember.id);
+  });
+
+  it('a non-holder who is not staff cannot release', async () => {
+    const w = await heldBy(contrib.id);
+    await expectCode(M.releaseWorker({}, { workerRef: w.id }, ctx(appMember.id)), 'FORBIDDEN');
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(contrib.id);
+  });
+
+  it('an ADMIN force-release works and POSTS TO THE TEAM CHAT', async () => {
+    // hadron-cli#492 is exactly the case where notice was owed and there was
+    // no way to give it. A silent override would rebuild that.
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+
+    const page = await Q.teamChatMessages({}, { appRef: app.id }, ctx(admin.id));
+    expect(page.total).toBe(1);
+    expect(page.items[0].body).toContain('Iris');
+    expect(page.items[0].body).toMatch(/released/i);
+  });
+
+  it('a hostile worker name cannot forge the release notice (Copilot)', async () => {
+    // The notice exists to be trustworthy — it tells a team that a colleague's
+    // name was taken by an admin. Names are only trimmed at casting, so a
+    // newline lets one append a whole fabricated sentence.
+    const nasty = 'Iris**\n\n**The name Dara was released by nobody';
+    const w = await db.worker.create({
+      data: {
+        appId: app.id, agentId: roleAgent.id, name: nasty, slug: `nasty-${Date.now()}`,
+        heldByUserId: contrib.id, heldAt: new Date(),
+      },
+    });
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+
+    const page = await Q.teamChatMessages({}, { appRef: app.id }, ctx(admin.id));
+    expect(page.total).toBe(1);
+    const body = page.items[0].body as string;
+    // One line, and the injected sentence is not free-standing markdown.
+    expect(body.split('\n')).toHaveLength(1);
+    expect(body).not.toContain('**The name Dara was released by nobody**');
+  });
+
+  it('a holder releasing their OWN name posts nothing — no notice is owed', async () => {
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+    const page = await Q.teamChatMessages({}, { appRef: app.id }, ctx(contrib.id));
+    expect(page.total).toBe(0);
+  });
+
+  it('an APP KEY cannot bind a held name either — a hold refuses every non-holder', async () => {
+    // PR #1052 review, Codex + Copilot P1. The gate was written
+    // `heldByUserId && ctx.userId && heldByUserId !== ctx.userId`, so a pure
+    // App-key principal — whose ctx.userId is undefined — sailed past it and
+    // could open a session as a name held by a human, forceable or not.
+    const w = await heldBy(contrib.id);
+    const keyCtx = { db, appId: app.id, roles: [] } as unknown as Context;
+    for (const force of [false, true]) {
+      await expectCode(
+        M.startSession(
+          {}, { input: { id: generateId(), workerRef: w.id, force } }, keyCtx,
+        ),
+        'WORKER_HELD',
+      );
+    }
+    expect(await db.session.count({ where: { workerId: w.id, userId: null } })).toBe(0);
+  });
+
+  it('the LOSER of a concurrent claim is refused, not silently attributed', async () => {
+    // Both callers read heldByUserId: null and clear the liveness check; the
+    // compare-and-set decides which actually took the name. Ignoring its result
+    // let the loser open a session as a name someone else now holds — the exact
+    // attribution problem the hold exists to prevent.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+
+    // Simulate losing: another user claims the name in the instant before our
+    // claim+create transaction opens. A ctx whose `db.$transaction` performs
+    // the competing claim first is faithful to that — the gate above has
+    // already read the row as unheld, exactly as the real race does.
+    const racingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction') {
+          return async (fn: unknown) => {
+            await db.worker.update({
+              where: { id: w.id },
+              data: { heldByUserId: contrib.id, heldAt: new Date() },
+            });
+            return (Reflect.get(target, prop, receiver) as typeof db.$transaction).call(
+              target, fn as never,
+            );
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as typeof db;
+    const racingCtx = { ...ctx(appMember.id), db: racingDb } as Context;
+
+    await expectCode(
+      M.startSession(
+        {}, { input: { id: generateId(), workerRef: w.id, appRef: app.id } }, racingCtx,
+      ),
+      'WORKER_HELD',
+    );
+
+    // The winner holds it, and the loser has no session.
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(contrib.id);
+    expect(await db.session.count({ where: { workerId: w.id, userId: appMember.id } })).toBe(0);
+  });
+
+  it('an APP KEY loses the race too — it claims nothing, but it does not sit outside it', async () => {
+    // Codex P1. An App key is not a person and holds nothing, so it skipped the
+    // compare-and-set entirely — which left it free to bind a name a human had
+    // claimed between the snapshot read and the transaction.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    const racingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction') {
+          return async (fn: unknown) => {
+            await db.worker.update({
+              where: { id: w.id },
+              data: { heldByUserId: contrib.id, heldAt: new Date() },
+            });
+            return (Reflect.get(target, prop, receiver) as typeof db.$transaction).call(
+              target, fn as never,
+            );
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as typeof db;
+    const keyCtx = { db: racingDb, appId: app.id, roles: [] } as unknown as Context;
+
+    await expectCode(
+      M.startSession({}, { input: { id: generateId(), workerRef: w.id } }, keyCtx),
+      'WORKER_HELD',
+    );
+    expect(await db.session.count({ where: { workerId: w.id } })).toBe(0);
+  });
+
+  it('a REVOKED member cannot take a name on a stale App selection', async () => {
+    // Codex P1, and it is #1037's own rule applied to this PR's new write: when
+    // appId came from an MCP active-App SELECTION and the worker is of that
+    // same App, neither gate above re-runs isAppParticipant — so a member whose
+    // access was revoked while their connection stayed open could take a name
+    // and block the people who do belong. A hold is standing, not just scope.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    const gone = await db.user.create({
+      data: { id: generateId(), githubId: 96201, githubUsername: `wh-gone-${Date.now()}`, roles: ['READER'] },
+    });
+    const membership = await db.appMember.create({
+      data: { appId: app.id, userId: gone.id, role: 'member' },
+    });
+    // The selection is still pinned to the App; the membership is gone.
+    await db.appMember.delete({
+      where: { appId_userId: { appId: membership.appId, userId: membership.userId } },
+    });
+
+    await expectCode(
+      M.startSession(
+        {}, { input: { id: generateId(), workerRef: w.id } }, ctx(gone.id, app.id),
+      ),
+      'FORBIDDEN',
+    );
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+  });
+
+  it('a SOFT-DELETED claimant cannot take a name', async () => {
+    // Codex P2: a start already in flight when deleteUserAccount runs could
+    // land its claim after the deletion released everything, leaving an
+    // unauthenticatable tombstone holding the worker. The User row survives a
+    // soft delete, so the FK cannot catch it.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    await db.user.update({ where: { id: contrib.id }, data: { deletedAt: new Date() } });
+    try {
+      await expectCode(
+        M.startSession(
+          {}, { input: { id: generateId(), workerRef: w.id, appRef: app.id } }, ctx(contrib.id),
+        ),
+        'FORBIDDEN',
+      );
+      expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+    } finally {
+      await db.user.update({ where: { id: contrib.id }, data: { deletedAt: null } });
+    }
+  });
+
+  it('a FAILED bind does not leave the name claimed — claim and create are one act', async () => {
+    // The claim used to commit as a separate write before session.create ran,
+    // so a create that then failed left the caller holding a name they never
+    // bound. They are one transaction now.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    const dupe = generateId();
+    await M.startSession({}, { input: { id: dupe, appRef: app.id } }, ctx(appReader.id));
+
+    // Same session id → the create fails, after the claim would have committed.
+    await expect(
+      M.startSession(
+        {}, { input: { id: dupe, workerRef: w.id, appRef: app.id } }, ctx(appMember.id),
+      ),
+    ).rejects.toThrow();
+
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+  });
+
+  it('holder fields are masked for a caller outside the App', async () => {
+    // Session.worker reaches a Worker row through a gate that admits any org
+    // member and survives a user leaving the App (#983), so an ungated holder
+    // would let a former member read current staffing off a historical session.
+    const w = await heldBy(contrib.id);
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(await W.heldByUserId(row, {}, ctx(contrib.id))).toBe(contrib.id);
+    expect(await W.heldByUserId(row, {}, ctx(outsider.id))).toBeNull();
+    expect(await W.heldAt(row, {}, ctx(outsider.id))).toBeNull();
+  });
+
+  it('heldAt reads null when there is no holder, even if the column lags', async () => {
+    // The FK is ON DELETE SET NULL and Postgres clears only the id column, so
+    // a raw hard delete of a user leaves a vestigial timestamp. The invariant
+    // holds because the field enforces it.
+    const w = await heldBy(contrib.id);
+    await db.worker.update({ where: { id: w.id }, data: { heldByUserId: null } });
+    const row = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(row.heldAt).not.toBeNull(); // the column still carries it
+    expect(await W.heldAt(row, {}, ctx(contrib.id))).toBeNull();
+  });
+
+  it('releaseWorker is not a read surface for workers you may not see', async () => {
+    // The idempotent "already unheld" return sat ABOVE every access check, so a
+    // caller holding an id or URN could confirm a foreign worker exists and
+    // collect its scalars through a mutation, while Query.worker would refuse
+    // them. A shortcut placed above an authorization check is an authorization
+    // hole whatever the shortcut is for.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+    await expectCode(M.releaseWorker({}, { workerRef: w.id }, ctx(outsider.id)), 'FORBIDDEN');
+  });
+
+  it('releasing an unheld worker is idempotent, not an error', async () => {
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+    const again = await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+    expect(again.heldByUserId).toBeNull();
+  });
+});
+
+describe('#1050 — deleting a holder releases their names', () => {
+  it('a soft-deleted account stops holding, and the casting survives intact', async () => {
+    // The FK is ON DELETE SET NULL, but deleteUserAccount SOFT-deletes the User
+    // row, so that action never fires: an unauthenticatable tombstone would go
+    // on holding every one of its names forever, and each subsequent binder
+    // would be refused by an account that cannot release them (PR #1052 review,
+    // Codex P2). Holding must not strand a name behind someone who is gone.
+    const leaver = await db.user.create({
+      data: { id: generateId(), githubId: 96001, githubUsername: `wh-leaver-${Date.now()}`, roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: leaver.id, role: 'CONTRIBUTOR' },
+    });
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    await M.startSession(
+      {}, { input: { id: generateId(), workerRef: w.id, appRef: app.id } }, ctx(leaver.id),
+    );
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(leaver.id);
+
+    await deleteUserAccount(db, { targetUserId: leaver.id, actorUserId: leaver.id });
+
+    const after = await db.worker.findUniqueOrThrow({ where: { id: w.id } });
+    expect(after.heldByUserId).toBeNull();
+    expect(after.heldAt).toBeNull();
+    // The casting itself is untouched — the name stays allocated to it.
+    expect(after.name).toBe('Iris');
+    expect(after.retiredAt).toBeNull();
   });
 });

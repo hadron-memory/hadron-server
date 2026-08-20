@@ -796,7 +796,14 @@ describe('#1029 — worker handoff', () => {
       ctx(appMember.id),
     );
 
-    // A DIFFERENT human binds the same worker.
+    // #1050 — the name is now HELD by the first driver, and ending a session
+    // does not free it. So the cross-human path runs through a release, which
+    // is the model working rather than an obstacle: a handoff reaches a
+    // different person only when the name was deliberately handed over.
+    await M.releaseWorker({}, { workerRef: worker.id }, ctx(appMember.id));
+
+    // A DIFFERENT human binds the same worker — and inherits the sequence,
+    // because a handoff belongs to the WORKER (Holger, 2026-08-19).
     const second = await startAs(appReader.id, worker.id);
     expect(second.id).not.toBe(first.id);
 
