@@ -926,6 +926,83 @@ describe('#1050 — worker name holding', () => {
     expect(await db.session.count({ where: { workerId: w.id, userId: appMember.id } })).toBe(0);
   });
 
+  it('an APP KEY loses the race too — it claims nothing, but it does not sit outside it', async () => {
+    // Codex P1. An App key is not a person and holds nothing, so it skipped the
+    // compare-and-set entirely — which left it free to bind a name a human had
+    // claimed between the snapshot read and the transaction.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    const racingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction') {
+          return async (fn: unknown) => {
+            await db.worker.update({
+              where: { id: w.id },
+              data: { heldByUserId: contrib.id, heldAt: new Date() },
+            });
+            return (Reflect.get(target, prop, receiver) as typeof db.$transaction).call(
+              target, fn as never,
+            );
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as typeof db;
+    const keyCtx = { db: racingDb, appId: app.id, roles: [] } as unknown as Context;
+
+    await expectCode(
+      M.startSession({}, { input: { id: generateId(), workerRef: w.id } }, keyCtx),
+      'WORKER_HELD',
+    );
+    expect(await db.session.count({ where: { workerId: w.id } })).toBe(0);
+  });
+
+  it('a REVOKED member cannot take a name on a stale App selection', async () => {
+    // Codex P1, and it is #1037's own rule applied to this PR's new write: when
+    // appId came from an MCP active-App SELECTION and the worker is of that
+    // same App, neither gate above re-runs isAppParticipant — so a member whose
+    // access was revoked while their connection stayed open could take a name
+    // and block the people who do belong. A hold is standing, not just scope.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    const gone = await db.user.create({
+      data: { id: generateId(), githubId: 96201, githubUsername: `wh-gone-${Date.now()}`, roles: ['READER'] },
+    });
+    const membership = await db.appMember.create({
+      data: { appId: app.id, userId: gone.id, role: 'member' },
+    });
+    // The selection is still pinned to the App; the membership is gone.
+    await db.appMember.delete({
+      where: { appId_userId: { appId: membership.appId, userId: membership.userId } },
+    });
+
+    await expectCode(
+      M.startSession(
+        {}, { input: { id: generateId(), workerRef: w.id } }, ctx(gone.id, app.id),
+      ),
+      'FORBIDDEN',
+    );
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+  });
+
+  it('a SOFT-DELETED claimant cannot take a name', async () => {
+    // Codex P2: a start already in flight when deleteUserAccount runs could
+    // land its claim after the deletion released everything, leaving an
+    // unauthenticatable tombstone holding the worker. The User row survives a
+    // soft delete, so the FK cannot catch it.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
+    await db.user.update({ where: { id: contrib.id }, data: { deletedAt: new Date() } });
+    try {
+      await expectCode(
+        M.startSession(
+          {}, { input: { id: generateId(), workerRef: w.id, appRef: app.id } }, ctx(contrib.id),
+        ),
+        'FORBIDDEN',
+      );
+      expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+    } finally {
+      await db.user.update({ where: { id: contrib.id }, data: { deletedAt: null } });
+    }
+  });
+
   it('a FAILED bind does not leave the name claimed — claim and create are one act', async () => {
     // The claim used to commit as a separate write before session.create ran,
     // so a create that then failed left the caller holding a name they never

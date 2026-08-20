@@ -714,7 +714,11 @@ export const sessionMutations = {
         // before `session.create` ran, so a create that then failed — a retried
         // duplicate id, an invalid relation — left the caller holding a name
         // they never bound. Claim and bind are one act and now commit together.
-        claimWorkerId = worker.id;
+        //
+        // Set for an App-KEY binder too, which claims nothing: it marks the
+        // worker as needing a re-check inside the transaction, so a key cannot
+        // bind a name a human claimed in the meantime.
+        if (!worker.heldByUserId) claimWorkerId = worker.id;
         // #1029: wire the continuity chain. `prevSessionId` and
         // `parentSessionId` have been in the schema since the beginning and
         // unused, so the chain primitive existed with nothing writing it. An
@@ -736,39 +740,97 @@ export const sessionMutations = {
       }
 
       return ctx.db.$transaction(async (tx) => {
-        if (claimWorkerId && ctx.userId) {
-          const claimed = await tx.worker.updateMany({
-            where: { id: claimWorkerId, heldByUserId: null },
-            data: { heldByUserId: ctx.userId, heldAt: new Date() },
-          });
-          // LOSING the race must refuse, not proceed. Both callers read
-          // `heldByUserId: null` and cleared the liveness check; the
-          // compare-and-set is what decides which of them took the name, and
-          // ignoring its result let the loser open a session as a name someone
-          // else now holds — recreating the attribution problem the hold exists
-          // to prevent, in the one window where two people genuinely raced.
-          if (claimed.count === 0) {
-            const winner = await tx.worker.findUnique({
-              where: { id: claimWorkerId },
-              select: { name: true, heldByUserId: true },
-            });
-            if (winner?.heldByUserId && winner.heldByUserId !== ctx.userId) {
-              const holder = await tx.user.findUnique({
-                where: { id: winner.heldByUserId },
+        // Everything about the hold is settled INSIDE this transaction, so the
+        // decision and the session insert commit together. The row read far
+        // above is a snapshot; by now another bind may have claimed the name.
+        if (claimWorkerId) {
+          const refuseHeld = async (heldByUserId: string, note: string): Promise<never> => {
+            const [worker, holder] = await Promise.all([
+              tx.worker.findUnique({ where: { id: claimWorkerId! }, select: { name: true } }),
+              tx.user.findUnique({
+                where: { id: heldByUserId },
                 select: { handle: true, githubUsername: true },
-              });
-              throw new GraphQLError(
-                `The name "${winner.name}" was claimed by ` +
-                  `${holder?.handle ?? holder?.githubUsername ?? winner.heldByUserId} ` +
-                  'a moment before this bind. Cast your own worker instead.',
-                {
-                  extensions: {
-                    code: 'WORKER_HELD',
-                    workerId: claimWorkerId,
-                    heldBy: winner.heldByUserId,
-                  },
+              }),
+            ]);
+            throw new GraphQLError(
+              `The name "${worker?.name ?? claimWorkerId}" ${note} ` +
+                `${holder?.handle ?? holder?.githubUsername ?? heldByUserId}. ` +
+                'Cast your own worker instead.',
+              {
+                extensions: {
+                  code: 'WORKER_HELD',
+                  workerId: claimWorkerId,
+                  heldBy: heldByUserId,
                 },
+              },
+            );
+          };
+
+          if (ctx.userId) {
+            // PARTICIPATION is rechecked immediately before the hold is granted
+            // (PR #1052 review, Codex P1). When `appId` came from an MCP
+            // active-App SELECTION and the worker is of that same App, neither
+            // gate above re-runs `isAppParticipant` — so a member whose access
+            // was revoked while their connection stayed open could still take a
+            // name and block the people who do belong. That is #1037's own rule
+            // ("deriving scope re-authorizes, it never assumes") applied to the
+            // write this PR adds, and a hold is standing, not just scope.
+            const app = await tx.app.findUnique({
+              where: { id: appId! },
+              select: { id: true, organizationId: true, ownerUserId: true },
+            });
+            if (!app || !(await isAppParticipant({ ...ctx, db: tx as unknown as Context['db'] }, app))) {
+              throw new GraphQLError(
+                'You are not a member of this worker\'s App, so you cannot take one of its names.',
+                { extensions: { code: 'FORBIDDEN' } },
               );
+            }
+
+            // A SOFT-DELETED claimant must not take a name (Codex P2): a start
+            // already in flight when `deleteUserAccount` runs could otherwise
+            // land its claim after the deletion released everything, leaving an
+            // unauthenticatable tombstone holding the worker. The User row
+            // survives a soft delete, so the FK cannot catch this.
+            const claimant = await tx.user.findUnique({
+              where: { id: ctx.userId },
+              select: { deletedAt: true },
+            });
+            if (claimant?.deletedAt) {
+              throw new GraphQLError('This account is deleted and cannot take a worker name.', {
+                extensions: { code: 'FORBIDDEN' },
+              });
+            }
+
+            const claimed = await tx.worker.updateMany({
+              where: { id: claimWorkerId, heldByUserId: null },
+              data: { heldByUserId: ctx.userId, heldAt: new Date() },
+            });
+            // LOSING the race must refuse, not proceed. Both callers read
+            // `heldByUserId: null` and cleared the liveness check; the
+            // compare-and-set is what decides which took the name, and ignoring
+            // its result let the loser open a session as a name someone else
+            // now holds.
+            if (claimed.count === 0) {
+              const winner = await tx.worker.findUnique({
+                where: { id: claimWorkerId },
+                select: { heldByUserId: true },
+              });
+              if (winner?.heldByUserId && winner.heldByUserId !== ctx.userId) {
+                await refuseHeld(winner.heldByUserId, 'was claimed a moment before this bind by');
+              }
+            }
+          } else {
+            // An App-KEY binder claims nothing — it is not a person and can
+            // hold no name — but it must still lose the race rather than sit
+            // outside it (Codex P1). Without this re-read, a human claiming
+            // between the snapshot above and this transaction left the App key
+            // free to bind a name that had just become held.
+            const now = await tx.worker.findUnique({
+              where: { id: claimWorkerId },
+              select: { heldByUserId: true },
+            });
+            if (now?.heldByUserId) {
+              await refuseHeld(now.heldByUserId, 'was claimed before this bind by');
             }
           }
         }
