@@ -154,6 +154,37 @@ async function loadRoleNodes(
  * historical record of what was allocated to this role and is left intact
  * rather than migrated away — inert data is cheaper than lost provenance.
  */
+/**
+ * `data.repos` → the role's repo affinity (#1024): the repos a worker in this
+ * role normally works in.
+ *
+ * Tolerant by construction. This is a SOFT signal a client renders as a warning
+ * (hadron-cli#456), never a gate, so a malformed value degrades to "no
+ * affinity" rather than failing a read of the whole roster — a role list that
+ * 500s because one node has a stray key is a worse outcome than a missing
+ * warning. Non-strings are dropped, entries trimmed, blanks removed, order
+ * preserved, exact duplicates collapsed.
+ *
+ * EMPTY AND UNSET MEAN THE SAME THING: no affinity, never warn. The issue left
+ * that open and the simplest contract is the honest one — a client cannot act
+ * differently on the two, since "spans everything" (the coordinator) and "not
+ * configured yet" both mean "do not warn", and inventing a distinction would
+ * make an unconfigured team look misconfigured.
+ */
+function parseRepoAffinity(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const trimmed = entry.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
 async function buildTeamRole(
   ctx: Context,
   node: DecryptedRoleNode,
@@ -197,6 +228,12 @@ async function buildTeamRole(
     loc: node.loc,
     nodeId: node.id,
     description: node.description,
+    // #1024 — repo affinity. The ONE piece of `data` this projection reads:
+    // a curated field, not a generic `data` passthrough, so the surface keeps
+    // deciding what it exposes rather than leaking whatever a node happens to
+    // carry (`data.names` on a legacy role node is exactly what must NOT
+    // appear here).
+    repos: parseRepoAffinity(node.data?.repos),
     roleAgent,
     hasNamePlaceholder,
   };
@@ -223,6 +260,8 @@ type TeamRoleWriteArgs = {
   teamAgentRef?: string | null;
   role: string;
   description?: string | null;
+  /** #1024 — repo affinity. Omitted preserves; an empty array clears. */
+  repos?: string[] | null;
 };
 
 /**
@@ -324,45 +363,73 @@ async function writeTeamRole(
       );
     }
 
-    // #1050: this surface no longer owns ANY `data` key, and therefore does
-    // not SEND one. The register, its conventions and the #987 compare-and-swap
-    // that protected them are gone, so a role write touches name and
-    // description only.
+    // #1050 — this surface owns NO `data` key by default, and therefore does
+    // not send one. Omitting `data` is load-bearing rather than tidiness
+    // (PR #1059 review, Codex P1): reading the node's data and writing it back
+    // looks like "passing it through untouched" and is a wholesale
+    // last-write-wins overwrite of a pre-write snapshot. Generic writers
+    // (updateNode, hadron_update_node_data) do NOT take withRoleWriteLock, so a
+    // concurrent edit landing in that window would be silently reverted. Legacy
+    // `data.names` survives precisely because it is never rewritten.
     //
-    // Omitting `data` is load-bearing, not tidiness (PR #1059 review, Codex
-    // P1). Reading the node's data and writing it back would look like
-    // "passing it through untouched" and would in fact be a wholesale
-    // last-write-wins overwrite of a snapshot taken before the write: generic
-    // writers (updateNode, hadron_update_node_data) do NOT take
-    // withRoleWriteLock, and this change removed the revision guard, so a
-    // concurrent generic edit landing in that window would be silently
-    // reverted — by a surface that claims to edit only the description.
-    // Omitted, writeNodeCore preserves whatever is actually in the row.
+    // #1024 adds exactly ONE key this surface does own: `repos`. Writing it
+    // reopens that window, so it is written the only safe way available —
+    // merge just this key, and stake the #989 revision guard on the row we
+    // read. A concurrent generic edit bumps revSeq and the write REFUSES
+    // (NODE_WRITE_CONFLICT) rather than silently reverting it.
     //
-    // Legacy data.names on an existing role node therefore survives because it
-    // is never rewritten, which is a stronger guarantee than re-sending it.
+    // The guard is why `data` is still absent when `repos` is omitted: an
+    // unconditional merge would make every description edit a data write, and
+    // pay the conflict risk for callers who touched no data at all.
+    const wantsRepoWrite = args.repos !== undefined && args.repos !== null;
+    const mergedData = wantsRepoWrite
+      ? { ...(existing?.data ?? {}), repos: parseRepoAffinity(args.repos) }
+      : undefined;
 
-    await writeNodeCore(
-      {
-        memoryId: systemMemoryId,
-        loc,
-        // Node name defaults to the role slug; description is optional and
-        // preserve-on-omit via the shared seam's D4 semantics.
-        ...(mode === 'create' ? { name: role } : {}),
-        ...(args.description !== undefined && args.description !== null
-          ? { description: args.description }
-          : {}),
-        reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
-      },
-      ctx,
-      mode,
-      // #1050: no guardRevSeq. The #989 revision guard existed to close a
-      // TOCTOU window on the REGISTER — a generic node write slipping between
-      // the locked read and the write — and there is no longer a register for
-      // an off-road write to clobber. Role writes now set only name and
-      // description, which are last-write-wins like every other node field.
-      mode === 'update' ? { targetNodeId: existing!.id } : undefined,
-    );
+    try {
+      await writeNodeCore(
+        {
+          memoryId: systemMemoryId,
+          loc,
+          // Node name defaults to the role slug; description is optional and
+          // preserve-on-omit via the shared seam's D4 semantics.
+          ...(mode === 'create' ? { name: role } : {}),
+          ...(args.description !== undefined && args.description !== null
+            ? { description: args.description }
+            : {}),
+          ...(mergedData !== undefined ? { data: mergedData } : {}),
+          reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
+        },
+        ctx,
+        mode,
+        mode === 'update'
+          ? {
+              targetNodeId: existing!.id,
+              // Only when this write carries data. A description-only edit stays
+              // last-write-wins like any other node field, as it was before
+              // #1024 — the guard exists for the data merge, not for the row.
+              ...(wantsRepoWrite ? { guardRevSeq: existing!.revSeq } : {}),
+            }
+          : undefined,
+      );
+    } catch (e) {
+      // #1024: the guard fired. Translate rather than leak the generic node
+      // code — a caller of updateTeamRole has no idea what NODE_WRITE_CONFLICT
+      // refers to, and the actionable fact is specific: somebody edited this
+      // role node's data outside this surface, so re-read and retry.
+      //
+      // Deliberately a REFUSAL rather than a retry-in-place. The competing
+      // write is by definition one this surface cannot see the intent of, and
+      // silently re-merging on top of it is how the last-write-wins revert
+      // (PR #1059) happened in the first place.
+      if (e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
+        throw new GraphQLError(
+          `The "${role}" role definition was modified while this edit ran — re-read it and retry.`,
+          { extensions: { code: 'TEAM_ROLE_DATA_CONFLICT', role } },
+        );
+      }
+      throw e;
+    }
 
     // Return the fresh projection through the same builder the read uses.
     const nodes = await loadRoleNodes(ctx, systemMemoryId);

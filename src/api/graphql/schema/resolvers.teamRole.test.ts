@@ -412,6 +412,156 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     expect((after.data as Record<string, unknown>).names).toEqual(['Fred', 'Gwen', 'Hans']);
   });
 
+  // ── #1024: repo affinity ──────────────────────────────────────────────────
+  it('reads data.repos, and sets it through the surface rather than by hand', async () => {
+    const created = await M.createTeamRole(
+      {},
+      { appRef: app.id, role: 'ios-app-engineer', repos: ['hadron-memory/hadron-ios'] },
+      ctx(contrib.id),
+    );
+    expect(created.repos).toEqual(['hadron-memory/hadron-ios']);
+
+    const updated = await M.updateTeamRole(
+      {},
+      {
+        appRef: app.id,
+        role: 'ios-app-engineer',
+        repos: ['hadron-memory/hadron-ios', 'hadron-memory/hadron-macapp'],
+      },
+      ctx(contrib.id),
+    );
+    expect(updated.repos).toEqual([
+      'hadron-memory/hadron-ios',
+      'hadron-memory/hadron-macapp',
+    ]);
+  });
+
+  it('omitted PRESERVES; an empty array CLEARS', async () => {
+    await M.createTeamRole(
+      {},
+      { appRef: app.id, role: 'qa', repos: ['acme/qa'] },
+      ctx(contrib.id),
+    );
+    // A description-only edit must not disturb affinity.
+    const desc = await M.updateTeamRole(
+      {},
+      { appRef: app.id, role: 'qa', description: 'Quality' },
+      ctx(contrib.id),
+    );
+    expect(desc.repos).toEqual(['acme/qa']);
+    expect(desc.description).toBe('Quality');
+
+    const cleared = await M.updateTeamRole(
+      {},
+      { appRef: app.id, role: 'qa', repos: [] },
+      ctx(contrib.id),
+    );
+    expect(cleared.repos).toEqual([]);
+  });
+
+  it('a repo write MERGES — sibling data keys survive, including a legacy register', async () => {
+    // The role node in this fixture still carries data.names. #1050 left it
+    // there as history, and a repos write must not be the thing that finally
+    // erases it.
+    const before = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId } },
+    });
+    expect((before.data as { names?: string[] }).names?.length).toBeGreaterThan(0);
+
+    await M.updateTeamRole(
+      {},
+      { appRef: app.id, role: 'backend-engineer', repos: ['acme/api'] },
+      ctx(contrib.id),
+    );
+
+    const after = await db.node.findUniqueOrThrow({ where: { id: before.id } });
+    const data = after.data as { names?: string[]; repos?: string[] };
+    expect(data.repos).toEqual(['acme/api']);
+    expect(data.names).toEqual((before.data as { names?: string[] }).names);
+  });
+
+  it('REFUSES rather than reverting when a generic write races the merge', async () => {
+    // Generic node surfaces do not take withRoleWriteLock, so the merge's
+    // read-then-write window is real. The #989 revision guard turns what would
+    // be a silent revert (PR #1059's P1) into a typed refusal.
+    //
+    // The race is STAGED INSIDE the window rather than before it: bumping
+    // revSeq before the call proves nothing, because the surface re-reads the
+    // node at the head of its lock and would simply see the new value. The
+    // competing write has to land between that read and the guarded write,
+    // which is exactly where this spy puts it.
+    const node = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId } },
+    });
+    const spy = vi
+      .spyOn(nodeWrite, 'writeNodeCore')
+      .mockImplementation(async (...callArgs: Parameters<typeof nodeWrite.writeNodeCore>) => {
+        spy.mockRestore();
+        await db.node.update({
+          where: { id: node.id },
+          data: { revSeq: { increment: 1 }, data: { offRoad: 'landed first' } },
+        });
+        return nodeWrite.writeNodeCore(...callArgs);
+      });
+
+    try {
+      await expectCode(
+        M.updateTeamRole(
+          {},
+          { appRef: app.id, role: 'backend-engineer', repos: ['acme/api'] },
+          ctx(contrib.id),
+        ),
+        'TEAM_ROLE_DATA_CONFLICT',
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    // And the competing write survives untouched — the point of refusing.
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect((after.data as { offRoad?: string }).offRoad).toBe('landed first');
+  });
+
+  it('a description-only edit takes NO revision guard', async () => {
+    // The guard exists for the data merge, not for the row. Making every
+    // description edit a guarded write would pay conflict risk for callers who
+    // touched no data at all.
+    const spy = vi.spyOn(nodeWrite, 'writeNodeCore');
+    try {
+      await M.updateTeamRole(
+        {},
+        { appRef: app.id, role: 'backend-engineer', description: 'just words' },
+        ctx(contrib.id),
+      );
+      const opts = spy.mock.calls.at(-1)?.[3] as { guardRevSeq?: number } | undefined;
+      expect(opts?.guardRevSeq).toBeUndefined();
+      expect(Object.keys(spy.mock.calls.at(-1)?.[0] as object)).not.toContain('data');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a malformed data.repos degrades to no affinity rather than failing the read', async () => {
+    // A soft signal must not be able to 500 the roster. Non-strings dropped,
+    // entries trimmed, blanks removed, order kept, duplicates collapsed.
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'roles:frontend-engineer', memoryId: teamAgent.systemMemoryId } },
+      data: { data: { repos: 'not-an-array' } },
+    });
+    const page = await teamRoles(ctx(contrib.id));
+    expect(page.items.find((r: any) => r.role === 'frontend-engineer').repos).toEqual([]);
+
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'roles:frontend-engineer', memoryId: teamAgent.systemMemoryId } },
+      data: { data: { repos: ['  a/b  ', 7, '', 'a/b', 'c/d', null] } },
+    });
+    const page2 = await teamRoles(ctx(contrib.id));
+    expect(page2.items.find((r: any) => r.role === 'frontend-engineer').repos).toEqual([
+      'a/b',
+      'c/d',
+    ]);
+  });
+
   it('refuses an unknown role → WORKER_ROLE_NOT_FOUND with the available list', async () => {
     try {
       await M.updateTeamRole(

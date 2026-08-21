@@ -1366,6 +1366,71 @@ export const workerFieldResolvers = {
         return null;
       }
     },
+    /**
+     * #1024 — the repo affinity of this worker's ROLE, resolved so a client
+     * binding a worker needs no second round-trip to `teamRoles`. The CLI's
+     * mismatch warning fires at `session start` (hadron-cli#456), which already
+     * has the worker in hand.
+     *
+     * Behind the worker read gate and masked on deny, like `promptOverride` and
+     * the holder — because `Session.worker` reaches a Worker through a WIDER
+     * gate that admits any org member and survives a user leaving the App, so
+     * an ungated field here would publish a team's repo list through any
+     * historical session.
+     *
+     * Masking to `[]` rather than null is deliberate and costs nothing: empty
+     * already means "no affinity, never warn" (the field's contract), so a
+     * denied caller simply gets no warning — the safe direction for a signal
+     * that must never become a refusal.
+     *
+     * UNPROVEN BY CONSTRUCTION, and kept anyway. `teamRoles` runs
+     * `requireWorkerReadAccess` — the same predicate `maySeeWorkerInternals`
+     * wraps — so today the inner call refuses first and deleting this line
+     * leaves the suite green. That is a green mutation indicting the TEST, not
+     * the guard (review:a-green-mutation-indicts-the-test): no input reaches
+     * it, because the two gates are currently identical.
+     *
+     * It stays because it makes THIS field's audience explicit rather than
+     * inherited. `teamRoles` is a roster read and widening it is plausible; if
+     * it ever admits a broader caller, this field would silently widen with it
+     * — through `Session.worker`, which is the leak path described above. The
+     * day those predicates diverge, this line becomes load-bearing and a test
+     * can reach it.
+     *
+     * Resolved through `teamRoles`' own projection so the parsing rules stay in
+     * one place: a role with no definition node, or a worker with no role, is
+     * `[]` rather than an error. A soft signal must not be able to fail a read.
+     */
+    repos: async (
+      worker: { appId: string; role: string | null },
+      _: unknown,
+      ctx: Context,
+    ): Promise<string[]> => {
+      if (!worker.role) return [];
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return [];
+      const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
+      if (!app || app.deletedAt) return [];
+      try {
+        // LAZY import: resolvers.teamRole imports this module (withRoleWriteLock,
+        // locateTeamAgent), so a static import here would close the cycle. Same
+        // reason and same shape as the teamChat locator below.
+        const { teamRoleQueries } = await import('./resolvers.teamRole.js');
+        const page = await teamRoleQueries.teamRoles(
+          null,
+          { appRef: worker.appId },
+          ctx,
+        );
+        const match = (page.items as Array<{ role: string; repos: string[] }>).find(
+          (r) => r.role.toLowerCase() === worker.role!.toLowerCase(),
+        );
+        return match?.repos ?? [];
+      } catch {
+        // An encrypted system memory with no session key, an ambiguous Team
+        // Agent, no roles branch at all: none of these should fail a worker
+        // read for the sake of a warning that is optional by design.
+        return [];
+      }
+    },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     promptOverride: async (
       worker: { appId: string; promptOverride: string | null },

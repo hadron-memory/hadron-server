@@ -1967,6 +1967,24 @@ export const typeDefs = `#graphql
     urn: String
     "The cast-list role this filling answers ('backend-engineer')."
     role: String
+    """
+    #1024 — the repo affinity of this worker's ROLE, resolved so a client that
+    already holds the worker needs no second round-trip to teamRoles. The CLI
+    warns on a role/repo mismatch at session start (hadron-cli#456).
+
+    WORKING-STATE field: behind the worker read gate and masked to [] on deny,
+    like promptOverride and the holder — Session.worker reaches a Worker
+    through a wider gate that admits any org member and survives a user leaving
+    the App, so an ungated field would publish a team's repo list through any
+    historical session.
+
+    Masking to [] costs nothing, because empty already means "no affinity,
+    never warn": a denied caller simply gets no warning, which is the safe
+    direction for a signal that must never become a refusal. Same reason a
+    worker with no role, a role with no definition, or an unreadable system
+    memory all answer [] rather than erroring.
+    """
+    repos: [String!]!
     "Per-worker individuality layered over the agent's template prompt."
     promptOverride: String
     "The worker-scoped working memory in the App's container (null until provisioned)."
@@ -2124,6 +2142,25 @@ export const typeDefs = `#graphql
     loc: String!
     nodeId: ID!
     description: String
+    """
+    #1024 — the repos a worker in this role normally works in, from
+    \`data.repos\`. A SOFT signal for clients to warn on a role/repo mismatch at
+    session start (hadron-cli#456): a worker bound as a server-engineer with
+    \`--repo …/hadron-cli\` is usually a mistake and is sometimes deliberate.
+
+    NEVER a refusal, and never inferred. Cross-repo work is legitimate — a
+    coordinator does it by definition, and sibling repos share code — so a hard
+    gate would be wrong the first time someone makes a genuine cross-cutting
+    change. Affinity is declared, not guessed from the role slug, which happens
+    to work for \`cli-engineer\` → \`hadron-cli\` and breaks for any team whose repo
+    names do not match their role names.
+
+    EMPTY AND UNSET ARE THE SAME: no affinity, never warn. A client cannot
+    usefully act differently on the two, since "spans everything" and "not
+    configured yet" both mean do-not-warn, and distinguishing them would make an
+    unconfigured team look misconfigured.
+    """
+    repos: [String!]!
     """
     The single installed agent whose personaRole matches this role — exactly
     the agent a role-mode castWorker would use (null when zero or ambiguous).
@@ -6721,13 +6758,22 @@ export const typeDefs = `#graphql
       teamAgentRef: ID
       role: String!
       description: String
+      repos: [String!]
     ): TeamRole!
 
     """
     #960 — edit a roles:<role> definition. Omitted fields preserve. Unknown
     role: WORKER_ROLE_NOT_FOUND. Same authorization as createTeamRole.
 
-    #1050: with the register gone this edits the description and nothing else,
+    #1024: \`repos\` sets the role's repo affinity. Omitted PRESERVES; an empty
+    array CLEARS. It is merged into the node's \`data\` rather than replacing it,
+    and the write is guarded on the row's revision — a concurrent generic node
+    write (updateNode, hadron_update_node_data) refuses TEAM_ROLE_DATA_CONFLICT
+    rather than silently reverting, since those surfaces do not take this one's
+    lock. Retry after re-reading. A description-only edit carries no data and
+    takes no guard.
+
+    #1050: with the register gone this otherwise edits the description alone,
     so the #987 expectedNames compare-and-swap is gone too — it existed solely
     to stop two concurrent wholesale register writes silently dropping each
     other's newly added FREE names, a hazard that cannot arise when the write
@@ -6739,6 +6785,7 @@ export const typeDefs = `#graphql
       teamAgentRef: ID
       role: String!
       description: String
+      repos: [String!]
     ): TeamRole!
 
     """

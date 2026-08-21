@@ -288,6 +288,51 @@ describe('castWorker — agent resolution', () => {
   });
 });
 
+describe('#1024 — Worker.repos (resolved role affinity)', () => {
+  const roleNodeRepos = (role: string, repos: unknown) =>
+    db.node.upsert({
+      where: { loc_memoryId: { loc: `roles:${role}`, memoryId: teamAgent.systemMemoryId } },
+      create: {
+        id: generateId(),
+        memoryId: teamAgent.systemMemoryId,
+        loc: `roles:${role}`,
+        name: role,
+        data: { repos } as any,
+      },
+      update: { data: { repos } as any },
+    });
+
+  it('resolves the affinity of the worker\'s role', async () => {
+    await roleNodeRepos('backend-engineer', ['hadron-memory/hadron-server']);
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(admin.id))).toEqual([
+      'hadron-memory/hadron-server',
+    ]);
+  });
+
+  it('is [] for a worker with no role, and for a role with no definition', async () => {
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos({ ...worker, role: null }, {}, ctx(admin.id))).toEqual([]);
+    expect(await W.repos({ ...worker, role: 'astronaut' }, {}, ctx(admin.id))).toEqual([]);
+  });
+
+  it('MASKS to [] for a caller outside the App — the Session.worker nesting path', async () => {
+    // Session.worker reaches a Worker through a wider gate that admits any org
+    // member and survives leaving the App, so an ungated field here would
+    // publish the team's repo list through any historical session.
+    //
+    // HONEST NOTE on what this asserts: the OUTCOME is pinned, the mechanism is
+    // not. `teamRoles` runs the same predicate the mask wraps, so today this
+    // passes whether or not the mask is present — deleting it leaves the suite
+    // green. The mask is defence-in-depth against those two gates diverging
+    // (see the field's JSDoc); this test guarantees the outsider sees nothing,
+    // by whichever gate gets there first.
+    await roleNodeRepos('backend-engineer', ['hadron-memory/hadron-server']);
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(outsider.id))).toEqual([]);
+  });
+});
+
 describe('castWorker — naming (#1050: the register is gone)', () => {
   it('a nameless cast REFUSES — there is no pool to draw from', async () => {
     await expectCode(cast({ role: 'backend-engineer' }), 'WORKER_NAME_REQUIRED');
