@@ -82,6 +82,7 @@ import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
+import { recordNodeUsage } from '../../../lib/usageRecorder.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import {
   ALL_NODE_MERGE_FIELDS,
@@ -1539,6 +1540,13 @@ export const memoryMutations = {
 
       const result = await syncGraphFromGithub(memory);
       if (result.error) throw new Error(result.error);
+
+      // #1061 — one write per node the sync actually wrote. This mutation and
+      // the `hadron_sync_graph` MCP tool are the two sync entry points with a
+      // principal to attribute to; the webhook and the startup batch loop
+      // deliberately drop `writtenNodes`, because an unattended sync is nobody's
+      // usage (PR #1062 review — Copilot).
+      recordNodeUsage(ctx.db, 'write', result.writtenNodes ?? [], ctx);
 
       return ctx.db.memory.findUniqueOrThrow({ where: { id }, include: MEMORY_INCLUDE });
     },

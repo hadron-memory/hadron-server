@@ -26,6 +26,7 @@ import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/w
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import {
   HANDOFFS_PARENT_LOC,
   HANDOFF_SESSION_KEY,
@@ -2052,6 +2053,10 @@ export const sessionMutations = {
         // preview so a dry run predicts THIS prompt rather than approximating
         // it. Behavior here is unchanged — the Mustache compile, the
         // routing-edge skip and the dangling-target skip all moved verbatim.
+        // #1061 — the targets the assembler actually INLINED (routing edges and
+        // empty-content targets are skipped), so the read events below describe
+        // what crossed the boundary rather than what the node links to.
+        const inlined: unknown[] = [];
         const assembled = await assembleRunNodePrompt(
           { ...node, loc },
           stringArgs ?? undefined,
@@ -2060,8 +2065,16 @@ export const sessionMutations = {
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
             compileTemplate: (content, data, memoryId) =>
               compileTemplate(content, data, memoryId, ctx.db, {}),
+            onTargetInlined: (target) => inlined.push(target),
           },
         );
+        // #1061 — the render-only branch of runTask (`!appRef`) returns the
+        // assembled bundle to the caller, so it is a read of the run node and
+        // of every dependency inlined into it — the same treatment the
+        // `renderRunNode` preview gets. The `action-run` event below is a
+        // separate question (how often was this run?), not a substitute
+        // (PR #1062 review — Codex).
+        recordNodeUsage(ctx.db, 'read', toUsageNodeRefs([node, ...inlined]), ctx);
 
         // Record usage event (fire-and-forget).
         ctx.db.usageEvent

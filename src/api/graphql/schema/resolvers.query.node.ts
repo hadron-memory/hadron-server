@@ -252,23 +252,24 @@ export const nodeQueries = {
         : undefined;
 
       // #1061 — a render returns the node's assembled content, so it counts as
-      // a read of the run node AND of every dependency inlined into the bundle
-      // (each of which passed its own memory-read gate above). This resolver
-      // deliberately records no `action-run` event — see the doc comment — but
-      // that is about metering an execution, not about node reads, which did
-      // happen.
-      recordNodeUsage(
-        ctx.db,
-        'read',
-        toUsageNodeRefs([node, ...visibleEdges.map((e) => e.target)]),
-        ctx,
-      );
+      // a read of the run node AND of every dependency inlined into the bundle.
+      // Collected from the assembler's own `onTargetInlined` hook rather than
+      // from `visibleEdges`: the assembler ALSO skips routing edges and
+      // empty-content targets (PR #1062 review — Codex P2, Copilot), so
+      // recording the gate's output would count reads for content that never
+      // crossed the boundary. Recorded AFTER assembly, so a compileTemplate
+      // failure records nothing at all.
+      //
+      // This resolver deliberately records no `action-run` event — see the doc
+      // comment — but that is about metering an execution, not about node
+      // reads, which did happen.
+      const inlined: unknown[] = [];
 
       // #858 review (Codex P1): assemble with the SAME function runTask
       // executes — Mustache via compileTemplate, routing edges skipped — not
       // the legacy MCP bundle, which does a literal replaceAll and inlines
       // every edge. A preview that disagrees with the run is worse than none.
-      return assembleRunNodePrompt(
+      const bundle = await assembleRunNodePrompt(
         { ...node, outgoingEdges: visibleEdges } as never,
         stringArgs,
         {
@@ -276,8 +277,11 @@ export const nodeQueries = {
             loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
           compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
             compileTemplate(content, data, memoryId, ctx.db, {}),
+          onTargetInlined: (target) => inlined.push(target),
         },
       );
+      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs([node, ...inlined]), ctx);
+      return bundle;
     },
 
     // Spec: cor:api:180 — cross-entity URN resolution
@@ -565,14 +569,20 @@ export const nodeQueries = {
         // delegates here). A denied or missing ref returns null earlier and
         // records nothing — an event must never name a node the caller could
         // not read (#825).
-        recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
+        //
+        // Recorded at the END, not the top: `decryptNodesBatch` and
+        // `compileTemplate` can both throw (a missing session key, an
+        // unresolvable template reference), and the caller then gets an error
+        // instead of content (PR #1062 review — Copilot).
         await decryptNodesBatch(ctx.db, [node]);
         if (!raw && node.content?.includes('{{')) {
           const compiled = await compileTemplate(
             node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
           );
+          recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
           return { ...node, content: compiled };
         }
+        recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
         return node;
       };
 
@@ -696,9 +706,10 @@ export const nodeQueries = {
       }
       await decryptNodesBatch(ctx.db, [node]);
       // #1061 — an export hands the caller the node's full content, so it is a
-      // read like any other. Recorded once here, after the access gate and
-      // before the format branch, so PDF and MD/JSON count the same.
-      recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
+      // read like any other. Recorded in each SUCCESSFUL format branch below
+      // rather than here: the PDF path calls the external hadrontool-pdf
+      // service and `renderNodeExport` can throw, and a failed export returned
+      // no content (PR #1062 review — Copilot).
       const memory = await ctx.db.memory.findUnique({
         where: { id: node.memoryId },
         select: { urn: true },
@@ -715,6 +726,7 @@ export const nodeQueries = {
           node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
         const { base64, bytes } = await renderMarkdownToPdf(markdown, { title: node.name });
         const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
+        recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
         return {
           format: 'PDF',
           mimeType: 'application/pdf',
@@ -747,6 +759,7 @@ export const nodeQueries = {
       );
 
       const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
+      recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
       return {
         format: fmt,
         mimeType,
@@ -1451,9 +1464,11 @@ export const nodeQueries = {
      * ref strings, so a URN caller gets back something actionable rather than
      * a PK it never sent. Hard caps (cor:api:040:02): over the node-count cap
      * throws; over the response-size cap returns a partial result flagged
-     * `truncated` — never a silent short read. No UsageEvent is recorded,
-     * matching the single-node GraphQL reads (nodeById / node), which don't
-     * either — per-surface parity.
+     * `truncated` — never a silent short read. Records one `read` UsageEvent
+     * per node ACTUALLY RETURNED (#1061 — a node the size cap omitted is not
+     * counted), matching the single-node GraphQL read (`node`), which records
+     * one — per-surface parity. Before #1061 neither recorded anything, which
+     * is what this sentence used to say (PR #1062 review — Copilot).
      */
     nodeBatch: async (
       _: unknown,

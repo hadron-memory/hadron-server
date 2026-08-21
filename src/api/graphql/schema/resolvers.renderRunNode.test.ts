@@ -133,6 +133,38 @@ describe('renderRunNode — it is a READ (#818)', () => {
     expect(await db.usageEvent.count({ where: { type: 'action-run' } })).toBe(0);
   });
 
+  it('records reads ONLY for dependencies actually inlined, not every edge (#1061)', async () => {
+    // The assembler skips a target with no content, so recording from the edge
+    // list would inflate the read series for a node the bundle never carried
+    // (PR #1062 review — Codex P2, Copilot).
+    const empty = await createDbNode(db, {
+      loc: 'reference:empty', memoryId: mem.id, name: 'Empty', content: '',
+    });
+    await db.edge.create({
+      data: {
+        id: generateId(), memoryId: mem.id, sourceId: action.id, targetId: empty.id,
+        name: 'documents', loc: 'actions:review:documents:reference:empty',
+      },
+    });
+
+    const out = await render(action.id, { subject: 'x' });
+    expect(out).toContain('PLAYBOOK BODY');
+    expect(out).not.toContain('Empty');
+
+    for (let i = 0; i < 50; i++) {
+      if ((await db.usageEvent.count({ where: { type: 'read' } })) >= 2) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const reads = await db.usageEvent.findMany({
+      where: { type: 'read' },
+      select: { nodeId: true },
+    });
+    const ids = reads.map((r) => r.nodeId);
+    expect(ids).toContain(action.id); // the run node
+    expect(ids).toContain(dep.id);    // the inlined dependency
+    expect(ids).not.toContain(empty.id); // skipped by the assembler → no read
+  });
+
   it('DOES record read events — a preview still returns node content (#1061)', async () => {
     // #1061 narrowed the assertion above from "no UsageEvent at all" to "no
     // action-run". The two are different questions: the #818 contract is that

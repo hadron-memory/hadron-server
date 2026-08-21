@@ -2280,23 +2280,6 @@ export function createMcpServerInstance(
         return textResult(`Node "${rawUrn}" not found.`);
       }
 
-      // Record usage event (fire-and-forget).
-      //
-      // #796: `memoryId` is attributed directly so the event stays counted for
-      // this memory after the node is deleted (nodeId is SetNull).
-      //
-      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
-      // bound session. `auth.sessionId` is a validated Session.id — an App-key
-      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
-      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
-      // MCP transport session id. It was hardcoded null in all five MCP usage
-      // writers, which meant MCP work produced no session heartbeat at all: the
-      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
-      // busy session could be reaped as idle. Residual gap: user-credential MCP
-      // callers cannot bind a session today (cor:aut:020:02 restricts binding to
-      // App-key callers), so their heartbeat is still only updateSession.
-      recordNodeRead(db, { id: node.id, loc, memoryId: node.memoryId }, auth);
-
       // Spec 031 — contentScope-driven response shape. Default 'content'
       // preserves pre-spec output byte-for-byte. Defensive enum check: zod
       // validates the same set at the MCP transport boundary, but direct-
@@ -2319,9 +2302,34 @@ export function createMcpServerInstance(
       const lockState = mcpDecryptOrMark(node);
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      return textResult(
-        await renderNodeReadProjection(node, scope, { locked: lockState === 'locked' }),
-      );
+      const projection = await renderNodeReadProjection(node, scope, {
+        locked: lockState === 'locked',
+      });
+
+      // Record usage event (fire-and-forget), AFTER the projection is in hand:
+      // the defensive contentScope check above returns an error for a direct
+      // handler call with a bad scope, and recording first would count a read
+      // for content never returned (PR #1062 review — Copilot).
+      //
+      // #796: `memoryId` is attributed directly so the event stays counted for
+      // this memory after the node is deleted (nodeId is SetNull).
+      //
+      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
+      // bound session. `auth.sessionId` is a validated Session.id — an App-key
+      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
+      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
+      // MCP transport session id. It was hardcoded null in all five MCP usage
+      // writers, which meant MCP work produced no session heartbeat at all: the
+      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
+      // busy session could be reaped as idle. Residual gap: user-credential MCP
+      // callers cannot bind a session today (cor:aut:020:02 restricts binding to
+      // App-key callers), so their heartbeat is still only updateSession.
+      //
+      // A LOCKED node still records: the projection is what crossed the
+      // boundary, and the caller did read this node's addressable state.
+      recordNodeRead(db, { id: node.id, loc, memoryId: node.memoryId }, auth);
+
+      return textResult(projection);
     },
   );
 
@@ -4619,6 +4627,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     loc: string,
     args?: Record<string, string>,
   ): Promise<string> {
+    // #1061 — collected by the renderer itself (see its `onTargetInlined`
+    // note): it inlines a target only when that target HAS content, so a list
+    // built from `node.outgoingEdges` here would record reads for nodes the
+    // bundle never carried (PR #1062 review — Copilot).
+    const inlined: unknown[] = [];
     const rendered = await renderRunNodeBundle(node, args, async (memoryId) => {
       // Reuse the tool surface's own memoized memory-urn lookup.
       let memUrn = memoryUrnCache.get(memoryId);
@@ -4628,7 +4641,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         memoryUrnCache.set(memoryId, memUrn);
       }
       return memUrn;
-    });
+    }, (target) => inlined.push(target));
     db.usageEvent
       .create({
         data: {
@@ -4658,12 +4671,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     // the GraphQL `renderRunNode` preview would have excluded. That asymmetry
     // predates this change and is tracked separately; the events recorded here
     // describe what this tool actually returned, which is the honest reading.
-    recordNodeUsage(
-      db,
-      'read',
-      toUsageNodeRefs([node, ...node.outgoingEdges.map((e) => e.target)]),
-      auth,
-    );
+    recordNodeUsage(db, 'read', toUsageNodeRefs([node, ...inlined]), auth);
     return rendered;
   }
 

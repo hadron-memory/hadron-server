@@ -785,7 +785,13 @@ export const teamChatQueries = {
     const total = await ctx.db.node.count({ where });
     if (take === 0) return { items: [], total };
     const rows = await ctx.db.node.findMany({ where, orderBy, select, skip, take });
+    // Project BEFORE recording (PR #1062 review — Copilot): `projectMessage`
+    // decrypts, and on an encrypted memory with no live session key it throws
+    // SESSION_EXPIRED — so recording first would count reads for a transcript
+    // the caller never received. The mentions branch above already projects
+    // first; this makes the two branches agree.
+    const items = rows.map((r) => projectMessage(r, memEncInfo));
     recordRead(rows);
-    return { items: rows.map((r) => projectMessage(r, memEncInfo)), total };
+    return { items, total };
   },
 };

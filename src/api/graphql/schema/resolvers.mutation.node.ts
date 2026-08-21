@@ -2531,14 +2531,27 @@ export const nodeMutations = {
         });
       }
 
-      // #1061 — one write, on the SURVIVING target. The source node was HARD
-      // deleted above, so an event naming it would fail the `nodeId` FK on
-      // insert; the merge is recorded where its result lives.
+      // #1061 — one write, on the SURVIVING target. The source node may have
+      // been HARD deleted above (`deleteSource`), so an event naming it would
+      // fail the `nodeId` FK on insert; the merge is recorded where its result
+      // lives.
       recordNodeWrite(
         ctx.db,
         { id: finalNode.id, loc: finalNode.loc, memoryId: target.memoryId },
         ctx,
       );
+      // The merge also READ the source's content and folded it into the
+      // returned target — the same read `cloneNode` records for its source, and
+      // across memories when they differ (PR #1062 review — Copilot). Recorded
+      // only when the source SURVIVES: on `deleteSource` the row is gone and
+      // the FK has nothing to point at.
+      if (!deleteSource) {
+        recordNodeRead(
+          ctx.db,
+          { id: source.id, loc: source.loc, memoryId: source.memoryId },
+          ctx,
+        );
+      }
 
       return finalNode;
     },
