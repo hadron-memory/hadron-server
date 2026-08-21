@@ -408,7 +408,16 @@ async function writeTeamRole(
               // Only when this write carries data. A description-only edit stays
               // last-write-wins like any other node field, as it was before
               // #1024 — the guard exists for the data merge, not for the row.
-              ...(wantsRepoWrite ? { guardRevSeq: existing!.revSeq } : {}),
+              // A guarded update is TWO node writes — the revNo claim, then the
+            // main update guarded on the claimed value — and they are not in
+            // one transaction (the role lock runs on a separate connection).
+            // A writer landing between them leaves a consumed revSeq and a
+            // revision describing an edit that then refuses. That is
+            // pre-existing to #989's primitive rather than new here (#1072),
+            // but re-enabling the option is what makes it reachable again, so
+            // it is named at the call site rather than left to be rediscovered.
+            // The refusal itself is correct; the residue is an audit artifact.
+            ...(wantsRepoWrite ? { guardRevSeq: existing!.revSeq } : {}),
             }
           : undefined,
       );
@@ -542,6 +551,79 @@ async function deleteTeamRoleImpl(
       nodesDeleted: tombstoned.length,
     };
   });
+}
+
+/**
+ * #1024 — role → repo affinity for ONE App, memoized per request.
+ *
+ * Deliberately NOT a call to the `teamRoles` query, which is what the first
+ * version did (PR #1071 review, Codex found three defects in one decision):
+ *
+ * - it PAGES, so an App with more than 50 roles silently answered `[]` for
+ *   every role sorting past the first page — a suppressed warning that looks
+ *   exactly like "no affinity configured";
+ * - it runs `locateTeamAgent`, which throws TEAM_AGENT_AMBIGUOUS for an App
+ *   with several `roles:` branches — a SUPPORTED configuration — so those Apps
+ *   could never use this field at all;
+ * - it re-ran the whole projection per worker, so a 50-worker page reloaded and
+ *   re-decrypted the same roster 50 times.
+ *
+ * All three came from reusing a public query for an internal lookup. This reads
+ * the role nodes directly, across EVERY installed agent's system memory rather
+ * than one inferred Team Agent — which is both cheaper and more correct: if any
+ * installed agent defines the role, its affinity counts, and ambiguity stops
+ * being an error to swallow. Ties resolve by `loc` order, deterministically; a
+ * soft signal does not need arbitration beyond that.
+ *
+ * Caching is per REQUEST (on `ctx`), never longer — an edit landing mid-request
+ * is far less likely than a stale warning surviving a role change.
+ */
+export async function loadAppRepoAffinity(
+  ctx: Context,
+  appId: string,
+): Promise<Map<string, string[]>> {
+  type Cache = Map<string, Promise<Map<string, string[]>>>;
+  const holder = ctx as Context & { repoAffinityCache?: Cache };
+  const cache = (holder.repoAffinityCache ??= new Map());
+  let pending = cache.get(appId);
+  if (pending) return pending;
+
+  pending = (async () => {
+    const out = new Map<string, string[]>();
+    const installed = await ctx.db.appAgent.findMany({
+      where: { appId },
+      select: { agent: { select: { systemMemoryId: true, deletedAt: true } } },
+    });
+    const memoryIds = [
+      ...new Set(
+        installed
+          .map(({ agent }) => (agent && !agent.deletedAt ? agent.systemMemoryId : null))
+          .filter((id): id is string => !!id),
+      ),
+    ];
+    if (memoryIds.length === 0) return out;
+
+    for (const memoryId of memoryIds) {
+      let nodes: DecryptedRoleNode[];
+      try {
+        nodes = await loadRoleNodes(ctx, memoryId);
+      } catch {
+        // An encrypted system memory with no session key must not fail a
+        // worker read for the sake of an optional warning. Skip that memory;
+        // another agent's roles branch may still answer.
+        continue;
+      }
+      for (const node of nodes) {
+        const role = node.loc.slice(ROLES_BRANCH_PREFIX.length).toLowerCase();
+        if (out.has(role)) continue; // first by loc order wins
+        const repos = parseRepoAffinity(node.data?.repos);
+        if (repos.length > 0) out.set(role, repos);
+      }
+    }
+    return out;
+  })();
+  cache.set(appId, pending);
+  return pending;
 }
 
 export const teamRoleQueries = {

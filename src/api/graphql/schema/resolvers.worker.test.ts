@@ -316,6 +316,68 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     expect(await W.repos({ ...worker, role: 'astronaut' }, {}, ctx(admin.id))).toEqual([]);
   });
 
+  it('finds a role that sorts past the first page of a large roster', async () => {
+    // The `teamRoles` query pages at 50. Routing this lookup through it made an
+    // App with more than 50 roles answer [] for everything past the first page
+    // — a suppressed warning indistinguishable from "no affinity configured"
+    // (PR #1071 review, Codex).
+    for (let i = 0; i < 60; i++) {
+      await createRoleNode(teamAgent.systemMemoryId, `filler-${String(i).padStart(3, '0')}`);
+    }
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: teamAgent.systemMemoryId,
+        loc: 'roles:zz-late-role',
+        name: 'zz-late-role',
+        data: { repos: ['acme/late'] } as any,
+      },
+    });
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos({ ...worker, role: 'zz-late-role' }, {}, ctx(admin.id))).toEqual([
+      'acme/late',
+    ]);
+  });
+
+  it('works for an App with SEVERAL roles: branches (TEAM_AGENT_AMBIGUOUS)', async () => {
+    // A supported configuration. The single-Team-Agent lookup threw
+    // TEAM_AGENT_AMBIGUOUS, and the catch turned that into [] for every
+    // worker — so those Apps could never use the field at all.
+    await createRoleNode(roleAgent.systemMemoryId, 'designer');
+    await db.node.update({
+      where: {
+        loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId },
+      },
+      data: { data: { repos: ['acme/api'] } as any },
+    });
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(admin.id))).toEqual(['acme/api']);
+  });
+
+  it('loads the roster ONCE per request, not once per worker', async () => {
+    // A 50-worker page re-ran the whole projection 50 times: App lookup, Team
+    // Agent discovery, role loading and decryption, each time.
+    await db.node.update({
+      where: {
+        loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId },
+      },
+      data: { data: { repos: ['acme/api'] } as any },
+    });
+    const a = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const b = await cast({ agentRef: roleAgent.id, name: 'Henry' });
+    const shared = ctx(admin.id);
+    const spy = vi.spyOn(db.appAgent, 'findMany');
+    try {
+      expect(await W.repos(a, {}, shared)).toEqual(['acme/api']);
+      const afterFirst = spy.mock.calls.length;
+      expect(await W.repos(b, {}, shared)).toEqual(['acme/api']);
+      // Second worker, same request context: no further roster load.
+      expect(spy.mock.calls.length).toBe(afterFirst);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('MASKS to [] for a caller outside the App — the Session.worker nesting path', async () => {
     // Session.worker reaches a Worker through a wider gate that admits any org
     // member and survives leaving the App, so an ungated field here would

@@ -1397,9 +1397,16 @@ export const workerFieldResolvers = {
      * day those predicates diverge, this line becomes load-bearing and a test
      * can reach it.
      *
-     * Resolved through `teamRoles`' own projection so the parsing rules stay in
-     * one place: a role with no definition node, or a worker with no role, is
-     * `[]` rather than an error. A soft signal must not be able to fail a read.
+     * Resolved through `loadAppRepoAffinity` — a direct, request-memoized read
+     * of the role nodes, NOT the `teamRoles` query. Routing an internal lookup
+     * through a public paged query cost three defects in one decision (PR
+     * #1071 review, Codex): it truncated at 50 roles, it broke outright for an
+     * App with several `roles:` branches, and it reloaded the roster once per
+     * worker on a listing.
+     *
+     * A role with no definition, a worker with no role, and an unreadable
+     * system memory all answer `[]` rather than erroring. A soft signal must
+     * not be able to fail a read.
      */
     repos: async (
       worker: { appId: string; role: string | null },
@@ -1408,28 +1415,12 @@ export const workerFieldResolvers = {
     ): Promise<string[]> => {
       if (!worker.role) return [];
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return [];
-      const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
-      if (!app || app.deletedAt) return [];
-      try {
-        // LAZY import: resolvers.teamRole imports this module (withRoleWriteLock,
-        // locateTeamAgent), so a static import here would close the cycle. Same
-        // reason and same shape as the teamChat locator below.
-        const { teamRoleQueries } = await import('./resolvers.teamRole.js');
-        const page = await teamRoleQueries.teamRoles(
-          null,
-          { appRef: worker.appId },
-          ctx,
-        );
-        const match = (page.items as Array<{ role: string; repos: string[] }>).find(
-          (r) => r.role.toLowerCase() === worker.role!.toLowerCase(),
-        );
-        return match?.repos ?? [];
-      } catch {
-        // An encrypted system memory with no session key, an ambiguous Team
-        // Agent, no roles branch at all: none of these should fail a worker
-        // read for the sake of a warning that is optional by design.
-        return [];
-      }
+      // LAZY import: resolvers.teamRole imports this module (withRoleWriteLock,
+      // locateTeamAgent), so a static import would close the cycle. Same shape
+      // as the teamChat locator below.
+      const { loadAppRepoAffinity } = await import('./resolvers.teamRole.js');
+      const affinity = await loadAppRepoAffinity(ctx, worker.appId);
+      return affinity.get(worker.role.toLowerCase()) ?? [];
     },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     promptOverride: async (
