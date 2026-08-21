@@ -35,6 +35,7 @@ import {
   ChatScopeError,
 } from './chat-scope.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
+import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import {
   type Context,
   type SnapshotNode,
@@ -466,11 +467,16 @@ export const chatMutations = {
       // subtree — a concurrent non-recursive delete of `chats` (or the chat)
       // could count zero descendants and orphan them. Create both under the
       // ancestor-path lock in one READ COMMITTED tx (advisory before row).
+      // #1061 — the ids are minted inside the transaction; collected here so
+      // the writes are recorded only after it commits.
+      const startedNodes: { id: string; loc: string; memoryId: string }[] = [];
       await ctx.db.$transaction(async (tx) => {
         await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
+        const chatNodeId = generateId();
+        startedNodes.push({ id: chatNodeId, loc: chatLoc, memoryId: targetMemoryId });
         await tx.node.create({
           data: {
-            id: generateId(), memoryId: targetMemoryId, loc: chatLoc, name: chatName,
+            id: chatNodeId, memoryId: targetMemoryId, loc: chatLoc, name: chatName,
             nodeType: 'record',
             description: `Chat: ${convName}`,
             data: initialChatData as InputJsonValue,
@@ -483,14 +489,22 @@ export const chatMutations = {
           },
         });
         // Create the messages parent (so the chat subtree is well-formed)
+        const messagesNodeId = generateId();
+        startedNodes.push({
+          id: messagesNodeId, loc: `${chatLoc}:messages`, memoryId: targetMemoryId,
+        });
         await tx.node.create({
           data: {
-            id: generateId(), memoryId: targetMemoryId, loc: `${chatLoc}:messages`,
+            id: messagesNodeId, memoryId: targetMemoryId, loc: `${chatLoc}:messages`,
             name: 'messages', nodeType: 'record',
             createdBy: ctx.userId ?? null,
           },
         });
       });
+
+      // #1061 — starting a chat creates two real nodes (the chat record and its
+      // messages parent), so it is two writes.
+      recordNodeUsage(ctx.db, 'write', startedNodes, ctx);
 
       // Prepend the agent's system prompt to the compiled stage prompt
       if (agent.systemPrompt) {
@@ -609,15 +623,21 @@ export const chatMutations = {
       // keeps locs unique, and it stays anyway: a loc is an immutable address,
       // so churning the format a second time buys nothing, and it remains a
       // cheap backstop for any future write path that skips the allocator.
+      // #1061 — the message node's id + loc are minted inside the allocation
+      // closure; they escape so the write is recorded once it has committed.
+      let userMsgRef: { id: string; loc: string; memoryId: string } | null = null;
       const { seq: messageCount, chatData: allocatedChatData } = await appendChatMessage(
         ctx.db,
         chatRef,
         memEncInfo,
         async ({ tx, seq, msgNum }) => {
+          const msgId = generateId();
+          const msgLoc = `${chatId}:messages:${msgNum}-${generateId().slice(-8)}-user`;
+          userMsgRef = { id: msgId, loc: msgLoc, memoryId: chatNode.memoryId };
           await tx.node.create({
             data: {
-              id: generateId(), memoryId: chatNode.memoryId,
-              loc: `${chatId}:messages:${msgNum}-${generateId().slice(-8)}-user`,
+              id: msgId, memoryId: chatNode.memoryId,
+              loc: msgLoc,
               name: `${msgNum}-user`,
               nodeType: 'record', content: newMsgFields.content ?? null,
               data: (newMsgFields.data ?? null) as InputJsonValue,
@@ -627,6 +647,8 @@ export const chatMutations = {
           });
         },
       );
+      // A chat turn IS a node write on the chat's memory.
+      recordNodeUsage(ctx.db, 'write', userMsgRef ? [userMsgRef] : [], ctx);
       // Everything downstream reads the copy the allocation committed, not the
       // pre-lock one — a turn that raced us has already been folded in.
       chatData = allocatedChatData;
@@ -957,15 +979,20 @@ export const chatMutations = {
       // stamp the sending user: that would assert a human wrote the model's
       // words. (Which user prompted it is recoverable from the preceding
       // message's `seq`.)
+      // #1061 — as for the user turn above; see the note on attribution below.
+      let assistantMsgRef: { id: string; loc: string; memoryId: string } | null = null;
       const { seq: messageCount, chatData: allocatedChatData } = await appendChatMessage(
         ctx.db,
         chatRef,
         memEncInfo,
         async ({ tx, seq, msgNum }) => {
+          const msgId = generateId();
+          const msgLoc = `${chatId}:messages:${msgNum}-assistant`;
+          assistantMsgRef = { id: msgId, loc: msgLoc, memoryId: chatNode.memoryId };
           await tx.node.create({
             data: {
-              id: generateId(), memoryId: chatNode.memoryId,
-              loc: `${chatId}:messages:${msgNum}-assistant`,
+              id: msgId, memoryId: chatNode.memoryId,
+              loc: msgLoc,
               name: `${msgNum}-assistant`,
               nodeType: 'record', content: encMsg.content ?? null,
               data: (encMsg.data ?? null) as InputJsonValue,
@@ -974,6 +1001,12 @@ export const chatMutations = {
           });
         },
       );
+      // #1061 — the assistant turn is a node write too. Note the deliberate
+      // divergence from `createdBy`, which is left NULL just above because the
+      // PLATFORM authored the words (cor:dmo:010:01): the usage event still
+      // attributes to `ctx`, because usage answers "whose activity caused this
+      // row to exist", not "who wrote the prose". The caller's turn caused it.
+      recordNodeUsage(ctx.db, 'write', assistantMsgRef ? [assistantMsgRef] : [], ctx);
       chatData = allocatedChatData;
 
       // Save extracted data to memory's default data node
@@ -990,15 +1023,29 @@ export const chatMutations = {
             where: { id: dataNode.id },
             data: { data: (encData.data ?? null) as InputJsonValue },
           });
+          // #1061 — folding extracted data into the memory's `data` node
+          // rewrites a real node, so it is its own write.
+          recordNodeWrite(
+            ctx.db,
+            { id: dataNode.id, loc: dataNode.loc, memoryId: dataNode.memoryId },
+            ctx,
+          );
         } else {
           const encNew = encryptNodeFields({ content: null, data }, memEncInfo);
+          const dataNodeId = generateId();
           await ctx.db.node.create({
             data: {
-              id: generateId(), memoryId: chatNode.memoryId,
+              id: dataNodeId, memoryId: chatNode.memoryId,
               loc: 'data', name: 'data', nodeType: 'info',
               data: (encNew.data ?? null) as InputJsonValue,
             },
           });
+          // #1061 — first extraction into this memory mints the `data` node.
+          recordNodeWrite(
+            ctx.db,
+            { id: dataNodeId, loc: 'data', memoryId: chatNode.memoryId },
+            ctx,
+          );
         }
       }
 
@@ -1257,13 +1304,18 @@ export const chatMutations = {
       // #919: a summary does NOT consume a message number, but it is named and
       // ordered from the counter, so it reads it under the same lock — against
       // a value no in-flight turn can still change out from under it.
+      // #1061 — minted under the lock, recorded after it releases.
+      let summaryRef: { id: string; loc: string; memoryId: string } | null = null;
       await withChatRootLock(ctx.db, chatRef, memEncInfo, async ({ tx, chatData }) => {
         const messageCount = (chatData.messageCount as number) ?? 0;
         const summaryName = `${String(messageCount).padStart(3, '0')}a-summary`;
+        const summaryId = generateId();
+        const summaryLoc = `${chatId}:messages:${summaryName}`;
+        summaryRef = { id: summaryId, loc: summaryLoc, memoryId: chatNode.memoryId };
         await tx.node.create({
           data: {
-            id: generateId(), memoryId: chatNode.memoryId,
-            loc: `${chatId}:messages:${summaryName}`, name: summaryName,
+            id: summaryId, memoryId: chatNode.memoryId,
+            loc: summaryLoc, name: summaryName,
             nodeType: 'abstract', content: encSummary.content ?? null, seq: messageCount + 1,
             tags: ['summary'],
           },
@@ -1271,6 +1323,8 @@ export const chatMutations = {
         // No chat-root write: the summary is not a message.
         return { value: undefined };
       });
+      // A summary is not a message, but it IS a node — so it is a write.
+      recordNodeUsage(ctx.db, 'write', summaryRef ? [summaryRef] : [], ctx);
 
       return true;
     },

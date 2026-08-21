@@ -2,6 +2,13 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
+  type UsageNodeRef,
+  recordNodeRead,
+  recordNodeUsage,
+  recordNodeWrite,
+  toUsageNodeRefs,
+} from '../lib/usageRecorder.js';
+import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
   editorFromAuth,
@@ -470,6 +477,13 @@ export async function addEdge(args: {
     },
     update: {},
   });
+
+  // #1061 — an edge write is a graph write, attributed to the SOURCE node (the
+  // edge lives in the source's memory and UsageEvent has no edge dimension —
+  // same rule as the GraphQL createEdge). This helper also backs the edge set
+  // hadron_update_node replaces, but that path already records its own write on
+  // the node, so it is called only from hadron_create_edge.
+  recordNodeWrite(db, sourceNode, auth);
 
   const savedSourceUrn = await nodeUrn(sourceNode.loc, sourceNode.memoryId);
   const savedTargetUrn = await nodeUrn(target.loc, target.memoryId);
@@ -1733,14 +1747,20 @@ export function createMcpServerInstance(
       // exactly the orphan race. Serialize against an ancestor-delete by holding
       // advisory locks on the ancestor path across the upsert, matching the
       // hadron_create_node / createNode paths. Root-level locs skip the tx.
+      let sectionId: string;
       if (ancestorLocs(loc).length === 0) {
-        await db.node.upsert(upsertArgs);
+        ({ id: sectionId } = await db.node.upsert(upsertArgs));
       } else {
-        await db.$transaction(async (tx) => {
+        sectionId = await db.$transaction(async (tx) => {
           await lockAncestorsForCreate(tx, memoryId, loc);
-          await tx.node.upsert(upsertArgs);
+          const row = await tx.node.upsert(upsertArgs);
+          return row.id;
         });
       }
+
+      // #1061 — a section node is a node; creating or re-saving one is a write,
+      // recorded exactly as hadron_create_node's is.
+      recordNodeWrite(db, { id: sectionId, loc, memoryId }, auth);
 
       const urn = await nodeUrn(loc, memoryId);
       return textResult(`Node saved: ${urn}`);
@@ -2260,36 +2280,6 @@ export function createMcpServerInstance(
         return textResult(`Node "${rawUrn}" not found.`);
       }
 
-      // Record usage event (fire-and-forget)
-      db.usageEvent.create({
-        data: {
-          id: generateId(),
-          type: 'read',
-          nodeLoc: loc,
-          nodeId: node.id,
-          // #796: attributed directly so the event stays counted for this
-          // memory after the node is deleted (nodeId is SetNull).
-          memoryId: node.memoryId,
-          appId: auth.appId ?? null,
-          // 046-usage-metering FR-001: user attribution when the
-          // authenticated principal is a user (createdBy unchanged).
-          userId: auth.userId ?? null,
-          createdBy: auth.clientId ?? null,
-          // #930 (PR-933 Codex P1): attribute the event to the bound session.
-          // `auth.sessionId` is a validated Session.id — an App-key caller's
-          // X-Hadron-Session, checked in resolveAppKey for existence, App
-          // ownership, not-ended and not-past-expiry — so this is a real FK,
-          // not the MCP transport session id. It was hardcoded null in all
-          // five MCP usage writers, which meant MCP work produced no session
-          // heartbeat at all: the #930 reaper counts the latest attributed
-          // UsageEvent as liveness, so a busy session could be reaped as idle.
-          // Residual gap: user-credential MCP callers cannot bind a session
-          // today (cor:aut:020:02 restricts binding to App-key callers), so
-          // their heartbeat is still only updateSession — tracked separately.
-          sessionId: auth.sessionId ?? null,
-        },
-      }).catch(() => {});
-
       // Spec 031 — contentScope-driven response shape. Default 'content'
       // preserves pre-spec output byte-for-byte. Defensive enum check: zod
       // validates the same set at the MCP transport boundary, but direct-
@@ -2312,9 +2302,34 @@ export function createMcpServerInstance(
       const lockState = mcpDecryptOrMark(node);
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      return textResult(
-        await renderNodeReadProjection(node, scope, { locked: lockState === 'locked' }),
-      );
+      const projection = await renderNodeReadProjection(node, scope, {
+        locked: lockState === 'locked',
+      });
+
+      // Record usage event (fire-and-forget), AFTER the projection is in hand:
+      // the defensive contentScope check above returns an error for a direct
+      // handler call with a bad scope, and recording first would count a read
+      // for content never returned (PR #1062 review — Copilot).
+      //
+      // #796: `memoryId` is attributed directly so the event stays counted for
+      // this memory after the node is deleted (nodeId is SetNull).
+      //
+      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
+      // bound session. `auth.sessionId` is a validated Session.id — an App-key
+      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
+      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
+      // MCP transport session id. It was hardcoded null in all five MCP usage
+      // writers, which meant MCP work produced no session heartbeat at all: the
+      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
+      // busy session could be reaped as idle. Residual gap: user-credential MCP
+      // callers cannot bind a session today (cor:aut:020:02 restricts binding to
+      // App-key callers), so their heartbeat is still only updateSession.
+      //
+      // A LOCKED node still records: the projection is what crossed the
+      // boundary, and the caller did read this node's addressable state.
+      recordNodeRead(db, { id: node.id, loc, memoryId: node.memoryId }, auth);
+
+      return textResult(projection);
     },
   );
 
@@ -2542,7 +2557,7 @@ export function createMcpServerInstance(
       // per-node parity with hadron_get_node).
       const blocks: string[] = [];
       const omitted: string[] = [];
-      const readEvents: Prisma.UsageEventCreateManyInput[] = [];
+      const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
       for (const n of ordered) {
@@ -2562,27 +2577,15 @@ export function createMcpServerInstance(
         }
         blocks.push(projection);
         bytes += size;
-        readEvents.push({
-          id: generateId(),
-          type: 'read',
-          nodeLoc: n.loc,
-          nodeId: n.id,
-          memoryId: n.memoryId, // #796 (as in hadron_get_node's event)
-          appId: auth.appId ?? null,
-          // 046-usage-metering FR-001 (as in hadron_get_node's event).
-          userId: auth.userId ?? null,
-          createdBy: auth.clientId ?? null,
-          sessionId: auth.sessionId ?? null,
-        });
+        readEvents.push({ id: n.id, loc: n.loc, memoryId: n.memoryId });
       }
       // One batched insert for all returned nodes' read events, fire-and-forget
       // (parity with hadron_get_node's non-blocking single create). A per-node
       // create loop would fire up to BATCH_READ_MAX_NODES concurrent unawaited
       // inserts and pressure the connection pool — createMany is one round-trip
-      // (PR #283 review).
-      if (readEvents.length > 0) {
-        db.usageEvent.createMany({ data: readEvents }).catch(() => {});
-      }
+      // (PR #283 review). Only nodes that made it into the response are pushed
+      // above, so a node the byte cap omitted records no read.
+      recordNodeUsage(db, 'read', readEvents, auth);
 
       const headerParts = [`returned ${blocks.length} node(s)`];
       if (unavailable.length) headerParts.push(`${unavailable.length} unavailable`);
@@ -2696,6 +2699,12 @@ export function createMcpServerInstance(
         },
       });
       if (!node) return textResult('Node not found.');
+
+      // #1061 — this tool returns the node's full content, exactly as
+      // hadron_get_node does, so it records the same single read. Its GraphQL
+      // twin (`nextNode`) gets there by delegating to `node(ref:)`; this one has
+      // its own projection, so it records here.
+      recordNodeRead(db, { id: node.id, loc: node.loc, memoryId: node.memoryId }, auth);
 
       const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
@@ -3416,21 +3425,9 @@ export function createMcpServerInstance(
         await db.pendingEdge.delete({ where: { id: p.id } });
       }
 
-      // Record usage event
-      db.usageEvent.create({
-        data: {
-          id: generateId(),
-          type: 'write',
-          nodeLoc: loc,
-          nodeId: upserted.id,
-          memoryId, // #796 (as in hadron_get_node's event)
-          appId: auth.appId ?? null,
-          // 046-usage-metering FR-001 (as in hadron_get_node's event).
-          userId: auth.userId ?? null,
-          createdBy: auth.clientId ?? null,
-          sessionId: auth.sessionId ?? null,
-        },
-      }).catch(() => {});
+      // Record usage event (#796 memoryId + 046 FR-001 attribution, as in
+      // hadron_get_node's event — see the shared recorder).
+      recordNodeWrite(db, { id: upserted.id, loc, memoryId }, auth);
 
       // Announce the write (event pivot): the git mirror subscriber re-reads
       // and mirrors — this replaced the re-fetch + direct writeNodeToGit.
@@ -3703,21 +3700,9 @@ export function createMcpServerInstance(
         });
       }
 
-      // Record usage event
-      db.usageEvent.create({
-        data: {
-          id: generateId(),
-          type: 'write',
-          nodeLoc: loc,
-          nodeId: existing.id,
-          memoryId: existing.memoryId, // #796 (as in hadron_get_node's event)
-          appId: auth.appId ?? null,
-          // 046-usage-metering FR-001 (as in hadron_get_node's event).
-          userId: auth.userId ?? null,
-          createdBy: auth.clientId ?? null,
-          sessionId: auth.sessionId ?? null,
-        },
-      }).catch(() => {});
+      // Record usage event (#796 memoryId + 046 FR-001 attribution, as in
+      // hadron_get_node's event — see the shared recorder).
+      recordNodeWrite(db, { id: existing.id, loc, memoryId: existing.memoryId }, auth);
 
       // Announce the write (event pivot): the git mirror subscriber re-reads
       // and mirrors (encrypted memories punt there — see hadron_create_node).
@@ -4270,6 +4255,19 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         );
       }
 
+      // #1061 — a delete is a write, on the addressed node only (a recursive
+      // delete's descendants are not counted individually, matching the GraphQL
+      // deleteNode). A HARD delete records nothing: the row is gone, so the
+      // event's `nodeId` FK has nothing to point at — and unlike the soft case
+      // there is no surviving node whose usage series the event belongs to.
+      if (!hard) {
+        recordNodeWrite(
+          db,
+          { id: existing.id, loc: existing.loc, memoryId: existing.memoryId },
+          auth,
+        );
+      }
+
       const totalAffected = (recursive ? result.descendantCount : 0) + 1;
       const mode = hard ? 'Hard-deleted' : 'Soft-deleted';
       const suffix =
@@ -4531,6 +4529,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
       const { moved, childCount } = result;
 
+      // #1061 — a move is a write, recorded at the node's POST-move address
+      // (matching the GraphQL moveNode); rebased descendants are not counted
+      // individually. The PK comes from `existing` rather than `moved` because
+      // the transaction's declared return shape omits it — and a move never
+      // changes the PK, which is the whole point of relocating in place.
+      recordNodeWrite(db, { id: existing.id, loc: toLoc, memoryId: toMemory.id }, auth);
+
       // Empty sections omitted, matching hadron_get_node's pattern (PR-189
       // review feedback).
       const lines: string[] = [
@@ -4622,6 +4627,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     loc: string,
     args?: Record<string, string>,
   ): Promise<string> {
+    // #1061 — collected by the renderer itself (see its `onTargetInlined`
+    // note): it inlines a target only when that target HAS content, so a list
+    // built from `node.outgoingEdges` here would record reads for nodes the
+    // bundle never carried (PR #1062 review — Copilot).
+    const inlined: unknown[] = [];
     const rendered = await renderRunNodeBundle(node, args, async (memoryId) => {
       // Reuse the tool surface's own memoized memory-urn lookup.
       let memUrn = memoryUrnCache.get(memoryId);
@@ -4631,7 +4641,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         memoryUrnCache.set(memoryId, memUrn);
       }
       return memUrn;
-    });
+    }, (target) => inlined.push(target));
     db.usageEvent
       .create({
         data: {
@@ -4649,6 +4659,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         },
       })
       .catch(() => {});
+    // #1061 — the `action-run` event above meters an INVOCATION; it is not a
+    // read, and no read/write chart counts it. But the bundle also hands back
+    // the run node's content AND every dependency node inlined into it, so
+    // those are reads on the same footing as any other. Recorded separately so
+    // the two questions ("how often was this run?" and "how much of the graph
+    // was read?") stay separately answerable.
+    //
+    // NOTE: renderRunNodeBundle inlines edge targets WITHOUT a per-target
+    // memory-read gate, so a cross-memory dependency can be inlined here that
+    // the GraphQL `renderRunNode` preview would have excluded. That asymmetry
+    // predates this change and is tracked separately; the events recorded here
+    // describe what this tool actually returned, which is the honest reading.
+    recordNodeUsage(db, 'read', toUsageNodeRefs([node, ...inlined]), auth);
     return rendered;
   }
 
@@ -6453,6 +6476,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
       if (result.error) return textResult(`Sync failed: ${result.error}`);
+      // #1061 — one write per node the sync actually wrote. This tool is the
+      // ONE entry point to a git sync that has a principal to attribute to; the
+      // webhook and startup batch-loop callers deliberately drop `writtenNodes`
+      // on the floor, because an unattended sync is nobody's usage.
+      recordNodeUsage(db, 'write', result.writtenNodes ?? [], auth);
       return textResult(`Synced ${result.nodeCount ?? 0} nodes.`);
     },
   );

@@ -39,7 +39,19 @@ export type MemoryWithOrg = Memory & { organization: Organization | null };
  */
 export const syncGraphFromGithub = async (
   graph: MemoryWithOrg,
-): Promise<{ error?: string; nodeCount?: number }> => {
+): Promise<{
+  error?: string;
+  nodeCount?: number;
+  /**
+   * #1061 — the nodes this run actually wrote, for a caller that HAS a
+   * principal to attribute them to (the `hadron_sync_graph` tool). Deliberately
+   * returned rather than recorded here: this function is also driven by the
+   * webhook and the startup batch loop, where there is no caller at all, and
+   * usage attributed to nobody is worse than usage not recorded. An unattended
+   * sync is not somebody's activity.
+   */
+  writtenNodes?: { id: string; loc: string; memoryId: string }[];
+}> => {
   try {
     const graphName = graph.urn;
 
@@ -103,6 +115,10 @@ export const syncGraphFromGithub = async (
       nodeId: string;
       plaintext: { content: string | null; abstract: string | null };
     }> = [];
+    // #1061 — accumulated INSIDE the transaction (that is where the surviving
+    // row ids are known) but declared outside it so the refs survive the commit
+    // and can be returned to the caller.
+    const writtenNodes: { id: string; loc: string; memoryId: string }[] = [];
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
@@ -215,6 +231,7 @@ export const syncGraphFromGithub = async (
           rowId = row.id;
         }
         upsertedIds.push(rowId);
+        writtenNodes.push({ id: rowId, loc, memoryId: graph.id });
         locToRowId.set(loc, rowId);
         if (node.id && !fileIdToRowId.has(node.id)) fileIdToRowId.set(node.id, rowId);
         pendingEmbeds.push({
@@ -319,7 +336,7 @@ export const syncGraphFromGithub = async (
     }
 
     console.log(`Synced memory "${graphName}": ${fsGraph.nodes.length} nodes, ${edges.length} edges`);
-    return { nodeCount: fsGraph.nodes.length };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({

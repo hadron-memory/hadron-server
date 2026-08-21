@@ -51,6 +51,16 @@ export async function renderRunNodeBundle(
   node: RenderableRunNode,
   args: Record<string, string> | undefined,
   memoryUrnOf: MemoryUrnLookup,
+  /**
+   * #1061 — called once per target whose content is actually INLINED into the
+   * bundle. Usage recording must count what crossed the response boundary, and
+   * a target with empty content is skipped below; a caller that recorded every
+   * outgoing edge instead would inflate the read series for exactly the nodes
+   * it did not return. Reporting from inside the loop is what keeps the two
+   * from drifting — a second copy of this predicate at the call site is the
+   * bug waiting to happen.
+   */
+  onTargetInlined?: (target: RenderableRunNode['outgoingEdges'][number]['target']) => void,
 ): Promise<string> {
   let actionContent = node.content || '';
   if (args) {
@@ -64,6 +74,7 @@ export async function renderRunNodeBundle(
     if (target?.content) {
       const targetUrn = emitNodeUrnV2(await memoryUrnOf(target.memoryId), target.loc);
       topicSections.push(`## Node: ${target.name} (${targetUrn})\n\n${target.content}`);
+      onTargetInlined?.(target);
     }
   }
   const parts = [`# Node: ${node.name}\n\n${actionContent}`];
@@ -108,6 +119,13 @@ export async function assembleRunNodePrompt(
     ) => Promise<string>;
     /** Include a referenced target? Lets a caller drop unreadable/deleted ones. */
     includeTarget?: (target: RenderableRunNode['outgoingEdges'][number]['target']) => boolean;
+    /**
+     * #1061 — called once per target actually INLINED. Routing edges and
+     * empty-content targets are skipped below, so a caller that recorded usage
+     * from `outgoingEdges` would count reads for content it never returned.
+     * See the note on `renderRunNodeBundle`'s identical hook.
+     */
+    onTargetInlined?: (target: RenderableRunNode['outgoingEdges'][number]['target']) => void;
   },
 ): Promise<string> {
   let actionContent = node.content || '';
@@ -123,6 +141,7 @@ export async function assembleRunNodePrompt(
     if (deps.includeTarget && !deps.includeTarget(target)) continue;
     const targetUrn = emitNodeUrnV2(await deps.memoryUrnOf(target.memoryId), target.loc);
     topicSections.push(`## Node: ${target.name} (${targetUrn})\n\n${target.content}`);
+    deps.onTargetInlined?.(target);
   }
 
   const parts = [`# Node: ${node.name}\n\n${actionContent}`];

@@ -5,6 +5,7 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
+import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { excludeTeamChat } from '../../../lib/teamChatLoc.js';
 import {
   type Context,
@@ -236,7 +237,9 @@ export const chatQueries = {
         // members' messages differently from one read to the next.
         orderBy: [{ seq: 'asc' as const }, { createdAt: 'asc' as const }, { loc: 'asc' as const }],
         take: limit ?? 100,
-        select: { loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },
+        // `id` rides along for the #1061 usage attribution; the projection
+        // below doesn't use it (a transcript entry is addressed by loc/seq).
+        select: { id: true, loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },
       });
       // Decrypt before reading `data.role` / returning `content` — for
       // encrypted memories `data` is an opaque wrapper until decrypted, so
@@ -246,6 +249,13 @@ export const chatQueries = {
       if (memEncInfo.isEncrypted) {
         for (const m of rows) decryptNodeFields(m, memEncInfo);
       }
+      // #1061 — a transcript read returns each message's content, so it is one
+      // read per message returned. Recorded here, AFTER the decrypt above: an
+      // encrypted chat with no live session key throws SESSION_EXPIRED out of
+      // `decryptNodeFields`, and the caller then receives no transcript at all
+      // (PR #1062 review — Codex P2, Copilot). Impersonated callers threw
+      // Forbidden further up, so nothing here can land in a support session.
+      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(rows), ctx);
       return rows.map((m) => {
         // Agent-agnostic role detection (Constitution Invariant #14):
         //   - Primary: data.role on the message node.

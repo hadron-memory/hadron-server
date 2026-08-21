@@ -56,6 +56,7 @@ import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { locateTeamAgent } from './resolvers.worker.js';
+import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
 // listing and the shared chat-loc gate both have to exclude `chats:team`, and
@@ -603,6 +604,7 @@ export const teamChatMutations = {
 
     const messageId = generateId();
     const createdBy = ctx.userId ?? null;
+    let messageLoc: string | null = null;
     const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
       // replyToSeq is validated INSIDE the allocating transaction, under the
       // chat lock, so the target can't be soft-deleted out from under us and
@@ -633,6 +635,10 @@ export const teamChatMutations = {
       // (#919 makes seq unique); the suffix atom is the author label, a
       // display convenience in an address that lands in URNs and search.
       const loc = `${TEAM_CHAT_MESSAGES_LOC}:${msgNum}-${generateId().slice(-8)}-${sanitizeLocAtom(authorLabel).toLowerCase()}`;
+      // #1061 — the loc is minted inside this transaction closure, but the
+      // usage event is recorded after it COMMITS (a rolled-back append must
+      // record nothing), so it has to escape.
+      messageLoc = loc;
       const row = await tx.node.create({
         data: {
           id: messageId,
@@ -662,6 +668,16 @@ export const teamChatMutations = {
       }
       return row.createdAt;
     });
+
+    // #1061 — a chat message IS a node, so posting one is a write on the team's
+    // shared chat memory. This was one of the largest blind spots in the old
+    // instrumentation: `hadron_team_chat_post` created more nodes on a busy day
+    // than every instrumented write tool combined, and counted for none of it.
+    recordNodeWrite(
+      ctx.db,
+      messageLoc ? { id: messageId, loc: messageLoc, memoryId: root.memoryId } : null,
+      ctx,
+    );
 
     return {
       nodeId: messageId,
@@ -734,8 +750,24 @@ export const teamChatQueries = {
       { createdAt: 'asc' as const },
       { loc: 'asc' as const },
     ];
+    // `loc` is selected for the #1061 usage attribution only — the projection
+    // itself doesn't use it, but a UsageEvent without a loc is far less legible
+    // in the raw event feed.
     const select = {
-      id: true, seq: true, content: true, data: true, createdAt: true,
+      id: true, loc: true, seq: true, content: true, data: true, createdAt: true,
+    };
+
+    // #1061 — reading the transcript returns message CONTENT, so each message
+    // handed back is a read. Recorded on the page actually returned, never on
+    // the wider candidate set a mentions filter scans: `take: 0` (a pure count
+    // probe) and a filtered-out message both correctly record nothing.
+    const recordRead = (rows: readonly { id: string; loc: string }[]): void => {
+      recordNodeUsage(
+        ctx.db,
+        'read',
+        rows.map((r) => ({ id: r.id, loc: r.loc, memoryId: root.memoryId })),
+        ctx,
+      );
     };
 
     if (mentionsRef) {
@@ -743,14 +775,23 @@ export const teamChatQueries = {
       if (!tokens) return { items: [], total: 0 };
       const rows = await ctx.db.node.findMany({ where, orderBy, select });
       const matching = rows
-        .map((r) => projectMessage(r, memEncInfo))
-        .filter((m) => m.mentions.some((t) => tokens.includes(t)));
-      return { items: take === 0 ? [] : matching.slice(skip, skip + take), total: matching.length };
+        .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo) }))
+        .filter((m) => m.msg.mentions.some((t) => tokens.includes(t)));
+      const page = take === 0 ? [] : matching.slice(skip, skip + take);
+      recordRead(page.map((m) => m.row));
+      return { items: page.map((m) => m.msg), total: matching.length };
     }
 
     const total = await ctx.db.node.count({ where });
     if (take === 0) return { items: [], total };
     const rows = await ctx.db.node.findMany({ where, orderBy, select, skip, take });
-    return { items: rows.map((r) => projectMessage(r, memEncInfo)), total };
+    // Project BEFORE recording (PR #1062 review — Copilot): `projectMessage`
+    // decrypts, and on an encrypted memory with no live session key it throws
+    // SESSION_EXPIRED — so recording first would count reads for a transcript
+    // the caller never received. The mentions branch above already projects
+    // first; this makes the two branches agree.
+    const items = rows.map((r) => projectMessage(r, memEncInfo));
+    recordRead(rows);
+    return { items, total };
   },
 };

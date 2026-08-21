@@ -60,6 +60,13 @@ import {
 } from '../../../integrations/db/provider.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
+import {
+  recordNodeRead,
+  recordNodeUsage,
+  recordNodeWrite,
+  toUsageNodeRef,
+  toUsageNodeRefs,
+} from '../../../lib/usageRecorder.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import {
   ancestorLocs,
@@ -756,6 +763,17 @@ export async function writeNodeCore(
         plaintext: { content: finalNode.content, abstract: finalNode.abstract },
       });
 
+      // #1061 — the one place a `write` event is recorded for every caller that
+      // reaches the shared write core: GraphQL createNode/updateNode, the
+      // portal and CLI behind them, importNode, the run-tools, asset reference
+      // nodes and the session handoff. Placed after the write has landed, so a
+      // refused or conflicted write records nothing.
+      recordNodeWrite(
+        ctx.db,
+        { id: finalNode.id, loc: finalNode.loc, memoryId: input.memoryId },
+        ctx,
+      );
+
       return finalNode;
 }
 
@@ -1434,6 +1452,14 @@ export const nodeMutations = {
       });
 
       // ── Post-commit side effects (best-effort, mirror upsertNode) ──
+      // #1061 — one `write` event per node the bulk edit actually rewrote. The
+      // dry run above returns before this point, so a preview records nothing.
+      recordNodeUsage(
+        ctx.db,
+        'write',
+        toUsageNodeRefs(plans.map((p) => p.raw)),
+        ctx,
+      );
       for (const p of plans) {
         // Re-embed when the embedded text (content/abstract) changed.
         if (p.contentChanged || p.abstractChanged) {
@@ -1660,6 +1686,23 @@ export const nodeMutations = {
         }
         throw e;
       }
+      // #1061 — a delete is a write. Recorded for the addressed node only, not
+      // per descendant of a recursive delete: the subtree is removed by one
+      // `updateMany` whose row identities are never materialized, and counting
+      // a tree's size as N separate writes would swamp the series for what the
+      // caller experienced as a single edit.
+      //
+      // A HARD delete records nothing: the row is gone, so the event's `nodeId`
+      // FK has nothing to point at (the insert would simply fail into the
+      // recorder's swallowed catch) — and unlike the soft case there is no
+      // surviving node whose usage series the event belongs to.
+      if (!hard) {
+        recordNodeWrite(
+          ctx.db,
+          { id: resolvedId, loc: node.loc, memoryId: node.memoryId },
+          ctx,
+        );
+      }
       return true;
     },
 
@@ -1741,7 +1784,7 @@ export const nodeMutations = {
         }
         throw e;
       }
-      return ctx.db.edge.create({
+      const edge = await ctx.db.edge.create({
         data: {
           id: generateId(),
           memoryId: src.memoryId,
@@ -1764,6 +1807,17 @@ export const nodeMutations = {
         },
         include: { source: true, target: true },
       });
+      // #1061 — an edge write is a graph write, attributed to the SOURCE node:
+      // the edge lives in the source's memory (spec 037) and `UsageEvent` has
+      // no edge dimension. Attributing to the target instead would file the
+      // event in another memory on a cross-memory edge. Recorded after the
+      // create so a loc conflict records nothing.
+      recordNodeWrite(
+        ctx.db,
+        { id: resolvedSourceId, loc: src.loc, memoryId: src.memoryId },
+        ctx,
+      );
+      return edge;
     },
 
     updateEdge: async (
@@ -1840,7 +1894,7 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
-      return ctx.db.edge.update({
+      const updatedEdge = await ctx.db.edge.update({
         where: { id: resolvedEdgeId },
         data: {
           ...(name !== undefined ? { name: name ?? null } : {}),
@@ -1854,6 +1908,9 @@ export const nodeMutations = {
         },
         include: { source: true, target: true },
       });
+      // #1061 — attributed to the source node, as createEdge is.
+      recordNodeWrite(ctx.db, toUsageNodeRef(updatedEdge.source), ctx);
+      return updatedEdge;
     },
 
     deleteEdge: async (
@@ -1878,9 +1935,14 @@ export const nodeMutations = {
       }
       // PR-348 parity (Codex #554): gate on write access to the edge's memory
       // before deleting — the global CONTRIBUTOR role gate is not memory-scoped.
+      // `source` rides along for the #1061 usage attribution below; it is read
+      // here rather than after the delete, when the row is gone.
       const edgeMem = await ctx.db.edge.findUnique({
         where: { id: resolvedEdgeId },
-        select: { memoryId: true },
+        select: {
+          memoryId: true,
+          source: { select: { id: true, loc: true, memoryId: true } },
+        },
       });
       if (!edgeMem) {
         throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
@@ -1889,6 +1951,8 @@ export const nodeMutations = {
       }
       await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
       await ctx.db.edge.delete({ where: { id: resolvedEdgeId } });
+      // #1061 — attributed to the source node, as createEdge is.
+      recordNodeWrite(ctx.db, toUsageNodeRef(edgeMem.source), ctx);
       return true;
     },
 
@@ -1933,7 +1997,7 @@ export const nodeMutations = {
       } as const;
 
       try {
-        return await ctx.db.$transaction(
+        const moved = await ctx.db.$transaction(
           async (tx) => {
             // #664/#752: moving a node INTO a subtree is the same orphan vector as
             // a create there — a concurrent non-recursive delete of a destination
@@ -1960,6 +2024,13 @@ export const nodeMutations = {
           // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
           { timeout: 120_000 },
         );
+        // #1061 — a move is a write, recorded against the node's POST-move
+        // address (the loc and, on a cross-memory move, the memory it now
+        // lives in): that is where a reader of the usage series will look for
+        // it. As with a recursive delete, the rebased descendants are not
+        // counted individually — one caller edit, one event.
+        recordNodeWrite(ctx.db, toUsageNodeRef(moved), ctx);
+        return moved;
       } catch (e) {
         // Map the shared helper's typed errors (thrown from either branch) to the
         // GraphQL surface.
@@ -2065,6 +2136,10 @@ export const nodeMutations = {
         seq: srcPlain.seq ?? undefined,
         edges,
       };
+      // #1061 — a clone is both: the source's content was returned to this
+      // caller (a read of the SOURCE memory, which may differ from the
+      // destination's) and writeNodeCore records the write of the new node.
+      recordNodeRead(ctx.db, toUsageNodeRef(source), ctx);
       return writeNodeCore(input, ctx, 'create');
     },
 
@@ -2459,6 +2534,28 @@ export const nodeMutations = {
         });
       }
 
+      // #1061 — one write, on the SURVIVING target. The source node may have
+      // been HARD deleted above (`deleteSource`), so an event naming it would
+      // fail the `nodeId` FK on insert; the merge is recorded where its result
+      // lives.
+      recordNodeWrite(
+        ctx.db,
+        { id: finalNode.id, loc: finalNode.loc, memoryId: target.memoryId },
+        ctx,
+      );
+      // The merge also READ the source's content and folded it into the
+      // returned target — the same read `cloneNode` records for its source, and
+      // across memories when they differ (PR #1062 review — Copilot). Recorded
+      // only when the source SURVIVES: on `deleteSource` the row is gone and
+      // the FK has nothing to point at.
+      if (!deleteSource) {
+        recordNodeRead(
+          ctx.db,
+          { id: source.id, loc: source.loc, memoryId: source.memoryId },
+          ctx,
+        );
+      }
+
       return finalNode;
     },
 
@@ -2488,6 +2585,11 @@ export const nodeMutations = {
       const replaceMemSchema = (
         await ctx.db.memory.findUnique({ where: { id: resolvedMemoryId }, select: { schema: true } })
       )?.schema as unknown as MemorySchema | null;
+
+      // #1061 — collected inside the transaction because the PKs are minted
+      // there (`input.id ?? generateId()`); recorded only after it commits, so
+      // a rolled-back subtree records nothing.
+      const written: { id: string; loc: string; memoryId: string }[] = [];
 
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
         // #664/#752: this bulk create bypasses the locked writeNodeCore path, so
@@ -2535,13 +2637,17 @@ export const nodeMutations = {
             tags: _tags,
             ...nodeFields
           } = input;
+          const createdId = input.id ?? generateId();
           await tx.node.create({
             data: {
-              id: input.id ?? generateId(),
+              id: createdId,
               ...nodeFields,
               tags: serializeTags(input.tags ?? []) as string[],
             } as Prisma.NodeUncheckedCreateInput,
           });
+          if (typeof input.loc === 'string' && input.loc !== '') {
+            written.push({ id: createdId, loc: input.loc, memoryId: resolvedMemoryId });
+          }
         }
 
         for (const edge of edges) {
@@ -2567,6 +2673,14 @@ export const nodeMutations = {
           }
         }
       });
+
+      // #1061 — one write per node the subtree replace actually created. This
+      // is the git-sync path, so a repo-backed memory's chart will be dominated
+      // by sync writes rather than by hand edits. That is the honest reading:
+      // the rows really were rewritten, and the alternative (silently exempting
+      // the biggest writer on the platform) is what made the old series
+      // untrustworthy in the first place.
+      recordNodeUsage(ctx.db, 'write', written, ctx);
 
       return nodes.length;
     },
@@ -2655,6 +2769,10 @@ export const nodeMutations = {
         memoryId: restored.memoryId,
         plaintext: { content: revision.content, abstract: revision.abstract },
       });
+      // #1061 — a restore rewrites the live node, so it is a write like any
+      // other. The revision-pruning mutations below (delete/label/clear
+      // history) are NOT: they touch snapshot rows, never the node.
+      recordNodeWrite(ctx.db, toUsageNodeRef(restored), ctx);
       return restored;
     },
 

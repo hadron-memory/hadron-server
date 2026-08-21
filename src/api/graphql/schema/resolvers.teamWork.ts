@@ -61,6 +61,7 @@ import {
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { locateTeamAgent } from './resolvers.worker.js';
+import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 
 /** Canonical loc of the worklog collection root in a team App's shared memory. */
 export const WORKLOG_LOC = 'worklog';
@@ -740,6 +741,10 @@ export const teamWorkMutations = {
       }
     });
 
+    // #1061 — a worklog record IS a node, so appending one is a write. Like
+    // team-chat posts, this was a high-volume creator that counted for nothing.
+    recordNodeWrite(ctx.db, { id: recordId, loc, memoryId: root.memoryId }, ctx);
+
     return {
       nodeId: recordId,
       sessionId,
@@ -936,10 +941,20 @@ export const teamWorkQueries = {
     const rows = await ctx.db.node.findMany({
       where,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      select: { id: true, properties: true, createdAt: true },
+      // `loc` rides along for the #1061 usage attribution; the projection
+      // itself doesn't use it.
+      select: { id: true, loc: true, properties: true, createdAt: true },
       skip,
       take,
     });
+    // #1061 — each worklog record returned carries its stored properties, so
+    // it is a read. The `take: 0` count probe above returns before this point.
+    recordNodeUsage(
+      ctx.db,
+      'read',
+      rows.map((r) => ({ id: r.id, loc: r.loc, memoryId: root.memoryId })),
+      ctx,
+    );
     return { items: rows.map(projectWorkItem), total };
   },
 };
