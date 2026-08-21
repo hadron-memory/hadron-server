@@ -60,7 +60,7 @@ import {
   requireOrgRole,
   requireOwnerOrOrgRole,
   isAppParticipant,
-  appTeamSpaceFilter,
+  resolveAppTeamSpaceMemoryIds,
   isOwnerOrOrgMember,
   getAccessibleMemoryIds,
   memoryAccessFilter,
@@ -1855,12 +1855,7 @@ export const nodeQueries = {
       // exactly the results they get today, and a participant additionally sees
       // the space they are already entitled to read.
       const teamSpaceIds = (await isAppParticipant(ctx, app))
-        ? (
-            await ctx.db.memory.findMany({
-              where: appTeamSpaceFilter(resolvedAppId),
-              select: { id: true },
-            })
-          ).map((m) => m.id)
+        ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
         : [];
 
       const memoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds])];

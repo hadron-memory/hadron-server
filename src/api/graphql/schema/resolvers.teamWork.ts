@@ -58,7 +58,7 @@ import {
   requireOwnerOrOrgRole,
   requireSessionWriteAccess,
   clampListTake,
-  appTeamSpaceFilter,
+  resolveAppTeamSpaceMemoryIds,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { locateTeamAgent } from './resolvers.worker.js';
@@ -188,19 +188,26 @@ type WorklogRootRow = { id: string; memoryId: string };
  * installed agent's shared memory.
  */
 async function locateWorklogRoot(ctx: Context, appId: string): Promise<WorklogRootRow | null> {
+  const teamSpaceIds = await resolveAppTeamSpaceMemoryIds(ctx.db, appId);
+  if (teamSpaceIds.length === 0) return null;
   return ctx.db.node.findFirst({
     // loc-scope-ok: deliberately spans the App's OWN app-class memories (one
     // per installed agent) — the relation filter is the tenant scope (#947).
-    // #1031: the team-space predicate is now the SHARED `appTeamSpaceFilter`
-    // rather than a local copy. The copy here had drifted — it excluded a
+    // #1031: resolved through the SHARED `resolveAppTeamSpaceMemoryIds` rather
+    // than a local predicate. The copy here had drifted — it excluded a
     // Worker's working memory but not a SESSION memory, so a `worklog` node
     // planted in one could make the TEAM ledger resolve into a per-user
-    // session scope. That is the fourth row shape of `class='app'`, and the
-    // one findings:app-class-is-four-row-shapes records as the easiest to miss.
+    // session scope: the row shape findings:app-class-is-four-row-shapes
+    // records as the easiest to miss.
+    //
+    // The resolver (not a `where`) is what keeps LEGACY pre-#723 spaces
+    // working. This locator admitted them before #1031 and `teamWorkItems`
+    // never runs the adoption path, so requiring the #723 key would turn an
+    // existing legacy ledger into an empty one.
     where: {
       loc: WORKLOG_LOC,
       deletedAt: null,
-      memory: appTeamSpaceFilter(appId),
+      memoryId: { in: teamSpaceIds },
     },
     orderBy: { createdAt: 'asc' },
     select: { id: true, memoryId: true },

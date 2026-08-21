@@ -3,6 +3,10 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
+import {
+  agentSlugCandidates,
+  memoryCarriesLegacyKeyFor,
+} from '../../../lib/sharedMemoryLegacyKey.js';
 import { runEmailOperation, type ToolCalendarEvent, type ToolDriveFile } from '../../../lib/emailClient.js';
 import { scopeForOperation } from '../../../lib/emailOperationScopes.js';
 import {
@@ -616,52 +620,6 @@ export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<b
  * MCP's `requireAppScope`) is judged solely on the user, which is exactly
  * what this returns.
  */
-/**
- * The Prisma `where` that means **the App's TEAM SPACE** — the app-class memory
- * hosting `chats:team` and the worklog — and nothing else under that App.
- *
- * `class='app'` is a tenancy bucket shared by SEVERAL row shapes, not one
- * ([[findings:app-class-is-four-row-shapes]], #1003), so a bare
- * `appId + class:'app'` predicate is always wrong. Each clause earns its place
- * and each omission is a distinct bug:
- *
- * - `workerOf: { none: {} }` excludes a Worker's casting-scoped working memory
- *   (#974), whose App-wide readability is an open policy question owned by
- *   `maySeeWorkerInternals` and must not be settled by accident.
- * - `userMemoryOfAgentId: null` excludes SESSION memories, reachable only
- *   through a session binding. On a read gate, admitting them hands every App
- *   member every anonymous end-user session — the #934/#967 isolation breach.
- * - `sharedMemoryOfAgentId: { not: null }` excludes NAME-ADDRESSABLE memories
- *   from `createMemoryInApp(memoryClass: 'app')`, which match every other
- *   clause here: appId set, no Worker, no user key, and their own null shared
- *   key. Without it an older named memory wins `App.sharedMemory`'s
- *   oldest-first fallback, and `appNodes` treats every one of them as a team
- *   space (PR #1066 review, Codex).
- *
- * ## The known gap, deliberately left open
- *
- * That last clause is also blind to LEGACY (pre-#723) team spaces, whose
- * `sharedMemoryOfAgentId` is null because identity then lived in the URN
- * string. This predicate cannot tell such a row from a named app memory by
- * COLUMNS ALONE — both are all-null — so distinguishing them requires the URN
- * matcher in `lib/sharedMemoryLegacyKey.ts`, by parsed-atom equality (never a
- * LIKE pattern: a slug may contain `_`, a single-char wildcard).
- *
- * Widening this predicate to catch legacy rows without that matcher trades a
- * silent under-report for a silent MIS-report, which is worse. Tracked
- * separately; the adoption sweep is the real fix, not a looser read.
- */
-export function appTeamSpaceFilter(appId: string) {
-  return {
-    appId,
-    class: 'app' as const,
-    deletedAt: null,
-    workerOf: { none: {} },
-    userMemoryOfAgentId: null,
-    sharedMemoryOfAgentId: { not: null },
-  };
-}
-
 export async function isAppParticipant(
   ctx: Context,
   app: { id: string; organizationId: string | null; ownerUserId: string | null },
@@ -698,6 +656,107 @@ export async function isAppParticipant(
     }
   }
   return false;
+}
+
+/**
+ * Column narrowing for the App's TEAM SPACE — the app-class memory hosting
+ * `chats:team` and the worklog. NOT sufficient on its own: see
+ * {@link resolveAppTeamSpaceMemoryIds}, which is the surface callers want.
+ *
+ * `class='app'` is a tenancy bucket shared by several row shapes, not one
+ * ([[findings:app-class-is-four-row-shapes]], #1003), so a bare
+ * `appId + class:'app'` predicate is always wrong:
+ *
+ * - `workerOf: { none: {} }` excludes a Worker's casting-scoped working memory
+ *   (#974), whose App-wide readability is an open policy question owned by
+ *   `maySeeWorkerInternals` and must not be settled by accident.
+ * - `userMemoryOfAgentId: null` excludes SESSION memories, reachable only
+ *   through a session binding. Admitting them on a read gate hands every App
+ *   member every anonymous end-user session — the #934/#967 isolation breach.
+ *
+ * What these columns CANNOT do is separate a LEGACY (pre-#723) team space from
+ * a name-addressable `createMemoryInApp` memory: both have every key null. That
+ * is the URN matcher's job, and the reason this is not exported alone.
+ */
+function appTeamSpaceColumnFilter(appId: string) {
+  return {
+    appId,
+    class: 'app' as const,
+    deletedAt: null,
+    workerOf: { none: {} },
+    userMemoryOfAgentId: null,
+  };
+}
+
+/**
+ * The memory ids that ARE this App's team space — the identity question.
+ *
+ * Two kinds qualify, and both must, which is why this is a resolver rather than
+ * a `where` object:
+ *
+ * 1. **Adopted** rows, carrying the #723 key `sharedMemoryOfAgentId`.
+ * 2. **Legacy** (pre-#723) rows, whose key is null because identity then lived
+ *    in the urn string `<app-urn>:<agent-slug>:shared`.
+ *
+ * Legacy rows are column-INDISTINGUISHABLE from name-addressable
+ * `createMemoryInApp(memoryClass: 'app')` memories, which also carry every key
+ * null. Getting this wrong fails in both directions and neither is loud:
+ *
+ * - Requiring the key drops legacy spaces — `App.sharedMemory` reports none and
+ *   the worklog locator finds an empty ledger for an App the adoption sweep has
+ *   not reached (PR #1066 review, Copilot: a regression, since both admitted
+ *   legacy before).
+ * - Dropping the key admits named memories, so an older one wins an
+ *   oldest-first pick and is presented as the team space (same PR, Codex).
+ *
+ * So legacy rows are matched by URN through {@link memoryCarriesLegacyKeyFor} —
+ * by PARSED-ATOM EQUALITY, never a SQL pattern. A slug may legally contain `_`,
+ * a single-character `LIKE` wildcard, and Prisma's `endsWith`/`contains`
+ * compile to `LIKE`, so a pattern would let `sales_bot` adopt `salesXbot`'s
+ * space. That module is the one definition the three adoption paths share; this
+ * is the fourth reader and deliberately not a fifth copy.
+ *
+ * Candidates are narrowed by indexed columns first and compared in memory — an
+ * App holds a handful of app-class rows, so the scan is trivial.
+ *
+ * NOTE this is TENANCY, not authorization: it answers "which memory is the team
+ * space", never "may the caller read it". Pair with {@link isAppParticipant}.
+ * The MCP access map deliberately does NOT use this — see the comment at
+ * `getAppTeamSpaceAccess`, which answers the broader ACCESS question.
+ */
+export async function resolveAppTeamSpaceMemoryIds(
+  db: Context['db'],
+  appId: string,
+): Promise<string[]> {
+  const rows = await db.memory.findMany({
+    where: appTeamSpaceColumnFilter(appId),
+    select: { id: true, urn: true, legacyUrn: true, sharedMemoryOfAgentId: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  if (rows.length === 0) return [];
+
+  const adopted = rows.filter((r) => r.sharedMemoryOfAgentId !== null);
+  const unkeyed = rows.filter((r) => r.sharedMemoryOfAgentId === null);
+  if (unkeyed.length === 0) return adopted.map((r) => r.id);
+
+  // Only the App's OWN installed agents can have minted a legacy key here, so
+  // the slug set is bounded by the install roster rather than the org.
+  const installed = await db.appAgent.findMany({
+    where: { appId },
+    select: { agent: { select: { urn: true, legacyUrn: true } } },
+  });
+  const slugs = [
+    ...new Set(
+      installed.flatMap(({ agent }) => (agent ? agentSlugCandidates(agent) : [])),
+    ),
+  ];
+  const legacy = slugs.length
+    ? unkeyed.filter((r) => memoryCarriesLegacyKeyFor(r, slugs))
+    : [];
+
+  // Preserve the createdAt ordering the caller's oldest-first picks rely on.
+  const keep = new Set([...adopted, ...legacy].map((r) => r.id));
+  return rows.filter((r) => keep.has(r.id)).map((r) => r.id);
 }
 
 /** Row shape shared by the masked mappers below (no key material leaves). */

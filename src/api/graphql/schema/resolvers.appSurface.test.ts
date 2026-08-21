@@ -544,12 +544,60 @@ describe('appNodes', () => {
   });
 
   it('a Worker working memory and a SESSION memory are never the team space', async () => {
-    // The other two `class='app'` row shapes under the same App
+    // The other `class='app'` row shapes under the same App
     // (findings:app-class-is-four-row-shapes). Both carry this App's appId and
     // class, so a bare appId+class predicate would pull them in — the session
-    // one is the #934/#967 isolation breach, and it is the shape the original
-    // three-shape analysis missed.
+    // one is the #934/#967 isolation breach.
+    //
+    // The Worker is ATTACHED, not implied (PR #1066 review, Copilot: the first
+    // version of this test named a Worker and created only a session memory,
+    // so the authorization-sensitive exclusion it claimed to cover was never
+    // exercised). `workerOf` is the discriminator, and it discriminates only if
+    // a Worker actually points at the row — which is what production does, in
+    // one transaction with the memory create.
     const { app } = await withTeamSpace('app-team-space-shapes');
+
+    // The worker memory is given a LEGACY-SHAPED urn (`…:<agent-slug>:shared`)
+    // on purpose. Without it the URN matcher already rejects the row and
+    // `workerOf` is never reached — dropping the clause leaves the suite green,
+    // which is a guard asserted and not proven
+    // (review:a-green-mutation-indicts-the-test). With it, `workerOf` is the
+    // ONLY thing standing between a Worker's casting-scoped memory and the team
+    // space, which is exactly the collision the clause exists for: a legacy
+    // shared row later attached to a Worker looks like both.
+    const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+    const agentSlug = agentRow.urn.split(':').slice(1).join(':');
+    const workerMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        appId: app.id,
+        urn: `${orgId}:app-team-space-shapes:${agentSlug}:shared`,
+        name: 'worker working memory',
+        class: 'app',
+        acceptsUploads: false,
+      },
+    });
+    await db.worker.create({
+      data: {
+        appId: app.id,
+        agentId,
+        name: `Iris-${Date.now()}`,
+        slug: `iris-${Date.now()}`,
+        memoryId: workerMem.id,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: workerMem.id,
+        loc: 'private:worker-note',
+        isLink: false,
+        name: 'worker note',
+        tags: [],
+      },
+    });
+
     const sessionMem = await db.memory.create({
       data: {
         id: generateId(),
@@ -573,9 +621,12 @@ describe('appNodes', () => {
       },
     });
 
-    const nodes = await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx());
-    expect(nodes.map((n: { loc: string }) => n.loc)).toContain('chats:team');
-    expect(nodes.map((n: { loc: string }) => n.loc)).not.toContain('private:session-note');
+    const locs = (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(locs).toContain('chats:team');
+    expect(locs).not.toContain('private:worker-note');
+    expect(locs).not.toContain('private:session-note');
   });
 
   it('returns empty when the App is orphan (agent_id IS NULL)', async () => {

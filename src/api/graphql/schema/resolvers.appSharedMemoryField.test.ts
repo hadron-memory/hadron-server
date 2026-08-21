@@ -136,6 +136,29 @@ describe('#965 — App.sharedMemory', () => {
     expect(mem?.id).not.toBe(workerMem.id);
   });
 
+  it('still finds a LEGACY (pre-#723) team space, whose sharedMemoryOfAgentId is null', async () => {
+    // NOT a new feature — behaviour that predates #1031 and that requiring the
+    // #723 key would have silently removed (PR #1066 review, Copilot). Legacy
+    // rows are column-identical to name-addressable memories, so they are
+    // matched by URN through memoryCarriesLegacyKeyFor.
+    const app = await createApp('Eng Team Legacy');
+    const shared = await db.memory.findFirstOrThrow({
+      where: { appId: app.id, class: 'app' },
+    });
+    const agent = await db.agent.findFirstOrThrow({
+      where: { id: shared.sharedMemoryOfAgentId! },
+    });
+    // Put the row back into its pre-#723 shape: key null, identity in the urn.
+    const agentSlug = agent.urn.split(':').slice(1).join(':');
+    await db.memory.update({
+      where: { id: shared.id },
+      data: { sharedMemoryOfAgentId: null, urn: `${app.urn}:${agentSlug}:shared` },
+    });
+
+    const mem = await A.sharedMemory(app, {}, ctx(member.id));
+    expect(mem?.id).toBe(shared.id);
+  });
+
   it('never answers with a NAME-ADDRESSABLE app memory (createMemoryInApp)', async () => {
     // The shape that column-narrowing alone cannot exclude, found in review of
     // PR #1066: createMemoryInApp(memoryClass: 'app') produces appId set, no
