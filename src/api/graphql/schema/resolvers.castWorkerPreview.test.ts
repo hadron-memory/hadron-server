@@ -64,6 +64,9 @@ beforeEach(async () => {
 
   const created = await M.createAgent({}, { orgId: org.id, name: 'CWP Team Agent' }, ctx(admin.id));
   teamAgent = { id: created.id, systemMemoryId: created.systemMemoryId };
+  // #1050: a LEGACY role node that still carries data.names. Kept in the
+  // fixture on purpose — the register is gone, and the proof that it is gone is
+  // that a node still holding one changes nothing about a cast or a preview.
   await db.node.create({
     data: {
       id: generateId(),
@@ -97,31 +100,50 @@ const preview = (c: Context, args: Record<string, unknown> = {}) =>
   Q.castWorkerPreview({}, { appRef: app.id, ...args }, c);
 
 describe('#964 — castWorkerPreview', () => {
-  it('register mode: previews the next free name, the composed prompt, and the resolved Team Agent — writing NOTHING', async () => {
-    await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: 'fred' } });
-    const p = await preview(ctx(admin.id), { role: 'backend-engineer' });
-    expect(p.name).toBe('Gwen');
-    expect(p.role).toBe('backend-engineer');
-    expect(p.agentId).toBe(roleAgent.id);
-    expect(p.teamAgentId).toBe(teamAgent.id);
-    expect(p.prompt).toBe('You are Gwen, a backend-engineer.');
-    expect(p.hasNamePlaceholder).toBe(true);
-    // Reserves nothing, creates nothing.
-    expect(await db.worker.count({ where: { appId: app.id } })).toBe(1);
+  it('a nameless preview REFUSES — there is no register to allocate from (#1050)', async () => {
+    // The register used to answer this call. Its removal makes a name the
+    // caller's to supply, and the preview must refuse exactly where the cast
+    // does, since answering "what would the cast do" is its whole contract.
+    await expectCode(preview(ctx(admin.id), { role: 'backend-engineer' }), 'WORKER_NAME_REQUIRED');
   });
 
-  it('the preview matches what the real cast then allocates', async () => {
-    const p = await preview(ctx(admin.id), { role: 'backend-engineer' });
-    const worker = await M.castWorker({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+  it('a legacy data.names register on the role node is INERT — it allocates nothing', async () => {
+    // The fixture's role node still lists Fred/Gwen/Hans. Before #1050 this
+    // preview returned "Fred"; now the names are historical data nobody reads.
+    // Left in place rather than migrated away: the list records what was once
+    // allocated to the role, and erasing it would destroy provenance to tidy a
+    // field with no reader.
+    const node = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer' },
+    });
+    expect((node.data as { names?: string[] }).names).toEqual(['Fred', 'Gwen', 'Hans']);
+    await expectCode(preview(ctx(admin.id), { role: 'backend-engineer' }), 'WORKER_NAME_REQUIRED');
+  });
+
+  it('the preview matches what the real cast then does — refusal included', async () => {
+    // The parity that matters is not "same name" any more, it is same VERDICT.
+    await expectCode(preview(ctx(admin.id), { role: 'backend-engineer' }), 'WORKER_NAME_REQUIRED');
+    await expectCode(
+      M.castWorker({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id)),
+      'WORKER_NAME_REQUIRED',
+    );
+    // And with a name, both agree on it.
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Zara' });
+    const worker = await M.castWorker(
+      {}, { appRef: app.id, role: 'backend-engineer', name: 'Zara' }, ctx(admin.id),
+    );
     expect(worker.name).toBe(p.name);
   });
 
   it('a previewed name is NOT reserved — someone else can take it first, by design', async () => {
-    const p = await preview(ctx(admin.id), { role: 'backend-engineer' });
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Fred' });
     expect(p.name).toBe('Fred');
     await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: 'fred' } });
-    // The next preview simply moves on; the earlier one held no lease.
-    expect((await preview(ctx(admin.id), { role: 'backend-engineer' })).name).toBe('Gwen');
+    // The preview held no lease, so the same call now refuses.
+    await expectCode(
+      preview(ctx(admin.id), { role: 'backend-engineer', name: 'Fred' }),
+      'WORKER_NAME_TAKEN',
+    );
   });
 
   it('explicit name: free previews with the override appended; taken refuses WORKER_NAME_TAKEN (retired included)', async () => {
@@ -131,7 +153,6 @@ describe('#964 — castWorkerPreview', () => {
       promptOverride: 'Be terse.',
     });
     expect(p.name).toBe('Zoe');
-    expect(p.teamAgentId).toBeNull();
     expect(p.prompt).toBe('You are Zoe, a backend-engineer.\n\nBe terse.');
     await db.worker.create({
       data: { appId: app.id, agentId: roleAgent.id, name: 'zoe', slug: 'zoe', retiredAt: new Date() },
@@ -144,12 +165,19 @@ describe('#964 — castWorkerPreview', () => {
 
   it('typed refusals behave identically to the cast (the point of a preview)', async () => {
     // Unknown role → the agent resolution refusal, not a silent guess.
-    await expectCode(preview(ctx(admin.id), { role: 'no-such-role' }), 'WORKER_AGENT_NOT_FOUND');
-    // Exhausted register.
-    for (const name of ['Fred', 'Gwen', 'Hans']) {
-      await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name, slug: workerSlugBase(name) } });
-    }
-    await expectCode(preview(ctx(admin.id), { role: 'backend-engineer' }), 'WORKER_REGISTER_EXHAUSTED');
+    await expectCode(
+      preview(ctx(admin.id), { role: 'no-such-role', name: 'Zed' }),
+      'WORKER_AGENT_NOT_FOUND',
+    );
+    // A taken name — the refusal that replaced WORKER_REGISTER_EXHAUSTED as the
+    // "you cannot have this one" answer, now that names are chosen not drawn.
+    await db.worker.create({
+      data: { appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: workerSlugBase('Fred') },
+    });
+    await expectCode(
+      preview(ctx(admin.id), { role: 'backend-engineer', name: 'Fred' }),
+      'WORKER_NAME_TAKEN',
+    );
   });
 
   it('flags a nameless template before the name is burned', async () => {
@@ -157,7 +185,7 @@ describe('#964 — castWorkerPreview', () => {
       where: { id: roleAgent.id },
       data: { personaPrompt: 'You are a {{role}}.' },
     });
-    const p = await preview(ctx(admin.id), { role: 'backend-engineer' });
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBe(false);
     expect(p.prompt).toBe('You are a backend-engineer.');
   });
@@ -170,15 +198,15 @@ describe('#964 — castWorkerPreview', () => {
       where: { id: roleAgent.id },
       data: { personaPrompt: 'You are {{ name }}, a {{role}}.' },
     });
-    const p = await preview(ctx(admin.id), { role: 'backend-engineer' });
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBe(false);
     expect(p.prompt).toBe('You are {{ name }}, a backend-engineer.');
   });
 
   it('takes the MINT gate, not a read gate: outsiders and pure App-key principals are refused', async () => {
-    await expectCode(preview(ctx(outsider.id), { role: 'backend-engineer' }), 'FORBIDDEN');
+    await expectCode(preview(ctx(outsider.id), { role: 'backend-engineer', name: 'Gwen' }), 'FORBIDDEN');
     // Staffing is a human act — the pure App-key principal is denied for the
     // cast, so the preview matches.
-    await expectCode(preview(ctx(undefined, app.id), { role: 'backend-engineer' }), 'FORBIDDEN');
+    await expectCode(preview(ctx(undefined, app.id), { role: 'backend-engineer', name: 'Gwen' }), 'FORBIDDEN');
   });
 });

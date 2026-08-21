@@ -197,7 +197,7 @@ export interface ChunkVectorRow {
  * `FOR NO KEY UPDATE`, not `FOR UPDATE`, deliberately — the inserts below
  * FK-reference this same row, and an FK check takes `FOR KEY SHARE`, which `NO
  * KEY UPDATE` admits and `UPDATE` would block against (the deadlock class
- * already documented on `withRegisterLock`).
+ * already documented on `withRoleWriteLock`).
  */
 export async function upsertChunkVectors(
   db: PrismaClient,

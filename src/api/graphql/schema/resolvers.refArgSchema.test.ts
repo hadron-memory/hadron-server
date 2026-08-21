@@ -34,7 +34,9 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   createAppKey: ['appRef'],
   createApp: ['orgRef', 'agentRef'],
   installAgentIntoApp: ['appRef', 'agentRef'],
-  castWorker: ['appRef', 'agentRef', 'teamAgentRef'],
+  // #1050: teamAgentRef removed — casting reads no system memory, so the
+  // argument had become accepted-and-ignored.
+  castWorker: ['appRef', 'agentRef'],
   retireWorker: ['workerRef'],
   deleteWorker: ['workerRef'],
   createTeamChatMessage: ['appRef', 'sessionRef'],

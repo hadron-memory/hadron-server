@@ -124,8 +124,10 @@ export async function writeNodeCore(
   // while revSeq still equals this value, else the typed
   // NODE_WRITE_CONFLICT refuses — BEFORE the revision snapshot, so a
   // refused write leaves no artifact. For callers whose precondition must
-  // hold against writers outside their own locking discipline
-  // (updateTeamRole's expectedNames vs the generic node surfaces).
+  // hold against writers outside their own locking discipline. (#1050 removed
+  // this option's original caller — updateTeamRole's expectedNames — but the
+  // mechanism stays: it is the generic guarded-write primitive, and the next
+  // caller-level precondition will need exactly it.)
   opts?: { targetNodeId?: string; guardRevSeq?: number },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -585,8 +587,9 @@ export async function writeNodeCore(
           // revSeq value the claim above just installed, so a revisioned
           // write interleaving between claim and write is caught here
           // (its own claim bumps revSeq past ours). This is what makes a
-          // caller-level precondition (updateTeamRole's expectedNames) hold
-          // against writers that do NOT share the caller's lock — the
+          // caller-level precondition hold against writers that do NOT share
+          // the caller's lock (#1050 retired the first such caller,
+          // updateTeamRole's expectedNames; the primitive is unchanged) — the
           // generic node surfaces write this row unguarded, so an
           // application-level compare alone has a TOCTOU window between it
           // and this write. updateMany because a unique `where` can't carry

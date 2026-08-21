@@ -208,9 +208,11 @@ describe('castWorker — happy path', () => {
     expect(worker.promptOverride).toBe('Prefer boring solutions.');
   });
 
-  it('a blank caller-supplied name is absent (cor:agt:020:02) — register allocates', async () => {
-    const worker = await cast({ role: 'backend-engineer', name: '   ' });
-    expect(worker.name).toBe('Iris');
+  it('a blank caller-supplied name counts as ABSENT and refuses (#1050)', async () => {
+    // Whitespace was never a name (cor:agt:020:02). It used to fall through to
+    // the register; with no register to fall through to, it is the same
+    // refusal as passing nothing — which is the point: one rule, not two.
+    await expectCode(cast({ role: 'backend-engineer', name: '   ' }), 'WORKER_NAME_REQUIRED');
   });
 
   it('multiple castings of ONE agent in one App are legal — Iris and Henry, same agent', async () => {
@@ -275,9 +277,10 @@ describe('castWorker — agent resolution', () => {
     await expectCode(cast({ name: 'Zoe' }), 'BAD_USER_INPUT');
   });
 
-  it('agentRef without role, name, or a personaRole to default from → BAD_USER_INPUT', async () => {
-    // The team agent carries no persona dressing: nothing names a register.
-    await expectCode(cast({ agentRef: teamAgent.id }), 'BAD_USER_INPUT');
+  it('agentRef without a name → WORKER_NAME_REQUIRED (#1050)', async () => {
+    // Previously BAD_USER_INPUT, because with no role there was no register to
+    // name. The missing thing was always the NAME, and now the error says so.
+    await expectCode(cast({ agentRef: teamAgent.id }), 'WORKER_NAME_REQUIRED');
   });
 
   it('a multi-atom role is rejected before touching anything', async () => {
@@ -285,130 +288,64 @@ describe('castWorker — agent resolution', () => {
   });
 });
 
-describe('castWorker — name allocation (the register)', () => {
-  it('allocates first-to-last, advancing past taken names (WORKER_NAME_TAKEN retry contract)', async () => {
-    const first = await cast({ role: 'backend-engineer' });
-    const second = await cast({ role: 'backend-engineer' });
-    expect(first.name).toBe('Iris');
-    expect(second.name).toBe('Henry');
+describe('castWorker — naming (#1050: the register is gone)', () => {
+  it('a nameless cast REFUSES — there is no pool to draw from', async () => {
+    await expectCode(cast({ role: 'backend-engineer' }), 'WORKER_NAME_REQUIRED');
+    // And says why, because "required" alone invites the reader to look for
+    // the setting that would make it optional.
+    try {
+      await cast({ role: 'backend-engineer' });
+      expect.fail('expected WORKER_NAME_REQUIRED');
+    } catch (e) {
+      expect((e as GraphQLError).message).toMatch(/permanent within the App/);
+    }
   });
 
-  it('two RACING casts get different names — the unique constraint is the primitive', async () => {
-    const [a, b] = await Promise.all([
-      cast({ role: 'backend-engineer' }),
-      cast({ role: 'backend-engineer' }),
+  it('a legacy data.names register on the role node allocates NOTHING', async () => {
+    // The fixture role node still carries names. Before #1050 a nameless cast
+    // returned "Iris" from it; the register's removal is only real if a node
+    // that still HAS one changes nothing.
+    const node = await db.node.findFirstOrThrow({
+      where: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer' },
+    });
+    expect((node.data as { names?: string[] }).names?.length).toBeGreaterThan(0);
+    await expectCode(cast({ role: 'backend-engineer' }), 'WORKER_NAME_REQUIRED');
+  });
+
+  it('two RACING casts of ONE name: exactly one wins — the unique constraint is the primitive', async () => {
+    // What the register never was: the thing that made concurrent casting
+    // safe. workers_app_name_uniq did that, and still does.
+    const results = await Promise.allSettled([
+      cast({ agentRef: roleAgent.id, name: 'Iris' }),
+      cast({ agentRef: roleAgent.id, name: 'Iris' }),
     ]);
-    expect(a.name).not.toBe(b.name);
-    expect(['Iris', 'Henry']).toContain(a.name);
-    expect(['Iris', 'Henry']).toContain(b.name);
+    const ok = results.filter((r) => r.status === 'fulfilled');
+    const failed = results.filter((r) => r.status === 'rejected');
+    expect(ok).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    expect(((failed[0] as PromiseRejectedResult).reason as GraphQLError).extensions?.code).toBe(
+      'WORKER_NAME_TAKEN',
+    );
+    expect(await db.worker.count({ where: { appId: app.id, name: 'Iris' } })).toBe(1);
   });
 
-  it('register names are case-insensitively reserved — "iris" taken blocks "Iris"', async () => {
+  it('names are case-insensitively reserved — "iris" taken blocks "Iris"', async () => {
     await cast({ agentRef: roleAgent.id, name: 'iris' });
-    const next = await cast({ role: 'backend-engineer' });
-    expect(next.name).toBe('Henry');
-  });
-
-  it('a caller-supplied taken name is the typed WORKER_NAME_TAKEN — no silent retry', async () => {
-    await cast({ agentRef: roleAgent.id, name: 'Iris' });
     await expectCode(cast({ agentRef: roleAgent.id, name: 'Iris' }), 'WORKER_NAME_TAKEN');
-  });
-
-  it('the explicit-name reservation is case-insensitive — "IRIS" collides with "Iris"', async () => {
-    await cast({ agentRef: roleAgent.id, name: 'Iris' });
-    await expectCode(cast({ agentRef: roleAgent.id, name: 'IRIS' }), 'WORKER_NAME_TAKEN');
-  });
-
-  it('names that share a lossy @mention slug are BOTH castable — one uniqueness layer only', async () => {
-    // "Mary Jane" and "Mary-Jane" both slug to @mary-jane. That collision is
-    // accepted by decision (Holger, 2026-08-14, reversing a PR #978 review
-    // suggestion): cor:agt:020:02 keeps the case-insensitive NAME as the only
-    // uniqueness layer, and a shared mention address — inherent to the shipped
-    // one-format mention contract, and identical under the old persona model —
-    // simply reaches both workers.
-    const mj = await cast({ agentRef: roleAgent.id, name: 'Mary Jane' });
-    const mj2 = await cast({ agentRef: roleAgent.id, name: 'Mary-Jane' });
-    expect(mj.name).toBe('Mary Jane');
-    expect(mj2.name).toBe('Mary-Jane');
-    expect(mj.id).not.toBe(mj2.id);
   });
 
   it('a RETIRED worker keeps its name reserved forever (cor:agt:020:02)', async () => {
-    const iris = await cast({ role: 'backend-engineer' });
-    expect(iris.name).toBe('Iris');
+    // The invariant the register was often credited with, demonstrated without
+    // one: permanence comes from the constraint, not from a bookkeeping list.
+    const iris = await cast({ agentRef: roleAgent.id, name: 'Iris' });
     await M.retireWorker({}, { workerRef: iris.id }, ctx(admin.id));
-    // The register must NOT recycle "Iris" — history references her.
-    const next = await cast({ role: 'backend-engineer' });
-    expect(next.name).toBe('Henry');
-    // An explicit re-cast of the retired name is the typed refusal.
     await expectCode(cast({ agentRef: roleAgent.id, name: 'Iris' }), 'WORKER_NAME_TAKEN');
   });
 
-  it('register exhausted → WORKER_REGISTER_EXHAUSTED', async () => {
-    for (const _ of [1, 2, 3]) {
-      await cast({ role: 'backend-engineer' });
-    }
-    await expectCode(cast({ role: 'backend-engineer' }), 'WORKER_REGISTER_EXHAUSTED');
-  });
-
-  it('empty register + no explicit name → WORKER_REGISTER_EXHAUSTED', async () => {
-    await createRoleNode(teamAgent.systemMemoryId, 'qa', { names: [] });
-    // Explicit agentRef + role: the register lookup uses the explicit role.
-    await expectCode(cast({ agentRef: roleAgent.id, role: 'qa' }), 'WORKER_REGISTER_EXHAUSTED');
-  });
-
-  it('a case-insensitive register duplicate keeps the FIRST spelling', async () => {
-    await createRoleNode(teamAgent.systemMemoryId, 'writer', { names: ['Ana', 'ANA', 'Ben'] });
-    const first = await cast({ agentRef: roleAgent.id, role: 'writer' });
-    const second = await cast({ agentRef: roleAgent.id, role: 'writer' });
-    expect(first.name).toBe('Ana');
-    expect(second.name).toBe('Ben');
-  });
-
-  it('a role with no roles:<role> node → WORKER_ROLE_NOT_FOUND listing available roles', async () => {
-    try {
-      await cast({ agentRef: roleAgent.id, role: 'astronaut' });
-      expect.fail('expected WORKER_ROLE_NOT_FOUND');
-    } catch (e) {
-      expect((e as GraphQLError).extensions?.code).toBe('WORKER_ROLE_NOT_FOUND');
-      expect((e as GraphQLError).extensions?.availableRoles).toEqual(['backend-engineer']);
-    }
-  });
-});
-
-describe('castWorker — Team Agent location', () => {
-  it('no installed agent carries a roles: branch → TEAM_AGENT_NOT_FOUND', async () => {
-    await db.node.deleteMany({ where: { memoryId: teamAgent.systemMemoryId } });
-    await expectCode(cast({ role: 'backend-engineer' }), 'TEAM_AGENT_NOT_FOUND');
-  });
-
-  it('two installed agents with roles: branches → TEAM_AGENT_AMBIGUOUS; teamAgentRef resolves it', async () => {
-    // Give the role-agent's system memory a roles: branch too.
-    await createRoleNode(roleAgent.systemMemoryId, 'designer');
-    await expectCode(cast({ role: 'backend-engineer' }), 'TEAM_AGENT_AMBIGUOUS');
-    const worker = await cast({ role: 'backend-engineer', teamAgentRef: teamAgent.id });
-    expect(worker.name).toBe('Iris');
-  });
-
-  it('teamAgentRef naming an agent NOT installed here → TEAM_AGENT_NOT_INSTALLED', async () => {
-    const foreign = await M.createAgent({}, { orgId: org.id, name: 'Foreign Team' }, ctx(admin.id));
-    await createRoleNode(foreign.systemMemoryId, 'backend-engineer');
-    await expectCode(
-      cast({ role: 'backend-engineer', teamAgentRef: foreign.id }),
-      'TEAM_AGENT_NOT_INSTALLED',
-    );
-  });
-
-  it('an encrypted system memory without a session key refuses with the typed SESSION_EXPIRED', async () => {
-    // The register lives in `data`, which is ciphertext under spec 041.
-    await db.memory.update({
-      where: { id: teamAgent.systemMemoryId },
-      data: { isEncrypted: true },
-    });
-    await expectCode(cast({ role: 'backend-engineer' }), 'SESSION_EXPIRED');
-  });
-
-  it('an explicit name never touches the register — encryption does not block it', async () => {
+  it('an ENCRYPTED system memory no longer blocks a cast at all', async () => {
+    // Casting used to read the register out of `data` — ciphertext under spec
+    // 041 — so a nameless cast into an encrypted system memory refused
+    // SESSION_EXPIRED. Casting now reads no system memory whatsoever.
     await db.memory.update({
       where: { id: teamAgent.systemMemoryId },
       data: { isEncrypted: true },
@@ -416,7 +353,9 @@ describe('castWorker — Team Agent location', () => {
     const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
     expect(worker.name).toBe('Zoe');
   });
+});
 
+describe('castWorker — App and agent resolution', () => {
   it('uninstalled App → APP_UNINSTALLED', async () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     await expectCode(cast({ agentRef: roleAgent.id, name: 'Zoe' }), 'APP_UNINSTALLED');

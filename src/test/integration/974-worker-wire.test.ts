@@ -30,8 +30,8 @@ const M = resolvers.Mutation as any;
 
 /** Every advertised castWorker argument, plus the resolved-field surface. */
 const CAST = `
-  mutation Cast($appRef: ID!, $agentRef: ID, $role: String, $name: String, $teamAgentRef: ID, $promptOverride: String) {
-    castWorker(appRef: $appRef, agentRef: $agentRef, role: $role, name: $name, teamAgentRef: $teamAgentRef, promptOverride: $promptOverride) {
+  mutation Cast($appRef: ID!, $agentRef: ID, $role: String, $name: String, $promptOverride: String) {
+    castWorker(appRef: $appRef, agentRef: $agentRef, role: $role, name: $name, promptOverride: $promptOverride) {
       id
       appId
       agentId
@@ -171,7 +171,6 @@ describe('the Worker surface on the wire (#974)', () => {
       agentRef: roleAgent.id,
       role: 'backend-engineer',
       name: 'Zoe',
-      teamAgentRef: teamAgent.id,
       promptOverride: 'Stay focused.',
     });
     expect(body.errors).toBeUndefined();
@@ -190,16 +189,21 @@ describe('the Worker surface on the wire (#974)', () => {
     zoeId = worker.id;
   });
 
-  it('register mode allocates through the wire', async () => {
-    const body = await gql(CAST, { appRef: app.id, role: 'backend-engineer' });
+  it('a named cast lands through the wire', async () => {
+    const body = await gql(CAST, { appRef: app.id, role: 'backend-engineer', name: 'Iris' });
     expect(body.errors).toBeUndefined();
     expect(body.data?.castWorker?.name).toBe('Iris');
     irisId = body.data?.castWorker?.id;
   });
 
-  it('register exhaustion carries WORKER_REGISTER_EXHAUSTED as extensions.code', async () => {
+  it('a NAMELESS cast carries WORKER_NAME_REQUIRED as extensions.code (#1050)', async () => {
+    // The register used to answer this over the wire. With it gone the refusal
+    // is the contract, and it must be typed rather than a bare validation
+    // error — the name stays nullable in the SDL precisely so this message,
+    // which says WHY a name cannot be derived, is what a client receives.
     const body = await gql(CAST, { appRef: app.id, role: 'backend-engineer' });
-    expect(body.errors?.[0]?.extensions?.code).toBe('WORKER_REGISTER_EXHAUSTED');
+    expect(body.errors?.[0]?.extensions?.code).toBe('WORKER_NAME_REQUIRED');
+    expect(body.errors?.[0]?.message).toMatch(/permanent within the App/);
   });
 
   it('a caller-supplied taken name carries WORKER_NAME_TAKEN as extensions.code', async () => {
