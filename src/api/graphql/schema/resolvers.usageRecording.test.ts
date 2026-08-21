@@ -190,7 +190,9 @@ describe('#1061 — writes are recorded on every node-write surface', () => {
 
   it('records a write for a soft delete, and none for a hard delete', async () => {
     await seedNodes(1, 'del');
-    const node = await db.node.findFirstOrThrow({ where: { loc: 'del-0' } });
+    const node = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'del-0', memoryId: mem.id } },
+    });
 
     await M.deleteNode(null, { nodeRef: node.id }, asUser());
     let events = await eventsOfType('write');
@@ -200,7 +202,9 @@ describe('#1061 — writes are recorded on every node-write surface', () => {
     // Hard delete removes the row, so an event naming it could not satisfy the
     // nodeId FK — and there is no surviving node the write belongs to.
     await seedNodes(1, 'hard');
-    const hard = await db.node.findFirstOrThrow({ where: { loc: 'hard-0' } });
+    const hard = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'hard-0', memoryId: mem.id } },
+    });
     await M.deleteNode(null, { nodeRef: hard.id, hard: true }, asUser());
     events = await eventsOfType('write', { minCount: 1 });
     expect(events).toHaveLength(1);
@@ -256,7 +260,9 @@ describe('#1061 — writes are recorded on every node-write surface', () => {
 
   it('records a write at the POST-move address when a node is relocated', async () => {
     await seedNodes(1, 'mv');
-    const node = await db.node.findFirstOrThrow({ where: { loc: 'mv-0' } });
+    const node = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'mv-0', memoryId: mem.id } },
+    });
 
     await M.moveNode(null, { sourceRef: node.id, targetUrn: `hrn:node:${mem.urn}:moved` }, asUser());
 
