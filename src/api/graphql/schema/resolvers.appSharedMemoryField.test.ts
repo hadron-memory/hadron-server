@@ -93,9 +93,22 @@ describe('#965 — App.sharedMemory', () => {
     const shared = await db.memory.findFirstOrThrow({
       where: { appId: app.id, class: 'app' },
     });
-    // A worker working memory: same class, same appId, NO sharedMemoryOfAgentId
-    // (provisionWorkerMemory's shape) — and force it OLDER than the shared row
-    // so "oldest wins" alone would pick it if the key filter were missing.
+    // A worker working memory: same class, same appId — and forced OLDER than
+    // the shared row so "oldest wins" alone would pick it if the discriminator
+    // were missing.
+    //
+    // #1031 made this fixture FAITHFUL by attaching the Worker. It previously
+    // created the memory alone, which no producer does: provisionWorkerMemory
+    // creates the memory and sets Worker.memoryId in ONE transaction,
+    // precisely so a rollback cannot leave an orphan. The unattached row was a
+    // fifth shape that exists in no code path.
+    //
+    // That mattered because the unattached row was being excluded by
+    // `sharedMemoryOfAgentId: { not: null }` — a filter that also excludes
+    // LEGACY (pre-#723) team spaces, which is the bug the test was
+    // accidentally protecting. `workerOf` is the real discriminator for this
+    // shape (findings:app-class-is-four-row-shapes), and it only discriminates
+    // if the Worker is actually there.
     const workerMem = await db.memory.create({
       data: {
         id: generateId(),
@@ -108,9 +121,38 @@ describe('#965 — App.sharedMemory', () => {
         createdAt: new Date(Date.now() - 60_000),
       },
     });
+    const roleAgent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    await db.worker.create({
+      data: {
+        appId: app.id,
+        agentId: roleAgent.id,
+        name: `Iris-${Date.now()}`,
+        slug: `iris-${Date.now()}`,
+        memoryId: workerMem.id,
+      },
+    });
     const mem = await A.sharedMemory(app, {}, ctx(member.id));
     expect(mem?.id).toBe(shared.id);
     expect(mem?.id).not.toBe(workerMem.id);
+  });
+
+  it('finds a LEGACY (pre-#723) team space, whose sharedMemoryOfAgentId is null', async () => {
+    // The behaviour #1031 restores. The previous predicate keyed on
+    // `sharedMemoryOfAgentId: { not: null }`, so an App whose space the
+    // adoption sweep had not reached reported no shared memory at all — the
+    // "failure that looks fixed": correct for every adopted row, silently
+    // blind to the ones that most need finding.
+    const app = await createApp('Eng Team Legacy');
+    await db.memory.updateMany({
+      where: { appId: app.id, class: 'app' },
+      data: { sharedMemoryOfAgentId: null },
+    });
+    const legacy = await db.memory.findFirstOrThrow({
+      where: { appId: app.id, class: 'app' },
+    });
+
+    const mem = await A.sharedMemory(app, {}, ctx(member.id));
+    expect(mem?.id).toBe(legacy.id);
   });
 
   it('prefers the memory holding the worklog root over an older keyed row', async () => {

@@ -48,6 +48,7 @@ import {
   readAllAgentRecordsFromEager,
   readPrimaryAgentField,
   assetUrn,
+  appTeamSpaceFilter,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
@@ -957,15 +958,13 @@ export const typeResolvers = {
       const worklogRoot = await ctx.db.node.findFirst({
         // loc-scope-ok: deliberately spans the App's OWN app-class memories —
         // the relation filter is the tenant scope (mirrors locateWorklogRoot).
-        // `workerOf: none` (#982 review, Copilot): a Worker's working memory
-        // is also an app-class row under this App, and a generic node write
-        // can plant a `worklog` loc in one — a casting-scoped memory is never
-        // the team space, here or in the worklog locator. Legacy unkeyed
-        // shared rows have no Worker pointing at them, so they still match.
+        // #1031: shared `appTeamSpaceFilter`, which also excludes SESSION
+        // memories; the local copy this replaces did not, so a planted
+        // `worklog` loc in a per-user session scope could answer here.
         where: {
           loc: WORKLOG_LOC,
           deletedAt: null,
-          memory: { appId: a.id, class: 'app', deletedAt: null, workerOf: { none: {} } },
+          memory: appTeamSpaceFilter(a.id),
         },
         orderBy: { createdAt: 'asc' },
         select: { memoryId: true },
@@ -973,12 +972,12 @@ export const typeResolvers = {
       const memory = worklogRoot
         ? await ctx.db.memory.findUnique({ where: { id: worklogRoot.memoryId } })
         : await ctx.db.memory.findFirst({
-            where: {
-              appId: a.id,
-              class: 'app',
-              deletedAt: null,
-              sharedMemoryOfAgentId: { not: null },
-            },
+            // #1031: was `sharedMemoryOfAgentId: { not: null }`, which is the
+            // "failure that looks fixed" — correct for ADOPTED team spaces and
+            // silently blind to LEGACY (pre-#723) ones, whose column is null.
+            // An App whose space the adoption sweep has not reached would
+            // report no shared memory at all whenever it has no worklog yet.
+            where: appTeamSpaceFilter(a.id),
             orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
           });
       if (!memory || memory.deletedAt) return null;

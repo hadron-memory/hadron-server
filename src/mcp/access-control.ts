@@ -31,6 +31,7 @@ import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { isAgentInstalled } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
+import { appTeamSpaceFilter } from '../api/graphql/schema/resolvers.helpers.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 
 // ---------------------------------------------------------------------------
@@ -226,13 +227,10 @@ async function getAppTeamSpaceAccess(
   callerUserId: string | null,
 ): Promise<Map<string, string>> {
   const rows = await db.memory.findMany({
-    where: {
-      appId: app.id,
-      class: 'app',
-      deletedAt: null,
-      workerOf: { none: {} },
-      userMemoryOfAgentId: null,
-    },
+    // #1031: the shared `appTeamSpaceFilter`. This copy was the CORRECT one —
+    // all four clauses — which is exactly why it should be the definition
+    // rather than the best of three drifting duplicates.
+    where: appTeamSpaceFilter(app.id),
     select: { id: true, ownerUserId: true },
   });
 
