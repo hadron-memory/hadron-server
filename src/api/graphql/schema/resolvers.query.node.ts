@@ -66,6 +66,12 @@ import {
   loadMemoryUrn,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import {
+  recordNodeRead,
+  recordNodeUsage,
+  toUsageNodeRef,
+  toUsageNodeRefs,
+} from '../../../lib/usageRecorder.js';
 
 export const nodeQueries = {
     /**
@@ -175,7 +181,9 @@ export const nodeQueries = {
      * A QUERY, not a mutation (the issue left this open): it is
      * side-effect-free. Unlike the MCP tool it records NO `action-run`
      * UsageEvent — metering a preview would inflate the ledger with actions
-     * nobody took.
+     * nobody took. It DOES record `read` events (#1061) for the run node and
+     * every dependency inlined into the bundle: not being an execution says
+     * nothing about whether content was returned, and it was.
      *
      * Assembles with `assembleRunNodePrompt` — the SAME function `runTask`
      * executes (Mustache via compileTemplate; flow-routing edges skipped) —
@@ -242,6 +250,19 @@ export const nodeQueries = {
             Object.entries(args).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
           )
         : undefined;
+
+      // #1061 — a render returns the node's assembled content, so it counts as
+      // a read of the run node AND of every dependency inlined into the bundle
+      // (each of which passed its own memory-read gate above). This resolver
+      // deliberately records no `action-run` event — see the doc comment — but
+      // that is about metering an execution, not about node reads, which did
+      // happen.
+      recordNodeUsage(
+        ctx.db,
+        'read',
+        toUsageNodeRefs([node, ...visibleEdges.map((e) => e.target)]),
+        ctx,
+      );
 
       // #858 review (Codex P1): assemble with the SAME function runTask
       // executes — Mustache via compileTemplate, routing edges skipped — not
@@ -538,6 +559,13 @@ export const nodeQueries = {
       const finish = async <T extends { content: string | null; data: unknown; memoryId: string }>(
         node: T,
       ) => {
+        // #1061 — every dispatch form of this query funnels its ONE successful
+        // return through `finish`, so this is the single place a `read` is
+        // recorded for the canonical node read (and for `nextNode`, which
+        // delegates here). A denied or missing ref returns null earlier and
+        // records nothing — an event must never name a node the caller could
+        // not read (#825).
+        recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
         await decryptNodesBatch(ctx.db, [node]);
         if (!raw && node.content?.includes('{{')) {
           const compiled = await compileTemplate(
@@ -667,6 +695,10 @@ export const nodeQueries = {
         }
       }
       await decryptNodesBatch(ctx.db, [node]);
+      // #1061 — an export hands the caller the node's full content, so it is a
+      // read like any other. Recorded once here, after the access gate and
+      // before the format branch, so PDF and MD/JSON count the same.
+      recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
       const memory = await ctx.db.memory.findUnique({
         where: { id: node.memoryId },
         select: { urn: true },
@@ -939,6 +971,17 @@ export const nodeQueries = {
         where: f.where ?? null,
       };
 
+      // #1061 — one `read` per node this query hands back, across every branch
+      // below (browse, keyword, regex, vector, hybrid, and the neighbours an
+      // `expand` appends). A search that returns 30 hits IS thirty node reads:
+      // the unit of the usage series is node content returned, not calls made,
+      // so a caller that reads 30 nodes through one search and one that reads
+      // them one at a time land in the same place. Every branch has already
+      // scoped its rows to the caller's readable memories before reaching here.
+      const recordSearchHits = (hits: readonly { node: unknown }[]): void => {
+        recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(hits.map((h) => h.node)), ctx);
+      };
+
       // ── No query → filtered list (subsumes `nodes`) ──
       if (!hasQuery) {
         // A `where` predicate (JSONB the Prisma query can't express) OR a
@@ -965,10 +1008,9 @@ export const nodeQueries = {
           await decryptNodesBatch(ctx.db, rows);
           const byId = new Map(rows.map((n) => [n.id, n]));
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
-          return {
-            hits: ordered.map((n) => ({ node: n, score: null, vector: null })),
-            passages: [], total: null, reason: null, degraded: null,
-          };
+          const browseHits = ordered.map((n) => ({ node: n, score: null, vector: null }));
+          recordSearchHits(browseHits);
+          return { hits: browseHits, passages: [], total: null, reason: null, degraded: null };
         }
         const orderBy =
           sort === 'seq' ? { seq: 'asc' as const }
@@ -982,8 +1024,10 @@ export const nodeQueries = {
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
+        const listHits = rows.map((n) => ({ node: n, score: null, vector: null }));
+        recordSearchHits(listHits);
         return {
-          hits: rows.map((n) => ({ node: n, score: null, vector: null })),
+          hits: listHits,
           passages: [],
           total: null,
           reason: null,
@@ -1079,6 +1123,7 @@ export const nodeQueries = {
             }
           }
         }
+        recordSearchHits(hits);
         return { hits, passages: [], total: null, reason, degraded };
       };
 
@@ -1128,6 +1173,7 @@ export const nodeQueries = {
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
           }
         }
+        recordSearchHits(hits);
         return { hits, passages: [], total: null, reason, degraded };
       };
 
@@ -1310,6 +1356,20 @@ export const nodeQueries = {
           include: { memory: { select: { urn: true } } },
         });
         const parentById = new Map(parents.map((p) => [p.id, p]));
+        // #1061 — chunk granularity returns passages rather than whole nodes,
+        // but the passage text IS node content, so each DISTINCT parent counts
+        // once (not once per passage: three chunks of one node is one node's
+        // content read, and per-chunk counting would make a node's read count
+        // depend on how finely it happens to be chunked). Scoped to the parents
+        // that survive `allowedParents`, so a filtered-out node records nothing.
+        recordNodeUsage(
+          ctx.db,
+          'read',
+          toUsageNodeRefs(
+            parents.filter((p) => allowedParents == null || allowedParents.has(p.id)),
+          ),
+          ctx,
+        );
         const passages = chunkHits
           .filter((c) => parentById.has(c.nodeId) && (allowedParents == null || allowedParents.has(c.nodeId)))
           .map((c) => {
@@ -1561,6 +1621,11 @@ export const nodeQueries = {
         bytes += size;
       }
 
+      // #1061 — one read per node actually RETURNED. Deliberately `nodes` and
+      // not `ordered`: a node the byte cap omitted was never handed to the
+      // caller, so counting it would credit a read that didn't happen.
+      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(nodes), ctx);
+
       return { nodes, unavailable, truncated, omitted };
     },
 
@@ -1807,6 +1872,10 @@ export const nodeQueries = {
         },
       });
       await decryptNodesBatch(ctx.db, results);
+      // #1061 — the App-scoped node list returns full node projections, so each
+      // one is a read. Scope is the App's installed-agent memories, established
+      // above.
+      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(results), ctx);
       return results;
     },
 

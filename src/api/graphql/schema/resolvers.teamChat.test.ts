@@ -238,6 +238,70 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
   });
 });
 
+describe('#1061 — team chat posts and reads are counted as usage', () => {
+  /** Poll: recording is fire-and-forget, so the row lands after the call returns. */
+  const settle = async (type: 'read' | 'write', want: number) => {
+    for (let i = 0; i < 50; i++) {
+      if ((await db.usageEvent.count({ where: { type } })) >= want) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return db.usageEvent.findMany({
+      where: { type },
+      select: { nodeId: true, nodeLoc: true, memoryId: true, userId: true },
+    });
+  };
+
+  it('records a write for a post, attributed to the poster and the shared memory', async () => {
+    const msg = await post(ctx(appMember.id), { body: 'counted' });
+
+    const events = await settle('write', 1);
+    expect(events).toHaveLength(1);
+    // The loc is minted inside the append transaction — this asserts it
+    // actually escapes the closure, not just that SOMETHING was recorded.
+    expect(events[0].nodeId).toBe(msg.nodeId);
+    expect(events[0].nodeLoc).not.toBeNull();
+    expect(events[0].userId).toBe(appMember.id);
+
+    const row = await db.node.findUniqueOrThrow({ where: { id: msg.nodeId } });
+    expect(events[0].nodeLoc).toBe(row.loc);
+    expect(events[0].memoryId).toBe(row.memoryId);
+  });
+
+  it('records one read per message returned by a transcript read', async () => {
+    await post(ctx(appMember.id), { body: 'one' });
+    await post(ctx(appMember.id), { body: 'two' });
+    await post(ctx(appMember.id), { body: 'three' });
+
+    const page = await read(ctx(appMember.id));
+    expect(page.items).toHaveLength(3);
+
+    const events = await settle('read', 3);
+    expect(events).toHaveLength(3);
+  });
+
+  it('records nothing for an impersonated read that SUCCEEDS', async () => {
+    await post(ctx(appMember.id), { body: 'seed' });
+    const baseline = await db.usageEvent.count({ where: { type: 'read' } });
+
+    // The impersonation org MUST match the App's, so the read is genuinely
+    // ALLOWED — otherwise this would only be asserting that a FORBIDDEN throw
+    // records nothing, which proves nothing about the suppression.
+    const imp = {
+      db,
+      userId: appMember.id,
+      roles: [],
+      impersonation: { sessionId: 'imp', adminUserId: admin.id, orgId: org.id },
+    } as unknown as Context;
+    const page = await Q.teamChatMessages({}, { appRef: app.id }, imp);
+    expect(page.items).toHaveLength(1); // the read succeeded
+
+    // ctx.userId is the TARGET in a support session, so recording would file
+    // an admin's browsing as the target user's own activity.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(await db.usageEvent.count({ where: { type: 'read' } })).toBe(baseline);
+  });
+});
+
 describe('createTeamChatMessage — body validation', () => {
   it('refuses an empty body with BAD_USER_INPUT', async () => {
     await expectCode(post(ctx(appMember.id), { body: '   ' }), 'BAD_USER_INPUT');

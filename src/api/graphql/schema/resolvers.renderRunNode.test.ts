@@ -128,11 +128,30 @@ describe('renderRunNode — the render half of the run pipeline (#818)', () => {
 
 describe('renderRunNode — it is a READ (#818)', () => {
   it('records NO action-run UsageEvent, unlike the MCP tool', async () => {
-    const before = await db.usageEvent.count();
     await render(action.id, { subject: 'x' });
     // Metering a preview would inflate the ledger with actions nobody took.
     expect(await db.usageEvent.count({ where: { type: 'action-run' } })).toBe(0);
-    expect(await db.usageEvent.count()).toBe(before);
+  });
+
+  it('DOES record read events — a preview still returns node content (#1061)', async () => {
+    // #1061 narrowed the assertion above from "no UsageEvent at all" to "no
+    // action-run". The two are different questions: the #818 contract is that
+    // a preview must not be metered as an EXECUTION, which it still isn't.
+    // But the render hands the caller the run node's content plus every
+    // inlined dependency, and those reads genuinely happened — so leaving them
+    // out would make this the one content-returning surface on the whole
+    // GraphQL API that stays invisible in the usage series.
+    await render(action.id, { subject: 'x' });
+    for (let i = 0; i < 50; i++) {
+      // Recording is fire-and-forget, so poll rather than read immediately.
+      if ((await db.usageEvent.count({ where: { type: 'read' } })) > 0) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const reads = await db.usageEvent.findMany({
+      where: { type: 'read' },
+      select: { nodeId: true },
+    });
+    expect(reads.map((r) => r.nodeId)).toContain(action.id);
   });
 
   it('writes nothing to the node', async () => {
