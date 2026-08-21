@@ -59,6 +59,8 @@ import {
   requireRole,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  isAppParticipant,
+  resolveAppTeamSpaceMemoryIds,
   isOwnerOrOrgMember,
   getAccessibleMemoryIds,
   memoryAccessFilter,
@@ -1819,7 +1821,7 @@ export const nodeQueries = {
           },
         },
       });
-      const memoryIds = [
+      const agentMemoryIds = [
         ...new Set(
           (appWithAgents?.appAgents ?? []).flatMap((aa) => [
             // #524 — the installed agent's system memory is universally
@@ -1832,6 +1834,31 @@ export const nodeQueries = {
           ]),
         ),
       ];
+
+      // #1031 — the App's own TEAM SPACE, which is structurally unreachable
+      // through the installed-agent walk above: it is an app-class memory keyed
+      // by (appId, sharedMemoryOfAgentId), not an entry in any agent's
+      // memoryItems. Without it the App page can see `roles:*` and not the team
+      // chat, the worklog, or the epics that live beside them.
+      //
+      // ADMITTED ONLY FOR A PARTICIPANT, and that condition is the whole care
+      // in this change. `appNodes` gates on org READER+, while the team space's
+      // audience is the App PARTICIPANT — AppMember at any role, org
+      // CONTRIBUTOR+, or a user-owned App's owner (`cor:agt:020:00` §3). Those
+      // are NOT the same set: an org READER passes this resolver's gate and is
+      // NOT a participant. Adding the team space unconditionally would hand
+      // every org reader the team's chat and worklog, which is precisely the
+      // widening-a-read-gate leak this resolver would otherwise introduce
+      // (`findings:broadening-read-gate-leaks-nested-objects`).
+      //
+      // So the scope is principal-dependent, deliberately: an org reader keeps
+      // exactly the results they get today, and a participant additionally sees
+      // the space they are already entitled to read.
+      const teamSpaceIds = (await isAppParticipant(ctx, app))
+        ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
+        : [];
+
+      const memoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds])];
       if (memoryIds.length === 0) return [];
 
       // #525 — optional node-level NodeFilter, pushed server-side so callers

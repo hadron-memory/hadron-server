@@ -478,6 +478,157 @@ describe('appNodes', () => {
     expect(nodes[0].loc).toBe('org.test.node');
   });
 
+  // ── #1031: the App's own TEAM SPACE ──────────────────────────────────────
+  //
+  // Structurally unreachable through the installed-agent walk (it is keyed by
+  // (appId, sharedMemoryOfAgentId), not an entry in any agent's memoryItems),
+  // so the App page could see `roles:*` and not the team chat or worklog.
+  //
+  // The care in the fix is WHO sees it: appNodes gates on org READER+, while
+  // the team space's audience is the App PARTICIPANT (cor:agt:020:00 §3). Those
+  // differ by exactly one principal shape — the org READER — and both arms are
+  // asserted, because a test of only the happy arm would pass on the version
+  // that leaks.
+  async function withTeamSpace(slug: string) {
+    const { app } = await createDbAppWithKey(db, slug, orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    const teamSpace = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        appId: app.id,
+        sharedMemoryOfAgentId: agentId,
+        urn: `${orgId}:${slug}-team-space`,
+        name: `${slug} team space`,
+        class: 'app',
+        acceptsUploads: false,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: teamSpace.id,
+        loc: 'chats:team',
+        isLink: false,
+        name: 'team chat',
+        tags: [],
+      },
+    });
+    return { app, teamSpace };
+  }
+
+  it("includes the App's own team space for a participant", async () => {
+    const { app } = await withTeamSpace('app-team-space');
+    const nodes = await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx());
+    expect(nodes.map((n: { loc: string }) => n.loc)).toContain('chats:team');
+  });
+
+  it('does NOT hand the team space to an org READER, who passes this gate but is not a participant', async () => {
+    const { app } = await withTeamSpace('app-team-space-reader');
+    const reader = await db.user.create({
+      data: { id: generateId(), githubId: 771031, githubUsername: `an-reader-${Date.now()}`, roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgId, userId: reader.id, role: 'READER' },
+    });
+    const ctx = { db, roles: ['READER'], userId: reader.id } as Context;
+
+    const nodes = await resolvers.Query.appNodes({}, { appRef: app.id }, ctx);
+    // They still get what they were always entitled to...
+    expect(nodes.map((n: { loc: string }) => n.loc)).toContain('org.test.node');
+    // ...and NOT the team chat. An org READER is admitted by appNodes' own
+    // READER+ gate and is not an App participant (isAppParticipant requires
+    // CONTRIBUTOR+ on the org route), so admitting the team space here would
+    // publish the team's chat and worklog to every reader in the org.
+    expect(nodes.map((n: { loc: string }) => n.loc)).not.toContain('chats:team');
+  });
+
+  it('a Worker working memory and a SESSION memory are never the team space', async () => {
+    // The other `class='app'` row shapes under the same App
+    // (findings:app-class-is-four-row-shapes). Both carry this App's appId and
+    // class, so a bare appId+class predicate would pull them in — the session
+    // one is the #934/#967 isolation breach.
+    //
+    // The Worker is ATTACHED, not implied (PR #1066 review, Copilot: the first
+    // version of this test named a Worker and created only a session memory,
+    // so the authorization-sensitive exclusion it claimed to cover was never
+    // exercised). `workerOf` is the discriminator, and it discriminates only if
+    // a Worker actually points at the row — which is what production does, in
+    // one transaction with the memory create.
+    const { app } = await withTeamSpace('app-team-space-shapes');
+
+    // The worker memory is given a LEGACY-SHAPED urn (`…:<agent-slug>:shared`)
+    // on purpose. Without it the URN matcher already rejects the row and
+    // `workerOf` is never reached — dropping the clause leaves the suite green,
+    // which is a guard asserted and not proven
+    // (review:a-green-mutation-indicts-the-test). With it, `workerOf` is the
+    // ONLY thing standing between a Worker's casting-scoped memory and the team
+    // space, which is exactly the collision the clause exists for: a legacy
+    // shared row later attached to a Worker looks like both.
+    const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+    const agentSlug = agentRow.urn.split(':').slice(1).join(':');
+    const workerMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        appId: app.id,
+        urn: `${orgId}:app-team-space-shapes:${agentSlug}:shared`,
+        name: 'worker working memory',
+        class: 'app',
+        acceptsUploads: false,
+      },
+    });
+    await db.worker.create({
+      data: {
+        appId: app.id,
+        agentId,
+        name: `Iris-${Date.now()}`,
+        slug: `iris-${Date.now()}`,
+        memoryId: workerMem.id,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: workerMem.id,
+        loc: 'private:worker-note',
+        isLink: false,
+        name: 'worker note',
+        tags: [],
+      },
+    });
+
+    const sessionMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgId,
+        appId: app.id,
+        userMemoryOfAgentId: agentId,
+        urn: `${orgId}:app-session-scope`,
+        name: 'session scope',
+        class: 'app',
+        acceptsUploads: false,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: sessionMem.id,
+        loc: 'private:session-note',
+        isLink: false,
+        name: 'session note',
+        tags: [],
+      },
+    });
+
+    const locs = (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(locs).toContain('chats:team');
+    expect(locs).not.toContain('private:worker-note');
+    expect(locs).not.toContain('private:session-note');
+  });
+
   it('returns empty when the App is orphan (agent_id IS NULL)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-no-membership', orgId);
     const nodes = await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx());

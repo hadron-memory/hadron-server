@@ -48,6 +48,7 @@ import {
   readAllAgentRecordsFromEager,
   readPrimaryAgentField,
   assetUrn,
+  resolveAppTeamSpaceMemoryIds,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
@@ -954,33 +955,30 @@ export const typeResolvers = {
      * not its memory gets null; denied and missing are indistinguishable.
      */
     sharedMemory: async (a: { id: string }, _: unknown, ctx: Context) => {
+      const teamSpaceIds = await resolveAppTeamSpaceMemoryIds(ctx.db, a.id);
+      if (teamSpaceIds.length === 0) return null;
       const worklogRoot = await ctx.db.node.findFirst({
         // loc-scope-ok: deliberately spans the App's OWN app-class memories —
-        // the relation filter is the tenant scope (mirrors locateWorklogRoot).
-        // `workerOf: none` (#982 review, Copilot): a Worker's working memory
-        // is also an app-class row under this App, and a generic node write
-        // can plant a `worklog` loc in one — a casting-scoped memory is never
-        // the team space, here or in the worklog locator. Legacy unkeyed
-        // shared rows have no Worker pointing at them, so they still match.
+        // the tenant scope is the resolved team-space id set (mirrors
+        // locateWorklogRoot). #1031: resolved rather than filtered, because
+        // LEGACY pre-#723 spaces have no #723 key and are column-identical to
+        // name-addressable createMemoryInApp memories — telling them apart is
+        // a URN match, not a column one.
         where: {
           loc: WORKLOG_LOC,
           deletedAt: null,
-          memory: { appId: a.id, class: 'app', deletedAt: null, workerOf: { none: {} } },
+          memoryId: { in: teamSpaceIds },
         },
         orderBy: { createdAt: 'asc' },
         select: { memoryId: true },
       });
       const memory = worklogRoot
         ? await ctx.db.memory.findUnique({ where: { id: worklogRoot.memoryId } })
-        : await ctx.db.memory.findFirst({
-            where: {
-              appId: a.id,
-              class: 'app',
-              deletedAt: null,
-              sharedMemoryOfAgentId: { not: null },
-            },
-            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-          });
+        : // Oldest team space wins when no ledger exists yet. The id set is
+          // already createdAt-ordered by the resolver.
+          (teamSpaceIds[0]
+            ? await ctx.db.memory.findUnique({ where: { id: teamSpaceIds[0] } })
+            : null);
       if (!memory || memory.deletedAt) return null;
       return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
     },

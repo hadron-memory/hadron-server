@@ -226,6 +226,21 @@ async function getAppTeamSpaceAccess(
   callerUserId: string | null,
 ): Promise<Map<string, string>> {
   const rows = await db.memory.findMany({
+    // #1031: deliberately NOT `appTeamSpaceFilter`. That predicate answers
+    // "which memory IS the team space" — an IDENTITY question that must pick
+    // exactly one row, so it requires the #723 shared key and thereby excludes
+    // both name-addressable createMemoryInApp memories and legacy rows.
+    //
+    // This is the READ-ACCESS question, and it is legitimately broader: every
+    // app-class row this App owns, except the two that are scoped to somebody
+    // narrower than the App (a Worker's casting memory, a per-user session).
+    // A named app memory and a LEGACY team space both belong to the App and
+    // both must stay readable by its members — #1003 exists because they were
+    // not, and `access-control.appClassRead.test.ts` pins the legacy case.
+    //
+    // The two predicates are column-indistinguishable for legacy vs named rows,
+    // which is exactly why they must not share a definition: over-admitting is
+    // right here and wrong there.
     where: {
       appId: app.id,
       class: 'app',
