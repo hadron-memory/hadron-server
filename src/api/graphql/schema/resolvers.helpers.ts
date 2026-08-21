@@ -3,10 +3,7 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
-import {
-  agentSlugCandidates,
-  memoryCarriesLegacyKeyFor,
-} from '../../../lib/sharedMemoryLegacyKey.js';
+import { sharedUrnAgentSlug } from '../../../lib/sharedMemoryLegacyKey.js';
 import { runEmailOperation, type ToolCalendarEvent, type ToolDriveFile } from '../../../lib/emailClient.js';
 import { scopeForOperation } from '../../../lib/emailOperationScopes.js';
 import {
@@ -739,20 +736,26 @@ export async function resolveAppTeamSpaceMemoryIds(
   const unkeyed = rows.filter((r) => r.sharedMemoryOfAgentId === null);
   if (unkeyed.length === 0) return adopted.map((r) => r.id);
 
-  // Only the App's OWN installed agents can have minted a legacy key here, so
-  // the slug set is bounded by the install roster rather than the org.
-  const installed = await db.appAgent.findMany({
-    where: { appId },
-    select: { agent: { select: { urn: true, legacyUrn: true } } },
-  });
-  const slugs = [
-    ...new Set(
-      installed.flatMap(({ agent }) => (agent ? agentSlugCandidates(agent) : [])),
-    ),
-  ];
-  const legacy = slugs.length
-    ? unkeyed.filter((r) => memoryCarriesLegacyKeyFor(r, slugs))
-    : [];
+  // A LEGACY row is recognised from its OWN urn, not from the install roster.
+  //
+  // Deriving the slug set from currently-installed agents looked tighter and
+  // silently lost history (PR #1066 review, Codex): uninstall HARD-DELETES the
+  // AppAgent row while deliberately RETAINING the pairing's memories (FR-005),
+  // so a legacy space whose agent was later uninstalled would stop being
+  // recognised — App.sharedMemory null, teamWorkItems an empty ledger — while
+  // the adopted branch, keyed on a column, kept working. A predicate that
+  // forgets more than its sibling as installs change is the wrong shape.
+  //
+  // The roster cross-check bought nothing here anyway. `chat-scope` matches
+  // slugs because it resolves ONE (app, agent) pairing; this asks the broader
+  // "is this row a team space of THIS App", and `appId` has already answered
+  // the tenancy half. What remains is the urn's own shape, and
+  // `sharedUrnAgentSlug` already rejects the one collision that matters — a
+  // name-addressable `…:<agent>:app-mem:<name>` row, including one literally
+  // named "shared".
+  const legacy = unkeyed.filter(
+    (r) => sharedUrnAgentSlug(r.urn) !== null || sharedUrnAgentSlug(r.legacyUrn) !== null,
+  );
 
   // Preserve the createdAt ordering the caller's oldest-first picks rely on.
   const keep = new Set([...adopted, ...legacy].map((r) => r.id));

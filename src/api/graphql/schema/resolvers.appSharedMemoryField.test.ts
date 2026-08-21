@@ -159,6 +159,31 @@ describe('#965 — App.sharedMemory', () => {
     expect(mem?.id).toBe(shared.id);
   });
 
+  it('keeps a LEGACY space recognisable after its agent is UNINSTALLED', async () => {
+    // Uninstall hard-deletes the AppAgent row and deliberately RETAINS the
+    // pairing's memories (FR-005), so anything that identifies a legacy space
+    // from the current install roster loses that history the moment an agent
+    // is removed — while the adopted branch, keyed on a column, keeps working
+    // (PR #1066 review, Codex). The row is recognised from its own urn.
+    const app = await createApp('Eng Team Uninstalled');
+    const shared = await db.memory.findFirstOrThrow({
+      where: { appId: app.id, class: 'app' },
+    });
+    const agent = await db.agent.findFirstOrThrow({
+      where: { id: shared.sharedMemoryOfAgentId! },
+    });
+    const agentSlug = agent.urn.split(':').slice(1).join(':');
+    await db.memory.update({
+      where: { id: shared.id },
+      data: { sharedMemoryOfAgentId: null, urn: `${app.urn}:${agentSlug}:shared` },
+    });
+    // ...and the agent is uninstalled afterwards.
+    await db.appAgent.deleteMany({ where: { appId: app.id, agentId: agent.id } });
+
+    const mem = await A.sharedMemory(app, {}, ctx(member.id));
+    expect(mem?.id).toBe(shared.id);
+  });
+
   it('never answers with a NAME-ADDRESSABLE app memory (createMemoryInApp)', async () => {
     // The shape that column-narrowing alone cannot exclude, found in review of
     // PR #1066: createMemoryInApp(memoryClass: 'app') produces appId set, no
