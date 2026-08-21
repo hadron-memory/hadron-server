@@ -2091,16 +2091,13 @@ export const typeDefs = `#graphql
   nested entity hands out its field resolvers.
   """
   type CastWorkerPreview {
-    "The name the cast would allocate: the explicit name, or the first register entry free against the App's FULL roster (retired names stay taken)."
+    "The name the cast would take — the caller's, checked free against the App's FULL roster (retired names stay taken). Required since #1050; a nameless preview refuses exactly where the cast would."
     name: String!
     "The casting's role: explicit, else the agent's personaRole dressing."
     role: String
     "The role-agent the casting would bind."
     agentId: ID!
     agentName: String!
-    "The Team Agent whose register resolved the name (register mode only; null with an explicit name)."
-    teamAgentId: ID
-    teamAgentName: String
     """
     The composed boot prompt, post {{name}}/{{role}} substitution with
     promptOverride appended — the same composition Worker.prompt performs,
@@ -2113,42 +2110,9 @@ export const typeDefs = `#graphql
   }
 
   """
-  One entry of a role's name register (#960, cor:agt:020:02). Order is
-  allocation order — castWorker walks the register first-to-last.
-  """
-  type TeamRoleName {
-    name: String!
-    """
-    True when a Worker holds this name in the App (case-insensitive, retired
-    included — retirement never frees a name). Judged against the App's FULL
-    roster server-side, which is why a client cannot compute this column.
-
-    #1034: REGISTER sense — "this name is already allocated to some casting".
-    NOT \`WORKER_TAKEN\`, which means a worker has a live worker session. A name
-    can be taken here while nobody is driving it, and a worker can be
-    WORKER_TAKEN under a name this column knows nothing about (a
-    caller-supplied name never passes through a register). Conflating the two
-    is hadron-cli#487.
-    """
-    taken: Boolean!
-    """
-    The Worker holding the name, when taken.
-
-    #1034: this is the REGISTER's holder — which *casting* owns this name —
-    and is a different relation from \`Worker.heldByUserId\`, which is the
-    *person* holding that worker (#1050). Same word, two referents: this one
-    answers "which worker got this name", the other "whose name is this".
-
-    Consequence for anything added later: a resolved holder on Worker must NOT
-    be spelled \`Worker.heldBy\`, because a reader who met this field first will
-    read it as the register sense (@Gil, team chat seq 129).
-    """
-    heldBy: Worker
-  }
-
-  """
   A role definition (#960): the roles:<role> node in the Team Agent's system
-  memory, carrying the name register (data.names) and register conventions.
+  memory. #1050: it carries no name register — a role is a definition, not an
+  allocation pool.
   The persona prompt template is NOT here — with the Worker model (#974) it
   lives on the role-agent as dressing (personaRole + personaPrompt); roleAgent
   points at it.
@@ -2160,15 +2124,6 @@ export const typeDefs = `#graphql
     loc: String!
     nodeId: ID!
     description: String
-    "Ordered register = allocation order (trimmed, case-insensitive dedup, first spelling wins)."
-    register: [TeamRoleName!]!
-    freeCount: Int!
-    "True when no register name is free (empty registers included) — the next register-mode cast refuses WORKER_REGISTER_EXHAUSTED."
-    exhausted: Boolean!
-    "Register convention: initial-letter range like 'F-J' (data.nameRange). Writes validate added names against it."
-    nameRange: String
-    "Register convention prose (data.nameConvention)."
-    nameConvention: String
     """
     The single installed agent whose personaRole matches this role — exactly
     the agent a role-mode castWorker would use (null when zero or ambiguous).
@@ -2201,16 +2156,6 @@ export const typeDefs = `#graphql
     so the subtree is recoverable.
     """
     nodesDeleted: Int!
-    """
-    Register spellings handed to the successor, in the order they were added to
-    it. Empty when no transferTo was given.
-    """
-    transferredNames: [String!]!
-    """
-    The successor role AFTER the transfer, so a client can render the new
-    register without a second read. Null when no transferTo was given.
-    """
-    transferredTo: TeamRole
   }
 
   "Result of updateTeamCollections (hadron-cli#401)."
@@ -4992,11 +4937,13 @@ export const typeDefs = `#graphql
 
     """
     An App's role definitions (#960): every roles:<role> node in the Team
-    Agent's system memory, projected with the one answer a client cannot
-    compute — which register names are still FREE, judged against the App's
-    full worker roster (names are unique per App, case-insensitively, forever
-    — cor:agt:020:02). Ordered by role slug. Same read authorization as
-    workers. teamAgentRef disambiguates when more than one installed agent
+    Agent's system memory. Ordered by role slug. Same read authorization as
+    workers.
+
+    #1050: no register projection. This once existed chiefly to answer "which
+    names are still free", which needed the App's FULL roster and so could not
+    be computed client-side — with names no longer allocated from a pool there
+    is no such question, and the read is a plain list of definitions. teamAgentRef disambiguates when more than one installed agent
     carries a roles: branch (TEAM_AGENT_AMBIGUOUS otherwise); an encrypted
     system memory without an active session key refuses SESSION_EXPIRED.
     """
@@ -5005,10 +4952,10 @@ export const typeDefs = `#graphql
     """
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
-    _NOT_INSTALLED, WORKER_ROLE_NOT_FOUND, WORKER_REGISTER_EXHAUSTED,
+    _NOT_INSTALLED, WORKER_ROLE_NOT_FOUND, WORKER_NAME_REQUIRED,
     WORKER_NAME_TAKEN, APP_UNINSTALLED, TEAM_AGENT_NOT_FOUND /
     _NOT_INSTALLED / _AMBIGUOUS, and SESSION_EXPIRED for an encrypted
-    register without an active session key), same MINT gate — up to but not
+    system memory without an active session key), same MINT gate — up to but not
     including the writes, and return what would be created. A Query, not a
     dryRun flag: casting a name is the one irreversible act in the team
     feature (cor:agt:020:02 — permanence), and previewing it must not need a
@@ -5022,7 +4969,6 @@ export const typeDefs = `#graphql
       agentRef: ID
       role: String
       name: String
-      teamAgentRef: ID
       promptOverride: String
     ): CastWorkerPreview!
 
@@ -6644,14 +6590,13 @@ export const typeDefs = `#graphql
     WORKER_AGENT_NOT_FOUND / WORKER_AGENT_AMBIGUOUS, never a guess). The
     casting's role defaults to the agent's personaRole when role is omitted.
 
-    Name allocation (cor:agt:020:02): a caller-supplied name wins (one
-    attempt — WORKER_NAME_TAKEN is the answer); otherwise the Team Agent's
-    cast-list register for the role (the roles:<role> node's data.names,
-    located as before: teamAgentRef, or the single installed agent with a
-    roles: branch) is walked first-to-last, advancing past WORKER_NAME_TAKEN —
-    the workers_app_name_uniq constraint IS the allocation primitive. Names
-    are unique per App, case-insensitively, FOREVER (two Apps may each have an
-    Iris; retirement and uninstall never free a name).
+    The name (cor:agt:020:02) is REQUIRED since #1050 — one attempt, and
+    WORKER_NAME_TAKEN is the answer. There is no register to fall back to: a
+    name is permanent within the App, so it is chosen and never derived, and a
+    nameless cast refuses WORKER_NAME_REQUIRED rather than minting a permanent
+    identifier nobody picked. The workers_app_name_uniq constraint IS the
+    arbiter. Names are unique per App, case-insensitively, FOREVER (two Apps
+    may each have an Iris; retirement and uninstall never free a name).
 
     A worker-scoped working memory is provisioned in the App's container
     (Worker.memoryId; best-effort — a failed provision leaves it null for
@@ -6662,20 +6607,29 @@ export const typeDefs = `#graphql
     user-owned App. Pure App-key principals are denied.
 
     Error codes (extensions.code): WORKER_NAME_TAKEN,
-    WORKER_REGISTER_EXHAUSTED, WORKER_AGENT_NOT_INSTALLED,
+    WORKER_NAME_REQUIRED, WORKER_AGENT_NOT_INSTALLED,
     WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS, WORKER_ROLE_NOT_FOUND,
-    TEAM_AGENT_NOT_FOUND, TEAM_AGENT_AMBIGUOUS, TEAM_AGENT_NOT_INSTALLED,
-    SESSION_EXPIRED (encrypted system memory without an active session key),
     APP_UNINSTALLED.
 
-    Accepts the entity's ID or URN for appRef, agentRef, and teamAgentRef.
+    #1050: the TEAM_AGENT_* and SESSION_EXPIRED refusals are gone from this
+    mutation. They were reachable only because a nameless cast had to locate a
+    Team Agent and read its (possibly encrypted) system memory to find a
+    register. Casting now touches no system memory at all, so teamAgentRef is
+    gone too rather than left accepted-and-ignored.
+
+    Accepts the entity's ID or URN for appRef and agentRef.
     """
     castWorker(
       appRef: ID!
       agentRef: ID
       role: String
+      # #1050: a name is now mandatory in EFFECT but stays nullable in the
+      # schema, refused at the resolver with the typed WORKER_NAME_REQUIRED.
+      # A non-null String would report the same mistake as a bare validation error,
+      # losing the reason a name cannot be derived — and it would split this
+      # surface from the MCP tool, which calls the resolver directly and would
+      # keep the typed refusal. One rule, one message, both paths.
       name: String
-      teamAgentRef: ID
       promptOverride: String
     ): Worker!
 
@@ -6748,112 +6702,66 @@ export const typeDefs = `#graphql
     """
     #960 — mint a roles:<role> definition in the Team Agent's system memory.
     Owns the spec knowledge a hand-authoring caller had to carry: the loc is
-    roles:<role> (single atom), the register goes in data.names (ordered),
-    and the write runs the register invariants — an added name may not appear
-    in another of this App's registers (TEAM_ROLE_NAME_DUPLICATE) and must
-    fall inside nameRange when one is set (TEAM_ROLE_NAME_OUT_OF_RANGE,
-    override with allowOutOfRange; a supplied nameRange must parse as an
-    initial-letter range like 'F-J'). Register checks and the write run in
-    one App-scoped critical section, serialized with register-mode casting.
-    Refuses an existing role
-    (TEAM_ROLE_EXISTS — updateTeamRole is the edit path). Authorization is
-    the Team Agent's definition-edit gate: whoever may write the agent's
-    system memory through the generic node surface may write roles — the
-    write delegates to that same seam (encryption, revision snapshot, git
-    mirror included).
+    roles:<role> (single atom). Refuses an existing role (TEAM_ROLE_EXISTS —
+    updateTeamRole is the edit path). Authorization is the Team Agent's
+    definition-edit gate: whoever may write the agent's system memory through
+    the generic node surface may write roles — the write delegates to that same
+    seam (encryption, revision snapshot, git mirror included).
+
+    #1050: a role definition no longer carries a NAME REGISTER. There is no
+    names / nameRange / nameConvention / allowOutOfRange, and no register
+    invariants to run, because names are not allocated — a cast supplies its
+    own and workers_app_name_uniq is the sole arbiter. Any data.names left on
+    an existing node is historical and is neither read nor rewritten.
     """
     createTeamRole(
       appRef: ID!
       teamAgentRef: ID
       role: String!
-      names: [String!]!
-      nameRange: String
-      nameConvention: String
       description: String
-      allowOutOfRange: Boolean
     ): TeamRole!
 
     """
-    #960 — edit a roles:<role> definition. names is WHOLESALE (the natural
-    fit for 'team role names set') but the invariants run against the DIFF
-    between stored and submitted, so add/rm/mv sugar can never smuggle a
-    violation: a name MINTED in this App may never be removed
-    (TEAM_ROLE_NAME_MINTED — the register entry records the allocation), an
-    added name may not appear in another register (TEAM_ROLE_NAME_DUPLICATE),
-    and added names validate against nameRange (allowOutOfRange overrides).
-    Omitted fields preserve; explicit null clears a convention key. Sibling
-    data keys always survive (the single --data clobber hazard is unreachable
-    through this surface). Unknown role: WORKER_ROLE_NOT_FOUND. Same
-    authorization as createTeamRole.
+    #960 — edit a roles:<role> definition. Omitted fields preserve. Unknown
+    role: WORKER_ROLE_NOT_FOUND. Same authorization as createTeamRole.
 
-    #987 — expectedNames turns the wholesale write into COMPARE-AND-SWAP:
-    when supplied, the write refuses TEAM_ROLE_STALE unless the STORED
-    register still equals it (ordered, exact spellings, after the same
-    trim/dedup canonicalization the register itself gets — pass back the
-    register exactly as teamRoles returned it). The refusal's extensions
-    carry the current storedNames, so a client rebases its edit without a
-    second read. This is what makes read-modify-write sugar (names
-    add/rm/mv) safe: the diff invariants deliberately protect only MINTED
-    names, so without the precondition two concurrent composed writes
-    silently drop each other's newly added FREE names — no refusal fires,
-    because removing an unminted name is legal by design.
+    #1050: with the register gone this edits the description and nothing else,
+    so the #987 expectedNames compare-and-swap is gone too — it existed solely
+    to stop two concurrent wholesale register writes silently dropping each
+    other's newly added FREE names, a hazard that cannot arise when the write
+    owns no list. That closes #1028 (the client-side register CAS arithmetic)
+    outright rather than by implementing it.
     """
     updateTeamRole(
       appRef: ID!
       teamAgentRef: ID
       role: String!
-      names: [String!]
-      nameRange: String
-      nameConvention: String
       description: String
-      allowOutOfRange: Boolean
-      expectedNames: [String!]
     ): TeamRole!
 
     """
     #1002 — retire a roles:<role> definition. Soft-deletes the role node and
     any sub-nodes under it (roles:<role>:notes is content OF the role), so the
     subtree is recoverable. Unknown role: WORKER_ROLE_NOT_FOUND. Same
-    authorization and same App-scoped critical section as createTeamRole, so a
-    retirement serializes with register-mode casting.
+    authorization as createTeamRole.
 
-    MINTED names decide whether a bare delete is allowed. A minted register
-    entry is what records that a name was allocated to this role; dropping the
-    register without rehoming it would erase that ledger, so a role holding
-    minted names refuses TEAM_ROLE_IN_USE unless transferTo names a successor.
-    A role whose register is entirely free deletes with no ceremony.
+    #1050: unconditional. The minted-name check, TEAM_ROLE_IN_USE, transferTo's
+    one-step supersede, the post-delete recheck and the restore compensation
+    all existed to protect the REGISTER as a ledger of which names had been
+    allocated to this role; with no register there is no ledger to protect and
+    no second write to compensate for.
 
-    Note this does NOT free the names themselves: a Worker's name is permanent
-    per App (cor:agt:020:02, enforced by workers_app_name_uniq irrespective of
-    any register), so retiring a role can never make a taken name castable
-    again. The register is bookkeeping about ALLOCATION, not identity — which
-    is exactly why moving it between roles is safe.
-
-    transferTo performs the supersede as ONE step: the old definition is
-    retired and its whole register is appended to the successor's, preserving
-    order and skipping spellings the successor already lists. This removes the
-    ordering trap a hand-run sequence has to rediscover (a name may not sit in
-    two of an App's registers, so the old role must be gone BEFORE the
-    successor can claim its names — TEAM_ROLE_NAME_DUPLICATE otherwise).
-    Transferred names are EXEMPT from the successor's nameRange: they are
-    re-homed allocations, not new ones, and the range governs what may be
-    allocated next. The successor's own conventions are left untouched —
-    changing them is updateTeamRole's job, not a side effect of a delete.
-
-    The delete and the transfer are two operations that cannot share one
-    transaction, so the source role is RESTORED if the transfer fails — the
-    delete is soft, and the tombstone still holds the register verbatim. The
-    minted check is also re-run AFTER the delete, because an explicit-name
-    castWorker mints without taking the register lock and could otherwise slip
-    a freshly minted name past the pre-check. Should the restore itself fail,
-    TEAM_ROLE_DELETE_NOT_COMPENSATED reports the loc to recover by hand rather
-    than leaving the caller to retry against a role that is silently gone.
+    What that machinery protected is unchanged, and was never the register's
+    doing: a Worker's name is permanent per App (cor:agt:020:02, enforced by
+    workers_app_name_uniq irrespective of any role), so deleting a role can no
+    more free a taken name than it could before. Superseding a role is now
+    create-the-successor then delete-the-old; the names were never the thing
+    being moved.
     """
     deleteTeamRole(
       appRef: ID!
       teamAgentRef: ID
       role: String!
-      transferTo: String
     ): DeleteTeamRolePayload!
 
     """

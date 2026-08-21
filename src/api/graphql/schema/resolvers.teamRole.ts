@@ -1,20 +1,27 @@
 // Team roles as a platform surface — #960 (cor:agt:020:01/:02), re-keyed by
 // the Worker model (#974): a role definition is the `roles:<role>` node in the
-// Team Agent's system memory, carrying the NAME REGISTER (`data.names`,
-// ordered) plus the register conventions (`data.nameRange`,
-// `data.nameConvention`). The persona prompt template is NOT here — it lives
-// on the role-agent as dressing (`Agent.personaRole` + `personaPrompt`), which
-// this surface only points at.
+// Team Agent's system memory. The persona prompt template is NOT here — it
+// lives on the role-agent as dressing (`Agent.personaRole` + `personaPrompt`),
+// which this surface only points at.
 //
-// Why this is a server surface and not a client-side join (#960): the one
-// question the read exists to answer — "which names are still free?" — needs
-// the App's FULL worker roster (names are unique per App, case-insensitively,
-// forever — cor:agt:020:02), and a client sees only the workers it can read.
-// A client-computed FREE column systematically over-reports (the
-// hadron-cli#383 failure shape). The writes own the register invariants a
-// client cannot check (hadron-cli#410): a minted name may never leave the
-// register, a name may not appear in two of the App's registers, and sibling
-// `data` keys survive every edit.
+// #1050 — the NAME REGISTER is gone. `data.names` and its conventions
+// (`nameRange`, `nameConvention`), the allocation order, the diff invariants
+// and the #987 compare-and-swap that protected them are all removed, because
+// names are no longer allocated from a pool: a cast supplies its own and
+// `workers_app_name_uniq` is the sole arbiter.
+//
+// That takes most of this module's original justification with it. The read
+// existed chiefly to answer "which names are still free?", which needed the
+// App's FULL roster and so could not be computed client-side; the writes
+// existed to own register invariants a client could not check. What remains is
+// a thin, honest surface over role DEFINITIONS — slug, description, and the
+// role-agent a cast would use — with one thing a client still cannot do for
+// itself: resolve the role-agent behind its own read gate.
+//
+// Legacy `data.names` on existing role nodes is neither read nor rewritten. It
+// records what was once allocated to a role, and erasing it would destroy
+// provenance to tidy a field with no reader.
+
 import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import {
@@ -23,10 +30,8 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import {
   locateTeamAgent,
-  parseNameRegister,
   requireWorkerReadAccess,
-  takenWorkersByName,
-  withRegisterLock,
+  withRoleWriteLock,
   ROLES_BRANCH_PREFIX,
 } from './resolvers.worker.js';
 import { templateBindsName } from '../../../lib/personaDescription.js';
@@ -39,39 +44,6 @@ import {
 } from './resolvers.helpers.js';
 
 type WorkerRosterRow = Record<string, unknown> & { id: string; name: string };
-
-/**
- * Register spelling → the Worker holding it, judged by the DATABASE's
- * lower() via `takenWorkersByName` — the constraint's own expression
- * (`workers_app_name_uniq` on `(app_id, lower(name))`) — never ECMAScript
- * toLowerCase (#985 review, Codex P2: the two diverge under locale-sensitive
- * case folding, so a JS-folded verdict could disagree with the cast).
- */
-async function loadHeldByName(
-  ctx: Context,
-  appId: string,
-  names: string[],
-): Promise<Map<string, WorkerRosterRow>> {
-  const takenIds = await takenWorkersByName(ctx.db, appId, names);
-  if (takenIds.size === 0) return new Map();
-  const rows = await ctx.db.worker.findMany({
-    where: { id: { in: [...new Set(takenIds.values())] } },
-  });
-  const byId = new Map(rows.map((w) => [w.id, w as WorkerRosterRow]));
-  const byName = new Map<string, WorkerRosterRow>();
-  for (const [name, wid] of takenIds) {
-    const row = byId.get(wid);
-    if (row) byName.set(name, row);
-  }
-  return byName;
-}
-
-/** Union of every register spelling across role nodes (heldBy lookup input). */
-function allRegisterNames(nodes: DecryptedRoleNode[]): string[] {
-  const out = new Set<string>();
-  for (const n of nodes) for (const name of parseNameRegister(n.data?.names)) out.add(name);
-  return [...out];
-}
 
 type RoleAgentEntry = {
   /** The single installed agent whose personaRole matches, or null (zero or 2+). */
@@ -165,36 +137,29 @@ async function loadRoleNodes(
   return out;
 }
 
-/** Read a string data key, tolerating absent/non-string values as null. */
-function stringKey(data: Record<string, unknown> | null, key: string): string | null {
-  const v = data?.[key];
-  return typeof v === 'string' && v.trim() !== '' ? v : null;
-}
-
 /**
- * Assemble one TeamRole projection from a decrypted role node + the roster
- * and role-agent indexes. `taken` consults the ONE per-App name unique
- * (`workers_app_name_uniq`, case-insensitive; retirement never frees a name —
- * cor:agt:020:02), so the read can never report free a name the cast would
- * refuse. `hasNamePlaceholder` moved to the role-AGENT's dressing with the
+ * Assemble one TeamRole projection from a decrypted role node + the role-agent
+ * index. `hasNamePlaceholder` moved to the role-AGENT's dressing with the
  * Worker model: it flags a `personaPrompt` that never binds `{{name}}` — the
  * silent-breakage check #960 kept on the read because agents authored before
  * the guard exist. Null when no single role-agent resolves.
+ *
+ * #1050: the name REGISTER is gone from this projection — no `register`,
+ * `freeCount`, `exhausted`, `nameRange` or `nameConvention`. A role is now a
+ * definition (slug, description, role-agent) and nothing about allocation,
+ * because names are no longer allocated: a cast supplies its own, and
+ * `workers_app_name_uniq` is the only arbiter of whether one is free.
+ *
+ * Any `data.names` still on the node is deliberately NOT read. It is the
+ * historical record of what was allocated to this role and is left intact
+ * rather than migrated away — inert data is cheaper than lost provenance.
  */
 async function buildTeamRole(
   ctx: Context,
   node: DecryptedRoleNode,
-  heldByName: Map<string, WorkerRosterRow>,
   roleAgentIndex: Map<string, RoleAgentEntry>,
 ) {
   const role = node.loc.slice(ROLES_BRANCH_PREFIX.length);
-  const names = parseNameRegister(node.data?.names);
-  const register = names.map((name) => {
-    const heldBy = heldByName.get(name) ?? null;
-    return { name, taken: heldBy !== null, heldBy };
-  });
-  const freeCount = register.filter((r) => !r.taken).length;
-
   const entry = roleAgentIndex.get(role.toLowerCase());
   let roleAgent: Record<string, unknown> | null = null;
   let hasNamePlaceholder: boolean | null = null;
@@ -232,11 +197,6 @@ async function buildTeamRole(
     loc: node.loc,
     nodeId: node.id,
     description: node.description,
-    register,
-    freeCount,
-    exhausted: freeCount === 0,
-    nameRange: stringKey(node.data, 'nameRange'),
-    nameConvention: stringKey(node.data, 'nameConvention'),
     roleAgent,
     hasNamePlaceholder,
   };
@@ -257,129 +217,12 @@ async function resolveApp(ctx: Context, appRef: string): Promise<AppRow> {
   return ctx.db.app.findUniqueOrThrow({ where: { id: appId } }) as Promise<AppRow>;
 }
 
-/** Parse a `nameRange` convention like "F-J" → inclusive initial bounds, or null when unparseable. */
-function parseNameRange(range: string): { from: string; to: string } | null {
-  const m = /^\s*([A-Za-z])\s*-\s*([A-Za-z])\s*$/.exec(range);
-  if (!m) return null;
-  const from = m[1].toLowerCase();
-  const to = m[2].toLowerCase();
-  return from <= to ? { from, to } : { from: to, to: from };
-}
-
-/**
- * The register-diff invariants (#960 + hadron-cli#410) — run against the DIFF
- * between the stored and submitted registers, so the checks hold regardless
- * of how the client phrased the edit (`names add/rm/set/mv` are all
- * read-modify-submit sugar over the one wholesale mutation):
- *
- *   1. a name MINTED in this App may not be removed — keeping `Iris` in the
- *      register is what records the allocation; dropping her leaves a gap
- *      another role can claim (the #942 §2 shared-handle ambiguity,
- *      reintroduced through bookkeeping);
- *   2. an added name may not appear in another of this App's registers — a
- *      name in two registers is a latent WORKER_NAME_TAKEN where whichever
- *      role casts first silently costs the other an entry;
- *   3. an added name must fall inside `nameRange` when one is present and
- *      parseable ("F-J" = initial letter bounds), unless the caller passes
- *      `allowOutOfRange` for a deliberate exception. No range ⇒ no check
- *      (GraphQL deliberately has no warning channel — #960's decided shape).
- *
- * App-scoped throughout (#972: the App is the name namespace — a name in
- * ANOTHER App's register is legitimate). Why the deadline is hard: a name is
- * permanent once cast (cor:agt:020:02) — before the cast a register mistake
- * is a typo; after it, it can only be abandoned. The register edit is the
- * last point at which the mistake is cheap.
- */
-function checkRegisterInvariants(args: {
-  role: string;
-  submitted: string[];
-  stored: string[];
-  /** Stored spellings that are MINTED in the App — judged by the DB's lower()
-   *  (`loadHeldByName`), so a minted name can't slip removal via a JS/PG
-   *  case-folding disagreement (#985 review). */
-  mintedStored: Set<string>;
-  otherRegisters: Map<string, string>; // lower(name) → role slug holding it
-  nameRange: string | null;
-  allowOutOfRange: boolean;
-}): void {
-  const { role, submitted, stored, mintedStored, otherRegisters, nameRange, allowOutOfRange } = args;
-  const submittedLower = new Set(submitted.map((n) => n.toLowerCase()));
-
-  const removedMinted = stored.filter(
-    (n) => !submittedLower.has(n.toLowerCase()) && mintedStored.has(n),
-  );
-  if (removedMinted.length > 0) {
-    throw new GraphQLError(
-      `Cannot remove ${removedMinted.map((n) => JSON.stringify(n)).join(', ')} from the "${role}" register: the name is minted in this App (a Worker holds it — retirement never frees a name), and the register entry is what records the allocation. Names may be added or reordered; a minted name stays.`,
-      { extensions: { code: 'TEAM_ROLE_NAME_MINTED', role, names: removedMinted } },
-    );
-  }
-
-  const storedLower = new Set(stored.map((n) => n.toLowerCase()));
-  const added = submitted.filter((n) => !storedLower.has(n.toLowerCase()));
-
-  const duplicated = added.filter((n) => otherRegisters.has(n.toLowerCase()));
-  if (duplicated.length > 0) {
-    const first = duplicated[0];
-    throw new GraphQLError(
-      `Name ${JSON.stringify(first)} already appears in this App's "${otherRegisters.get(first.toLowerCase())}" register — a name in two registers is a latent WORKER_NAME_TAKEN (whichever role casts first wins, and the other silently loses an entry).`,
-      {
-        extensions: {
-          code: 'TEAM_ROLE_NAME_DUPLICATE',
-          role,
-          names: duplicated,
-          heldByRoles: duplicated.map((n) => otherRegisters.get(n.toLowerCase())),
-        },
-      },
-    );
-  }
-
-  if (nameRange && !allowOutOfRange) {
-    const bounds = parseNameRange(nameRange);
-    if (bounds) {
-      const outOfRange = added.filter((n) => {
-        const initial = n[0]?.toLowerCase() ?? '';
-        return initial < bounds.from || initial > bounds.to;
-      });
-      if (outOfRange.length > 0) {
-        throw new GraphQLError(
-          `Name ${outOfRange.map((n) => JSON.stringify(n)).join(', ')} falls outside this register's nameRange "${nameRange}" (a worker's initial identifies its role at a glance). Pass allowOutOfRange: true for a deliberate exception.`,
-          { extensions: { code: 'TEAM_ROLE_NAME_OUT_OF_RANGE', role, names: outOfRange, nameRange } },
-        );
-      }
-    }
-  }
-}
-
-/** lower(name) → holding role slug, across every OTHER role node of the memory. */
-function indexOtherRegisters(
-  nodes: DecryptedRoleNode[],
-  excludeLoc: string,
-): Map<string, string> {
-  const index = new Map<string, string>();
-  for (const node of nodes) {
-    if (node.loc === excludeLoc) continue;
-    const slug = node.loc.slice(ROLES_BRANCH_PREFIX.length);
-    for (const name of parseNameRegister(node.data?.names)) {
-      if (!index.has(name.toLowerCase())) index.set(name.toLowerCase(), slug);
-    }
-  }
-  return index;
-}
-
 /** Shared write-path argument shape. */
 type TeamRoleWriteArgs = {
   appRef: string;
   teamAgentRef?: string | null;
   role: string;
-  names?: string[] | null;
-  nameRange?: string | null;
-  nameConvention?: string | null;
   description?: string | null;
-  allowOutOfRange?: boolean | null;
-  // #987 — compare-and-swap precondition (update only): the write proceeds
-  // only while the stored register still equals this, else TEAM_ROLE_STALE.
-  expectedNames?: string[] | null;
 };
 
 /**
@@ -415,16 +258,6 @@ async function writeTeamRole(
   mode: 'create' | 'update',
 ) {
   const role = normalizeRoleSlug(args.role);
-  // A caller-supplied nameRange must PARSE, or the range validation it
-  // promises silently never runs (#984 review, Copilot). Legacy malformed
-  // STORED ranges (hand-authored before this surface) stay tolerated when the
-  // argument is omitted — checkRegisterInvariants skips an unparseable one.
-  if (typeof args.nameRange === 'string' && !parseNameRange(args.nameRange)) {
-    throw new GraphQLError(
-      `nameRange must be an initial-letter range like "F-J" (got ${JSON.stringify(args.nameRange)}). Pass null to clear it.`,
-      { extensions: { code: 'BAD_USER_INPUT' } },
-    );
-  }
   const app = await resolveApp(ctx, args.appRef);
   if (app.deletedAt) {
     throw new GraphQLError(`App not found: ${args.appRef}`, {
@@ -473,7 +306,7 @@ async function writeTeamRole(
   // role writes can each observe a name absent and both persist it, and a
   // register-mode cast can interleave with a removal. castWorker's register
   // mode takes the same lock, so cast-vs-edit serializes too.
-  return withRegisterLock(ctx, systemMemoryId, async () => {
+  return withRoleWriteLock(ctx, systemMemoryId, async () => {
     const allNodes = await loadRoleNodes(ctx, systemMemoryId);
     const existing = allNodes.find((n) => n.loc === loc) ?? null;
 
@@ -491,133 +324,39 @@ async function writeTeamRole(
       );
     }
 
-    const storedData = existing?.data ?? null;
-    const storedNames = parseNameRegister(storedData?.names);
+    // #1050: this surface no longer owns ANY `data` key. The register, its
+    // conventions and the #987 compare-and-swap that protected it are gone, so
+    // a role write now touches only the node's name and description.
+    //
+    // Existing `data` is passed through untouched rather than stripped —
+    // `data.names` on a legacy role node is the record of what was once
+    // allocated to that role, and erasing it would destroy provenance to tidy
+    // a field nothing reads. Sibling-key preservation therefore stops being a
+    // special measure and becomes the whole behaviour.
+    const mergedData: Record<string, unknown> | undefined = existing?.data ?? undefined;
 
-    // #987 — the compare-and-swap precondition, judged INSIDE the register
-    // lock so the comparison and the write are one atomic step. Why it
-    // exists: the diff invariants deliberately protect only MINTED names,
-    // so two concurrent read-modify-write clients composing wholesale lists
-    // silently drop each other's newly added FREE names — legal by design,
-    // invisible to every refusal. With expectedNames the later writer gets
-    // a typed TEAM_ROLE_STALE carrying the current register, and rebases.
-    // Both sides run through parseNameRegister, so a client that passes
-    // back exactly what teamRoles returned always compares clean; the
-    // comparison is ordered and exact-spelling (a reorder IS an edit, and
-    // spellings round-trip verbatim).
-    if (mode === 'update' && args.expectedNames != null) {
-      const expected = parseNameRegister(args.expectedNames);
-      const unchanged =
-        expected.length === storedNames.length &&
-        expected.every((n, i) => n === storedNames[i]);
-      if (!unchanged) {
-        throw new GraphQLError(
-          `The "${role}" register changed since you read it — rebase your edit onto the current register (in extensions.storedNames) and retry with it as expectedNames.`,
-          {
-            extensions: {
-              code: 'TEAM_ROLE_STALE',
-              role,
-              expectedNames: expected,
-              storedNames,
-            },
-          },
-        );
-      }
-    }
-
-    // Omitted preserves (the omitted-vs-null contract): an update that sends
-    // no `names` edits conventions without touching the register.
-    const submitted =
-      args.names === undefined || args.names === null
-        ? storedNames
-        : parseNameRegister(args.names);
-
-    // The effective range for validating ADDED names: the one being written,
-    // else the stored one (explicit null clears — and with it, the check).
-    const effectiveRange =
-      args.nameRange === undefined
-        ? stringKey(storedData, 'nameRange')
-        : (args.nameRange ?? null);
-
-    checkRegisterInvariants({
-      role,
-      submitted,
-      stored: storedNames,
-      mintedStored: new Set(
-        (await loadHeldByName(ctx, app.id, storedNames)).keys(),
-      ),
-      otherRegisters: indexOtherRegisters(allNodes, loc),
-      nameRange: effectiveRange,
-      allowOutOfRange: args.allowOutOfRange === true,
-    });
-
-    // Merge: replace only the keys this surface owns; every sibling `data`
-    // key survives (the hadron-cli#410 clobber hazard, unreachable through
-    // this surface by construction). Explicit null deletes a convention key.
-    const mergedData: Record<string, unknown> = { ...(storedData ?? {}) };
-    mergedData.names = submitted;
-    if (args.nameRange !== undefined) {
-      if (args.nameRange === null) delete mergedData.nameRange;
-      else mergedData.nameRange = args.nameRange;
-    }
-    if (args.nameConvention !== undefined) {
-      if (args.nameConvention === null) delete mergedData.nameConvention;
-      else mergedData.nameConvention = args.nameConvention;
-    }
-
-    try {
-      await writeNodeCore(
-        {
-          memoryId: systemMemoryId,
-          loc,
-          // Node name defaults to the role slug; description is optional and
-          // preserve-on-omit via the shared seam's D4 semantics.
-          ...(mode === 'create' ? { name: role } : {}),
-          ...(args.description !== undefined && args.description !== null
-            ? { description: args.description }
-            : {}),
-          data: mergedData,
-          reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
-        },
-        ctx,
-        mode,
-        mode === 'update'
-          ? {
-              targetNodeId: existing!.id,
-              // #989 (PR review, Codex/Copilot P1): when the caller staked a
-              // precondition, the WRITE itself is guarded at the DB predicate
-              // on the node's updatedAt — the register lock serializes every
-              // participant, but the generic node surfaces (updateNode,
-              // hadron_update_node_data) write this row without it, and an
-              // application-level compare alone leaves a TOCTOU window
-              // between the check and the write.
-              ...(args.expectedNames != null
-                ? { guardRevSeq: existing!.revSeq }
-                : {}),
-            }
-          : undefined,
-      );
-    } catch (e) {
-      // An off-road write interleaved between our locked read and the
-      // guarded write: surface it as the SAME staleness the precondition
-      // reports, with the CURRENT register so the client rebases identically.
-      if (e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
-        const fresh = await loadRoleNodes(ctx, systemMemoryId);
-        const freshNode = fresh.find((n) => n.loc === loc);
-        throw new GraphQLError(
-          `The "${role}" register changed since you read it — rebase your edit onto the current register (in extensions.storedNames) and retry with it as expectedNames.`,
-          {
-            extensions: {
-              code: 'TEAM_ROLE_STALE',
-              role,
-              expectedNames: parseNameRegister(args.expectedNames),
-              storedNames: parseNameRegister(freshNode?.data?.names),
-            },
-          },
-        );
-      }
-      throw e;
-    }
+    await writeNodeCore(
+      {
+        memoryId: systemMemoryId,
+        loc,
+        // Node name defaults to the role slug; description is optional and
+        // preserve-on-omit via the shared seam's D4 semantics.
+        ...(mode === 'create' ? { name: role } : {}),
+        ...(args.description !== undefined && args.description !== null
+          ? { description: args.description }
+          : {}),
+        data: mergedData,
+        reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
+      },
+      ctx,
+      mode,
+      // #1050: no guardRevSeq. The #989 revision guard existed to close a
+      // TOCTOU window on the REGISTER — a generic node write slipping between
+      // the locked read and the write — and there is no longer a register for
+      // an off-road write to clobber. Role writes now set only name and
+      // description, which are last-write-wins like every other node field.
+      mode === 'update' ? { targetNodeId: existing!.id } : undefined,
+    );
 
     // Return the fresh projection through the same builder the read uses.
     const nodes = await loadRoleNodes(ctx, systemMemoryId);
@@ -627,62 +366,31 @@ async function writeTeamRole(
         extensions: { code: 'INTERNAL_SERVER_ERROR' },
       });
     }
-    return buildTeamRole(
-      ctx,
-      node,
-      await loadHeldByName(ctx, app.id, parseNameRegister(node.data?.names)),
-      await loadRoleAgentIndex(ctx, app.id),
-    );
+    return buildTeamRole(ctx, node, await loadRoleAgentIndex(ctx, app.id));
   });
 }
 
 /**
- * deleteTeamRole — #1002: retire a `roles:<role>` definition, optionally
- * handing its register to a successor in the same step.
+ * deleteTeamRole — #1002: retire a `roles:<role>` definition and its sub-nodes.
  *
- * ## Why MINTED names gate a bare delete
+ * #1050 — unconditional. The minted-name gate, `TEAM_ROLE_IN_USE`, the
+ * `transferTo` supersede, the post-delete recheck and the restore
+ * compensation all existed to protect the register as a LEDGER of which names
+ * had been allocated to this role. With no register there is no ledger, and
+ * with no second write there is nothing to compensate.
  *
- * The register entry is what records that a name was allocated to this role
- * (`TEAM_ROLE_NAME_MINTED` protects exactly this on the edit path). Deleting a
- * role that holds minted entries erases that ledger, so a bare delete refuses
- * `TEAM_ROLE_IN_USE`; naming a `transferTo` rehomes the ledger instead of
- * dropping it. The rule this generalizes: a minted name may never leave the
- * App's registers — but it MAY move between them.
- *
- * What deletion emphatically does NOT do is free the names. A Worker's name is
- * permanent per App (`cor:agt:020:02`), enforced by `workers_app_name_uniq` on
- * `(app_id, lower(name))` irrespective of any register — so a retired role can
- * never make a taken name castable again, whatever the register says. That is
- * the fact that makes moving a register between roles safe at all: the register
- * governs ALLOCATION bookkeeping, the unique governs identity.
- *
- * ## Ordering — the trap this exists to remove
- *
- * A name may not sit in two of one App's registers, so a hand-run supersede has
- * to delete the old role BEFORE the successor can claim its names, and must set
- * the successor's range before adding out-of-range names. Both orderings are
- * invisible until they fail (hadron-cli#441). Here it is one operation inside
- * the register lock: delete first, then extend the successor.
- *
- * Everything that can be validated is validated BEFORE the delete, so the only
- * way to fail between the two writes is an infrastructure error — and the
- * delete is SOFT, so even that is recoverable rather than lossy.
+ * What that machinery protected is untouched, and was never the register's
+ * doing: a Worker's name is permanent per App (`cor:agt:020:02`), enforced by
+ * `workers_app_name_uniq` on `(app_id, lower(name))` irrespective of any role
+ * — so deleting a role can no more free a taken name than it could before.
+ * Superseding a role is now create-the-successor then delete-the-old; the
+ * names were never the thing being moved.
  */
 async function deleteTeamRoleImpl(
-  args: { appRef: string; teamAgentRef?: string | null; role: string; transferTo?: string | null },
+  args: { appRef: string; teamAgentRef?: string | null; role: string },
   ctx: Context,
 ) {
   const role = normalizeRoleSlug(args.role);
-  const transferTo =
-    args.transferTo == null || args.transferTo.trim() === ''
-      ? null
-      : normalizeRoleSlug(args.transferTo);
-  if (transferTo && transferTo.toLowerCase() === role.toLowerCase()) {
-    throw new GraphQLError('transferTo must name a DIFFERENT role than the one being deleted.', {
-      extensions: { code: 'BAD_USER_INPUT', role },
-    });
-  }
-
   const app = await resolveApp(ctx, args.appRef);
   if (app.deletedAt) {
     throw new GraphQLError(`App not found: ${args.appRef}`, {
@@ -717,7 +425,7 @@ async function deleteTeamRoleImpl(
   const systemMemoryId = teamAgent.systemMemoryId;
   const loc = `${ROLES_BRANCH_PREFIX}${role}`;
 
-  return withRegisterLock(ctx, systemMemoryId, async () => {
+  return withRoleWriteLock(ctx, systemMemoryId, async () => {
     const allNodes = await loadRoleNodes(ctx, systemMemoryId);
     const existing = allNodes.find((n) => n.loc === loc) ?? null;
     if (!existing) {
@@ -728,69 +436,22 @@ async function deleteTeamRoleImpl(
       );
     }
 
-    const storedNames = parseNameRegister(existing.data?.names);
-    const minted = new Set((await loadHeldByName(ctx, app.id, storedNames)).keys());
-
-    let successor: DecryptedRoleNode | null = null;
-    let successorMerged: string[] = [];
-    let transferredNames: string[] = [];
-
-    if (transferTo) {
-      const successorLoc = `${ROLES_BRANCH_PREFIX}${transferTo}`;
-      successor = allNodes.find((n) => n.loc === successorLoc) ?? null;
-      if (!successor) {
-        const available = allNodes.map((n) => n.loc.slice(ROLES_BRANCH_PREFIX.length));
-        throw new GraphQLError(
-          `transferTo role "${transferTo}" is not defined in ${teamAgent.name}'s system memory.${available.length ? ` Available roles: ${available.join(', ')}.` : ''} Create it with createTeamRole first.`,
-          { extensions: { code: 'WORKER_ROLE_NOT_FOUND', role: transferTo, availableRoles: available } },
-        );
-      }
-      const successorNames = parseNameRegister(successor.data?.names);
-      const have = new Set(successorNames.map((n) => n.toLowerCase()));
-      // Append in the source register's order; a spelling the successor already
-      // lists is skipped rather than duplicated (the register is deduped
-      // case-insensitively by parseNameRegister, so re-adding would be a no-op
-      // at best and an ordering surprise at worst).
-      transferredNames = storedNames.filter((n) => !have.has(n.toLowerCase()));
-      successorMerged = [...successorNames, ...transferredNames];
-
-      // Defensive: a transferred name must not already live in a THIRD
-      // register. The one-name-one-register invariant makes this unreachable,
-      // but the check costs one map lookup and the alternative is silently
-      // creating the ambiguity the invariant exists to prevent.
-      const others = indexOtherRegisters(
-        allNodes.filter((n) => n.loc !== loc && n.loc !== successorLoc),
-        '',
-      );
-      const clashing = transferredNames.filter((n) => others.has(n.toLowerCase()));
-      if (clashing.length > 0) {
-        throw new GraphQLError(
-          `Cannot transfer ${clashing.map((n) => JSON.stringify(n)).join(', ')} to "${transferTo}": already in this App's "${others.get(clashing[0].toLowerCase())}" register.`,
-          { extensions: { code: 'TEAM_ROLE_NAME_DUPLICATE', role: transferTo, names: clashing } },
-        );
-      }
-      // NOTE: no nameRange check. Transferred names are re-homed allocations,
-      // not new ones — the range governs what may be allocated NEXT, and
-      // range-checking a supersede would refuse exactly the case this argument
-      // exists for (hadron-cli#441 superseded frontend-engineer with
-      // svelte-app-engineer, whose ranges differ).
-    } else if (minted.size > 0) {
-      const mintedList = storedNames.filter((n) => minted.has(n));
-      throw new GraphQLError(
-        `Cannot delete the "${role}" role: ${mintedList.map((n) => JSON.stringify(n)).join(', ')} ${mintedList.length === 1 ? 'is' : 'are'} minted in this App (a Worker holds the name — retirement never frees one), and the register entry is what records that allocation. Pass transferTo to hand the register to a successor role, which is the supersede this refusal is protecting.`,
-        { extensions: { code: 'TEAM_ROLE_IN_USE', role, names: mintedList } },
-      );
-    }
-
-    // Delete FIRST: a name may not sit in two registers, so the successor
-    // cannot claim these spellings while the old definition still lists them.
-    // recursive because roles:<role>:notes is content OF this role. Delegated
-    // to the shared node seam (resolvers.object.ts does the same), so the
-    // descendant handling, tombstone semantics and write gate stay in one place.
+    // #1050: a bare, unconditional soft-delete. Everything that used to guard
+    // this — the minted-name check, TEAM_ROLE_IN_USE, transferTo's supersede,
+    // the post-delete recheck and the restore-compensation — existed to protect
+    // the REGISTER as a ledger of which names had been allocated to this role.
+    // With no register there is no ledger to protect, and no second write to
+    // compensate for: the delete is now one operation.
     //
-    // The exact ids are captured first so the compensation below restores
-    // precisely what THIS delete tombstoned — a loc-prefix restore would also
-    // resurrect nodes that were already tombstoned before we ran.
+    // What that machinery protected is unchanged and was never the register's
+    // doing: a Worker's name is permanent per App (cor:agt:020:02, enforced by
+    // workers_app_name_uniq), so deleting a role can no more free a taken name
+    // than it could before. Superseding a role is now: create the successor,
+    // delete the old one. The names were never the thing being moved.
+    //
+    // recursive because roles:<role>:notes is content OF this role. Delegated
+    // to the shared node seam so descendant handling, tombstone semantics and
+    // the write gate stay in one place.
     const tombstoned = (
       await ctx.db.node.findMany({
         where: {
@@ -803,91 +464,9 @@ async function deleteTeamRoleImpl(
     ).map((n) => n.id);
     await nodeMutations.deleteNode(null, { nodeRef: existing.id, recursive: true }, ctx);
 
-    let transferredTo: Awaited<ReturnType<typeof buildTeamRole>> | null = null;
-    try {
-      // ── The post-delete recheck (PR #1014 review, Codex P1) ───────────────
-      // castWorker takes the register lock in REGISTER mode only; an
-      // EXPLICIT-name cast mints without it. So a name can become minted
-      // between the pre-check above and this delete, and a bare delete would
-      // then erase the ledger of a freshly minted name — the exact invariant
-      // this mutation claims to hold. Rechecking AFTER the delete is what
-      // closes it: a cast either lands before this read (we see it and undo)
-      // or after (it mints against a role that is already gone, which is the
-      // ordinary WORKER_ROLE_NOT_FOUND it would get anyway).
-      //
-      // Transfers are exempt — a name minted mid-flight is carried to the
-      // successor like any other, so the ledger survives either way.
-      if (!transferTo) {
-        const mintedNow = await loadHeldByName(ctx, app.id, storedNames);
-        if (mintedNow.size > 0) {
-          const raced = storedNames.filter((n) => mintedNow.has(n));
-          throw new GraphQLError(
-            `Cannot delete the "${role}" role: ${raced.map((n) => JSON.stringify(n)).join(', ')} was minted while this deletion ran, and the register entry is what records that allocation. Retry with transferTo to hand the register to a successor role.`,
-            { extensions: { code: 'TEAM_ROLE_IN_USE', role, names: raced } },
-          );
-        }
-      }
-
-      if (successor && transferTo) {
-        const mergedData: Record<string, unknown> = { ...(successor.data ?? {}) };
-        mergedData.names = successorMerged;
-        await writeNodeCore(
-          {
-            memoryId: systemMemoryId,
-            loc: successor.loc,
-            data: mergedData,
-            reason: `deleteTeamRole transfer ${role} → ${transferTo} (#1002)`,
-          },
-          ctx,
-          'update',
-          { targetNodeId: successor.id },
-        );
-        const fresh = await loadRoleNodes(ctx, systemMemoryId);
-        const node = fresh.find((n) => n.loc === successor!.loc);
-        if (node) {
-          transferredTo = await buildTeamRole(
-            ctx,
-            node,
-            await loadHeldByName(ctx, app.id, parseNameRegister(node.data?.names)),
-            await loadRoleAgentIndex(ctx, app.id),
-          );
-        }
-      }
-    } catch (e) {
-      // ── Compensation (PR #1014 review, Codex P1) ─────────────────────────
-      // The delete and the successor write are two operations that cannot
-      // share one transaction: the register lock's own transaction runs its
-      // bracketed work on the outer client by design (nested node inserts
-      // would deadlock against the memory row it holds — see withRegisterLock),
-      // and the generic node surface does not take that lock at all, so a
-      // concurrent deleteNode on the SUCCESSOR can make the write below fail
-      // after the source is already gone.
-      //
-      // So the source is RESTORED rather than left half-superseded. This is
-      // only possible because the delete is soft — the tombstone still holds
-      // the register verbatim, so undoing it loses nothing.
-      await ctx.db.node
-        .updateMany({
-          where: { id: { in: tombstoned } },
-          data: { deletedAt: null, deletedBy: null },
-        })
-        .catch((restoreErr: unknown) => {
-          // A failed compensation is worse than the original failure, because
-          // the caller would otherwise retry against a role that is silently
-          // gone. Say so explicitly instead of reporting only the first error.
-          throw new GraphQLError(
-            `deleteTeamRole failed AND could not restore the "${role}" role definition — it is soft-deleted at ${loc} in ${teamAgent.name}'s system memory and must be restored by hand. Original error: ${e instanceof Error ? e.message : String(e)}. Restore error: ${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`,
-            { extensions: { code: 'TEAM_ROLE_DELETE_NOT_COMPENSATED', role, loc, memoryId: systemMemoryId } },
-          );
-        });
-      throw e;
-    }
-
     return {
       role,
       nodesDeleted: tombstoned.length,
-      transferredNames,
-      transferredTo,
     };
   });
 }
@@ -925,13 +504,10 @@ export const teamRoleQueries = {
       return { items: [], total: 0 };
     }
     const nodes = await loadRoleNodes(ctx, teamAgent.systemMemoryId);
-    const heldByName = await loadHeldByName(ctx, app.id, allRegisterNames(nodes));
     const roleAgentIndex = await loadRoleAgentIndex(ctx, app.id);
     const page = nodes.slice(offset ?? 0, (offset ?? 0) + clampListTake(limit));
     return {
-      items: await Promise.all(
-        page.map((n) => buildTeamRole(ctx, n, heldByName, roleAgentIndex)),
-      ),
+      items: await Promise.all(page.map((n) => buildTeamRole(ctx, n, roleAgentIndex))),
       total: nodes.length,
     };
   },
@@ -944,7 +520,7 @@ export const teamRoleMutations = {
    * soft-deleted tombstone at the loc is resurrected by the shared write
    * seam rather than P2002-blocking forever (the chat-bootstrap lesson).
    */
-  createTeamRole: async (_: unknown, args: TeamRoleWriteArgs & { names: string[] }, ctx: Context) =>
+  createTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) =>
     writeTeamRole(args, ctx, 'create'),
 
   /**
@@ -958,13 +534,13 @@ export const teamRoleMutations = {
     writeTeamRole(args, ctx, 'update'),
 
   /**
-   * deleteTeamRole — #1002: retire a role definition, optionally handing its
-   * register to a successor in one step. See {@link deleteTeamRoleImpl} for
-   * the minted-name rule and why the ordering trap disappears here.
+   * deleteTeamRole — #1002: retire a role definition and its sub-nodes.
+   * Unconditional since #1050; see {@link deleteTeamRoleImpl} for why the
+   * minted-name gate and the transfer machinery went with the register.
    */
   deleteTeamRole: async (
     _: unknown,
-    args: { appRef: string; teamAgentRef?: string | null; role: string; transferTo?: string | null },
+    args: { appRef: string; teamAgentRef?: string | null; role: string },
     ctx: Context,
   ) => deleteTeamRoleImpl(args, ctx),
 };

@@ -103,14 +103,24 @@ describe('hadron_cast_worker (#974)', () => {
     expect(out).toContain(`Worker id: ${worker!.id}`);
   });
 
-  it('allocates from the register when name is omitted (role resolves the agent too)', async () => {
+  it('REFUSES when name is omitted — no register to draw from (#1050)', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     const out = await srv.callToolText('hadron_cast_worker', { role: 'backend-engineer' });
+    // The MCP surface renders the typed refusal as tool text, and must carry
+    // the REASON — an agent reading only "required" will hunt for the setting
+    // that makes it optional, which is exactly what was just removed.
+    expect(out).toMatch(/permanent within the App/);
+    expect(out).not.toContain('Worker cast:');
+  });
+
+  it('casts with an explicit name, and the role still resolves the agent', async () => {
+    const srv = createTestableMcpServer(hybridAuth(admin.id));
+    const out = await srv.callToolText('hadron_cast_worker', {
+      role: 'backend-engineer',
+      name: 'Iris',
+    });
     expect(out).toContain('Worker cast: **Iris** (backend-engineer)');
     expect(out).toContain('You are Iris, a backend-engineer.');
-    // Advances past the taken name on the next cast.
-    const next = await srv.callToolText('hadron_cast_worker', { role: 'backend-engineer' });
-    expect(next).toContain('Worker cast: **Henry**');
   });
 
   it('accepts an explicit app URN', async () => {
@@ -141,14 +151,22 @@ describe('hadron_cast_worker (#974)', () => {
     expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
   });
 
-  it('surfaces the typed WORKER_ROLE_NOT_FOUND refusal as tool text', async () => {
+  it('an undefined role string is NOT validated against role definitions (#1050)', async () => {
+    // Before #1050 this refused WORKER_ROLE_NOT_FOUND, listing the defined
+    // roles — but only as a SIDE EFFECT of needing the roles:<role> node to
+    // find a register. Casting no longer reads role definitions at all, so
+    // that refusal is unreachable from here.
+    //
+    // Not a regression, and worth stating rather than leaving to be
+    // rediscovered: cor:agt:020:00 makes cast lists ergonomics and explicitly
+    // NEVER a gate, so validating a cast against them was never the contract.
+    // With an explicit agent, `role` is the casting's label.
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     const out = await srv.callToolText('hadron_cast_worker', {
       agent: roleAgent.id,
       role: 'astronaut',
+      name: 'Zara',
     });
-    expect(out).toContain('Error:');
-    expect(out).toContain('astronaut');
-    expect(out).toContain('backend-engineer'); // lists the available roles
+    expect(out).toContain('Worker cast: **Zara** (astronaut)');
   });
 });
