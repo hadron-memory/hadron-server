@@ -620,10 +620,10 @@ export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<b
  * The Prisma `where` that means **the App's TEAM SPACE** — the app-class memory
  * hosting `chats:team` and the worklog — and nothing else under that App.
  *
- * `class='app'` is FOUR row shapes sharing one tenancy bucket, not one
+ * `class='app'` is a tenancy bucket shared by SEVERAL row shapes, not one
  * ([[findings:app-class-is-four-row-shapes]], #1003), so a bare
- * `appId + class:'app'` predicate is always wrong. Each clause here earns its
- * place and each omission is a distinct bug:
+ * `appId + class:'app'` predicate is always wrong. Each clause earns its place
+ * and each omission is a distinct bug:
  *
  * - `workerOf: { none: {} }` excludes a Worker's casting-scoped working memory
  *   (#974), whose App-wide readability is an open policy question owned by
@@ -631,21 +631,25 @@ export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<b
  * - `userMemoryOfAgentId: null` excludes SESSION memories, reachable only
  *   through a session binding. On a read gate, admitting them hands every App
  *   member every anonymous end-user session — the #934/#967 isolation breach.
- * - Keying on the BASE rather than `sharedMemoryOfAgentId: { not: null }`
- *   keeps LEGACY (pre-#723) team spaces, which have that column null. Filtering
- *   on it is the failure that looks fixed: correct for adopted rows, silently
- *   broken for every App the adoption sweep has not reached.
+ * - `sharedMemoryOfAgentId: { not: null }` excludes NAME-ADDRESSABLE memories
+ *   from `createMemoryInApp(memoryClass: 'app')`, which match every other
+ *   clause here: appId set, no Worker, no user key, and their own null shared
+ *   key. Without it an older named memory wins `App.sharedMemory`'s
+ *   oldest-first fallback, and `appNodes` treats every one of them as a team
+ *   space (PR #1066 review, Codex).
  *
- * Extracted at #1031. The finding above asked for the three copies of this
- * predicate to be kept "in lockstep" and they had already drifted — two of the
- * three omitted `userMemoryOfAgentId`. That is the drift CLAUDE.md's
- * reuse-the-shared-gate rule exists to prevent, so there is now one definition
- * and no copies.
+ * ## The known gap, deliberately left open
  *
- * NOTE this is a TENANCY predicate, not an authorization one. It answers "which
- * memory is this App's team space", never "may the caller read it" — the team
- * space's audience is the App PARTICIPANT (`cor:agt:020:00` §3), which is
- * NARROWER than some callers' own gates. Pair it with `isAppParticipant`.
+ * That last clause is also blind to LEGACY (pre-#723) team spaces, whose
+ * `sharedMemoryOfAgentId` is null because identity then lived in the URN
+ * string. This predicate cannot tell such a row from a named app memory by
+ * COLUMNS ALONE — both are all-null — so distinguishing them requires the URN
+ * matcher in `lib/sharedMemoryLegacyKey.ts`, by parsed-atom equality (never a
+ * LIKE pattern: a slug may contain `_`, a single-char wildcard).
+ *
+ * Widening this predicate to catch legacy rows without that matcher trades a
+ * silent under-report for a silent MIS-report, which is worse. Tracked
+ * separately; the adoption sweep is the real fix, not a looser read.
  */
 export function appTeamSpaceFilter(appId: string) {
   return {
@@ -654,6 +658,7 @@ export function appTeamSpaceFilter(appId: string) {
     deletedAt: null,
     workerOf: { none: {} },
     userMemoryOfAgentId: null,
+    sharedMemoryOfAgentId: { not: null },
   };
 }
 

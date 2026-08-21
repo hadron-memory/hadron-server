@@ -136,23 +136,32 @@ describe('#965 — App.sharedMemory', () => {
     expect(mem?.id).not.toBe(workerMem.id);
   });
 
-  it('finds a LEGACY (pre-#723) team space, whose sharedMemoryOfAgentId is null', async () => {
-    // The behaviour #1031 restores. The previous predicate keyed on
-    // `sharedMemoryOfAgentId: { not: null }`, so an App whose space the
-    // adoption sweep had not reached reported no shared memory at all — the
-    // "failure that looks fixed": correct for every adopted row, silently
-    // blind to the ones that most need finding.
-    const app = await createApp('Eng Team Legacy');
-    await db.memory.updateMany({
+  it('never answers with a NAME-ADDRESSABLE app memory (createMemoryInApp)', async () => {
+    // The shape that column-narrowing alone cannot exclude, found in review of
+    // PR #1066: createMemoryInApp(memoryClass: 'app') produces appId set, no
+    // Worker, no user key, and its OWN sharedMemoryOfAgentId null — matching
+    // every other clause of appTeamSpaceFilter. Forced older so oldest-first
+    // would pick it if the shared key were not required.
+    const app = await createApp('Eng Team Named');
+    const shared = await db.memory.findFirstOrThrow({
       where: { appId: app.id, class: 'app' },
-      data: { sharedMemoryOfAgentId: null },
     });
-    const legacy = await db.memory.findFirstOrThrow({
-      where: { appId: app.id, class: 'app' },
+    const named = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:eng-team-named:app-mem:notes`,
+        name: 'notes',
+        class: 'app',
+        visibility: null,
+        appId: app.id,
+        createdAt: new Date(Date.now() - 60_000),
+      },
     });
 
     const mem = await A.sharedMemory(app, {}, ctx(member.id));
-    expect(mem?.id).toBe(legacy.id);
+    expect(mem?.id).toBe(shared.id);
+    expect(mem?.id).not.toBe(named.id);
   });
 
   it('prefers the memory holding the worklog root over an older keyed row', async () => {
