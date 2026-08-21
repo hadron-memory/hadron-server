@@ -172,6 +172,13 @@ export interface TestableMcpServer {
     args?: unknown,
   ): Promise<{ content: Array<{ type: string; text: string }> }>;
   callToolText(name: string, args?: unknown): Promise<string>;
+  /**
+   * A registered tool's DESCRIPTION — the prose an LLM reads when choosing the
+   * tool, which is the only part of a tool that can rot with nothing going red
+   * (#1034). Throws on an unregistered name rather than returning undefined, so
+   * a renamed tool fails the assertion loudly instead of vacuously passing.
+   */
+  toolDescription(name: string): string;
 }
 
 export function createTestableMcpServer(
@@ -206,6 +213,7 @@ export function createTestableMcpServer(
           extra: unknown,
         ) => Promise<{ content: Array<{ type: string; text: string }> }>;
         enabled: boolean;
+        description?: string;
       }
     >;
   })._registeredTools;
@@ -216,6 +224,11 @@ export function createTestableMcpServer(
       if (!tool) throw new Error(`Tool not registered: ${name}`);
       if (!tool.enabled) throw new Error(`Tool disabled: ${name}`);
       return tool.handler(args, {});
+    },
+    toolDescription(name: string) {
+      const tool = tools[name];
+      if (!tool) throw new Error(`Tool not registered: ${name}`);
+      return tool.description ?? '';
     },
     async callToolText(name: string, args: unknown = {}) {
       const result = await this.callTool(name, args);
@@ -5125,7 +5138,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a new work session. All subsequent tool calls can reference this session ID for attribution. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of the session, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is already driving refuses WORKER_TAKEN with who last drove it and when (informed takeover, cor:agt:020:03); retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
+    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open and the worker taken, until hadron_end_session or the server reaper. All subsequent tool calls can reference this session ID for attribution. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker that already has an open worker session refuses WORKER_TAKEN with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
     {
       description: z.string().describe("What this session is about"),
       type: z.string().optional().describe('Session type: DEVELOPER, CHATBOT, AUTOMATION, EDGE'),
@@ -5138,7 +5151,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       parentSessionId: z.string().optional().describe('Parent session ID'),
       prevSessionId: z.string().optional().describe('Previous session ID'),
       workerRef: z.string().optional().describe('The Worker (named casting) this session works as. Three forms resolve: the worker\'s NAME ("Iris" — unique within the App, case-insensitive, and what a human will say), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its bare id. Prefer the name for a human-driven pickup; the URN when addressing a worker across App context. Must belong to this App; stamps the session\'s agentId from the casting and returns the worker\'s boot briefing.'),
-      force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker. Use only on the user\'s explicit override, after showing who last drove it.'),
+      force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker — one with a worker session still open. That open session may be someone else\'s live work, or your own left behind by a chat session that ended without ending it (ending a chat session never ends a worker session); the server cannot tell which, so neither should you assume. Use only on the user\'s explicit override, after showing who last drove it.'),
     },
     async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId, workerRef, force }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
@@ -5306,15 +5319,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_end_session',
-    'End a session, and for a worker-bound one write its closing HANDOFF (#1029) — the record the next stint of this worker inherits automatically at bind. Pass `handoff` whenever you are stopping deliberately: what landed, what is open, what is blocked, what the next driver should not repeat. Route rather than restate — point at the live artifacts instead of summarizing them, since a restatement drifts while a pointer does not. The server owns where it goes; you supply the prose. A failed handoff write REFUSES the end and leaves the session open, so retrying is safe; ending with no handoff is a deliberate choice, and the next driver is told the stint ended without one.',
+    'End a session, and for a worker-bound one write its closing HANDOFF (#1029) — the record the next stint of this worker inherits automatically at bind. This is the CLIENT operation that ends a WORKER SESSION, and the server\'s reaper can end one without you. Ending your CHAT SESSION does not end a worker session (#1034). It ends the SESSION, not any HOLD: if a person bound the worker, the name stays theirs until released (#1050) and only they can bind it again. An App-key BIND takes no hold — a fact about the bind, not a promise about the worker afterwards, since an eligible user may have forced a binding meanwhile and taken the name. Archiving the Desktop window, closing the Claude Code session, or losing the conversation any other way leaves this binding open server-side and the worker taken until you call this tool or the reaper claims it. Call it deliberately when you stop working, not when the window closes — by then it is too late to write a handoff, because the context that would compose one has gone. Pass `handoff` whenever you are stopping deliberately: what landed, what is open, what is blocked, what the next driver should not repeat. Route rather than restate — point at the live artifacts instead of summarizing them, since a restatement drifts while a pointer does not. The server owns where it goes; you supply the prose. A failed handoff write REFUSES the end and leaves the session open, so retrying is safe; ending with no handoff is a deliberate choice, and the next driver is told the stint ended without one.',
     {
-      id: z.string().describe('Session ID to end'),
+      id: z.string().describe('Id of the session to end — a Hadron session id (the worker session id, when one is bound), never anything about your chat session'),
       summary: z.string().optional().describe('Summary of what was accomplished'),
       handoff: z
         .string()
         .optional()
         .describe(
-          'The closing handoff for this worker: prose the NEXT session of this worker receives at bind. Worker-bound sessions only.',
+          'The closing handoff for this worker: prose the NEXT worker session bound to this worker receives at bind. Worker-bound sessions only.',
         ),
       inputTokens: z.number().optional().describe('Total input tokens used'),
       outputTokens: z.number().optional().describe('Total output tokens used'),
@@ -5414,9 +5427,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               : ' (closed deliberately).') +
             ' Metrics were updated; the original end time stands. You were not bound when you' +
             ' made this call — hadron_whoami lists what you are actually driving.'
-          : `Session ended: ${id}`) +
+          : // #1034: name the KIND of session that just ended. This receipt is
+            // the last thing a driver reads before closing the window, and the
+            // failure it is placed against is the reverse order — closing the
+            // window and assuming this happened.
+            `${session.workerId ? 'Worker session' : 'Session'} ended: ${id}`) +
           (handoffBody
-            ? '\nHandoff written — the next session bound to this worker receives it automatically.'
+            ? '\nHandoff written — the next worker session bound to this worker receives it automatically.'
             : session.workerId && closed.endedByThisCall
               ? '\n(No handoff written. The next driver will be told this stint ended without one.)'
               : ''),
@@ -5428,7 +5445,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_whoami',
-    'Answer "what am I driving right now?" — your own OPEN sessions, with the worker each is bound to, its App, and when it started (#1016). On the MCP surface the session id is the only handle that makes work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The loss is worst where it is quietest — hadron_team_chat_post takes the session as an OPTIONAL argument, so omitting it posts as the human instead of the worker, silently, with no error and the wrong authorship recorded. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure of your session id, or after any context loss, and pass the id it returns back to those tools. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    'Answer "what am I driving right now?" — your own OPEN sessions, each with its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The loss is worst where it is quietest — hadron_team_chat_post takes the session as an OPTIONAL argument, so omitting it posts as the human instead of the worker, silently, with no error and the wrong authorship recorded. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
     {
       limit: z.number().int().optional().describe('Max sessions to return (default 10, cap 50). Newest first.'),
       includeEnded: z.boolean().optional().describe('Also list recently ENDED sessions — useful to confirm you did end one, or to find the session a work record should have been attributed to.'),
@@ -5545,8 +5562,22 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
       return textResult(
         `${sessions.length} session(s):\n${lines.join('\n')}\n\n` +
-          'Pass the session id to hadron_team_chat_post (to post AS the worker rather than as yourself), ' +
-          'hadron_record_work, and hadron_end_session. Re-fetch a worker\'s boot briefing with hadron_get_worker.',
+          // #1034: "session id" stays GENERAL here, because this list includes
+          // unbound sessions whose own row says "working as: nobody" — calling
+          // every id a worker session id would contradict the line above it and
+          // invite a reader to infer a binding that does not exist. The
+          // worker-session fact below is scoped to the rows it is true of.
+          // #1034: every clause here is scoped to the rows it is TRUE of. This
+          // list deliberately includes unbound sessions, and team chat REFUSES
+          // one (SESSION_NOT_WORKER_BOUND) — so unconditional "post as the
+          // worker" advice contradicts the "working as: nobody" row directly
+          // above it, and promises a call that cannot succeed.
+          'Pass a row that is BOUND and still OPEN to hadron_team_chat_post to post AS that worker — an ' +
+          'unbound row is refused SESSION_NOT_WORKER_BOUND and an [ENDED] one SESSION_ENDED, neither ' +
+          'silently posted as you. Any session id works for ' +
+          'hadron_record_work and hadron_end_session. Re-fetch a worker\'s boot briefing with hadron_get_worker. ' +
+          'A bound row is a worker session, and it stays open — with its worker taken — until ' +
+          'hadron_end_session or the reaper, no matter what happened to the chat session that started it.',
       );
     },
   );
@@ -6446,7 +6477,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_chatbot_start',
-    'Start a new chat session with an agent. Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call hadron_chatbot_process with the result.',
+    'Start a new AGENT CHAT — a saved conversation with an agent (#1034: an agent chat, NOT a "chat session", which is reserved for the human\'s own conversation, and NOT the team chat). Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call hadron_chatbot_process with the result.',
     {
       agentId: z.string().describe('ID of the agent to chat with'),
       userId: z.string().optional().describe('User/persona identifier (e.g. "alex-chen"). Used to scope the per-user memory. If omitted, uses the authenticated user.'),

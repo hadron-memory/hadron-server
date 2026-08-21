@@ -670,7 +670,7 @@ export const sessionMutations = {
           });
           const who = holder?.handle ?? holder?.githubUsername ?? worker.heldByUserId;
           throw new GraphQLError(
-            `The name "${worker.name}" is held by ${who}. A held name is not freed by a session ending, ` +
+            `The name "${worker.name}" is held by ${who}. A held name is not freed by a worker session ending, ` +
               'and this cannot be forced — cast your own worker instead ' +
               '(the holder, or an App/org admin, can release it).',
             {
@@ -738,8 +738,41 @@ export const sessionMutations = {
                 })
               : null;
             const lastDriver = driver?.handle ?? driver?.githubUsername ?? active.userId ?? null;
+            // #1034: this refusal is where the worker-session/chat-session
+            // collision surfaces to a human, and it is the specific failure a
+            // team new to the surface walks into — archive the window, assume
+            // the worker came free, meet a takeover prompt with no way to read
+            // it. Two things the old wording left the reader to infer wrongly:
+            // WHOSE the open session is (it may be the caller's own, which the
+            // old "show the user who is driving it" sent them hunting a
+            // colleague for), and that `last seen` says whether anyone is
+            // actually there (it does not — it is worker-session activity, and
+            // a worker session outlives its chat session).
+            //
+            // What the server must NOT do is guess WHY it is open. It knows the
+            // row exists; it has no signal tying that row to a closed chat
+            // session, so "probably abandoned" would be an unsupported claim
+            // pushing the reader toward force — the hadron-cli#492 harm, in the
+            // message meant to prevent it. Both possibilities, then the
+            // confirmation step (PR #1056 review, Copilot + Codex).
+            const isOwnSession = !!ctx.userId && active.userId === ctx.userId;
+            // Three arms, because "who is driving it" has three different
+            // answers and two of them were previously collapsed into the
+            // wrong one (PR #1056 review, Codex + Copilot). A pure App-key
+            // bind attaches NO person, so `lastDriver` is null and telling the
+            // caller to go ask the driver names somebody who does not exist —
+            // the same defect as the old self-case wording, one arm over.
+            const takenBy = isOwnSession
+              ? 'That worker session is YOUR OWN and is still open — either you are still working in it from another chat session, or it was left behind by one that ended (ending a chat session never ends a worker session). The server cannot tell which. Confirm with the user that nothing is still running in it, then pass force: true.'
+              : lastDriver
+                ? 'Show the user who is driving it, and pass force: true only on their explicit override.'
+                : 'No person is attached to that worker session — it was opened by an App key, so there is nobody to ask. Confirm with the user that the automation holding it is not mid-task, then pass force: true.';
             throw new GraphQLError(
-              `This worker is taken: session ${active.id}${lastDriver ? ` (last driven by ${lastDriver})` : ''}, last seen ${lastSeenAt.toISOString()}. Show the user who is driving it, and pass force: true only on their explicit override.`,
+              `This worker is taken: worker session ${active.id}${lastDriver ? ` (last driven by ${lastDriver})` : ''}, last seen ${lastSeenAt.toISOString()}. ` +
+                takenBy +
+                (isOwnSession
+                  ? ''
+                  : ' Note "last seen" is worker-session activity, not presence: a worker session outlives the chat session that started it, so an idle-looking one may still have someone behind it.'),
               {
                 extensions: {
                   code: 'WORKER_TAKEN',

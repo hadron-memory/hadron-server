@@ -822,6 +822,66 @@ describe('#1050 — worker name holding', () => {
     expect(forced.workerId).toBe(w.id);
   });
 
+  // #1034: the WORKER_TAKEN message is where the worker-session/chat-session
+  // collision reaches a human, and it is the failure a team new to the surface
+  // walks into — archive the window, assume the worker came free, meet a
+  // refusal with no way to read it.
+  it('a takeover refusal on YOUR OWN open session says so, and explains the chat session did not end it', async () => {
+    // Post-#1050 this is the common shape: the name is yours, so HELD does not
+    // fire, and what you meet is your own binding left open by a conversation
+    // that closed. Telling the driver "show the user who is driving it" — the
+    // old wording — sends them looking for a colleague who does not exist.
+    const w = await heldBy(contrib.id);
+    await bind(contrib.id, w.id);
+
+    await expect(bind(contrib.id, w.id)).rejects.toThrow(/worker session/i);
+    try {
+      await bind(contrib.id, w.id);
+      expect.unreachable('binding an already-bound worker must refuse');
+    } catch (e) {
+      const msg = (e as GraphQLError).message;
+      expect(msg).toMatch(/YOUR OWN/);
+      expect(msg).toMatch(/ending a chat session never ends a worker session/i);
+      // And NOT the other-driver instruction, which is the wrong action here.
+      expect(msg).not.toMatch(/show the user who is driving it/i);
+    }
+  });
+
+  it("a takeover refusal on someone ELSE's session keeps the show-the-user instruction", async () => {
+    // The two arms must stay distinct: naming the caller's own session is only
+    // right when it IS theirs. An unheld worker driven by another member still
+    // refuses TAKEN, and there the original instruction is the correct one.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Kira' }, ctx(admin.id));
+    await bind(appMember.id, w.id); // appMember drives it, and so holds the name
+
+    try {
+      // The holder binding again is the only path that reaches TAKEN here;
+      // any other principal would hit WORKER_HELD first (which is the point).
+      await bind(appMember.id, w.id);
+      expect.unreachable('binding an already-bound worker must refuse');
+    } catch (e) {
+      const msg = (e as GraphQLError).message;
+      expect(msg).toMatch(/worker session/i);
+    }
+
+    // The other-driver arm, reached by a session whose userId is not the
+    // caller's: force past the hold check by asking as the holder while the
+    // live session belongs to someone else.
+    const other = await cast({ agentRef: roleAgent.id, name: 'Lex' }, ctx(admin.id));
+    const s = await bind(appMember.id, other.id);
+    await db.worker.update({ where: { id: other.id }, data: { heldByUserId: contrib.id } });
+    expect(s.workerId).toBe(other.id);
+
+    try {
+      await bind(contrib.id, other.id);
+      expect.unreachable('a live session on another driver must refuse');
+    } catch (e) {
+      const msg = (e as GraphQLError).message;
+      expect(msg).toMatch(/show the user who is driving it/i);
+      expect(msg).not.toMatch(/YOUR OWN/);
+    }
+  });
+
   it('the holder can release, and the next binder holds it', async () => {
     const w = await heldBy(contrib.id);
     await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
