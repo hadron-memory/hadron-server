@@ -17,6 +17,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import * as nodeWrite from './resolvers.mutation.node.js';
 import { workerSlugBase } from '../../../lib/workerSlug.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -371,6 +372,44 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
       where: { loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId } },
     });
     expect(after.data).toEqual(before.data);
+  });
+
+  it('never SENDS a data payload, so it cannot replay a stale snapshot (#1059 review)', async () => {
+    // The defect: reading the node's `data` and writing it back looks like
+    // "passing it through untouched" and is really a wholesale
+    // last-write-wins overwrite of a snapshot taken before the write. Generic
+    // writers (updateNode, hadron_update_node_data) do NOT take
+    // withRoleWriteLock and this change removed the revision guard, so an edit
+    // landing between the role surface's read and its write would be silently
+    // reverted — by a surface that claims to edit only the description.
+    //
+    // Asserting the ABSENCE of `data` on the write, rather than staging the
+    // race: a test that writes off-road BEFORE the call proves nothing,
+    // because the snapshot it reads is then already current. (That first
+    // version passed against the reintroduced bug — a green mutation indicting
+    // the test, exactly as review:a-green-mutation-indicts-the-test says.)
+    // The guarantee is "we never send data"; that is what is pinned.
+    const spy = vi.spyOn(nodeWrite, 'writeNodeCore');
+    try {
+      await M.updateTeamRole(
+        {},
+        { appRef: app.id, role: 'backend-engineer', description: 'edited' },
+        ctx(contrib.id),
+      );
+      expect(spy).toHaveBeenCalled();
+      for (const call of spy.mock.calls) {
+        expect(Object.keys(call[0] as object)).not.toContain('data');
+      }
+    } finally {
+      spy.mockRestore();
+    }
+
+    // And end-to-end: the description changed, node data is untouched.
+    const after = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId } },
+    });
+    expect(after.description).toBe('edited');
+    expect((after.data as Record<string, unknown>).names).toEqual(['Fred', 'Gwen', 'Hans']);
   });
 
   it('refuses an unknown role → WORKER_ROLE_NOT_FOUND with the available list', async () => {

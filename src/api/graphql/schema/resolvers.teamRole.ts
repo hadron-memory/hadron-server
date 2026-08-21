@@ -324,16 +324,23 @@ async function writeTeamRole(
       );
     }
 
-    // #1050: this surface no longer owns ANY `data` key. The register, its
-    // conventions and the #987 compare-and-swap that protected it are gone, so
-    // a role write now touches only the node's name and description.
+    // #1050: this surface no longer owns ANY `data` key, and therefore does
+    // not SEND one. The register, its conventions and the #987 compare-and-swap
+    // that protected them are gone, so a role write touches name and
+    // description only.
     //
-    // Existing `data` is passed through untouched rather than stripped —
-    // `data.names` on a legacy role node is the record of what was once
-    // allocated to that role, and erasing it would destroy provenance to tidy
-    // a field nothing reads. Sibling-key preservation therefore stops being a
-    // special measure and becomes the whole behaviour.
-    const mergedData: Record<string, unknown> | undefined = existing?.data ?? undefined;
+    // Omitting `data` is load-bearing, not tidiness (PR #1059 review, Codex
+    // P1). Reading the node's data and writing it back would look like
+    // "passing it through untouched" and would in fact be a wholesale
+    // last-write-wins overwrite of a snapshot taken before the write: generic
+    // writers (updateNode, hadron_update_node_data) do NOT take
+    // withRoleWriteLock, and this change removed the revision guard, so a
+    // concurrent generic edit landing in that window would be silently
+    // reverted — by a surface that claims to edit only the description.
+    // Omitted, writeNodeCore preserves whatever is actually in the row.
+    //
+    // Legacy data.names on an existing role node therefore survives because it
+    // is never rewritten, which is a stronger guarantee than re-sending it.
 
     await writeNodeCore(
       {
@@ -345,7 +352,6 @@ async function writeTeamRole(
         ...(args.description !== undefined && args.description !== null
           ? { description: args.description }
           : {}),
-        data: mergedData,
         reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
       },
       ctx,

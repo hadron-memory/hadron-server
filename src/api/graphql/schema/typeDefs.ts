@@ -4952,10 +4952,8 @@ export const typeDefs = `#graphql
     """
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
-    _NOT_INSTALLED, WORKER_ROLE_NOT_FOUND, WORKER_NAME_REQUIRED,
-    WORKER_NAME_TAKEN, APP_UNINSTALLED, TEAM_AGENT_NOT_FOUND /
-    _NOT_INSTALLED / _AMBIGUOUS, and SESSION_EXPIRED for an encrypted
-    system memory without an active session key), same MINT gate — up to but not
+    _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN, APP_UNINSTALLED),
+    same MINT gate — up to but not
     including the writes, and return what would be created. A Query, not a
     dryRun flag: casting a name is the one irreversible act in the team
     feature (cor:agt:020:02 — permanence), and previewing it must not need a
@@ -6608,8 +6606,12 @@ export const typeDefs = `#graphql
 
     Error codes (extensions.code): WORKER_NAME_TAKEN,
     WORKER_NAME_REQUIRED, WORKER_AGENT_NOT_INSTALLED,
-    WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS, WORKER_ROLE_NOT_FOUND,
-    APP_UNINSTALLED.
+    WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS, APP_UNINSTALLED.
+
+    #1050 also removed WORKER_ROLE_NOT_FOUND from this mutation: it fired only
+    because a nameless cast had to find a roles:<role> node to read a register.
+    An unrecognized role now resolves no agent (WORKER_AGENT_NOT_FOUND) or, with
+    an explicit agentRef, is simply the casting's label.
 
     #1050: the TEAM_AGENT_* and SESSION_EXPIRED refusals are gone from this
     mutation. They were reachable only because a nameless cast had to locate a
