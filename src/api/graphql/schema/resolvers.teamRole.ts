@@ -262,6 +262,12 @@ type TeamRoleWriteArgs = {
   description?: string | null;
   /** #1024 — repo affinity. Omitted preserves; an empty array clears. */
   repos?: string[] | null;
+  /**
+   * Internal: the create half of a two-call create+set sequence. Runs the
+   * tombstone data-shape validation without writing data, so the pair cannot
+   * fail after the role is already live.
+   */
+  validateRepoTarget?: boolean;
 };
 
 /**
@@ -393,6 +399,14 @@ async function writeTeamRole(
     //
     // Only looked up when a repo write is actually happening, and only on
     // create: an update already has the live row.
+    // VALIDATE BEFORE ANY WRITE, including the create path that sends no data.
+    // The two-call create (create, then guarded repo update) otherwise fails
+    // HALFWAY for a tombstone holding a scalar or array: the create resurrects
+    // the role, the update then refuses TEAM_ROLE_DATA_NOT_OBJECT, and the
+    // caller is left with a live role it did not successfully configure
+    // (PR #1071 review, Codex). Splitting a write in two adds a failure mode
+    // between the halves, and that one has to be checked before the first.
+    //
     // The merge base must be a PLAIN OBJECT. A `roles:<role>` node authored
     // generically can legally hold a scalar or an array in `data`, and
     // spreading those silently corrupts them — an array becomes numeric keys, a
@@ -412,7 +426,10 @@ async function writeTeamRole(
     let mergeBase: Record<string, unknown> = wantsRepoWrite
       ? asPlainObject(existing?.data, 'stored')
       : {};
-    if (wantsRepoWrite && mode === 'create' && !existing) {
+    // `validateOnly` is the create half of the two-call sequence: it performs
+    // no data write, but must still refuse a shape the update half would.
+    const validateOnly = args.repos === undefined && args.validateRepoTarget === true;
+    if ((wantsRepoWrite || validateOnly) && mode === 'create' && !existing) {
       const tombstone = await ctx.db.node.findFirst({
         where: { memoryId: systemMemoryId, loc, deletedAt: { not: null } },
         orderBy: { deletedAt: 'desc' },
@@ -425,7 +442,6 @@ async function writeTeamRole(
         const row = { ...tombstone } as Record<string, unknown>;
         try {
           decryptNodeFields(row as never, memInfo);
-          mergeBase = asPlainObject(row.data, 'tombstoned');
         } catch {
           // Unreadable tombstone: refuse to guess. Falling through with an
           // empty base would erase exactly what this branch exists to keep.
@@ -434,6 +450,11 @@ async function writeTeamRole(
             { extensions: { code: 'TEAM_ROLE_TOMBSTONE_UNREADABLE', role, loc } },
           );
         }
+        // OUTSIDE the catch. Wrapping the shape check in the decrypt handler
+        // relabelled a perfectly readable bad-shaped tombstone as UNREADABLE —
+        // the broad-catch defect this PR already fixed once, reintroduced by me
+        // in the branch that fixes it. Caught by its own test.
+        mergeBase = asPlainObject(row.data, 'tombstoned');
       }
     }
     const mergedData = wantsRepoWrite
@@ -785,7 +806,12 @@ export const teamRoleMutations = {
    * seam rather than P2002-blocking forever (the chat-bootstrap lesson).
    */
   createTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) => {
-    const created = await writeTeamRole({ ...args, repos: undefined }, ctx, 'create');
+    const wantsRepos = args.repos !== undefined && args.repos !== null;
+    const created = await writeTeamRole(
+      { ...args, repos: undefined, validateRepoTarget: wantsRepos },
+      ctx,
+      'create',
+    );
     // #1071 review (Codex): repos are written as a SECOND, guarded update
     // rather than folded into the create. writeNodeCore resurrects a tombstone
     // through its upsert-update branch, which takes no revision guard — so a
@@ -797,7 +823,7 @@ export const teamRoleMutations = {
     // Sequential, never nested: withRoleWriteLock takes FOR NO KEY UPDATE on
     // the memory row, so re-entering it inside its own bracket deadlocks
     // against itself. Each call takes and releases the lock in turn.
-    if (args.repos === undefined || args.repos === null) return created;
+    if (!wantsRepos) return created;
     return writeTeamRole({ ...args, description: undefined }, ctx, 'update');
   },
 

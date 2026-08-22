@@ -682,6 +682,31 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     ]);
   });
 
+  it('a create over a BAD-SHAPED tombstone refuses WITHOUT resurrecting it (#1071 review)', async () => {
+    // Splitting the write in two (create, then guarded repo update) added a
+    // failure mode between the halves: the create resurrected the role and the
+    // update then refused, leaving a live role the caller never configured.
+    // The shape check therefore runs before the first write.
+    const node = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'roles:frontend-engineer', memoryId: teamAgent.systemMemoryId } },
+    });
+    await db.node.update({ where: { id: node.id }, data: { data: ['scalar-ish'] as any } });
+    await M.deleteTeamRole({}, { appRef: app.id, role: 'frontend-engineer' }, ctx(contrib.id));
+
+    await expectCode(
+      M.createTeamRole(
+        {},
+        { appRef: app.id, role: 'frontend-engineer', repos: ['acme/x'] },
+        ctx(contrib.id),
+      ),
+      'TEAM_ROLE_DATA_NOT_OBJECT',
+    );
+
+    // Still a tombstone: the refusal happened before the resurrection.
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.deletedAt).not.toBeNull();
+  });
+
   it('refuses an unknown role → WORKER_ROLE_NOT_FOUND with the available list', async () => {
     try {
       await M.updateTeamRole(
