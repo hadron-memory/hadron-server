@@ -629,6 +629,59 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     expect((after.data as { names?: string[] }).names).toEqual(legacyNames);
   });
 
+  it('refuses a non-object data rather than corrupting it (#1071 review)', async () => {
+    // A generically authored role node can legally hold a scalar or array in
+    // data. Spreading those silently corrupts them — an array becomes numeric
+    // keys, a string becomes character keys. This surface only ever promised to
+    // modify `repos`.
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'roles:frontend-engineer', memoryId: teamAgent.systemMemoryId } },
+      data: { data: ['not', 'an', 'object'] as any },
+    });
+    await expectCode(
+      M.updateTeamRole(
+        {},
+        { appRef: app.id, role: 'frontend-engineer', repos: ['acme/x'] },
+        ctx(contrib.id),
+      ),
+      'TEAM_ROLE_DATA_NOT_OBJECT',
+    );
+    // Untouched.
+    const after = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'roles:frontend-engineer', memoryId: teamAgent.systemMemoryId } },
+    });
+    expect(after.data).toEqual(['not', 'an', 'object']);
+  });
+
+  it('a GENERIC node write also invalidates the affinity memo (#1071 review)', async () => {
+    // updateNode / updateNodeData are supported paths to the same data, so
+    // invalidating only from the TeamRole mutations would leave the memo stale
+    // for exactly the writers that do not know about it. The shared write seam
+    // clears it instead.
+    const shared = ctx(contrib.id);
+    const { loadAppRepoAffinity } = await import('./resolvers.teamRole.js');
+    await M.updateTeamRole(
+      {},
+      { appRef: app.id, role: 'backend-engineer', repos: ['acme/before'] },
+      shared,
+    );
+    expect((await loadAppRepoAffinity(shared, app.id)).get('backend-engineer')).toEqual([
+      'acme/before',
+    ]);
+
+    const node = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId } },
+    });
+    await M.updateNodeData(
+      {},
+      { nodeRef: node.id, data: { repos: ['acme/generic'] } },
+      shared,
+    );
+    expect((await loadAppRepoAffinity(shared, app.id)).get('backend-engineer')).toEqual([
+      'acme/generic',
+    ]);
+  });
+
   it('refuses an unknown role → WORKER_ROLE_NOT_FOUND with the available list', async () => {
     try {
       await M.updateTeamRole(

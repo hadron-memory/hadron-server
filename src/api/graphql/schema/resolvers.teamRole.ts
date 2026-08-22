@@ -393,7 +393,25 @@ async function writeTeamRole(
     //
     // Only looked up when a repo write is actually happening, and only on
     // create: an update already has the live row.
-    let mergeBase: Record<string, unknown> = existing?.data ?? {};
+    // The merge base must be a PLAIN OBJECT. A `roles:<role>` node authored
+    // generically can legally hold a scalar or an array in `data`, and
+    // spreading those silently corrupts them — an array becomes numeric keys, a
+    // string becomes character keys, a number vanishes entirely (PR #1071
+    // review, Codex). This surface promises to modify only `repos`, so it
+    // refuses rather than rewriting a shape it was never asked to touch.
+    const asPlainObject = (v: unknown, where: string): Record<string, unknown> => {
+      if (v == null) return {};
+      if (typeof v !== 'object' || Array.isArray(v)) {
+        throw new GraphQLError(
+          `Role "${role}" has non-object ${where} data, so setting repos would rewrite it. Fix the node's data first.`,
+          { extensions: { code: 'TEAM_ROLE_DATA_NOT_OBJECT', role, loc } },
+        );
+      }
+      return v as Record<string, unknown>;
+    };
+    let mergeBase: Record<string, unknown> = wantsRepoWrite
+      ? asPlainObject(existing?.data, 'stored')
+      : {};
     if (wantsRepoWrite && mode === 'create' && !existing) {
       const tombstone = await ctx.db.node.findFirst({
         where: { memoryId: systemMemoryId, loc, deletedAt: { not: null } },
@@ -407,7 +425,7 @@ async function writeTeamRole(
         const row = { ...tombstone } as Record<string, unknown>;
         try {
           decryptNodeFields(row as never, memInfo);
-          mergeBase = ((row.data as Record<string, unknown> | null) ?? {});
+          mergeBase = asPlainObject(row.data, 'tombstoned');
         } catch {
           // Unreadable tombstone: refuse to guess. Falling through with an
           // empty base would erase exactly what this branch exists to keep.
@@ -475,12 +493,6 @@ async function writeTeamRole(
       }
       throw e;
     }
-
-    // #1071 review (Codex): the per-request affinity cache must not outlive a
-    // write to the thing it caches. A multi-field mutation that resolves
-    // Worker.repos, updates the role, then resolves another worker would
-    // otherwise deterministically read the pre-update map.
-    invalidateRepoAffinity(ctx, app.id);
 
     // Return the fresh projection through the same builder the read uses.
     const nodes = await loadRoleNodes(ctx, systemMemoryId);
@@ -587,8 +599,9 @@ async function deleteTeamRoleImpl(
       })
     ).map((n) => n.id);
     await nodeMutations.deleteNode(null, { nodeRef: existing.id, recursive: true }, ctx);
-    // Same reason as the write path: a deleted role must not keep answering
-    // from this request's memoized map.
+    // The affinity memo is invalidated by writeNodeCore for any `roles:` write;
+    // a delete goes through nodeMutations.deleteNode, which does not, so it is
+    // cleared explicitly here.
     invalidateRepoAffinity(ctx, app.id);
 
     return {
