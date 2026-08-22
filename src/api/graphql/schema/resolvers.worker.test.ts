@@ -381,6 +381,32 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     expect(await W.repos(worker, {}, ctx(admin.id))).toEqual([]);
   });
 
+  it('an UNREADABLE earlier memory stops the walk rather than letting a later one win', async () => {
+    // Skipping an unreadable memory let a later agent's duplicate role supply
+    // an affinity the earlier, unreadable one might have overridden — a false
+    // mismatch warning conjured out of a memory nobody could read
+    // (PR #1071 review, Codex).
+    //
+    // The team agent is installed first, so its encrypted memory stops the
+    // walk: the role-agent's later definition must NOT win.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: roleAgent.systemMemoryId,
+        loc: 'roles:backend-engineer',
+        name: 'backend-engineer',
+        data: { repos: ['acme/should-not-win'] } as any,
+      },
+    });
+    await db.memory.update({
+      where: { id: teamAgent.systemMemoryId },
+      data: { isEncrypted: true },
+    });
+
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(admin.id))).toEqual([]);
+  });
+
   it('propagates an unexpected error instead of degrading to no affinity', async () => {
     // The catch around the role load tolerates ONE thing: an encrypted system
     // memory with no session key. A bare catch would turn a DB or runtime

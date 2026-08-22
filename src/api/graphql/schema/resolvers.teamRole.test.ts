@@ -578,6 +578,32 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     ]);
   });
 
+  it('a role write INVALIDATES the request-scoped affinity cache', async () => {
+    // The cache lives for the whole request. A multi-field mutation that reads
+    // affinity, writes it, then reads again would otherwise deterministically
+    // see the pre-update map (PR #1071 review, Codex).
+    const shared = ctx(contrib.id);
+    const { loadAppRepoAffinity } = await import('./resolvers.teamRole.js');
+
+    await M.updateTeamRole(
+      {},
+      { appRef: app.id, role: 'backend-engineer', repos: ['acme/before'] },
+      shared,
+    );
+    expect((await loadAppRepoAffinity(shared, app.id)).get('backend-engineer')).toEqual([
+      'acme/before',
+    ]);
+
+    await M.updateTeamRole(
+      {},
+      { appRef: app.id, role: 'backend-engineer', repos: ['acme/after'] },
+      shared,
+    );
+    expect((await loadAppRepoAffinity(shared, app.id)).get('backend-engineer')).toEqual([
+      'acme/after',
+    ]);
+  });
+
   it('refuses an unknown role → WORKER_ROLE_NOT_FOUND with the available list', async () => {
     try {
       await M.updateTeamRole(

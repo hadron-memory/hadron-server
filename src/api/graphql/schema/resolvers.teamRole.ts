@@ -440,6 +440,12 @@ async function writeTeamRole(
       throw e;
     }
 
+    // #1071 review (Codex): the per-request affinity cache must not outlive a
+    // write to the thing it caches. A multi-field mutation that resolves
+    // Worker.repos, updates the role, then resolves another worker would
+    // otherwise deterministically read the pre-update map.
+    invalidateRepoAffinity(ctx, app.id);
+
     // Return the fresh projection through the same builder the read uses.
     const nodes = await loadRoleNodes(ctx, systemMemoryId);
     const node = nodes.find((n) => n.loc === loc);
@@ -545,6 +551,9 @@ async function deleteTeamRoleImpl(
       })
     ).map((n) => n.id);
     await nodeMutations.deleteNode(null, { nodeRef: existing.id, recursive: true }, ctx);
+    // Same reason as the write path: a deleted role must not keep answering
+    // from this request's memoized map.
+    invalidateRepoAffinity(ctx, app.id);
 
     return {
       role,
@@ -579,6 +588,11 @@ async function deleteTeamRoleImpl(
  * Caching is per REQUEST (on `ctx`), never longer — an edit landing mid-request
  * is far less likely than a stale warning surviving a role change.
  */
+/** Drop an App's memoized affinity — every role write must call this. */
+function invalidateRepoAffinity(ctx: Context, appId: string): void {
+  (ctx as Context & { repoAffinityCache?: Map<string, unknown> }).repoAffinityCache?.delete(appId);
+}
+
 export async function loadAppRepoAffinity(
   ctx: Context,
   appId: string,
@@ -618,17 +632,24 @@ export async function loadAppRepoAffinity(
       } catch (e) {
         // ONLY the documented case: an encrypted system memory with no active
         // session key must not fail a worker read for the sake of an optional
-        // warning. Skip that memory; another agent's roles branch may answer.
-        //
-        // Everything else propagates (review:narrow-catch-blocks, and PR #1071
-        // review, Copilot). A bare catch here would turn a DB or runtime
-        // failure into "no affinity" — silently correct-looking, and
-        // undiagnosable, because the field's whole contract is that an empty
-        // answer is normal.
-        if (e instanceof GraphQLError && e.extensions?.code === 'SESSION_EXPIRED') {
-          continue;
+        // warning. Everything else propagates (review:narrow-catch-blocks) — a
+        // bare catch would turn a DB or runtime failure into "no affinity",
+        // which is undiagnosable precisely because an empty answer is normal.
+        if (!(e instanceof GraphQLError && e.extensions?.code === 'SESSION_EXPIRED')) {
+          throw e;
         }
-        throw e;
+        // STOP rather than skip (PR #1071 review, Codex). Skipping an
+        // unreadable memory let a LATER agent's duplicate role supply an
+        // affinity the earlier, unreadable one might have overridden —
+        // breaking the first-install precedence declared above and inventing a
+        // false mismatch warning out of a memory nobody could read.
+        //
+        // Everything already in `out` came from a strictly EARLIER memory, so
+        // it keeps its precedence and stays. Everything not yet set is now
+        // unknowable, and unknown answers [] — never warn. A partial answer
+        // that could be wrong is worse than no answer for a signal whose whole
+        // job is to be trusted when it fires.
+        break;
       }
       for (const node of nodes) {
         const role = node.loc.slice(ROLES_BRANCH_PREFIX.length).toLowerCase();
