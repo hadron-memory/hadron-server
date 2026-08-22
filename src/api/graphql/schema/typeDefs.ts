@@ -6747,6 +6747,14 @@ export const typeDefs = `#graphql
     the generic node surface may write roles — the write delegates to that same
     seam (encryption, revision snapshot, git mirror included).
 
+    #1024 deliberately does NOT take \`repos\` here — set it with
+    updateTeamRole. A create that also wrote data could not be made atomic: the
+    write resurrects a tombstone through an unguarded upsert branch, and
+    splitting it into create-then-guarded-update introduced a partial failure
+    between the halves (the role lands, the repo write refuses). Two explicit
+    calls put that seam where the caller can see and retry it, instead of hiding
+    a non-atomic pair inside one mutation.
+
     #1050: a role definition no longer carries a NAME REGISTER. There is no
     names / nameRange / nameConvention / allowOutOfRange, and no register
     invariants to run, because names are not allocated — a cast supplies its
@@ -6758,7 +6766,6 @@ export const typeDefs = `#graphql
       teamAgentRef: ID
       role: String!
       description: String
-      repos: [String!]
     ): TeamRole!
 
     """

@@ -262,12 +262,6 @@ type TeamRoleWriteArgs = {
   description?: string | null;
   /** #1024 — repo affinity. Omitted preserves; an empty array clears. */
   repos?: string[] | null;
-  /**
-   * Internal: the create half of a two-call create+set sequence. Runs the
-   * tombstone data-shape validation without writing data, so the pair cannot
-   * fail after the role is already live.
-   */
-  validateRepoTarget?: boolean;
 };
 
 /**
@@ -399,64 +393,26 @@ async function writeTeamRole(
     //
     // Only looked up when a repo write is actually happening, and only on
     // create: an update already has the live row.
-    // VALIDATE BEFORE ANY WRITE, including the create path that sends no data.
-    // The two-call create (create, then guarded repo update) otherwise fails
-    // HALFWAY for a tombstone holding a scalar or array: the create resurrects
-    // the role, the update then refuses TEAM_ROLE_DATA_NOT_OBJECT, and the
-    // caller is left with a live role it did not successfully configure
-    // (PR #1071 review, Codex). Splitting a write in two adds a failure mode
-    // between the halves, and that one has to be checked before the first.
-    //
     // The merge base must be a PLAIN OBJECT. A `roles:<role>` node authored
     // generically can legally hold a scalar or an array in `data`, and
     // spreading those silently corrupts them — an array becomes numeric keys, a
     // string becomes character keys, a number vanishes entirely (PR #1071
     // review, Codex). This surface promises to modify only `repos`, so it
     // refuses rather than rewriting a shape it was never asked to touch.
-    const asPlainObject = (v: unknown, where: string): Record<string, unknown> => {
-      if (v == null) return {};
-      if (typeof v !== 'object' || Array.isArray(v)) {
-        throw new GraphQLError(
-          `Role "${role}" has non-object ${where} data, so setting repos would rewrite it. Fix the node's data first.`,
-          { extensions: { code: 'TEAM_ROLE_DATA_NOT_OBJECT', role, loc } },
-        );
-      }
-      return v as Record<string, unknown>;
-    };
-    let mergeBase: Record<string, unknown> = wantsRepoWrite
-      ? asPlainObject(existing?.data, 'stored')
+    const mergeBase: Record<string, unknown> = wantsRepoWrite
+      ? (() => {
+          const v = existing?.data;
+          if (v == null) return {};
+          if (typeof v !== 'object' || Array.isArray(v)) {
+            throw new GraphQLError(
+              `Role "${role}" has non-object data, so setting repos would rewrite it. Fix the node's data first.`,
+              { extensions: { code: 'TEAM_ROLE_DATA_NOT_OBJECT', role, loc } },
+            );
+          }
+          return v as Record<string, unknown>;
+        })()
       : {};
-    // `validateOnly` is the create half of the two-call sequence: it performs
-    // no data write, but must still refuse a shape the update half would.
-    const validateOnly = args.repos === undefined && args.validateRepoTarget === true;
-    if ((wantsRepoWrite || validateOnly) && mode === 'create' && !existing) {
-      const tombstone = await ctx.db.node.findFirst({
-        where: { memoryId: systemMemoryId, loc, deletedAt: { not: null } },
-        orderBy: { deletedAt: 'desc' },
-        select: { id: true, data: true, memoryId: true },
-      });
-      if (tombstone) {
-        // Decrypt through the same seam the live read uses, so an encrypted
-        // system memory does not silently contribute an empty base.
-        const memInfo = await getMemoryEncryptionInfo(ctx.db, systemMemoryId);
-        const row = { ...tombstone } as Record<string, unknown>;
-        try {
-          decryptNodeFields(row as never, memInfo);
-        } catch {
-          // Unreadable tombstone: refuse to guess. Falling through with an
-          // empty base would erase exactly what this branch exists to keep.
-          throw new GraphQLError(
-            `Role "${role}" has a soft-deleted definition whose data cannot be read, so recreating it with repos would erase its history. Restore or purge it first.`,
-            { extensions: { code: 'TEAM_ROLE_TOMBSTONE_UNREADABLE', role, loc } },
-          );
-        }
-        // OUTSIDE the catch. Wrapping the shape check in the decrypt handler
-        // relabelled a perfectly readable bad-shaped tombstone as UNREADABLE —
-        // the broad-catch defect this PR already fixed once, reintroduced by me
-        // in the branch that fixes it. Caught by its own test.
-        mergeBase = asPlainObject(row.data, 'tombstoned');
-      }
-    }
+
     const mergedData = wantsRepoWrite
       ? { ...mergeBase, repos: parseRepoAffinity(args.repos) }
       : undefined;
@@ -479,7 +435,7 @@ async function writeTeamRole(
         // data preserves whatever the row holds; the repos are then written by
         // the GUARDED update below, which is the same path an ordinary edit
         // takes. One write path for data, one guard, no special case.
-        ...(mode === 'update' && mergedData !== undefined ? { data: mergedData } : {}),
+        ...(mergedData !== undefined ? { data: mergedData } : {}),
           reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
         },
         ctx,
@@ -805,35 +761,9 @@ export const teamRoleMutations = {
    * soft-deleted tombstone at the loc is resurrected by the shared write
    * seam rather than P2002-blocking forever (the chat-bootstrap lesson).
    */
-  createTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) => {
-    const wantsRepos = args.repos !== undefined && args.repos !== null;
-    const created = await writeTeamRole(
-      { ...args, repos: undefined, validateRepoTarget: wantsRepos },
-      ctx,
-      'create',
-    );
-    // #1071 review (Codex): repos are written as a SECOND, guarded update
-    // rather than folded into the create. writeNodeCore resurrects a tombstone
-    // through its upsert-update branch, which takes no revision guard — so a
-    // create racing a restoreNodeRevision could replace concurrent data with a
-    // stale merge. The create sends no data at all (preserving whatever the row
-    // holds), and the update path — one implementation of the merge, its guard
-    // and its non-object refusal — sets them.
-    //
-    // Sequential, never nested: withRoleWriteLock takes FOR NO KEY UPDATE on
-    // the memory row, so re-entering it inside its own bracket deadlocks
-    // against itself. Each call takes and releases the lock in turn.
-    if (!wantsRepos) return created;
-    return writeTeamRole({ ...args, description: undefined }, ctx, 'update');
-  },
+  createTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) =>
+    writeTeamRole({ ...args, repos: undefined }, ctx, 'create'),
 
-  /**
-   * updateTeamRole — #960: edit a role definition. `names` is wholesale
-   * (explicit, the natural fit for `team role names set`) but the invariants
-   * run against the DIFF, so `add`/`rm`/`mv` sugar can never smuggle an
-   * invariant violation. Omitted fields preserve; explicit null clears a
-   * convention key.
-   */
   updateTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) =>
     writeTeamRole(args, ctx, 'update'),
 

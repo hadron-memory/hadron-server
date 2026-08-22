@@ -414,7 +414,8 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
 
   // ── #1024: repo affinity ──────────────────────────────────────────────────
   it('reads data.repos, and sets it through the surface rather than by hand', async () => {
-    const created = await M.createTeamRole(
+    await M.createTeamRole({}, { appRef: app.id, role: 'ios-app-engineer' }, ctx(contrib.id));
+    const created = await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'ios-app-engineer', repos: ['hadron-memory/hadron-ios'] },
       ctx(contrib.id),
@@ -437,7 +438,8 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
   });
 
   it('omitted PRESERVES; an empty array CLEARS', async () => {
-    await M.createTeamRole(
+    await M.createTeamRole({}, { appRef: app.id, role: 'qa' }, ctx(contrib.id));
+    await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'qa', repos: ['acme/qa'] },
       ctx(contrib.id),
@@ -462,7 +464,8 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
   it('explicit null is OMITTED, not a clear (#1071 review)', async () => {
     // A client whose variables default to null must not silently wipe
     // affinity. The two readings differ and the SDL now says which.
-    await M.createTeamRole(
+    await M.createTeamRole({}, { appRef: app.id, role: 'qa2' }, ctx(contrib.id));
+    await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'qa2', repos: ['acme/qa'] },
       ctx(contrib.id),
@@ -604,12 +607,10 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     ]);
   });
 
-  it('RESURRECTING a deleted role with repos preserves its tombstoned data', async () => {
-    // writeNodeCore resurrects a tombstone on create, but loadRoleNodes filters
-    // deletedAt — so the merge base was empty and the write sent { repos } as
-    // the WHOLE data bag, erasing the tombstone's history including legacy
-    // data.names (PR #1071 review, Codex). The one thing this surface has
-    // promised throughout is that it does not do that.
+  it('a create does NOT write data, so a resurrected role keeps its history', async () => {
+    // #1071 review: create takes no repos at all now, precisely so the
+    // resurrection path never carries a data write. writeNodeCore preserves the
+    // tombstone's data when none is sent.
     const before = await db.node.findUniqueOrThrow({
       where: { loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId } },
     });
@@ -617,12 +618,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     expect(legacyNames?.length).toBeGreaterThan(0);
 
     await M.deleteTeamRole({}, { appRef: app.id, role: 'backend-engineer' }, ctx(contrib.id));
-    const recreated = await M.createTeamRole(
-      {},
-      { appRef: app.id, role: 'backend-engineer', repos: ['acme/api'] },
-      ctx(contrib.id),
-    );
-    expect(recreated.repos).toEqual(['acme/api']);
+    await M.createTeamRole({}, { appRef: app.id, role: 'backend-engineer' }, ctx(contrib.id));
 
     const after = await db.node.findUniqueOrThrow({ where: { id: before.id } });
     expect(after.deletedAt).toBeNull();
@@ -682,30 +678,6 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     ]);
   });
 
-  it('a create over a BAD-SHAPED tombstone refuses WITHOUT resurrecting it (#1071 review)', async () => {
-    // Splitting the write in two (create, then guarded repo update) added a
-    // failure mode between the halves: the create resurrected the role and the
-    // update then refused, leaving a live role the caller never configured.
-    // The shape check therefore runs before the first write.
-    const node = await db.node.findUniqueOrThrow({
-      where: { loc_memoryId: { loc: 'roles:frontend-engineer', memoryId: teamAgent.systemMemoryId } },
-    });
-    await db.node.update({ where: { id: node.id }, data: { data: ['scalar-ish'] as any } });
-    await M.deleteTeamRole({}, { appRef: app.id, role: 'frontend-engineer' }, ctx(contrib.id));
-
-    await expectCode(
-      M.createTeamRole(
-        {},
-        { appRef: app.id, role: 'frontend-engineer', repos: ['acme/x'] },
-        ctx(contrib.id),
-      ),
-      'TEAM_ROLE_DATA_NOT_OBJECT',
-    );
-
-    // Still a tombstone: the refusal happened before the resurrection.
-    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
-    expect(after.deletedAt).not.toBeNull();
-  });
 
   it('refuses an unknown role → WORKER_ROLE_NOT_FOUND with the available list', async () => {
     try {
