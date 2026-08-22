@@ -382,8 +382,44 @@ async function writeTeamRole(
     // unconditional merge would make every description edit a data write, and
     // pay the conflict risk for callers who touched no data at all.
     const wantsRepoWrite = args.repos !== undefined && args.repos !== null;
+    // The base to merge onto. `existing` comes from loadRoleNodes, which
+    // filters `deletedAt: null` — but writeNodeCore RESURRECTS a tombstone on
+    // create (`isResurrect`), so a create over a soft-deleted role updates that
+    // row rather than inserting a new one. Merging against `existing` alone
+    // would therefore send `{ repos }` as the WHOLE data bag and erase the
+    // tombstone's history — legacy `data.names` included — which is the one
+    // thing this surface has promised throughout not to do
+    // (PR #1071 review, Codex).
+    //
+    // Only looked up when a repo write is actually happening, and only on
+    // create: an update already has the live row.
+    let mergeBase: Record<string, unknown> = existing?.data ?? {};
+    if (wantsRepoWrite && mode === 'create' && !existing) {
+      const tombstone = await ctx.db.node.findFirst({
+        where: { memoryId: systemMemoryId, loc, deletedAt: { not: null } },
+        orderBy: { deletedAt: 'desc' },
+        select: { id: true, data: true, memoryId: true },
+      });
+      if (tombstone) {
+        // Decrypt through the same seam the live read uses, so an encrypted
+        // system memory does not silently contribute an empty base.
+        const memInfo = await getMemoryEncryptionInfo(ctx.db, systemMemoryId);
+        const row = { ...tombstone } as Record<string, unknown>;
+        try {
+          decryptNodeFields(row as never, memInfo);
+          mergeBase = ((row.data as Record<string, unknown> | null) ?? {});
+        } catch {
+          // Unreadable tombstone: refuse to guess. Falling through with an
+          // empty base would erase exactly what this branch exists to keep.
+          throw new GraphQLError(
+            `Role "${role}" has a soft-deleted definition whose data cannot be read, so recreating it with repos would erase its history. Restore or purge it first.`,
+            { extensions: { code: 'TEAM_ROLE_TOMBSTONE_UNREADABLE', role, loc } },
+          );
+        }
+      }
+    }
     const mergedData = wantsRepoWrite
-      ? { ...(existing?.data ?? {}), repos: parseRepoAffinity(args.repos) }
+      ? { ...mergeBase, repos: parseRepoAffinity(args.repos) }
       : undefined;
 
     try {

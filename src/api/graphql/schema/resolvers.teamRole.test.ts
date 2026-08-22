@@ -604,6 +604,31 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     ]);
   });
 
+  it('RESURRECTING a deleted role with repos preserves its tombstoned data', async () => {
+    // writeNodeCore resurrects a tombstone on create, but loadRoleNodes filters
+    // deletedAt — so the merge base was empty and the write sent { repos } as
+    // the WHOLE data bag, erasing the tombstone's history including legacy
+    // data.names (PR #1071 review, Codex). The one thing this surface has
+    // promised throughout is that it does not do that.
+    const before = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId } },
+    });
+    const legacyNames = (before.data as { names?: string[] }).names;
+    expect(legacyNames?.length).toBeGreaterThan(0);
+
+    await M.deleteTeamRole({}, { appRef: app.id, role: 'backend-engineer' }, ctx(contrib.id));
+    const recreated = await M.createTeamRole(
+      {},
+      { appRef: app.id, role: 'backend-engineer', repos: ['acme/api'] },
+      ctx(contrib.id),
+    );
+    expect(recreated.repos).toEqual(['acme/api']);
+
+    const after = await db.node.findUniqueOrThrow({ where: { id: before.id } });
+    expect(after.deletedAt).toBeNull();
+    expect((after.data as { names?: string[] }).names).toEqual(legacyNames);
+  });
+
   it('refuses an unknown role → WORKER_ROLE_NOT_FOUND with the available list', async () => {
     try {
       await M.updateTeamRole(
