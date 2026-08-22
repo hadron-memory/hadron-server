@@ -451,7 +451,14 @@ async function writeTeamRole(
           ...(args.description !== undefined && args.description !== null
             ? { description: args.description }
             : {}),
-          ...(mergedData !== undefined ? { data: mergedData } : {}),
+          // On CREATE we never send data. writeNodeCore resurrects a tombstone
+        // through its upsert-update branch, and that branch takes no revision
+        // guard — so a create racing a restoreNodeRevision could replace the
+        // concurrent data with a stale merge (PR #1071 review, Codex). Omitting
+        // data preserves whatever the row holds; the repos are then written by
+        // the GUARDED update below, which is the same path an ordinary edit
+        // takes. One write path for data, one guard, no special case.
+        ...(mode === 'update' && mergedData !== undefined ? { data: mergedData } : {}),
           reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
         },
         ctx,
@@ -599,10 +606,6 @@ async function deleteTeamRoleImpl(
       })
     ).map((n) => n.id);
     await nodeMutations.deleteNode(null, { nodeRef: existing.id, recursive: true }, ctx);
-    // The affinity memo is invalidated by writeNodeCore for any `roles:` write;
-    // a delete goes through nodeMutations.deleteNode, which does not, so it is
-    // cleared explicitly here.
-    invalidateRepoAffinity(ctx, app.id);
 
     return {
       role,
@@ -637,19 +640,27 @@ async function deleteTeamRoleImpl(
  * Caching is per REQUEST (on `ctx`), never longer — an edit landing mid-request
  * is far less likely than a stale warning surviving a role change.
  */
-/** Drop an App's memoized affinity — every role write must call this. */
-function invalidateRepoAffinity(ctx: Context, appId: string): void {
-  (ctx as Context & { repoAffinityCache?: Map<string, unknown> }).repoAffinityCache?.delete(appId);
-}
-
 export async function loadAppRepoAffinity(
   ctx: Context,
   appId: string,
+  opts?: { memoize?: boolean },
 ): Promise<Map<string, string[]>> {
+  // MEMOIZED ONLY FOR QUERIES (PR #1071 review, Codex, rounds 4-7).
+  //
+  // A request-scoped memo over data a request can also WRITE is stale by
+  // construction, and each round of review found another writer that had to
+  // invalidate it: the TeamRole mutations, then updateNode/updateNodeData, then
+  // deleteNode/moveNode/restoreNodeRevision. Chasing the last writer is the
+  // wrong shape — the set is open, and every miss is silent.
+  //
+  // The memo exists to stop a 50-worker LISTING reloading the roster 50 times,
+  // and a listing is a query. A mutation pays the re-read and can never read
+  // its own stale answer. That retires the whole class rather than its
+  // instances, which is why the invalidation hooks are gone with it.
   type Cache = Map<string, Promise<Map<string, string[]>>>;
   const holder = ctx as Context & { repoAffinityCache?: Cache };
-  const cache = (holder.repoAffinityCache ??= new Map());
-  let pending = cache.get(appId);
+  const cache = opts?.memoize ? (holder.repoAffinityCache ??= new Map()) : null;
+  let pending = cache?.get(appId);
   if (pending) return pending;
 
   pending = (async () => {
@@ -720,7 +731,7 @@ export async function loadAppRepoAffinity(
     }
     return out;
   })();
-  cache.set(appId, pending);
+  cache?.set(appId, pending);
   return pending;
 }
 
@@ -773,8 +784,22 @@ export const teamRoleMutations = {
    * soft-deleted tombstone at the loc is resurrected by the shared write
    * seam rather than P2002-blocking forever (the chat-bootstrap lesson).
    */
-  createTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) =>
-    writeTeamRole(args, ctx, 'create'),
+  createTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) => {
+    const created = await writeTeamRole({ ...args, repos: undefined }, ctx, 'create');
+    // #1071 review (Codex): repos are written as a SECOND, guarded update
+    // rather than folded into the create. writeNodeCore resurrects a tombstone
+    // through its upsert-update branch, which takes no revision guard — so a
+    // create racing a restoreNodeRevision could replace concurrent data with a
+    // stale merge. The create sends no data at all (preserving whatever the row
+    // holds), and the update path — one implementation of the merge, its guard
+    // and its non-object refusal — sets them.
+    //
+    // Sequential, never nested: withRoleWriteLock takes FOR NO KEY UPDATE on
+    // the memory row, so re-entering it inside its own bracket deadlocks
+    // against itself. Each call takes and releases the lock in turn.
+    if (args.repos === undefined || args.repos === null) return created;
+    return writeTeamRole({ ...args, description: undefined }, ctx, 'update');
+  },
 
   /**
    * updateTeamRole — #960: edit a role definition. `names` is wholesale

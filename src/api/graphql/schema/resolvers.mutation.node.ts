@@ -137,18 +137,6 @@ export async function writeNodeCore(
   // caller-level precondition will need exactly it.)
   opts?: { targetNodeId?: string; guardRevSeq?: number },
 ) {
-  // #1024 (PR #1071 review, Codex): any write to a `roles:<role>` node can
-  // change `data.repos`, and the request-scoped affinity memo must not outlive
-  // it. Invalidating HERE rather than in the TeamRole mutations is the point —
-  // `updateNode` and `updateNodeData` are supported paths to the same data, and
-  // three call-site invalidations would have covered only the surface that
-  // happens to know about the cache.
-  //
-  // Cheap and unconditional: clearing a map entry costs nothing on the writes
-  // that are not role definitions.
-  if (typeof rawInput?.loc === 'string' && rawInput.loc.startsWith('roles:')) {
-    (ctx as { repoAffinityCache?: Map<string, unknown> }).repoAffinityCache?.clear();
-  }
       // Keep the historical `input` name so the body below stays a
       // minimal-diff move from the upsertNode resolver it used to be.
       let input = rawInput;

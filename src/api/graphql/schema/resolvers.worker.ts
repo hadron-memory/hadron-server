@@ -1412,6 +1412,7 @@ export const workerFieldResolvers = {
       worker: { appId: string; role: string | null },
       _: unknown,
       ctx: Context,
+      info?: { operation?: { operation?: string } },
     ): Promise<string[]> => {
       if (!worker.role) return [];
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return [];
@@ -1419,7 +1420,13 @@ export const workerFieldResolvers = {
       // locateTeamAgent), so a static import would close the cycle. Same shape
       // as the teamChat locator below.
       const { loadAppRepoAffinity } = await import('./resolvers.teamRole.js');
-      const affinity = await loadAppRepoAffinity(ctx, worker.appId);
+      // Memoize only inside a QUERY. In a mutation the same request can write
+      // the roles this answer derives from, and a request-scoped memo over
+      // writable data is stale by construction — so a mutation pays the
+      // re-read rather than risking its own stale answer.
+      const affinity = await loadAppRepoAffinity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
       return affinity.get(worker.role.toLowerCase()) ?? [];
     },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */

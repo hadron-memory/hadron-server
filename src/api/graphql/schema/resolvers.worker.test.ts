@@ -424,9 +424,13 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     }
   });
 
-  it('loads the roster ONCE per request, not once per worker', async () => {
-    // A 50-worker page re-ran the whole projection 50 times: App lookup, Team
-    // Agent discovery, role loading and decryption, each time.
+  it('memoizes the roster within a QUERY, and never within a mutation', async () => {
+    // The memo exists so a 50-worker LISTING does not reload the roster 50
+    // times. It is scoped to queries because a request-scoped memo over data
+    // the same request can WRITE is stale by construction — review found three
+    // separate writers that would have had to invalidate it, and the set is
+    // open. A mutation pays the re-read and can never read its own stale
+    // answer (PR #1071 review, Codex rounds 4-7).
     await db.node.update({
       where: {
         loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId },
@@ -435,18 +439,50 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     });
     const a = await cast({ agentRef: roleAgent.id, name: 'Iris' });
     const b = await cast({ agentRef: roleAgent.id, name: 'Henry' });
+    const query = { operation: { operation: 'query' } };
+    const mutation = { operation: { operation: 'mutation' } };
+
     const shared = ctx(admin.id);
-    const spy = vi.spyOn(db.appAgent, 'findMany');
+    let spy = vi.spyOn(db.appAgent, 'findMany');
     try {
-      expect(await W.repos(a, {}, shared)).toEqual(['acme/api']);
+      expect(await W.repos(a, {}, shared, query)).toEqual(['acme/api']);
       const afterFirst = spy.mock.calls.length;
-      expect(await W.repos(b, {}, shared)).toEqual(['acme/api']);
-      // Second worker, same request context: no further roster load.
-      expect(spy.mock.calls.length).toBe(afterFirst);
+      expect(await W.repos(b, {}, shared, query)).toEqual(['acme/api']);
+      expect(spy.mock.calls.length).toBe(afterFirst); // memoized
+    } finally {
+      spy.mockRestore();
+    }
+
+    const inMutation = ctx(admin.id);
+    spy = vi.spyOn(db.appAgent, 'findMany');
+    try {
+      expect(await W.repos(a, {}, inMutation, mutation)).toEqual(['acme/api']);
+      const afterFirst = spy.mock.calls.length;
+      expect(await W.repos(b, {}, inMutation, mutation)).toEqual(['acme/api']);
+      // Re-read, deliberately: a mutation must not serve its own stale answer.
+      expect(spy.mock.calls.length).toBeGreaterThan(afterFirst);
     } finally {
       spy.mockRestore();
     }
   });
+
+  it('propagates an unexpected error instead of degrading to no affinity', async () => {
+    // The catch around the role load tolerates ONE thing: an encrypted system
+    // memory with no session key. A bare catch would turn a DB or runtime
+    // failure into [] — which reads as "no affinity configured", is a normal
+    // answer by design, and is therefore undiagnosable
+    // (review:narrow-catch-blocks; PR #1071 review, Copilot).
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const spy = vi
+      .spyOn(db.node, 'findMany')
+      .mockRejectedValueOnce(new Error('connection reset'));
+    try {
+      await expect(W.repos(worker, {}, ctx(admin.id))).rejects.toThrow(/connection reset/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
 
   it('MASKS to [] for a caller outside the App — the Session.worker nesting path', async () => {
     // Session.worker reaches a Worker through a wider gate that admits any org
