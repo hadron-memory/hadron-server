@@ -354,6 +354,33 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     expect(await W.repos(worker, {}, ctx(admin.id))).toEqual(['acme/api']);
   });
 
+  it('an EMPTY affinity on the first definition wins over a later one (#1071 review)', async () => {
+    // "Empty" is an answer, not the absence of one: it means "spans
+    // everything, never warn" — which is exactly what a coordinator role
+    // declares. Recording only non-empty results made an empty first-installed
+    // definition invisible, so a later agent's repos silently won and the role
+    // that deliberately spans everything got a FALSE mismatch warning.
+    await db.node.update({
+      where: {
+        loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId },
+      },
+      data: { data: { repos: [] } as any },
+    });
+    // A second installed agent declares the SAME role with real repos.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: roleAgent.systemMemoryId,
+        loc: 'roles:backend-engineer',
+        name: 'backend-engineer',
+        data: { repos: ['acme/should-not-win'] } as any,
+      },
+    });
+
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(admin.id))).toEqual([]);
+  });
+
   it('propagates an unexpected error instead of degrading to no affinity', async () => {
     // The catch around the role load tolerates ONE thing: an encrypted system
     // memory with no session key. A bare catch would turn a DB or runtime

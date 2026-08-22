@@ -632,9 +632,20 @@ export async function loadAppRepoAffinity(
       }
       for (const node of nodes) {
         const role = node.loc.slice(ROLES_BRANCH_PREFIX.length).toLowerCase();
-        if (out.has(role)) continue; // first by loc order wins
-        const repos = parseRepoAffinity(node.data?.repos);
-        if (repos.length > 0) out.set(role, repos);
+        // FIRST definition wins, even when its affinity is EMPTY (PR #1071
+        // review, Codex). Recording only non-empty results made an empty
+        // first-installed definition invisible, so a later agent's affinity
+        // silently won — contradicting the install-order tie-break declared
+        // just above it, and worse, the contract that empty means "no
+        // affinity, never warn". The observable failure is a FALSE mismatch
+        // warning: the role that deliberately spans everything gets told it is
+        // in the wrong repo.
+        //
+        // Empty is an answer here, not the absence of one. This is the same
+        // conflation the field's own doc warns about, in the loader that
+        // implements it.
+        if (out.has(role)) continue;
+        out.set(role, parseRepoAffinity(node.data?.repos));
       }
     }
     return out;
