@@ -6766,7 +6766,10 @@ export const typeDefs = `#graphql
     role: WORKER_ROLE_NOT_FOUND. Same authorization as createTeamRole.
 
     #1024: \`repos\` sets the role's repo affinity. Omitted PRESERVES; an empty
-    array CLEARS. It is merged into the node's \`data\` rather than replacing it,
+    array CLEARS; explicit \`null\` is treated as OMITTED, not as a clear — worth
+    stating because a client whose variables default to null would otherwise
+    have to guess, and the two readings differ (preserve vs wipe). Pass \`[]\`
+    to clear deliberately. It is merged into the node's \`data\` rather than replacing it,
     and the write is guarded on the row's revision — a concurrent generic node
     write (updateNode, hadron_update_node_data) refuses TEAM_ROLE_DATA_CONFLICT
     rather than silently reverting, since those surfaces do not take this one's

@@ -572,8 +572,9 @@ async function deleteTeamRoleImpl(
  * the role nodes directly, across EVERY installed agent's system memory rather
  * than one inferred Team Agent — which is both cheaper and more correct: if any
  * installed agent defines the role, its affinity counts, and ambiguity stops
- * being an error to swallow. Ties resolve by `loc` order, deterministically; a
- * soft signal does not need arbitration beyond that.
+ * being an error to swallow. Ties resolve by INSTALL order, then `loc` order —
+ * both explicitly ordered, since a tie-break is only deterministic if every
+ * step of it is.
  *
  * Caching is per REQUEST (on `ctx`), never longer — an edit landing mid-request
  * is far less likely than a stale warning surviving a role change.
@@ -590,8 +591,15 @@ export async function loadAppRepoAffinity(
 
   pending = (async () => {
     const out = new Map<string, string[]>();
+    // ORDERED, because the tie-break below depends on it. Without an explicit
+    // orderBy, Prisma makes no ordering promise, so two installed agents each
+    // defining the same role could answer differently between requests or
+    // environments (PR #1071 review, Copilot) — and the comment below claimed a
+    // determinism the query did not provide. Install order is the meaningful
+    // one: the agent installed first owns the role by default.
     const installed = await ctx.db.appAgent.findMany({
       where: { appId },
+      orderBy: [{ createdAt: 'asc' }, { agentId: 'asc' }],
       select: { agent: { select: { systemMemoryId: true, deletedAt: true } } },
     });
     const memoryIds = [
@@ -607,11 +615,20 @@ export async function loadAppRepoAffinity(
       let nodes: DecryptedRoleNode[];
       try {
         nodes = await loadRoleNodes(ctx, memoryId);
-      } catch {
-        // An encrypted system memory with no session key must not fail a
-        // worker read for the sake of an optional warning. Skip that memory;
-        // another agent's roles branch may still answer.
-        continue;
+      } catch (e) {
+        // ONLY the documented case: an encrypted system memory with no active
+        // session key must not fail a worker read for the sake of an optional
+        // warning. Skip that memory; another agent's roles branch may answer.
+        //
+        // Everything else propagates (review:narrow-catch-blocks, and PR #1071
+        // review, Copilot). A bare catch here would turn a DB or runtime
+        // failure into "no affinity" — silently correct-looking, and
+        // undiagnosable, because the field's whole contract is that an empty
+        // answer is normal.
+        if (e instanceof GraphQLError && e.extensions?.code === 'SESSION_EXPIRED') {
+          continue;
+        }
+        throw e;
       }
       for (const node of nodes) {
         const role = node.loc.slice(ROLES_BRANCH_PREFIX.length).toLowerCase();

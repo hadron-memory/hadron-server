@@ -459,6 +459,22 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     expect(cleared.repos).toEqual([]);
   });
 
+  it('explicit null is OMITTED, not a clear (#1071 review)', async () => {
+    // A client whose variables default to null must not silently wipe
+    // affinity. The two readings differ and the SDL now says which.
+    await M.createTeamRole(
+      {},
+      { appRef: app.id, role: 'qa2', repos: ['acme/qa'] },
+      ctx(contrib.id),
+    );
+    const kept = await M.updateTeamRole(
+      {},
+      { appRef: app.id, role: 'qa2', repos: null },
+      ctx(contrib.id),
+    );
+    expect(kept.repos).toEqual(['acme/qa']);
+  });
+
   it('a repo write MERGES — sibling data keys survive, including a legacy register', async () => {
     // The role node in this fixture still carries data.names. #1050 left it
     // there as history, and a repos write must not be the thing that finally

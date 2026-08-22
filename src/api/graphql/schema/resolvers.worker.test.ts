@@ -354,6 +354,23 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     expect(await W.repos(worker, {}, ctx(admin.id))).toEqual(['acme/api']);
   });
 
+  it('propagates an unexpected error instead of degrading to no affinity', async () => {
+    // The catch around the role load tolerates ONE thing: an encrypted system
+    // memory with no session key. A bare catch would turn a DB or runtime
+    // failure into [] — which reads as "no affinity configured", is a normal
+    // answer by design, and is therefore undiagnosable
+    // (review:narrow-catch-blocks; PR #1071 review, Copilot).
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const spy = vi
+      .spyOn(db.node, 'findMany')
+      .mockRejectedValueOnce(new Error('connection reset'));
+    try {
+      await expect(W.repos(worker, {}, ctx(admin.id))).rejects.toThrow(/connection reset/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('loads the roster ONCE per request, not once per worker', async () => {
     // A 50-worker page re-ran the whole projection 50 times: App lookup, Team
     // Agent discovery, role loading and decryption, each time.
