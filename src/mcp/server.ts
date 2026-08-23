@@ -544,6 +544,35 @@ function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent', bareUrn: string):
   }
 }
 
+/**
+ * The portal link for a worker URN, or null (#1026).
+ *
+ * ONE resolver for every MCP surface that prints a worker URN — the cast
+ * receipt, the bind receipt, the roster, the single read, and `hadron_whoami`.
+ * The rule those surfaces now share is flat: **wherever a worker URN is
+ * printed, the link that opens it is printed with it**, so an agent never has
+ * to assemble `<origin>/app/u/<urn>` itself. That is the same instruction every
+ * role-agent prompt already gives for node reads (#881), and #1008's identity
+ * signature was the one place the platform could not honour it.
+ *
+ * Takes the URN the caller ALREADY has rather than re-resolving through
+ * `Worker.portalUrl`: the field resolver would repeat the App lookup that
+ * produced that URN, and `portalUrlForUrn` is the same pure function it ends in
+ * — so this cannot drift from the GraphQL field, and costs nothing.
+ *
+ * Null for a null URN (an App URN the fixed arity cannot take) and for an unset
+ * or malformed `FRONTEND_URL`. Callers omit the line entirely rather than emit
+ * a guess: a link to the wrong host is worse than no link (lib/portalUrl.ts).
+ *
+ * Returns the URL rather than a formatted line because the surfaces disagree on
+ * framing — the block reads print `URL: <x>` on its own line, the list reads
+ * indent it under their item — and a helper that owned both shapes would take a
+ * format argument to save nothing.
+ */
+function workerPortalUrl(urn: string | null | undefined): string | null {
+  return urn ? portalUrlForUrn(urn) : null;
+}
+
 /** Build a full urn:node: URN from a loc and memoryId. Caches memory URNs. */
 const memoryUrnCache = new Map<string, string>();
 async function nodeUrn(loc: string, memoryId: string): Promise<string> {
@@ -5317,8 +5346,22 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             const continuity = worker
               ? await resolvers.Worker.continuity(worker, {}, mcpCtx)
               : null;
+            // #1026 — the bind is where a worker FIRST needs its own identity,
+            // and it printed neither the URN nor a link. #1008 asks every
+            // worker to sign what it publishes with a hyperlinked URN, so the
+            // briefing had to send it to hadron_get_worker for a string the
+            // bind already had in hand. Emitting both here removes that round
+            // trip at exactly the moment the need arises, and removes the
+            // reason the prompts carve out an exception to "never hand-build a
+            // portal link".
+            const boundUrn = worker
+              ? ((await resolvers.Worker.urn(worker, {}, mcpCtx)) as string | null)
+              : null;
+            const boundUrl = workerPortalUrl(boundUrn);
             workerLine =
               `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
+              (boundUrn ? `\n${boundUrn}` : '') +
+              (boundUrl ? `\nURL: ${boundUrl}` : '') +
               // A worker whose agent carries no template and who has no override
               // has no briefing — say so, rather than emitting a bare heading.
               (prompt
@@ -5570,12 +5613,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             urn = null;
           }
         }
+        // #1026 — from the URN just composed, so this row's link and its
+        // identifier cannot disagree.
+        const url = workerPortalUrl(urn);
         return (
           `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}\n` +
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
           (worker
-            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''}${urn ? `\n    ${urn}` : ''}\n`
+            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''}${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
           (app ? `    app: ${app.name}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
@@ -5658,11 +5704,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // back later — the cast is a one-time mint, and before the URN existed
         // an MCP-only client that did not record the cuid had no way back to
         // the worker (hadron-cli#443).
-        const workerUrn = await resolvers.Worker.urn(worker, {}, ctx);
+        const workerUrn = (await resolvers.Worker.urn(worker, {}, ctx)) as string | null;
+        // #1026: the cast is a one-time mint whose receipt is the record a
+        // human keeps, so the link ships with the URN it is built from.
+        const workerUrl = workerPortalUrl(workerUrn);
         return textResult(
           `Worker cast: **${worker.name}**${worker.role ? ` (${worker.role})` : ''}\n` +
             `Worker id: ${worker.id}\n` +
             (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
+            (workerUrl ? `URL: ${workerUrl}\n` : '') +
             `\nBoot briefing:\n\n${prompt ?? ''}`,
         );
       } catch (e) {
@@ -5984,10 +6034,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               flags.push('unheld — binding it holds it');
             }
             flags.push(taken.has(w.id) ? 'session live' : 'no live session');
+            // #1026 — built from the SAME page-shared URN above, so the roster
+            // costs no extra lookup per worker (the PR #1000 rule that pulled
+            // the App URN out of the per-item path in the first place).
+            const url = workerPortalUrl(urn);
             return (
               `- ${w.name}${w.role ? ` (${w.role})` : ''} — ${flags.join(', ')}` +
               (agentName ? `\n    agent: ${agentName}` : '') +
-              (urn ? `\n    ${urn}` : '')
+              (urn ? `\n    ${urn}` : '') +
+              (url ? `\n    URL: ${url}` : '')
             );
           }),
         );
@@ -6087,6 +6142,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           resolvers.Worker.continuity(worker, {}, ctx),
         ]);
         const agentName = (agent as { name?: string } | null)?.name ?? null;
+        const readUrl = workerPortalUrl(workerUrn as string | null);
 
         // Liveness is derived from real rows, never a lease (cor:agt:020:03) —
         // the same predicate hadron_start_session refuses WORKER_TAKEN on, and
@@ -6106,6 +6162,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           `**${worker.name}**${worker.role ? ` (${worker.role})` : ''} — ${flags.join(', ')}\n` +
             `Worker id: ${worker.id}\n` +
             (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
+            // #1026: THE recovery read is also the read a worker comes to for
+            // its own identity line, so the link ships beside the URN rather
+            // than being assembled from it.
+            (readUrl ? `URL: ${readUrl}\n` : '') +
             (agentName ? `Role agent: ${agentName}\n` : '') +
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
