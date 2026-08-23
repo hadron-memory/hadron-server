@@ -18,6 +18,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
@@ -1336,35 +1337,123 @@ async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boole
   return pending;
 }
 
+/**
+ * The App's `urn` COLUMN, read for URN composition. Only the column — never the
+ * App object, which would hand the caller App.keys / App.members
+ * (findings:broadening-read-gate-leaks-nested-objects, #552).
+ *
+ * Memoized per request+App, and ONLY inside a query (#1026). Both halves matter:
+ *
+ *   - memoized, because `Worker.urn` and `Worker.portalUrl` each need it, and a
+ *     roster selecting both would otherwise run TWO identical App lookups per
+ *     worker — concurrently, up to the 200-item page cap. That is the defect PR
+ *     #1000's review already caught once on this exact lookup; adding a second
+ *     URN-shaped field without a memo would reintroduce it at double the width.
+ *   - query-only, because `updateApp` can write a new `urn`, so a request-scoped
+ *     memo over it is stale by construction in a mutation. Same rule, and the
+ *     same reason, as the `repos` affinity memo below: a mutation pays the
+ *     re-read rather than serving its own stale answer.
+ *
+ * `info` is absent when an MCP tool calls the field resolver directly, which
+ * lands on the un-memoized path — the safe direction.
+ */
+async function loadAppUrnForWorker(
+  ctx: Context,
+  appId: string,
+  opts: { memoize: boolean },
+): Promise<string | null> {
+  type Cache = Map<string, Promise<string | null>>;
+  const read = async (): Promise<string | null> => {
+    const app = await ctx.db.app.findUnique({ where: { id: appId }, select: { urn: true } });
+    return app?.urn ?? null;
+  };
+  if (!opts.memoize) return read();
+  const holder = ctx as Context & { workerAppUrnCache?: Cache };
+  const cache = (holder.workerAppUrnCache ??= new Map());
+  let pending = cache.get(appId);
+  if (!pending) {
+    pending = read();
+    cache.set(appId, pending);
+  }
+  return pending;
+}
+
+/**
+ * The worker's URN, `hrn:worker:<root>:<app-slug>:<slug>` (#991) — COMPUTED from
+ * the App's URN plus the stored `slug`, never a column, so a worker is
+ * addressable context-free (`workerRef`, `resolveUrn`, a portal link) without
+ * the caller holding its cuid.
+ *
+ * Shared by `Worker.urn` and `Worker.portalUrl` (#1026) so the identifier a
+ * worker prints and the link that opens it can never disagree about what they
+ * address — the same reason `Node.urn` and `Node.portalUrl` share
+ * `resolveNodeUrnField`.
+ *
+ * Null rather than an error when the App's URN isn't the flat `<root>:<slug>`
+ * pair the fixed arity needs (a legacy row the #697 backfill left behind) — an
+ * unaddressable worker is a gap, not a query failure.
+ */
+async function resolveWorkerUrnField(
+  worker: { appId: string; slug: string },
+  ctx: Context,
+  info?: { operation?: { operation?: string } },
+): Promise<string | null> {
+  const appUrn = await loadAppUrnForWorker(ctx, worker.appId, {
+    memoize: info?.operation?.operation === 'query',
+  });
+  if (appUrn === null) return null;
+  try {
+    return composeWorkerUrn(normalizeUrnForLookup(appUrn), worker.slug);
+  } catch {
+    return null;
+  }
+}
+
 export const workerFieldResolvers = {
   Worker: {
     /**
-     * The worker's URN, `hrn:worker:<root>:<app-slug>:<slug>` (#991) — COMPUTED
-     * from the App's URN plus the stored `slug`, never a column, so a worker is
-     * addressable context-free (`workerRef`, `resolveUrn`, a portal link)
-     * without the caller holding its cuid.
+     * The worker's URN (#991). See `resolveWorkerUrnField`.
      *
      * An identity scalar, ungated like `name`: it discloses the App's slug, and
-     * the Worker read gate already requires participation in that App. Only the
-     * App's `urn` COLUMN is read — never the App object, which would hand the
-     * caller App.keys / App.members (findings:broadening-read-gate-leaks-
-     * nested-objects, #552).
-     *
-     * Null rather than an error when the App's URN isn't the flat `<root>:<slug>`
-     * pair the fixed arity needs (a legacy row the #697 backfill left behind) —
-     * an unaddressable worker is a gap, not a query failure.
+     * the Worker read gate already requires participation in that App.
      */
-    urn: async (worker: { appId: string; slug: string }, _: unknown, ctx: Context) => {
-      const app = await ctx.db.app.findUnique({
-        where: { id: worker.appId },
-        select: { urn: true },
-      });
-      if (!app) return null;
-      try {
-        return composeWorkerUrn(normalizeUrnForLookup(app.urn), worker.slug);
-      } catch {
-        return null;
-      }
+    urn: (
+      worker: { appId: string; slug: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ) => resolveWorkerUrnField(worker, ctx, info),
+    /**
+     * #1026 — the portal link that opens this worker, so a worker signing an
+     * artifact under #1008 hands over a URL instead of assembling one.
+     *
+     * Node reads have emitted this since #881, and every role-agent prompt on
+     * this team carries the rule "never hand-build a portal link — copy the URL
+     * line a node read prints". Worker reads printed the URN and no link, so
+     * satisfying #1008 meant constructing `<origin>/app/u/<urn>` by hand: the
+     * one thing the surrounding instruction forbids. The prompts resolved that
+     * with an explicit carve-out ("the ONE portal link you may construct
+     * yourself"), which teaches an exception to a rule that exists for a good
+     * reason and puts the portal origin in the model's hands rather than the
+     * server's. This field is what lets the carve-out come out.
+     *
+     * Built from the SAME URN the `urn` field returns, so the two cannot
+     * diverge. Ungated for the same reason `urn` is — it discloses nothing the
+     * URN beside it does not.
+     *
+     * Nullable on BOTH arms, and neither is an error: no configured portal
+     * origin means no link (see lib/portalUrl.ts — a link to the wrong host is
+     * worse than none), and an App URN the fixed arity cannot take means no URN
+     * to build one from.
+     */
+    portalUrl: async (
+      worker: { appId: string; slug: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => {
+      const urn = await resolveWorkerUrnField(worker, ctx, info);
+      return urn === null ? null : portalUrlForUrn(urn);
     },
     /**
      * #1024 — the repo affinity of this worker's ROLE, resolved so a client

@@ -1965,6 +1965,18 @@ export const typeDefs = `#graphql
     shape this arity requires.
     """
     urn: String
+    """
+    #1026 — the portal link that opens this worker, mirroring Node.portalUrl
+    (#881), so a worker signing an artifact under #1008 hands over a URL
+    instead of assembling one out of a URN spelling the /app/u route may not
+    resolve.
+
+    Built from the SAME URN the urn field returns, so the two cannot diverge.
+    Null on both arms and neither is an error: no configured portal origin
+    means no link (a link to the wrong host is worse than none), and an App URN
+    the fixed arity cannot take means no URN to build one from.
+    """
+    portalUrl: String
     "The cast-list role this filling answers ('backend-engineer')."
     role: String
     """
