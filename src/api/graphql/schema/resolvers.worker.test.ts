@@ -288,6 +288,219 @@ describe('castWorker — agent resolution', () => {
   });
 });
 
+describe('#1024 — Worker.repos (resolved role affinity)', () => {
+  const roleNodeRepos = (role: string, repos: unknown) =>
+    db.node.upsert({
+      where: { loc_memoryId: { loc: `roles:${role}`, memoryId: teamAgent.systemMemoryId } },
+      create: {
+        id: generateId(),
+        memoryId: teamAgent.systemMemoryId,
+        loc: `roles:${role}`,
+        name: role,
+        data: { repos } as any,
+      },
+      update: { data: { repos } as any },
+    });
+
+  it('resolves the affinity of the worker\'s role', async () => {
+    await roleNodeRepos('backend-engineer', ['hadron-memory/hadron-server']);
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(admin.id))).toEqual([
+      'hadron-memory/hadron-server',
+    ]);
+  });
+
+  it('is [] for a worker with no role, and for a role with no definition', async () => {
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos({ ...worker, role: null }, {}, ctx(admin.id))).toEqual([]);
+    expect(await W.repos({ ...worker, role: 'astronaut' }, {}, ctx(admin.id))).toEqual([]);
+  });
+
+  it('finds a role that sorts past the first page of a large roster', async () => {
+    // The `teamRoles` query pages at 50. Routing this lookup through it made an
+    // App with more than 50 roles answer [] for everything past the first page
+    // — a suppressed warning indistinguishable from "no affinity configured"
+    // (PR #1071 review, Codex).
+    for (let i = 0; i < 60; i++) {
+      await createRoleNode(teamAgent.systemMemoryId, `filler-${String(i).padStart(3, '0')}`);
+    }
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: teamAgent.systemMemoryId,
+        loc: 'roles:zz-late-role',
+        name: 'zz-late-role',
+        data: { repos: ['acme/late'] } as any,
+      },
+    });
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos({ ...worker, role: 'zz-late-role' }, {}, ctx(admin.id))).toEqual([
+      'acme/late',
+    ]);
+  });
+
+  it('works for an App with SEVERAL roles: branches (TEAM_AGENT_AMBIGUOUS)', async () => {
+    // A supported configuration. The single-Team-Agent lookup threw
+    // TEAM_AGENT_AMBIGUOUS, and the catch turned that into [] for every
+    // worker — so those Apps could never use the field at all.
+    await createRoleNode(roleAgent.systemMemoryId, 'designer');
+    await db.node.update({
+      where: {
+        loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId },
+      },
+      data: { data: { repos: ['acme/api'] } as any },
+    });
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(admin.id))).toEqual(['acme/api']);
+  });
+
+  it('an EMPTY affinity on the first definition wins over a later one (#1071 review)', async () => {
+    // "Empty" is an answer, not the absence of one: it means "spans
+    // everything, never warn" — which is exactly what a coordinator role
+    // declares. Recording only non-empty results made an empty first-installed
+    // definition invisible, so a later agent's repos silently won and the role
+    // that deliberately spans everything got a FALSE mismatch warning.
+    await db.node.update({
+      where: {
+        loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId },
+      },
+      data: { data: { repos: [] } as any },
+    });
+    // A second installed agent declares the SAME role with real repos.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: roleAgent.systemMemoryId,
+        loc: 'roles:backend-engineer',
+        name: 'backend-engineer',
+        data: { repos: ['acme/should-not-win'] } as any,
+      },
+    });
+
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(admin.id))).toEqual([]);
+  });
+
+  it('an UNREADABLE earlier memory stops the walk rather than letting a later one win', async () => {
+    // Skipping an unreadable memory let a later agent's duplicate role supply
+    // an affinity the earlier, unreadable one might have overridden — a false
+    // mismatch warning conjured out of a memory nobody could read
+    // (PR #1071 review, Codex).
+    //
+    // The team agent is installed first, so its encrypted memory stops the
+    // walk: the role-agent's later definition must NOT win.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: roleAgent.systemMemoryId,
+        loc: 'roles:backend-engineer',
+        name: 'backend-engineer',
+        data: { repos: ['acme/should-not-win'] } as any,
+      },
+    });
+    await db.memory.update({
+      where: { id: teamAgent.systemMemoryId },
+      data: { isEncrypted: true },
+    });
+
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(admin.id))).toEqual([]);
+  });
+
+  it('propagates an unexpected error instead of degrading to no affinity', async () => {
+    // The catch around the role load tolerates ONE thing: an encrypted system
+    // memory with no session key. A bare catch would turn a DB or runtime
+    // failure into [] — which reads as "no affinity configured", is a normal
+    // answer by design, and is therefore undiagnosable
+    // (review:narrow-catch-blocks; PR #1071 review, Copilot).
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const spy = vi
+      .spyOn(db.node, 'findMany')
+      .mockRejectedValueOnce(new Error('connection reset'));
+    try {
+      await expect(W.repos(worker, {}, ctx(admin.id))).rejects.toThrow(/connection reset/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('memoizes the roster within a QUERY, and never within a mutation', async () => {
+    // The memo exists so a 50-worker LISTING does not reload the roster 50
+    // times. It is scoped to queries because a request-scoped memo over data
+    // the same request can WRITE is stale by construction — review found three
+    // separate writers that would have had to invalidate it, and the set is
+    // open. A mutation pays the re-read and can never read its own stale
+    // answer (PR #1071 review, Codex rounds 4-7).
+    await db.node.update({
+      where: {
+        loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId },
+      },
+      data: { data: { repos: ['acme/api'] } as any },
+    });
+    const a = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const b = await cast({ agentRef: roleAgent.id, name: 'Henry' });
+    const query = { operation: { operation: 'query' } };
+    const mutation = { operation: { operation: 'mutation' } };
+
+    const shared = ctx(admin.id);
+    let spy = vi.spyOn(db.appAgent, 'findMany');
+    try {
+      expect(await W.repos(a, {}, shared, query)).toEqual(['acme/api']);
+      const afterFirst = spy.mock.calls.length;
+      expect(await W.repos(b, {}, shared, query)).toEqual(['acme/api']);
+      expect(spy.mock.calls.length).toBe(afterFirst); // memoized
+    } finally {
+      spy.mockRestore();
+    }
+
+    const inMutation = ctx(admin.id);
+    spy = vi.spyOn(db.appAgent, 'findMany');
+    try {
+      expect(await W.repos(a, {}, inMutation, mutation)).toEqual(['acme/api']);
+      const afterFirst = spy.mock.calls.length;
+      expect(await W.repos(b, {}, inMutation, mutation)).toEqual(['acme/api']);
+      // Re-read, deliberately: a mutation must not serve its own stale answer.
+      expect(spy.mock.calls.length).toBeGreaterThan(afterFirst);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('propagates an unexpected error instead of degrading to no affinity', async () => {
+    // The catch around the role load tolerates ONE thing: an encrypted system
+    // memory with no session key. A bare catch would turn a DB or runtime
+    // failure into [] — which reads as "no affinity configured", is a normal
+    // answer by design, and is therefore undiagnosable
+    // (review:narrow-catch-blocks; PR #1071 review, Copilot).
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const spy = vi
+      .spyOn(db.node, 'findMany')
+      .mockRejectedValueOnce(new Error('connection reset'));
+    try {
+      await expect(W.repos(worker, {}, ctx(admin.id))).rejects.toThrow(/connection reset/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+
+  it('MASKS to [] for a caller outside the App — the Session.worker nesting path', async () => {
+    // Session.worker reaches a Worker through a wider gate that admits any org
+    // member and survives leaving the App, so an ungated field here would
+    // publish the team's repo list through any historical session.
+    //
+    // HONEST NOTE on what this asserts: the OUTCOME is pinned, the mechanism is
+    // not. `teamRoles` runs the same predicate the mask wraps, so today this
+    // passes whether or not the mask is present — deleting it leaves the suite
+    // green. The mask is defence-in-depth against those two gates diverging
+    // (see the field's JSDoc); this test guarantees the outsider sees nothing,
+    // by whichever gate gets there first.
+    await roleNodeRepos('backend-engineer', ['hadron-memory/hadron-server']);
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.repos(worker, {}, ctx(outsider.id))).toEqual([]);
+  });
+});
+
 describe('castWorker — naming (#1050: the register is gone)', () => {
   it('a nameless cast REFUSES — there is no pool to draw from', async () => {
     await expectCode(cast({ role: 'backend-engineer' }), 'WORKER_NAME_REQUIRED');

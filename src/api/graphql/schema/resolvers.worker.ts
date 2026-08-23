@@ -1366,6 +1366,69 @@ export const workerFieldResolvers = {
         return null;
       }
     },
+    /**
+     * #1024 — the repo affinity of this worker's ROLE, resolved so a client
+     * binding a worker needs no second round-trip to `teamRoles`. The CLI's
+     * mismatch warning fires at `session start` (hadron-cli#456), which already
+     * has the worker in hand.
+     *
+     * Behind the worker read gate and masked on deny, like `promptOverride` and
+     * the holder — because `Session.worker` reaches a Worker through a WIDER
+     * gate that admits any org member and survives a user leaving the App, so
+     * an ungated field here would publish a team's repo list through any
+     * historical session.
+     *
+     * Masking to `[]` rather than null is deliberate and costs nothing: empty
+     * already means "no affinity, never warn" (the field's contract), so a
+     * denied caller simply gets no warning — the safe direction for a signal
+     * that must never become a refusal.
+     *
+     * UNPROVEN BY CONSTRUCTION, and kept anyway. `teamRoles` runs
+     * `requireWorkerReadAccess` — the same predicate `maySeeWorkerInternals`
+     * wraps — so today the inner call refuses first and deleting this line
+     * leaves the suite green. That is a green mutation indicting the TEST, not
+     * the guard (review:a-green-mutation-indicts-the-test): no input reaches
+     * it, because the two gates are currently identical.
+     *
+     * It stays because it makes THIS field's audience explicit rather than
+     * inherited. `teamRoles` is a roster read and widening it is plausible; if
+     * it ever admits a broader caller, this field would silently widen with it
+     * — through `Session.worker`, which is the leak path described above. The
+     * day those predicates diverge, this line becomes load-bearing and a test
+     * can reach it.
+     *
+     * Resolved through `loadAppRepoAffinity` — a direct, request-memoized read
+     * of the role nodes, NOT the `teamRoles` query. Routing an internal lookup
+     * through a public paged query cost three defects in one decision (PR
+     * #1071 review, Codex): it truncated at 50 roles, it broke outright for an
+     * App with several `roles:` branches, and it reloaded the roster once per
+     * worker on a listing.
+     *
+     * A role with no definition, a worker with no role, and an unreadable
+     * system memory all answer `[]` rather than erroring. A soft signal must
+     * not be able to fail a read.
+     */
+    repos: async (
+      worker: { appId: string; role: string | null },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string[]> => {
+      if (!worker.role) return [];
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return [];
+      // LAZY import: resolvers.teamRole imports this module (withRoleWriteLock,
+      // locateTeamAgent), so a static import would close the cycle. Same shape
+      // as the teamChat locator below.
+      const { loadAppRepoAffinity } = await import('./resolvers.teamRole.js');
+      // Memoize only inside a QUERY. In a mutation the same request can write
+      // the roles this answer derives from, and a request-scoped memo over
+      // writable data is stale by construction — so a mutation pays the
+      // re-read rather than risking its own stale answer.
+      const affinity = await loadAppRepoAffinity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return affinity.get(worker.role.toLowerCase()) ?? [];
+    },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     promptOverride: async (
       worker: { appId: string; promptOverride: string | null },

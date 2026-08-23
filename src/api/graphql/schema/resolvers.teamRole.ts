@@ -154,6 +154,37 @@ async function loadRoleNodes(
  * historical record of what was allocated to this role and is left intact
  * rather than migrated away — inert data is cheaper than lost provenance.
  */
+/**
+ * `data.repos` → the role's repo affinity (#1024): the repos a worker in this
+ * role normally works in.
+ *
+ * Tolerant by construction. This is a SOFT signal a client renders as a warning
+ * (hadron-cli#456), never a gate, so a malformed value degrades to "no
+ * affinity" rather than failing a read of the whole roster — a role list that
+ * 500s because one node has a stray key is a worse outcome than a missing
+ * warning. Non-strings are dropped, entries trimmed, blanks removed, order
+ * preserved, exact duplicates collapsed.
+ *
+ * EMPTY AND UNSET MEAN THE SAME THING: no affinity, never warn. The issue left
+ * that open and the simplest contract is the honest one — a client cannot act
+ * differently on the two, since "spans everything" (the coordinator) and "not
+ * configured yet" both mean "do not warn", and inventing a distinction would
+ * make an unconfigured team look misconfigured.
+ */
+function parseRepoAffinity(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const trimmed = entry.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
 async function buildTeamRole(
   ctx: Context,
   node: DecryptedRoleNode,
@@ -197,6 +228,12 @@ async function buildTeamRole(
     loc: node.loc,
     nodeId: node.id,
     description: node.description,
+    // #1024 — repo affinity. The ONE piece of `data` this projection reads:
+    // a curated field, not a generic `data` passthrough, so the surface keeps
+    // deciding what it exposes rather than leaking whatever a node happens to
+    // carry (`data.names` on a legacy role node is exactly what must NOT
+    // appear here).
+    repos: parseRepoAffinity(node.data?.repos),
     roleAgent,
     hasNamePlaceholder,
   };
@@ -223,6 +260,8 @@ type TeamRoleWriteArgs = {
   teamAgentRef?: string | null;
   role: string;
   description?: string | null;
+  /** #1024 — repo affinity. Omitted preserves; an empty array clears. */
+  repos?: string[] | null;
 };
 
 /**
@@ -324,45 +363,120 @@ async function writeTeamRole(
       );
     }
 
-    // #1050: this surface no longer owns ANY `data` key, and therefore does
-    // not SEND one. The register, its conventions and the #987 compare-and-swap
-    // that protected them are gone, so a role write touches name and
-    // description only.
+    // #1050 — this surface owns NO `data` key by default, and therefore does
+    // not send one. Omitting `data` is load-bearing rather than tidiness
+    // (PR #1059 review, Codex P1): reading the node's data and writing it back
+    // looks like "passing it through untouched" and is a wholesale
+    // last-write-wins overwrite of a pre-write snapshot. Generic writers
+    // (updateNode, hadron_update_node_data) do NOT take withRoleWriteLock, so a
+    // concurrent edit landing in that window would be silently reverted. Legacy
+    // `data.names` survives precisely because it is never rewritten.
     //
-    // Omitting `data` is load-bearing, not tidiness (PR #1059 review, Codex
-    // P1). Reading the node's data and writing it back would look like
-    // "passing it through untouched" and would in fact be a wholesale
-    // last-write-wins overwrite of a snapshot taken before the write: generic
-    // writers (updateNode, hadron_update_node_data) do NOT take
-    // withRoleWriteLock, and this change removed the revision guard, so a
-    // concurrent generic edit landing in that window would be silently
-    // reverted — by a surface that claims to edit only the description.
-    // Omitted, writeNodeCore preserves whatever is actually in the row.
+    // #1024 adds exactly ONE key this surface does own: `repos`. Writing it
+    // reopens that window, so it is written the only safe way available —
+    // merge just this key, and stake the #989 revision guard on the row we
+    // read. A concurrent generic edit bumps revSeq and the write REFUSES
+    // (NODE_WRITE_CONFLICT) rather than silently reverting it.
     //
-    // Legacy data.names on an existing role node therefore survives because it
-    // is never rewritten, which is a stronger guarantee than re-sending it.
+    // The guard is why `data` is still absent when `repos` is omitted: an
+    // unconditional merge would make every description edit a data write, and
+    // pay the conflict risk for callers who touched no data at all.
+    const wantsRepoWrite = args.repos !== undefined && args.repos !== null;
+    // The base to merge onto. `existing` comes from loadRoleNodes, which
+    // filters `deletedAt: null` — but writeNodeCore RESURRECTS a tombstone on
+    // create (`isResurrect`), so a create over a soft-deleted role updates that
+    // row rather than inserting a new one. Merging against `existing` alone
+    // would therefore send `{ repos }` as the WHOLE data bag and erase the
+    // tombstone's history — legacy `data.names` included — which is the one
+    // thing this surface has promised throughout not to do
+    // (PR #1071 review, Codex).
+    //
+    // Only looked up when a repo write is actually happening, and only on
+    // create: an update already has the live row.
+    // The merge base must be a PLAIN OBJECT. A `roles:<role>` node authored
+    // generically can legally hold a scalar or an array in `data`, and
+    // spreading those silently corrupts them — an array becomes numeric keys, a
+    // string becomes character keys, a number vanishes entirely (PR #1071
+    // review, Codex). This surface promises to modify only `repos`, so it
+    // refuses rather than rewriting a shape it was never asked to touch.
+    const mergeBase: Record<string, unknown> = wantsRepoWrite
+      ? (() => {
+          const v = existing?.data;
+          if (v == null) return {};
+          if (typeof v !== 'object' || Array.isArray(v)) {
+            throw new GraphQLError(
+              `Role "${role}" has non-object data, so setting repos would rewrite it. Fix the node's data first.`,
+              { extensions: { code: 'TEAM_ROLE_DATA_NOT_OBJECT', role, loc } },
+            );
+          }
+          return v as Record<string, unknown>;
+        })()
+      : {};
 
-    await writeNodeCore(
-      {
-        memoryId: systemMemoryId,
-        loc,
-        // Node name defaults to the role slug; description is optional and
-        // preserve-on-omit via the shared seam's D4 semantics.
-        ...(mode === 'create' ? { name: role } : {}),
-        ...(args.description !== undefined && args.description !== null
-          ? { description: args.description }
-          : {}),
-        reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
-      },
-      ctx,
-      mode,
-      // #1050: no guardRevSeq. The #989 revision guard existed to close a
-      // TOCTOU window on the REGISTER — a generic node write slipping between
-      // the locked read and the write — and there is no longer a register for
-      // an off-road write to clobber. Role writes now set only name and
-      // description, which are last-write-wins like every other node field.
-      mode === 'update' ? { targetNodeId: existing!.id } : undefined,
-    );
+    const mergedData = wantsRepoWrite
+      ? { ...mergeBase, repos: parseRepoAffinity(args.repos) }
+      : undefined;
+
+    try {
+      await writeNodeCore(
+        {
+          memoryId: systemMemoryId,
+          loc,
+          // Node name defaults to the role slug; description is optional and
+          // preserve-on-omit via the shared seam's D4 semantics.
+          ...(mode === 'create' ? { name: role } : {}),
+          ...(args.description !== undefined && args.description !== null
+            ? { description: args.description }
+            : {}),
+          // On CREATE we never send data. writeNodeCore resurrects a tombstone
+        // through its upsert-update branch, and that branch takes no revision
+        // guard — so a create racing a restoreNodeRevision could replace the
+        // concurrent data with a stale merge (PR #1071 review, Codex). Omitting
+        // data preserves whatever the row holds; the repos are then written by
+        // the GUARDED update below, which is the same path an ordinary edit
+        // takes. One write path for data, one guard, no special case.
+        ...(mergedData !== undefined ? { data: mergedData } : {}),
+          reason: `${mode === 'create' ? 'createTeamRole' : 'updateTeamRole'} (#960)`,
+        },
+        ctx,
+        mode,
+        mode === 'update'
+          ? {
+              targetNodeId: existing!.id,
+              // Only when this write carries data. A description-only edit stays
+              // last-write-wins like any other node field, as it was before
+              // #1024 — the guard exists for the data merge, not for the row.
+              // A guarded update is TWO node writes — the revNo claim, then the
+            // main update guarded on the claimed value — and they are not in
+            // one transaction (the role lock runs on a separate connection).
+            // A writer landing between them leaves a consumed revSeq and a
+            // revision describing an edit that then refuses. That is
+            // pre-existing to #989's primitive rather than new here (#1072),
+            // but re-enabling the option is what makes it reachable again, so
+            // it is named at the call site rather than left to be rediscovered.
+            // The refusal itself is correct; the residue is an audit artifact.
+            ...(wantsRepoWrite ? { guardRevSeq: existing!.revSeq } : {}),
+            }
+          : undefined,
+      );
+    } catch (e) {
+      // #1024: the guard fired. Translate rather than leak the generic node
+      // code — a caller of updateTeamRole has no idea what NODE_WRITE_CONFLICT
+      // refers to, and the actionable fact is specific: somebody edited this
+      // role node's data outside this surface, so re-read and retry.
+      //
+      // Deliberately a REFUSAL rather than a retry-in-place. The competing
+      // write is by definition one this surface cannot see the intent of, and
+      // silently re-merging on top of it is how the last-write-wins revert
+      // (PR #1059) happened in the first place.
+      if (e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
+        throw new GraphQLError(
+          `The "${role}" role definition was modified while this edit ran — re-read it and retry.`,
+          { extensions: { code: 'TEAM_ROLE_DATA_CONFLICT', role } },
+        );
+      }
+      throw e;
+    }
 
     // Return the fresh projection through the same builder the read uses.
     const nodes = await loadRoleNodes(ctx, systemMemoryId);
@@ -477,6 +591,127 @@ async function deleteTeamRoleImpl(
   });
 }
 
+/**
+ * #1024 — role → repo affinity for ONE App, memoized per request.
+ *
+ * Deliberately NOT a call to the `teamRoles` query, which is what the first
+ * version did (PR #1071 review, Codex found three defects in one decision):
+ *
+ * - it PAGES, so an App with more than 50 roles silently answered `[]` for
+ *   every role sorting past the first page — a suppressed warning that looks
+ *   exactly like "no affinity configured";
+ * - it runs `locateTeamAgent`, which throws TEAM_AGENT_AMBIGUOUS for an App
+ *   with several `roles:` branches — a SUPPORTED configuration — so those Apps
+ *   could never use this field at all;
+ * - it re-ran the whole projection per worker, so a 50-worker page reloaded and
+ *   re-decrypted the same roster 50 times.
+ *
+ * All three came from reusing a public query for an internal lookup. This reads
+ * the role nodes directly, across EVERY installed agent's system memory rather
+ * than one inferred Team Agent — which is both cheaper and more correct: if any
+ * installed agent defines the role, its affinity counts, and ambiguity stops
+ * being an error to swallow. Ties resolve by INSTALL order, then `loc` order —
+ * both explicitly ordered, since a tie-break is only deterministic if every
+ * step of it is.
+ *
+ * Caching is per REQUEST (on `ctx`), never longer — an edit landing mid-request
+ * is far less likely than a stale warning surviving a role change.
+ */
+export async function loadAppRepoAffinity(
+  ctx: Context,
+  appId: string,
+  opts?: { memoize?: boolean },
+): Promise<Map<string, string[]>> {
+  // MEMOIZED ONLY FOR QUERIES (PR #1071 review, Codex, rounds 4-7).
+  //
+  // A request-scoped memo over data a request can also WRITE is stale by
+  // construction, and each round of review found another writer that had to
+  // invalidate it: the TeamRole mutations, then updateNode/updateNodeData, then
+  // deleteNode/moveNode/restoreNodeRevision. Chasing the last writer is the
+  // wrong shape — the set is open, and every miss is silent.
+  //
+  // The memo exists to stop a 50-worker LISTING reloading the roster 50 times,
+  // and a listing is a query. A mutation pays the re-read and can never read
+  // its own stale answer. That retires the whole class rather than its
+  // instances, which is why the invalidation hooks are gone with it.
+  type Cache = Map<string, Promise<Map<string, string[]>>>;
+  const holder = ctx as Context & { repoAffinityCache?: Cache };
+  const cache = opts?.memoize ? (holder.repoAffinityCache ??= new Map()) : null;
+  let pending = cache?.get(appId);
+  if (pending) return pending;
+
+  pending = (async () => {
+    const out = new Map<string, string[]>();
+    // ORDERED, because the tie-break below depends on it. Without an explicit
+    // orderBy, Prisma makes no ordering promise, so two installed agents each
+    // defining the same role could answer differently between requests or
+    // environments (PR #1071 review, Copilot) — and the comment below claimed a
+    // determinism the query did not provide. Install order is the meaningful
+    // one: the agent installed first owns the role by default.
+    const installed = await ctx.db.appAgent.findMany({
+      where: { appId },
+      orderBy: [{ createdAt: 'asc' }, { agentId: 'asc' }],
+      select: { agent: { select: { systemMemoryId: true, deletedAt: true } } },
+    });
+    const memoryIds = [
+      ...new Set(
+        installed
+          .map(({ agent }) => (agent && !agent.deletedAt ? agent.systemMemoryId : null))
+          .filter((id): id is string => !!id),
+      ),
+    ];
+    if (memoryIds.length === 0) return out;
+
+    for (const memoryId of memoryIds) {
+      let nodes: DecryptedRoleNode[];
+      try {
+        nodes = await loadRoleNodes(ctx, memoryId);
+      } catch (e) {
+        // ONLY the documented case: an encrypted system memory with no active
+        // session key must not fail a worker read for the sake of an optional
+        // warning. Everything else propagates (review:narrow-catch-blocks) — a
+        // bare catch would turn a DB or runtime failure into "no affinity",
+        // which is undiagnosable precisely because an empty answer is normal.
+        if (!(e instanceof GraphQLError && e.extensions?.code === 'SESSION_EXPIRED')) {
+          throw e;
+        }
+        // STOP rather than skip (PR #1071 review, Codex). Skipping an
+        // unreadable memory let a LATER agent's duplicate role supply an
+        // affinity the earlier, unreadable one might have overridden —
+        // breaking the first-install precedence declared above and inventing a
+        // false mismatch warning out of a memory nobody could read.
+        //
+        // Everything already in `out` came from a strictly EARLIER memory, so
+        // it keeps its precedence and stays. Everything not yet set is now
+        // unknowable, and unknown answers [] — never warn. A partial answer
+        // that could be wrong is worse than no answer for a signal whose whole
+        // job is to be trusted when it fires.
+        break;
+      }
+      for (const node of nodes) {
+        const role = node.loc.slice(ROLES_BRANCH_PREFIX.length).toLowerCase();
+        // FIRST definition wins, even when its affinity is EMPTY (PR #1071
+        // review, Codex). Recording only non-empty results made an empty
+        // first-installed definition invisible, so a later agent's affinity
+        // silently won — contradicting the install-order tie-break declared
+        // just above it, and worse, the contract that empty means "no
+        // affinity, never warn". The observable failure is a FALSE mismatch
+        // warning: the role that deliberately spans everything gets told it is
+        // in the wrong repo.
+        //
+        // Empty is an answer here, not the absence of one. This is the same
+        // conflation the field's own doc warns about, in the loader that
+        // implements it.
+        if (out.has(role)) continue;
+        out.set(role, parseRepoAffinity(node.data?.repos));
+      }
+    }
+    return out;
+  })();
+  cache?.set(appId, pending);
+  return pending;
+}
+
 export const teamRoleQueries = {
   /**
    * teamRoles — #960: the role definitions of an App's Team Agent, with the
@@ -527,15 +762,8 @@ export const teamRoleMutations = {
    * seam rather than P2002-blocking forever (the chat-bootstrap lesson).
    */
   createTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) =>
-    writeTeamRole(args, ctx, 'create'),
+    writeTeamRole({ ...args, repos: undefined }, ctx, 'create'),
 
-  /**
-   * updateTeamRole — #960: edit a role definition. `names` is wholesale
-   * (explicit, the natural fit for `team role names set`) but the invariants
-   * run against the DIFF, so `add`/`rm`/`mv` sugar can never smuggle an
-   * invariant violation. Omitted fields preserve; explicit null clears a
-   * convention key.
-   */
   updateTeamRole: async (_: unknown, args: TeamRoleWriteArgs, ctx: Context) =>
     writeTeamRole(args, ctx, 'update'),
 
