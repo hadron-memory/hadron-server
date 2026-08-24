@@ -149,24 +149,36 @@ export function findBrokenSdlLiterals(file, text) {
 
     const openLineStart = text.lastIndexOf('\n', openIndex) + 1;
     const closeLineStart = text.lastIndexOf('\n', i) + 1;
+    const lineEnd = text.indexOf('\n', i);
+    const line = text.slice(closeLineStart, lineEnd === -1 ? text.length : lineEnd);
     const sameLineAsOpening = openLineStart === closeLineStart;
     const firstOnItsLine = text.slice(closeLineStart, i).trim() === '';
-    // A template literal is an EXPRESSION: whatever consumed it follows the
-    // closing backtick. `;` here, `,` or `)` if the SDL is ever passed inline.
-    const closesAnExpression = /^\s*[;,)]/.test(text.slice(i + 1));
+    // A template literal is an EXPRESSION, so its closer is followed by whatever
+    // consumed it and NOTHING ELSE on that line: `;` here, or `,` / `)` / `]` /
+    // `}` if the SDL is ever passed inline, plus an optional trailing comment.
+    //
+    // Asserting only a PREFIX is not enough, and that was the second round on
+    // this same predicate (Codex, PR #1085): a description line reading
+    // `` `;` ends a statement. `` starts with a backtick AND is followed by a
+    // semicolon, so a prefix test called it a terminator. Being told "narrower"
+    // twice means the SHAPE is wrong rather than the width — a prefix cannot
+    // separate syntax from prose that begins like it, however many characters
+    // it inspects, so the whole line is the unit (findings, #1032).
+    const closesAnExpression = /^[\s;,)\]}]*(\/\/.*)?$/.test(
+      text.slice(i + 1, lineEnd === -1 ? text.length : lineEnd),
+    );
 
     if ((!sameLineAsOpening && !firstOnItsLine) || !closesAnExpression) {
-      const lineEnd = text.indexOf('\n', i);
-      const line = text.slice(closeLineStart, lineEnd === -1 ? text.length : lineEnd);
       const inComment = line.slice(0, i - closeLineStart).includes('#');
       // Position-legal but shape-illegal: a line that STARTS with a backtick,
       // i.e. prose — a code span or a fenced block — that looks like a closer.
       const looksLikeATerminator = firstOnItsLine && !sameLineAsOpening;
       const why = looksLikeATerminator
         ? [
-            'this backtick starts the line like a terminator, but no `;` follows',
-            'it — so it is prose (a code span or a fenced block), and it ends the',
-            'SDL template literal here. Escape it (\\`).',
+            'this backtick starts the line like a terminator, but the rest of the',
+            'line is prose rather than a plain `;` — so it is a code span or a',
+            'fenced block, and it ends the SDL template literal here. Escape it',
+            '(\\`).',
           ]
         : [
             inComment

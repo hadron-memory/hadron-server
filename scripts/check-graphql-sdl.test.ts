@@ -154,6 +154,35 @@ describe('check-graphql-sdl — the literal is intact', () => {
     expect(r.out).toContain('typeDefs.ts:3');
   });
 
+  it('FAILS on a code span that opens a line AND begins with a semicolon', () => {
+    // Codex's second pass on PR #1085: `` `;` ends a statement. `` satisfies
+    // both "starts the line" and "followed by a semicolon", so a PREFIX-shaped
+    // shape check waved it through. Being told narrower twice means the shape
+    // is wrong, not the width — the whole line is the unit now.
+    const r = runOn(
+      sdl(
+        '  """',
+        '  ' + BACKTICK + ';' + BACKTICK + ' ends a statement.',
+        '  """',
+        '  type Q { id: ID! }',
+      ),
+    );
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('typeDefs.ts:3');
+  });
+
+  it('does NOT fire on a terminator carrying a trailing line comment', () => {
+    const r = runOn(
+      lines(
+        'export const typeDefs = ' + BACKTICK + '#graphql',
+        '  type Q { id: ID! }',
+        BACKTICK + '; // the single SDL source',
+        '',
+      ),
+    );
+    expect(r.code).toBe(0);
+  });
+
   it('does NOT fire when a legitimate terminator is followed by a comma', () => {
     // The SDL is a `;` today, but a literal passed inline closes on `,` or `)`.
     const r = runOn(
