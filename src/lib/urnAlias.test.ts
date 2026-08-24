@@ -342,3 +342,101 @@ describe('#1079 — the owner-handle cascade records aliases too', () => {
     expect(await resolveAppRef(db, `hrn:app:${oldHandle}:tool`)).toEqual({ id: app.id });
   });
 });
+
+describe('#1080 review — defects the first draft shipped', () => {
+  it('normalizes the alias key on write, so a `::` stored urn is still findable', async () => {
+    // A row may hold the canonical `::` spelling from the spec-021 migration
+    // window, while every resolver queries the single-colon form. Storing the
+    // key verbatim put it somewhere nothing ever looks.
+    const app = await mkApp(`${org.urn}:team`);
+    await recordUrnRename(db, {
+      entityType: 'APP', entityId: app.id, oldUrn: `${org.urn}::team`, newUrn: `${org.urn}:renamed`,
+    });
+    await db.app.update({ where: { id: app.id }, data: { urn: `${org.urn}:renamed` } });
+    const row = await db.urnAlias.findFirstOrThrow({ where: { entityId: app.id } });
+    expect(row.urn).toBe(`${org.urn}:team`);
+    expect(await resolveAppRef(db, `hrn:app:${org.urn}:team`)).toEqual({ id: app.id });
+  });
+
+  it('treats a `::` → `:` spelling change as no rename at all', async () => {
+    const app = await mkApp(`${org.urn}:team`);
+    await recordUrnRename(db, {
+      entityType: 'APP', entityId: app.id, oldUrn: `${org.urn}::team`, newUrn: `${org.urn}:team`,
+    });
+    expect(await db.urnAlias.count()).toBe(0);
+  });
+
+  it('finds a live holder even when more than three dead ones came first', async () => {
+    // The old `take: 3` was UNORDERED, so three dead claimants could hide the
+    // live one and report a resolvable URN as missing.
+    const shared = `${org.urn}:shared`;
+    for (let i = 0; i < 4; i++) {
+      const dead = await mkApp(`${org.urn}:dead-${i}`);
+      await recordUrnRename(db, { entityType: 'APP', entityId: dead.id, oldUrn: shared, newUrn: dead.urn });
+      await db.app.update({ where: { id: dead.id }, data: { deletedAt: new Date() } });
+    }
+    const live = await mkApp(`${org.urn}:live`);
+    await recordUrnRename(db, { entityType: 'APP', entityId: live.id, oldUrn: shared, newUrn: live.urn });
+    expect(await resolveAppRef(db, `hrn:app:${shared}`)).toEqual({ id: live.id });
+  });
+
+  it('a dead claimant does not make a NODE urn ambiguous', async () => {
+    // resolveMemoryRef filtered liveness before the ambiguity check; the
+    // node/edge arm did not, so the two surfaces disagreed about the same URN.
+    const shared = `${org.urn}:shared`;
+    const dead = await mkMemory(`${org.urn}:dead`);
+    const live = await mkMemory(`${org.urn}:live`);
+    await recordUrnRename(db, { entityType: 'MEMORY', entityId: dead.id, oldUrn: shared, newUrn: dead.urn });
+    await recordUrnRename(db, { entityType: 'MEMORY', entityId: live.id, oldUrn: shared, newUrn: live.urn });
+    await db.memory.update({ where: { id: dead.id }, data: { deletedAt: new Date() } });
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId: live.id, loc: 'a:b', name: 'n' },
+    });
+    const { resolveNodeRef } = await import('./entityRef/nodeRef.js');
+    expect(await resolveNodeRef(db, `hrn:node:${shared}:a:b`)).toEqual({ id: node.id });
+  });
+
+  it('a soft-deleted holder of a re-used urn does not suppress the alias arm', async () => {
+    // `??` only fires on null, so an unfiltered primary lookup let a dead row
+    // win the coalesce and the old URN 404'd despite a live historical claimant.
+    const shared = `${org.urn}:shared`;
+    const live = await mkMemory(`${org.urn}:live`);
+    await recordUrnRename(db, { entityType: 'MEMORY', entityId: live.id, oldUrn: shared, newUrn: live.urn });
+    const squatter = await mkMemory(shared);
+    await db.memory.update({ where: { id: squatter.id }, data: { deletedAt: new Date() } });
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId: live.id, loc: 'a:b', name: 'n' },
+    });
+    const { resolveNodeRef } = await import('./entityRef/nodeRef.js');
+    expect(await resolveNodeRef(db, `hrn:node:${shared}:a:b`)).toEqual({ id: node.id });
+  });
+
+  it('an agent rename aliases the system memory it drags along', async () => {
+    // The agent rename also renames its derived `<urn>-system` memory. Without a
+    // MEMORY alias, every node URN under a Team Agent's roles: branch 404s.
+    const sysMem = await mkMemory(`${org.urn}:helper-system`);
+    const agent = await db.agent.create({
+      data: {
+        id: generateId(), organizationId: org.id, name: 'G', urn: `${org.urn}:helper`,
+        visibility: 'ORGANIZATION', systemMemoryId: sysMem.id,
+      },
+    });
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId: sysMem.id, loc: 'roles:backend', name: 'r' },
+    });
+    const published = `hrn:node:${org.urn}:helper-system:roles:backend`;
+
+    const { resolvers } = await import('../api/graphql/schema/resolvers.js');
+    await resolvers.Mutation.updateAgent(
+      {},
+      { ref: agent.id, urn: 'assistant' } as never,
+      { db, userId: user.id, roles: ['ADMIN'], organizationId: org.id } as never,
+    );
+
+    expect((await db.memory.findUniqueOrThrow({ where: { id: sysMem.id } })).urn).toBe(
+      `${org.urn}:assistant-system`,
+    );
+    const { resolveNodeRef } = await import('./entityRef/nodeRef.js');
+    expect(await resolveNodeRef(db, published)).toEqual({ id: node.id });
+  });
+});

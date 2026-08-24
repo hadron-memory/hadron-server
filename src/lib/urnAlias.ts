@@ -57,6 +57,7 @@
  * resolves. Retiring the columns is a follow-up; nothing here depends on it.
  */
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { normalizeUrnForLookup } from './urn.js';
 
 /**
  * The entities whose URN is a stored, renameable column. Deliberately closed:
@@ -70,6 +71,13 @@ export type UrnAliasReason = 'RENAME' | 'ORG_RENAME_CASCADE' | 'V1_MIGRATION';
 
 /** The narrow slice of the client this module needs — a tx client satisfies it. */
 type AliasDb = Pick<PrismaClient, 'urnAlias'>;
+
+/**
+ * Runaway guard on how many historical holders of ONE urn a lookup will examine.
+ * Not a semantic bound — liveness and ambiguity are decided across everything
+ * fetched, so this only caps a pathological map (see `findUrnAliasTargetIds`).
+ */
+const ALIAS_CANDIDATE_CAP = 100;
 
 /**
  * Record that `oldUrn` no longer addresses `entityId` directly.
@@ -88,10 +96,16 @@ type AliasDb = Pick<PrismaClient, 'urnAlias'>;
  * recording `'' → x` would insert an alias nothing can match, and a rename that
  * renamed nothing has no history to keep.
  *
- * Both URNs must already be in the **normalized lookup form** — the resolvers
- * query this table with a normalized value, so a raw spelling stored here is
- * simply unreachable. Callers normalize; this function does not, deliberately,
- * so there is one normalizer rather than two that can disagree.
+ * **Normalizes both URNs itself** (PR #1080 review, Codex + Copilot P2). An
+ * earlier draft required callers to pass the normalized form and stored what it
+ * was given, on the reasoning that a stored `urn` column already IS the lookup
+ * form. That is not guaranteed: a row may still hold the canonical `::` spelling
+ * from the spec-021 migration window — `resolveNodeRef` builds BOTH spellings as
+ * candidates precisely because of it — and an alias stored as `org::slug` is
+ * unreachable from resolvers that query `org:slug`. Normalizing in the one place
+ * every TypeScript writer goes through is what makes the storage invariant true
+ * rather than merely documented. (The bulk SQL cascades cannot call this, so they
+ * normalize inline; see `propagateOrgUrnRename`.)
  */
 export async function recordUrnRename(
   db: AliasDb,
@@ -104,8 +118,13 @@ export async function recordUrnRename(
     createdBy?: string | null;
   },
 ): Promise<void> {
-  const oldUrn = params.oldUrn?.trim();
-  const newUrn = params.newUrn?.trim();
+  const rawOld = params.oldUrn?.trim();
+  const rawNew = params.newUrn?.trim();
+  if (!rawOld || !rawNew) return;
+  const oldUrn = normalizeUrnForLookup(rawOld);
+  const newUrn = normalizeUrnForLookup(rawNew);
+  // Compare AFTER normalizing: `org::slug` → `org:slug` is a spelling change,
+  // not a rename, and recording it would create an alias pointing at itself.
   if (!oldUrn || !newUrn || oldUrn === newUrn) return;
   await db.urnAlias.upsert({
     where: {
@@ -137,9 +156,18 @@ export async function recordUrnRename(
  * is what stops an alias resurrecting a dead row or routing around a gate. Rule
  * 2 in the module docstring.
  *
- * Bounded at three rows: the callers only need to distinguish none / exactly one
- * / more-than-one, and an unbounded `IN (…)` on a corrupted map would be a
- * cheap way to make a hot lookup expensive.
+ * Deliberately NOT limited to two or three rows (PR #1080 review, Codex +
+ * Copilot P2). An earlier draft took 3, which is wrong twice over once a URN has
+ * had more than three historical holders — legal, because aliases outlive the
+ * entities they name: the take is UNORDERED, so it can return three dead holders
+ * and report a live fourth as missing, or drop one of two live holders and turn
+ * an ambiguity into a confident wrong answer. Liveness has to be evaluated
+ * across ALL candidates and the bound applied to the LIVE set, which is what
+ * `findLiveUrnAliasTargets` now does.
+ *
+ * The cap here is a runaway guard, not a semantic bound: it sits far above any
+ * plausible number of historical holders of one URN, so reaching it means the
+ * map is corrupt rather than that a caller is unlucky.
  */
 export async function findUrnAliasTargetIds(
   db: AliasDb,
@@ -149,9 +177,9 @@ export async function findUrnAliasTargetIds(
   const urn = lookupUrn?.trim();
   if (!urn) return [];
   const rows = await db.urnAlias.findMany({
-    where: { urn, entityType: entityType as never },
+    where: { urn: normalizeUrnForLookup(urn), entityType: entityType as never },
     select: { entityId: true },
-    take: 3,
+    take: ALIAS_CANDIDATE_CAP,
   });
   return rows.map((r: { entityId: string }) => r.entityId);
 }
@@ -221,12 +249,22 @@ export async function findMemoryByAliasedUrn(
   db: Pick<PrismaClient, 'urnAlias' | 'memory'>,
   candidateUrns: ReadonlyArray<string>,
   onAmbiguous: (candidate: string, rows: ReadonlyArray<{ id: string }>) => never,
+  options?: { includeDeleted?: boolean },
 ): Promise<{ id: string; deletedAt: Date | null } | null> {
   for (const candidate of candidateUrns) {
     const ids = await findUrnAliasTargetIds(db, 'MEMORY', candidate);
     if (ids.length === 0) continue;
+    // Liveness BEFORE ambiguity (PR #1080 review, Codex + Copilot P2). An
+    // earlier draft fetched every claimant unfiltered and raised on more than
+    // one, so a live memory sharing an old URN with a soft-deleted one made a
+    // node or edge lookup FAIL — while `resolveMemoryRef`, which filters first,
+    // resolved the live row happily. Two surfaces, two answers, for the same
+    // URN. It also returned an arbitrary row, which could be the dead one.
+    //
+    // This is `cor:urn:030:02` in its exact form: a dead claimant is not a
+    // claimant, so it must not be able to make a resolvable URN ambiguous.
     const rows = await db.memory.findMany({
-      where: { id: { in: ids } },
+      where: { id: { in: ids }, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
       select: { id: true, deletedAt: true },
       take: 2,
     });

@@ -55,11 +55,17 @@ export async function propagateOrgUrnRename(
   // which would read as an ambiguous alias and start refusing a URN that
   // resolves to exactly one entity.
   const createdBy = options?.createdBy ?? null;
+  // `replace(urn, '::', ':')` normalizes the alias KEY the way
+  // `normalizeUrnForLookup` does for a bare stored urn (PR #1080 review,
+  // Copilot P2). Rows may still hold the canonical `::` spelling from the
+  // spec-021 migration window, while every resolver queries the single-colon
+  // form — so an un-normalized key would be stored somewhere nothing ever looks.
+  // Bulk SQL cannot call the TypeScript normalizer, hence the inline mirror.
   await tx.$executeRaw`
     INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by)
-    SELECT gen_random_uuid()::text, m.urn, 'MEMORY'::"UrnAliasEntityType", m.id,
+    SELECT gen_random_uuid()::text, replace(m.urn, '::', ':'), 'MEMORY'::"UrnAliasEntityType", m.id,
            'ORG_RENAME_CASCADE'::"UrnAliasReason",
-           ${newOrgUrn} || substr(m.urn, strpos(m.urn, ':')), ${createdBy}
+           replace(${newOrgUrn} || substr(m.urn, strpos(m.urn, ':')), '::', ':'), ${createdBy}
     FROM memories m
     WHERE m.organization_id = ${organizationId} AND strpos(m.urn, ':') > 0
       AND NOT starts_with(m.urn, ${newOrgUrn} || ':')
@@ -68,9 +74,9 @@ export async function propagateOrgUrnRename(
   `;
   await tx.$executeRaw`
     INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by)
-    SELECT gen_random_uuid()::text, a.urn, 'AGENT'::"UrnAliasEntityType", a.id,
+    SELECT gen_random_uuid()::text, replace(a.urn, '::', ':'), 'AGENT'::"UrnAliasEntityType", a.id,
            'ORG_RENAME_CASCADE'::"UrnAliasReason",
-           ${newOrgUrn} || substr(a.urn, strpos(a.urn, ':')), ${createdBy}
+           replace(${newOrgUrn} || substr(a.urn, strpos(a.urn, ':')), '::', ':'), ${createdBy}
     FROM agents a
     WHERE a.organization_id = ${organizationId} AND strpos(a.urn, ':') > 0
       AND NOT starts_with(a.urn, ${newOrgUrn} || ':')
@@ -79,9 +85,9 @@ export async function propagateOrgUrnRename(
   `;
   await tx.$executeRaw`
     INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by)
-    SELECT gen_random_uuid()::text, ap.urn, 'APP'::"UrnAliasEntityType", ap.id,
+    SELECT gen_random_uuid()::text, replace(ap.urn, '::', ':'), 'APP'::"UrnAliasEntityType", ap.id,
            'ORG_RENAME_CASCADE'::"UrnAliasReason",
-           ${newOrgUrn} || substr(ap.urn, strpos(ap.urn, ':')), ${createdBy}
+           replace(${newOrgUrn} || substr(ap.urn, strpos(ap.urn, ':')), '::', ':'), ${createdBy}
     FROM apps ap
     WHERE ap.organization_id = ${organizationId} AND strpos(ap.urn, ':') > 0
       AND NOT starts_with(ap.urn, ${newOrgUrn} || ':')

@@ -88,10 +88,16 @@ export async function renameOwnerNamespacedUrns(
   // cannot be a bound parameter, so a loop needs `$executeRawUnsafe` and string
   // interpolation. Spelling them out keeps every statement a parameterized
   // `$executeRaw` and matches `propagateOrgUrnRename` next door.
+  // `replace(urn, '::', ':')` normalizes the alias KEY the way
+  // `normalizeUrnForLookup` does for a bare stored urn (PR #1080 review,
+  // Copilot P2). Rows may still hold the canonical `::` spelling from the
+  // spec-021 migration window, while every resolver queries the single-colon
+  // form — so an un-normalized key would be stored somewhere nothing ever looks.
+  // Bulk SQL cannot call the TypeScript normalizer, hence the inline mirror.
   await tx.$executeRaw`
     INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn)
-    SELECT gen_random_uuid()::text, m.urn, 'MEMORY'::"UrnAliasEntityType", m.id,
-           'RENAME'::"UrnAliasReason", ${newPrefix} || substr(m.urn, strpos(m.urn, ':'))
+    SELECT gen_random_uuid()::text, replace(m.urn, '::', ':'), 'MEMORY'::"UrnAliasEntityType", m.id,
+           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(m.urn, strpos(m.urn, ':')), '::', ':')
     FROM memories m
     WHERE m.owner_user_id = ${userId} AND strpos(m.urn, ':') > 0
       AND NOT starts_with(m.urn, ${newColon})
@@ -100,8 +106,8 @@ export async function renameOwnerNamespacedUrns(
   `;
   await tx.$executeRaw`
     INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn)
-    SELECT gen_random_uuid()::text, a.urn, 'AGENT'::"UrnAliasEntityType", a.id,
-           'RENAME'::"UrnAliasReason", ${newPrefix} || substr(a.urn, strpos(a.urn, ':'))
+    SELECT gen_random_uuid()::text, replace(a.urn, '::', ':'), 'AGENT'::"UrnAliasEntityType", a.id,
+           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(a.urn, strpos(a.urn, ':')), '::', ':')
     FROM agents a
     WHERE a.owner_user_id = ${userId} AND strpos(a.urn, ':') > 0
       AND NOT starts_with(a.urn, ${newColon})
@@ -110,8 +116,8 @@ export async function renameOwnerNamespacedUrns(
   `;
   await tx.$executeRaw`
     INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn)
-    SELECT gen_random_uuid()::text, ap.urn, 'APP'::"UrnAliasEntityType", ap.id,
-           'RENAME'::"UrnAliasReason", ${newPrefix} || substr(ap.urn, strpos(ap.urn, ':'))
+    SELECT gen_random_uuid()::text, replace(ap.urn, '::', ':'), 'APP'::"UrnAliasEntityType", ap.id,
+           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(ap.urn, strpos(ap.urn, ':')), '::', ':')
     FROM apps ap
     WHERE ap.owner_user_id = ${userId} AND strpos(ap.urn, ':') > 0
       AND NOT starts_with(ap.urn, ${newColon})

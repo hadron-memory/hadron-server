@@ -694,6 +694,17 @@ export const appMutations = {
       // alias heals them without workerRef changing, because a worker URN is
       // resolved by resolving its App URN first.
       return ctx.db.$transaction(async (tx) => {
+        // Lock and RE-READ the urn inside the transaction (PR #1080 review,
+        // Codex + Copilot P2). The row above was read before the transaction
+        // opened, so two concurrent renames could both record the SAME old urn
+        // and the intermediate identity — committed, and returned to whoever
+        // made the first call — would never be aliased at all. Reading under
+        // FOR UPDATE serializes the renames and makes each one record the urn it
+        // actually superseded. `updateOrganization` already did this; the three
+        // single-entity paths did not.
+        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
+          SELECT urn FROM apps WHERE id = ${resolvedId} FOR UPDATE
+        `;
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
             entityType: 'APP',
@@ -701,7 +712,7 @@ export const appMutations = {
             // The `urn` column already holds the normalized lookup form the
             // resolvers query, so it is recorded verbatim — re-normalizing here
             // would introduce a second normalizer that can disagree with it.
-            oldUrn: app.urn,
+            oldUrn: lockedRow?.urn ?? app.urn,
             newUrn,
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           });

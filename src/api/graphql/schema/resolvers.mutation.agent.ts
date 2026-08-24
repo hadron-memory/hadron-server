@@ -443,17 +443,45 @@ export const agentMutations = {
           select: { urn: true },
         });
         if (sys?.urn === derivedOldUrn) {
-          await ctx.db.memory.update({
-            where: { id: agent.systemMemoryId },
-            data: {
-              urn: `${newUrn}-system`,
-              updatedBy: ctx.userId ?? ctx.clientId ?? null,
-            },
-          }).catch((err) => {
-            // Best-effort, like the name sync below: a rare collision on the
-            // new URN shouldn't fail the whole agent rename.
-            console.warn('[updateAgent] system memory URN sync failed:', err);
-          });
+          // #1079 (PR #1080 review, Codex + Copilot P2) — this renames a
+          // MEMORY, so it owes a MEMORY alias. Without one an agent rename
+          // silently 404'd every published node and edge URN under that
+          // agent's system memory — which for a Team Agent is its whole
+          // `roles:` branch, and for any agent is where its definition lives.
+          // I aliased the Agent and missed the memory it drags along.
+          //
+          // Wrapped in its OWN transaction rather than folded into the agent
+          // rename below, which preserves the best-effort contract this block
+          // already had: a URN collision here must not fail the agent rename.
+          // Folding it in would also break on the first caught error, because a
+          // failed statement poisons the enclosing Postgres transaction — the
+          // catch would swallow the error and every later write in that
+          // transaction would fail with "current transaction is aborted".
+          await ctx.db
+            .$transaction(async (tx) => {
+              await tx.memory.update({
+                where: { id: agent.systemMemoryId as string },
+                data: {
+                  urn: `${newUrn}-system`,
+                  updatedBy: ctx.userId ?? ctx.clientId ?? null,
+                },
+              });
+              await recordUrnRename(tx, {
+                entityType: 'MEMORY',
+                entityId: agent.systemMemoryId as string,
+                oldUrn: derivedOldUrn,
+                newUrn: `${newUrn}-system`,
+                createdBy: ctx.userId ?? ctx.clientId ?? null,
+              });
+            })
+            .catch((err) => {
+              // Best-effort, like the name sync below: a rare collision on the
+              // new URN shouldn't fail the whole agent rename. The alias and the
+              // rename succeed or fail together, so a failure here leaves the
+              // memory at its old URN — still resolvable, which is the safe
+              // direction.
+              console.warn('[updateAgent] system memory URN sync failed:', err);
+            });
         }
       }
 
@@ -480,13 +508,24 @@ export const agentMutations = {
       // #1079 — the rename and its alias record commit together (see the App arm
       // in resolvers.mutation.app.ts for why they cannot be separate).
       return ctx.db.$transaction(async (tx) => {
+        // Lock and RE-READ the urn inside the transaction (PR #1080 review,
+        // Codex + Copilot P2). The row above was read before the transaction
+        // opened, so two concurrent renames could both record the SAME old urn
+        // and the intermediate identity — committed, and returned to whoever
+        // made the first call — would never be aliased at all. Reading under
+        // FOR UPDATE serializes the renames and makes each one record the urn it
+        // actually superseded. `updateOrganization` already did this; the three
+        // single-entity paths did not.
+        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
+          SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
+        `;
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
             entityType: 'AGENT',
             entityId: id,
             // Recorded verbatim: the `urn` column already holds the normalized
             // lookup form the resolvers query.
-            oldUrn: agent.urn,
+            oldUrn: lockedRow?.urn ?? agent.urn,
             newUrn,
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           });

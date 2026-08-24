@@ -95,17 +95,32 @@ export async function resolveEdgeRef(
   }
 
   const memory =
+    // Liveness in the QUERY, not after it (PR #1080 review, Copilot P2).
+    // `??` only fires on a null, so an unfiltered primary lookup let a
+    // SOFT-DELETED holder of a re-used URN win the coalesce and suppress the
+    // alias arm entirely — the old URN then 404'd even though a live
+    // historical claimant existed and `resolveMemoryRef` would have found
+    // it. Filtering here makes "not live" mean "not found", which is what
+    // lets the alias arm run and matches the entity resolvers.
     (await db.memory.findFirst({
-      where: { urn: { in: memoryUrnCandidates } },
+      where: {
+        urn: { in: memoryUrnCandidates },
+        ...(options?.includeDeleted ? {} : { deletedAt: null }),
+      },
       select: { id: true, deletedAt: true },
     })) ??
     // #1079 — same arm as resolveNodeRef, for the same reason: this resolver
     // splits the memory prefix out itself rather than delegating to
     // `resolveMemoryRef`, so a renamed memory would otherwise strand every
     // published edge URN under it.
-    (await findMemoryByAliasedUrn(db, memoryUrnCandidates, () => {
-      throw new EdgeNotFoundError(ref);
-    }));
+    (await findMemoryByAliasedUrn(
+      db,
+      memoryUrnCandidates,
+      () => {
+        throw new EdgeNotFoundError(ref);
+      },
+      { includeDeleted: options?.includeDeleted },
+    ));
   if (!memory || (!options?.includeDeleted && memory.deletedAt)) {
     throw new EdgeNotFoundError(ref);
   }
