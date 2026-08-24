@@ -49,10 +49,32 @@ const TABLES = ['memories', 'agents', 'apps', 'organizations'];
 /** The Prisma model names for those same four entities. */
 const MODELS = ['memory', 'agent', 'app', 'organization'];
 
-/** How far past an update call we look for the alias call. */
-const PROXIMITY_LINES = 30;
+/**
+ * How far either side of a write we look for alias evidence.
+ *
+ * Sized to the real cascades, which group their three alias INSERTs first and
+ * their three UPDATEs after, putting ~37 lines between the last INSERT and the
+ * last UPDATE. At 30 the gate flagged two correctly-aliased statements.
+ *
+ * The trade-off is explicit: a wider window means an unaliased write sitting
+ * near an unrelated aliased one can slip through. That is the right direction
+ * for a heuristic whose job is to make a human look — a gate that cries wolf on
+ * correct code gets waived reflexively, and then it protects nothing. The
+ * proof-it-fails tests are what keep the window honest.
+ */
+const PROXIMITY_LINES = 60;
 
 const WAIVER = /urn-alias-exempt:/;
+
+/**
+ * Evidence that the write records an alias. TWO spellings, because the bulk
+ * cascades cannot call the TypeScript helper: they insert into `urn_aliases`
+ * directly in SQL, in the same transaction. Accepting only `recordUrnRename`
+ * flagged the two correctly-aliased cascades — a false positive on exactly the
+ * paths the gate exists to protect, which would have trained the next reader to
+ * waive it rather than read it.
+ */
+const ALIAS_EVIDENCE = /recordUrnRename|INSERT\s+INTO\s+urn_aliases/i;
 
 /**
  * An UPDATE call on one of the four models. Deliberately anchored on the call
@@ -63,8 +85,23 @@ const WAIVER = /urn-alias-exempt:/;
 const UPDATE_CALL = new RegExp(
   `\\b(?:tx|db|ctx\\.db)\\.(${MODELS.join('|')})\\.(update|updateMany)\\(`,
 );
-/** Raw SQL, e.g. `UPDATE memories SET urn = …`. */
-const SQL_URN_WRITE = new RegExp(`UPDATE\\s+"?(${TABLES.join('|')})"?\\s+SET\\s+urn\\s*=`, 'i');
+/**
+ * Raw SQL, e.g. `UPDATE memories SET urn = …`.
+ *
+ * Matched against the WHOLE FILE, not line by line (PR #1080 fourth review,
+ * Codex P2). The production cascades wrap their SQL across lines —
+ * `UPDATE memories` on one, `SET urn = …` on the next — so a per-line test
+ * matched neither, and the two BULK rename paths (the widest ones, an org
+ * rename and a handle change) were the only paths this gate did not cover.
+ * A gate blind to precisely the code it was built for is the phantom shape
+ * again, one layer up: I wrote the check, proved it fails, and still shipped a
+ * hole because I proved it against the idiom I had in mind rather than the
+ * idiom in the tree.
+ */
+const SQL_URN_WRITE_GLOBAL = new RegExp(
+  `UPDATE\\s+"?(${TABLES.join('|')})"?\\s+SET\\s+urn\\s*=`,
+  'gis',
+);
 /**
  * A `urn:` assignment anywhere inside the captured payload — NOT anchored to the
  * start of a line.
@@ -116,19 +153,33 @@ function callBlock(lines, startIdx) {
 
 const violations = [];
 for (const file of sourceFiles()) {
-  const lines = readFileSync(file, 'utf8').split('\n');
-  lines.forEach((line, i) => {
-    const isSql = SQL_URN_WRITE.test(line);
-    const isUpdate = UPDATE_CALL.test(line);
-    if (!isSql && !isUpdate) return;
-    // An update that never assigns `urn` cannot orphan anything.
-    if (isUpdate && !URN_FIELD.test(callBlock(lines, i))) return;
+  const text = readFileSync(file, 'utf8');
+  const lines = text.split('\n');
+
+  /** Shared verdict for a write at line index `i`. */
+  const unaliased = (i) => {
     const before = lines.slice(Math.max(0, i - PROXIMITY_LINES), i).join('\n');
     const after = lines.slice(i, i + PROXIMITY_LINES).join('\n');
-    if (WAIVER.test(before) || WAIVER.test(after)) return;
-    if (/recordUrnRename/.test(before) || /recordUrnRename/.test(after)) return;
-    violations.push(`${file}:${i + 1}: ${line.trim()}`);
+    if (WAIVER.test(before) || WAIVER.test(after)) return false;
+    return !ALIAS_EVIDENCE.test(before) && !ALIAS_EVIDENCE.test(after);
+  };
+
+  // Prisma update calls — line-anchored, since the call opens on one line.
+  lines.forEach((line, i) => {
+    if (!UPDATE_CALL.test(line)) return;
+    // An update that never assigns `urn` cannot orphan anything.
+    if (!URN_FIELD.test(callBlock(lines, i))) return;
+    if (unaliased(i)) violations.push(`${file}:${i + 1}: ${line.trim()}`);
   });
+
+  // Raw SQL — whole-file, because the statement spans lines.
+  SQL_URN_WRITE_GLOBAL.lastIndex = 0;
+  for (const m of text.matchAll(SQL_URN_WRITE_GLOBAL)) {
+    const i = text.slice(0, m.index).split('\n').length - 1;
+    if (unaliased(i)) {
+      violations.push(`${file}:${i + 1}: ${m[0].replace(/\s+/g, ' ').trim()}`);
+    }
+  }
 }
 
 if (violations.length > 0) {

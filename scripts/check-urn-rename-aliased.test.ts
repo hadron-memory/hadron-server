@@ -106,3 +106,35 @@ describe('check-urn-rename-aliased', () => {
     expect(r.code).toBe(0);
   });
 });
+
+describe('check-urn-rename-aliased — multiline raw SQL', () => {
+  it('FAILS on a cascade whose UPDATE and SET urn sit on different lines', () => {
+    // The production cascades are written exactly this way, so a per-line SQL
+    // test left the two WIDEST rename paths unchecked.
+    const r = runOn(`
+      export async function cascade(tx: any, org: string, next: string) {
+        await tx.$executeRaw\`
+          UPDATE memories
+          SET urn = \${next} || substr(urn, strpos(urn, ':'))
+          WHERE organization_id = \${org}
+        \`;
+      }
+    `);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('src/x.ts');
+  });
+
+  it('passes when that same cascade records aliases alongside', () => {
+    const r = runOn(`
+      export async function cascade(tx: any, org: string, next: string) {
+        await recordUrnRename(tx, { entityType: 'MEMORY' });
+        await tx.$executeRaw\`
+          UPDATE memories
+          SET urn = \${next} || substr(urn, strpos(urn, ':'))
+          WHERE organization_id = \${org}
+        \`;
+      }
+    `);
+    expect(r.code).toBe(0);
+  });
+});
