@@ -1360,9 +1360,37 @@ describe('#1050 — worker name holding', () => {
     );
     expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
       .toBe(contrib.id);
-    // …and crucially NO team-chat notice was posted, because no release happened.
+    // …and crucially NO team-chat notice was posted, because no release
+    // happened. "Refused" and "released but quietly" are indistinguishable from
+    // the worker row alone, and the notice is the part a caller must not
+    // discover afterwards.
+    // loc-scope-ok: deliberately cross-memory — `cleanDb` runs per test, so
+    // "no chat node exists ANYWHERE" is a strictly stronger assertion than
+    // scoping to one memory, and it cannot pass by looking in the wrong place.
     const posts = await db.node.count({ where: { loc: { startsWith: 'chats:team' } } });
     expect(posts).toBe(0);
+  });
+
+  it('a HOLDER asserting a different user is refused, not authorized as the holder', async () => {
+    // PR #1084 review, Codex P1. Everything after the assertion decides
+    // authorization from the hold we READ — the isHolder branch, the admin gate
+    // it skips, and the notice only a non-holder release posts. If the guarded
+    // write could target a different user than that decision was made against,
+    // holder A asserting B (with the hold moving A→B in between) would release
+    // B under A's holder authorization, skipping the admin gate AND the public
+    // notice: the silent force-release this feature exists to prevent,
+    // reintroduced by the mechanism meant to prevent it.
+    const w = await heldBy(contrib.id);
+    await expectCode(
+      // contrib IS the holder, so without this rejection they are authorized —
+      // and appMember is somebody else entirely.
+      M.releaseWorker(
+        {}, { workerRef: w.id, expectedHolderUserId: appMember.id }, ctx(contrib.id),
+      ),
+      'WORKER_HOLD_STALE',
+    );
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(contrib.id);
   });
 
   it('passing BOTH assertions is BAD_USER_INPUT — they contradict', async () => {

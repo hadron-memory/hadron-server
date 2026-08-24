@@ -932,6 +932,24 @@ export const workerMutations = {
     // before the authorization branch below, because being told the assertion
     // is stale discloses nothing the read gate above has not already allowed.
     if (assertsUnheld) throw holdStale(worker.id, worker.heldByUserId);
+    // An assertion naming a DIFFERENT user than the hold we just read is stale
+    // by definition — and rejecting it here is load-bearing, not tidiness
+    // (PR #1084 review, Codex P1).
+    //
+    // Everything below decides authorization from `worker.heldByUserId`: the
+    // `isHolder` branch, the admin gate it skips, and the team-chat notice that
+    // only a non-holder release posts. If the guarded write could target a
+    // DIFFERENT user than that decision was made against, the two come apart —
+    // holder A asserting B, with the hold moving A→B in between, would release
+    // B under A's holder authorization, skipping both the admin gate and the
+    // notice. That is precisely the silent force-release this feature exists to
+    // prevent, reintroduced by the mechanism meant to prevent it.
+    //
+    // So the invariant is: the authorization decision and the guarded value
+    // name the SAME user, always.
+    if (assertsHolder && expectedHolderUserId !== worker.heldByUserId) {
+      throw holdStale(worker.id, worker.heldByUserId);
+    }
 
     const isHolder = !!ctx.userId && worker.heldByUserId === ctx.userId;
     if (!isHolder) {
@@ -962,13 +980,14 @@ export const workerMutations = {
       }
     }
 
-    // The guard IS the check (#1073). Guarding on the ASSERTED holder makes the
-    // write itself atomic against a concurrent change — there is no window
-    // between a verification and the update, which is exactly what a client
-    // cannot achieve from outside however tightly it re-reads.
-    const guardHolder = assertsHolder ? (expectedHolderUserId as string) : worker.heldByUserId;
+    // The guard IS the check (#1073). The assertion has already been proven
+    // equal to the hold we read and authorized against, so guarding on that
+    // value is atomic against a change landing between the read and this write
+    // — which is exactly what a client cannot achieve from outside, however
+    // tightly it re-reads. Zero rows under an assertion therefore means the
+    // hold moved in that window.
     const released = await ctx.db.worker.updateMany({
-      where: { id: worker.id, heldByUserId: guardHolder },
+      where: { id: worker.id, heldByUserId: worker.heldByUserId },
       data: { heldByUserId: null, heldAt: null, updatedBy: ctx.userId ?? null },
     });
     if (released.count === 0 && assertsHolder) {
