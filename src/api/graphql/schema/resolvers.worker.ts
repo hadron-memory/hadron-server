@@ -406,6 +406,27 @@ function isSlugTaken(e: unknown): boolean {
   );
 }
 
+/**
+ * The typed `WORKER_HOLD_STALE` refusal (#1073) — the hold is not what the
+ * caller asserted, so the release it described is not the release it would
+ * perform.
+ *
+ * Carries the holder found NOW, because that is the fact a caller needs to
+ * re-prompt with. Naming it discloses nothing new: the caller has already
+ * passed `requireWorkerReadAccess`, through which `Worker.heldByUserId` is
+ * readable anyway — the masking rule for that field applies to callers who fail
+ * that gate, and they never reach here.
+ *
+ * `heldByUserId: null` means the name is unheld now.
+ */
+const holdStale = (workerId: string, heldByUserId: string | null): GraphQLError =>
+  new GraphQLError(
+    heldByUserId
+      ? 'The hold changed: this name is now held by someone else. Re-read it and decide again — releasing it would be a force-release, which posts to the team chat.'
+      : 'The hold changed: this name is no longer held by anyone, so there is nothing to release.',
+    { extensions: { code: 'WORKER_HOLD_STALE', workerId, heldByUserId } },
+  );
+
 /** The typed WORKER_NAME_TAKEN refusal — the allocation contract's advance
  *  signal (cor:agt:020:02). */
 function nameTaken(name: string, appId: string): GraphQLError {
@@ -858,9 +879,31 @@ export const workerMutations = {
    */
   releaseWorker: async (
     _: unknown,
-    { workerRef }: { workerRef: string },
+    {
+      workerRef,
+      expectedHolderUserId,
+      expectUnheld,
+    }: { workerRef: string; expectedHolderUserId?: string | null; expectUnheld?: boolean | null },
     ctx: Context,
   ) => {
+    // #1073 — the caller may state the hold it believes it is releasing.
+    //
+    // TWO arguments rather than one nullable id, deliberately. Distinguishing
+    // "expect nobody" from "no expectation" through a nullable argument would
+    // rest on KEY PRESENCE, and any layer forwarding the argument
+    // unconditionally sends `undefined` — which is present, and would be read
+    // as an assertion the caller never made
+    // (findings:optional-arg-meets-presence-semantics, a real incident here).
+    // A safety precondition must not depend on every hop between caller and
+    // resolver preserving absence, so both forms are explicit values.
+    const assertsHolder = typeof expectedHolderUserId === 'string' && expectedHolderUserId !== '';
+    const assertsUnheld = expectUnheld === true;
+    if (assertsHolder && assertsUnheld) {
+      throw new GraphQLError(
+        'Pass expectedHolderUserId or expectUnheld, not both — they assert contradictory holds.',
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
     const worker = await resolveWorkerRefRow(ctx, workerRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
 
@@ -874,10 +917,21 @@ export const workerMutations = {
     await requireWorkerReadAccess(ctx, app);
 
     if (!worker.heldByUserId) {
+      // An expectation of a SPECIFIC holder is violated by there being none —
+      // the hold the caller meant to release is already gone, and reporting
+      // success would describe an act that did not happen.
+      if (assertsHolder) throw holdStale(worker.id, null);
       // Idempotent rather than an error: "nobody holds this" is the state the
       // caller asked for, and a release racing another release is not a fault.
       return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     }
+    // Held, but the caller asserted it was not. This is the dangerous case
+    // #1073 names: a client whose pre-read said "unheld" does not prompt, so
+    // without this the hold taken in the interval is force-released SILENTLY
+    // and the team chat records a public act nobody was asked about. Refused
+    // before the authorization branch below, because being told the assertion
+    // is stale discloses nothing the read gate above has not already allowed.
+    if (assertsUnheld) throw holdStale(worker.id, worker.heldByUserId);
 
     const isHolder = !!ctx.userId && worker.heldByUserId === ctx.userId;
     if (!isHolder) {
@@ -908,10 +962,26 @@ export const workerMutations = {
       }
     }
 
+    // The guard IS the check (#1073). Guarding on the ASSERTED holder makes the
+    // write itself atomic against a concurrent change — there is no window
+    // between a verification and the update, which is exactly what a client
+    // cannot achieve from outside however tightly it re-reads.
+    const guardHolder = assertsHolder ? (expectedHolderUserId as string) : worker.heldByUserId;
     const released = await ctx.db.worker.updateMany({
-      where: { id: worker.id, heldByUserId: worker.heldByUserId },
+      where: { id: worker.id, heldByUserId: guardHolder },
       data: { heldByUserId: null, heldAt: null, updatedBy: ctx.userId ?? null },
     });
+    if (released.count === 0 && assertsHolder) {
+      // Zero rows under an assertion means the hold moved between the read
+      // above and this write. Re-read to name who holds it NOW rather than
+      // echoing the stale value the caller sent (zero-row-guarded-write-has-
+      // two-causes: say which predicate failed).
+      const current = await ctx.db.worker.findUnique({
+        where: { id: worker.id },
+        select: { heldByUserId: true },
+      });
+      throw holdStale(worker.id, current?.heldByUserId ?? null);
+    }
 
     if (released.count > 0 && !isHolder) {
       // Best-effort: an unreachable chat must not block an admin recovering a

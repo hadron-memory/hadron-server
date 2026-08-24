@@ -1293,6 +1293,107 @@ describe('#1050 — worker name holding', () => {
     const again = await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
     expect(again.heldByUserId).toBeNull();
   });
+
+  // ── #1073 — the optional hold precondition ────────────────────────────────
+  //
+  // The two release paths are different ACTS: the holder's own release
+  // notifies nobody, an admin force-release announces itself in the team chat.
+  // A client can only classify from a pre-read, and the hold can change in
+  // between — so without a precondition the act performed differs from the act
+  // described, and the dangerous direction is silent: a pre-read showing
+  // "unheld" skips the confirmation entirely, so a hold taken in the interval
+  // is force-released with no one asked and a public notice posted.
+
+  it('expectedHolderUserId matching the actual holder releases normally', async () => {
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id, expectedHolderUserId: contrib.id }, ctx(contrib.id));
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+  });
+
+  it('expectedHolderUserId naming the WRONG holder refuses WORKER_HOLD_STALE', async () => {
+    const w = await heldBy(contrib.id);
+    await expectCode(
+      M.releaseWorker({}, { workerRef: w.id, expectedHolderUserId: appMember.id }, ctx(admin.id)),
+      'WORKER_HOLD_STALE',
+    );
+    // …and the hold is untouched: a refused release must not half-happen.
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(contrib.id);
+  });
+
+  it('the refusal names who holds it NOW, not the stale value the caller sent', async () => {
+    const w = await heldBy(contrib.id);
+    try {
+      await M.releaseWorker({}, { workerRef: w.id, expectedHolderUserId: appMember.id }, ctx(admin.id));
+      expect.unreachable('a stale expectation must refuse');
+    } catch (e) {
+      const ext = (e as GraphQLError).extensions as { heldByUserId?: string | null };
+      // The caller re-prompts from this, so echoing their own guess back would
+      // be worse than useless.
+      expect(ext.heldByUserId).toBe(contrib.id);
+    }
+  });
+
+  it('expectedHolderUserId refuses when the name has since become UNHELD', async () => {
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id)); // someone got there first
+    await expectCode(
+      M.releaseWorker({}, { workerRef: w.id, expectedHolderUserId: contrib.id }, ctx(admin.id)),
+      'WORKER_HOLD_STALE',
+    );
+  });
+
+  it('expectUnheld: true on an actually-unheld name is the idempotent no-op', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Nia' }, ctx(admin.id));
+    const out = await M.releaseWorker({}, { workerRef: w.id, expectUnheld: true }, ctx(admin.id));
+    expect((out as { heldByUserId: string | null }).heldByUserId).toBeNull();
+  });
+
+  it('expectUnheld: true refuses when a hold was taken in the interval — the silent force-release', async () => {
+    // THE case #1073 exists for. Without the assertion this call would
+    // force-release contrib's hold, post a public notice, and report success
+    // to an admin who was never asked, because their pre-read said "unheld".
+    const w = await heldBy(contrib.id);
+    await expectCode(
+      M.releaseWorker({}, { workerRef: w.id, expectUnheld: true }, ctx(admin.id)),
+      'WORKER_HOLD_STALE',
+    );
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId)
+      .toBe(contrib.id);
+    // …and crucially NO team-chat notice was posted, because no release happened.
+    const posts = await db.node.count({ where: { loc: { startsWith: 'chats:team' } } });
+    expect(posts).toBe(0);
+  });
+
+  it('passing BOTH assertions is BAD_USER_INPUT — they contradict', async () => {
+    const w = await heldBy(contrib.id);
+    await expectCode(
+      M.releaseWorker(
+        {}, { workerRef: w.id, expectedHolderUserId: contrib.id, expectUnheld: true }, ctx(admin.id),
+      ),
+      'BAD_USER_INPUT',
+    );
+  });
+
+  it('passing NEITHER keeps the unconditional behaviour — the change is additive', async () => {
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+  });
+
+  it('a forwarded undefined is NOT an assertion — presence semantics are not relied on', async () => {
+    // findings:optional-arg-meets-presence-semantics: a layer that forwards the
+    // argument unconditionally sends undefined, which is PRESENT. If that were
+    // read as an assertion, every such caller would start being refused.
+    const w = await heldBy(contrib.id);
+    await M.releaseWorker(
+      {},
+      { workerRef: w.id, expectedHolderUserId: undefined, expectUnheld: undefined },
+      ctx(contrib.id),
+    );
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
+  });
+
 });
 
 describe('#1050 — deleting a holder releases their names', () => {

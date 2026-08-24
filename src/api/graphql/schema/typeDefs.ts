@@ -6715,8 +6715,34 @@ export const typeDefs = `#graphql
     this casting, and the handoff sequence and worklog travel with the worker
     to whoever holds it next. Idempotent: releasing an unheld worker returns
     it unchanged.
+
+    #1073 — OPTIONAL PRECONDITION. The two release paths are different acts:
+    the holder's own release notifies nobody, an admin force-release announces
+    itself in the team chat. A client that wants to tell its user which one it
+    is about to perform can only classify from a pre-read, and the hold can
+    change in between — so the act performed differs from the act described,
+    and a hold taken in that interval is force-released silently.
+
+    State what you expect and the server refuses instead. Pass
+    expectedHolderUserId to assert a specific holder, or expectUnheld: true to
+    assert there is none; a mismatch refuses WORKER_HOLD_STALE carrying the
+    holder actually found. Passing neither keeps the unconditional behaviour,
+    so this is additive. Passing both is BAD_USER_INPUT.
+
+    Two arguments rather than one nullable id on purpose: distinguishing
+    "expect nobody" from "no expectation" through a nullable argument would
+    rest on KEY PRESENCE, and any layer that forwards the argument
+    unconditionally sends undefined — present, and read as an assertion nobody
+    made. That is a live hazard in this codebase, so a safety precondition does
+    not lean on it.
     """
-    releaseWorker(workerRef: ID!): Worker!
+    releaseWorker(
+      workerRef: ID!
+      "Assert the name is held by exactly this user. Mismatch refuses WORKER_HOLD_STALE."
+      expectedHolderUserId: ID
+      "Assert the name is held by nobody. Mismatch refuses WORKER_HOLD_STALE."
+      expectUnheld: Boolean
+    ): Worker!
 
     """
     #1010 — amend a casting's individuality after the fact.
