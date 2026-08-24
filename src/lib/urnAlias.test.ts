@@ -440,3 +440,93 @@ describe('#1080 review — defects the first draft shipped', () => {
     expect(await resolveNodeRef(db, published)).toEqual({ id: node.id });
   });
 });
+
+describe('#1080 re-review — a bound must never precede liveness', () => {
+  it('finds the only live holder past the first alias page', async () => {
+    // The cap moved 3 → 100 in the first fix round, which is the same defect at
+    // a larger threshold. The walk now pages until it has enough LIVE rows, so
+    // holder count cannot hide a resolvable URN.
+    const shared = `${org.urn}:shared`;
+    const dead: string[] = [];
+    for (let i = 0; i < 120; i++) dead.push(`${org.urn}:dead-${i}`);
+    // Created in bulk: 120 dead claimants is past one 100-row page.
+    await db.app.createMany({
+      data: dead.map((urn) => ({ id: generateId(), organizationId: org.id, name: 'A', urn })),
+    });
+    const deadRows = await db.app.findMany({ where: { urn: { in: dead } }, select: { id: true } });
+    await db.urnAlias.createMany({
+      data: deadRows.map((r) => ({
+        id: generateId(), urn: shared, entityType: 'APP' as const,
+        entityId: r.id, reason: 'RENAME' as const,
+      })),
+    });
+    await db.app.updateMany({ where: { urn: { in: dead } }, data: { deletedAt: new Date() } });
+
+    const live = await mkApp(`${org.urn}:live`);
+    await recordUrnRename(db, { entityType: 'APP', entityId: live.id, oldUrn: shared, newUrn: live.urn });
+
+    expect(await resolveAppRef(db, `hrn:app:${shared}`)).toEqual({ id: live.id });
+  });
+
+  it('still detects ambiguity when both live holders sit past the first page', async () => {
+    const shared = `${org.urn}:shared`;
+    const dead: string[] = [];
+    for (let i = 0; i < 120; i++) dead.push(`${org.urn}:dead-${i}`);
+    await db.app.createMany({
+      data: dead.map((urn) => ({ id: generateId(), organizationId: org.id, name: 'A', urn })),
+    });
+    const deadRows = await db.app.findMany({ where: { urn: { in: dead } }, select: { id: true } });
+    await db.urnAlias.createMany({
+      data: deadRows.map((r) => ({
+        id: generateId(), urn: shared, entityType: 'APP' as const,
+        entityId: r.id, reason: 'RENAME' as const,
+      })),
+    });
+    await db.app.updateMany({ where: { urn: { in: dead } }, data: { deletedAt: new Date() } });
+
+    const a = await mkApp(`${org.urn}:one`);
+    const b = await mkApp(`${org.urn}:two`);
+    await recordUrnRename(db, { entityType: 'APP', entityId: a.id, oldUrn: shared, newUrn: a.urn });
+    await recordUrnRename(db, { entityType: 'APP', entityId: b.id, oldUrn: shared, newUrn: b.urn });
+
+    // Truncating the walk early would silently pick one of these.
+    await expect(resolveAppRef(db, `hrn:app:${shared}`)).rejects.toBeInstanceOf(
+      AmbiguousLegacyUrnError,
+    );
+  });
+
+  // NOTE ON WHAT THIS DOES *NOT* COVER. This pins the PRE-TRANSACTION
+  // derived-pattern guard, not the locked re-check inside the transaction.
+  // Mutating that inner guard away leaves this test green, because the outer
+  // check has already excluded this input — a green mutation indicting the
+  // test, exactly as `review:a-green-mutation-indicts-the-test` describes. The
+  // inner guard is reachable only when the pattern matches at the outer read and
+  // has changed by the time the lock is acquired, which is a real interleaving
+  // this suite cannot stage. It is documented as unproven at the call site
+  // rather than deleted, and rather than claimed here to be tested.
+  it('leaves a system memory that no longer matches the derived pattern alone', async () => {
+    const sysMem = await mkMemory(`${org.urn}:helper-system`);
+    const agent = await db.agent.create({
+      data: {
+        id: generateId(), organizationId: org.id, name: 'G', urn: `${org.urn}:helper`,
+        visibility: 'ORGANIZATION', systemMemoryId: sysMem.id,
+      },
+    });
+    // Simulate the concurrent winner: the memory no longer matches the pattern
+    // derived from the agent urn this call read.
+    await db.memory.update({ where: { id: sysMem.id }, data: { urn: `${org.urn}:moved-system` } });
+
+    const { resolvers } = await import('../api/graphql/schema/resolvers.js');
+    await resolvers.Mutation.updateAgent(
+      {},
+      { ref: agent.id, urn: 'assistant' } as never,
+      { db, userId: user.id, roles: ['ADMIN'], organizationId: org.id } as never,
+    );
+
+    // Left alone, and no alias invented for a rename that did not happen.
+    expect((await db.memory.findUniqueOrThrow({ where: { id: sysMem.id } })).urn).toBe(
+      `${org.urn}:moved-system`,
+    );
+    expect(await db.urnAlias.count({ where: { entityId: sysMem.id } })).toBe(0);
+  });
+});

@@ -459,8 +459,36 @@ export const agentMutations = {
           // transaction would fail with "current transaction is aborted".
           await ctx.db
             .$transaction(async (tx) => {
+              const memId = agent.systemMemoryId as string;
+              // Lock and RE-READ inside the transaction (PR #1080 re-review,
+              // Codex P2). `sys.urn` was read before this transaction opened, so
+              // two concurrent agent renames could both see `A-system`; the
+              // first commits `B-system`, the second overwrites with `C-system`
+              // while still recording `A-system` as the predecessor — leaving
+              // the committed, possibly published `B-system` with no alias.
+              // Aliasing the urn actually superseded is the whole point.
+              const [lockedSys] = await tx.$queryRaw<{ urn: string }[]>`
+                SELECT urn FROM memories WHERE id = ${memId} FOR UPDATE
+              `;
+              const currentSysUrn = lockedSys?.urn;
+              // Re-check the derived-pattern guard against the LOCKED value: a
+              // concurrent rename may already have moved it off the pattern, and
+              // a wizard-supplied system memory carries an author-chosen URN we
+              // must never rewrite.
+              //
+              // UNPROVEN BY TEST, and kept anyway. Mutating this line away leaves
+              // the suite green, because the pre-transaction check above already
+              // excludes every input the suite can construct. Reaching it needs
+              // the pattern to match at that outer read and to have CHANGED by
+              // the time this lock is acquired — a genuine interleaving no test
+              // here can stage. Per `review:a-green-mutation-indicts-the-test`
+              // that green indicts the test, not the guard: it does not mean the
+              // check is redundant, only that nothing exercises it. It is the
+              // sole thing standing between a concurrent rename and this code
+              // rewriting an author-chosen system-memory URN from stale data.
+              if (!currentSysUrn || currentSysUrn !== derivedOldUrn) return;
               await tx.memory.update({
-                where: { id: agent.systemMemoryId as string },
+                where: { id: memId },
                 data: {
                   urn: `${newUrn}-system`,
                   updatedBy: ctx.userId ?? ctx.clientId ?? null,
@@ -468,8 +496,8 @@ export const agentMutations = {
               });
               await recordUrnRename(tx, {
                 entityType: 'MEMORY',
-                entityId: agent.systemMemoryId as string,
-                oldUrn: derivedOldUrn,
+                entityId: memId,
+                oldUrn: currentSysUrn,
                 newUrn: `${newUrn}-system`,
                 createdBy: ctx.userId ?? ctx.clientId ?? null,
               });

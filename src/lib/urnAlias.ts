@@ -72,12 +72,16 @@ export type UrnAliasReason = 'RENAME' | 'ORG_RENAME_CASCADE' | 'V1_MIGRATION';
 /** The narrow slice of the client this module needs — a tx client satisfies it. */
 type AliasDb = Pick<PrismaClient, 'urnAlias'>;
 
+/** How many alias rows one page of the liveness walk examines. */
+const ALIAS_PAGE_SIZE = 100;
+
 /**
- * Runaway guard on how many historical holders of ONE urn a lookup will examine.
- * Not a semantic bound — liveness and ambiguity are decided across everything
- * fetched, so this only caps a pathological map (see `findUrnAliasTargetIds`).
+ * Runaway guard on the liveness walk. NOT a semantic bound — liveness and
+ * ambiguity are decided across the pages actually walked, and the walk stops as
+ * soon as two live rows are found. Reaching this means one URN has had tens of
+ * thousands of historical holders, i.e. the map is corrupt.
  */
-const ALIAS_CANDIDATE_CAP = 100;
+const ALIAS_MAX_PAGES = 100;
 
 /**
  * Record that `oldUrn` no longer addresses `entityId` directly.
@@ -149,37 +153,37 @@ export async function recordUrnRename(
 }
 
 /**
- * The entity ids this URN used to address, for one entity kind.
+ * One PAGE of the entity ids this URN used to address, for one entity kind.
  *
  * Returns ids ONLY — never a liveness verdict. The caller re-queries its own
  * table with its own filters (soft-delete, `uninstalled_at`, visibility), which
- * is what stops an alias resurrecting a dead row or routing around a gate. Rule
- * 2 in the module docstring.
+ * is what stops an alias resurrecting a dead row or routing around a gate
+ * (`cor:urn:030:02`).
  *
- * Deliberately NOT limited to two or three rows (PR #1080 review, Codex +
- * Copilot P2). An earlier draft took 3, which is wrong twice over once a URN has
- * had more than three historical holders — legal, because aliases outlive the
- * entities they name: the take is UNORDERED, so it can return three dead holders
- * and report a live fourth as missing, or drop one of two live holders and turn
- * an ambiguity into a confident wrong answer. Liveness has to be evaluated
- * across ALL candidates and the bound applied to the LIVE set, which is what
- * `findLiveUrnAliasTargets` now does.
- *
- * The cap here is a runaway guard, not a semantic bound: it sits far above any
- * plausible number of historical holders of one URN, so reaching it means the
- * map is corrupt rather than that a caller is unlucky.
+ * Paged and ORDERED, because a bound applied before liveness is a correctness
+ * bug rather than a safety measure (PR #1080 review, Codex P2 — twice). The
+ * first draft took 3 rows; the second raised it to 100, which Codex correctly
+ * called the same defect at a larger threshold. An unordered, pre-liveness limit
+ * can return only dead holders and report a live one as missing, or drop one of
+ * two live holders and turn an ambiguity into a confident wrong answer — and the
+ * schema deliberately permits unbounded historical holders of one URN. Ordering
+ * by id makes paging deterministic; `findLiveUrnAliasTargets` walks the pages
+ * until it has enough LIVE rows to answer.
  */
 export async function findUrnAliasTargetIds(
   db: AliasDb,
   entityType: UrnAliasEntityType,
   lookupUrn: string,
+  page?: { skip?: number; take?: number },
 ): Promise<string[]> {
   const urn = lookupUrn?.trim();
   if (!urn) return [];
   const rows = await db.urnAlias.findMany({
     where: { urn: normalizeUrnForLookup(urn), entityType: entityType as never },
     select: { entityId: true },
-    take: ALIAS_CANDIDATE_CAP,
+    orderBy: { id: 'asc' },
+    skip: page?.skip ?? 0,
+    take: page?.take ?? ALIAS_PAGE_SIZE,
   });
   return rows.map((r: { entityId: string }) => r.entityId);
 }
@@ -187,15 +191,19 @@ export async function findUrnAliasTargetIds(
 /**
  * Alias-map candidates, re-queried for liveness by the caller's own filter.
  *
- * `findLive` receives the ids this URN used to address and must apply the SAME
+ * `findLive` receives ids this URN used to address and must apply the SAME
  * liveness and visibility predicates the resolver's primary lookup applies —
- * that is rule 2 (liveness is never stored in the map), and keeping it a callback
- * is what makes it structurally impossible for this module to answer a liveness
- * question it has no business answering.
+ * `cor:urn:030:02`. Keeping it a callback is what makes it structurally
+ * impossible for this module to answer a question that is not its to answer.
  *
- * Skips the second query entirely when the map has nothing, so the added cost on
- * the overwhelmingly common path — a URN that is simply not found — is one
- * indexed lookup that returns no rows.
+ * Walks alias pages until it has TWO live rows (enough to distinguish "one
+ * match" from "ambiguous") or the pages run out, so the liveness decision is
+ * never truncated by a bound applied before it. `ALIAS_MAX_PAGES` is a runaway
+ * guard on a corrupt map, not a semantic limit — reaching it means one URN has
+ * had tens of thousands of historical holders.
+ *
+ * Costs exactly one indexed query on the overwhelmingly common path (a URN that
+ * is simply not found), because an empty first page returns immediately.
  */
 export async function findLiveUrnAliasTargets<T extends { id: string }>(
   db: AliasDb,
@@ -203,9 +211,27 @@ export async function findLiveUrnAliasTargets<T extends { id: string }>(
   lookupUrn: string,
   findLive: (ids: string[]) => Promise<T[]>,
 ): Promise<T[]> {
-  const ids = await findUrnAliasTargetIds(db, entityType, lookupUrn);
-  if (ids.length === 0) return [];
-  return findLive(ids);
+  const live: T[] = [];
+  const seen = new Set<string>();
+  for (let page = 0; page < ALIAS_MAX_PAGES; page++) {
+    const ids = await findUrnAliasTargetIds(db, entityType, lookupUrn, {
+      skip: page * ALIAS_PAGE_SIZE,
+      take: ALIAS_PAGE_SIZE,
+    });
+    if (ids.length === 0) break;
+    for (const row of await findLive(ids)) {
+      if (!seen.has(row.id)) {
+        seen.add(row.id);
+        live.push(row);
+      }
+    }
+    // Two live rows already settle every question a caller asks: exactly one
+    // match, or ambiguous. Reading further pages could only add more of the
+    // latter.
+    if (live.length >= 2) break;
+    if (ids.length < ALIAS_PAGE_SIZE) break;
+  }
+  return live;
 }
 
 /**
@@ -252,22 +278,21 @@ export async function findMemoryByAliasedUrn(
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string; deletedAt: Date | null } | null> {
   for (const candidate of candidateUrns) {
-    const ids = await findUrnAliasTargetIds(db, 'MEMORY', candidate);
-    if (ids.length === 0) continue;
-    // Liveness BEFORE ambiguity (PR #1080 review, Codex + Copilot P2). An
-    // earlier draft fetched every claimant unfiltered and raised on more than
-    // one, so a live memory sharing an old URN with a soft-deleted one made a
-    // node or edge lookup FAIL — while `resolveMemoryRef`, which filters first,
-    // resolved the live row happily. Two surfaces, two answers, for the same
-    // URN. It also returned an arbitrary row, which could be the dead one.
+    // Routed through the shared paged walk rather than fetching ids directly
+    // (PR #1080 re-review, Codex P2): liveness is applied per page and the walk
+    // stops at two LIVE rows, so a bound can never hide the only live holder.
     //
-    // This is `cor:urn:030:02` in its exact form: a dead claimant is not a
-    // claimant, so it must not be able to make a resolvable URN ambiguous.
-    const rows = await db.memory.findMany({
-      where: { id: { in: ids }, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
-      select: { id: true, deletedAt: true },
-      take: 2,
-    });
+    // Liveness BEFORE ambiguity. An earlier draft raised on any two claimants,
+    // so a live memory sharing an old URN with a soft-deleted one made a node or
+    // edge lookup FAIL — while `resolveMemoryRef`, which filters first, resolved
+    // the live row happily. Two surfaces, two answers, for the same URN. That is
+    // `cor:urn:030:02` exactly: a dead claimant is not a claimant.
+    const rows = await findLiveUrnAliasTargets(db, 'MEMORY', candidate, (ids) =>
+      db.memory.findMany({
+        where: { id: { in: ids }, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
+        select: { id: true, deletedAt: true },
+      }),
+    );
     if (rows.length === 0) continue;
     // Ambiguity is the caller's error type to throw, so this helper stays free
     // of any one resolver's vocabulary.
@@ -276,3 +301,4 @@ export async function findMemoryByAliasedUrn(
   }
   return null;
 }
+
