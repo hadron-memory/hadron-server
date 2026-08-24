@@ -22,8 +22,17 @@
  *      is the greatest of `startedAt`, `updatedAt`, and the session's most
  *      recent `UsageEvent.createdAt`: any write attributed to the session
  *      is a heartbeat, which is exactly the "a session log / chat post
- *      touches liveness" behavior the persona design wants, for free
+ *      touches liveness" behavior the persona design wants
  *      (`updateSession`'s `updatedAt` bump is the explicit touch, #931).
+ *
+ *      This said "for free" until #1081, and that word was the defect: on the
+ *      MCP desktop track a chat post touched nothing, because a
+ *      user-credential caller has no transport binding and its events are
+ *      therefore unattributed. The only heartbeat was an accident of
+ *      `record_work(kind:'pr')` writing `Session.prNumber`, so workers who
+ *      open PRs lived and coordinators were reaped mid-work. The touch is now
+ *      explicit on every MCP tool handed a session id — the behaviour this
+ *      comment always described is finally true on both tracks.
  *
  * Reaping sets **both** `endedAt` and `autoExpiredAt` to the same instant,
  * so "active" stays the single predicate `endedAt IS NULL` everywhere and

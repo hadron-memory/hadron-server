@@ -1184,6 +1184,126 @@ export function createMcpServerInstance(
    * (findings:auth-appid-credential-vs-selection) — it IS that App, and no
    * session argument may re-point it.
    */
+  /**
+   * #1081 — touch a session the caller just drove, so the reaper counts it live.
+   *
+   * ## Why this exists
+   *
+   * The reaper measures last activity as the greatest of `startedAt`,
+   * `updatedAt`, and the newest UsageEvent attributed to the session
+   * (`reapSessions.ts`). On the MCP desktop track a user-credential caller
+   * usually has NO transport binding — the worker session is created by
+   * `hadron_start_session` mid-conversation, long after the HTTP connection was
+   * established, so it can never appear in an `X-Hadron-Session` header. With
+   * `auth.sessionId` null, every usage event is unattributed and nothing bumps
+   * `updatedAt`.
+   *
+   * The result was a heartbeat by ACCIDENT: the only MCP-path write that
+   * touched the Session row was `hadron_record_work(kind:'pr')` denormalizing
+   * `Session.prNumber` — a display-only field update. So a worker who opens PRs
+   * stayed alive and a worker who does not, notably a COORDINATOR who reads
+   * chat and dispatches all day, was reaped ~24h after binding no matter how
+   * hard they worked. That is 7-of-8 coordinator stints ending with no #1029
+   * handoff, and it is why three different reaper ceilings (24h / 27h / 43.6h)
+   * were each reported and each contradicted: one regime, different tool mixes.
+   *
+   * This makes the touch EXPLICIT and puts it on every tool handed a live
+   * session id, which is what the reaper's own docstring already claims happens
+   * ("a session log / chat post touches liveness … for free").
+   *
+   * ## What keeps it from being a hole
+   *
+   * - **Ownership is re-checked, never assumed.** A user principal may only
+   *   touch a session attributed to them; a pure App-key caller only its App's.
+   *   Otherwise any caller could keep an arbitrary session alive by naming it.
+   * - **It cannot revive the dead.** Guarded on `endedAt: null`, so a heartbeat
+   *   racing `endSession` or the reaper updates zero rows rather than
+   *   resurrecting a closed session — and never clears `autoExpiredAt`.
+   * - **It cannot fail a tool call.** A heartbeat is bookkeeping; a caller's
+   *   read must not 500 because liveness bookkeeping had a bad day.
+   */
+  async function heartbeatSession(sessionRef?: string | null): Promise<void> {
+    // Defensive normalization: `createTestableMcpServer` bypasses zod, so a
+    // non-string here would throw out of `.trim()` and fail the whole tool call
+    // — the one thing this function promises never to do (PR #1082 review,
+    // Copilot). Same reason the handlers re-validate contentScope.
+    const id = typeof sessionRef === 'string' ? sessionRef.trim() : '';
+    if (!id) return;
+    // Scope to what the caller demonstrably owns. A pure App-key caller has no
+    // userId by construction; a user principal is judged on the user (the #932
+    // rule), so an impersonated support session cannot heartbeat its target.
+    const owner = auth.userId
+      ? { userId: auth.userId }
+      : auth.appId
+        ? { appId: auth.appId }
+        : null;
+    if (!owner || auth.impersonation) return;
+    // CURRENT eligibility, not historical (PR #1082 review, Codex P1).
+    // Ownership alone is a HISTORICAL fact: `Session.userId` is stamped at bind
+    // and never revoked, so a user removed from the App or the org still
+    // satisfies it with a perfectly valid credential. They could then keep an
+    // old worker session — and the worker it holds — alive indefinitely by
+    // issuing tool calls that are themselves denied, since this touch runs
+    // before any of the handlers' own gates. "Revoked membership must not
+    // authorize" applies to keeping something alive exactly as it applies to
+    // reading it.
+    try {
+      // INSIDE the try (PR #1082 review, Copilot): this is a DB lookup, and it
+      // sat outside while the docstring two paragraphs up promised the
+      // heartbeat "cannot fail a tool call". A transient error here would have
+      // broken that promise — the same claim-wider-than-the-code defect this
+      // PR's own commit messages keep naming. Either step throwing means no
+      // heartbeat, which is the safe direction: the session simply ages.
+      if (auth.userId && !(await callerStillDrives(id))) return;
+      await db.session.updateMany({
+        where: { id, endedAt: null, deletedAt: null, ...owner },
+        data: { updatedAt: new Date() },
+      });
+    } catch (err) {
+      // Deliberately swallowed — see the docstring. Logged, not raised.
+      console.warn('[heartbeatSession] touch failed:', err);
+    }
+  }
+
+  /**
+   * Is this user-principal caller STILL entitled to drive this session?
+   *
+   * Shares its predicate with `adoptAppFromSession` deliberately: that function
+   * already establishes "this session is mine and its App still admits me", and
+   * two copies of that question would drift — which is how a revoked member ends
+   * up refused on one surface and served on another (the `effectiveAccess` tell,
+   * #362). This one answers the question WITHOUT pinning the App, because a
+   * heartbeat must not silently re-scope a caller who passed `app` explicitly.
+   *
+   * A session with `appId: null` is a self-attributed user-credential coding
+   * session (#934) — there is no App to be a member of, so ownership is the
+   * whole gate and there is nothing further to revoke.
+   */
+  async function callerStillDrives(sessionId: string): Promise<boolean> {
+    if (!auth.userId) return false;
+    const session = await db.session.findUnique({
+      where: { id: sessionId },
+      select: { appId: true, userId: true },
+    });
+    if (!session || session.userId !== auth.userId) return false;
+    if (!session.appId) return true;
+    const app = await db.app.findFirst({
+      where: { id: session.appId, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (!app) return false;
+    return isAppParticipant(
+      {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context,
+      app,
+    );
+  }
+
   async function adoptAppFromSession(sessionRef?: string | null): Promise<boolean> {
     if (!auth.userId || !sessionRef) return false;
 
@@ -2384,9 +2504,15 @@ export function createMcpServerInstance(
       // MCP transport session id. It was hardcoded null in all five MCP usage
       // writers, which meant MCP work produced no session heartbeat at all: the
       // #930 reaper counts the latest attributed UsageEvent as liveness, so a
-      // busy session could be reaped as idle. Residual gap: user-credential MCP
-      // callers cannot bind a session today (cor:aut:020:02 restricts binding to
-      // App-key callers), so their heartbeat is still only updateSession.
+      // The residual this comment used to describe — "user-credential MCP
+      // callers cannot bind a session today" — was CLOSED by #934 four days
+      // after it was written: `bindSession` takes both principal shapes, and a
+      // user principal binds a session attributed to them. The real gap was
+      // narrower and outlived it: a desktop caller's session is created
+      // mid-conversation by `hadron_start_session`, so it can never reach an
+      // `X-Hadron-Session` header on a connection that already exists, leaving
+      // `auth.sessionId` null and every event here unattributed. #1081 gives
+      // that caller an explicit heartbeat instead (`heartbeatSession`).
       //
       // A LOCKED node still records: the projection is what crossed the
       // boundary, and the caller did read this node's addressable state.
@@ -5696,9 +5822,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       agent: z.string().optional().describe('The agent to cast (Agent URN or ID) — must be installed in the App. Omit to resolve it from role.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       promptOverride: z.string().optional().describe('Per-worker individuality layered over the agent\'s template prompt — appended to the bound template in the worker\'s resolved prompt.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which App to cast in when app is omitted.'),
+      session: z.string().optional().describe('Your session id — used to resolve which App to cast in when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
     },
     async ({ role, name, agent, app, promptOverride, session }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
       // Delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement). Auth semantics
       // live in the resolver's gate: a hybrid user+selection principal is
@@ -5767,6 +5897,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
     async ({ body, replyToSeq, session, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
       // Delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement). App default
       // mirrors hadron_cast_worker: requireAppScope() runs BEFORE reading
@@ -5836,10 +5970,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned.'),
+      session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
     async ({ sinceSeq, mentions, limit, offset, session, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
       let appRef = app;
       if (!appRef) {
         // #1005: this read is the one App-scoped team tool that took NEITHER an
@@ -5899,10 +6037,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       includeRetired: z.boolean().optional().describe('Include retired castings — historical staff whose names stay reserved.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which team App to list when app is omitted.'),
+      session: z.string().optional().describe('Your session id — used to resolve which team App to list when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
     async ({ includeRetired, limit, offset, session, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
       // App default mirrors hadron_cast_worker / hadron_record_work:
       // requireAppScope() runs BEFORE reading auth.appId so the omit-app flow
       // honors hadron_set_active_app.
@@ -6094,13 +6236,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_get_worker',
-    'Read ONE worker, including its resolved BOOT BRIEFING (#1015). THE recovery read: hadron_start_session returns the briefing once, at bind time, and the briefing must never be cached — so an agent whose context was compacted has no copy and no legitimate way back to it. This is that way. It is a pure read: it reserves nothing, mints nothing, and does not touch the session, so recovering costs neither a second session nor a force-takeover of yourself (both of which corrupt the provenance record the Worker model exists to produce). workerRef takes the same three forms as hadron_start_session — the worker\'s NAME ("Iris"), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id; an id or URN names its own App, a bare NAME needs one selected (or passed as app/session). Re-read this whenever you are unsure you are still working as the worker you bound.',
+    'Read ONE worker, including its resolved BOOT BRIEFING (#1015). THE recovery read: hadron_start_session returns the briefing once, at bind time, and the briefing must never be cached — so an agent whose context was compacted has no copy and no legitimate way back to it. This is that way. It reserves nothing and mints nothing, so recovering costs neither a second session nor a force-takeover of yourself (both of which corrupt the provenance record the Worker model exists to produce). workerRef takes the same three forms as hadron_start_session — the worker\'s NAME ("Iris"), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id; an id or URN names its own App, a bare NAME needs one selected (or passed as app/session). Re-read this whenever you are unsure you are still working as the worker you bound.',
     {
       workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which App a bare NAME belongs to when app is omitted.'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so it is not reaped as idle while you are working (#1081).'),
     },
     async ({ workerRef, app, session }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
       // createTestableMcpServer bypasses zod — normalize defensively so the
       // test surface and production agree on malformed input.
       const trimmed = typeof workerRef === 'string' ? workerRef.trim() : '';
@@ -6239,9 +6385,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // offering the option at all.
       promptOverride: z.string().optional().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it; omit it to leave the override untouched."),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which App a bare NAME belongs to when app is omitted.'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so it is not reaped as idle while you are working (#1081).'),
     },
     async ({ workerRef, promptOverride, app, session }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
       // Name-vs-self-describing ref handling, identical to hadron_get_worker.
       // The MUTATION takes a worker id, so a name is resolved to one FIRST
       // through the read surface — which applies the staff READ gate; the
@@ -6331,6 +6481,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
     async ({ session, tool, kind, ref, action, detail, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
       // Delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement). App default
       // mirrors hadron_cast_worker: requireAppScope() runs BEFORE reading
@@ -6427,6 +6581,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
     async ({ ref, session, worker, tool, kind, limit, offset, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
       let appRef = app;
       if (!appRef) {
         // #1005: the optional session filter doubles as an App-resolution hint.
