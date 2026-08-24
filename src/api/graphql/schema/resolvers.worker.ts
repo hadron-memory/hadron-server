@@ -31,6 +31,7 @@ import {
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
 import { applyPersonaTemplate, templateBindsName } from '../../../lib/personaDescription.js';
+import { sessionActivityAt, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import {
   newestHandoff,
   handoffSessionId,
@@ -1404,6 +1405,76 @@ export const workerQueries = {
   },
 };
 
+/** Per-worker driving state: is a session open, and when was it last driven. */
+export type WorkerActivity = { hasLiveSession: boolean; lastActiveAt: Date | null };
+
+/**
+ * Driving state for EVERY worker of one App, in three queries (hadron-cli#487).
+ *
+ * Ada's finding is that a coordinator cannot tell "dispatched and pending" from
+ * "dispatched into the void": ten issues went to a worker whose entire history
+ * was two sessions of 2m26s and 41s, and `worker list` renders that identically
+ * to a worker driven yesterday. The join already existed — `startSession`
+ * computes it for the takeover prompt — so only the READ surface was missing.
+ *
+ * Loaded per APP rather than per worker on purpose. A roster is the calling
+ * shape, and a field resolver that queried per worker would issue one query per
+ * row, concurrently, up to the 200-item page cap — the N+1 that PR #1000's
+ * review pulled out of the MCP roster twice already.
+ *
+ * Memoized ONLY inside a query, for the reason `loadAppRepoAffinity` states: a
+ * request-scoped memo over data the same request can WRITE is stale by
+ * construction, and `startSession` / `endSession` write exactly this. A mutation
+ * pays the re-read rather than answering from a cache it just invalidated.
+ */
+export async function loadAppWorkerActivity(
+  ctx: Context,
+  appId: string,
+  opts?: { memoize?: boolean },
+): Promise<Map<string, WorkerActivity>> {
+  type Cache = Map<string, Promise<Map<string, WorkerActivity>>>;
+  const holder = ctx as Context & { workerActivityCache?: Cache };
+  const cache = opts?.memoize ? (holder.workerActivityCache ??= new Map()) : null;
+  const cached = cache?.get(appId);
+  if (cached) return cached;
+
+  const pending = (async () => {
+    const out = new Map<string, WorkerActivity>();
+    // Sessions of THIS App's workers. `deletedAt: null` matches the predicate
+    // `startSession` refuses WORKER_TAKEN on, exactly (PR #1000 review, Codex
+    // P2): without it a roster calls a worker busy whose only live session is
+    // soft-deleted, while binding it actually succeeds. Liveness a reader sees
+    // and liveness the server enforces must be ONE predicate.
+    const sessions = await ctx.db.session.findMany({
+      where: { worker: { appId }, deletedAt: null },
+      select: { id: true, workerId: true, startedAt: true, updatedAt: true, endedAt: true },
+    });
+    if (sessions.length === 0) return out;
+
+    const lastEventBySession = await loadLastEventBySession(
+      ctx.db as never,
+      sessions.map((s) => s.id),
+    );
+    for (const s of sessions) {
+      if (!s.workerId) continue;
+      const at = sessionActivityAt(s, lastEventBySession.get(s.id));
+      const prior = out.get(s.workerId);
+      out.set(s.workerId, {
+        // ANY open session makes the worker live, so this ORs across rows
+        // rather than reading the newest one: `force` lets several coexist,
+        // and the most recent row is not necessarily the open one.
+        hasLiveSession: (prior?.hasLiveSession ?? false) || s.endedAt === null,
+        lastActiveAt:
+          prior?.lastActiveAt && prior.lastActiveAt > at ? prior.lastActiveAt : at,
+      });
+    }
+    return out;
+  })();
+
+  cache?.set(appId, pending);
+  return pending;
+}
+
 /**
  * #983 review (Codex + Copilot P1): `Session.worker` made Worker rows
  * reachable by principals the worker queries never admitted —
@@ -1674,6 +1745,58 @@ export const workerFieldResolvers = {
       _: unknown,
       ctx: Context,
     ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.memoryId : null),
+    /**
+     * hadron-cli#487 — is a worker session open on this name RIGHT NOW.
+     *
+     * Nullable, and null means "not permitted to know" rather than "no". A
+     * non-null `Boolean!` would have to answer `false` on deny, which states a
+     * fact the resolver never computed — the #1084 P1 in miniature, where the
+     * gate and the value described different things. Masked like every other
+     * working-state field, because `Session.worker` reaches Worker rows through
+     * a wider gate (#983).
+     *
+     * This is NOT availability. A name's availability is its HOLD
+     * (`cor:agt:020:09`); liveness only says whether a session is open, which
+     * is a question about your own worker. The two were conflated in the CLI
+     * and that conflation IS hadron-cli#487.
+     */
+    hasLiveSession: async (
+      worker: { id: string; appId: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<boolean | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return activity.get(worker.id)?.hasLiveSession ?? false;
+    },
+    /**
+     * hadron-cli#487 — when this worker was last DRIVEN, across every session
+     * it has ever had; null for a worker nobody has ever bound.
+     *
+     * That null is the whole point of the field: a worker cast and never driven
+     * is a meaningfully different thing from one worked yesterday, and every
+     * surface rendered them identically while a coordinator dispatched ten
+     * issues into the second one thinking it was the first.
+     *
+     * Derived by the platform's shared derivation (`sessionActivityAt`), so an
+     * "idle since" a human reads here agrees with the one the takeover prompt
+     * shows and the one the reaper acts on. Masked on deny, as above.
+     */
+    lastActiveAt: async (
+      worker: { id: string; appId: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<Date | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return activity.get(worker.id)?.lastActiveAt ?? null;
+    },
     /**
      * The role-agent behind the casting — behind Query.agent's OWN read gate
      * (PUBLIC, else owner / org READER), masked to null on deny. The Worker

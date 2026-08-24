@@ -138,6 +138,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
+import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 // #1012 — durable per-client MCP selections (active App / active memory).
 import {
   CLIENT_KEY_HEADER,
@@ -6096,28 +6097,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               `${limit === 0 ? ' with limit 0 (count only)' : ''}.`,
           );
         }
-        // "Taken right now" in ONE query for the whole page rather than per
-        // worker: cor:agt:020:03 derives liveness from active sessions, and
-        // this is the same signal hadron_start_session refuses WORKER_TAKEN on.
-        // It names only THAT a worker is taken, never who is driving it — the
-        // driver's identity stays behind the takeover refusal, which is a
-        // deliberate act rather than a listing.
-        const taken = new Set(
-          (
-            await db.session.findMany({
-              // `deletedAt: null` matches startSession's WORKER_TAKEN predicate
-              // exactly (PR #1000 review, Codex P2). Without it the roster
-              // advertises a worker as unavailable whose only live session is
-              // soft-deleted — while binding it actually succeeds.
-              where: {
-                workerId: { in: page.items.map((w: { id: string }) => w.id) },
-                endedAt: null,
-                deletedAt: null,
-              },
-              select: { workerId: true },
-            })
-          ).map((s: { workerId: string | null }) => s.workerId),
-        );
+        // "Taken right now" + "last driven", in ONE load for the whole page
+        // rather than per worker: cor:agt:020:03 derives liveness from active
+        // sessions, and this is the same signal hadron_start_session refuses
+        // WORKER_TAKEN on. It names only THAT a worker is taken, never who is
+        // driving it — the driver's identity stays behind the takeover refusal,
+        // which is a deliberate act rather than a listing.
+        //
+        // Shared with `Worker.hasLiveSession` / `Worker.lastActiveAt` since
+        // hadron-cli#487 (`loadAppWorkerActivity`), rather than the copy of the
+        // predicate that used to live here. Two roster surfaces reading the
+        // same fact must not be able to disagree about it, and the MCP roster
+        // and the GraphQL one are read by the same coordinator minutes apart.
+        const activity = await loadAppWorkerActivity(ctx, page.items[0].appId);
         // The App's URN once for the PAGE, not once per worker (PR #1000
         // review, Copilot): every worker here belongs to the SAME App, so
         // calling the `Worker.urn` field resolver per item repeated one
@@ -6209,7 +6201,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             } else {
               flags.push('unheld — binding it holds it');
             }
-            flags.push(taken.has(w.id) ? 'session live' : 'no live session');
+            const act = activity.get(w.id);
+            flags.push(act?.hasLiveSession ? 'session live' : 'no live session');
+            // hadron-cli#487: "cast but never driven" is the state a
+            // coordinator most needs and no surface showed — ten issues went to
+            // a worker whose whole history was two sessions under three
+            // minutes, rendered exactly like one worked yesterday.
+            if (!act?.lastActiveAt) flags.push('never driven');
             // #1026 — built from the SAME page-shared URN above, so the roster
             // costs no extra lookup per worker (the PR #1000 rule that pulled
             // the App URN out of the per-item path in the first place).

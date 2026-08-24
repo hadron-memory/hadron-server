@@ -872,6 +872,119 @@ describe('Worker field resolvers', () => {
 });
 
 // ---------------------------------------------------------------------------
+// hadron-cli#487 — is anyone actually driving this worker?
+// ---------------------------------------------------------------------------
+
+/**
+ * Ada's finding: ten issues were dispatched to a worker whose entire history
+ * was two sessions of 2m26s and 41s. Nothing rendered that differently from a
+ * worker driven yesterday, so a coordinator can dispatch into a channel nobody
+ * reads and get no signal at all — a failure that is silent, compounds daily,
+ * and is invisible precisely to the role whose job is to notice it.
+ *
+ * Both fields are WORKING STATE, so both mask to null on deny rather than
+ * answering "no": `hasLiveSession: false` on a caller who may not know would
+ * state a fact the server never computed.
+ */
+describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
+  const bindAs = (userId: string, workerId: string) =>
+    M.startSession(
+      {}, { input: { id: generateId(), workerRef: workerId, appRef: app.id } }, ctx(userId),
+    );
+
+  it('a cast-but-never-driven worker reads null, NOT a zero timestamp', async () => {
+    // The distinction the whole issue is about: "nobody has ever picked this
+    // up" must not render as "idle since the epoch" or as "idle since it was
+    // cast", both of which are answers to a question nobody asked.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.lastActiveAt(w, {}, ctx(admin.id))).toBeNull();
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+  });
+
+  it('an OPEN session reads live, and last-active tracks the heartbeat', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
+    const atStart = await W.lastActiveAt(w, {}, ctx(admin.id));
+    expect(atStart).toBeInstanceOf(Date);
+
+    // `updatedAt` is the explicit heartbeat (#930), and the roster must move
+    // with it — otherwise a session driven all day reads as idle since bind.
+    const later = new Date(Date.now() + 60_000);
+    await db.session.update({ where: { id: s.id }, data: { updatedAt: later } });
+    expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(later.getTime());
+  });
+
+  it('ENDING a session clears liveness but keeps the last-driven instant', async () => {
+    // Exactly Dara's shape in the issue: sessions that happened, ended, and
+    // left a name looking identical to one never touched. It must not.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    await M.endSession({}, { id: s.id }, ctx(appMember.id));
+
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+    expect(await W.lastActiveAt(w, {}, ctx(admin.id))).toBeInstanceOf(Date);
+  });
+
+  it('a SOFT-DELETED session is not liveness — the binder predicate wins', async () => {
+    // startSession refuses WORKER_TAKEN on `endedAt: null, deletedAt: null`.
+    // A roster that omitted `deletedAt` would advertise a worker as busy that
+    // a binder can take without even a prompt (PR #1000 review, Codex P2).
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    await db.session.update({ where: { id: s.id }, data: { deletedAt: new Date() } });
+
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+    expect(await W.lastActiveAt(w, {}, ctx(admin.id))).toBeNull();
+  });
+
+  it('ANY open session makes it live, even when a newer one has ended', async () => {
+    // `force` lets several sessions coexist, so liveness ORs across rows
+    // rather than reading the most recent — which may be the ended one.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const open = await bindAs(appMember.id, w.id);
+    const forced = await M.startSession(
+      {},
+      { input: { id: generateId(), workerRef: w.id, appRef: app.id, force: true } },
+      ctx(appMember.id),
+    );
+    await M.endSession({}, { id: forced.id }, ctx(appMember.id));
+
+    expect(await db.session.count({ where: { workerId: w.id, endedAt: null } })).toBe(1);
+    expect(open.id).toBeTruthy();
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
+  });
+
+  it('MASKS to null for a caller outside the App — not to false', async () => {
+    // `Session.worker` reaches Worker rows through a wider gate than the
+    // worker queries (#983), so an ungated answer publishes current staffing
+    // to a former member off a historical session. And the mask must be null:
+    // false is an assertion, null is a refusal to assert.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    await bindAs(appMember.id, w.id);
+
+    expect(await W.hasLiveSession(w, {}, ctx(outsider.id))).toBeNull();
+    expect(await W.lastActiveAt(w, {}, ctx(outsider.id))).toBeNull();
+    // …while the same live worker reads true for someone inside the App, so
+    // the null above is the GATE and not an empty result set.
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
+  });
+
+  it('one worker going live does not make its sibling live', async () => {
+    // The loader answers per APP in one query, so a mis-keyed fold would
+    // smear one worker's session across the roster.
+    const driven = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const idle = await cast({ agentRef: roleAgent.id, name: 'Jonas' });
+    await bindAs(appMember.id, driven.id);
+
+    expect(await W.hasLiveSession(driven, {}, ctx(admin.id))).toBe(true);
+    expect(await W.hasLiveSession(idle, {}, ctx(admin.id))).toBe(false);
+    expect(await W.lastActiveAt(idle, {}, ctx(admin.id))).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // #1050 — a NAME is held by a person until released
 // ---------------------------------------------------------------------------
 

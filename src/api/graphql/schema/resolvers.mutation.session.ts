@@ -49,6 +49,7 @@ import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
+import { loadLastEventBySession, mostRecentlyActive } from '../../../lib/sessionActivity.js';
 import {
   type Context,
   isAppParticipant,
@@ -709,29 +710,19 @@ export const sessionMutations = {
             // greatest of startedAt, updatedAt (the explicit heartbeat), and
             // the latest attributed UsageEvent — computed per session, then
             // the most recently active session wins.
-            const events = await ctx.db.usageEvent.groupBy({
-              by: ['sessionId'],
-              where: { sessionId: { in: activeSessions.map((s) => s.id) } },
-              _max: { createdAt: true },
-            });
-            const lastEventBySession = new Map(
-              events.map((e) => [e.sessionId, e._max.createdAt]),
+            //
+            // Both steps now come from `lib/sessionActivity.ts` (hadron-cli#487):
+            // the same derivation had to answer `Worker.lastActiveAt`, and a
+            // third hand-written copy of "when was this last driven" is how the
+            // takeover prompt and the roster start disagreeing about the same
+            // worker in the same second.
+            const lastEventBySession = await loadLastEventBySession(
+              ctx.db as never,
+              activeSessions.map((s) => s.id),
             );
-            let active = activeSessions[0];
-            let lastSeenAt = new Date(0);
-            for (const s of activeSessions) {
-              const seen = new Date(
-                Math.max(
-                  s.startedAt.getTime(),
-                  s.updatedAt?.getTime() ?? 0,
-                  lastEventBySession.get(s.id)?.getTime() ?? 0,
-                ),
-              );
-              if (seen > lastSeenAt) {
-                lastSeenAt = seen;
-                active = s;
-              }
-            }
+            const best = mostRecentlyActive(activeSessions, lastEventBySession);
+            const active = best?.session ?? activeSessions[0];
+            const lastSeenAt = best?.at ?? active.startedAt;
             const driver = active.userId
               ? await ctx.db.user.findUnique({
                   where: { id: active.userId },

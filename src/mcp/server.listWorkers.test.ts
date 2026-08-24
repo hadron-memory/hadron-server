@@ -89,6 +89,30 @@ describe('#997 — hadron_list_workers', () => {
     expect(out).toMatch(/Alex.*no live session/s);
   });
 
+  it('flags a worker NEVER DRIVEN, and drops the flag once one has been', async () => {
+    // hadron-cli#487: a casting nobody picked up rendered exactly like one
+    // worked yesterday, so a coordinator dispatched ten issues into a name
+    // whose whole history was two sessions under three minutes.
+    const iris = await worker('Iris', 'iris');
+    await worker('Alex', 'alex');
+    await db.session.create({
+      data: { id: generateId(), workerId: iris.id, appId: app.id, userId: user.id,
+        endedAt: new Date() },
+    });
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
+    // Asserted PER LINE, not with a dot-all regex over the whole roster: `/s`
+    // spans rows, so `Iris.*never driven` matches Alex's flag two lines down
+    // and the negative case passes whatever Iris says. That is the loose
+    // assertion @Jonas hit twice on hadron-cli#521 the same week.
+    const lineFor = (name: string) =>
+      out.split('\n').find((l) => l.trimStart().startsWith(`- ${name} `)) ?? '';
+    // Iris was driven and is now idle; Alex has never been bound at all.
+    expect(lineFor('Alex')).toContain('never driven');
+    expect(lineFor('Iris')).not.toContain('never driven');
+    // …and the ended session is not liveness.
+    expect(lineFor('Iris')).toContain('no live session');
+  });
+
   it('does not name the driver — that stays behind the takeover refusal', async () => {
     const iris = await worker('Iris', 'iris');
     await db.session.create({
