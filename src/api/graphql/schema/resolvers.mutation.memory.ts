@@ -88,6 +88,7 @@ import {
   ALL_NODE_MERGE_FIELDS,
   type NodeMergeField,
 } from '../../../lib/nodeMerge.js';
+import { recordUrnRename } from '../../../lib/urnAlias.js';
 import {
   type Context,
   requireRole,
@@ -745,7 +746,24 @@ export const memoryMutations = {
         );
       }
 
-      const updated = await ctx.db.memory.update({
+      // #1079 — the rename and its alias record commit together. This is the
+      // WIDEST arm of the fix: a node URN carries its memory's slug, so before
+      // the alias map a single memory rename orphaned every published node URN
+      // beneath it — the platform's most-cited identifier, and the one this
+      // project's own docs, specs and chat archives are written in.
+      const updated = await ctx.db.$transaction(async (tx) => {
+        if (newUrn !== undefined) {
+          await recordUrnRename(tx, {
+            entityType: 'MEMORY',
+            entityId: id,
+            // Recorded verbatim: the `urn` column already holds the normalized
+            // lookup form the resolvers query.
+            oldUrn: memory.urn,
+            newUrn,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          });
+        }
+        return tx.memory.update({
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -791,6 +809,7 @@ export const memoryMutations = {
           ...(maxRevCount != null ? { maxRevCount } : {}),
         },
         include: MEMORY_INCLUDE,
+        });
       });
 
       // 033 — react to vector-index config changes (FR-004/FR-008/FR-026):

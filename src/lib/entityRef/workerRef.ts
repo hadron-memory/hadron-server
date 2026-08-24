@@ -45,7 +45,7 @@ export function composeWorkerUrn(appUrn: string, workerSlug: string): string {
 }
 
 export async function resolveWorkerRef(
-  db: Pick<PrismaClient, 'worker' | 'app'>,
+  db: Pick<PrismaClient, 'worker' | 'app' | 'urnAlias'>,
   ref: string,
 ): Promise<{ id: string }> {
   const trimmed = (ref ?? '').trim();

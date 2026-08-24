@@ -26,10 +26,11 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
+import { findMemoryByAliasedUrn } from '../urnAlias.js';
 import { EdgeNotFoundError } from './errors.js';
 
 export async function resolveEdgeRef(
-  db: Pick<PrismaClient, 'edge' | 'memory'>,
+  db: Pick<PrismaClient, 'edge' | 'memory' | 'urnAlias'>,
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
@@ -93,10 +94,18 @@ export async function resolveEdgeRef(
     memoryUrnCandidates = [`${parts[0]}:${parts[1]}`, `${parts[0]}::${parts[1]}`];
   }
 
-  const memory = await db.memory.findFirst({
-    where: { urn: { in: memoryUrnCandidates } },
-    select: { id: true, deletedAt: true },
-  });
+  const memory =
+    (await db.memory.findFirst({
+      where: { urn: { in: memoryUrnCandidates } },
+      select: { id: true, deletedAt: true },
+    })) ??
+    // #1079 — same arm as resolveNodeRef, for the same reason: this resolver
+    // splits the memory prefix out itself rather than delegating to
+    // `resolveMemoryRef`, so a renamed memory would otherwise strand every
+    // published edge URN under it.
+    (await findMemoryByAliasedUrn(db, memoryUrnCandidates, () => {
+      throw new EdgeNotFoundError(ref);
+    }));
   if (!memory || (!options?.includeDeleted && memory.deletedAt)) {
     throw new EdgeNotFoundError(ref);
   }

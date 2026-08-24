@@ -55,6 +55,7 @@ import {
   uninstallAgentFromAppCore,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
+import { recordUrnRename } from '../../../lib/urnAlias.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -683,7 +684,29 @@ export const appMutations = {
           }
         }
       }
-      return ctx.db.app.update({
+      // #1079 — a rename and its alias record commit TOGETHER. Separately, the
+      // window between them is exactly the failure the alias map exists to
+      // prevent: the old URN has stopped resolving and nothing remembers it.
+      //
+      // This is the App arm of that fix, and it is the one #1079 was filed for:
+      // a worker URN embeds the App slug, so renaming an App silently 404'd
+      // every worker URN published in a commit trailer or issue signature. The
+      // alias heals them without workerRef changing, because a worker URN is
+      // resolved by resolving its App URN first.
+      return ctx.db.$transaction(async (tx) => {
+        if (newUrn !== undefined) {
+          await recordUrnRename(tx, {
+            entityType: 'APP',
+            entityId: resolvedId,
+            // The `urn` column already holds the normalized lookup form the
+            // resolvers query, so it is recorded verbatim — re-normalizing here
+            // would introduce a second normalizer that can disagree with it.
+            oldUrn: app.urn,
+            newUrn,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          });
+        }
+        return tx.app.update({
         where: { id: resolvedId },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -704,6 +727,7 @@ export const appMutations = {
           updatedBy: ctx.userId ?? null,
         },
         include: APP_INCLUDE,
+        });
       });
     },
 

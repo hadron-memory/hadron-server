@@ -11,9 +11,10 @@ import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { AppNotFoundError } from './errors.js';
 import { resolveLegacyAlias } from './legacyAlias.js';
+import { findLiveUrnAliasTargets, dedupeById } from '../urnAlias.js';
 
 export async function resolveAppRef(
-  db: Pick<PrismaClient, 'app'>,
+  db: Pick<PrismaClient, 'app' | 'urnAlias'>,
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
@@ -44,17 +45,32 @@ export async function resolveAppRef(
   if (app) {
     return { id: app.id };
   }
-  // #697 stored-alias-map fallback — see memoryRef. The alias match keeps App's
-  // active-row liveness (`uninstalled_at IS NULL`). Inert until migration.
+  // Alias fallback: the #697 `legacy_urn` column AND the #1079 rename map, read
+  // together and deduplicated. Both keep App's active-row liveness
+  // (`uninstalled_at IS NULL`), so an alias never reaches an uninstalled App.
+  //
+  // #1079 is what makes a renamed App's PUBLISHED worker URNs keep resolving:
+  // `hrn:worker:<root>:<app-slug>:<slug>` is resolved by looking up
+  // `hrn:app:<root>:<app-slug>` here first, so healing the App ref heals every
+  // worker URN beneath it without workerRef knowing anything about renames.
   if (lookupUrn !== null) {
-    const aliased = resolveLegacyAlias(
-      ref,
-      await db.app.findMany({
+    const live = (ids: string[]) =>
+      db.app.findMany({
+        where: { id: { in: ids }, uninstalledAt: null, ...deletedFilter },
+        select: { id: true },
+      });
+    const [legacyRows, aliasRows] = await Promise.all([
+      db.app.findMany({
         where: { legacyUrn: lookupUrn, uninstalledAt: null, ...deletedFilter },
         select: { id: true },
         take: 2,
       }),
-    );
+      findLiveUrnAliasTargets(db, 'APP', lookupUrn, live),
+    ]);
+    // Deduplicate before the ambiguity check — the migration backfilled the map
+    // FROM `legacy_urn`, so the two sources overlap by construction and a bare
+    // concat would refuse a URN that resolves to exactly one App.
+    const aliased = resolveLegacyAlias(ref, dedupeById(legacyRows, aliasRows));
     if (aliased) return aliased;
   }
   throw new AppNotFoundError(ref);

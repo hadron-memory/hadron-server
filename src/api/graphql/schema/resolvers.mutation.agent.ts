@@ -49,6 +49,7 @@ import {
   resolveAgentRefArg,
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
+import { recordUrnRename } from '../../../lib/urnAlias.js';
 
 /**
  * #928/#929 review: persona dressing fields are trimmed, and a blank-after-trim
@@ -476,7 +477,21 @@ export const agentMutations = {
         });
       }
 
-      return ctx.db.agent.update({
+      // #1079 — the rename and its alias record commit together (see the App arm
+      // in resolvers.mutation.app.ts for why they cannot be separate).
+      return ctx.db.$transaction(async (tx) => {
+        if (newUrn !== undefined) {
+          await recordUrnRename(tx, {
+            entityType: 'AGENT',
+            entityId: id,
+            // Recorded verbatim: the `urn` column already holds the normalized
+            // lookup form the resolvers query.
+            oldUrn: agent.urn,
+            newUrn,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          });
+        }
+        return tx.agent.update({
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -497,6 +512,7 @@ export const agentMutations = {
           ...(personaPromptNorm !== undefined ? { personaPrompt: personaPromptNorm } : {}),
         },
         include: AGENT_INCLUDE,
+        });
       });
     },
 
