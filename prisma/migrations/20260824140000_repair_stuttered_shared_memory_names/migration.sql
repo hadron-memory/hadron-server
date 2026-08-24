@@ -39,6 +39,15 @@
 -- The separator is U+2014 EM DASH surrounded by spaces, matching
 -- `sharedMemoryName` exactly. A different dash would match nothing and this
 -- migration would silently do nothing, which is why it is spelled out here.
+--
+-- `starts_with`, NOT `LIKE` (PR #1083 review, Codex P2). These are free-form
+-- display names, so an App called "Eng_Team" or "50% Team" puts a LIKE WILDCARD
+-- into the pattern: `_` matches any character and `%` matches any run of them.
+-- A hand-renamed memory whose prefix merely resembles `<app> — <agent>` would
+-- then match, and the SET below would slice it at an offset computed from the
+-- LITERAL prefix length — corrupting exactly the hand-chosen name this migration
+-- promises to leave alone. `starts_with` is a literal comparison with no
+-- metacharacters, and is what the URN cascades already use for the same reason.
 
 UPDATE "memories" m
 SET "name" = ap."name" || substring(m."name" FROM length(ap."name" || ' — ' || a."name") + 1)
@@ -48,4 +57,4 @@ WHERE m."class" = 'app'
   AND m."app_id" = ap."id"
   AND m."shared_memory_of_agent_id" = a."id"
   AND ap."name" = a."name"
-  AND m."name" LIKE ap."name" || ' — ' || a."name" || ' — %';
+  AND starts_with(m."name", ap."name" || ' — ' || a."name" || ' — ');
