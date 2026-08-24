@@ -55,6 +55,7 @@ import {
   uninstallAgentFromAppCore,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
+import { recordUrnRename } from '../../../lib/urnAlias.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -683,7 +684,40 @@ export const appMutations = {
           }
         }
       }
-      return ctx.db.app.update({
+      // #1079 — a rename and its alias record commit TOGETHER. Separately, the
+      // window between them is exactly the failure the alias map exists to
+      // prevent: the old URN has stopped resolving and nothing remembers it.
+      //
+      // This is the App arm of that fix, and it is the one #1079 was filed for:
+      // a worker URN embeds the App slug, so renaming an App silently 404'd
+      // every worker URN published in a commit trailer or issue signature. The
+      // alias heals them without workerRef changing, because a worker URN is
+      // resolved by resolving its App URN first.
+      return ctx.db.$transaction(async (tx) => {
+        // Lock and RE-READ the urn inside the transaction (PR #1080 review,
+        // Codex + Copilot P2). The row above was read before the transaction
+        // opened, so two concurrent renames could both record the SAME old urn
+        // and the intermediate identity — committed, and returned to whoever
+        // made the first call — would never be aliased at all. Reading under
+        // FOR UPDATE serializes the renames and makes each one record the urn it
+        // actually superseded. `updateOrganization` already did this; the three
+        // single-entity paths did not.
+        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
+          SELECT urn FROM apps WHERE id = ${resolvedId} FOR UPDATE
+        `;
+        if (newUrn !== undefined) {
+          await recordUrnRename(tx, {
+            entityType: 'APP',
+            entityId: resolvedId,
+            // The `urn` column already holds the normalized lookup form the
+            // resolvers query, so it is recorded verbatim — re-normalizing here
+            // would introduce a second normalizer that can disagree with it.
+            oldUrn: lockedRow?.urn ?? app.urn,
+            newUrn,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          });
+        }
+        return tx.app.update({
         where: { id: resolvedId },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -704,6 +738,7 @@ export const appMutations = {
           updatedBy: ctx.userId ?? null,
         },
         include: APP_INCLUDE,
+        });
       });
     },
 

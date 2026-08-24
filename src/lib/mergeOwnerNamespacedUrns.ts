@@ -35,6 +35,7 @@
 
 import type { Prisma } from '../generated/prisma/index.js';
 import { mintLocalSlug } from './mintLocalSlug.js';
+import { recordUrnRename } from './urnAlias.js';
 
 export interface MergeOwnerUrnsArgs {
   sourceUserId: string;
@@ -105,6 +106,19 @@ export async function mergeOwnerNamespacedUrns(
       // through the #697 alias map after the re-root.
       data: { urn: newUrn, ownerUserId: targetUserId, legacyUrn: m.urn },
     });
+    // #1079 (PR #1080 review, Copilot P2) — a merge RE-ROOTS a urn, which is a
+    // rename by any other name, so it owes an alias. `legacyUrn` alone is not
+    // enough for two reasons: it is a single column, so a second merge
+    // overwrites the first source's urn and that published URN 404s forever;
+    // and node/edge refs reach the alias map rather than that column, so
+    // without this a merge stranded every published node URN under a re-rooted
+    // memory.
+    await recordUrnRename(tx, {
+      entityType: 'MEMORY',
+      entityId: m.id,
+      oldUrn: m.urn,
+      newUrn,
+    });
     memRemap.push([m.urn, newUrn]);
   }
 
@@ -128,6 +142,19 @@ export async function mergeOwnerNamespacedUrns(
       where: { id: a.id },
       data: { urn: newUrn, ownerUserId: targetUserId, legacyUrn: a.urn },
     });
+    // #1079 (PR #1080 review, Copilot P2) — a merge RE-ROOTS a urn, which is a
+    // rename by any other name, so it owes an alias. `legacyUrn` alone is not
+    // enough for two reasons: it is a single column, so a second merge
+    // overwrites the first source's urn and that published URN 404s forever;
+    // and node/edge refs reach the alias map rather than that column, so
+    // without this a merge stranded every published node URN under a re-rooted
+    // memory.
+    await recordUrnRename(tx, {
+      entityType: 'AGENT',
+      entityId: a.id,
+      oldUrn: a.urn,
+      newUrn,
+    });
   }
 
   // ── Apps ─────────────────────────────────────────────────────────────────
@@ -150,6 +177,19 @@ export async function mergeOwnerNamespacedUrns(
     await tx.app.update({
       where: { id: app.id },
       data: { urn: newUrn, ownerUserId: targetUserId, legacyUrn: app.urn },
+    });
+    // #1079 (PR #1080 review, Copilot P2) — a merge RE-ROOTS a urn, which is a
+    // rename by any other name, so it owes an alias. `legacyUrn` alone is not
+    // enough for two reasons: it is a single column, so a second merge
+    // overwrites the first source's urn and that published URN 404s forever;
+    // and node/edge refs reach the alias map rather than that column, so
+    // without this a merge stranded every published node URN under a re-rooted
+    // memory.
+    await recordUrnRename(tx, {
+      entityType: 'APP',
+      entityId: app.id,
+      oldUrn: app.urn,
+      newUrn,
     });
   }
 

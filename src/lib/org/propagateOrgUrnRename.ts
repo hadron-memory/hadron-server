@@ -33,8 +33,67 @@ export async function propagateOrgUrnRename(
   organizationId: string,
   oldOrgUrn: string,
   newOrgUrn: string,
+  options?: { createdBy?: string | null },
 ): Promise<void> {
   if (oldOrgUrn === newOrgUrn) return;
+
+  // #1079 — record what each child USED to be called, BEFORE rewriting it.
+  //
+  // Ordering is the whole of it: the UPDATE below derives the new urn from the
+  // old one, so once it has run the old value is gone and unrecoverable. These
+  // INSERTs therefore run first, in the same transaction, and each mirrors its
+  // UPDATE's WHERE clause EXACTLY — an alias recorded for a row the UPDATE
+  // skips would claim a rename that never happened, and a row rewritten without
+  // an alias is the silent 404 this map exists to prevent. If those two
+  // predicates ever drift, they drift into one of those two bugs.
+  //
+  // This arm matters more than its size suggests: an org rename is the widest
+  // rename there is, so it is the one that orphans a whole tenancy's published
+  // URNs at once — including every node URN, which carries its memory's slug.
+  //
+  // ON CONFLICT keeps a rename back and forth from accumulating duplicate rows,
+  // which would read as an ambiguous alias and start refusing a URN that
+  // resolves to exactly one entity.
+  const createdBy = options?.createdBy ?? null;
+  // `replace(urn, '::', ':')` normalizes the alias KEY the way
+  // `normalizeUrnForLookup` does for a bare stored urn (PR #1080 review,
+  // Copilot P2). Rows may still hold the canonical `::` spelling from the
+  // spec-021 migration window, while every resolver queries the single-colon
+  // form — so an un-normalized key would be stored somewhere nothing ever looks.
+  // Bulk SQL cannot call the TypeScript normalizer, hence the inline mirror.
+  await tx.$executeRaw`
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by)
+    SELECT gen_random_uuid()::text, replace(m.urn, '::', ':'), 'MEMORY'::"UrnAliasEntityType", m.id,
+           'ORG_RENAME_CASCADE'::"UrnAliasReason",
+           replace(${newOrgUrn} || substr(m.urn, strpos(m.urn, ':')), '::', ':'), ${createdBy}
+    FROM memories m
+    WHERE m.organization_id = ${organizationId} AND strpos(m.urn, ':') > 0
+      AND NOT starts_with(m.urn, ${newOrgUrn} || ':')
+    ON CONFLICT (urn, entity_type, entity_id)
+      DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
+  `;
+  await tx.$executeRaw`
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by)
+    SELECT gen_random_uuid()::text, replace(a.urn, '::', ':'), 'AGENT'::"UrnAliasEntityType", a.id,
+           'ORG_RENAME_CASCADE'::"UrnAliasReason",
+           replace(${newOrgUrn} || substr(a.urn, strpos(a.urn, ':')), '::', ':'), ${createdBy}
+    FROM agents a
+    WHERE a.organization_id = ${organizationId} AND strpos(a.urn, ':') > 0
+      AND NOT starts_with(a.urn, ${newOrgUrn} || ':')
+    ON CONFLICT (urn, entity_type, entity_id)
+      DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
+  `;
+  await tx.$executeRaw`
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by)
+    SELECT gen_random_uuid()::text, replace(ap.urn, '::', ':'), 'APP'::"UrnAliasEntityType", ap.id,
+           'ORG_RENAME_CASCADE'::"UrnAliasReason",
+           replace(${newOrgUrn} || substr(ap.urn, strpos(ap.urn, ':')), '::', ':'), ${createdBy}
+    FROM apps ap
+    WHERE ap.organization_id = ${organizationId} AND strpos(ap.urn, ':') > 0
+      AND NOT starts_with(ap.urn, ${newOrgUrn} || ':')
+    ON CONFLICT (urn, entity_type, entity_id)
+      DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
+  `;
 
   // One bulk UPDATE per table, scoped to this org's rows by `organization_id`
   // alone. `strpos(urn, ':')` is the 1-based index of the first colon (the

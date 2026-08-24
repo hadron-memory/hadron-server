@@ -11,9 +11,10 @@ import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { AgentNotFoundError } from './errors.js';
 import { resolveLegacyAlias } from './legacyAlias.js';
+import { findLiveUrnAliasTargets, dedupeById } from '../urnAlias.js';
 
 export async function resolveAgentRef(
-  db: Pick<PrismaClient, 'agent'>,
+  db: Pick<PrismaClient, 'agent' | 'urnAlias'>,
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
@@ -39,14 +40,24 @@ export async function resolveAgentRef(
   }
   // #697 stored-alias-map fallback — see memoryRef. Inert until migration.
   if (lookupUrn !== null) {
-    const aliased = resolveLegacyAlias(
-      ref,
-      await db.agent.findMany({
+    // #1079 rename map read ALONGSIDE the #697 column, deduplicated by id:
+    // the migration backfilled one from the other, so a bare concat would hand
+    // the same row to the ambiguity check twice and refuse a URN that resolves
+    // to exactly one agent.
+    const live = (ids: string[]) =>
+      db.agent.findMany({
+        where: { id: { in: ids }, ...deletedFilter },
+        select: { id: true },
+      });
+    const [legacyRows, aliasRows] = await Promise.all([
+      db.agent.findMany({
         where: { legacyUrn: lookupUrn, ...deletedFilter },
         select: { id: true },
         take: 2,
       }),
-    );
+      findLiveUrnAliasTargets(db, 'AGENT', lookupUrn, live),
+    ]);
+    const aliased = resolveLegacyAlias(ref, dedupeById(legacyRows, aliasRows));
     if (aliased) return aliased;
   }
   throw new AgentNotFoundError(ref);

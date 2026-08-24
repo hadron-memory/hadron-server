@@ -14,9 +14,11 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { OrganizationNotFoundError } from './errors.js';
+import { resolveLegacyAlias } from './legacyAlias.js';
+import { findLiveUrnAliasTargets } from '../urnAlias.js';
 
 export async function resolveOrgRef(
-  db: Pick<PrismaClient, 'organization'>,
+  db: Pick<PrismaClient, 'organization' | 'urnAlias'>,
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
@@ -37,8 +39,35 @@ export async function resolveOrgRef(
     where: { ...where, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
     select: { id: true },
   });
-  if (!org) {
-    throw new OrganizationNotFoundError(ref);
+  if (org) {
+    return { id: org.id };
   }
-  return { id: org.id };
+  // #1079 rename map. Organization is the ONE renameable entity with no
+  // `legacy_urn` column — it was outside the #697 v1→v2 migration, so before
+  // this map an org rename had no alias mechanism at all, and it is the widest
+  // rename there is: `propagateOrgUrnRename` rewrites the denormalized org
+  // prefix on every Memory, Agent and App the org owns, so one org rename
+  // orphaned every published URN in the tenancy at once.
+  //
+  // No `legacy_urn` arm to merge here, so no dedupe is needed — but the
+  // ambiguity rule still applies, because an org URN freed by a rename can be
+  // taken by a new org and the old one may have been renamed more than once.
+  if (!isId) {
+    const lookupUrn = normalizeUrnForLookup(parseUrnInput(ref).value);
+    const aliased = resolveLegacyAlias(
+      ref,
+      await findLiveUrnAliasTargets(db, 'ORGANIZATION', lookupUrn, (ids) =>
+        // findMany, not findFirst: a findFirst can only ever return one row, which
+        // would silently satisfy the ambiguity check instead of tripping it —
+        // picking an arbitrary org for a URN that names two.
+        db.organization.findMany({
+          where: { id: { in: ids }, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
+          select: { id: true },
+          take: 2,
+        }),
+      ),
+    );
+    if (aliased) return aliased;
+  }
+  throw new OrganizationNotFoundError(ref);
 }

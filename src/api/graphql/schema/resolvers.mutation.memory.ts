@@ -88,6 +88,7 @@ import {
   ALL_NODE_MERGE_FIELDS,
   type NodeMergeField,
 } from '../../../lib/nodeMerge.js';
+import { recordUrnRename } from '../../../lib/urnAlias.js';
 import {
   type Context,
   requireRole,
@@ -745,7 +746,35 @@ export const memoryMutations = {
         );
       }
 
-      const updated = await ctx.db.memory.update({
+      // #1079 — the rename and its alias record commit together. This is the
+      // WIDEST arm of the fix: a node URN carries its memory's slug, so before
+      // the alias map a single memory rename orphaned every published node URN
+      // beneath it — the platform's most-cited identifier, and the one this
+      // project's own docs, specs and chat archives are written in.
+      const updated = await ctx.db.$transaction(async (tx) => {
+        // Lock and RE-READ the urn inside the transaction (PR #1080 review,
+        // Codex + Copilot P2). The row above was read before the transaction
+        // opened, so two concurrent renames could both record the SAME old urn
+        // and the intermediate identity — committed, and returned to whoever
+        // made the first call — would never be aliased at all. Reading under
+        // FOR UPDATE serializes the renames and makes each one record the urn it
+        // actually superseded. `updateOrganization` already did this; the three
+        // single-entity paths did not.
+        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
+          SELECT urn FROM memories WHERE id = ${id} FOR UPDATE
+        `;
+        if (newUrn !== undefined) {
+          await recordUrnRename(tx, {
+            entityType: 'MEMORY',
+            entityId: id,
+            // Recorded verbatim: the `urn` column already holds the normalized
+            // lookup form the resolvers query.
+            oldUrn: lockedRow?.urn ?? memory.urn,
+            newUrn,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          });
+        }
+        return tx.memory.update({
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -791,6 +820,7 @@ export const memoryMutations = {
           ...(maxRevCount != null ? { maxRevCount } : {}),
         },
         include: MEMORY_INCLUDE,
+        });
       });
 
       // 033 — react to vector-index config changes (FR-004/FR-008/FR-026):
@@ -1660,6 +1690,17 @@ export const memoryMutations = {
               },
             });
           }
+          // #1079 (PR #1080 third review, Codex P2) — linking an anonymous
+          // memory to a user REPLACES its urn, which is a rename by any other
+          // name and owes an alias. Already inside this transaction, so the
+          // alias and the rewrite commit together.
+          await recordUrnRename(tx, {
+            entityType: 'MEMORY',
+            entityId: resolvedMemoryId,
+            oldUrn: memory.urn,
+            newUrn,
+            createdBy: user.id,
+          });
           await tx.memory.update({
             where: { id: resolvedMemoryId },
             data: {
@@ -1680,7 +1721,17 @@ export const memoryMutations = {
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }
 
-      return ctx.db.memory.update({
+      // #1079 — same rename, unencrypted branch. Wrapped so the alias and the
+      // rewrite commit together rather than as two independent writes.
+      return ctx.db.$transaction(async (tx) => {
+        await recordUrnRename(tx, {
+          entityType: 'MEMORY',
+          entityId: resolvedMemoryId,
+          oldUrn: memory.urn,
+          newUrn,
+          createdBy: user.id,
+        });
+        return tx.memory.update({
         where: { id: resolvedMemoryId },
         data: {
           urn: newUrn,
@@ -1688,6 +1739,7 @@ export const memoryMutations = {
           anonymousExpiresAt: null,
           updatedBy: ctx.appId,
         },
+        });
       });
     },
 

@@ -3911,3 +3911,82 @@ model McpSessionState {
   @@index([memoryId])
   @@map("mcp_session_state")
 }
+
+/// Which kind of entity a {@link UrnAlias} addresses. Only the four entities
+/// that STORE a urn column can be renamed; every other URN in the platform
+/// (node, edge, worker, apprun, …) is composed on read from one of these, so
+/// aliasing these four heals the derived URNs for free.
+enum UrnAliasEntityType {
+  ORGANIZATION
+  MEMORY
+  AGENT
+  APP
+}
+
+/// Why a {@link UrnAlias} row exists.
+enum UrnAliasReason {
+  /// A deliberate rename of the entity's own URN.
+  RENAME
+  /// The org-URN prefix rewrite cascaded onto a child row (#337).
+  ORG_RENAME_CASCADE
+  /// The pre-v2 URN this row was migrated FROM (#697) — backfilled from the
+  /// per-table `legacy_urn` columns, which this table supersedes.
+  V1_MIGRATION
+}
+
+/// #1079 — every URN an entity USED to answer to.
+///
+/// A URN is the platform's stable, publishable identifier: it goes into commit
+/// trailers, PR descriptions, issue signatures, chat messages and exported
+/// documents, none of which can be rewritten after the fact. But four entities
+/// store their URN in a column, and all four can be renamed — so before this
+/// table a rename silently turned every published reference into a 404, and
+/// there was no record that the old URN had ever meant anything.
+///
+/// The blast radius is wider than the four rows, because most URNs in the
+/// platform are COMPOSED on read from one of them: a node URN carries its
+/// memory's slug, a worker URN carries its App's slug, an apprun URN likewise.
+/// Renaming one memory therefore orphans every published node URN under it.
+/// Aliasing the four storing entities heals all of it, because the derived
+/// URNs resolve THROUGH their parent's ref resolver.
+///
+/// **Liveness is not stored here.** A row records only that a URN once
+/// addressed an entity; whether that entity is still readable, uninstalled or
+/// soft-deleted is answered by re-querying it, so an alias can never resurrect
+/// a dead row or leak one past its own gate.
+///
+/// **A live URN always wins.** An old URN becomes free on rename and may be
+/// taken by a new entity, so every resolver tries the `urn` column first and
+/// consults this table only on a miss. Two entities may therefore legitimately
+/// have held the SAME urn at different times; that is why the alias urn is not
+/// unique, and an ambiguous lookup fails loudly rather than guessing (the
+/// `AmbiguousLegacyUrnError` rule this shares with the `legacy_urn` fallback).
+model UrnAlias {
+  id String @id @default(cuid())
+
+  /// The superseded URN, stored in the same normalized lookup form the
+  /// resolvers compute (`hrn:`/`urn:` prefix stripped, `::` collapsed to `:`)
+  /// — a raw spelling here would be unreachable from a normalized query.
+  urn        String             @map("urn")
+  entityType UrnAliasEntityType @map("entity_type")
+  entityId   String             @map("entity_id")
+  reason     UrnAliasReason
+
+  /// The URN that replaced it — provenance only, never matched on. Null for a
+  /// V1_MIGRATION backfill row, whose successor is the entity's current urn.
+  replacedByUrn String? @map("replaced_by_urn")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  /// Who performed the rename, when a principal was attributable.
+  createdBy String?  @map("created_by")
+
+  /// One alias row per (urn, entity) — a rename back and forth must not
+  /// accumulate duplicates, which would read as an ambiguous lookup and start
+  /// refusing a URN that resolves to exactly one entity.
+  @@unique([urn, entityType, entityId], map: "urn_aliases_urn_entity_uniq")
+  /// The lookup index: resolvers query by (urn, entityType).
+  @@index([urn, entityType])
+  /// Reverse lookup — "what did this entity used to be called".
+  @@index([entityType, entityId])
+  @@map("urn_aliases")
+}

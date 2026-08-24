@@ -74,6 +74,57 @@ export async function renameOwnerNamespacedUrns(
     WHERE deleted_at IS NOT NULL AND starts_with(urn, ${newColon})
   `;
 
+  // #1079 — record what each row USED to be called, BEFORE the rewrite derives
+  // the new URN from it and the old value is gone. Same ordering rule, same
+  // mirror-the-WHERE-exactly rule, and the same reason as the org cascade in
+  // `propagateOrgUrnRename`: an alias for a row the UPDATE skips claims a rename
+  // that never happened, and a row rewritten without one is a silent 404 on
+  // every URN published under the old handle.
+  //
+  // The reclaim DELETEs above run first and take their aliases with them, which
+  // is correct: those rows are soft-deleted tombstones being hard-deleted, and
+  // an alias to a row that no longer exists resolves to nothing anyway.
+  // Three explicit statements rather than a loop over table names: a table name
+  // cannot be a bound parameter, so a loop needs `$executeRawUnsafe` and string
+  // interpolation. Spelling them out keeps every statement a parameterized
+  // `$executeRaw` and matches `propagateOrgUrnRename` next door.
+  // `replace(urn, '::', ':')` normalizes the alias KEY the way
+  // `normalizeUrnForLookup` does for a bare stored urn (PR #1080 review,
+  // Copilot P2). Rows may still hold the canonical `::` spelling from the
+  // spec-021 migration window, while every resolver queries the single-colon
+  // form — so an un-normalized key would be stored somewhere nothing ever looks.
+  // Bulk SQL cannot call the TypeScript normalizer, hence the inline mirror.
+  await tx.$executeRaw`
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn)
+    SELECT gen_random_uuid()::text, replace(m.urn, '::', ':'), 'MEMORY'::"UrnAliasEntityType", m.id,
+           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(m.urn, strpos(m.urn, ':')), '::', ':')
+    FROM memories m
+    WHERE m.owner_user_id = ${userId} AND strpos(m.urn, ':') > 0
+      AND NOT starts_with(m.urn, ${newColon})
+    ON CONFLICT (urn, entity_type, entity_id)
+      DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
+  `;
+  await tx.$executeRaw`
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn)
+    SELECT gen_random_uuid()::text, replace(a.urn, '::', ':'), 'AGENT'::"UrnAliasEntityType", a.id,
+           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(a.urn, strpos(a.urn, ':')), '::', ':')
+    FROM agents a
+    WHERE a.owner_user_id = ${userId} AND strpos(a.urn, ':') > 0
+      AND NOT starts_with(a.urn, ${newColon})
+    ON CONFLICT (urn, entity_type, entity_id)
+      DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
+  `;
+  await tx.$executeRaw`
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn)
+    SELECT gen_random_uuid()::text, replace(ap.urn, '::', ':'), 'APP'::"UrnAliasEntityType", ap.id,
+           'RENAME'::"UrnAliasReason", replace(${newPrefix} || substr(ap.urn, strpos(ap.urn, ':')), '::', ':')
+    FROM apps ap
+    WHERE ap.owner_user_id = ${userId} AND strpos(ap.urn, ':') > 0
+      AND NOT starts_with(ap.urn, ${newColon})
+    ON CONFLICT (urn, entity_type, entity_id)
+      DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
+  `;
+
   // `strpos(urn, ':')` is the 1-based index of the handle→slug colon;
   // `substr(urn, that)` keeps the colon + slug verbatim, so prepending the new
   // `@<handle>` prefix rewrites ANY stale prefix. `strpos > 0` skips a

@@ -26,6 +26,7 @@
  */
 import { GraphQLError } from 'graphql';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { recordUrnRename } from './urnAlias.js';
 
 /** The owner columns every tenanted row carries (exactly one is non-null). */
 export interface OwnerColumns {
@@ -231,6 +232,19 @@ export async function repairAgentSystemMemoryOwner(
       } else {
         urn = derivedUrn;
       }
+    }
+    // #1079 (PR #1080 third review, Codex P2) — this repair can REPLACE the
+    // memory's urn, which is a rename and owes an alias. Without one the repair
+    // silently 404s every node and edge URN published under that system memory.
+    // Same transaction as the update, so the two cannot diverge.
+    if (urn && urn !== memory.urn) {
+      await recordUrnRename(tx, {
+        entityType: 'MEMORY',
+        entityId: memory.id,
+        oldUrn: memory.urn,
+        newUrn: urn,
+        createdBy: actor ?? null,
+      });
     }
     const updated = await tx.memory.update({
       where: { id: memory.id },

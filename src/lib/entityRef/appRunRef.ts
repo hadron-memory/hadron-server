@@ -32,7 +32,7 @@ export function composeAppRunUrn(appUrn: string, runId: string): string {
 }
 
 export async function resolveAppRunRef(
-  db: Pick<PrismaClient, 'appRun' | 'app'>,
+  db: Pick<PrismaClient, 'appRun' | 'app' | 'urnAlias'>,
   ref: string,
 ): Promise<{ id: string }> {
   if (isIdFunc(ref)) {

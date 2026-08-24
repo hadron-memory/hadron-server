@@ -24,6 +24,11 @@ export function buildAppKey(suffix?: string): string {
 export async function cleanDb(db: PrismaClient): Promise<void> {
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
+  // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
+  // describes being hard-deleted, since a published URN keeps being followed
+  // afterwards. That also means nothing below cascades it away, so it has to be
+  // cleared explicitly or aliases leak between tests.
+  await db.urnAlias.deleteMany();
   // 036-ai-service-config: configs FK every owner level (incl.
   // hadron_server, which nothing below deletes) — clear them first.
   await db.aiServiceConfig.deleteMany();

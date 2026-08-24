@@ -1229,6 +1229,12 @@ export async function createServer(): Promise<Express> {
       const ghOrgLogin: string | undefined = installation.account?.login;
       if (ghOrgLogin) {
         if (action === 'created') {
+          // urn-alias-exempt: `urn` here is a WHERE selector, not a write — the
+          // data payload sets only githubInstallationId, so no URN moves and
+          // there is nothing to alias. Flagged because the checker matches
+          // `urn:` anywhere in the call rather than parsing out the data block,
+          // which over-flags on purpose: a stray waiver costs one line, a missed
+          // rename costs a published URN.
           const updated = await db.organization.updateMany({
             where: { urn: ghOrgLogin, githubInstallationId: null },
             data: { githubInstallationId: installation.id },

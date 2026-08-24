@@ -38,6 +38,7 @@ import {
   resolveOrgRefArg,
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
+import { recordUrnRename } from '../../../lib/urnAlias.js';
 
 /**
  * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
@@ -376,7 +377,21 @@ export const orgMutations = {
             include: ORG_INCLUDE,
           });
           if (renaming) {
-            await propagateOrgUrnRename(tx, resolvedId, oldUrn as string, urn);
+            // #1079 — record the org's OWN alias before cascading. Organization
+            // is the one renameable entity with no `legacy_urn` column (it was
+            // outside the #697 migration), so until the alias map it had no
+            // aliasing at all: an org rename made every published URN in the
+            // tenancy unresolvable, its own included.
+            await recordUrnRename(tx, {
+              entityType: 'ORGANIZATION',
+              entityId: resolvedId,
+              oldUrn: oldUrn as string,
+              newUrn: urn,
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            });
+            await propagateOrgUrnRename(tx, resolvedId, oldUrn as string, urn, {
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            });
           }
           return updated;
         })
