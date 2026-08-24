@@ -1690,6 +1690,17 @@ export const memoryMutations = {
               },
             });
           }
+          // #1079 (PR #1080 third review, Codex P2) — linking an anonymous
+          // memory to a user REPLACES its urn, which is a rename by any other
+          // name and owes an alias. Already inside this transaction, so the
+          // alias and the rewrite commit together.
+          await recordUrnRename(tx, {
+            entityType: 'MEMORY',
+            entityId: resolvedMemoryId,
+            oldUrn: memory.urn,
+            newUrn,
+            createdBy: user.id,
+          });
           await tx.memory.update({
             where: { id: resolvedMemoryId },
             data: {
@@ -1710,7 +1721,17 @@ export const memoryMutations = {
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }
 
-      return ctx.db.memory.update({
+      // #1079 — same rename, unencrypted branch. Wrapped so the alias and the
+      // rewrite commit together rather than as two independent writes.
+      return ctx.db.$transaction(async (tx) => {
+        await recordUrnRename(tx, {
+          entityType: 'MEMORY',
+          entityId: resolvedMemoryId,
+          oldUrn: memory.urn,
+          newUrn,
+          createdBy: user.id,
+        });
+        return tx.memory.update({
         where: { id: resolvedMemoryId },
         data: {
           urn: newUrn,
@@ -1718,6 +1739,7 @@ export const memoryMutations = {
           anonymousExpiresAt: null,
           updatedBy: ctx.appId,
         },
+        });
       });
     },
 

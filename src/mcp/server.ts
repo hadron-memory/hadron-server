@@ -33,7 +33,7 @@ import {
   type SafeUrnEmission,
 } from '../lib/urnEmit.js';
 import { portalUrlForUrn } from '../lib/portalUrl.js';
-import { findUrnAliasTargetIds, dedupeById } from '../lib/urnAlias.js';
+import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
@@ -760,29 +760,35 @@ async function resolveMemoryByUrn(
   // through #1079 — and every node and edge URN beneath it — still answered
   // "not found" over MCP while resolving fine over GraphQL. Two surfaces, two
   // answers, which is the drift #1079 exists to remove.
-  const [legacyRows, aliasIds] = await Promise.all([
+  const [legacyRows, aliasRows] = await Promise.all([
     db.memory.findMany({
       where: { deletedAt: null, legacyUrn: { in: [legacyForm, canonicalForm] } },
       select: { id: true, urn: true },
       take: 2,
     }),
+    // Through the shared PAGED walk, not the one-page primitive (PR #1080
+    // third review, Codex P2). Calling `findUrnAliasTargetIds` directly took
+    // only its first page before liveness, so a live claimant sitting past
+    // page one resolved over GraphQL and 404'd over MCP — reintroducing, on
+    // this surface alone, the very drift wiring MCP up was meant to remove.
+    // Liveness is re-applied inside the walk and never read off the alias
+    // (cor:urn:030:02).
     (async () => {
-      const ids = await Promise.all(
-        [legacyForm, canonicalForm].map((u) => findUrnAliasTargetIds(db, 'MEMORY', u)),
+      const perForm = await Promise.all(
+        [legacyForm, canonicalForm].map((u) =>
+          findLiveUrnAliasTargets(db, 'MEMORY', u, (ids) =>
+            db.memory.findMany({
+              where: { deletedAt: null, id: { in: ids } },
+              select: { id: true, urn: true },
+            }),
+          ),
+        ),
       );
-      return [...new Set(ids.flat())];
+      return perForm.flat();
     })(),
   ]);
-  // Liveness re-applied here, never read off the alias (cor:urn:030:02), and
-  // deduplicated by id before the ambiguity check because the two sources
-  // overlap by construction.
-  const aliasRows = aliasIds.length
-    ? await db.memory.findMany({
-        where: { deletedAt: null, id: { in: aliasIds } },
-        select: { id: true, urn: true },
-        take: 2,
-      })
-    : [];
+  // Deduplicated by id before the ambiguity check: the two alias sources overlap
+  // by construction, and the two URN spellings can resolve the same row twice.
   const candidates = dedupeById(legacyRows, aliasRows);
   const aliased = resolveLegacyAlias(rawUrn, candidates);
   return aliased ? (candidates.find((m) => m.id === aliased.id) ?? null) : null;
