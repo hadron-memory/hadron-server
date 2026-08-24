@@ -1,5 +1,16 @@
 name: GraphQL SDL parse
 
+# Two checks, in one script, in the order the second one needs.
+#
+# FIRST (#1076): the SDL template literal is intact. A bare backtick
+# inside a GraphQL description or `#` comment terminates it, and the
+# TypeScript error that follows names a field as though it were a
+# statement, sometimes hundreds of lines from the cause. This half
+# reads the file as text and names the offending line. It runs first
+# because the parse below cannot IMPORT a module the backtick broke
+# — which is also why that import is dynamic.
+#
+# SECOND: the SDL parses.
 # Imports the `typeDefs` template literal from
 # `src/api/graphql/schema/typeDefs.ts` and runs `graphql.parse()` on
 # it. Catches the class of bug from PR #136: two adjacent
@@ -53,5 +64,5 @@ jobs:
       # can resolve without crashing on a missing client.
       - run: pnpm prisma generate
 
-      - name: Parse the GraphQL SDL
+      - name: Check the SDL literal, then parse the SDL
         run: pnpm tsx scripts/check-graphql-sdl.mjs
