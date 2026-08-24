@@ -1234,6 +1234,16 @@ export function createMcpServerInstance(
         ? { appId: auth.appId }
         : null;
     if (!owner || auth.impersonation) return;
+    // CURRENT eligibility, not historical (PR #1082 review, Codex P1).
+    // Ownership alone is a HISTORICAL fact: `Session.userId` is stamped at bind
+    // and never revoked, so a user removed from the App or the org still
+    // satisfies it with a perfectly valid credential. They could then keep an
+    // old worker session — and the worker it holds — alive indefinitely by
+    // issuing tool calls that are themselves denied, since this touch runs
+    // before any of the handlers' own gates. "Revoked membership must not
+    // authorize" applies to keeping something alive exactly as it applies to
+    // reading it.
+    if (auth.userId && !(await callerStillDrives(id))) return;
     try {
       await db.session.updateMany({
         where: { id, endedAt: null, deletedAt: null, ...owner },
@@ -1243,6 +1253,45 @@ export function createMcpServerInstance(
       // Deliberately swallowed — see the docstring. Logged, not raised.
       console.warn('[heartbeatSession] touch failed:', err);
     }
+  }
+
+  /**
+   * Is this user-principal caller STILL entitled to drive this session?
+   *
+   * Shares its predicate with `adoptAppFromSession` deliberately: that function
+   * already establishes "this session is mine and its App still admits me", and
+   * two copies of that question would drift — which is how a revoked member ends
+   * up refused on one surface and served on another (the `effectiveAccess` tell,
+   * #362). This one answers the question WITHOUT pinning the App, because a
+   * heartbeat must not silently re-scope a caller who passed `app` explicitly.
+   *
+   * A session with `appId: null` is a self-attributed user-credential coding
+   * session (#934) — there is no App to be a member of, so ownership is the
+   * whole gate and there is nothing further to revoke.
+   */
+  async function callerStillDrives(sessionId: string): Promise<boolean> {
+    if (!auth.userId) return false;
+    const session = await db.session.findUnique({
+      where: { id: sessionId },
+      select: { appId: true, userId: true },
+    });
+    if (!session || session.userId !== auth.userId) return false;
+    if (!session.appId) return true;
+    const app = await db.app.findFirst({
+      where: { id: session.appId, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (!app) return false;
+    return isAppParticipant(
+      {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context,
+      app,
+    );
   }
 
   async function adoptAppFromSession(sessionRef?: string | null): Promise<boolean> {
@@ -5763,7 +5812,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       agent: z.string().optional().describe('The agent to cast (Agent URN or ID) — must be installed in the App. Omit to resolve it from role.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       promptOverride: z.string().optional().describe('Per-worker individuality layered over the agent\'s template prompt — appended to the bound template in the worker\'s resolved prompt.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which App to cast in when app is omitted.'),
+      session: z.string().optional().describe('Your session id — used to resolve which App to cast in when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
     },
     async ({ role, name, agent, app, promptOverride, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The
@@ -5911,7 +5960,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned.'),
+      session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
     async ({ sinceSeq, mentions, limit, offset, session, app }) => {
@@ -5978,7 +6027,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       includeRetired: z.boolean().optional().describe('Include retired castings — historical staff whose names stay reserved.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which team App to list when app is omitted.'),
+      session: z.string().optional().describe('Your session id — used to resolve which team App to list when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
     async ({ includeRetired, limit, offset, session, app }) => {
@@ -6177,11 +6226,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_get_worker',
-    'Read ONE worker, including its resolved BOOT BRIEFING (#1015). THE recovery read: hadron_start_session returns the briefing once, at bind time, and the briefing must never be cached — so an agent whose context was compacted has no copy and no legitimate way back to it. This is that way. It is a pure read: it reserves nothing, mints nothing, and does not touch the session, so recovering costs neither a second session nor a force-takeover of yourself (both of which corrupt the provenance record the Worker model exists to produce). workerRef takes the same three forms as hadron_start_session — the worker\'s NAME ("Iris"), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id; an id or URN names its own App, a bare NAME needs one selected (or passed as app/session). Re-read this whenever you are unsure you are still working as the worker you bound.',
+    'Read ONE worker, including its resolved BOOT BRIEFING (#1015). THE recovery read: hadron_start_session returns the briefing once, at bind time, and the briefing must never be cached — so an agent whose context was compacted has no copy and no legitimate way back to it. This is that way. It reserves nothing and mints nothing, so recovering costs neither a second session nor a force-takeover of yourself (both of which corrupt the provenance record the Worker model exists to produce). workerRef takes the same three forms as hadron_start_session — the worker\'s NAME ("Iris"), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id; an id or URN names its own App, a bare NAME needs one selected (or passed as app/session). Re-read this whenever you are unsure you are still working as the worker you bound.',
     {
       workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which App a bare NAME belongs to when app is omitted.'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so it is not reaped as idle while you are working (#1081).'),
     },
     async ({ workerRef, app, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The
@@ -6326,7 +6375,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // offering the option at all.
       promptOverride: z.string().optional().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it; omit it to leave the override untouched."),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
-      session: z.string().optional().describe('Your session id — used only to resolve which App a bare NAME belongs to when app is omitted.'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so it is not reaped as idle while you are working (#1081).'),
     },
     async ({ workerRef, promptOverride, app, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The

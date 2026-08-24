@@ -186,3 +186,37 @@ describe('#1081 — the heartbeat is not a hole', () => {
     expect(out).not.toMatch(/heartbeat/i);
   });
 });
+
+describe('#1082 review — the heartbeat re-checks CURRENT eligibility', () => {
+  it('a REVOKED org member cannot keep their old session alive', async () => {
+    // `Session.userId` is stamped at bind and never revoked, so ownership alone
+    // is a HISTORICAL fact. Without a current-participation check a removed
+    // member could hold a worker indefinitely with tool calls that are
+    // themselves denied — the heartbeat runs before the handler's own gate.
+    const id = await staleSession();
+    const before = await updatedAt(id);
+    await db.orgMember.updateMany({
+      where: { organizationId: org.id, userId: user.id },
+      data: { deletedAt: new Date() },
+    });
+    const srv = createTestableMcpServer(auth());
+    await srv.callToolText('hadron_team_chat_read', { session: id, sinceSeq: 0 });
+    expect((await updatedAt(id))!.getTime()).toBe(before!.getTime());
+  });
+
+  it('a member in good standing still heartbeats — the guard is not a blanket refusal', async () => {
+    const id = await staleSession();
+    const srv = createTestableMcpServer(auth());
+    await srv.callToolText('hadron_team_chat_read', { session: id, sinceSeq: 0 });
+    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(LONG_AGO.getTime());
+  });
+
+  it('an UNINSTALLED App stops the heartbeat too', async () => {
+    const id = await staleSession();
+    const before = await updatedAt(id);
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    const srv = createTestableMcpServer(auth());
+    await srv.callToolText('hadron_team_chat_read', { session: id, sinceSeq: 0 });
+    expect((await updatedAt(id))!.getTime()).toBe(before!.getTime());
+  });
+});
