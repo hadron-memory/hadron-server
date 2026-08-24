@@ -418,12 +418,22 @@ function isSlugTaken(e: unknown): boolean {
  * that gate, and they never reach here.
  *
  * `heldByUserId: null` means the name is unheld now.
+ *
+ * The wording states the FACT and stops there — it does not say the holder is
+ * "someone else", nor that a release would be a force-release (PR #1084 review,
+ * Copilot). Neither is knowable here: this throws before the holder is compared
+ * to the caller, and the account now holding the name may well BE the caller —
+ * a caller asserting `expectUnheld` who turns out to hold it themselves is the
+ * plain case. Releasing then posts nothing and is not a force-release, so a
+ * message claiming otherwise would send them to a confirmation they do not owe.
+ * The client can decide the relationship itself; `heldByUserId` is right there
+ * in the extensions and the caller knows its own id.
  */
 const holdStale = (workerId: string, heldByUserId: string | null): GraphQLError =>
   new GraphQLError(
     heldByUserId
-      ? 'The hold changed: this name is now held by someone else. Re-read it and decide again — releasing it would be a force-release, which posts to the team chat.'
-      : 'The hold changed: this name is no longer held by anyone, so there is nothing to release.',
+      ? 'The hold is not what you asserted: this name is currently held. Re-read the worker and decide again — the release you described is not the release this would perform.'
+      : 'The hold is not what you asserted: this name is currently held by nobody, so there is nothing to release.',
     { extensions: { code: 'WORKER_HOLD_STALE', workerId, heldByUserId } },
   );
 

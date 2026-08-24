@@ -1393,6 +1393,27 @@ describe('#1050 — worker name holding', () => {
       .toBe(contrib.id);
   });
 
+  it('the refusal does not claim a force-release when the caller holds it themselves', async () => {
+    // PR #1084 review, Copilot. The throw happens BEFORE the holder is compared
+    // to the caller, so the account now holding the name may BE the caller — a
+    // caller asserting expectUnheld who turns out to hold it is the plain case.
+    // Releasing then posts nothing and is not a force-release, so a message
+    // saying "someone else" or "this would be a force-release" would send them
+    // to a confirmation they do not owe.
+    const w = await heldBy(contrib.id);
+    try {
+      await M.releaseWorker({}, { workerRef: w.id, expectUnheld: true }, ctx(contrib.id));
+      expect.unreachable('a stale unheld assertion must refuse');
+    } catch (e) {
+      const err = e as GraphQLError;
+      expect((err.extensions as { code?: string }).code).toBe('WORKER_HOLD_STALE');
+      expect(err.message).not.toMatch(/someone else/i);
+      expect(err.message).not.toMatch(/force-release/i);
+      // The client decides the relationship itself, from the id it is handed.
+      expect((err.extensions as { heldByUserId?: string | null }).heldByUserId).toBe(contrib.id);
+    }
+  });
+
   it('passing BOTH assertions is BAD_USER_INPUT — they contradict', async () => {
     const w = await heldBy(contrib.id);
     await expectCode(
