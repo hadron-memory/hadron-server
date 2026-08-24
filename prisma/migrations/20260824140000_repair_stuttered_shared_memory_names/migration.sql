@@ -16,45 +16,58 @@
 -- its label. The portal renders this one in the team-chat breadcrumb, so the
 -- doubled form is visible rather than buried.
 --
--- NARROW BY CONSTRUCTION. Only a row whose stored name is EXACTLY what the old
--- composer would have produced is touched:
+-- ## Matched EXACTLY, and why that beats the clever version
 --
---   * it is an app-class, non-deleted memory;
---   * its App and its identity Agent are named IDENTICALLY (the only case the
---     old code stuttered — a genuinely two-named pairing like
---     "Eng Team WL — Second Agent — shared chats" is correct and must survive);
---   * and its name literally equals `<app> — <agent> — <anything>`.
+-- The predicate is a literal equality against the precise string the old
+-- composer produced: `<name> — <name> — shared chats`, where the App and its
+-- identity Agent are named identically (the only case that stuttered).
 --
--- A hand-edited name matches none of those and is left alone. That matters more
--- than covering every row: a cosmetic repair that overwrites a name someone
--- chose is a worse outcome than a label that reads oddly.
+-- Two earlier drafts were narrower in intent and wider in effect, and both were
+-- caught in review (PR #1083, Codex + Copilot independently):
 --
--- Kind-agnostic on purpose: the trailing segment is carried over verbatim rather
--- than assumed to be 'shared chats', so a future app-class memory kind inherits
--- the repair instead of being silently skipped.
+--   1. `LIKE <app> || ' — ' || <agent> || ' — %'` — these are FREE-FORM display
+--      names, so an App called "Eng_Team" or "50% Team" puts a LIKE WILDCARD in
+--      the pattern (`_` matches any character, `%` any run). A hand-renamed
+--      memory whose prefix merely RESEMBLED the stutter would match.
+--   2. `starts_with(..., '<app> — <agent> — ')` — literal, but still matched any
+--      trailing text, so a user-chosen `Team — Team — quarterly notes` was
+--      rewritten to `Team — quarterly notes`.
 --
--- Idempotent: after this runs the names no longer match the predicate, so a
--- re-run (or a hand-recovered migration) updates zero rows.
+-- Draft 2 was written to be "kind-agnostic", so a future app-class memory kind
+-- would inherit the repair. That traded a REAL safety property for a
+-- HYPOTHETICAL one: `sharedMemoryName` has exactly one non-test caller and it
+-- always passes the default kind, so no alternate kind exists to repair — while
+-- `updateMemory(name:)` lets a user set any name at all. The speculative
+-- generality could only ever have hit hand-chosen labels.
+--
+-- An exact equality also removes the offset arithmetic entirely: there is no
+-- prefix length to compute and therefore no way to slice a name at the wrong
+-- place. If a future kind ever ships and needs repairing, it gets its own
+-- migration, written when the string it must match is known rather than guessed.
+--
+-- ## Tombstones are INCLUDED, deliberately
+--
+-- No `deleted_at IS NULL` filter (PR #1083 review, Codex + Copilot). The
+-- canonical `(App, Agent)` lookup in `findOrCreateAppClassMemory` spans
+-- soft-deleted rows on purpose, and its `revive` path clears only `deleted_at` /
+-- `deleted_by` — it does NOT recompute the name. So a tombstoned stuttered row
+-- skipped here would come back with the doubled label on the pairing's next
+-- touch, AFTER this one-off migration had already run, and nothing would repair
+-- it a second time. Repairing a tombstone is free (the name is display-only and
+-- the row is invisible until revived) and it is what makes "one-off" true.
+--
+-- Idempotent: after this runs the names no longer equal the predicate, so a
+-- re-run updates zero rows.
 --
 -- The separator is U+2014 EM DASH surrounded by spaces, matching
 -- `sharedMemoryName` exactly. A different dash would match nothing and this
 -- migration would silently do nothing, which is why it is spelled out here.
---
--- `starts_with`, NOT `LIKE` (PR #1083 review, Codex P2). These are free-form
--- display names, so an App called "Eng_Team" or "50% Team" puts a LIKE WILDCARD
--- into the pattern: `_` matches any character and `%` matches any run of them.
--- A hand-renamed memory whose prefix merely resembles `<app> — <agent>` would
--- then match, and the SET below would slice it at an offset computed from the
--- LITERAL prefix length — corrupting exactly the hand-chosen name this migration
--- promises to leave alone. `starts_with` is a literal comparison with no
--- metacharacters, and is what the URN cascades already use for the same reason.
 
 UPDATE "memories" m
-SET "name" = ap."name" || substring(m."name" FROM length(ap."name" || ' — ' || a."name") + 1)
+SET "name" = ap."name" || ' — shared chats'
 FROM "apps" ap, "agents" a
 WHERE m."class" = 'app'
-  AND m."deleted_at" IS NULL
   AND m."app_id" = ap."id"
   AND m."shared_memory_of_agent_id" = a."id"
   AND ap."name" = a."name"
-  AND starts_with(m."name", ap."name" || ' — ' || a."name" || ' — ');
+  AND m."name" = ap."name" || ' — ' || a."name" || ' — shared chats';
