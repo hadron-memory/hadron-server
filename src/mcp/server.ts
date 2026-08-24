@@ -1223,7 +1223,11 @@ export function createMcpServerInstance(
    *   read must not 500 because liveness bookkeeping had a bad day.
    */
   async function heartbeatSession(sessionRef?: string | null): Promise<void> {
-    const id = sessionRef?.trim();
+    // Defensive normalization: `createTestableMcpServer` bypasses zod, so a
+    // non-string here would throw out of `.trim()` and fail the whole tool call
+    // — the one thing this function promises never to do (PR #1082 review,
+    // Copilot). Same reason the handlers re-validate contentScope.
+    const id = typeof sessionRef === 'string' ? sessionRef.trim() : '';
     if (!id) return;
     // Scope to what the caller demonstrably owns. A pure App-key caller has no
     // userId by construction; a user principal is judged on the user (the #932
@@ -1243,8 +1247,14 @@ export function createMcpServerInstance(
     // before any of the handlers' own gates. "Revoked membership must not
     // authorize" applies to keeping something alive exactly as it applies to
     // reading it.
-    if (auth.userId && !(await callerStillDrives(id))) return;
     try {
+      // INSIDE the try (PR #1082 review, Copilot): this is a DB lookup, and it
+      // sat outside while the docstring two paragraphs up promised the
+      // heartbeat "cannot fail a tool call". A transient error here would have
+      // broken that promise — the same claim-wider-than-the-code defect this
+      // PR's own commit messages keep naming. Either step throwing means no
+      // heartbeat, which is the safe direction: the session simply ages.
+      if (auth.userId && !(await callerStillDrives(id))) return;
       await db.session.updateMany({
         where: { id, endedAt: null, deletedAt: null, ...owner },
         data: { updatedAt: new Date() },

@@ -82,7 +82,16 @@ function auth(userId = user.id): AuthContext {
   return { userId, appId: app.id, roles: ['READER'], clientId: `user:${userId}` };
 }
 
-/** A live worker session attributed to `userId`, last touched LONG_AGO. */
+/**
+ * A live worker session attributed to `userId`, last touched LONG_AGO.
+ *
+ * Callers must compare against the value this leaves STORED (`updatedAt(id)`),
+ * never against `LONG_AGO` itself: `updated_at` is timestamp-without-zone, so a
+ * raw-SQL write round-trips through a zone conversion and the literal is not
+ * what comes back. Asserting `> LONG_AGO` happens to hold in a positive-offset
+ * zone and would pass VACUOUSLY in a negative one — a false green that depends
+ * on where the suite runs (PR #1082 review, Copilot).
+ */
 async function staleSession(userId = user.id): Promise<string> {
   const s = await db.session.create({
     data: { id: generateId(), workerId: worker.id, appId: app.id, userId },
@@ -97,18 +106,20 @@ const updatedAt = async (id: string) =>
 describe('#1081 — every tool handed a session id heartbeats it', () => {
   it('hadron_team_chat_read — the pure-read case that wrote nothing at all', async () => {
     const id = await staleSession();
+    const before = await updatedAt(id);
     const srv = createTestableMcpServer(auth());
     await srv.callToolText('hadron_team_chat_read', { session: id, sinceSeq: 0 });
     // This is the coordinator's day: reading the chat kept no session alive
     // before #1081, because a read writes no rows the reaper can see.
-    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(LONG_AGO.getTime());
+    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(before!.getTime());
   });
 
   it('hadron_team_chat_post', async () => {
     const id = await staleSession();
+    const before = await updatedAt(id);
     const srv = createTestableMcpServer(auth());
     await srv.callToolText('hadron_team_chat_post', { session: id, body: 'hello' });
-    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(LONG_AGO.getTime());
+    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(before!.getTime());
   });
 
   it('hadron_list_workers and hadron_get_worker', async () => {
@@ -117,9 +128,10 @@ describe('#1081 — every tool handed a session id heartbeats it', () => {
       ['hadron_get_worker', { workerRef: 'Dara' }],
     ] as const) {
       const id = await staleSession();
+      const before = await updatedAt(id);
       const srv = createTestableMcpServer(auth());
       await srv.callToolText(tool, { ...(args as object), session: id } as never);
-      expect((await updatedAt(id))!.getTime(), tool).toBeGreaterThan(LONG_AGO.getTime());
+      expect((await updatedAt(id))!.getTime(), tool).toBeGreaterThan(before!.getTime());
     }
   });
 
@@ -127,18 +139,20 @@ describe('#1081 — every tool handed a session id heartbeats it', () => {
     // Only kind:'pr' with a `#N` ref used to touch the Session, as a side effect
     // of denormalizing prNumber. A branch record heartbeats now too.
     const id = await staleSession();
+    const before = await updatedAt(id);
     const srv = createTestableMcpServer(auth());
     await srv.callToolText('hadron_record_work', {
       session: id, tool: 'github', kind: 'branch', ref: 'o/r:feat/x', action: 'pushed',
     });
-    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(LONG_AGO.getTime());
+    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(before!.getTime());
   });
 
   it('hadron_team_work_items', async () => {
     const id = await staleSession();
+    const before = await updatedAt(id);
     const srv = createTestableMcpServer(auth());
     await srv.callToolText('hadron_team_work_items', { session: id });
-    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(LONG_AGO.getTime());
+    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(before!.getTime());
   });
 });
 
@@ -206,9 +220,10 @@ describe('#1082 review — the heartbeat re-checks CURRENT eligibility', () => {
 
   it('a member in good standing still heartbeats — the guard is not a blanket refusal', async () => {
     const id = await staleSession();
+    const before = await updatedAt(id);
     const srv = createTestableMcpServer(auth());
     await srv.callToolText('hadron_team_chat_read', { session: id, sinceSeq: 0 });
-    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(LONG_AGO.getTime());
+    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(before!.getTime());
   });
 
   it('an UNINSTALLED App stops the heartbeat too', async () => {
@@ -218,5 +233,37 @@ describe('#1082 review — the heartbeat re-checks CURRENT eligibility', () => {
     const srv = createTestableMcpServer(auth());
     await srv.callToolText('hadron_team_chat_read', { session: id, sinceSeq: 0 });
     expect((await updatedAt(id))!.getTime()).toBe(before!.getTime());
+  });
+});
+
+describe('#1082 review — the heartbeat genuinely cannot fail a tool call', () => {
+  it('a NON-STRING session argument does not throw out of the tool', async () => {
+    // createTestableMcpServer bypasses zod, so the handler sees whatever it is
+    // given. `.trim()` on a number would have thrown and failed the whole call.
+    const srv = createTestableMcpServer(auth());
+    const out = await srv.callToolText('hadron_team_chat_read', {
+      session: 12345 as never,
+      app: app.id,
+      sinceSeq: 0,
+    });
+    expect(typeof out).toBe('string');
+    expect(out).not.toMatch(/trim is not a function|TypeError/i);
+  });
+
+  it('a DB failure inside the eligibility check does not fail the tool call', async () => {
+    const id = await staleSession();
+    const before = await updatedAt(id);
+    // The eligibility lookup used to sit outside the try/catch, so a transient
+    // error here broke the "cannot fail a tool call" promise.
+    const spy = vi
+      .spyOn(db.session, 'findUnique')
+      .mockRejectedValueOnce(new Error('transient db failure'));
+    const srv = createTestableMcpServer(auth());
+    const out = await srv.callToolText('hadron_team_chat_read', { session: id, sinceSeq: 0 });
+    expect(typeof out).toBe('string');
+    expect(out).not.toMatch(/transient db failure/);
+    // …and it did NOT heartbeat, which is the safe direction: the session ages.
+    expect((await updatedAt(id))!.getTime()).toBe(before!.getTime());
+    spy.mockRestore();
   });
 });
