@@ -35,18 +35,38 @@
  * events. That is the safe direction: an abandoned session reads as MORE idle,
  * never less, and every consumer of this number is asking "is anyone there?".
  *
- * Today's other caller passes only ACTIVE sessions, where `autoExpiredAt` is
- * null by construction, so its behaviour is unchanged — the rule lives here
- * rather than at the call site because it is a property of the derivation.
+ * The same reasoning caps the result at `endedAt`: `updateSession` permits
+ * writes after a session ends (a merge lands days later), and usage events can
+ * be attributed late, so both can advance a timestamp on a session nobody is
+ * driving. Nothing that happens after a stint ends is that stint being driven.
+ *
+ * Today's other caller passes only ACTIVE sessions, where `autoExpiredAt` and
+ * `endedAt` are null by construction, so its behaviour is unchanged — these
+ * rules live here rather than at the call site because they are properties of
+ * the derivation.
  */
 export function sessionActivityAt(
-  session: { startedAt: Date; updatedAt?: Date | null; autoExpiredAt?: Date | null },
+  session: {
+    startedAt: Date;
+    updatedAt?: Date | null;
+    autoExpiredAt?: Date | null;
+    endedAt?: Date | null;
+  },
   lastEventAt?: Date | null,
 ): Date {
   const heartbeat = session.autoExpiredAt ? null : session.updatedAt;
-  return new Date(
-    Math.max(session.startedAt.getTime(), heartbeat?.getTime() ?? 0, lastEventAt?.getTime() ?? 0),
+  const at = Math.max(
+    session.startedAt.getTime(),
+    heartbeat?.getTime() ?? 0,
+    lastEventAt?.getTime() ?? 0,
   );
+  // Activity cannot POSTDATE the end. `updateSession` deliberately permits
+  // writes after `endedAt` — a merge lands days after the stint that produced
+  // it — and usage events can be attributed late for the same reason
+  // (`hadron_record_work` takes an ended session on purpose). Both advance
+  // timestamps on a session nobody is driving.
+  const end = session.endedAt?.getTime();
+  return new Date(end !== undefined && end < at ? end : at);
 }
 
 /**

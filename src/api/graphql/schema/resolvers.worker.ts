@@ -1465,7 +1465,7 @@ export async function loadAppWorkerActivity(
     >`
       SELECT s.worker_id AS "workerId",
              bool_or(s.ended_at IS NULL) AS "live",
-             max(GREATEST(
+             max(LEAST(GREATEST(
                s.started_at,
                -- The REAPER ends an idle session with an updateMany, and
                -- Prisma's @updatedAt advances updated_at to the reaping
@@ -1481,7 +1481,13 @@ export async function loadAppWorkerActivity(
                -- abandoned name look more idle, never less.
                CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
                ue.max_created
-             )) AS "lastActiveAt"
+             -- ACTIVITY CANNOT POSTDATE THE END (PR #1086 review, Codex P2).
+             -- updateSession deliberately permits writes after ended_at, so a
+             -- merge landing days later attributes a PR to a finished stint
+             -- and drags updated_at with it; usage events can be attributed
+             -- late for the same reason. Neither is someone driving the
+             -- worker. LEAST ignores NULL, so an OPEN session is uncapped.
+             ), s.ended_at)) AS "lastActiveAt"
       FROM sessions s
       JOIN workers w ON w.id = s.worker_id
       LEFT JOIN LATERAL (

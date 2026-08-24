@@ -1008,6 +1008,44 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
     expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(endedAt.getTime());
   });
 
+  it('does NOT count a POST-END metadata write as a drive', async () => {
+    // updateSession deliberately permits writes after endedAt — a merge lands
+    // days after the stint that produced it — and @updatedAt moves with them.
+    // Attributing that to the worker says someone was driving it on the day
+    // the PR merged (PR #1086 review, Codex P2).
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    const endedAt = new Date(Date.now() + 60_000);
+    await db.session.update({ where: { id: s.id }, data: { endedAt } });
+
+    // Three days later the PR merges and its number is attributed back.
+    const merged = new Date(endedAt.getTime() + 3 * 24 * 60 * 60 * 1000);
+    await db.session.update({
+      where: { id: s.id },
+      data: { prNumber: 1086, updatedAt: merged },
+    });
+
+    const at = (await W.lastActiveAt(w, {}, ctx(admin.id))) as Date;
+    expect(at.getTime()).toBe(endedAt.getTime());
+  });
+
+  it('does NOT count a LATE usage event either — the cap is the end, not the source', async () => {
+    // hadron_record_work takes an ended session on purpose (late attribution,
+    // cor:agt:020:05), so the same postdating arrives through a second door.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    const endedAt = new Date(Date.now() + 60_000);
+    await db.session.update({ where: { id: s.id }, data: { endedAt } });
+    await db.usageEvent.create({
+      data: {
+        id: generateId(), sessionId: s.id, type: 'read',
+        createdAt: new Date(endedAt.getTime() + 86_400_000),
+      },
+    });
+
+    expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(endedAt.getTime());
+  });
+
   it('counts an attributed usage event as activity', async () => {
     // The third input of the shared derivation, and the one a roster would
     // otherwise miss for a session driven entirely through MCP.
