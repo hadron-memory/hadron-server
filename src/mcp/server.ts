@@ -6031,6 +6031,22 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── hadron_list_workers ───────────────────────────────────────────────────────
 
+/**
+ * Compact relative age for the roster — "3d ago" (hadron-cli#487).
+ *
+ * Coarse on purpose: a coordinator is asking "has anyone touched this in a
+ * while?", and minute-precision on a two-week-old session invites a reader to
+ * treat it as presence. Rounds DOWN, so it never overstates recency.
+ */
+function ageOf(at: Date, now: Date = new Date()): string {
+  const mins = Math.floor((now.getTime() - at.getTime()) / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
   server.tool(
     'hadron_list_workers',
     'List the team App\'s workers — its named staff (#997). THE roster read: use it when you need to work as a teammate but do not know the names, since hadron_start_session\'s workerRef takes a name. Returns each worker\'s name, URN, role, WHO HOLDS IT, whether a session is live, and whether it is retired. #1050: a name is HELD by a person until released — a held name is not yours to take however idle it looks, and the remedy is to cast your own worker, never to end someone\'s session. An UNHELD worker is held by whoever binds it next. "session live" is a separate fact and only ever a question about your own worker. Retired workers are excluded unless includeRetired — their names stay reserved forever, so they explain a WORKER_NAME_TAKEN refusal.',
@@ -6207,7 +6223,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // coordinator most needs and no surface showed — ten issues went to
             // a worker whose whole history was two sessions under three
             // minutes, rendered exactly like one worked yesterday.
+            //
+            // The AGE matters as much as the never-case, and omitting it was
+            // the same defect one step in (PR #1086 review, Codex P2): a worker
+            // last driven in March and one driven an hour ago both read "no
+            // live session", while the timestamp sat computed and unrendered.
+            // Rendered only when there is no live session — during one, "live"
+            // is the answer and an age beside it invites reading the age as
+            // presence, which is #1034's confusion in a new place.
             if (!act?.lastActiveAt) flags.push('never driven');
+            else if (!act.hasLiveSession) flags.push(`last driven ${ageOf(act.lastActiveAt)}`);
             // #1026 — built from the SAME page-shared URN above, so the roster
             // costs no extra lookup per worker (the PR #1000 rule that pulled
             // the App URN out of the per-item path in the first place).

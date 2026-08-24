@@ -113,6 +113,34 @@ describe('#997 — hadron_list_workers', () => {
     expect(lineFor('Iris')).toContain('no live session');
   });
 
+  it('renders HOW LONG AGO an idle worker was last driven', async () => {
+    // Ada's worker: two brief sessions weeks ago. Without the age it reads
+    // exactly like one driven an hour ago, which is the whole complaint —
+    // and the timestamp was already computed (PR #1086 review, Codex P2).
+    const iris = await worker('Iris', 'iris');
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await db.session.create({
+      data: { id: generateId(), workerId: iris.id, appId: app.id, userId: user.id,
+        startedAt: threeDaysAgo, updatedAt: threeDaysAgo, endedAt: threeDaysAgo },
+    });
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
+    const line = out.split('\n').find((l) => l.trimStart().startsWith('- Iris ')) ?? '';
+    expect(line).toContain('last driven 3d ago');
+  });
+
+  it('does NOT print an age beside a LIVE session', async () => {
+    // "live" is the answer during a session; an age next to it invites
+    // reading the age as presence, which is the #1034 confusion again.
+    const iris = await worker('Iris', 'iris');
+    await db.session.create({
+      data: { id: generateId(), workerId: iris.id, appId: app.id, userId: user.id },
+    });
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
+    const line = out.split('\n').find((l) => l.trimStart().startsWith('- Iris ')) ?? '';
+    expect(line).toContain('session live');
+    expect(line).not.toContain('last driven');
+  });
+
   it('does not name the driver — that stays behind the takeover refusal', async () => {
     const iris = await worker('Iris', 'iris');
     await db.session.create({
