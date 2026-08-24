@@ -1439,36 +1439,62 @@ export async function loadAppWorkerActivity(
   if (cached) return cached;
 
   const pending = (async () => {
-    const out = new Map<string, WorkerActivity>();
-    // Sessions of THIS App's workers. `deletedAt: null` matches the predicate
-    // `startSession` refuses WORKER_TAKEN on, exactly (PR #1000 review, Codex
-    // P2): without it a roster calls a worker busy whose only live session is
-    // soft-deleted, while binding it actually succeeds. Liveness a reader sees
-    // and liveness the server enforces must be ONE predicate.
-    const sessions = await ctx.db.session.findMany({
-      where: { worker: { appId }, deletedAt: null },
-      select: { id: true, workerId: true, startedAt: true, updatedAt: true, endedAt: true },
-    });
-    if (sessions.length === 0) return out;
-
-    const lastEventBySession = await loadLastEventBySession(
-      ctx.db as never,
-      sessions.map((s) => s.id),
+    // AGGREGATED IN THE DATABASE, one row per worker (PR #1086 review, Codex
+    // P2). The first draft fetched every non-deleted session of every worker in
+    // the App and folded them in JavaScript — session history is UNBOUNDED, so
+    // latency, heap and the `IN (…)` parameter count grew with the App's
+    // lifetime on every roster read, and a single-worker read paid the same
+    // price. The output here is O(workers), not O(sessions).
+    //
+    // Three points the SQL encodes, each of which is a rule rather than a
+    // detail:
+    //
+    //  - `deleted_at IS NULL` matches the predicate `startSession` refuses
+    //    WORKER_TAKEN on, exactly (PR #1000 review, Codex P2). Without it a
+    //    roster calls a worker busy whose only live session is soft-deleted,
+    //    while binding it actually succeeds. Liveness a reader SEES and
+    //    liveness the server ENFORCES must be one predicate.
+    //  - `bool_or(ended_at IS NULL)` — ANY open session makes the worker live.
+    //    `force` lets several coexist, and the most recent row is not
+    //    necessarily the open one.
+    //  - `CASE WHEN auto_expired_at IS NULL THEN updated_at END` — see below.
+    //    `GREATEST` ignores NULL arguments in Postgres, so a dropped term is
+    //    simply not considered rather than poisoning the row.
+    const rows = await ctx.db.$queryRaw<
+      { workerId: string; live: boolean; lastActiveAt: Date | null }[]
+    >`
+      SELECT s.worker_id AS "workerId",
+             bool_or(s.ended_at IS NULL) AS "live",
+             max(GREATEST(
+               s.started_at,
+               -- The REAPER ends an idle session with an updateMany, and
+               -- Prisma's @updatedAt advances updated_at to the reaping
+               -- instant (#930). Folding that in would report the background
+               -- cleanup as the worker's last drive — shifting it forward by
+               -- the whole idle window, and making an ABANDONED worker read as
+               -- recently driven, which is the exact signal this field exists
+               -- to give (PR #1086 review, Codex P2). auto_expired_at is set
+               -- on precisely those rows, so they fall back to started_at and
+               -- their usage events. That UNDER-reports — the last genuine
+               -- heartbeat was overwritten by the reap and is unrecoverable —
+               -- and under-reporting is the safe direction here: it makes an
+               -- abandoned name look more idle, never less.
+               CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
+               ue.max_created
+             )) AS "lastActiveAt"
+      FROM sessions s
+      JOIN workers w ON w.id = s.worker_id
+      LEFT JOIN LATERAL (
+        SELECT max(e.created_at) AS max_created
+        FROM usage_events e
+        WHERE e.session_id = s.id
+      ) ue ON true
+      WHERE w.app_id = ${appId} AND s.deleted_at IS NULL
+      GROUP BY s.worker_id
+    `;
+    return new Map<string, WorkerActivity>(
+      rows.map((r) => [r.workerId, { hasLiveSession: r.live, lastActiveAt: r.lastActiveAt }]),
     );
-    for (const s of sessions) {
-      if (!s.workerId) continue;
-      const at = sessionActivityAt(s, lastEventBySession.get(s.id));
-      const prior = out.get(s.workerId);
-      out.set(s.workerId, {
-        // ANY open session makes the worker live, so this ORs across rows
-        // rather than reading the newest one: `force` lets several coexist,
-        // and the most recent row is not necessarily the open one.
-        hasLiveSession: (prior?.hasLiveSession ?? false) || s.endedAt === null,
-        lastActiveAt:
-          prior?.lastActiveAt && prior.lastActiveAt > at ? prior.lastActiveAt : at,
-      });
-    }
-    return out;
   })();
 
   cache?.set(appId, pending);

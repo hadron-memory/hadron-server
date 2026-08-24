@@ -971,6 +971,56 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
     expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
   });
 
+  it('does NOT report the REAPER as the last drive', async () => {
+    // The reaper ends an idle session with an updateMany, and @updatedAt moves
+    // to the reaping instant — so folding it in would shift lastActiveAt
+    // forward by the whole idle window and make an ABANDONED worker read as
+    // recently driven. Which is the precise signal this field exists to give.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+
+    const drivenAt = (await W.lastActiveAt(w, {}, ctx(admin.id))) as Date;
+    // What a reap looks like on the row: both stamps set, and updatedAt
+    // dragged a day forward with them.
+    const reapedAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await db.session.update({
+      where: { id: s.id },
+      data: { endedAt: reapedAt, autoExpiredAt: reapedAt, updatedAt: reapedAt },
+    });
+
+    const after = (await W.lastActiveAt(w, {}, ctx(admin.id))) as Date;
+    expect(after.getTime()).toBeLessThan(reapedAt.getTime());
+    expect(after.getTime()).toBeLessThanOrEqual(drivenAt.getTime());
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+  });
+
+  it('DOES count an explicit endSession as a drive — only the reaper is excluded', async () => {
+    // The spare, not just the fire: ending your own session is a driver
+    // action, so its updatedAt must still count. Only auto-expiry is dropped.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    const endedAt = new Date(Date.now() + 60_000);
+    await db.session.update({
+      where: { id: s.id },
+      data: { endedAt, autoExpiredAt: null, updatedAt: endedAt },
+    });
+
+    expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(endedAt.getTime());
+  });
+
+  it('counts an attributed usage event as activity', async () => {
+    // The third input of the shared derivation, and the one a roster would
+    // otherwise miss for a session driven entirely through MCP.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    const eventAt = new Date(Date.now() + 120_000);
+    await db.usageEvent.create({
+      data: { id: generateId(), sessionId: s.id, type: 'read', createdAt: eventAt },
+    });
+
+    expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(eventAt.getTime());
+  });
+
   it('one worker going live does not make its sibling live', async () => {
     // The loader answers per APP in one query, so a mis-keyed fold would
     // smear one worker's session across the roster.

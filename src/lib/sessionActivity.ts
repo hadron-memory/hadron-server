@@ -20,17 +20,32 @@
  * so a change here reaches every surface a human reads an "idle since" off.
  */
 
-/** The three-input activity instant for ONE session. */
+/**
+ * The three-input activity instant for ONE session.
+ *
+ * `updatedAt` is DROPPED on an auto-expired session. The reaper ends an idle
+ * session with an `updateMany`, and Prisma's `@updatedAt` advances the column to
+ * the reaping instant — so on a reaped row it records the background cleanup,
+ * not a driver, and folding it in reports an ABANDONED session as active until
+ * the moment it was swept up (PR #1086 review, Codex P2). `autoExpiredAt` marks
+ * exactly those rows (#930).
+ *
+ * The last genuine heartbeat is gone — the reap overwrote it — so this
+ * under-reports on a reaped session, falling back to `startedAt` and the usage
+ * events. That is the safe direction: an abandoned session reads as MORE idle,
+ * never less, and every consumer of this number is asking "is anyone there?".
+ *
+ * Today's other caller passes only ACTIVE sessions, where `autoExpiredAt` is
+ * null by construction, so its behaviour is unchanged — the rule lives here
+ * rather than at the call site because it is a property of the derivation.
+ */
 export function sessionActivityAt(
-  session: { startedAt: Date; updatedAt?: Date | null },
+  session: { startedAt: Date; updatedAt?: Date | null; autoExpiredAt?: Date | null },
   lastEventAt?: Date | null,
 ): Date {
+  const heartbeat = session.autoExpiredAt ? null : session.updatedAt;
   return new Date(
-    Math.max(
-      session.startedAt.getTime(),
-      session.updatedAt?.getTime() ?? 0,
-      lastEventAt?.getTime() ?? 0,
-    ),
+    Math.max(session.startedAt.getTime(), heartbeat?.getTime() ?? 0, lastEventAt?.getTime() ?? 0),
   );
 }
 
