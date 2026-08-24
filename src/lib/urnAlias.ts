@@ -1,6 +1,13 @@
 /**
  * The URN alias map (#1079) — every URN an entity used to answer to.
  *
+ * Implements `cor:urn:030` — URN stability across renames:
+ *   - `cor:urn:030:01` — a published URN keeps resolving after a rename
+ *     (record atomically with the rename; a live URN beats an alias; ambiguity
+ *     refuses; repetition does not accumulate).
+ *   - `cor:urn:030:02` — an alias is not an access bypass (no liveness or
+ *     authority is stored here; the caller re-queries under its own filters).
+ *
  * ## The defect this closes
  *
  * A URN is the platform's publishable identifier. It goes into commit trailers,
