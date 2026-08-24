@@ -157,6 +157,15 @@ export function findBrokenSdlLiterals(file, text) {
     // consumed it and NOTHING ELSE on that line: `;` here, or `,` / `)` / `]` /
     // `}` if the SDL is ever passed inline, plus an optional trailing comment.
     //
+    // A TypeScript continuation — `` `.trim() `` or `` ` as const `` — is
+    // therefore refused too, which is DELIBERATE (Codex, third pass on #1085).
+    // None exists in the SDL, and recognizing them means modelling expression
+    // syntax in a text scanner: every form it learns is a shape prose can then
+    // imitate, and the failure that buys is a SILENT false negative, which is
+    // the one this gate exists to prevent. A false positive is loud, and the
+    // message says outright that a real continuation means widening this rule
+    // rather than escaping anything — so nobody is sent to the wrong fix.
+    //
     // Asserting only a PREFIX is not enough, and that was the second round on
     // this same predicate (Codex, PR #1085): a description line reading
     // `` `;` ends a statement. `` starts with a backtick AND is followed by a
@@ -176,9 +185,12 @@ export function findBrokenSdlLiterals(file, text) {
       const why = looksLikeATerminator
         ? [
             'this backtick starts the line like a terminator, but the rest of the',
-            'line is prose rather than a plain `;` — so it is a code span or a',
-            'fenced block, and it ends the SDL template literal here. Escape it',
-            '(\\`).',
+            'line is not a plain close (`;` `,` `)`) — so this gate reads it as',
+            'prose, a code span or a fenced block, that ended the SDL template',
+            'literal here. Escape it (\\`).',
+            'If instead this IS the terminator and the line is a valid expression',
+            'continuation (`.trim()`, `as const`), this gate does not model those:',
+            'widen closesAnExpression in scripts/check-graphql-sdl.mjs.',
           ]
         : [
             inComment

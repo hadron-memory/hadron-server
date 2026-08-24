@@ -171,6 +171,24 @@ describe('check-graphql-sdl — the literal is intact', () => {
     expect(r.out).toContain('typeDefs.ts:3');
   });
 
+  it('refuses a TypeScript continuation, and says so instead of saying "escape it"', () => {
+    // Declined finding, pinned: a real `.trim()` / `as const` continuation is
+    // refused on purpose (see the rationale in check-graphql-sdl.mjs). What
+    // must NOT happen is sending that author to the wrong fix, so the message
+    // names the alternative reading. The rule is the strictness; this is the
+    // honesty about it.
+    const r = runOn(
+      lines(
+        'export const typeDefs = ' + BACKTICK + '#graphql',
+        '  type Q { id: ID! }',
+        BACKTICK + '.trim();',
+        '',
+      ),
+    );
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('widen closesAnExpression');
+  });
+
   it('does NOT fire on a terminator carrying a trailing line comment', () => {
     const r = runOn(
       lines(
