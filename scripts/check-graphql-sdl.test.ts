@@ -127,14 +127,57 @@ describe('check-graphql-sdl — the literal is intact', () => {
     expect(r.out).toContain('gate was checking nothing');
   });
 
+  it('FAILS on a description line that STARTS with a backtick', () => {
+    // Codex P2 on PR #1085, and a hole in the hadron-portal check this was
+    // ported from: a position-only rule reads a leading backtick as the
+    // document's own terminator, reports the literal intact, and hands back the
+    // very cascade the gate translates. A markdown code span reaches it.
+    const r = runOn(
+      sdl(
+        '  """',
+        '  Example:',
+        '  ' + BACKTICK + 'query { me { id } }' + BACKTICK + ' is the shape.',
+        '  """',
+        '  type Q { id: ID! }',
+      ),
+    );
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('typeDefs.ts:4');
+    expect(r.out).toContain('starts the line like a terminator');
+  });
+
+  it('FAILS on a fenced block opening a line inside a description', () => {
+    const r = runOn(
+      sdl('  """', '  ' + BACKTICK.repeat(3) + 'graphql', '  """', '  type Q { id: ID! }'),
+    );
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('typeDefs.ts:3');
+  });
+
+  it('does NOT fire when a legitimate terminator is followed by a comma', () => {
+    // The SDL is a `;` today, but a literal passed inline closes on `,` or `)`.
+    const r = runOn(
+      lines(
+        'export const schemas = [',
+        '  ' + BACKTICK + '#graphql',
+        '  type Q { id: ID! }',
+        '  ' + BACKTICK + ',',
+        '];',
+        '',
+      ),
+    );
+    expect(r.code).toBe(0);
+  });
+
   it('reports the plain multi-line TS template literals it must ignore', () => {
     // Without the #graphql marker this check would fire on ordinary prose,
     // whose closing backtick legitimately sits at the end of a line.
-    const offenders = findBrokenSdlLiterals(
+    const found = findBrokenSdlLiterals(
       'x.ts',
       lines('const msg = ' + BACKTICK + 'hello', 'world' + BACKTICK + ';', ''),
     );
-    expect(offenders).toEqual([]);
+    expect(found.offenders).toEqual([]);
+    expect(found.documents).toBe(0);
   });
 });
 

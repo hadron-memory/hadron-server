@@ -80,17 +80,28 @@ function lineOf(text, index) {
  * Documentation cannot fix it because it fails at AUTHORING time, and a review
  * node fires at review time — after the bad diagnosis has already been made.
  *
- * Detected by WHERE the literal ended, which is the precondition itself rather
- * than one symptom of breaking it. A legitimate terminator has one of exactly
- * two shapes:
+ * Detected by WHERE the literal ended AND what follows it, which is the
+ * precondition itself rather than one symptom of breaking it. A legitimate
+ * terminator satisfies both:
  *
- *   - a multi-line document closes with the backtick FIRST on its line (`` `; ``)
- *   - a single-line document opens and closes on the same line
+ *   - POSITION: first on its line (`` `; ``), or on the opening line for a
+ *     single-line document
+ *   - SHAPE: followed by `;` `,` or `)` — a template literal is an expression,
+ *     so a real terminator is always followed by whatever consumed it
  *
  * Anything else means the literal ended in the MIDDLE of a body, which is a
  * nested backtick by definition — wherever it sits. The `#` need not start the
  * line: a GraphQL comment runs to end-of-line, so `id # the `urn` field`
  * terminates just as early.
+ *
+ * POSITION alone is not enough, and the version of this check ported from
+ * hadron-portal had that hole (Codex P2 on PR #1085). A description line may
+ * legitimately BEGIN with a backtick — a markdown code span, or a fenced
+ * ```graphql block — and a position-only rule reads that leading backtick as
+ * the document's own terminator, announces the literal intact, and hands the
+ * developer the exact TS cascade the gate exists to translate. Requiring the
+ * closing SHAPE as well is what tells a terminator from a line that merely
+ * starts like one.
  *
  * An ESCAPED backtick (`` \` ``) terminates nothing and is this file's actual
  * idiom — 71 of them, and they render as backticks in the published
@@ -104,11 +115,16 @@ function lineOf(text, index) {
  */
 export function findBrokenSdlLiterals(file, text) {
   const offenders = [];
+  // Counted by the SAME walk that finds the offenders. Counting openings with a
+  // second, separately-written matcher is how the anti-phantom count and the
+  // thing it certifies drift apart (PR #1085 review).
+  let documents = 0;
   SDL_OPEN.lastIndex = 0;
   let match;
   while ((match = SDL_OPEN.exec(text)) !== null) {
     const openIndex = match.index + match[0].indexOf('`');
     const name = match[1] ?? file;
+    documents += 1;
 
     let i = openIndex + 1;
     while (i < text.length) {
@@ -135,30 +151,37 @@ export function findBrokenSdlLiterals(file, text) {
     const closeLineStart = text.lastIndexOf('\n', i) + 1;
     const sameLineAsOpening = openLineStart === closeLineStart;
     const firstOnItsLine = text.slice(closeLineStart, i).trim() === '';
+    // A template literal is an EXPRESSION: whatever consumed it follows the
+    // closing backtick. `;` here, `,` or `)` if the SDL is ever passed inline.
+    const closesAnExpression = /^\s*[;,)]/.test(text.slice(i + 1));
 
-    if (!sameLineAsOpening && !firstOnItsLine) {
+    if ((!sameLineAsOpening && !firstOnItsLine) || !closesAnExpression) {
       const lineEnd = text.indexOf('\n', i);
       const line = text.slice(closeLineStart, lineEnd === -1 ? text.length : lineEnd);
       const inComment = line.slice(0, i - closeLineStart).includes('#');
-      offenders.push({
-        name,
-        file,
-        line: lineOf(text, i),
-        errors: [
-          inComment
-            ? 'a backtick in this # comment ends the SDL template literal early —'
-            : 'a backtick here ends the SDL template literal early —',
-          'everything below it is then parsed as TypeScript, which reports',
-          'TS1005 / TS1443 wherever it stops making sense — sometimes here,',
-          'sometimes hundreds of lines away, and never as "unterminated',
-          'literal". Escape it (\\`), use single quotes, or spell the symbol out.',
-          `    ${line.trim()}`,
-        ],
-      });
+      // Position-legal but shape-illegal: a line that STARTS with a backtick,
+      // i.e. prose — a code span or a fenced block — that looks like a closer.
+      const looksLikeATerminator = firstOnItsLine && !sameLineAsOpening;
+      const why = looksLikeATerminator
+        ? [
+            'this backtick starts the line like a terminator, but no `;` follows',
+            'it — so it is prose (a code span or a fenced block), and it ends the',
+            'SDL template literal here. Escape it (\\`).',
+          ]
+        : [
+            inComment
+              ? 'a backtick in this # comment ends the SDL template literal early —'
+              : 'a backtick here ends the SDL template literal early —',
+            'everything below it is then parsed as TypeScript, which reports',
+            'TS1005 / TS1443 wherever it stops making sense — sometimes here,',
+            'sometimes hundreds of lines away, and never as "unterminated',
+            'literal". Escape it (\\`), use single quotes, or spell the symbol out.',
+          ];
+      offenders.push({ name, file, line: lineOf(text, i), errors: [...why, `    ${line.trim()}`] });
     }
     SDL_OPEN.lastIndex = i + 1;
   }
-  return offenders;
+  return { offenders, documents };
 }
 
 /**
@@ -181,8 +204,9 @@ export function scanSdlDir(dir = DEFAULT_SDL_DIR) {
     // relative to that dir, rather than a ../../.. climb out of ROOT.
     const fromRoot = relative(ROOT, path);
     const file = fromRoot.startsWith('..') ? relative(dir, path) : fromRoot;
-    documents += (text.match(new RegExp('`' + SDL_MARKER, 'g')) ?? []).length;
-    offenders.push(...findBrokenSdlLiterals(file, text));
+    const found = findBrokenSdlLiterals(file, text);
+    documents += found.documents;
+    offenders.push(...found.offenders);
   }
   return { offenders, documents };
 }
