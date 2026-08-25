@@ -140,6 +140,22 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant } from '../lib/splitNodeUrnTolerant.js';
+
+/**
+ * Annotate a node projection that was reached through a `#<fragment>` URN.
+ *
+ * #696: the fragment addresses a resource OF the node, and neither read tool
+ * projects one separately — so returning the parent's projection unannotated
+ * answers a question the caller did not ask (hadron-server#994's harm on a read
+ * surface). ONE spelling, shared by hadron_get_node and hadron_get_nodes,
+ * because cor:api:040:01 makes their per-node output the same thing and two
+ * copies of a notice drift (PR #1088 review, Codex P2 — the batch dropped it).
+ */
+function noteFragment(projection: string, fragment: string | undefined): string {
+  return fragment
+    ? `Note: "#${fragment}" addresses this node's ${fragment}, which this tool does not project separately — showing the node itself.\n\n${projection}`
+    : projection;
+}
 // #1012 — durable per-client MCP selections (active App / active memory).
 import {
   CLIENT_KEY_HEADER,
@@ -2532,11 +2548,7 @@ export function createMcpServerInstance(
       // ask — the hadron-server#994 harm (resolving to the parent) arriving on
       // a read surface. This tool has no data view, so it serves the node and
       // SAYS which resource that is; `resolveUrn` tags its result the same way.
-      return textResult(
-        fragment
-          ? `Note: "#${fragment}" addresses this node's ${fragment}, which this tool does not project separately — showing the node itself.\n\n${projection}`
-          : projection,
-      );
+      return textResult(noteFragment(projection, fragment));
     },
   );
 
@@ -2591,6 +2603,8 @@ export function createMcpServerInstance(
       // couldn't return — denied OR not-found, reported indistinguishably so the
       // result never discloses whether an unreadable node exists (cor:api:040:03).
       const ordered: Array<ReadProjectionNode & { id: string }> = [];
+      /** node id -> the fragment its ref named, for the shared notice below. */
+      const fragmentByNodeId = new Map<string, string>();
       const unavailable: string[] = [];
 
       if (hasPrefix) {
@@ -2644,6 +2658,11 @@ export function createMcpServerInstance(
         // missing PK capability sit unnoticed: the symptom was indistinguishable
         // from a legitimate access outcome (#822, mirroring #813 on GraphQL).
         type UrnRef = { raw: string; memoryUrn: string; loc: string };
+        // A `#data` ref reaches its PARENT node, and the projection must say so
+        // exactly as the single read does (cor:api:040:01). Keyed by raw ref,
+        // then re-keyed to node id below, because one node can be named twice
+        // in a batch — once by PK and once by a fragment URN.
+        const fragmentByRef = new Map<string, string>();
         const urnRefs: UrnRef[] = [];
         const pkRefs: string[] = [];
         for (const raw of uniqueRefs) {
@@ -2664,7 +2683,8 @@ export function createMcpServerInstance(
             // read, and a corrupt stored loc containing `#` readable one way
             // and a "malformed ref" the other breaks that promise for the rows
             // most likely to be looked up in bulk (PR #1088 review, Codex P2).
-            const { memoryUrn: mu, loc } = splitNodeUrnTolerant(raw);
+            const { memoryUrn: mu, loc, fragment } = splitNodeUrnTolerant(raw);
+            if (fragment) fragmentByRef.set(raw, fragment);
             urnRefs.push({ raw, memoryUrn: mu, loc });
           } catch {
             return textResult(
@@ -2758,6 +2778,8 @@ export function createMcpServerInstance(
           const n = nodeByRef.get(raw);
           if (!n || seenIds.has(n.id)) continue;
           seenIds.add(n.id);
+          const frag = fragmentByRef.get(raw);
+          if (frag) fragmentByNodeId.set(n.id, frag);
           ordered.push(n);
         }
       }
@@ -2787,7 +2809,7 @@ export function createMcpServerInstance(
           omitted.push(await nodeUrn(n.loc, n.memoryId));
           continue;
         }
-        blocks.push(projection);
+        blocks.push(noteFragment(projection, fragmentByNodeId.get(n.id)));
         bytes += size;
         readEvents.push({ id: n.id, loc: n.loc, memoryId: n.memoryId });
       }

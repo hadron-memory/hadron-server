@@ -278,6 +278,25 @@ describe('hadron_get_nodes — per-node parity (cor:api:040:01)', () => {
     // Same suppression as the single read: an unvalidated loc is never an href.
     expect(batch.match(/^URL: /gm)).toBeNull();
   });
+
+  it('annotates a #data ref the same way the single read does', async () => {
+    // The other half of parity, and the direction I missed first time: the
+    // batch decomposed the fragment and then dropped it, so a #data ref got an
+    // UNannotated projection of the parent while hadron_get_node annotated it
+    // (PR #1088 review, Codex P2). Both notices now come from one helper.
+    await addNode('frag:batch', { content: 'F.' });
+    const srv = createTestableMcpServer(adminAuth());
+    const single = await srv.callToolText('hadron_get_node', {
+      urn: `hrn:node:${ORG}:${MEM}:frag:batch#data`,
+    });
+    const batch = await srv.callToolText('hadron_get_nodes', {
+      refs: [`hrn:node:${ORG}:${MEM}:frag:batch#data`],
+    });
+    for (const text of [single, batch]) {
+      expect(text).toContain('#data');
+      expect(text.toLowerCase()).toContain('showing the node itself');
+    }
+  });
 });
 
 // ───── hadron_get_next_node ───────────────────────────────────────────────
