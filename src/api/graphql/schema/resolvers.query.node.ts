@@ -1804,10 +1804,33 @@ export const nodeQueries = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      // Org-scoped auth: anyone with org membership at READER+ on the App's
-      // org may read its accessible nodes; platform ADMIN/OWNER bypasses.
+      // Auth: an App PARTICIPANT, or org membership at READER+ on the App's
+      // org; platform ADMIN/OWNER bypasses.
+      //
+      // #1070 — the participant arm closes a drift, and it is worth being
+      // precise that it is a drift rather than a widening. This gate used to be
+      // `requireOwnerOrOrgRole` alone, which admits org members and the App's
+      // owner but NOT an AppMember with no role in the owning org — the
+      // external / B2C participant shape. `isAppParticipant`
+      // (`cor:agt:020:00` §3) does admit them, and so does the MCP access map:
+      // `getMemoryAccess` folds the App's installed-agent memories
+      // (systemMemoryId READ_ONLY + memoryItems) and its team space for exactly
+      // this principal (`mcp/access-control.ts`, #1003).
+      //
+      // So the same person, in the same App, could read this material through
+      // MCP and got FORBIDDEN here — which is the `effectiveAccess` tell for a
+      // hand-rolled gate falling out of sync with the shared predicate (#362).
+      // Admitting them grants nothing the platform does not already grant them;
+      // it stops two surfaces disagreeing about one question.
+      //
+      // Deliberately additive: the org-READER arm is unchanged, so a reader who
+      // is not a participant keeps exactly today's results — including NOT the
+      // team space, which stays behind its own `isAppParticipant` check below.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) {
+      // Resolved ONCE: the gate here and the team-space scope below ask the
+      // same question, and two calls would be two identical queries per read.
+      const participant = await isAppParticipant(ctx, app);
+      if (!isPlatformAdmin && !participant) {
         await requireOwnerOrOrgRole(ctx, app, 'READER');
       }
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
@@ -1854,7 +1877,7 @@ export const nodeQueries = {
       // So the scope is principal-dependent, deliberately: an org reader keeps
       // exactly the results they get today, and a participant additionally sees
       // the space they are already entitled to read.
-      const teamSpaceIds = (await isAppParticipant(ctx, app))
+      const teamSpaceIds = participant
         ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
         : [];
 

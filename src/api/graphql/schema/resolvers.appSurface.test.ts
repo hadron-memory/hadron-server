@@ -22,6 +22,7 @@ import {
 import { generateId } from '../../../lib/id.js';
 import { getPrimaryAgentId } from '../../../lib/appAgent.js';
 import { resolvers, type Context } from './resolvers.js';
+import { canReadMemoryRecord } from './resolvers.helpers.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -516,6 +517,80 @@ describe('appNodes', () => {
     });
     return { app, teamSpace };
   }
+
+  it('admits an EXTERNAL AppMember — no org role at all (#1070)', async () => {
+    // The drift: this resolver gated on org READER+, which does not admit an
+    // AppMember with no role in the owning org (the external / B2C shape),
+    // while `isAppParticipant` and the MCP access map both do. Same person,
+    // same App, FORBIDDEN here and granted there.
+    const { app } = await withTeamSpace('app-nodes-external-member');
+    const outsider = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771070,
+        githubUsername: `an-external-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    // Deliberately NO orgMember row — that absence is the whole test.
+    await db.appMember.create({
+      data: { appId: app.id, userId: outsider.id, role: 'member' },
+    });
+    const ctx = { db, roles: ['READER'], userId: outsider.id } as Context;
+
+    const locs = (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    // The installed agent's memories, as the MCP map already grants them...
+    expect(locs).toContain('org.test.node');
+    // ...and the team space, because they ARE a participant.
+    expect(locs).toContain('chats:team');
+  });
+
+  it('AGREES with effectiveAccess for that member — the stated tell for this drift', async () => {
+    // #362 names the symptom exactly: READ granted by the authoritative
+    // access resolver but Forbidden in a per-kind query means the per-kind
+    // gate has drifted. That is what #1070 was. Asserting the two TOGETHER is
+    // what stops it drifting back — either surface changing alone reds this.
+    const { app, teamSpace } = await withTeamSpace('app-nodes-parity');
+    const outsider = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771072,
+        githubUsername: `an-parity-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({
+      data: { appId: app.id, userId: outsider.id, role: 'member' },
+    });
+
+    // Asserted against the SHARED predicate rather than through
+    // effectiveAccess's ref resolver — same question, no dependence on how this
+    // fixture's synthetic memory URN happens to parse. `canReadMemoryRecord` is
+    // the one that governs a read of an App-scoped memory and admits an
+    // AppMember explicitly (#982, the same drift fixed one surface over).
+    const outsiderCtx = { db, roles: ['READER'], userId: outsider.id } as Context;
+    const space = await db.memory.findUniqueOrThrow({ where: { id: teamSpace.id } });
+    expect(await canReadMemoryRecord(outsiderCtx, space)).toBe(true);
+
+    const locs = (await resolvers.Query.appNodes({}, { appRef: app.id }, outsiderCtx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(locs).toContain('chats:team');
+  });
+
+  it('still refuses someone who is neither a participant nor an org member', async () => {
+    // The spare, not just the fire: the participant arm must not have turned
+    // the gate into "any authenticated reader".
+    const { app } = await withTeamSpace('app-nodes-stranger');
+    const stranger = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771071,
+        githubUsername: `an-stranger-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    const ctx = { db, roles: ['READER'], userId: stranger.id } as Context;
+    await expect(
+      resolvers.Query.appNodes({}, { appRef: app.id }, ctx),
+    ).rejects.toThrow();
+  });
 
   it("includes the App's own team space for a participant", async () => {
     const { app } = await withTeamSpace('app-team-space');
