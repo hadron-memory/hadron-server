@@ -139,6 +139,23 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 // narrower member-row copy that would drift from it.
 import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
+import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
+
+/**
+ * Annotate a node projection that was reached through a `#<fragment>` URN.
+ *
+ * #696: the fragment addresses a resource OF the node, and neither read tool
+ * projects one separately — so returning the parent's projection unannotated
+ * answers a question the caller did not ask (hadron-server#994's harm on a read
+ * surface). ONE spelling, shared by hadron_get_node and hadron_get_nodes,
+ * because cor:api:040:01 makes their per-node output the same thing and two
+ * copies of a notice drift (PR #1088 review, Codex P2 — the batch dropped it).
+ */
+function noteFragment(projection: string, fragment: string | undefined): string {
+  return fragment
+    ? `Note: "#${fragment}" addresses this node's ${fragment}, which this tool does not project separately — showing the node itself.\n\n${projection}`
+    : projection;
+}
 // #1012 — durable per-client MCP selections (active App / active memory).
 import {
   CLIENT_KEY_HEADER,
@@ -413,7 +430,12 @@ export async function addEdge(args: {
       if (e instanceof UrnNotQualifiedError) return { error: `Source: ${e.message}` };
       throw e;
     }
-    const { memoryUrn: sourceMemoryUrn, loc: sourceLoc } = splitNodeUrn(rawSource);
+    const { memoryUrn: sourceMemoryUrn, loc: sourceLoc, fragment: sourceFrag } =
+      splitNodeUrn(rawSource);
+    // An edge is drawn between NODES: a fragment source would silently anchor
+    // it to the parent and bake that into a derived edge loc.
+    const sourceFragRefusal = nodeFragmentRefusal(rawSource, sourceFrag);
+    if (sourceFragRefusal) return { error: `Source: ${sourceFragRefusal}` };
     const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
     if (!sourceMem) {
       return { error: `Source memory not found: "${sourceMemoryUrn}".` };
@@ -1885,7 +1907,9 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+      const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+      if (fragRefusal) return textResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
@@ -2426,7 +2450,12 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      // Tolerant of an already-corrupt stored loc containing `#`: reads are
+      // how a bad row is discovered, so the decomposer refusing one would make
+      // exactly the row you need to see the one row you cannot read (urn-lib-js
+      // 0.0.14 → 0.0.15 bump). `#data` still decomposes normally and is
+      // reported below rather than silently serving the parent.
+      const { memoryUrn, loc, fragment, literalLoc } = splitNodeUrnTolerant(rawUrn);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
@@ -2435,31 +2464,50 @@ export function createMcpServerInstance(
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
 
-      // #180 Bug 2: soft-deleted nodes are not addressable via read.
-      // findFirst with explicit deletedAt: null instead of findUnique so
-      // tombstoned rows return "not found" rather than leaking their last
-      // content.
-      const node = await db.node.findFirst({
-        where: { loc, memoryId: memory.id, deletedAt: null },
-        include: {
-          // Filter edges whose other-end node is soft-deleted; dangling
-          // tombstones in the Related / Referenced-by section are no
-          // more useful than the deleted node itself.
-          outgoingEdges: {
-            include: { target: true },
-            where: { target: { deletedAt: null } },
-          },
-          incomingEdges: {
-            include: { source: true },
-            where: { source: { deletedAt: null } },
-          },
-          // Spec 032 — encryption gate for the abstract-stale predicate
-          // (FR-010). Riding the node fetch avoids a second round-trip
-          // (PR-210 review). resolveMemoryByUrn above doesn't carry
-          // `isEncrypted` and changing it has a wider blast radius.
-          memory: { select: { isEncrypted: true } },
+      // The projection's include, named so the two candidate lookups below
+      // cannot drift apart.
+      const nodeReadInclude = {
+        // Filter edges whose other-end node is soft-deleted; dangling
+        // tombstones in the Related / Referenced-by section are no
+        // more useful than the deleted node itself.
+        outgoingEdges: {
+          include: { target: true },
+          where: { target: { deletedAt: null } },
         },
+        incomingEdges: {
+          include: { source: true },
+          where: { source: { deletedAt: null } },
+        },
+        // Spec 032 — encryption gate for the abstract-stale predicate
+        // (FR-010). Riding the node fetch avoids a second round-trip
+        // (PR-210 review). resolveMemoryByUrn above doesn't carry
+        // `isEncrypted` and changing it has a wider blast radius.
+        memory: { select: { isEncrypted: true } },
+      } as const;
+
+      // A LITERAL match wins over the fragment reading. `#data` decomposes to
+      // parent + fragment, but a row's stored loc can BE `foo#data` (it
+      // predates loc validation), and only the database can tell which was
+      // meant — so the exact loc is tried first and the parent is the fallback
+      // (PR #1088 review, Codex P2). Without this the read either misses or
+      // returns a different node that happens to exist under the parent loc.
+      //
+      // #180 Bug 2: soft-deleted nodes are not addressable via read —
+      // findFirst with an explicit `deletedAt: null` rather than findUnique, so
+      // a tombstoned row returns "not found" instead of leaking its last
+      // content.
+      let matchedLiteral = false;
+      let node = await db.node.findFirst({
+        where: { loc: literalLoc ?? loc, memoryId: memory.id, deletedAt: null },
+        include: nodeReadInclude,
       });
+      if (node && literalLoc) matchedLiteral = true;
+      if (!node && literalLoc) {
+        node = await db.node.findFirst({
+          where: { loc, memoryId: memory.id, deletedAt: null },
+          include: nodeReadInclude,
+        });
+      }
       if (!node) {
         return textResult(`Node "${rawUrn}" not found.`);
       }
@@ -2519,7 +2567,16 @@ export function createMcpServerInstance(
       // boundary, and the caller did read this node's addressable state.
       recordNodeRead(db, { id: node.id, loc, memoryId: node.memoryId }, auth);
 
-      return textResult(projection);
+      // #696: `#data` addresses the node's DATA, not the node — and before the
+      // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
+      // read simply missed. Now it decomposes, and returning the parent's
+      // projection with no word said would answer a question the caller did not
+      // ask — the hadron-server#994 harm (resolving to the parent) arriving on
+      // a read surface. This tool has no data view, so it serves the node and
+      // SAYS which resource that is; `resolveUrn` tags its result the same way.
+      // No notice when the LITERAL row matched: nothing was resolved away, the
+      // caller got exactly the loc they named.
+      return textResult(noteFragment(projection, matchedLiteral ? undefined : fragment));
     },
   );
 
@@ -2574,6 +2631,8 @@ export function createMcpServerInstance(
       // couldn't return — denied OR not-found, reported indistinguishably so the
       // result never discloses whether an unreadable node exists (cor:api:040:03).
       const ordered: Array<ReadProjectionNode & { id: string }> = [];
+      /** node id -> the fragment its ref named, for the shared notice below. */
+      const fragmentByNodeId = new Map<string, string>();
       const unavailable: string[] = [];
 
       if (hasPrefix) {
@@ -2626,7 +2685,12 @@ export function createMcpServerInstance(
         // `unavailable` next to genuinely-denied nodes is what let this tool's
         // missing PK capability sit unnoticed: the symptom was indistinguishable
         // from a legitimate access outcome (#822, mirroring #813 on GraphQL).
-        type UrnRef = { raw: string; memoryUrn: string; loc: string };
+        type UrnRef = { raw: string; memoryUrn: string; loc: string; literalLoc?: string };
+        // A `#data` ref reaches its PARENT node, and the projection must say so
+        // exactly as the single read does (cor:api:040:01). Keyed by raw ref,
+        // then re-keyed to node id below, because one node can be named twice
+        // in a batch — once by PK and once by a fragment URN.
+        const fragmentByRef = new Map<string, string>();
         const urnRefs: UrnRef[] = [];
         const pkRefs: string[] = [];
         for (const raw of uniqueRefs) {
@@ -2642,8 +2706,14 @@ export function createMcpServerInstance(
           }
           try {
             assertFullyQualifiedUrn(raw, 'node');
-            const { memoryUrn: mu, loc } = splitNodeUrn(raw);
-            urnRefs.push({ raw, memoryUrn: mu, loc });
+            // Tolerant, exactly as hadron_get_node is: cor:api:040:01 promises
+            // this batch produces the SAME per-node projection as the single
+            // read, and a corrupt stored loc containing `#` readable one way
+            // and a "malformed ref" the other breaks that promise for the rows
+            // most likely to be looked up in bulk (PR #1088 review, Codex P2).
+            const { memoryUrn: mu, loc, fragment, literalLoc } = splitNodeUrnTolerant(raw);
+            if (fragment) fragmentByRef.set(raw, fragment);
+            urnRefs.push({ raw, memoryUrn: mu, loc, literalLoc });
           } catch {
             return textResult(
               `hadron_get_nodes: "${raw}" is neither a node id nor a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). A relative or malformed ref is a caller error, not an access outcome, so it is reported here rather than in the Unavailable list.`,
@@ -2676,15 +2746,31 @@ export function createMcpServerInstance(
             for (const r of group) unavailable.push(r.raw);
             continue;
           }
+          // Both candidates for a fragmented ref, in ONE query: the literal
+          // stored loc (`foo#data`, a row predating loc validation) and the
+          // decomposed parent. The literal wins where it exists — same rule as
+          // the single read, since only the database can tell which was meant
+          // (PR #1088 review, Codex P2).
+          const wanted = new Set<string>();
+          for (const r of group) {
+            wanted.add(r.loc);
+            if (r.literalLoc) wanted.add(r.literalLoc);
+          }
           const rows = await db.node.findMany({
-            where: { memoryId: mem.id, loc: { in: group.map((r) => r.loc) }, deletedAt: null },
+            where: { memoryId: mem.id, loc: { in: [...wanted] }, deletedAt: null },
             include: projectionInclude,
           });
           const rowByLoc = new Map(rows.map((r) => [r.loc, r]));
           for (const r of group) {
-            const row = rowByLoc.get(r.loc);
-            if (row) nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
-            else unavailable.push(r.raw);
+            const literal = r.literalLoc ? rowByLoc.get(r.literalLoc) : undefined;
+            const row = literal ?? rowByLoc.get(r.loc);
+            if (!row) {
+              unavailable.push(r.raw);
+              continue;
+            }
+            // A literal match resolved nothing away, so it carries no notice.
+            if (literal) fragmentByRef.delete(r.raw);
+            nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
           }
         }
 
@@ -2734,7 +2820,15 @@ export function createMcpServerInstance(
         const seenIds = new Set<string>();
         for (const raw of uniqueRefs) {
           const n = nodeByRef.get(raw);
-          if (!n || seenIds.has(n.id)) continue;
+          if (!n) continue;
+          // Recorded BEFORE the seen-check: one node can be named twice in a
+          // batch — once by PK, once by a #data URN — and skipping first drops
+          // the notice whenever the plain ref happens to come earlier. My last
+          // commit claimed to have handled exactly this and did not
+          // (PR #1088 review, Copilot).
+          const frag = fragmentByRef.get(raw);
+          if (frag && !fragmentByNodeId.has(n.id)) fragmentByNodeId.set(n.id, frag);
+          if (seenIds.has(n.id)) continue;
           seenIds.add(n.id);
           ordered.push(n);
         }
@@ -2759,13 +2853,18 @@ export function createMcpServerInstance(
         const projection = await renderNodeReadProjection(n, scope, {
           locked: lockState === 'locked',
         });
-        const size = Buffer.byteLength(projection, 'utf8');
+        // Measured on the ANNOTATED block, which is what actually ships: sizing
+        // the bare projection and pushing the annotated one lets a block cross
+        // the advertised hard cap and leaves every later check counting from an
+        // undercounted total (PR #1088 review, Codex P2).
+        const block = noteFragment(projection, fragmentByNodeId.get(n.id));
+        const size = Buffer.byteLength(block, 'utf8');
         if (blocks.length > 0 && bytes + size > BATCH_READ_MAX_BYTES) {
           truncated = true;
           omitted.push(await nodeUrn(n.loc, n.memoryId));
           continue;
         }
-        blocks.push(projection);
+        blocks.push(block);
         bytes += size;
         readEvents.push({ id: n.id, loc: n.loc, memoryId: n.memoryId });
       }
@@ -3309,7 +3408,9 @@ export function createMcpServerInstance(
       }
 
       // Split into memory URN + loc and resolve the memory.
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+      const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+      if (fragRefusal) return textResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
@@ -3685,7 +3786,9 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+      const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+      if (fragRefusal) return textResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
@@ -4319,7 +4422,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         throw e;
       }
 
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+      const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+      if (fragRefusal) return textResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Node "${rawUrn}" not found.`);
@@ -4504,8 +4609,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         throw e;
       }
 
-      const { memoryUrn: fromMemoryUrn, loc: fromLoc } = splitNodeUrn(rawFrom);
-      const { memoryUrn: toMemoryUrn, loc: toLoc } = splitNodeUrn(rawTo);
+      const { memoryUrn: fromMemoryUrn, loc: fromLoc, fragment: fromFrag } =
+        splitNodeUrn(rawFrom);
+      const { memoryUrn: toMemoryUrn, loc: toLoc, fragment: toFrag } = splitNodeUrn(rawTo);
+      // BOTH ends: a fragment on the destination would move the node to the
+      // parent's loc and silently drop the "#data" the caller wrote.
+      const moveRefusal =
+        nodeFragmentRefusal(rawFrom, fromFrag) ?? nodeFragmentRefusal(rawTo, toFrag);
+      if (moveRefusal) return textResult(moveRefusal);
 
       const fromMemory = await resolveMemoryByUrn(fromMemoryUrn);
       if (!fromMemory) {
@@ -4791,7 +4902,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (e instanceof UrnNotQualifiedError) return { error: e.message };
       throw e;
     }
-    const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+    const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+    const actionFragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+    if (actionFragRefusal) return { error: actionFragRefusal };
     const memory = await resolveMemoryByUrn(memoryUrn);
     if (!memory || !(await canReadMemory(db, auth, memory.id))) {
       return { error: `Memory not found: "${memoryUrn}".` };

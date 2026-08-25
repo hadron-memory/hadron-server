@@ -50,6 +50,7 @@ import { type InputJsonValue } from '../../../generated/prisma/runtime/library.j
 import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import { loadLastEventBySession, mostRecentlyActive } from '../../../lib/sessionActivity.js';
+import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import {
   type Context,
   isAppParticipant,
@@ -1991,7 +1992,7 @@ export const sessionMutations = {
           throw e;
         }
 
-        const { memoryUrn: resolvedMemoryUrn, loc } = splitNodeUrn(targetNodeUrn);
+        const { memoryUrn: resolvedMemoryUrn, loc } = splitWholeNodeUrn(targetNodeUrn);
 
         // Find the memory by URN using case-insensitive matching (legacy `:` and canonical `::` forms).
         const parsedMemUrn = parseUrnInput(resolvedMemoryUrn.trim());

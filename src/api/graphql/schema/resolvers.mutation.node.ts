@@ -28,6 +28,7 @@ import {
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, splitNodeUrn } from '../../../lib/urn.js';
+import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import {
   validateLoc,
   InvalidLocError,
@@ -831,7 +832,7 @@ async function resolveRelocationTarget(
   let destMemoryId: string;
   let destLoc: string;
   if (hasUrn) {
-    const { memoryUrn, loc } = splitNodeUrn(targetUrn as string);
+    const { memoryUrn, loc } = splitWholeNodeUrn(targetUrn as string);
     destLoc = loc;
     ({ id: destMemoryId } = await resolveMemoryRef(ctx.db, memoryUrn));
   } else {
