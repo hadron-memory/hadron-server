@@ -31,7 +31,6 @@ import {
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
 import { applyPersonaTemplate, templateBindsName } from '../../../lib/personaDescription.js';
-import { sessionActivityAt, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import {
   newestHandoff,
   handoffSessionId,
@@ -1440,7 +1439,17 @@ export async function loadAppWorkerActivity(
 
   const pending = (async () => {
     // AGGREGATED IN THE DATABASE, one row per worker (PR #1086 review, Codex
-    // P2). The first draft fetched every non-deleted session of every worker in
+    // P2).
+    //
+    // This SQL is a SECOND implementation of `lib/sessionActivity.ts`, and that
+    // is deliberate rather than an oversight: one derivation must aggregate
+    // inside the query (unbounded history), the other works on rows already in
+    // hand (the takeover prompt). Neither can be expressed as the other. What
+    // makes two copies survivable is that they are pinned to agree — see the
+    // differential test in resolvers.worker.test.ts, which runs a matrix of
+    // session shapes through both and requires the same instant. Every rule
+    // below therefore exists twice, and BOTH times in this PR a review finding
+    // had to be applied to both. The first draft fetched every non-deleted session of every worker in
     // the App and folded them in JavaScript — session history is UNBOUNDED, so
     // latency, heap and the `IN (…)` parameter count grew with the App's
     // lifetime on every roster read, and a single-worker read paid the same

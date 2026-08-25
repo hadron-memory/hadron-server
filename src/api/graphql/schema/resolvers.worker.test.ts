@@ -23,6 +23,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
+import { sessionActivityAt, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -1057,6 +1058,74 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
     });
 
     expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(eventAt.getTime());
+  });
+
+  it('the SQL and the TS derivation agree, on EVERY session shape', async () => {
+    // Copilot on PR #1086 flagged an unused import, and the dead import was the
+    // TELL: rewriting the loader as aggregating SQL left lib/sessionActivity.ts
+    // unused HERE, so the roster and the takeover prompt now derive "last
+    // driven" from two independent implementations. Both are necessary — one
+    // must aggregate inside the query, the other folds rows already loaded —
+    // so the answer is not to delete one but to make them unable to disagree
+    // silently. Both review findings on this PR had to be applied twice.
+    //
+    // ONE WORKER PER SHAPE, deliberately. The first version of this test put
+    // every shape on one worker and compared the folded MAX, so any row that
+    // was not the maximum contributed nothing — dropping the reaper exclusion
+    // from the TS side passed. An aggregate assertion hides its components,
+    // which is the same loose-assertion family as @Jonas's index comparison on
+    // hadron-cli#521. Proven: each mutation below now reddens this test.
+    const t = (offsetMinutes: number) => new Date(Date.now() + offsetMinutes * 60_000);
+    const shapes: Record<string, {
+      startedAt: Date; updatedAt: Date | null; endedAt: Date | null;
+      autoExpiredAt: Date | null; eventAt?: Date;
+    }> = {
+      Iris: { startedAt: t(-500), updatedAt: t(-400), endedAt: null, autoExpiredAt: null },
+      Jonas: { startedAt: t(-300), updatedAt: t(-200), endedAt: t(-200), autoExpiredAt: null },
+      // Reaped: every stamp dragged to the reaping instant, plus an event that
+      // predates it — the value the exclusion has to fall back to.
+      Mira: {
+        startedAt: t(-900), updatedAt: t(-100), endedAt: t(-100), autoExpiredAt: t(-100),
+        eventAt: t(-880),
+      },
+      // Ended, then a merge attributed the PR back long afterwards.
+      Pia: { startedAt: t(-800), updatedAt: t(-10), endedAt: t(-700), autoExpiredAt: null },
+      // Never touched after bind.
+      Tove: { startedAt: t(-50), updatedAt: null, endedAt: null, autoExpiredAt: null },
+    };
+
+    const workers: Record<string, { id: string; appId: string }> = {};
+    const sessionIds: string[] = [];
+    for (const [name, shape] of Object.entries(shapes)) {
+      const w = await cast({ agentRef: roleAgent.id, name });
+      workers[name] = w;
+      const id = generateId();
+      sessionIds.push(id);
+      const { eventAt, ...row } = shape;
+      await db.session.create({
+        data: { id, workerId: w.id, appId: app.id, userId: appMember.id, ...row },
+      });
+      if (eventAt) {
+        await db.usageEvent.create({
+          data: { id: generateId(), sessionId: id, type: 'read', createdAt: eventAt },
+        });
+      }
+    }
+
+    const rows = await db.session.findMany({ where: { id: { in: sessionIds } } });
+    const lastEvent = await loadLastEventBySession(db as never, sessionIds);
+
+    for (const [name, w] of Object.entries(workers)) {
+      const row = rows.find((r) => r.workerId === w.id)!;
+      const expected = sessionActivityAt(row, lastEvent.get(row.id));
+      const actual = (await W.lastActiveAt(w, {}, ctx(admin.id))) as Date;
+      // Second-precision: updated_at is timestamp WITHOUT time zone, so a raw
+      // round-trip is not bit-identical.
+      expect(
+        Math.abs(actual.getTime() - expected.getTime()),
+        `${name}: SQL ${actual.toISOString()} vs TS ${expected.toISOString()}`,
+      ).toBeLessThan(1000);
+    }
   });
 
   it('one worker going live does not make its sibling live', async () => {
