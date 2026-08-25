@@ -139,6 +139,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 // narrower member-row copy that would drift from it.
 import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
+import { splitNodeUrnTolerant } from '../lib/splitNodeUrnTolerant.js';
 // #1012 — durable per-client MCP selections (active App / active memory).
 import {
   CLIENT_KEY_HEADER,
@@ -2426,7 +2427,12 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      // Tolerant of an already-corrupt stored loc containing `#`: reads are
+      // how a bad row is discovered, so the decomposer refusing one would make
+      // exactly the row you need to see the one row you cannot read (urn-lib-js
+      // 0.0.14 → 0.0.15 bump). `#data` still decomposes normally and is
+      // reported below rather than silently serving the parent.
+      const { memoryUrn, loc, fragment } = splitNodeUrnTolerant(rawUrn);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
@@ -2519,7 +2525,18 @@ export function createMcpServerInstance(
       // boundary, and the caller did read this node's addressable state.
       recordNodeRead(db, { id: node.id, loc, memoryId: node.memoryId }, auth);
 
-      return textResult(projection);
+      // #696: `#data` addresses the node's DATA, not the node — and before the
+      // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
+      // read simply missed. Now it decomposes, and returning the parent's
+      // projection with no word said would answer a question the caller did not
+      // ask — the hadron-server#994 harm (resolving to the parent) arriving on
+      // a read surface. This tool has no data view, so it serves the node and
+      // SAYS which resource that is; `resolveUrn` tags its result the same way.
+      return textResult(
+        fragment
+          ? `Note: "#${fragment}" addresses this node's ${fragment}, which this tool does not project separately — showing the node itself.\n\n${projection}`
+          : projection,
+      );
     },
   );
 

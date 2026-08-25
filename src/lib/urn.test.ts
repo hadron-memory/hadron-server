@@ -1236,12 +1236,32 @@ describe('splitNodeUrn', () => {
     });
   });
 
-  it('splits canonical `::` form with deep loc', () => {
+  it('treats every `::` segment but the last as the MEMORY, not the loc', () => {
+    // `a::b::c::d::e` is genuinely ambiguous — memory `a:b` with loc `c:d:e`,
+    // or memory `a:b:c:d` with loc `e`? The v1 grammar cannot tell you. The
+    // corpus (the cross-language contract) settles it the second way, and that
+    // is the reading this platform needs: app-scoped memory URNs are
+    // multi-segment by construction — `<org>:<app>:<agent>:app-mem:<slug>`,
+    // `<org>:<agent>:app-user:<id>` (mintMemoryUrnV2.ts) — while loc atoms are
+    // joined with a single `:`. Under the other reading every app-memory node
+    // URN in `::` form resolves to a memory that does not exist.
+    //
+    // This expectation was inverted until urn-lib-js 0.0.15: it encoded the
+    // pre-extraction local implementation, which predated app-scoped memories.
     expect(
       splitNodeUrn('urn:node:acme.com::mmdata::services::db-helpers::query'),
     ).toEqual({
-      memoryUrn: 'acme.com:mmdata',
-      loc: 'services:db-helpers:query',
+      memoryUrn: 'acme.com:mmdata:services:db-helpers',
+      loc: 'query',
+    });
+  });
+
+  it('decomposes an app-scoped memory node URN — the case that forced the rule', () => {
+    expect(
+      splitNodeUrn('hrn:node:micromentor.org::coding-app::coding-agent::app-mem::a:b'),
+    ).toEqual({
+      memoryUrn: 'micromentor.org:coding-app:coding-agent:app-mem',
+      loc: 'a:b',
     });
   });
 

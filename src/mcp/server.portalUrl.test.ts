@@ -217,6 +217,18 @@ describe('hadron_get_node — corrupt stored loc', () => {
 
   // The reason the link is suppressed rather than merely odd-looking: a loc can
   // carry URL structure, and portalUrlForUrn interpolates the URN raw.
+  it('serves the node for a #data URN, and says which resource it served', async () => {
+    // #696: `#data` addresses the node's data. Before the urn-lib-js 0.0.15
+    // bump the fragment stayed glued to the loc and the read simply missed;
+    // now it decomposes, so a silent parent projection would answer a question
+    // the caller did not ask (hadron-server#994's harm, on a read surface).
+    await rawNode('frag-subject', 'frag-node');
+    const text = await getNode(`hrn:node:${ORG}:${MEM}:frag-subject#data`);
+    expect(text).toContain('frag-node');
+    expect(text).toContain('#data');
+    expect(text.toLowerCase()).toContain('showing the node itself');
+  });
+
   it.each([
     ['fragment', 'evil#@example.com'],
     ['query', 'evil?x=1'],
