@@ -1404,6 +1404,118 @@ export const workerQueries = {
   },
 };
 
+/** Per-worker driving state: is a session open, and when was it last driven. */
+export type WorkerActivity = { hasLiveSession: boolean; lastActiveAt: Date | null };
+
+/**
+ * Driving state for EVERY worker of one App, in three queries (hadron-cli#487).
+ *
+ * Ada's finding is that a coordinator cannot tell "dispatched and pending" from
+ * "dispatched into the void": ten issues went to a worker whose entire history
+ * was two sessions of 2m26s and 41s, and `worker list` renders that identically
+ * to a worker driven yesterday. The join already existed — `startSession`
+ * computes it for the takeover prompt — so only the READ surface was missing.
+ *
+ * Loaded per APP rather than per worker on purpose. A roster is the calling
+ * shape, and a field resolver that queried per worker would issue one query per
+ * row, concurrently, up to the 200-item page cap — the N+1 that PR #1000's
+ * review pulled out of the MCP roster twice already.
+ *
+ * Memoized ONLY inside a query, for the reason `loadAppRepoAffinity` states: a
+ * request-scoped memo over data the same request can WRITE is stale by
+ * construction, and `startSession` / `endSession` write exactly this. A mutation
+ * pays the re-read rather than answering from a cache it just invalidated.
+ */
+export async function loadAppWorkerActivity(
+  ctx: Context,
+  appId: string,
+  opts?: { memoize?: boolean },
+): Promise<Map<string, WorkerActivity>> {
+  type Cache = Map<string, Promise<Map<string, WorkerActivity>>>;
+  const holder = ctx as Context & { workerActivityCache?: Cache };
+  const cache = opts?.memoize ? (holder.workerActivityCache ??= new Map()) : null;
+  const cached = cache?.get(appId);
+  if (cached) return cached;
+
+  const pending = (async () => {
+    // AGGREGATED IN THE DATABASE, one row per worker (PR #1086 review, Codex
+    // P2).
+    //
+    // This SQL is a SECOND implementation of `lib/sessionActivity.ts`, and that
+    // is deliberate rather than an oversight: one derivation must aggregate
+    // inside the query (unbounded history), the other works on rows already in
+    // hand (the takeover prompt). Neither can be expressed as the other. What
+    // makes two copies survivable is that they are pinned to agree — see the
+    // differential test in resolvers.worker.test.ts, which runs a matrix of
+    // session shapes through both and requires the same instant. Every rule
+    // below therefore exists twice, and BOTH times in this PR a review finding
+    // had to be applied to both. The first draft fetched every non-deleted session of every worker in
+    // the App and folded them in JavaScript — session history is UNBOUNDED, so
+    // latency, heap and the `IN (…)` parameter count grew with the App's
+    // lifetime on every roster read, and a single-worker read paid the same
+    // price. The output here is O(workers), not O(sessions).
+    //
+    // Three points the SQL encodes, each of which is a rule rather than a
+    // detail:
+    //
+    //  - `deleted_at IS NULL` matches the predicate `startSession` refuses
+    //    WORKER_TAKEN on, exactly (PR #1000 review, Codex P2). Without it a
+    //    roster calls a worker busy whose only live session is soft-deleted,
+    //    while binding it actually succeeds. Liveness a reader SEES and
+    //    liveness the server ENFORCES must be one predicate.
+    //  - `bool_or(ended_at IS NULL)` — ANY open session makes the worker live.
+    //    `force` lets several coexist, and the most recent row is not
+    //    necessarily the open one.
+    //  - `CASE WHEN auto_expired_at IS NULL THEN updated_at END` — see below.
+    //    `GREATEST` ignores NULL arguments in Postgres, so a dropped term is
+    //    simply not considered rather than poisoning the row.
+    const rows = await ctx.db.$queryRaw<
+      { workerId: string; live: boolean; lastActiveAt: Date | null }[]
+    >`
+      SELECT s.worker_id AS "workerId",
+             bool_or(s.ended_at IS NULL) AS "live",
+             max(LEAST(GREATEST(
+               s.started_at,
+               -- The REAPER ends an idle session with an updateMany, and
+               -- Prisma's @updatedAt advances updated_at to the reaping
+               -- instant (#930). Folding that in would report the background
+               -- cleanup as the worker's last drive — shifting it forward by
+               -- the whole idle window, and making an ABANDONED worker read as
+               -- recently driven, which is the exact signal this field exists
+               -- to give (PR #1086 review, Codex P2). auto_expired_at is set
+               -- on precisely those rows, so they fall back to started_at and
+               -- their usage events. That UNDER-reports — the last genuine
+               -- heartbeat was overwritten by the reap and is unrecoverable —
+               -- and under-reporting is the safe direction here: it makes an
+               -- abandoned name look more idle, never less.
+               CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
+               ue.max_created
+             -- ACTIVITY CANNOT POSTDATE THE END (PR #1086 review, Codex P2).
+             -- updateSession deliberately permits writes after ended_at, so a
+             -- merge landing days later attributes a PR to a finished stint
+             -- and drags updated_at with it; usage events can be attributed
+             -- late for the same reason. Neither is someone driving the
+             -- worker. LEAST ignores NULL, so an OPEN session is uncapped.
+             ), s.ended_at)) AS "lastActiveAt"
+      FROM sessions s
+      JOIN workers w ON w.id = s.worker_id
+      LEFT JOIN LATERAL (
+        SELECT max(e.created_at) AS max_created
+        FROM usage_events e
+        WHERE e.session_id = s.id
+      ) ue ON true
+      WHERE w.app_id = ${appId} AND s.deleted_at IS NULL
+      GROUP BY s.worker_id
+    `;
+    return new Map<string, WorkerActivity>(
+      rows.map((r) => [r.workerId, { hasLiveSession: r.live, lastActiveAt: r.lastActiveAt }]),
+    );
+  })();
+
+  cache?.set(appId, pending);
+  return pending;
+}
+
 /**
  * #983 review (Codex + Copilot P1): `Session.worker` made Worker rows
  * reachable by principals the worker queries never admitted —
@@ -1674,6 +1786,58 @@ export const workerFieldResolvers = {
       _: unknown,
       ctx: Context,
     ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.memoryId : null),
+    /**
+     * hadron-cli#487 — is a worker session open on this name RIGHT NOW.
+     *
+     * Nullable, and null means "not permitted to know" rather than "no". A
+     * non-null `Boolean!` would have to answer `false` on deny, which states a
+     * fact the resolver never computed — the #1084 P1 in miniature, where the
+     * gate and the value described different things. Masked like every other
+     * working-state field, because `Session.worker` reaches Worker rows through
+     * a wider gate (#983).
+     *
+     * This is NOT availability. A name's availability is its HOLD
+     * (`cor:agt:020:09`); liveness only says whether a session is open, which
+     * is a question about your own worker. The two were conflated in the CLI
+     * and that conflation IS hadron-cli#487.
+     */
+    hasLiveSession: async (
+      worker: { id: string; appId: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<boolean | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return activity.get(worker.id)?.hasLiveSession ?? false;
+    },
+    /**
+     * hadron-cli#487 — when this worker was last DRIVEN, across every session
+     * it has ever had; null for a worker nobody has ever bound.
+     *
+     * That null is the whole point of the field: a worker cast and never driven
+     * is a meaningfully different thing from one worked yesterday, and every
+     * surface rendered them identically while a coordinator dispatched ten
+     * issues into the second one thinking it was the first.
+     *
+     * Derived by the platform's shared derivation (`sessionActivityAt`), so an
+     * "idle since" a human reads here agrees with the one the takeover prompt
+     * shows and the one the reaper acts on. Masked on deny, as above.
+     */
+    lastActiveAt: async (
+      worker: { id: string; appId: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<Date | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return activity.get(worker.id)?.lastActiveAt ?? null;
+    },
     /**
      * The role-agent behind the casting — behind Query.agent's OWN read gate
      * (PUBLIC, else owner / org READER), masked to null on deny. The Worker

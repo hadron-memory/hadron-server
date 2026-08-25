@@ -23,6 +23,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
+import { sessionActivityAt, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -868,6 +869,275 @@ describe('Worker field resolvers', () => {
     const worker = await cast({ agentRef: teamAgent.id, role: 'coordinator', name: 'Zoe' });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
     expect(prompt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hadron-cli#487 — is anyone actually driving this worker?
+// ---------------------------------------------------------------------------
+
+/**
+ * Ada's finding: ten issues were dispatched to a worker whose entire history
+ * was two sessions of 2m26s and 41s. Nothing rendered that differently from a
+ * worker driven yesterday, so a coordinator can dispatch into a channel nobody
+ * reads and get no signal at all — a failure that is silent, compounds daily,
+ * and is invisible precisely to the role whose job is to notice it.
+ *
+ * Both fields are WORKING STATE, so both mask to null on deny rather than
+ * answering "no": `hasLiveSession: false` on a caller who may not know would
+ * state a fact the server never computed.
+ */
+describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
+  const bindAs = (userId: string, workerId: string) =>
+    M.startSession(
+      {}, { input: { id: generateId(), workerRef: workerId, appRef: app.id } }, ctx(userId),
+    );
+
+  it('a cast-but-never-driven worker reads null, NOT a zero timestamp', async () => {
+    // The distinction the whole issue is about: "nobody has ever picked this
+    // up" must not render as "idle since the epoch" or as "idle since it was
+    // cast", both of which are answers to a question nobody asked.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await W.lastActiveAt(w, {}, ctx(admin.id))).toBeNull();
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+  });
+
+  it('an OPEN session reads live, and last-active tracks the heartbeat', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
+    const atStart = await W.lastActiveAt(w, {}, ctx(admin.id));
+    expect(atStart).toBeInstanceOf(Date);
+
+    // `updatedAt` is the explicit heartbeat (#930), and the roster must move
+    // with it — otherwise a session driven all day reads as idle since bind.
+    const later = new Date(Date.now() + 60_000);
+    await db.session.update({ where: { id: s.id }, data: { updatedAt: later } });
+    expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(later.getTime());
+  });
+
+  it('ENDING a session clears liveness but keeps the last-driven instant', async () => {
+    // Exactly Dara's shape in the issue: sessions that happened, ended, and
+    // left a name looking identical to one never touched. It must not.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    await M.endSession({}, { id: s.id }, ctx(appMember.id));
+
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+    expect(await W.lastActiveAt(w, {}, ctx(admin.id))).toBeInstanceOf(Date);
+  });
+
+  it('a SOFT-DELETED session is not liveness — the binder predicate wins', async () => {
+    // startSession refuses WORKER_TAKEN on `endedAt: null, deletedAt: null`.
+    // A roster that omitted `deletedAt` would advertise a worker as busy that
+    // a binder can take without even a prompt (PR #1000 review, Codex P2).
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    await db.session.update({ where: { id: s.id }, data: { deletedAt: new Date() } });
+
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+    expect(await W.lastActiveAt(w, {}, ctx(admin.id))).toBeNull();
+  });
+
+  it('ANY open session makes it live, even when a newer one has ended', async () => {
+    // `force` lets several sessions coexist, so liveness ORs across rows
+    // rather than reading the most recent — which may be the ended one.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const open = await bindAs(appMember.id, w.id);
+    const forced = await M.startSession(
+      {},
+      { input: { id: generateId(), workerRef: w.id, appRef: app.id, force: true } },
+      ctx(appMember.id),
+    );
+    await M.endSession({}, { id: forced.id }, ctx(appMember.id));
+
+    expect(await db.session.count({ where: { workerId: w.id, endedAt: null } })).toBe(1);
+    expect(open.id).toBeTruthy();
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
+  });
+
+  it('MASKS to null for a caller outside the App — not to false', async () => {
+    // `Session.worker` reaches Worker rows through a wider gate than the
+    // worker queries (#983), so an ungated answer publishes current staffing
+    // to a former member off a historical session. And the mask must be null:
+    // false is an assertion, null is a refusal to assert.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    await bindAs(appMember.id, w.id);
+
+    expect(await W.hasLiveSession(w, {}, ctx(outsider.id))).toBeNull();
+    expect(await W.lastActiveAt(w, {}, ctx(outsider.id))).toBeNull();
+    // …while the same live worker reads true for someone inside the App, so
+    // the null above is the GATE and not an empty result set.
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
+  });
+
+  it('does NOT report the REAPER as the last drive', async () => {
+    // The reaper ends an idle session with an updateMany, and @updatedAt moves
+    // to the reaping instant — so folding it in would shift lastActiveAt
+    // forward by the whole idle window and make an ABANDONED worker read as
+    // recently driven. Which is the precise signal this field exists to give.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+
+    const drivenAt = (await W.lastActiveAt(w, {}, ctx(admin.id))) as Date;
+    // What a reap looks like on the row: both stamps set, and updatedAt
+    // dragged a day forward with them.
+    const reapedAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await db.session.update({
+      where: { id: s.id },
+      data: { endedAt: reapedAt, autoExpiredAt: reapedAt, updatedAt: reapedAt },
+    });
+
+    const after = (await W.lastActiveAt(w, {}, ctx(admin.id))) as Date;
+    expect(after.getTime()).toBeLessThan(reapedAt.getTime());
+    expect(after.getTime()).toBeLessThanOrEqual(drivenAt.getTime());
+    expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+  });
+
+  it('DOES count an explicit endSession as a drive — only the reaper is excluded', async () => {
+    // The spare, not just the fire: ending your own session is a driver
+    // action, so its updatedAt must still count. Only auto-expiry is dropped.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    const endedAt = new Date(Date.now() + 60_000);
+    await db.session.update({
+      where: { id: s.id },
+      data: { endedAt, autoExpiredAt: null, updatedAt: endedAt },
+    });
+
+    expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(endedAt.getTime());
+  });
+
+  it('does NOT count a POST-END metadata write as a drive', async () => {
+    // updateSession deliberately permits writes after endedAt — a merge lands
+    // days after the stint that produced it — and @updatedAt moves with them.
+    // Attributing that to the worker says someone was driving it on the day
+    // the PR merged (PR #1086 review, Codex P2).
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    const endedAt = new Date(Date.now() + 60_000);
+    await db.session.update({ where: { id: s.id }, data: { endedAt } });
+
+    // Three days later the PR merges and its number is attributed back.
+    const merged = new Date(endedAt.getTime() + 3 * 24 * 60 * 60 * 1000);
+    await db.session.update({
+      where: { id: s.id },
+      data: { prNumber: 1086, updatedAt: merged },
+    });
+
+    const at = (await W.lastActiveAt(w, {}, ctx(admin.id))) as Date;
+    expect(at.getTime()).toBe(endedAt.getTime());
+  });
+
+  it('does NOT count a LATE usage event either — the cap is the end, not the source', async () => {
+    // hadron_record_work takes an ended session on purpose (late attribution,
+    // cor:agt:020:05), so the same postdating arrives through a second door.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    const endedAt = new Date(Date.now() + 60_000);
+    await db.session.update({ where: { id: s.id }, data: { endedAt } });
+    await db.usageEvent.create({
+      data: {
+        id: generateId(), sessionId: s.id, type: 'read',
+        createdAt: new Date(endedAt.getTime() + 86_400_000),
+      },
+    });
+
+    expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(endedAt.getTime());
+  });
+
+  it('counts an attributed usage event as activity', async () => {
+    // The third input of the shared derivation, and the one a roster would
+    // otherwise miss for a session driven entirely through MCP.
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await bindAs(appMember.id, w.id);
+    const eventAt = new Date(Date.now() + 120_000);
+    await db.usageEvent.create({
+      data: { id: generateId(), sessionId: s.id, type: 'read', createdAt: eventAt },
+    });
+
+    expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(eventAt.getTime());
+  });
+
+  it('the SQL and the TS derivation agree, on EVERY session shape', async () => {
+    // Copilot on PR #1086 flagged an unused import, and the dead import was the
+    // TELL: rewriting the loader as aggregating SQL left lib/sessionActivity.ts
+    // unused HERE, so the roster and the takeover prompt now derive "last
+    // driven" from two independent implementations. Both are necessary — one
+    // must aggregate inside the query, the other folds rows already loaded —
+    // so the answer is not to delete one but to make them unable to disagree
+    // silently. Both review findings on this PR had to be applied twice.
+    //
+    // ONE WORKER PER SHAPE, deliberately. The first version of this test put
+    // every shape on one worker and compared the folded MAX, so any row that
+    // was not the maximum contributed nothing — dropping the reaper exclusion
+    // from the TS side passed. An aggregate assertion hides its components,
+    // which is the same loose-assertion family as @Jonas's index comparison on
+    // hadron-cli#521. Proven: each mutation below now reddens this test.
+    const t = (offsetMinutes: number) => new Date(Date.now() + offsetMinutes * 60_000);
+    const shapes: Record<string, {
+      startedAt: Date; updatedAt: Date | null; endedAt: Date | null;
+      autoExpiredAt: Date | null; eventAt?: Date;
+    }> = {
+      Iris: { startedAt: t(-500), updatedAt: t(-400), endedAt: null, autoExpiredAt: null },
+      Jonas: { startedAt: t(-300), updatedAt: t(-200), endedAt: t(-200), autoExpiredAt: null },
+      // Reaped: every stamp dragged to the reaping instant, plus an event that
+      // predates it — the value the exclusion has to fall back to.
+      Mira: {
+        startedAt: t(-900), updatedAt: t(-100), endedAt: t(-100), autoExpiredAt: t(-100),
+        eventAt: t(-880),
+      },
+      // Ended, then a merge attributed the PR back long afterwards.
+      Pia: { startedAt: t(-800), updatedAt: t(-10), endedAt: t(-700), autoExpiredAt: null },
+      // Never touched after bind.
+      Tove: { startedAt: t(-50), updatedAt: null, endedAt: null, autoExpiredAt: null },
+    };
+
+    const workers: Record<string, { id: string; appId: string }> = {};
+    const sessionIds: string[] = [];
+    for (const [name, shape] of Object.entries(shapes)) {
+      const w = await cast({ agentRef: roleAgent.id, name });
+      workers[name] = w;
+      const id = generateId();
+      sessionIds.push(id);
+      const { eventAt, ...row } = shape;
+      await db.session.create({
+        data: { id, workerId: w.id, appId: app.id, userId: appMember.id, ...row },
+      });
+      if (eventAt) {
+        await db.usageEvent.create({
+          data: { id: generateId(), sessionId: id, type: 'read', createdAt: eventAt },
+        });
+      }
+    }
+
+    const rows = await db.session.findMany({ where: { id: { in: sessionIds } } });
+    const lastEvent = await loadLastEventBySession(db as never, sessionIds);
+
+    for (const [name, w] of Object.entries(workers)) {
+      const row = rows.find((r) => r.workerId === w.id)!;
+      const expected = sessionActivityAt(row, lastEvent.get(row.id));
+      const actual = (await W.lastActiveAt(w, {}, ctx(admin.id))) as Date;
+      // Second-precision: updated_at is timestamp WITHOUT time zone, so a raw
+      // round-trip is not bit-identical.
+      expect(
+        Math.abs(actual.getTime() - expected.getTime()),
+        `${name}: SQL ${actual.toISOString()} vs TS ${expected.toISOString()}`,
+      ).toBeLessThan(1000);
+    }
+  });
+
+  it('one worker going live does not make its sibling live', async () => {
+    // The loader answers per APP in one query, so a mis-keyed fold would
+    // smear one worker's session across the roster.
+    const driven = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const idle = await cast({ agentRef: roleAgent.id, name: 'Jonas' });
+    await bindAs(appMember.id, driven.id);
+
+    expect(await W.hasLiveSession(driven, {}, ctx(admin.id))).toBe(true);
+    expect(await W.hasLiveSession(idle, {}, ctx(admin.id))).toBe(false);
+    expect(await W.lastActiveAt(idle, {}, ctx(admin.id))).toBeNull();
   });
 });
 

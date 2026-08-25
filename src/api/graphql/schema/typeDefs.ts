@@ -2025,6 +2025,36 @@ export const typeDefs = `#graphql
     the register). Three senses of one word across two types.
     """
     heldAt: DateTime
+    """
+    hadron-cli#487 — whether a worker session is OPEN on this name right now.
+
+    Not availability: availability is the HOLD above (\`cor:agt:020:09\`), and an
+    ended, idle or reaped session never frees a name. This says only whether
+    someone is mid-stint, which is the question a coordinator asks about a name
+    already theirs. Conflating the two is the CLI bug this field exists for.
+
+    Derived from the session lifecycle with no lease (\`cor:agt:020:03\`), using
+    the SAME predicate startSession refuses WORKER_TAKEN on — a reader must not
+    be told a worker is busy that a binder can take.
+
+    Nullable BECAUSE of the read gate, not because the answer is unknown: this
+    is a working-state field like heldByUserId, masked to null on deny rather
+    than answering false, which would state a fact the server never computed.
+    """
+    hasLiveSession: Boolean
+    """
+    hadron-cli#487 — when this worker was last DRIVEN, over every session it has
+    ever had. Null for a worker nobody has ever bound, and that null is the
+    point: a casting nobody picked up renders identically to one worked
+    yesterday on every surface today, so a coordinator can dispatch into a
+    channel no one reads and get no signal at all.
+
+    The instant is the platform's one derivation of session activity — the
+    greatest of startedAt, updatedAt, and the newest attributed usage event — so
+    it agrees with the takeover prompt and with the idle window the reaper acts
+    on. Masked to null on deny, like heldByUserId.
+    """
+    lastActiveAt: DateTime
     "The role-agent behind the casting."
     agent: Agent
     "The App whose staff this casting fills."
