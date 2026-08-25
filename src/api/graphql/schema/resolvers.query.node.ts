@@ -1830,7 +1830,17 @@ export const nodeQueries = {
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       // Resolved ONCE: the gate here and the team-space scope below ask the
       // same question, and two calls would be two identical queries per read.
-      const participant = await isAppParticipant(ctx, app);
+      // NEVER under impersonation (PR #1093 review, Codex P1 — the #876 class,
+      // fifth instance). `isAppParticipant` guards impersonation on its OWNER
+      // branch and not on its AppMember branch, so an impersonated session
+      // whose TARGET is an AppMember of an App outside the shared org would be
+      // admitted by this arm — the org bound the impersonation session exists
+      // to enforce, bypassed by a predicate keyed on the target's identity.
+      // `canReadMemoryRecord` takes exactly this posture two hundred lines over
+      // ("Identity-scoped — never via impersonation"). Guarded here rather than
+      // in the shared predicate because changing that changes every caller;
+      // filed separately.
+      const participant = !ctx.impersonation && (await isAppParticipant(ctx, app));
       // Org authorization is tracked, not just enforced, because it decides the
       // SCOPE below as well as admission (PR #1093 review, Codex P1).
       let orgAuthorized = !!isPlatformAdmin;
@@ -1910,15 +1920,45 @@ export const nodeQueries = {
       // scope is untouched.
       const memoryIds = orgAuthorized
         ? [...new Set([...agentMemoryIds, ...teamSpaceIds])]
-        : [
-            ...new Set([
+        : await (async () => {
+            // The fold is the COARSE agent-derived map, and MCP does not stop
+            // there: its point read calls `canReadMemory` afterwards, which is
+            // what keeps a `personal`/`private` memory item owned by ANOTHER
+            // user out of the answer (PR #1093 review, Codex P1). Returning
+            // `.keys()` directly would hand an external member that user's
+            // nodes — a cross-tenant read, which is the one category this repo
+            // treats as never cosmetic.
+            //
+            // So the fold is filtered by the same record-level predicate the
+            // point read uses. The set is the primary agent's items plus the
+            // team space, so this is a handful of checks, not a sweep.
+            const folded = [
               ...(
                 await getAppMemoryAccess(ctx.db, resolvedAppId, {
                   callerUserId: ctx.userId ?? null,
                 })
               ).keys(),
-            ]),
-          ];
+            ];
+            // The one check MCP's point read adds over the map, applied with
+            // MCP's own rule (`canReadMemory`: class personal|private ⇒ the
+            // caller must BE `memory.userId`). Not `canReadMemoryRecord` — I
+            // tried that first and it is narrower than the fold in the other
+            // direction, dropping the agent's ordinary memories for this
+            // principal (#1092) and taking away material MCP does grant.
+            const rows = await ctx.db.memory.findMany({
+              where: { id: { in: folded } },
+              select: { id: true, class: true, userId: true },
+            });
+            return rows
+              .filter(
+                (m) =>
+                  !(
+                    (m.class === 'personal' || m.class === 'private') &&
+                    m.userId !== (ctx.userId ?? null)
+                  ),
+              )
+              .map((m) => m.id);
+          })();
       if (memoryIds.length === 0) return [];
 
       // #525 — optional node-level NodeFilter, pushed server-side so callers

@@ -636,6 +636,89 @@ describe('appNodes', () => {
     expect(orgLocs).toContain('secondary.node');
   });
 
+  it("never serves ANOTHER user's personal memory through the fold (#1093 P1)", async () => {
+    // getAppMemoryAccess is the COARSE agent-derived map; MCP's point read
+    // adds a personal/private owner check on top. Returning the map's keys
+    // directly handed an external member another user's personal nodes — a
+    // cross-tenant read, which is never cosmetic here.
+    const { app } = await withTeamSpace('app-nodes-personal');
+    const victim = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771074,
+        githubUsername: `an-victim-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, userId: victim.id,
+        userMemoryOfAgentId: agentId, appId: app.id,
+        urn: `${orgId}:personal-${Date.now()}`, name: "victim's personal",
+        class: 'personal', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: personal.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: personal.id, loc: 'victim.secret',
+        isLink: false, name: 'secret', tags: [],
+      },
+    });
+
+    const outsider = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771075,
+        githubUsername: `an-peeker-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({
+      data: { appId: app.id, userId: outsider.id, role: 'member' },
+    });
+
+    const locs = (await resolvers.Query.appNodes(
+      {}, { appRef: app.id }, { db, roles: ['READER'], userId: outsider.id } as Context,
+    )).map((n: { loc: string }) => n.loc);
+    expect(locs).not.toContain('victim.secret');
+    // Still a participant for everything they ARE entitled to.
+    expect(locs).toContain('chats:team');
+
+    // The owner still reads their own — the spare, so the filter is an owner
+    // check and not a blanket exclusion of personal memories.
+    await db.appMember.create({
+      data: { appId: app.id, userId: victim.id, role: 'member' },
+    });
+    const ownLocs = (await resolvers.Query.appNodes(
+      {}, { appRef: app.id }, { db, roles: ['READER'], userId: victim.id } as Context,
+    )).map((n: { loc: string }) => n.loc);
+    expect(ownLocs).toContain('victim.secret');
+  });
+
+  it('does NOT admit an impersonated session through the participant arm (#876 class)', async () => {
+    // isAppParticipant guards impersonation on its OWNER branch and not on its
+    // AppMember branch, so an impersonated session whose TARGET is an
+    // AppMember would be admitted here — bypassing the shared-org bound the
+    // impersonation session exists to enforce (PR #1093 review, Codex P1).
+    const { app } = await withTeamSpace('app-nodes-impersonation');
+    const target = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771076,
+        githubUsername: `an-target-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({
+      data: { appId: app.id, userId: target.id, role: 'member' },
+    });
+    // ctx.userId IS the target (that is the shape that fails open), with an
+    // impersonation marker naming an unrelated org.
+    const ctx = {
+      db, roles: ['READER'], userId: target.id,
+      impersonation: { orgId: generateId() },
+    } as unknown as Context;
+
+    await expect(resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).rejects.toThrow();
+  });
+
   it('still refuses someone who is neither a participant nor an org member', async () => {
     // The spare, not just the fire: the participant arm must not have turned
     // the gate into "any authenticated reader".
