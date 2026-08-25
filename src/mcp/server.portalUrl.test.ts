@@ -168,13 +168,17 @@ describe('hadron_get_node — URL line', () => {
  * Prisma — which is also how the surviving production rows got there (a write
  * path that predates or bypasses the check).
  */
+/**
+ * Insert a node straight past `validateLoc`. Module-scoped because the batch
+ * read must be shown to handle the same corrupt rows the single read does.
+ */
+async function rawNode(loc: string, name: string) {
+  return db.node.create({
+    data: { id: generateId(), memoryId: fx.memory.id, loc, name, nodeType: 'info' },
+  });
+}
+
 describe('hadron_get_node — corrupt stored loc', () => {
-  /** Insert a node straight past `validateLoc`. */
-  async function rawNode(loc: string, name: string) {
-    return db.node.create({
-      data: { id: generateId(), memoryId: fx.memory.id, loc, name, nodeType: 'info' },
-    });
-  }
 
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -256,6 +260,23 @@ describe('hadron_get_nodes — per-node parity (cor:api:040:01)', () => {
       expect(batch).toContain(`URL: ${PORTAL}/app/u/hrn:node:${ORG}:${MEM}:${loc}`);
     }
     expect(batch.match(/^URL: /gm)?.length).toBe(2);
+  });
+
+  it('reads a CORRUPT-loc row too — parity is the promise, not a caveat', async () => {
+    // The urn-lib-js 0.0.15 bump made a `#`-carrying stored loc refuse
+    // decomposition. hadron_get_node was taught to tolerate it; leaving the
+    // batch strict would mean the same row reads one way singly and reports
+    // "malformed ref" in bulk — and bulk is how a sweep over bad rows would
+    // find them (PR #1088 review, Codex P2).
+    await rawNode('bulk#evil', 'bulk-corrupt');
+    const srv = createTestableMcpServer(adminAuth());
+    const batch = await srv.callToolText('hadron_get_nodes', {
+      refs: [`${ORG}::${MEM}::bulk#evil`],
+    });
+    expect(batch).toContain('bulk-corrupt');
+    expect(batch).not.toContain('malformed');
+    // Same suppression as the single read: an unvalidated loc is never an href.
+    expect(batch.match(/^URL: /gm)).toBeNull();
   });
 });
 

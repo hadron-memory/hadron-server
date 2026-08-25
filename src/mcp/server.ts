@@ -2659,7 +2659,12 @@ export function createMcpServerInstance(
           }
           try {
             assertFullyQualifiedUrn(raw, 'node');
-            const { memoryUrn: mu, loc } = splitNodeUrn(raw);
+            // Tolerant, exactly as hadron_get_node is: cor:api:040:01 promises
+            // this batch produces the SAME per-node projection as the single
+            // read, and a corrupt stored loc containing `#` readable one way
+            // and a "malformed ref" the other breaks that promise for the rows
+            // most likely to be looked up in bulk (PR #1088 review, Codex P2).
+            const { memoryUrn: mu, loc } = splitNodeUrnTolerant(raw);
             urnRefs.push({ raw, memoryUrn: mu, loc });
           } catch {
             return textResult(
