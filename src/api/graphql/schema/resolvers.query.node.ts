@@ -67,6 +67,7 @@ import {
   isMemoryReadableCached,
   loadMemoryUrn,
 } from './resolvers.helpers.js';
+import { getAppMemoryAccess } from '../../../mcp/access-control.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
   recordNodeRead,
@@ -1830,8 +1831,18 @@ export const nodeQueries = {
       // Resolved ONCE: the gate here and the team-space scope below ask the
       // same question, and two calls would be two identical queries per read.
       const participant = await isAppParticipant(ctx, app);
-      if (!isPlatformAdmin && !participant) {
-        await requireOwnerOrOrgRole(ctx, app, 'READER');
+      // Org authorization is tracked, not just enforced, because it decides the
+      // SCOPE below as well as admission (PR #1093 review, Codex P1).
+      let orgAuthorized = !!isPlatformAdmin;
+      if (!orgAuthorized) {
+        try {
+          await requireOwnerOrOrgRole(ctx, app, 'READER');
+          orgAuthorized = true;
+        } catch (err) {
+          // A participant is admitted on the participant arm; anyone else keeps
+          // the original refusal, unchanged and from the original predicate.
+          if (!participant) throw err;
+        }
       }
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
       // memoryItems for every installed Agent. Apps with no installed
@@ -1881,7 +1892,33 @@ export const nodeQueries = {
         ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
         : [];
 
-      const memoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds])];
+      // SCOPE, and this is the half the participant arm turns on (PR #1093
+      // review, Codex P1). My justification for admitting a participant was
+      // that MCP already grants them this material — and the agent walk above
+      // is BROADER than what MCP grants: `getAppMemoryAccess` reads only the
+      // PRIMARY live agent, filters soft-deleted memory items and memories, and
+      // requires an active AgentOrgGrant for a cross-org install. The walk
+      // above does none of those. So admitting a participant to it would hand
+      // them secondary agents, deleted items, and installs whose cross-org
+      // grant has LAPSED — none of which they can reach anywhere else, which
+      // makes it a widening after all, of exactly the kind #1070 warned that
+      // this resolver's scope invites.
+      //
+      // A participant who is not also org-authorized therefore gets the
+      // platform's own answer for their principal — the same fold MCP uses —
+      // rather than this resolver's historically wider walk. An org member's
+      // scope is untouched.
+      const memoryIds = orgAuthorized
+        ? [...new Set([...agentMemoryIds, ...teamSpaceIds])]
+        : [
+            ...new Set([
+              ...(
+                await getAppMemoryAccess(ctx.db, resolvedAppId, {
+                  callerUserId: ctx.userId ?? null,
+                })
+              ).keys(),
+            ]),
+          ];
       if (memoryIds.length === 0) return [];
 
       // #525 — optional node-level NodeFilter, pushed server-side so callers

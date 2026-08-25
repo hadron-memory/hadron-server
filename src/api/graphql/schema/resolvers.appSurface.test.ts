@@ -576,6 +576,66 @@ describe('appNodes', () => {
     expect(locs).toContain('chats:team');
   });
 
+  it('gives the external member the MCP fold, NOT this resolver wider walk (#1093 P1)', async () => {
+    // My first version admitted the participant to the resolver's own
+    // installed-agent walk, justified by "MCP already grants them this". That
+    // was false: the walk reads EVERY installed agent with memoryItems
+    // unfiltered, while getAppMemoryAccess reads only the PRIMARY live agent,
+    // filters soft-deleted items, and requires a live cross-org grant. A
+    // SECOND installed agent is the cheapest way to show the difference.
+    const { app } = await withTeamSpace('app-nodes-scope');
+    const secondAgent = await db.agent.create({
+      data: {
+        id: generateId(), organizationId: orgId, name: 'second agent',
+        urn: `${orgId}:second-agent-${Date.now()}`, visibility: 'ORGANIZATION',
+      },
+    });
+    const secondMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, urn: `${orgId}:second-mem-${Date.now()}`,
+        name: 'second agent memory', class: 'knowledge', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId: secondAgent.id, memoryId: secondMemory.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: secondMemory.id, loc: 'secondary.node',
+        isLink: false, name: 'secondary', tags: [],
+      },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: secondAgent.id } });
+
+    const outsider = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771073,
+        githubUsername: `an-scope-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({
+      data: { appId: app.id, userId: outsider.id, role: 'member' },
+    });
+
+    const locs = (await resolvers.Query.appNodes(
+      {}, { appRef: app.id }, { db, roles: ['READER'], userId: outsider.id } as Context,
+    )).map((n: { loc: string }) => n.loc);
+
+    // What the platform grants them elsewhere: the primary agent's memory…
+    expect(locs).toContain('org.test.node');
+    // …and the team space…
+    expect(locs).toContain('chats:team');
+    // …but NOT the second installed agent, which the MCP fold never grants.
+    expect(locs).not.toContain('secondary.node');
+
+    // And an ORG member's scope is untouched — they still see everything the
+    // resolver always showed them. Proving the spare, not just the fire.
+    const orgLocs = (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(orgLocs).toContain('secondary.node');
+  });
+
   it('still refuses someone who is neither a participant nor an org member', async () => {
     // The spare, not just the fire: the participant arm must not have turned
     // the gate into "any authenticated reader".
