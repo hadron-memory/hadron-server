@@ -19,14 +19,24 @@ describe('splitNodeUrnTolerant', () => {
     });
   });
 
-  it('leaves a REGISTERED #data fragment to the library, and does not mark it', () => {
-    // Not the tolerant path: this decomposes cleanly, and the caller is meant
-    // to see `fragment` and decide, rather than have it folded into the loc.
+  it('reports BOTH readings of a registered #data fragment', () => {
+    // This decomposes cleanly, so it is not the recovery path — but a stored
+    // loc can literally BE `cor:urn#data`, and a pure function cannot tell
+    // that from fragment addressing. Only the database can, so both candidates
+    // are handed back and the read paths try `literalLoc` first (PR #1088
+    // review, Codex P2).
     expect(splitNodeUrnTolerant('hrn:node:acme.com:specs:cor:urn#data')).toEqual({
       memoryUrn: 'acme.com:specs',
       loc: 'cor:urn',
       fragment: 'data',
+      literalLoc: 'cor:urn#data',
     });
+  });
+
+  it('offers no literalLoc when there is no fragment to reinterpret', () => {
+    expect(splitNodeUrnTolerant('hrn:node:acme.com:specs:cor:urn')).not.toHaveProperty(
+      'literalLoc',
+    );
   });
 
   it('passes an ordinary URN straight through', () => {

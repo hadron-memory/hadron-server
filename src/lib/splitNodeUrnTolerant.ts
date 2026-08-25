@@ -21,9 +21,13 @@
  * split itself still comes from the library — nothing here re-implements the
  * grammar, which is the drift the package exists to end (#693, #239).
  *
- * A REGISTERED fragment (`#data`) is not this function's business: the library
- * decomposes it cleanly and reports `fragment`, and callers must decide what
- * that means rather than having it silently folded away.
+ * A REGISTERED fragment (`#data`) decomposes cleanly, so it never reaches the
+ * recovery path — but a stored loc can be `foo#data` LITERALLY, and then the
+ * clean decomposition is the wrong answer: the read looks up `foo` and either
+ * misses or, worse, returns a different node that happens to exist (PR #1088
+ * review, Codex P2). A pure function cannot tell those apart — only the
+ * database can — so `literalLoc` is always reported and the READ paths try it
+ * first. Callers that act on the whole node want `splitWholeNodeUrn` instead.
  */
 import { splitNodeUrn, UrnNotQualifiedError, type NodeLikeUrnParts } from './urn.js';
 
@@ -36,9 +40,15 @@ import { splitNodeUrn, UrnNotQualifiedError, type NodeLikeUrnParts } from './urn
  */
 export function splitNodeUrnTolerant(
   input: string,
-): NodeLikeUrnParts & { corruptFragment?: boolean } {
+): NodeLikeUrnParts & { corruptFragment?: boolean; literalLoc?: string } {
   try {
-    return splitNodeUrn(input);
+    const parts = splitNodeUrn(input);
+    // The loc as STORED would look, if this row predates loc validation and
+    // its loc really does contain the `#`. Only a lookup can decide; the
+    // caller tries this first and falls back to the decomposed reading.
+    return parts.fragment
+      ? { ...parts, literalLoc: `${parts.loc}#${parts.fragment}` }
+      : parts;
   } catch (err) {
     const hashIdx = input.indexOf('#');
     // Only the fragment refusal is recoverable, and only when there IS a
@@ -60,4 +70,45 @@ export function splitNodeUrnTolerant(
     const parts = splitNodeUrn(input.slice(0, hashIdx));
     return { ...parts, loc: parts.loc + input.slice(hashIdx), corruptFragment: true };
   }
+}
+
+/**
+ * The refusal a WHOLE-NODE operation owes a caller who addressed a fragment.
+ *
+ * Returns a message, or null when the URN names no fragment.
+ *
+ * urn-lib-js 0.0.15 made `splitNodeUrn` strip `#data` and report it separately.
+ * Every caller that destructures only `{ memoryUrn, loc }` therefore stopped
+ * missing and started resolving THE PARENT — and on `hadron_delete_node` that
+ * turns a safe not-found into deleting the whole node, when the caller asked to
+ * address only its data (PR #1088 review, Codex P1). Before the bump the same
+ * input looked up a literal `…#data` loc and found nothing.
+ *
+ * A fragment names a resource OF the node. Until a surface can act on that
+ * resource, the honest answer is to refuse and say which is which — never to
+ * act on the parent because it is the nearest thing we can find
+ * (hadron-server#994, whose whole subject is silently resolving to the parent).
+ */
+export function nodeFragmentRefusal(input: string, fragment?: string): string | null {
+  if (!fragment) return null;
+  return (
+    `"${input}" addresses this node's ${fragment}, not the node. ` +
+    `This operation acts on the whole node, so it will not act on a fragment reference — ` +
+    `drop "#${fragment}" to name the node itself.`
+  );
+}
+
+/**
+ * `splitNodeUrn` for an operation that acts on the WHOLE node: identical, but
+ * refuses a fragment instead of silently resolving to the parent.
+ *
+ * Throws `UrnNotQualifiedError`, which the GraphQL/controller call sites already
+ * surface as a client error. MCP handlers return text rather than throwing, so
+ * they use `nodeFragmentRefusal` and their own `textResult` instead.
+ */
+export function splitWholeNodeUrn(input: string): NodeLikeUrnParts {
+  const parts = splitNodeUrn(input);
+  const refusal = nodeFragmentRefusal(input, parts.fragment);
+  if (refusal) throw new UrnNotQualifiedError(refusal);
+  return parts;
 }

@@ -279,6 +279,39 @@ describe('hadron_get_nodes — per-node parity (cor:api:040:01)', () => {
     expect(batch.match(/^URL: /gm)).toBeNull();
   });
 
+  it('a LITERAL `foo#data` row wins over the fragment reading, and is not annotated', async () => {
+    // A row whose stored loc really is `frag:lit#data` (it predates loc
+    // validation). Decomposing would look up `frag:lit` and either miss or
+    // return a DIFFERENT node that happens to exist — so the exact loc is
+    // tried first (PR #1088 review, Codex P2). Both rows exist here, which is
+    // the only way to prove which one was chosen.
+    await addNode('frag:lit', { content: 'PARENT.' });
+    await rawNode('frag:lit#data', 'literal-row');
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_get_node', {
+      urn: `hrn:node:${ORG}:${MEM}:frag:lit#data`,
+    });
+    expect(text).toContain('literal-row');
+    expect(text).not.toContain('PARENT.');
+    // Nothing was resolved away, so there is nothing to annotate.
+    expect(text.toLowerCase()).not.toContain('showing the node itself');
+  });
+
+  it('keeps the notice when a node is named by PK FIRST and by #data after', async () => {
+    // The dedupe skips an already-seen node id; recording the fragment after
+    // that skip drops the notice whenever the plain ref comes first
+    // (PR #1088 review, Copilot).
+    await addNode('frag:order', { content: 'O.' });
+    const row = await db.node.findFirstOrThrow({
+      where: { loc: 'frag:order', memoryId: fx.memory.id },
+    });
+    const srv = createTestableMcpServer(adminAuth());
+    const batch = await srv.callToolText('hadron_get_nodes', {
+      refs: [row.id, `hrn:node:${ORG}:${MEM}:frag:order#data`],
+    });
+    expect(batch.toLowerCase()).toContain('showing the node itself');
+  });
+
   it('annotates a #data ref the same way the single read does', async () => {
     // The other half of parity, and the direction I missed first time: the
     // batch decomposed the fragment and then dropped it, so a #data ref got an
@@ -352,5 +385,76 @@ describe('hadron_find_nodes — URL per hit', () => {
     const text = await find({});
     expect(text).toContain('srv:acy:090');
     expect(text).not.toContain('URL:');
+  });
+});
+
+// ───── #1088 P1: a fragment must not reach a whole-node operation ──────────
+
+/**
+ * urn-lib-js 0.0.15 made `splitNodeUrn` strip `#data` and report it separately,
+ * so every caller destructuring only `{ memoryUrn, loc }` stopped MISSING and
+ * started resolving THE PARENT. On a read that is merely wrong; on
+ * `hadron_delete_node` it deletes a node the caller never named.
+ *
+ * Before the bump these inputs looked up a literal `…#data` loc and found
+ * nothing, so the bump alone turned a safe miss into a destructive hit.
+ */
+describe('#1088 — whole-node operations refuse a fragment', () => {
+  it('delete_node does NOT delete the parent — the case with teeth', async () => {
+    await addNode('doomed', { content: 'Still here.' });
+    const srv = createTestableMcpServer(adminAuth());
+    const out = await srv.callToolText('hadron_delete_node', {
+      urn: `hrn:node:${ORG}:${MEM}:doomed#data`,
+    });
+    expect(out).toContain('#data');
+    const row = await db.node.findFirst({ where: { loc: 'doomed', memoryId: fx.memory.id } });
+    expect(row).not.toBeNull();
+    expect(row?.deletedAt ?? null).toBeNull();
+  });
+
+  it('update_node does not write through a fragment reference', async () => {
+    await addNode('target', { content: 'Original.' });
+    const srv = createTestableMcpServer(adminAuth());
+    const out = await srv.callToolText('hadron_update_node', {
+      urn: `hrn:node:${ORG}:${MEM}:target#data`,
+      content: 'Overwritten.',
+    });
+    expect(out).toContain('#data');
+    const row = await db.node.findFirstOrThrow({
+      where: { loc: 'target', memoryId: fx.memory.id },
+    });
+    expect(row.content).toBe('Original.');
+  });
+
+  it('move_node refuses a fragment at EITHER end', async () => {
+    await addNode('mover', { content: 'M.' });
+    const srv = createTestableMcpServer(adminAuth());
+    const fromFrag = await srv.callToolText('hadron_move_node', {
+      urn: `hrn:node:${ORG}:${MEM}:mover#data`,
+      targetUrn: `hrn:node:${ORG}:${MEM}:moved`,
+    });
+    expect(fromFrag).toContain('#data');
+    // The destination end matters just as much: a fragment there would move
+    // the node to the parent's loc and silently drop what the caller wrote.
+    const toFrag = await srv.callToolText('hadron_move_node', {
+      urn: `hrn:node:${ORG}:${MEM}:mover`,
+      targetUrn: `hrn:node:${ORG}:${MEM}:moved#data`,
+    });
+    expect(toFrag).toContain('#data');
+    expect(
+      await db.node.findFirst({ where: { loc: 'mover', memoryId: fx.memory.id } }),
+    ).not.toBeNull();
+  });
+
+  it('create_node refuses rather than writing to the parent loc', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const out = await srv.callToolText('hadron_create_node', {
+      urn: `hrn:node:${ORG}:${MEM}:fresh#data`,
+      name: 'fresh',
+    });
+    expect(out).toContain('#data');
+    expect(
+      await db.node.findFirst({ where: { loc: 'fresh', memoryId: fx.memory.id } }),
+    ).toBeNull();
   });
 });
