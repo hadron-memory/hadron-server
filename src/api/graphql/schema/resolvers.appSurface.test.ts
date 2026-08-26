@@ -850,6 +850,48 @@ describe('appNodes', () => {
     ).toContain('chats:team');
   });
 
+  it("does not bleed App A's app-scoped knowledge into appNodes(B) (#1093 P1)", async () => {
+    // One Agent installed in two Apps carries BOTH Apps' app-scoped memories
+    // in its global memoryItems, so the fold for B contains A's — and
+    // canReadMemory enforces appId for personal/private rows only, admitting
+    // an app-class KNOWLEDGE memory of A on its non-personal branch.
+    const { app: appB } = await withTeamSpace('app-nodes-knowledge-b');
+    const { app: appA } = await createDbAppWithKey(db, 'app-nodes-knowledge-a', orgId);
+    await db.appAgent.create({ data: { appId: appA.id, agentId } });
+    const knowledgeInA = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, appId: appA.id,
+        urn: `${orgId}:knowledge-a-${Date.now()}`, name: 'A internal',
+        class: 'app', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: knowledgeInA.id, loc: 'a.internal',
+        isLink: false, name: 'A internal', tags: [],
+      },
+    });
+
+    const memberOfB = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771080,
+        githubUsername: `an-b-only-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({ data: { appId: appB.id, userId: memberOfB.id, role: 'member' } });
+    const ctx = { db, roles: ['READER'], userId: memberOfB.id } as Context;
+
+    const locs = (await resolvers.Query.appNodes({}, { appRef: appB.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(locs).not.toContain('a.internal');
+    // Still gets what App B is: its own team space.
+    expect(locs).toContain('chats:team');
+  });
+
   it('does NOT admit an impersonated session through the participant arm (#876 class)', async () => {
     // isAppParticipant guards impersonation on its OWNER branch and not on its
     // AppMember branch, so an impersonated session whose TARGET is an

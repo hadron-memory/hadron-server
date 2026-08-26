@@ -1975,7 +1975,25 @@ export const nodeQueries = {
                   : null,
               ),
             );
-            return allowed.filter((id): id is string => id !== null);
+            const readable = allowed.filter((id): id is string => id !== null);
+
+            // THIS App's memories only (PR #1093 review, Codex P1). One Agent
+            // installed in two Apps carries BOTH Apps' app-scoped memories in
+            // its global `memoryItems`, so the fold for B contains A's — and
+            // `canReadMemory` enforces `appId` for personal/private rows only,
+            // admitting an app-class KNOWLEDGE memory of A on its non-personal
+            // branch. This is a SCOPE rule about what `appNodes(B)` means, not
+            // another copy of the access gate: the resolver's own contract is
+            // "the App's memories are the authoritative scope", and the fold
+            // does not honour it.
+            //
+            // The org path has the SAME bleed through the same fold and is
+            // untouched here — pre-existing, wider than this arm, and filed.
+            const scoped = await ctx.db.memory.findMany({
+              where: { id: { in: readable }, OR: [{ appId: null }, { appId: resolvedAppId }] },
+              select: { id: true },
+            });
+            return scoped.map((m) => m.id);
           })();
       if (memoryIds.length === 0) return [];
 
