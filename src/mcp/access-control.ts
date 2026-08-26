@@ -555,6 +555,7 @@ export async function canReadMemory(
   db: PrismaClient,
   auth: AuthContext,
   memoryId: string,
+  opts: { access?: Map<string, string> } = {},
 ): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
@@ -619,7 +620,18 @@ export async function canReadMemory(
   // accessible Apps — the access map answers "does the caller have read
   // on this memory via *any* of their App memberships?"
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
-  const access = await getMemoryAccess(db, auth);
+  // `opts.access` is a REQUEST-SCOPED memo of this same call for this same
+  // auth, nothing more — a caller checking many memories at once (GraphQL
+  // `appNodes`, PR #1093) would otherwise rebuild the whole App fold per
+  // memory, which is an N+1 over the App's agents and their memory items.
+  //
+  // It is only ever consulted HERE, on the non-personal path. The
+  // personal/private branch above returns before it, so a precomputed map can
+  // never widen the answer for the rows where the owner, per-App and
+  // subscription rules apply — the ones a caller is most likely to get wrong
+  // by hand. Pass it only when it came from `getMemoryAccess(db, auth)` with
+  // the SAME auth; a map from another principal would be a gate bypass.
+  const access = opts.access ?? (await getMemoryAccess(db, auth));
   return access.has(memoryId);
 }
 

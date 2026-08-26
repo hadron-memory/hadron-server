@@ -67,7 +67,7 @@ import {
   isMemoryReadableCached,
   loadMemoryUrn,
 } from './resolvers.helpers.js';
-import { getAppMemoryAccess, canReadMemory } from '../../../mcp/access-control.js';
+import { getAppMemoryAccess, canReadMemory, getMemoryAccess } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
@@ -1951,9 +1951,16 @@ export const nodeQueries = {
               appId: resolvedAppId,
               roles: ctx.roles,
             } as AuthContext;
+            // The access map ONCE for the whole page, not once per memory:
+            // `canReadMemory` ends in `getMemoryAccess`, which rebuilds the
+            // App's agent fold on every call (PR #1093 review, Codex P2 — the
+            // same N+1 this resolver's roster sibling was cured of twice).
+            const sharedAccess = await getMemoryAccess(ctx.db as never, scopedAuth);
             const allowed = await Promise.all(
               folded.map(async (id) =>
-                (await canReadMemory(ctx.db as never, scopedAuth, id)) ? id : null,
+                (await canReadMemory(ctx.db as never, scopedAuth, id, { access: sharedAccess }))
+                  ? id
+                  : null,
               ),
             );
             return allowed.filter((id): id is string => id !== null);
