@@ -330,6 +330,86 @@ async function getPrimaryAgentAccess(
 // Public API used by MCP tool handlers
 // ---------------------------------------------------------------------------
 
+/**
+ * THE App-derived half of a principal's memory reach — "what does this caller
+ * reach by virtue of an App?", as a `memoryId → READ_ONLY|READ_WRITE` map.
+ *
+ * Extracted (#1092) so the MCP gate below and the GraphQL node-content gate
+ * (`getAccessibleMemoryIds`) compute an **identical** App-derived set and cannot
+ * re-diverge — the same reason `getOrgReadableMemoryIds` was extracted for the
+ * ORG-derived half after the 2026-06-13 Micromentor onboarding incident. Before
+ * this, GraphQL enumeration had no App branch for a user principal at all: an
+ * external AppMember was granted the App's memories by `Query.memory`, by
+ * `appNodes` and by MCP's point read, and got nothing from `findNodes` scoped to
+ * those same memories. Three surfaces yes, one no.
+ *
+ * The two arms are EXCLUSIVE, and deliberately so:
+ *
+ *   - **An active App is in focus** (`appId`) → that App alone. Spec 026 /
+ *     D-2026-05-21-003: the selection focuses the request.
+ *   - **No App in focus** → the union across every App the user is a member of.
+ *     App identity is a focusing concern, not access control; the user's
+ *     App-derived reach is bounded by their AppMember rows regardless of which
+ *     App is in focus.
+ *
+ * #1003 (Codex P1) / #934: a PURE App-key principal bound to an active session
+ * is hard-isolated to `sessionScopedMemoryIds` — the session's own memory plus
+ * the bound agent's reach. That boundary is what keeps a multi-user agent's
+ * end-user session from reading anything else the App can see, and unlike the
+ * GraphQL gate (which checks the session branch FIRST) the MCP module has no
+ * session branch: `hadron_get_node` gates on `canReadMemory` alone. So the App's
+ * team space — never in the session scope — must NOT be folded in for that
+ * shape, or an anonymous end-user session could read `chats:team` and `worklog`
+ * by URN. Only the TEAM-SPACE fold is gated: the agent-derived half is untouched,
+ * so this can never narrow a pre-existing reach.
+ *
+ * Narrowed to the pure App-key shape (`!userId`), mirroring #934: a user
+ * credential's session binding is heartbeat attribution, never a scope change,
+ * so a team member's own binding must not cost them their team space.
+ *
+ * **Personal-free by design, and relied upon.** Nothing here folds a
+ * strict-owner (`personal`/`private`) row *intentionally* — but nothing in this
+ * module ENFORCES it either, because `canReadMemory` strict-gates those classes
+ * ABOVE the map. A caller that consumes this map WITHOUT such a per-row check
+ * (the GraphQL gate turns it straight into `memoryId IN (…)`) must apply its own
+ * strict-owner filter rather than inherit the assumption.
+ */
+export async function getPrincipalAppMemoryAccess(
+  db: PrismaClient,
+  principal: { userId?: string | null; appId?: string | null; sessionId?: string | null },
+): Promise<Map<string, string>> {
+  const access = new Map<string, string>();
+  if (principal.appId) {
+    const sessionIsolated = Boolean(principal.sessionId) && !principal.userId;
+    for (const [memoryId, level] of await getAppMemoryAccess(db, principal.appId, {
+      includeTeamSpace: !sessionIsolated,
+      callerUserId: principal.userId ?? null,
+    })) {
+      access.set(memoryId, level);
+    }
+    return access;
+  }
+  if (!principal.userId) return access;
+
+  const apps = await resolveUserApps(principal.userId, db);
+  const perAppMaps = await Promise.all(
+    apps.map((app) => getAppMemoryAccess(db, app.id, { callerUserId: principal.userId })),
+  );
+  for (const perApp of perAppMaps) {
+    for (const [memoryId, level] of perApp) {
+      const existing = access.get(memoryId);
+      // READ_WRITE wins over READ_ONLY when the same memory appears via
+      // multiple App memberships (defensive — the data model makes this
+      // unlikely but not impossible if a user has two roles across two
+      // Apps that share a memory item).
+      if (!existing || (existing === 'READ_ONLY' && level === 'READ_WRITE')) {
+        access.set(memoryId, level);
+      }
+    }
+  }
+  return access;
+}
+
 export async function getMemoryAccess(
   db: PrismaClient,
   auth: AuthContext,
@@ -337,54 +417,14 @@ export async function getMemoryAccess(
   const access = new Map<string, string>();
 
   // ── Base: App-derived access ────────────────────────────────────────────
-  // App Key callers (auth.appId, no userId) and user callers with a resolved
-  // active App both start from the App's installed-Agent memory map.
-  //
-  // Spec 026 / D-2026-05-21-003 advisory branch: a user with NO active App
-  // selected gets the union across every App they're a member of — App
-  // identity is a focusing concern, not access control; the user's App-derived
-  // access is bounded by their AppMember rows regardless of which App is in
-  // focus.
-  //
-  // #1003 (Codex P1) / #934: a PURE App-key principal bound to an active
-  // session is hard-isolated to `sessionScopedMemoryIds` — the session's own
-  // memory plus the bound agent's reach. That boundary is what keeps a
-  // multi-user agent's end-user session from reading anything else the App can
-  // see, and unlike the GraphQL `getAccessibleMemoryIds` (which checks it
-  // FIRST) this module has no session branch: `hadron_get_node` gates on
-  // `canReadMemory` alone. So the App's team space — never in the session
-  // scope — must NOT be folded in for that shape, or an anonymous end-user
-  // session could read `chats:team` and `worklog` by URN.
-  //
-  // Narrowed to the pure App-key shape (`!auth.userId`), mirroring #934: a user
-  // credential's session binding is heartbeat attribution, never a scope
-  // change, so a team member's own binding must not cost them their team space.
-  // Only the team-space fold is gated — the agent-derived half is left exactly
-  // as it was, so this change cannot narrow any pre-existing reach.
-  if (auth.appId) {
-    const sessionIsolated = Boolean(auth.sessionId) && !auth.userId;
-    for (const [memoryId, level] of await getAppMemoryAccess(db, auth.appId, {
-      includeTeamSpace: !sessionIsolated,
-      callerUserId: auth.userId ?? null,
-    })) {
+  // Delegated to the shared predicate above (#1092) — see its header for the
+  // focus/union split and the session-isolation rule. Merged rather than
+  // assigned so the max-merge below governs uniformly; `access` is empty here,
+  // so this is the same result the two inlined arms produced.
+  for (const [memoryId, level] of await getPrincipalAppMemoryAccess(db, auth)) {
+    const existing = access.get(memoryId);
+    if (!existing || (existing === 'READ_ONLY' && level === 'READ_WRITE')) {
       access.set(memoryId, level);
-    }
-  } else if (auth.userId) {
-    const apps = await resolveUserApps(auth.userId, db);
-    const perAppMaps = await Promise.all(
-      apps.map((app) => getAppMemoryAccess(db, app.id, { callerUserId: auth.userId })),
-    );
-    for (const perApp of perAppMaps) {
-      for (const [memoryId, level] of perApp) {
-        const existing = access.get(memoryId);
-        // READ_WRITE wins over READ_ONLY when the same memory appears via
-        // multiple App memberships (defensive — the data model makes this
-        // unlikely but not impossible if a user has two roles across two
-        // Apps that share a memory item).
-        if (!existing || (existing === 'READ_ONLY' && level === 'READ_WRITE')) {
-          access.set(memoryId, level);
-        }
-      }
     }
   }
 
