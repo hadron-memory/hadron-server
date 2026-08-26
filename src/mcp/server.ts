@@ -54,7 +54,9 @@ import {
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
   SubtreeMoveSchemaViolationError,
+  type MoveNodeSubtreeResult,
 } from '../lib/nodeSubtreeMove.js';
+import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import {
   resolveAppForRequest,
@@ -4668,6 +4670,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           };
 
       let result: MoveResult;
+      // #1095 — the relocated set (each node's id + the loc it LEFT), captured
+      // inside the transaction so the git mirror can run after it commits. Empty
+      // for the same-slot no-op branch, which relocates nothing.
+      let relocated: MoveNodeSubtreeResult['moved'] = [];
       try {
         result = await db.$transaction(async (tx) => {
           // #664/#752: moving a node INTO a subtree is the same orphan vector as
@@ -4750,13 +4756,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // mentioned `name`, so the contract actively taught the wrong thing.
             // The damage was quiet, too — loc and name are usually similar
             // enough that a clobbered title still reads plausibly.
-            await moveNodeSubtree(tx, {
+            const subtreeResult = await moveNodeSubtree(tx, {
               source: existing,
               destLoc: toLoc,
               destMemoryId: crossMemory ? toMemory.id : undefined,
               editor: editorFromAuth(auth),
               renameSourceLeaf: renameToLeaf === true,
             });
+            relocated = subtreeResult.moved;
           }
 
           // Move BY ID — id is stable across moves, so this refetch can't race a
@@ -4836,6 +4843,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // the transaction's declared return shape omits it — and a move never
       // changes the PK, which is the whole point of relocating in place.
       recordNodeWrite(db, { id: existing.id, loc: toLoc, memoryId: toMemory.id }, auth);
+
+      // #1095 — mirror the move into the affected repos (destination gains the
+      // files, source loses them). Fired after the commit and NOT awaited: a
+      // mirror never fails a write that already landed. Same call the GraphQL
+      // moveNode resolver makes, so the two surfaces mirror identically.
+      void mirrorNodeMoveToGit(db, {
+        srcMemoryId: fromMemory.id,
+        destMemoryId: toMemory.id,
+        moved: relocated,
+        clientId: auth.clientId ?? null,
+      });
 
       // Empty sections omitted, matching hadron_get_node's pattern (PR-189
       // review feedback).

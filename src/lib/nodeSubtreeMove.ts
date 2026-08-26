@@ -19,11 +19,12 @@
  *
  * **Cross-memory (`destMemoryId` ≠ the source's memory):** crossing a memory
  * boundary must respect the DESTINATION's write-path invariants:
- *   - REFUSED (v1, CrossMemoryMoveUnsupportedError; #781 follow-ups) when either
- *     memory is ENCRYPTED (needs per-node re-encryption, cloneNode's path), when
- *     either is GIT-BACKED (the move isn't mirrored to the repos, so a sync would
- *     re-mint the rows), or when the subtree contains a CHAT-root (its data.scope
- *     is tied to the memory class).
+ *   - REFUSED (CrossMemoryMoveUnsupportedError; #781 follow-ups) when either
+ *     memory is ENCRYPTED (needs per-node re-encryption, cloneNode's path), or
+ *     when the subtree contains a CHAT-root (its data.scope is tied to the
+ *     memory class). GIT-BACKED memories were refused too until #1095, when
+ *     `mirrorNodeMoveToGit` gave the move a repo-aware mirror; the caller fires
+ *     it AFTER the transaction commits, using the `moved` list in the result.
  *   - Every moved node is validated against the destination's collection SCHEMA
  *     (the enforceNodeSchemaOnWrite gate) before any write.
  *   - Every moved node's `memoryId` becomes `destMemoryId`.
@@ -96,10 +97,10 @@ export class SubtreeMoveSourceChangedError extends Error {
 /**
  * A cross-memory move hits a case v1 doesn't support and refuses (rather than
  * silently corrupting): an ENCRYPTED memory (needs per-node decrypt/re-encrypt,
- * cloneNode's path), a GIT-BACKED memory (needs a move-aware mirror on both
- * repos, else the next sync re-mints the moved rows), or a CHAT subtree (its
- * data.scope invariants are class-specific). All are tracked follow-ups (#781).
- * The message names the specific reason.
+ * cloneNode's path) or a CHAT subtree (its data.scope invariants are
+ * class-specific). Both are tracked follow-ups (#781). The message names the
+ * specific reason. A GIT-BACKED memory was a third reason until #1095 built the
+ * move-aware mirror it was waiting on.
  */
 export class CrossMemoryMoveUnsupportedError extends Error {
   constructor(message: string) {
@@ -119,6 +120,13 @@ export class SubtreeMoveSchemaViolationError extends Error {
 export interface MoveNodeSubtreeResult {
   /** Number of nodes relocated (the source node plus its descendants). */
   movedCount: number;
+  /**
+   * Every relocated node: its stable id, the loc it LEFT, and the loc it now
+   * holds. The caller needs the pre-move address to mirror the move into git
+   * (#1095) — once the transaction commits, nothing else can recover it, since
+   * a move is the one write that changes a node's address in place.
+   */
+  moved: Array<{ id: string; previousLoc: string; loc: string }>;
 }
 
 /**
@@ -248,17 +256,15 @@ export async function moveNodeSubtree(
           'Move it within its memory, or clone the nodes into the destination.',
       );
     }
-    // Git-backed: a cross-memory move only touches DB rows; it does not remove
-    // the source repo files or write them to the destination repo. The next sync
-    // would re-mint the "moved" rows from the stale source frontmatter (or the
-    // destination sync would overwrite the DB-only state). Refuse until a
-    // move-aware mirror exists. #781 follow-up.
-    if (srcMem?.source != null || destMem?.source != null) {
-      throw new CrossMemoryMoveUnsupportedError(
-        'Cannot move a subtree across memories when either memory is Git-backed ' +
-          '(the move is not mirrored to the repositories). Move it within its memory.',
-      );
-    }
+    // Git-backed memories are NO LONGER refused (#1095). The move-aware mirror
+    // this guard was waiting on now exists: `mirrorNodeMoveToGit` removes the
+    // moved nodes' files from the source repo and writes them to the
+    // destination's, so a stale source file can't be re-minted by the next
+    // repo-wins sync. Git is one integration of a memory, not a lock on it —
+    // and the guard was over-broad besides, refusing on EITHER side when only
+    // the source side can strand a file. Callers fire the mirror after the
+    // transaction commits; it is fire-and-forget, so a repo that is unreachable
+    // degrades to the same DB-only state a same-memory move has always had.
     // Chat: a chat-root node carries a class-specific `data.scope` invariant
     // (validateChatScopeInvariants) — moving it to a different memory class can
     // make the chat unusable (CHAT_MEMORY_OUT_OF_SCOPE). Refuse a subtree that
@@ -308,6 +314,14 @@ export async function moveNodeSubtree(
   // NodeRevision. The snapshot/diff read the original `n` (its pre-move loc), so
   // temp parking doesn't affect audit history. Temp locs mirror deleteNode's
   // `__deleted-<id>` re-stamp — id-unique, outside any real loc namespace.
+  //
+  // The result is built BEFORE the rebase: once phase 2 lands, a row's old loc
+  // is gone and unrecoverable, and the git mirror needs the address each node
+  // left in order to delete the file it stranded there.
+  const result: MoveNodeSubtreeResult = {
+    movedCount: subtree.length,
+    moved: subtree.map((n) => ({ id: n.id, previousLoc: n.loc, loc: newLocById.get(n.id)! })),
+  };
   for (const n of subtree) {
     await tx.node.update({ where: { id: n.id }, data: { loc: `__moving-${n.id}` } });
   }
@@ -325,7 +339,7 @@ export async function moveNodeSubtree(
 
   if (!crossMemory) {
     // Same-memory: no memoryId changes anywhere, edges left untouched (#768).
-    return { movedCount: subtree.length };
+    return result;
   }
 
   // ── Cross-memory carry-over ─────────────────────────────────────────────
@@ -384,7 +398,7 @@ export async function moveNodeSubtree(
   const outgoing = await tx.edge.findMany({
     where: { deletedAt: null, sourceId: { in: [...movedIds] } },
   });
-  if (outgoing.length === 0) return { movedCount: subtree.length };
+  if (outgoing.length === 0) return result;
 
   // Target locs for boundary targets (targets outside the moved set).
   const outsideTargetIds = [
@@ -436,5 +450,5 @@ export async function moveNodeSubtree(
     await tx.edge.update({ where: { id: d.id }, data: { loc, memoryId: destMemoryId } });
   }
 
-  return { movedCount: subtree.length };
+  return result;
 }

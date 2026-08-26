@@ -41,7 +41,9 @@ import {
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
   SubtreeMoveSchemaViolationError,
+  type MoveNodeSubtreeResult,
 } from '../../../lib/nodeSubtreeMove.js';
+import { mirrorNodeMoveToGit } from '../../../integrations/github/mirrorNodeMove.js';
 import {
   NodeLocConflictError,
   NodeNotFoundError,
@@ -1998,6 +2000,7 @@ export const nodeMutations = {
       } as const;
 
       try {
+        let relocated: MoveNodeSubtreeResult['moved'] = [];
         const moved = await ctx.db.$transaction(
           async (tx) => {
             // #664/#752: moving a node INTO a subtree is the same orphan vector as
@@ -2013,12 +2016,13 @@ export const nodeMutations = {
             // Rebase the whole loc-subtree via the shared helper (it locks +
             // revalidates the source, carries embeddings/edges cross-memory, and
             // fails loud on a destination collision).
-            await moveNodeSubtree(tx, {
+            const result = await moveNodeSubtree(tx, {
               source,
               destLoc,
               destMemoryId: crossMemory ? destMemoryId : undefined,
               editor: editorFromAuth(ctx),
             });
+            relocated = result.moved;
             return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
           },
           // A large subtree touches many rows; the default 5s interactive-txn
@@ -2031,6 +2035,17 @@ export const nodeMutations = {
         // it. As with a recursive delete, the rebased descendants are not
         // counted individually — one caller edit, one event.
         recordNodeWrite(ctx.db, toUsageNodeRef(moved), ctx);
+        // #1095 — mirror the move into the affected repos: the destination gains
+        // the files, the source loses them. Fired AFTER the commit (the mirror
+        // re-reads the post-move rows) and NOT awaited — a mirror never fails a
+        // write that already landed. This is what replaced the blanket refusal
+        // of any cross-memory move touching a git-backed memory.
+        void mirrorNodeMoveToGit(ctx.db, {
+          srcMemoryId: source.memoryId,
+          destMemoryId,
+          moved: relocated,
+          clientId: ctx.clientId ?? null,
+        });
         return moved;
       } catch (e) {
         // Map the shared helper's typed errors (thrown from either branch) to the
