@@ -39,7 +39,11 @@ let orgId: string;
 /** Written paths, as (memoryId, loc) pairs — the checkout fake encodes the memory in localPath. */
 const written = () =>
   vi.mocked(writeNodeFile).mock.calls.map(([localPath, node]) => [localPath, node.loc]);
+/** Removals, as (repo, loc) pairs. */
 const removed = () => vi.mocked(removeNodeFile).mock.calls.map(([localPath, loc]) => [localPath, loc]);
+/** Removals with the id the removal is gated on — every one must carry the MOVED node's id. */
+const removedWithId = () =>
+  vi.mocked(removeNodeFile).mock.calls.map(([localPath, loc, id]) => [localPath, loc, id]);
 
 async function makeMemory(slug: string, extra: Record<string, unknown> = {}) {
   return db.memory.create({
@@ -89,10 +93,12 @@ describe('mirrorNodeMoveToGit — cross-memory', () => {
       [`/repo/${dest.id}`, 'q:c'],
     ]);
     // The source repo loses the OLD locs — the half that stops the next
-    // repo-wins sync from re-minting the moved nodes as duplicates.
-    expect(removed()).toEqual([
-      [`/repo/${src.id}`, 'p'],
-      [`/repo/${src.id}`, 'p:c'],
+    // repo-wins sync from re-minting the moved nodes as duplicates. Each removal
+    // is gated on the MOVED node's id, so a file another node has since written
+    // to that path is left alone.
+    expect(removedWithId()).toEqual([
+      [`/repo/${src.id}`, 'p', parent.id],
+      [`/repo/${src.id}`, 'p:c', child.id],
     ]);
   });
 
@@ -220,6 +226,26 @@ describe('mirrorNodeMoveToGit — same memory', () => {
       [`/repo/${mem.id}`, 'q'],
       [`/repo/${mem.id}`, 'q:c'],
     ]);
+  });
+
+  it('removes the old path even when the node has since moved OUT (live is empty)', async () => {
+    // The mirror is fire-and-forget: by the time it runs the node may have moved
+    // again, including out to another memory, which drops it from the post-move
+    // read. Removal is driven by `moved` (captured in-transaction), so the file
+    // it stranded still goes — keying off `live` would leave it to be re-minted
+    // by the next repo-wins sync.
+    const mem = await makeMemory('mem', { source: REPO });
+    const elsewhere = await makeMemory('elsewhere');
+    const node = await makeNode(elsewhere.id, 'moved-on');
+
+    await mirrorNodeMoveToGit(db, {
+      srcMemoryId: mem.id,
+      destMemoryId: mem.id,
+      moved: [{ id: node.id, previousLoc: 'p' }],
+    });
+
+    expect(written()).toEqual([]); // it no longer lives in this memory
+    expect(removedWithId()).toEqual([[`/repo/${mem.id}`, 'p', node.id]]);
   });
 
   it('removes BEFORE writing, so an overlapping rebase cannot delete a file it just wrote', async () => {

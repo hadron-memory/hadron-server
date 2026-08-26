@@ -234,6 +234,37 @@ export function orphanedLegacyPaths(
 }
 
 /**
+ * The node id recorded in an on-disk file's frontmatter, or null when the file
+ * is absent, carries no frontmatter, or carries no `id`.
+ *
+ * This is the mirror's answer to "whose file is this?" — the question that has
+ * to be asked before DELETING a path (#1095). A move mirror runs after its
+ * transaction commits, so by the time it removes the loc a node vacated, some
+ * other node may already have been created there and mirrored its own file to
+ * that exact path. Removing it blind would erase a live node from the repo and
+ * let the next repo-wins sync act on the absence. A null answer is deliberately
+ * NOT treated as a match: an id-less file was written by a human or another
+ * tool, and is not the mirror's to delete either.
+ */
+export function readNodeFileId(mdPath: string): string | null {
+  if (!existsSync(mdPath)) return null;
+  try {
+    const existing = readFileSync(mdPath, 'utf-8');
+    // Tolerate CRLF (Windows / git core.autocrlf) as well as LF.
+    const fmMatch = existing.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!fmMatch) return null;
+    const meta = parse(fmMatch[1]);
+    if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+      const id = (meta as Record<string, unknown>).id;
+      return typeof id === 'string' ? id : null;
+    }
+  } catch {
+    // Malformed frontmatter — we cannot claim the file, so we don't.
+  }
+  return null;
+}
+
+/**
  * Carry over frontmatter keys the exporter doesn't manage (`urn`, `author`)
  * from an existing on-disk file, so rewriting a node doesn't drop fields a
  * human or another tool added. No-op when the file doesn't exist yet.

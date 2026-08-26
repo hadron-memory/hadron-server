@@ -21,6 +21,16 @@
  * already committed, and a repository that is unreachable, uncloned, or
  * rejecting pushes must not retroactively fail it. Callers do not await a
  * result they can act on.
+ *
+ * Running after the commit is what makes the two rules below load-bearing, since
+ * the world can change underneath this (PR #1098 review):
+ *   - REMOVALS ARE DRIVEN BY `moved`, captured inside the transaction — never by
+ *     the post-move DB read. A node that moved AGAIN before this ran drops out of
+ *     that read, and keying removal off it would strand the file forever.
+ *   - REMOVALS ARE GATED ON NODE IDENTITY. The vacated loc may already hold a
+ *     DIFFERENT node's mirrored file; `removeNodeFile` deletes a path only when
+ *     its frontmatter names the moved node, so the mirror can never erase a
+ *     live node it does not own.
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -108,8 +118,6 @@ async function mirrorMove(
   const removesFromRepo = srcMem?.source != null;
   if (!writesToRepo && !removesFromRepo) return;
 
-  const previousLocById = new Map(moved.map((m) => [m.id, m.previousLoc]));
-
   // Re-read at the POST-move address. A node deleted (or moved again) between
   // the commit and now is skipped rather than mirrored to a stale path.
   const rows = writesToRepo
@@ -136,15 +144,20 @@ async function mirrorMove(
       },
       ({ localPath }) => {
         // Same-memory: the old paths live in THIS repo, so remove them in the
-        // same commit. Remove BEFORE writing — a subtree rebase can send one
-        // moved node onto another moved node's old loc (moving `a:b` up to `a`
-        // puts grandchild `a:b:b` on the vacated `a:b`), and removing after
-        // writing would delete the file just written.
+        // same commit.
+        //
+        // Driven by `moved` — captured INSIDE the transaction — and never by the
+        // post-move DB read: a node that moved AGAIN before this ran (or moved
+        // out to another memory entirely) drops out of `live`, and keying the
+        // removal off `live` would strand its old file forever, to be re-minted
+        // by the next repo-wins sync (PR #1098 review, Copilot).
+        //
+        // Remove BEFORE writing — a subtree rebase can send one moved node onto
+        // another moved node's old loc (moving `a:b` up to `a` puts grandchild
+        // `a:b:b` on the vacated `a:b`), and removing after writing would delete
+        // the file just written.
         if (!crossMemory) {
-          for (const row of live) {
-            const prev = previousLocById.get(row.id);
-            if (prev != null && prev !== row.loc) removeNodeFile(localPath, prev);
-          }
+          for (const m of moved) removeNodeFile(localPath, m.previousLoc, m.id);
         }
         for (const row of live) writeNodeFile(localPath, toNodeForGit(row));
       },
@@ -160,7 +173,7 @@ async function mirrorMove(
         logPrefix: '[mirrorNodeMove]',
       },
       ({ localPath }) => {
-        for (const m of moved) removeNodeFile(localPath, m.previousLoc);
+        for (const m of moved) removeNodeFile(localPath, m.previousLoc, m.id);
       },
     );
   }

@@ -7,6 +7,7 @@ import {
   preserveUnmanagedFrontmatter,
   nodeFilePath,
   orphanedLegacyPaths,
+  readNodeFileId,
 } from './nodeFrontmatter.js';
 
 export interface NodeForGit {
@@ -107,23 +108,41 @@ export function writeNodeFile(localPath: string, node: NodeForGit): void {
 }
 
 /**
- * Remove every file a node occupies at `loc` — the current `<...loc>.md` plus
- * the two legacy paths — from a checkout's working tree.
+ * Remove the files node `expectedNodeId` occupies at `loc` — the current
+ * `<...loc>.md` and the legacy `<...loc>/README.md` — from a checkout's working
+ * tree, plus the edge sidecar if either was actually removed. Returns whether
+ * anything went.
  *
  * The counterpart of {@link writeNodeFile}, for the address a node has LEFT
  * (#1095): without it a moved node's stale file stays in the repo, and the next
  * repo-wins sync re-mints it as a duplicate of a node that now lives elsewhere.
- * The node's own child directory is deliberately NOT removed — a descendant that
- * did not move still lives there.
+ *
+ * **A file is removed only if its frontmatter names `expectedNodeId`.** The move
+ * mirror is fire-and-forget, so by the time it runs, the vacated loc may already
+ * be occupied by a DIFFERENT node whose own mirror wrote that exact path — and
+ * deleting THAT would erase a live node from the repo and let the next
+ * repo-wins sync act on the absence (PR #1098 review, Codex P1). A file with a
+ * different id, no id, or unreadable frontmatter is left alone: leaving a stale
+ * file costs a duplicate node on the next sync, which is recoverable; deleting
+ * a live one is not.
+ *
+ * The node's own child DIRECTORY is deliberately never removed — a descendant
+ * that did not move still lives there.
  *
  * `loc` is never the empty-loc root here: a memory's root node cannot be moved.
  */
-export function removeNodeFile(localPath: string, loc: string): void {
-  if (loc === '') return;
-  rmSync(nodeFilePath(localPath, loc), { force: true });
+export function removeNodeFile(localPath: string, loc: string, expectedNodeId: string): boolean {
+  if (loc === '') return false;
   const legacy = orphanedLegacyPaths(localPath, loc);
-  rmSync(legacy.readme, { force: true });
-  rmSync(legacy.sidecar, { recursive: true, force: true });
+  let removed = false;
+  for (const path of [nodeFilePath(localPath, loc), legacy.readme]) {
+    if (readNodeFileId(path) !== expectedNodeId) continue;
+    rmSync(path, { force: true });
+    removed = true;
+  }
+  // The sidecar belongs to whichever file we just took; it stays if we took none.
+  if (removed) rmSync(legacy.sidecar, { recursive: true, force: true });
+  return removed;
 }
 
 /**
