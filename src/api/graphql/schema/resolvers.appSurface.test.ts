@@ -815,6 +815,41 @@ describe('appNodes', () => {
     ).not.toContain('mine.private');
   });
 
+  it('does NOT let a retained AppMember row revive a soft-uninstalled App (#1093 P1)', async () => {
+    // resolveAppRef resolves a historical row by id deliberately, and an
+    // AppMember row survives uninstall — so the participant arm would hand a
+    // dead App's retained nodes to a member whose membership every active-App
+    // access map already excludes.
+    const { app } = await withTeamSpace('app-nodes-uninstalled');
+    const member = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771079,
+        githubUsername: `an-uninstalled-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    const ctx = { db, roles: ['READER'], userId: member.id } as Context;
+
+    // While live, they read it — so the refusal below is the uninstall and
+    // not some other denial.
+    expect(
+      (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
+        (n: { loc: string }) => n.loc,
+      ),
+    ).toContain('chats:team');
+
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    await expect(resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).rejects.toThrow();
+
+    // …and an ORG caller still reads the retired App's retained nodes, which
+    // is existing behaviour this arm must not have changed.
+    expect(
+      (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).map(
+        (n: { loc: string }) => n.loc,
+      ),
+    ).toContain('chats:team');
+  });
+
   it('does NOT admit an impersonated session through the participant arm (#876 class)', async () => {
     // isAppParticipant guards impersonation on its OWNER branch and not on its
     // AppMember branch, so an impersonated session whose TARGET is an

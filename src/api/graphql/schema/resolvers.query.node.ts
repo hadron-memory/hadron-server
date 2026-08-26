@@ -1842,6 +1842,18 @@ export const nodeQueries = {
       // in the shared predicate because changing that changes every caller;
       // filed separately.
       const participant = !ctx.impersonation && (await isAppParticipant(ctx, app));
+      // ADMISSION only, and the distinction is load-bearing. A soft-uninstalled
+      // App must not be revived by a retained `AppMember` row: `resolveAppRef`
+      // resolves the historical row by id on purpose, membership survives
+      // uninstall, and `resolveUserApps` excludes exactly those memberships
+      // from every active-App access map (PR #1093 review, Codex P1).
+      //
+      // But it must NOT also change what an ORG caller sees on a retired App —
+      // folding the lifecycle into `participant` itself took the team space
+      // away from them, which is existing behaviour and not this PR's to
+      // change. My own test caught that; the comment claiming the scope was
+      // untouched was written before the assertion that checked it.
+      const admitAsParticipant = participant && !app.uninstalledAt;
       // Org authorization is tracked, not just enforced, because it decides the
       // SCOPE below as well as admission (PR #1093 review, Codex P1).
       //
@@ -1852,7 +1864,7 @@ export const nodeQueries = {
       // returned as though it were the right one. `isOwnerOrOrgMember` is the
       // same predicate `requireOwnerOrOrgRole` throws on, and it answers.
       const orgAuthorized = !!isPlatformAdmin || (await isOwnerOrOrgMember(ctx, app));
-      if (!orgAuthorized && !participant) {
+      if (!orgAuthorized && !admitAsParticipant) {
         // Unchanged refusal, from the original predicate, for anyone who is
         // neither — so the error a stranger sees is the one they saw before.
         await requireOwnerOrOrgRole(ctx, app, 'READER');
