@@ -694,6 +694,61 @@ describe('appNodes', () => {
     expect(ownLocs).toContain('victim.secret');
   });
 
+  it('does not leak the SAME user\'s personal memory ACROSS Apps (#1093 P1)', async () => {
+    // Owner-only does not imply per-App. A personal memory is scoped by
+    // (app_id, user_id) — spec 008's whole point — and one Agent installed in
+    // two Apps carries BOTH Apps' personal memories in one global memoryItems
+    // fold. So the userId check alone lets a member read their OWN App-A
+    // personal nodes through appNodes(B). Not a cross-user leak; a cross-App
+    // one, and it is the isolation the two-layer model hangs on.
+    const { app: appB } = await withTeamSpace('app-nodes-cross-app-b');
+    const { app: appA } = await createDbAppWithKey(db, 'app-nodes-cross-app-a', orgId);
+    await db.appAgent.create({ data: { appId: appA.id, agentId } });
+
+    const user = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771077,
+        githubUsername: `an-two-apps-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    // Personal memory scoped to App A, owned by this user, on the shared agent.
+    const personalInA = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, userId: user.id,
+        userMemoryOfAgentId: agentId, appId: appA.id,
+        urn: `${orgId}:personal-a-${Date.now()}`, name: 'personal in A',
+        class: 'personal', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: personalInA.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: personalInA.id, loc: 'a.only',
+        isLink: false, name: 'A only', tags: [],
+      },
+    });
+
+    // The user participates in BOTH Apps — which is the ordinary case, not an
+    // exotic one (the seed's Juno fixture is exactly this shape).
+    await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'member' } });
+    await db.appMember.create({ data: { appId: appB.id, userId: user.id, role: 'member' } });
+    const ctx = { db, roles: ['READER'], userId: user.id } as Context;
+
+    const inB = (await resolvers.Query.appNodes({}, { appRef: appB.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(inB).not.toContain('a.only');
+
+    // …and reading App A, the same user still gets it. The spare: this is
+    // per-App isolation, not a blanket exclusion of personal memories.
+    const inA = (await resolvers.Query.appNodes({}, { appRef: appA.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(inA).toContain('a.only');
+  });
+
   it('does NOT admit an impersonated session through the participant arm (#876 class)', async () => {
     // isAppParticipant guards impersonation on its OWNER branch and not on its
     // AppMember branch, so an impersonated session whose TARGET is an

@@ -1843,16 +1843,18 @@ export const nodeQueries = {
       const participant = !ctx.impersonation && (await isAppParticipant(ctx, app));
       // Org authorization is tracked, not just enforced, because it decides the
       // SCOPE below as well as admission (PR #1093 review, Codex P1).
-      let orgAuthorized = !!isPlatformAdmin;
-      if (!orgAuthorized) {
-        try {
-          await requireOwnerOrOrgRole(ctx, app, 'READER');
-          orgAuthorized = true;
-        } catch (err) {
-          // A participant is admitted on the participant arm; anyone else keeps
-          // the original refusal, unchanged and from the original predicate.
-          if (!participant) throw err;
-        }
+      //
+      // The BOOLEAN form, not try/catch around the throwing one (PR #1093
+      // review, Copilot). A catch wide enough to hold "Forbidden" also holds a
+      // DB error from inside the predicate, and swallowing that would silently
+      // downgrade an org member to the participant scope — a narrower answer
+      // returned as though it were the right one. `isOwnerOrOrgMember` is the
+      // same predicate `requireOwnerOrOrgRole` throws on, and it answers.
+      const orgAuthorized = !!isPlatformAdmin || (await isOwnerOrOrgMember(ctx, app));
+      if (!orgAuthorized && !participant) {
+        // Unchanged refusal, from the original predicate, for anyone who is
+        // neither — so the error a stranger sees is the one they saw before.
+        await requireOwnerOrOrgRole(ctx, app, 'READER');
       }
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
       // memoryItems for every installed Agent. Apps with no installed
@@ -1947,16 +1949,28 @@ export const nodeQueries = {
             // principal (#1092) and taking away material MCP does grant.
             const rows = await ctx.db.memory.findMany({
               where: { id: { in: folded } },
-              select: { id: true, class: true, userId: true },
+              select: { id: true, class: true, userId: true, appId: true, userMemoryOfAgentId: true },
             });
             return rows
-              .filter(
-                (m) =>
-                  !(
-                    (m.class === 'personal' || m.class === 'private') &&
-                    m.userId !== (ctx.userId ?? null)
-                  ),
-              )
+              .filter((m) => {
+                if (m.class !== 'personal' && m.class !== 'private') return true;
+                // Owner-only (MCP: `auth.userId !== memory.userId ⇒ false`).
+                if (m.userId !== (ctx.userId ?? null)) return false;
+                // …and PER-APP, which owner-only does not imply (PR #1093
+                // review, Codex P1). A personal memory is scoped by
+                // (app_id, user_id) — spec 008's whole point — and an Agent
+                // installed in two Apps carries BOTH Apps' personal memories in
+                // one global memoryItems fold. Without this, the same user
+                // reading appNodes(B) gets their own personal nodes from App A:
+                // not a cross-USER leak, a cross-APP one, and the isolation
+                // that the two-layer model hangs on.
+                //
+                // A FREE-STANDING personal memory (no App, no agent — spec 034)
+                // is owner-only and belongs to no App, so it passes on the
+                // owner check alone, exactly as MCP treats it.
+                if (m.appId === null && m.userMemoryOfAgentId === null) return true;
+                return m.appId === resolvedAppId;
+              })
               .map((m) => m.id);
           })();
       if (memoryIds.length === 0) return [];
