@@ -67,7 +67,8 @@ import {
   isMemoryReadableCached,
   loadMemoryUrn,
 } from './resolvers.helpers.js';
-import { getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { getAppMemoryAccess, canReadMemory } from '../../../mcp/access-control.js';
+import { type AuthContext } from '../../../middleware/auth.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
   recordNodeRead,
@@ -1923,17 +1924,21 @@ export const nodeQueries = {
       const memoryIds = orgAuthorized
         ? [...new Set([...agentMemoryIds, ...teamSpaceIds])]
         : await (async () => {
-            // The fold is the COARSE agent-derived map, and MCP does not stop
-            // there: its point read calls `canReadMemory` afterwards, which is
-            // what keeps a `personal`/`private` memory item owned by ANOTHER
-            // user out of the answer (PR #1093 review, Codex P1). Returning
-            // `.keys()` directly would hand an external member that user's
-            // nodes — a cross-tenant read, which is the one category this repo
-            // treats as never cosmetic.
+            // DELEGATED, after four review rounds of hand-copying this
+            // predicate one clause at a time (PR #1093 — owner, then per-App,
+            // then the subscription gate, then the legacy agent-scoped shape).
+            // Each round I copied what I had read and shipped the rest as an
+            // assertion. That is the repo's FIRST authorization invariant
+            // arriving as a bill:
             //
-            // So the fold is filtered by the same record-level predicate the
-            // point read uses. The set is the primary agent's items plus the
-            // team space, so this is a handful of checks, not a sweep.
+            //   "Reuse the shared access gate; a bespoke per-resolver gate
+            //    drifts."
+            //
+            // — which I quoted at other people twice this week while
+            // reimplementing one. `canReadMemory` is the gate MCP's point read
+            // uses, and the App it is asked about is the App being queried, so
+            // the auth it wants is this caller in THIS App's scope. There is
+            // now no rule here to be a partial copy of.
             const folded = [
               ...(
                 await getAppMemoryAccess(ctx.db, resolvedAppId, {
@@ -1941,37 +1946,17 @@ export const nodeQueries = {
                 })
               ).keys(),
             ];
-            // The one check MCP's point read adds over the map, applied with
-            // MCP's own rule (`canReadMemory`: class personal|private ⇒ the
-            // caller must BE `memory.userId`). Not `canReadMemoryRecord` — I
-            // tried that first and it is narrower than the fold in the other
-            // direction, dropping the agent's ordinary memories for this
-            // principal (#1092) and taking away material MCP does grant.
-            const rows = await ctx.db.memory.findMany({
-              where: { id: { in: folded } },
-              select: { id: true, class: true, userId: true, appId: true, userMemoryOfAgentId: true },
-            });
-            return rows
-              .filter((m) => {
-                if (m.class !== 'personal' && m.class !== 'private') return true;
-                // Owner-only (MCP: `auth.userId !== memory.userId ⇒ false`).
-                if (m.userId !== (ctx.userId ?? null)) return false;
-                // …and PER-APP, which owner-only does not imply (PR #1093
-                // review, Codex P1). A personal memory is scoped by
-                // (app_id, user_id) — spec 008's whole point — and an Agent
-                // installed in two Apps carries BOTH Apps' personal memories in
-                // one global memoryItems fold. Without this, the same user
-                // reading appNodes(B) gets their own personal nodes from App A:
-                // not a cross-USER leak, a cross-APP one, and the isolation
-                // that the two-layer model hangs on.
-                //
-                // A FREE-STANDING personal memory (no App, no agent — spec 034)
-                // is owner-only and belongs to no App, so it passes on the
-                // owner check alone, exactly as MCP treats it.
-                if (m.appId === null && m.userMemoryOfAgentId === null) return true;
-                return m.appId === resolvedAppId;
-              })
-              .map((m) => m.id);
+            const scopedAuth = {
+              userId: ctx.userId,
+              appId: resolvedAppId,
+              roles: ctx.roles,
+            } as AuthContext;
+            const allowed = await Promise.all(
+              folded.map(async (id) =>
+                (await canReadMemory(ctx.db as never, scopedAuth, id)) ? id : null,
+              ),
+            );
+            return allowed.filter((id): id is string => id !== null);
           })();
       if (memoryIds.length === 0) return [];
 

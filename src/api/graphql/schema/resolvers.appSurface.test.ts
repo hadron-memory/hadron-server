@@ -683,10 +683,17 @@ describe('appNodes', () => {
     // Still a participant for everything they ARE entitled to.
     expect(locs).toContain('chats:team');
 
-    // The owner still reads their own — the spare, so the filter is an owner
-    // check and not a blanket exclusion of personal memories.
+    // The owner still reads their own — the spare, so the gate is an owner
+    // check and not a blanket exclusion of personal memories. The
+    // AgentSubscription is not decoration: `canReadMemory` requires an active
+    // one for an agent-scoped personal memory, and its absence is exactly the
+    // revocation case Codex named. Its presence here is what makes this a
+    // spare rather than a second fire.
     await db.appMember.create({
       data: { appId: app.id, userId: victim.id, role: 'member' },
+    });
+    await db.agentSubscription.create({
+      data: { userId: victim.id, agentId, activatedAt: new Date() },
     });
     const ownLocs = (await resolvers.Query.appNodes(
       {}, { appRef: app.id }, { db, roles: ['READER'], userId: victim.id } as Context,
@@ -734,6 +741,9 @@ describe('appNodes', () => {
     // exotic one (the seed's Juno fixture is exactly this shape).
     await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'member' } });
     await db.appMember.create({ data: { appId: appB.id, userId: user.id, role: 'member' } });
+    await db.agentSubscription.create({
+      data: { userId: user.id, agentId, activatedAt: new Date() },
+    });
     const ctx = { db, roles: ['READER'], userId: user.id } as Context;
 
     const inB = (await resolvers.Query.appNodes({}, { appRef: appB.id }, ctx)).map(
@@ -747,6 +757,62 @@ describe('appNodes', () => {
       (n: { loc: string }) => n.loc,
     );
     expect(inA).toContain('a.only');
+  });
+
+  it('honours subscription REVOCATION on a personal memory (#1093 P1, delegated)', async () => {
+    // The clause I would have missed a fifth time. `canReadMemory` requires an
+    // ACTIVE AgentSubscription for an agent-scoped personal memory, so
+    // revoking one removes access everywhere — and a hand-copied filter here
+    // would have restored it on this surface alone. This test exists to pin
+    // the DELEGATION: it fails the moment anyone reimplements the rule locally
+    // and forgets a clause, which is the failure this PR kept having.
+    const { app } = await withTeamSpace('app-nodes-revoked');
+    const owner = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771078,
+        githubUsername: `an-revoked-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, userId: owner.id,
+        userMemoryOfAgentId: agentId, appId: app.id,
+        urn: `${orgId}:revoked-${Date.now()}`, name: 'personal', class: 'personal',
+        acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: personal.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: personal.id, loc: 'mine.private',
+        isLink: false, name: 'private', tags: [],
+      },
+    });
+    await db.appMember.create({ data: { appId: app.id, userId: owner.id, role: 'member' } });
+    const ctx = { db, roles: ['READER'], userId: owner.id } as Context;
+
+    // Active subscription: their own memory is readable.
+    await db.agentSubscription.create({
+      data: { userId: owner.id, agentId, activatedAt: new Date() },
+    });
+    expect(
+      (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
+        (n: { loc: string }) => n.loc,
+      ),
+    ).toContain('mine.private');
+
+    // Revoked: gone here too, not just everywhere else.
+    await db.agentSubscription.update({
+      where: { userId_agentId: { userId: owner.id, agentId } },
+      data: { revokedAt: new Date() },
+    });
+    expect(
+      (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
+        (n: { loc: string }) => n.loc,
+      ),
+    ).not.toContain('mine.private');
   });
 
   it('does NOT admit an impersonated session through the participant arm (#876 class)', async () => {
