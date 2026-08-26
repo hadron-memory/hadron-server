@@ -15,9 +15,18 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { mirrorNodeMoveToGit } from '../../../integrations/github/mirrorNodeMove.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+  writeNodeFile: vi.fn(),
+  removeNodeFile: vi.fn(),
+}));
+// #1095 — moveNode fires the move-aware git mirror after the transaction. The
+// mirror is a repo/filesystem side effect; the tests here assert the DB outcome,
+// and the spy lets the git-backed cases check that it was ASKED to mirror.
+vi.mock('../../../integrations/github/mirrorNodeMove.js', () => ({
+  mirrorNodeMoveToGit: vi.fn().mockResolvedValue(undefined),
 }));
 
 const M = resolvers.Mutation as any;
@@ -36,6 +45,7 @@ const edge = (sourceId: string, targetId: string, memoryId: string, loc: string)
   db.edge.create({ data: { id: generateId(), memoryId, sourceId, targetId, loc, name: 'rel' } });
 
 beforeEach(async () => {
+  vi.mocked(mirrorNodeMoveToGit).mockClear();
   await cleanDb(db);
   const a = await createDbOrgAndGraph(db, { orgName: 'mc-org', graphName: 'mc/a', visibility: 'ORGANIZATION' });
   org = a.org;
@@ -242,16 +252,46 @@ describe('moveNode subtree cascade (#768)', () => {
     expect(await locsIn(memA.id)).toEqual(['p', 'p:c']);
   });
 
-  it('refuses a cross-memory move when either memory is GIT-BACKED (#781 v1)', async () => {
+  // #1095 — a GIT-BACKED memory used to refuse this outright. Git is one
+  // integration of a memory, not a lock on it: the move now proceeds and
+  // `mirrorNodeMoveToGit` carries it into the repos (source loses the files,
+  // destination gains them).
+  it('ALLOWS a cross-memory move into a GIT-BACKED memory, and mirrors it (#1095)', async () => {
     const git = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'mc-org:mc/git', name: 'mc/git', class: 'knowledge', visibility: 'ORGANIZATION', source: 'https://github.com/acme/repo.git' },
     });
     const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
-    await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
-    await expect(
-      M.moveNode(null, { sourceRef: parent.id, targetUrn: `${git.urn}:q` }, asUser()),
-    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-    expect(await locsIn(memA.id)).toEqual(['p', 'p:c']); // nothing moved
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: `${git.urn}:q` }, asUser());
+
+    expect(await locsIn(memA.id)).toEqual([]); // the whole subtree left
+    expect(await locsIn(git.id)).toEqual(['q', 'q:c']);
+
+    // The mirror is told BOTH memories and every relocated node's PRE-move loc —
+    // without the old locs the source repo's stale files can't be removed.
+    expect(mirrorNodeMoveToGit).toHaveBeenCalledTimes(1);
+    const [, args] = vi.mocked(mirrorNodeMoveToGit).mock.calls[0];
+    expect(args.srcMemoryId).toBe(memA.id);
+    expect(args.destMemoryId).toBe(git.id);
+    expect([...args.moved].sort((a, b) => a.previousLoc.localeCompare(b.previousLoc))).toEqual([
+      { id: parent.id, previousLoc: 'p', loc: 'q' },
+      { id: child.id, previousLoc: 'p:c', loc: 'q:c' },
+    ]);
+  });
+
+  it('ALLOWS a cross-memory move OUT of a GIT-BACKED memory (#1095)', async () => {
+    await db.memory.update({
+      where: { id: memA.id },
+      data: { source: 'https://github.com/acme/repo.git' },
+    });
+    const parent = await createDbNode(db, { loc: 'p', memoryId: memA.id });
+
+    await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+
+    expect(await locsIn(memA.id)).toEqual([]);
+    expect(await locsIn(memB.id)).toEqual(['q']);
+    expect(mirrorNodeMoveToGit).toHaveBeenCalledTimes(1);
   });
 
   it('refuses moving a CHAT subtree across memories (#781 v1)', async () => {
