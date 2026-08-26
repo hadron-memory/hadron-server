@@ -22,6 +22,7 @@ import {
 import { generateId } from '../../../lib/id.js';
 import { getPrimaryAgentId } from '../../../lib/appAgent.js';
 import { resolvers, type Context } from './resolvers.js';
+import { canReadMemoryRecord } from './resolvers.helpers.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -516,6 +517,421 @@ describe('appNodes', () => {
     });
     return { app, teamSpace };
   }
+
+  it('admits an EXTERNAL AppMember — no org role at all (#1070)', async () => {
+    // The drift: this resolver gated on org READER+, which does not admit an
+    // AppMember with no role in the owning org (the external / B2C shape),
+    // while `isAppParticipant` and the MCP access map both do. Same person,
+    // same App, FORBIDDEN here and granted there.
+    const { app } = await withTeamSpace('app-nodes-external-member');
+    const outsider = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771070,
+        githubUsername: `an-external-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    // Deliberately NO orgMember row — that absence is the whole test.
+    await db.appMember.create({
+      data: { appId: app.id, userId: outsider.id, role: 'member' },
+    });
+    const ctx = { db, roles: ['READER'], userId: outsider.id } as Context;
+
+    const locs = (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    // The installed agent's memories, as the MCP map already grants them...
+    expect(locs).toContain('org.test.node');
+    // ...and the team space, because they ARE a participant.
+    expect(locs).toContain('chats:team');
+  });
+
+  it('AGREES with effectiveAccess for that member — the stated tell for this drift', async () => {
+    // #362 names the symptom exactly: READ granted by the authoritative
+    // access resolver but Forbidden in a per-kind query means the per-kind
+    // gate has drifted. That is what #1070 was. Asserting the two TOGETHER is
+    // what stops it drifting back — either surface changing alone reds this.
+    const { app, teamSpace } = await withTeamSpace('app-nodes-parity');
+    const outsider = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771072,
+        githubUsername: `an-parity-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({
+      data: { appId: app.id, userId: outsider.id, role: 'member' },
+    });
+
+    // Asserted against the SHARED predicate rather than through
+    // effectiveAccess's ref resolver — same question, no dependence on how this
+    // fixture's synthetic memory URN happens to parse. `canReadMemoryRecord` is
+    // the one that governs a read of an App-scoped memory and admits an
+    // AppMember explicitly (#982, the same drift fixed one surface over).
+    const outsiderCtx = { db, roles: ['READER'], userId: outsider.id } as Context;
+    const space = await db.memory.findUniqueOrThrow({ where: { id: teamSpace.id } });
+    expect(await canReadMemoryRecord(outsiderCtx, space)).toBe(true);
+
+    const locs = (await resolvers.Query.appNodes({}, { appRef: app.id }, outsiderCtx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(locs).toContain('chats:team');
+  });
+
+  it('gives the external member the MCP fold, NOT this resolver wider walk (#1093 P1)', async () => {
+    // My first version admitted the participant to the resolver's own
+    // installed-agent walk, justified by "MCP already grants them this". That
+    // was false: the walk reads EVERY installed agent with memoryItems
+    // unfiltered, while getAppMemoryAccess reads only the PRIMARY live agent,
+    // filters soft-deleted items, and requires a live cross-org grant. A
+    // SECOND installed agent is the cheapest way to show the difference.
+    const { app } = await withTeamSpace('app-nodes-scope');
+    const secondAgent = await db.agent.create({
+      data: {
+        id: generateId(), organizationId: orgId, name: 'second agent',
+        urn: `${orgId}:second-agent-${Date.now()}`, visibility: 'ORGANIZATION',
+      },
+    });
+    const secondMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, urn: `${orgId}:second-mem-${Date.now()}`,
+        name: 'second agent memory', class: 'knowledge', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId: secondAgent.id, memoryId: secondMemory.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: secondMemory.id, loc: 'secondary.node',
+        isLink: false, name: 'secondary', tags: [],
+      },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: secondAgent.id } });
+
+    const outsider = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771073,
+        githubUsername: `an-scope-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({
+      data: { appId: app.id, userId: outsider.id, role: 'member' },
+    });
+
+    const locs = (await resolvers.Query.appNodes(
+      {}, { appRef: app.id }, { db, roles: ['READER'], userId: outsider.id } as Context,
+    )).map((n: { loc: string }) => n.loc);
+
+    // What the platform grants them elsewhere: the primary agent's memory…
+    expect(locs).toContain('org.test.node');
+    // …and the team space…
+    expect(locs).toContain('chats:team');
+    // …but NOT the second installed agent, which the MCP fold never grants.
+    expect(locs).not.toContain('secondary.node');
+
+    // And an ORG member's scope is untouched — they still see everything the
+    // resolver always showed them. Proving the spare, not just the fire.
+    const orgLocs = (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(orgLocs).toContain('secondary.node');
+  });
+
+  it("never serves ANOTHER user's personal memory through the fold (#1093 P1)", async () => {
+    // getAppMemoryAccess is the COARSE agent-derived map; MCP's point read
+    // adds a personal/private owner check on top. Returning the map's keys
+    // directly handed an external member another user's personal nodes — a
+    // cross-tenant read, which is never cosmetic here.
+    const { app } = await withTeamSpace('app-nodes-personal');
+    const victim = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771074,
+        githubUsername: `an-victim-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, userId: victim.id,
+        userMemoryOfAgentId: agentId, appId: app.id,
+        urn: `${orgId}:personal-${Date.now()}`, name: "victim's personal",
+        class: 'personal', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: personal.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: personal.id, loc: 'victim.secret',
+        isLink: false, name: 'secret', tags: [],
+      },
+    });
+
+    const outsider = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771075,
+        githubUsername: `an-peeker-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({
+      data: { appId: app.id, userId: outsider.id, role: 'member' },
+    });
+
+    const locs = (await resolvers.Query.appNodes(
+      {}, { appRef: app.id }, { db, roles: ['READER'], userId: outsider.id } as Context,
+    )).map((n: { loc: string }) => n.loc);
+    expect(locs).not.toContain('victim.secret');
+    // Still a participant for everything they ARE entitled to.
+    expect(locs).toContain('chats:team');
+
+    // The owner still reads their own — the spare, so the gate is an owner
+    // check and not a blanket exclusion of personal memories. The
+    // AgentSubscription is not decoration: `canReadMemory` requires an active
+    // one for an agent-scoped personal memory, and its absence is exactly the
+    // revocation case Codex named. Its presence here is what makes this a
+    // spare rather than a second fire.
+    await db.appMember.create({
+      data: { appId: app.id, userId: victim.id, role: 'member' },
+    });
+    await db.agentSubscription.create({
+      data: { userId: victim.id, agentId, activatedAt: new Date() },
+    });
+    const ownLocs = (await resolvers.Query.appNodes(
+      {}, { appRef: app.id }, { db, roles: ['READER'], userId: victim.id } as Context,
+    )).map((n: { loc: string }) => n.loc);
+    expect(ownLocs).toContain('victim.secret');
+  });
+
+  it('does not leak the SAME user\'s personal memory ACROSS Apps (#1093 P1)', async () => {
+    // Owner-only does not imply per-App. A personal memory is scoped by
+    // (app_id, user_id) — spec 008's whole point — and one Agent installed in
+    // two Apps carries BOTH Apps' personal memories in one global memoryItems
+    // fold. So the userId check alone lets a member read their OWN App-A
+    // personal nodes through appNodes(B). Not a cross-user leak; a cross-App
+    // one, and it is the isolation the two-layer model hangs on.
+    const { app: appB } = await withTeamSpace('app-nodes-cross-app-b');
+    const { app: appA } = await createDbAppWithKey(db, 'app-nodes-cross-app-a', orgId);
+    await db.appAgent.create({ data: { appId: appA.id, agentId } });
+
+    const user = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771077,
+        githubUsername: `an-two-apps-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    // Personal memory scoped to App A, owned by this user, on the shared agent.
+    const personalInA = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, userId: user.id,
+        userMemoryOfAgentId: agentId, appId: appA.id,
+        urn: `${orgId}:personal-a-${Date.now()}`, name: 'personal in A',
+        class: 'personal', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: personalInA.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: personalInA.id, loc: 'a.only',
+        isLink: false, name: 'A only', tags: [],
+      },
+    });
+
+    // The user participates in BOTH Apps — which is the ordinary case, not an
+    // exotic one (the seed's Juno fixture is exactly this shape).
+    await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'member' } });
+    await db.appMember.create({ data: { appId: appB.id, userId: user.id, role: 'member' } });
+    await db.agentSubscription.create({
+      data: { userId: user.id, agentId, activatedAt: new Date() },
+    });
+    const ctx = { db, roles: ['READER'], userId: user.id } as Context;
+
+    const inB = (await resolvers.Query.appNodes({}, { appRef: appB.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(inB).not.toContain('a.only');
+
+    // …and reading App A, the same user still gets it. The spare: this is
+    // per-App isolation, not a blanket exclusion of personal memories.
+    const inA = (await resolvers.Query.appNodes({}, { appRef: appA.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(inA).toContain('a.only');
+  });
+
+  it('honours subscription REVOCATION on a personal memory (#1093 P1, delegated)', async () => {
+    // The clause I would have missed a fifth time. `canReadMemory` requires an
+    // ACTIVE AgentSubscription for an agent-scoped personal memory, so
+    // revoking one removes access everywhere — and a hand-copied filter here
+    // would have restored it on this surface alone. This test exists to pin
+    // the DELEGATION: it fails the moment anyone reimplements the rule locally
+    // and forgets a clause, which is the failure this PR kept having.
+    const { app } = await withTeamSpace('app-nodes-revoked');
+    const owner = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771078,
+        githubUsername: `an-revoked-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, userId: owner.id,
+        userMemoryOfAgentId: agentId, appId: app.id,
+        urn: `${orgId}:revoked-${Date.now()}`, name: 'personal', class: 'personal',
+        acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: personal.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: personal.id, loc: 'mine.private',
+        isLink: false, name: 'private', tags: [],
+      },
+    });
+    await db.appMember.create({ data: { appId: app.id, userId: owner.id, role: 'member' } });
+    const ctx = { db, roles: ['READER'], userId: owner.id } as Context;
+
+    // Active subscription: their own memory is readable.
+    await db.agentSubscription.create({
+      data: { userId: owner.id, agentId, activatedAt: new Date() },
+    });
+    expect(
+      (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
+        (n: { loc: string }) => n.loc,
+      ),
+    ).toContain('mine.private');
+
+    // Revoked: gone here too, not just everywhere else.
+    await db.agentSubscription.update({
+      where: { userId_agentId: { userId: owner.id, agentId } },
+      data: { revokedAt: new Date() },
+    });
+    expect(
+      (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
+        (n: { loc: string }) => n.loc,
+      ),
+    ).not.toContain('mine.private');
+  });
+
+  it('does NOT let a retained AppMember row revive a soft-uninstalled App (#1093 P1)', async () => {
+    // resolveAppRef resolves a historical row by id deliberately, and an
+    // AppMember row survives uninstall — so the participant arm would hand a
+    // dead App's retained nodes to a member whose membership every active-App
+    // access map already excludes.
+    const { app } = await withTeamSpace('app-nodes-uninstalled');
+    const member = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771079,
+        githubUsername: `an-uninstalled-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    const ctx = { db, roles: ['READER'], userId: member.id } as Context;
+
+    // While live, they read it — so the refusal below is the uninstall and
+    // not some other denial.
+    expect(
+      (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
+        (n: { loc: string }) => n.loc,
+      ),
+    ).toContain('chats:team');
+
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    await expect(resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).rejects.toThrow();
+
+    // …and an ORG caller still reads the retired App's retained nodes, which
+    // is existing behaviour this arm must not have changed.
+    expect(
+      (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).map(
+        (n: { loc: string }) => n.loc,
+      ),
+    ).toContain('chats:team');
+  });
+
+  it("does not bleed App A's app-scoped knowledge into appNodes(B) (#1093 P1)", async () => {
+    // One Agent installed in two Apps carries BOTH Apps' app-scoped memories
+    // in its global memoryItems, so the fold for B contains A's — and
+    // canReadMemory enforces appId for personal/private rows only, admitting
+    // an app-class KNOWLEDGE memory of A on its non-personal branch.
+    const { app: appB } = await withTeamSpace('app-nodes-knowledge-b');
+    const { app: appA } = await createDbAppWithKey(db, 'app-nodes-knowledge-a', orgId);
+    await db.appAgent.create({ data: { appId: appA.id, agentId } });
+    const knowledgeInA = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, appId: appA.id,
+        urn: `${orgId}:knowledge-a-${Date.now()}`, name: 'A internal',
+        class: 'app', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: knowledgeInA.id, loc: 'a.internal',
+        isLink: false, name: 'A internal', tags: [],
+      },
+    });
+
+    const memberOfB = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771080,
+        githubUsername: `an-b-only-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({ data: { appId: appB.id, userId: memberOfB.id, role: 'member' } });
+    const ctx = { db, roles: ['READER'], userId: memberOfB.id } as Context;
+
+    const locs = (await resolvers.Query.appNodes({}, { appRef: appB.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(locs).not.toContain('a.internal');
+    // Still gets what App B is: its own team space.
+    expect(locs).toContain('chats:team');
+  });
+
+  it('does NOT admit an impersonated session through the participant arm (#876 class)', async () => {
+    // isAppParticipant guards impersonation on its OWNER branch and not on its
+    // AppMember branch, so an impersonated session whose TARGET is an
+    // AppMember would be admitted here — bypassing the shared-org bound the
+    // impersonation session exists to enforce (PR #1093 review, Codex P1).
+    const { app } = await withTeamSpace('app-nodes-impersonation');
+    const target = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771076,
+        githubUsername: `an-target-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({
+      data: { appId: app.id, userId: target.id, role: 'member' },
+    });
+    // ctx.userId IS the target (that is the shape that fails open), with an
+    // impersonation marker naming an unrelated org.
+    const ctx = {
+      db, roles: ['READER'], userId: target.id,
+      impersonation: { orgId: generateId() },
+    } as unknown as Context;
+
+    await expect(resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).rejects.toThrow();
+  });
+
+  it('still refuses someone who is neither a participant nor an org member', async () => {
+    // The spare, not just the fire: the participant arm must not have turned
+    // the gate into "any authenticated reader".
+    const { app } = await withTeamSpace('app-nodes-stranger');
+    const stranger = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771071,
+        githubUsername: `an-stranger-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    const ctx = { db, roles: ['READER'], userId: stranger.id } as Context;
+    await expect(
+      resolvers.Query.appNodes({}, { appRef: app.id }, ctx),
+    ).rejects.toThrow();
+  });
 
   it("includes the App's own team space for a participant", async () => {
     const { app } = await withTeamSpace('app-team-space');

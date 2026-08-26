@@ -67,6 +67,8 @@ import {
   isMemoryReadableCached,
   loadMemoryUrn,
 } from './resolvers.helpers.js';
+import { getAppMemoryAccess, canReadMemory, getMemoryAccess } from '../../../mcp/access-control.js';
+import { type AuthContext } from '../../../middleware/auth.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
   recordNodeRead,
@@ -1804,10 +1806,67 @@ export const nodeQueries = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      // Org-scoped auth: anyone with org membership at READER+ on the App's
-      // org may read its accessible nodes; platform ADMIN/OWNER bypasses.
+      // Auth: an App PARTICIPANT, or org membership at READER+ on the App's
+      // org; platform ADMIN/OWNER bypasses.
+      //
+      // #1070 — the participant arm closes a drift, and it is worth being
+      // precise that it is a drift rather than a widening. This gate used to be
+      // `requireOwnerOrOrgRole` alone, which admits org members and the App's
+      // owner but NOT an AppMember with no role in the owning org — the
+      // external / B2C participant shape. `isAppParticipant`
+      // (`cor:agt:020:00` §3) does admit them, and so does the MCP access map:
+      // `getMemoryAccess` folds the App's installed-agent memories
+      // (systemMemoryId READ_ONLY + memoryItems) and its team space for exactly
+      // this principal (`mcp/access-control.ts`, #1003).
+      //
+      // So the same person, in the same App, could read this material through
+      // MCP and got FORBIDDEN here — which is the `effectiveAccess` tell for a
+      // hand-rolled gate falling out of sync with the shared predicate (#362).
+      // Admitting them grants nothing the platform does not already grant them;
+      // it stops two surfaces disagreeing about one question.
+      //
+      // Deliberately additive: the org-READER arm is unchanged, so a reader who
+      // is not a participant keeps exactly today's results — including NOT the
+      // team space, which stays behind its own `isAppParticipant` check below.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) {
+      // Resolved ONCE: the gate here and the team-space scope below ask the
+      // same question, and two calls would be two identical queries per read.
+      // NEVER under impersonation (PR #1093 review, Codex P1 — the #876 class,
+      // fifth instance). `isAppParticipant` guards impersonation on its OWNER
+      // branch and not on its AppMember branch, so an impersonated session
+      // whose TARGET is an AppMember of an App outside the shared org would be
+      // admitted by this arm — the org bound the impersonation session exists
+      // to enforce, bypassed by a predicate keyed on the target's identity.
+      // `canReadMemoryRecord` takes exactly this posture two hundred lines over
+      // ("Identity-scoped — never via impersonation"). Guarded here rather than
+      // in the shared predicate because changing that changes every caller;
+      // filed separately.
+      const participant = !ctx.impersonation && (await isAppParticipant(ctx, app));
+      // ADMISSION only, and the distinction is load-bearing. A soft-uninstalled
+      // App must not be revived by a retained `AppMember` row: `resolveAppRef`
+      // resolves the historical row by id on purpose, membership survives
+      // uninstall, and `resolveUserApps` excludes exactly those memberships
+      // from every active-App access map (PR #1093 review, Codex P1).
+      //
+      // But it must NOT also change what an ORG caller sees on a retired App —
+      // folding the lifecycle into `participant` itself took the team space
+      // away from them, which is existing behaviour and not this PR's to
+      // change. My own test caught that; the comment claiming the scope was
+      // untouched was written before the assertion that checked it.
+      const admitAsParticipant = participant && !app.uninstalledAt;
+      // Org authorization is tracked, not just enforced, because it decides the
+      // SCOPE below as well as admission (PR #1093 review, Codex P1).
+      //
+      // The BOOLEAN form, not try/catch around the throwing one (PR #1093
+      // review, Copilot). A catch wide enough to hold "Forbidden" also holds a
+      // DB error from inside the predicate, and swallowing that would silently
+      // downgrade an org member to the participant scope — a narrower answer
+      // returned as though it were the right one. `isOwnerOrOrgMember` is the
+      // same predicate `requireOwnerOrOrgRole` throws on, and it answers.
+      const orgAuthorized = !!isPlatformAdmin || (await isOwnerOrOrgMember(ctx, app));
+      if (!orgAuthorized && !admitAsParticipant) {
+        // Unchanged refusal, from the original predicate, for anyone who is
+        // neither — so the error a stranger sees is the one they saw before.
         await requireOwnerOrOrgRole(ctx, app, 'READER');
       }
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
@@ -1854,11 +1913,88 @@ export const nodeQueries = {
       // So the scope is principal-dependent, deliberately: an org reader keeps
       // exactly the results they get today, and a participant additionally sees
       // the space they are already entitled to read.
-      const teamSpaceIds = (await isAppParticipant(ctx, app))
+      const teamSpaceIds = participant
         ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
         : [];
 
-      const memoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds])];
+      // SCOPE, and this is the half the participant arm turns on (PR #1093
+      // review, Codex P1). My justification for admitting a participant was
+      // that MCP already grants them this material — and the agent walk above
+      // is BROADER than what MCP grants: `getAppMemoryAccess` reads only the
+      // PRIMARY live agent, filters soft-deleted memory items and memories, and
+      // requires an active AgentOrgGrant for a cross-org install. The walk
+      // above does none of those. So admitting a participant to it would hand
+      // them secondary agents, deleted items, and installs whose cross-org
+      // grant has LAPSED — none of which they can reach anywhere else, which
+      // makes it a widening after all, of exactly the kind #1070 warned that
+      // this resolver's scope invites.
+      //
+      // A participant who is not also org-authorized therefore gets the
+      // platform's own answer for their principal — the same fold MCP uses —
+      // rather than this resolver's historically wider walk. An org member's
+      // scope is untouched.
+      const memoryIds = orgAuthorized
+        ? [...new Set([...agentMemoryIds, ...teamSpaceIds])]
+        : await (async () => {
+            // DELEGATED, after four review rounds of hand-copying this
+            // predicate one clause at a time (PR #1093 — owner, then per-App,
+            // then the subscription gate, then the legacy agent-scoped shape).
+            // Each round I copied what I had read and shipped the rest as an
+            // assertion. That is the repo's FIRST authorization invariant
+            // arriving as a bill:
+            //
+            //   "Reuse the shared access gate; a bespoke per-resolver gate
+            //    drifts."
+            //
+            // — which I quoted at other people twice this week while
+            // reimplementing one. `canReadMemory` is the gate MCP's point read
+            // uses, and the App it is asked about is the App being queried, so
+            // the auth it wants is this caller in THIS App's scope. There is
+            // now no rule here to be a partial copy of.
+            const folded = [
+              ...(
+                await getAppMemoryAccess(ctx.db, resolvedAppId, {
+                  callerUserId: ctx.userId ?? null,
+                })
+              ).keys(),
+            ];
+            const scopedAuth = {
+              userId: ctx.userId,
+              appId: resolvedAppId,
+              roles: ctx.roles,
+            } as AuthContext;
+            // The access map ONCE for the whole page, not once per memory:
+            // `canReadMemory` ends in `getMemoryAccess`, which rebuilds the
+            // App's agent fold on every call (PR #1093 review, Codex P2 — the
+            // same N+1 this resolver's roster sibling was cured of twice).
+            const sharedAccess = await getMemoryAccess(ctx.db as never, scopedAuth);
+            const allowed = await Promise.all(
+              folded.map(async (id) =>
+                (await canReadMemory(ctx.db as never, scopedAuth, id, { access: sharedAccess }))
+                  ? id
+                  : null,
+              ),
+            );
+            const readable = allowed.filter((id): id is string => id !== null);
+
+            // THIS App's memories only (PR #1093 review, Codex P1). One Agent
+            // installed in two Apps carries BOTH Apps' app-scoped memories in
+            // its global `memoryItems`, so the fold for B contains A's — and
+            // `canReadMemory` enforces `appId` for personal/private rows only,
+            // admitting an app-class KNOWLEDGE memory of A on its non-personal
+            // branch. This is a SCOPE rule about what `appNodes(B)` means, not
+            // another copy of the access gate: the resolver's own contract is
+            // "the App's memories are the authoritative scope", and the fold
+            // does not honour it.
+            //
+            // The org path has the SAME bleed through the same fold and is
+            // untouched here — pre-existing, wider than this arm, and filed.
+            const scoped = await ctx.db.memory.findMany({
+              where: { id: { in: readable }, OR: [{ appId: null }, { appId: resolvedAppId }] },
+              select: { id: true },
+            });
+            return scoped.map((m) => m.id);
+          })();
       if (memoryIds.length === 0) return [];
 
       // #525 — optional node-level NodeFilter, pushed server-side so callers
