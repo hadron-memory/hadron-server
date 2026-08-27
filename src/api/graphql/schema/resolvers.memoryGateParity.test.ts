@@ -322,6 +322,132 @@ describe('#1092 memory read gates agree per principal shape', () => {
     expect(await enumerateGate(keyCtx, secret.id)).toBe(false);
   });
 
+  it('never lets the App fold carry a spec-047 USER-OWNED row to a co-member (PR #1102 review)', async () => {
+    // @codex P1 + @copilot, and both were right. The first strict-owner filter
+    // excluded only `personal`/`private` — but spec 047 adds a SECOND
+    // owner-only axis, `ownerUserId`, on ordinary classes. `canWriteToMemory`
+    // and `canReadMemory` both enforce it as a hard `auth.userId === ownerUserId`
+    // with no ADMIN, org or App path; my enumeration filter did not, so the
+    // parity this PR exists to create was broken again on the other axis.
+    //
+    // The reachable shape: `getPrimaryAgentAccess` excludes a user-owned row
+    // only when its owner differs from the APP's owner — it has no callerUserId
+    // check at all (unlike `getAppTeamSpaceAccess`, which grew one in #1004).
+    // So a user-owned App's own owner's memories fold in for EVERY member.
+    const appOwner = await makeUser(920005, 'parity-appowner');
+    const coMember = await makeUser(920006, 'parity-comember');
+    const ownedApp = await db.app.create({
+      data: {
+        id: generateId(),
+        name: 'parity-owned-app',
+        urn: `${appOwner}:parity-owned-app`,
+        ownerUserId: appOwner,
+      },
+    });
+    const ownedSystemMemory = await db.memory.create({
+      data: {
+        id: generateId(),
+        ownerUserId: appOwner,
+        urn: `${appOwner}:parity-owned-sys`,
+        name: 'parity-owned-sys',
+        class: 'system',
+      },
+    });
+    const ownedAgent = await db.agent.create({
+      data: {
+        id: generateId(),
+        ownerUserId: appOwner,
+        urn: `${appOwner}:parity-owned-agent`,
+        name: 'owned agent',
+        systemMemoryId: ownedSystemMemory.id,
+      },
+    });
+    await db.appAgent.create({ data: { appId: ownedApp.id, agentId: ownedAgent.id } });
+    await db.appMember.create({
+      data: { appId: ownedApp.id, userId: coMember, role: 'member' },
+    });
+
+    const coCtx = { db, roles: ['READER'], userId: coMember } as Context;
+    const coAuth = { userId: coMember, roles: ['READER'] } as AuthContext;
+    expect(await mcpGate(coAuth, ownedSystemMemory.id)).toBe(false);
+    expect(await enumerateGate(coCtx, ownedSystemMemory.id)).toBe(false);
+
+    // …and the OWNER still reaches their own row, so the filter narrows to the
+    // owner rather than to nobody. Without this the fix would pass by denying
+    // everyone, which is not what spec 047 says.
+    const ownerCtx = { db, roles: ['READER'], userId: appOwner } as Context;
+    const ownerAuth = { userId: appOwner, roles: ['READER'] } as AuthContext;
+    expect(await mcpGate(ownerAuth, ownedSystemMemory.id)).toBe(true);
+    expect(await enumerateGate(ownerCtx, ownedSystemMemory.id)).toBe(true);
+  });
+
+  it('does not bleed another App\'s app-scoped memory through a SHARED agent (#1097, PR #1102 review)', async () => {
+    // @copilot's second-round finding, and the sharper half is WHY it is mine:
+    // the bleed is pre-existing in `getAppMemoryAccess` (an Agent's `memoryItems`
+    // are global, so an Agent installed in A and B carries both Apps' app-scoped
+    // rows), and #1070 explicitly left it filed as #1097 rather than fixed. But
+    // this PR gives that fold a NEW audience — a plain user principal, who
+    // previously got no App fold at all — so it would have widened a known leak
+    // while claiming to close a drift.
+    //
+    // `appNodes` filters this downstream (resolvers.query.node.ts, "THIS App's
+    // memories only"). Filtering it in the SHARED predicate instead keeps both
+    // gates identical, which is this PR's entire thesis: fixing the bleed in
+    // GraphQL alone would have re-created a parity break in the act of closing
+    // one.
+    const otherApp = await db.app.create({
+      data: {
+        id: generateId(),
+        name: 'parity-other-app',
+        urn: `${fx.orgId}:parity-other-app`,
+        organizationId: fx.orgId,
+      },
+    });
+    // App-INTERNAL memory of the FIRST App (#653: an app-scoped knowledge row is
+    // reachable only through its own App's surface, never org-wide).
+    const appAInternal = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: fx.orgId,
+        appId: fx.appId,
+        urn: `${fx.orgId}:parity-a-internal`,
+        name: 'parity-a-internal',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    const sharedAgentId = (
+      await db.appAgent.findFirstOrThrow({ where: { appId: fx.appId }, select: { agentId: true } })
+    ).agentId;
+    await db.agentMemoryItem.create({
+      data: { agentId: sharedAgentId, memoryId: appAInternal.id, role: 'read' },
+    });
+    // The SAME agent installed into the second App — the whole mechanism.
+    await db.appAgent.create({ data: { appId: otherApp.id, agentId: sharedAgentId } });
+
+    const bOnlyMember = await makeUser(920007, 'parity-b-only');
+    await db.appMember.create({
+      data: { appId: otherApp.id, userId: bOnlyMember, role: 'member' },
+    });
+
+    const bCtx = { db, roles: ['READER'], userId: bOnlyMember } as Context;
+    const bAuth = { userId: bOnlyMember, roles: ['READER'] } as AuthContext;
+    expect(await mcpGate(bAuth, appAInternal.id)).toBe(false);
+    expect(await enumerateGate(bCtx, appAInternal.id)).toBe(false);
+
+    // A member of App A still reaches it — the scope rule narrows to the App
+    // whose fold is being built, not to nothing.
+    const aCtx = { db, roles: ['READER'], userId: externalMemberId } as Context;
+    const aAuth = { userId: externalMemberId, roles: ['READER'] } as AuthContext;
+    expect(await mcpGate(aAuth, appAInternal.id)).toBe(true);
+    expect(await enumerateGate(aCtx, appAInternal.id)).toBe(true);
+
+    // And a non-app-scoped memoryItem (appId NULL — an ordinary org knowledge
+    // memory the agent carries) stays reachable from BOTH Apps: the filter is
+    // about app-scoped rows, not about memoryItems in general.
+    expect(await enumerateGate(bCtx, fx.agentItemMemoryId)).toBe(true);
+  });
+
   describe('stranger (no org role, no App membership)', () => {
     const ctxOf = (): Context => ({ db, roles: ['READER'], userId: strangerId }) as Context;
     const authOf = (): AuthContext => ({ userId: strangerId, roles: ['READER'] }) as AuthContext;

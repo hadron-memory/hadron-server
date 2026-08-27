@@ -378,25 +378,31 @@ export async function getPrincipalAppMemoryAccess(
   db: PrismaClient,
   principal: { userId?: string | null; appId?: string | null; sessionId?: string | null },
 ): Promise<Map<string, string>> {
-  const access = new Map<string, string>();
+  const folds: Array<{ appId: string; map: Map<string, string> }> = [];
+
   if (principal.appId) {
     const sessionIsolated = Boolean(principal.sessionId) && !principal.userId;
-    for (const [memoryId, level] of await getAppMemoryAccess(db, principal.appId, {
-      includeTeamSpace: !sessionIsolated,
-      callerUserId: principal.userId ?? null,
-    })) {
-      access.set(memoryId, level);
-    }
-    return access;
+    folds.push({
+      appId: principal.appId,
+      map: await getAppMemoryAccess(db, principal.appId, {
+        includeTeamSpace: !sessionIsolated,
+        callerUserId: principal.userId ?? null,
+      }),
+    });
+  } else if (principal.userId) {
+    const apps = await resolveUserApps(principal.userId, db);
+    const maps = await Promise.all(
+      apps.map((app) => getAppMemoryAccess(db, app.id, { callerUserId: principal.userId })),
+    );
+    apps.forEach((app, i) => folds.push({ appId: app.id, map: maps[i] }));
   }
-  if (!principal.userId) return access;
 
-  const apps = await resolveUserApps(principal.userId, db);
-  const perAppMaps = await Promise.all(
-    apps.map((app) => getAppMemoryAccess(db, app.id, { callerUserId: principal.userId })),
-  );
-  for (const perApp of perAppMaps) {
-    for (const [memoryId, level] of perApp) {
+  const admitted = await admissibleFoldRows(db, principal.userId ?? null, folds);
+
+  const access = new Map<string, string>();
+  for (const { appId, map } of folds) {
+    for (const [memoryId, level] of map) {
+      if (!admitted.get(memoryId)?.has(appId)) continue;
       const existing = access.get(memoryId);
       // READ_WRITE wins over READ_ONLY when the same memory appears via
       // multiple App memberships (defensive — the data model makes this
@@ -408,6 +414,69 @@ export async function getPrincipalAppMemoryAccess(
     }
   }
   return access;
+}
+
+/**
+ * The two rules a folded row must satisfy to stay in a principal's App-derived
+ * reach — applied here, in the SHARED predicate, so both gates that consume it
+ * enforce them identically (PR #1102 review: @codex P1 + @copilot).
+ *
+ * Returns `memoryId → set of App ids that may contribute it`, resolved in ONE
+ * query for every fold rather than one per App.
+ *
+ * **1. App scope.** An Agent's `memoryItems` are GLOBAL to the Agent, so an
+ * Agent installed in Apps A and B carries BOTH Apps' app-scoped rows. Folding
+ * B's install therefore yielded A's App-internal memories, and a B-only member
+ * enumerated them. `appNodes` filters this downstream and says so
+ * (`resolvers.query.node.ts`, "THIS App's memories only"); doing it here instead
+ * means the MCP gate gets the same correction, rather than GraphQL alone —
+ * fixing it on one side would have re-created a parity break inside the change
+ * that exists to remove one. A row with `appId IS NULL` (an ordinary org
+ * knowledge memory the Agent carries) is App-agnostic and always admissible.
+ * This is the enumeration half of #1097.
+ *
+ * **2. Spec-047 strict ownership.** `ownerUserId` is a SECOND owner-only axis,
+ * orthogonal to `class`: `canReadMemory` and `canWriteToMemory` both enforce it
+ * as a bare `auth.userId === ownerUserId` with no ADMIN, org or App path. But
+ * `getPrimaryAgentAccess` drops a user-owned row only when its owner differs
+ * from the APP's owner — it takes no caller into account at all — so a
+ * user-owned App's OWNER's memories folded in for every member. An App-key
+ * principal (no `userId`) never matches an owner, and is denied by the point
+ * gates for exactly that reason, so it is denied here too.
+ *
+ * `personal`/`private` are deliberately NOT filtered here: the map's callers in
+ * this module strict-gate those classes above it, and `hadron_list_memories`
+ * folds the caller's own rows in separately. The GraphQL gate, which has no
+ * per-row check, applies that filter itself (`appDerivedMemoryIds`).
+ */
+async function admissibleFoldRows(
+  db: PrismaClient,
+  callerUserId: string | null,
+  folds: Array<{ appId: string; map: Map<string, string> }>,
+): Promise<Map<string, Set<string>>> {
+  const ids = [...new Set(folds.flatMap(({ map }) => [...map.keys()]))];
+  const admitted = new Map<string, Set<string>>();
+  if (ids.length === 0) return admitted;
+
+  const rows = await db.memory.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, appId: true, ownerUserId: true },
+  });
+  for (const row of rows) {
+    // Rule 2 — strict ownership admits the owner alone, nobody else, and no
+    // credential-only principal.
+    if (row.ownerUserId != null && row.ownerUserId !== callerUserId) continue;
+    // Rule 1 — an app-scoped row is contributed only by ITS App.
+    admitted.set(
+      row.id,
+      new Set(
+        row.appId == null
+          ? folds.map((f) => f.appId)
+          : folds.filter((f) => f.appId === row.appId).map((f) => f.appId),
+      ),
+    );
+  }
+  return admitted;
 }
 
 export async function getMemoryAccess(

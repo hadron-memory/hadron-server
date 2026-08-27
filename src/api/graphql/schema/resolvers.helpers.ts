@@ -1039,8 +1039,9 @@ export async function granteeShareAccess(
  * per request.
  *
  * Delegates the reach question to `getPrincipalAppMemoryAccess` — the one
- * predicate this and the MCP gate share — and adds the ONE thing that must not
- * be inherited from it: a **strict-owner filter**.
+ * predicate this and the MCP gate share, which enforces App scope and spec-047
+ * strict ownership for both — and adds the one rule that is genuinely local to
+ * THIS consumer: a **`personal`/`private` class filter**.
  *
  * That filter is not defensive decoration. The MCP map is documented
  * personal-free, but nothing enforces the claim: `addMemoryToAgent` rejects only
@@ -1054,6 +1055,14 @@ export async function granteeShareAccess(
  * The filter is also what keeps this gate's own contract: `getAccessibleMemoryIds`
  * admits personal/private ONLY through its identity-scoped clauses (owner,
  * holdings, share grantee). Nothing App-derived may add to that set.
+ *
+ * The **`ownerUserId`** axis deliberately lives upstream instead (PR #1102
+ * review). It is not a quirk of this consumer: `canReadMemory` and
+ * `canWriteToMemory` both enforce it, so a map carrying rows they hard-deny is
+ * wrong for every caller, not just this one. The rule of thumb the two placements
+ * encode — push a filter to the shared predicate when the other consumers also
+ * want it, keep it local only when it compensates for something local (here, the
+ * absence of a per-row check).
  */
 async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
   const all = await (ctx.appDerivedMemoryIdCache ??= (async () => {
