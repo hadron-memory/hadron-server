@@ -16,6 +16,18 @@
  * state the team space's audience as App PARTICIPATION and say nothing about
  * enumeration being narrower.
  *
+ * ONE PRINCIPAL SHAPE IS DELIBERATELY ABSENT, and saying so is the point of this
+ * paragraph — a table that claims to cover principal shapes must not omit one
+ * silently. A **MemoryShare grantee** is not here, because the two gates
+ * genuinely disagree for them and the disagreement is somebody else's, filed as
+ * **#849**: MCP's `canReadMemory` strict-owner branch tests `auth.userId !==
+ * memory.userId` and NEVER consults `MemoryShare`, while the GraphQL side
+ * honours shares through `granteeShareAccess` and `getAccessibleMemoryIds`'
+ * `sharedWithMe` clause. Adding the row would red on the MCP column for a reason
+ * this file is not the fix for. `resolvers.resolveUrn.test.ts` covers the
+ * grantee against the two GraphQL gates (#1104); when #849 lands, that shape
+ * belongs here.
+ *
  * NOTE the deliberate asymmetry in what is asserted: the record gate is allowed
  * to be BROADER than node content (an org member may open an app-scoped
  * memory's record without reading its nodes — `findings:record-vs-node-content-memory-gate`),

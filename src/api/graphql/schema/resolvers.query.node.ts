@@ -62,6 +62,7 @@ import {
   isAppParticipant,
   resolveAppTeamSpaceMemoryIds,
   isOwnerOrOrgMember,
+  canReadMemoryRecord,
   getAccessibleMemoryIds,
   memoryAccessFilter,
   isMemoryReadableCached,
@@ -338,12 +339,48 @@ export const nodeQueries = {
           } catch {
             return null;
           }
+          // #1104 — the RECORD gate, not the generic org/owner one this branch
+          // used to call, and not the node-content gate either. `resolveUrn`
+          // hands back a memory REFERENCE that the caller then opens as a
+          // record, so `findings:record-vs-node-content-memory-gate` picks the
+          // record gate — and using the same gate `Query.memory` uses is what
+          // makes a memory's two addresses agree by construction rather than by
+          // a second hand-rolled copy.
+          //
+          // `isOwnerOrOrgMember` is a generic org/owner predicate, and a memory
+          // is the one entity here whose access is CLASS-driven. It was wrong in
+          // BOTH directions, which is what a generic gate on a specific model
+          // looks like:
+          //   - too NARROW: it cannot see a MemoryShare, so a grantee who can
+          //     list the memory, open it by PK and read its nodes was refused at
+          //     `/app/u/<urn>` — the one address we ask people to hand around
+          //     (portal#630).
+          //   - too WIDE: with `ownerUserId` NULL it falls through to ORG
+          //     MEMBERSHIP, which no personal memory grants (`cor:acl:010:01`).
+          //     Any org member could resolve a colleague's org-owned personal
+          //     memory to its PK — not content, but a confirmation that it
+          //     exists, which is precisely what collapsing not-found and
+          //     no-access to null exists to prevent.
+          //
+          // `deletedAt` is checked here rather than left to the gate: a
+          // soft-deleted memory must resolve to null like a missing one.
           const memory = await ctx.db.memory.findUnique({
             where: { id },
-            select: { organizationId: true, ownerUserId: true },
+            select: {
+              id: true,
+              class: true,
+              userId: true,
+              ownerUserId: true,
+              organizationId: true,
+              appId: true,
+              // Load-bearing: `canReadMemoryRecord`'s share path reads it, and
+              // omitting it silently refuses every grantee.
+              userMemoryOfAgentId: true,
+              deletedAt: true,
+            },
           });
-          if (!memory) return null;
-          if (!(await isOwnerOrOrgMember(ctx, memory))) return null;
+          if (!memory || memory.deletedAt) return null;
+          if (!(await canReadMemoryRecord(ctx, memory))) return null;
           return { kind: 'memory', id };
         }
         case 'node': {
