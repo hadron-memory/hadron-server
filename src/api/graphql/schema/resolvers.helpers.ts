@@ -387,20 +387,37 @@ export async function resolveReadableMemoryId(
  */
 export async function canReadMemoryRecord(
   ctx: Context,
+  // EVERY field is required, and none of it is style (#1104, PR #1105 review —
+  // @copilot). This gate reads all of them, and an `undefined` from a narrowly
+  // `select`ed row does not fail loudly in any of the six cases — it changes the
+  // ANSWER, and in three of them it changes it OPEN:
+  //
+  //   - `ownerUserId` — `memory.ownerUserId != null` is LOOSE, so `undefined`
+  //     skips the spec-047 strict-owner branch entirely and falls through to
+  //     org membership: another user's user-owned memory, readable by any org
+  //     member. Fails OPEN.
+  //   - `organizationId` — `granteeShareAccess` compares it to `null` (so
+  //     `undefined` misses the free-standing short-circuit) and then hands it to
+  //     Prisma, which **silently drops an `undefined` where-filter**. The
+  //     org-membership check becomes "is this caller a member of ANY org", so a
+  //     share grantee outside the memory's org is admitted. Fails OPEN, and this
+  //     is the same Prisma behaviour `getOrgReadableMemoryIds` carries an
+  //     explicit guard against.
+  //   - `class` — decides which branch runs at all.
+  //   - `userMemoryOfAgentId` — `granteeShareAccess` reads it; `undefined !==
+  //     null` is true, so EVERY share grantee is silently refused. Fails closed.
+  //   - `userId` / `appId` — the owner and AppMember branches; both fail closed.
+  //
+  // Requiring them is what makes a wrong call a COMPILE error instead of a
+  // quiet re-answer, which is why `granteeShareAccess` below is now called
+  // without the `as never` that was hiding exactly this.
   memory: {
     id: string;
     class: string;
-    userId?: string | null;
-    ownerUserId?: string | null;
-    organizationId?: string | null;
-    appId?: string | null;
-    // REQUIRED, and required for a reason worth stating (#1104): the
-    // personal/private branch consults `granteeShareAccess`, which reads this
-    // column — so a caller passing a narrowly-`select`ed row leaves it
-    // `undefined`, `undefined !== null` is true, and EVERY share grantee is
-    // silently refused. Every existing caller happened to pass a whole row, so
-    // the hole was reachable only by the next one. Declared here (rather than
-    // left to the `as never` below) so that caller fails to compile instead.
+    userId: string | null;
+    ownerUserId: string | null;
+    organizationId: string | null;
+    appId: string | null;
     userMemoryOfAgentId: string | null;
   },
 ): Promise<boolean> {
@@ -410,7 +427,8 @@ export async function canReadMemoryRecord(
     // resources (the target-as-owner check below would otherwise admit them).
     if (ctx.impersonation) return false;
     if (ctx.userId && memory.userId === ctx.userId) return true;
-    if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory as never))) return true;
+    // No `as never`: the cast is what let a caller omit the fields this reads.
+    if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
     return false;
   }
   if (memory.ownerUserId != null) {

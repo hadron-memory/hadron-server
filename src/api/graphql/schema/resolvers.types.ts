@@ -1379,15 +1379,16 @@ export const typeResolvers = {
         class: string;
         visibility: string | null;
         appId: string | null;
-        userId?: string | null;
-        ownerUserId?: string | null;
-        organizationId?: string | null;
-        // #1104: `canReadMemoryRecord`'s share path reads this, so it is part
-        // of that gate's contract. Both load paths below use
-        // `include: { memory: true }`, so it is present at runtime and this is
-        // a declaration catching up with reality rather than a fix — but the
-        // omission is what would have made a future narrowing `select` refuse
-        // every share grantee silently, so it is required rather than optional.
+        // #1104 — all of these are `canReadMemoryRecord`'s contract, and it
+        // reads every one of them (see its header for what each `undefined`
+        // does; three of the six change the answer OPEN). Both load paths below
+        // use `include: { memory: true }`, so they are present at runtime and
+        // this is a declaration catching up with reality rather than a fix —
+        // the value is that a future narrowing `select` here now fails to
+        // compile rather than quietly re-answering an authorization question.
+        userId: string | null;
+        ownerUserId: string | null;
+        organizationId: string | null;
         userMemoryOfAgentId: string | null;
       };
       type Item = { memoryId: string; memory?: Mem | null };
