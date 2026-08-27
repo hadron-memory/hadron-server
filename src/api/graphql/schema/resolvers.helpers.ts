@@ -394,6 +394,14 @@ export async function canReadMemoryRecord(
     ownerUserId?: string | null;
     organizationId?: string | null;
     appId?: string | null;
+    // REQUIRED, and required for a reason worth stating (#1104): the
+    // personal/private branch consults `granteeShareAccess`, which reads this
+    // column — so a caller passing a narrowly-`select`ed row leaves it
+    // `undefined`, `undefined !== null` is true, and EVERY share grantee is
+    // silently refused. Every existing caller happened to pass a whole row, so
+    // the hole was reachable only by the next one. Declared here (rather than
+    // left to the `as never` below) so that caller fails to compile instead.
+    userMemoryOfAgentId: string | null;
   },
 ): Promise<boolean> {
   if (memory.class === 'personal' || memory.class === 'private') {

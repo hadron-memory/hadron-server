@@ -1382,6 +1382,13 @@ export const typeResolvers = {
         userId?: string | null;
         ownerUserId?: string | null;
         organizationId?: string | null;
+        // #1104: `canReadMemoryRecord`'s share path reads this, so it is part
+        // of that gate's contract. Both load paths below use
+        // `include: { memory: true }`, so it is present at runtime and this is
+        // a declaration catching up with reality rather than a fix — but the
+        // omission is what would have made a future narrowing `select` refuse
+        // every share grantee silently, so it is required rather than optional.
+        userMemoryOfAgentId: string | null;
       };
       type Item = { memoryId: string; memory?: Mem | null };
       const eager = a.memoryItems as Item[] | undefined;
