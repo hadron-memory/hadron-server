@@ -15,7 +15,7 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
-import { canWriteToMemory, getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { canWriteToMemory, getPrincipalAppMemoryAccess } from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
@@ -79,6 +79,12 @@ export interface Context {
   // response's edges overwhelmingly share a few endpoint memories, so each
   // distinct memory is checked once per request (see canReadMemoryCached).
   memoryReadCache?: Map<string, Promise<boolean>>;
+  // Request-scoped memo for the caller's APP-DERIVED memory ids (#1092). The
+  // fold costs several queries per App and the node gate runs on nearly every
+  // read surface, so it is computed at most once per request. Independent of
+  // any `onlyMemoryId` narrowing — the fold is the same set either way, and the
+  // scoping is applied to the result (see appDerivedMemoryIds).
+  appDerivedMemoryIdCache?: Promise<string[]>;
   // Request-scoped memo for Node.urn / Edge.urn composition (#481) — a list
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
@@ -1029,6 +1035,53 @@ export async function granteeShareAccess(
 }
 
 /**
+ * The caller's APP-DERIVED memory ids for the node-content gate (#1092), memoized
+ * per request.
+ *
+ * Delegates the reach question to `getPrincipalAppMemoryAccess` — the one
+ * predicate this and the MCP gate share, which enforces App scope and spec-047
+ * strict ownership for both — and adds the one rule that is genuinely local to
+ * THIS consumer: a **`personal`/`private` class filter**.
+ *
+ * That filter is not defensive decoration. The MCP map is documented
+ * personal-free, but nothing enforces the claim: `addMemoryToAgent` rejects only
+ * class `system`, so an org ADMIN can attach a `personal` memory as an agent
+ * memory item and it folds in (#1101). MCP survives that because `canReadMemory`
+ * strict-gates personal/private ABOVE the map; this gate has no such per-row
+ * check — its output becomes `memoryId IN (…)` directly. Inheriting an
+ * invariant that the upstream does not enforce is how a latent hole reaches a
+ * wider audience, and #1092 widens the audience.
+ *
+ * The filter is also what keeps this gate's own contract: `getAccessibleMemoryIds`
+ * admits personal/private ONLY through its identity-scoped clauses (owner,
+ * holdings, share grantee). Nothing App-derived may add to that set.
+ *
+ * The **`ownerUserId`** axis deliberately lives upstream instead (PR #1102
+ * review). It is not a quirk of this consumer: `canReadMemory` and
+ * `canWriteToMemory` both enforce it, so a map carrying rows they hard-deny is
+ * wrong for every caller, not just this one. The rule of thumb the two placements
+ * encode — push a filter to the shared predicate when the other consumers also
+ * want it, keep it local only when it compensates for something local (here, the
+ * absence of a per-row check).
+ */
+async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
+  const all = await (ctx.appDerivedMemoryIdCache ??= (async () => {
+    const folded = [...(await getPrincipalAppMemoryAccess(ctx.db, ctx)).keys()];
+    if (folded.length === 0) return [];
+    const rows = await ctx.db.memory.findMany({
+      where: {
+        id: { in: folded },
+        deletedAt: null,
+        class: { notIn: ['personal', 'private'] as never },
+      },
+      select: { id: true },
+    });
+    return rows.map((m: { id: string }) => m.id);
+  })());
+  return onlyMemoryId ? all.filter((id) => id === onlyMemoryId) : all;
+}
+
+/**
  * Returns the memory IDs accessible to the current caller, or null if the
  * caller has unrestricted access (global ADMIN/OWNER).
  *
@@ -1104,17 +1157,34 @@ export async function getAccessibleMemoryIds(
   // findNodes-backed search intersected to empty (hadron_find_nodes returned
   // "No nodes found" for all queries, survey mode included). One predicate,
   // shared — the sessionScopedMemoryIds lesson (#945) again.
-  if (ctx.appId) {
+  // #1092: this is a RETURN only for a principal whose entire reach IS the App
+  // — a pure App key, or an impersonated context (whose identity-scoped reach is
+  // deliberately dropped, #876 class, and whose behaviour this change leaves
+  // exactly as it was). A HYBRID user+selection caller — the shape every MCP
+  // tool builds once its user has an active App — falls THROUGH to the user
+  // branch, which unions this fold with the user's own reach.
+  //
+  // Returning here for a hybrid caller was a silent narrowing: an org member who
+  // selected an App lost their ORG memories from `findNodes`, while
+  // `hadron_get_node` on a node in one still succeeded (MCP's `getMemoryAccess`
+  // unions the App fold with `getOrgReadableMemoryIds`). A selection FOCUSES a
+  // request; it never narrows what its driver may read (`cor:acl:020:01`).
+  if (ctx.appId && (!ctx.userId || ctx.impersonation)) {
     // #1003: `callerUserId` gates only the App team-space fold — a user-owned
-    // App's team space is owner-only, and a HYBRID user+selection caller reaches
-    // this branch too (the session branch above catches only the pure App-key
-    // shape), so a co-member must not receive it. A pure App key passes null and
-    // acts for the App itself.
-    const access = await getAppMemoryAccess(ctx.db, ctx.appId, {
-      callerUserId: ctx.userId ?? null,
-    });
-    const ids = [...access.keys()];
-    return onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
+    // App's team space is owner-only, so a co-member must not receive it. A pure
+    // App key passes null and acts for the App itself.
+    //
+    // Routed through `appDerivedMemoryIds` (#1092) for its STRICT-OWNER filter,
+    // which this branch never had. Measured on the unmodified branch: an org
+    // ADMIN may attach a `personal` memory as an agent memory item
+    // (`addMemoryToAgent` rejects only class `system`), and this gate then
+    // returned it to a pure App key — while MCP's `canReadMemory` refused the
+    // same principal the same row. A pre-existing leak rather than one #1092
+    // introduced, closed here because it is the same fold three lines away and
+    // is now proven constructible. #1101 is the real fix — the ATTACH gate
+    // should refuse a strict-owner class; this is the read gate that must not
+    // depend on it having done so.
+    return appDerivedMemoryIds(ctx, onlyMemoryId);
   }
 
   // JWT user — org/public/subscription memories + owner-only personal/private
@@ -1177,6 +1247,32 @@ export async function getAccessibleMemoryIds(
     const accessibleIds = new Set(orgPublicIds);
     for (const g of ownAndHoldings as { id: string }[]) accessibleIds.add(g.id);
     for (const g of sharedWithMe as { id: string }[]) accessibleIds.add(g.id);
+    // #1092 — the APP-derived half, through the SAME predicate the MCP gate
+    // uses, for the same reason getOrgReadableMemoryIds is shared: the two
+    // surfaces answer one question and a second copy is how they drifted. This
+    // branch had no App arm at all, so an external AppMember (an AppMember with
+    // no org role — the supported B2C shape) was admitted to the App's memories
+    // by `Query.memory` (#982), by `appNodes` (#1070) and by MCP's point read,
+    // and got NOTHING from `findNodes` scoped to those same memories. Its
+    // user-visible face was `Edge.source`/`Edge.target` resolving to null for
+    // endpoints the same response had just authorized (PR #1093, Codex P2) —
+    // a rule that quietly nulls authorized data is not a narrower scope, it is
+    // a wrong answer.
+    //
+    // No new AUDIENCE is created here. `cor:acl:010:01` already states the
+    // team space's audience as App PARTICIPATION and names no narrower
+    // enumeration audience, so the absent branch was an incomplete
+    // implementation of a stated rule, not a decision to enumerate less. What
+    // changes is that material already readable BY URN becomes FINDABLE.
+    //
+    // Skipped when a SCOPED check has already admitted the target: the fold
+    // cannot change an answer that is already `true`, and skipping it keeps the
+    // common point-read (an org member reading their own org memory) at exactly
+    // its previous query cost. The fold is several queries per App and this gate
+    // runs on nearly every read surface, so the shortcut is worth stating.
+    if (!(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
+      for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
+    }
     return [...accessibleIds];
   }
 
