@@ -1392,8 +1392,21 @@ export const memoryMutations = {
       // MemoryShare is the supported way to give someone else a personal
       // memory, and it is per-user rather than per-audience.
       if (memory.class === 'personal' || memory.class === 'private') {
+        // Two messages, not one parameterized one (PR #1106 review, @copilot).
+        // The classes differ in the only respect the message is FOR — what the
+        // caller should do instead — so a shared sentence with a conditional
+        // tail told `private` to use a share that class cannot have.
+        //
+        // And `personal` is NOT "readable only by its owner": a MemoryShare
+        // grantee reads it, which is the whole subject of #1104/#1105, merged a
+        // day before this line was written. `cor:acl:010:01`'s shorthand is
+        // "owner-only" because it is contrasting with org-wide audiences; in an
+        // error message aimed at someone choosing their next action, that
+        // shorthand is simply wrong.
         throw new GraphQLError(
-          `A ${memory.class}-class memory is readable only by its owner and cannot be attached to an agent. Share it with a specific person instead (createMemoryShare); ${memory.class === 'private' ? 'private memories are never shareable' : 'a share grants one named user, not the agent’s whole audience'}.`,
+          memory.class === 'private'
+            ? 'A private-class memory is readable only by its owner and cannot be attached to an agent, which would grant the agent’s whole audience. Private memories are never shareable — if this content needs another reader, it belongs in a personal-class memory, which can be shared with a named person via createMemoryShare.'
+            : 'A personal-class memory is readable by its owner and by anyone they have shared it with, and cannot be attached to an agent — an attach grants the agent’s whole audience, which is not a set this class has. Use createMemoryShare to grant a specific person instead.',
           {
             extensions: {
               code: 'UNSUPPORTED_MEMORY_CLASS',

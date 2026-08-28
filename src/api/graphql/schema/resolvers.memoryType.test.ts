@@ -507,7 +507,24 @@ describe('AGENT_SYSTEM memory guards', () => {
           { agentRef: agent.id, memoryRef: secret.id, role: 'read' },
           adminCtx(),
         ),
-      ).rejects.toThrow(/strict-owner|personal|private/i);
+      ).rejects.toThrow(new RegExp(`${klass}-class memory`, 'i'));
+
+      // The remedy must be ACTIONABLE for this class, not merely present
+      // (PR #1106 review, @copilot): a shared message with a conditional tail
+      // told `private` to use a share that class cannot have, and described
+      // `personal` as owner-only when a MemoryShare grantee reads it — the
+      // subject of #1104, merged the day before.
+      const err = await resolvers.Mutation
+        .addMemoryToAgent({}, { agentRef: agent.id, memoryRef: secret.id, role: 'read' }, adminCtx())
+        .catch((e: Error) => e);
+      const message = (err as Error).message;
+      if (klass === 'private') {
+        expect(message).toMatch(/never shareable/i);
+        expect(message).not.toMatch(/readable by its owner and by anyone/i);
+      } else {
+        expect(message).toMatch(/anyone they have shared it with/i);
+        expect(message).toMatch(/createMemoryShare/);
+      }
 
       // …and nothing was written: a refusal that half-applies is worse than none.
       const items = await db.agentMemoryItem.findMany({ where: { agentId: agent.id } });
