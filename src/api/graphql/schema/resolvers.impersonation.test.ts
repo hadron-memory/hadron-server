@@ -674,6 +674,53 @@ describe('#1094 — isAppParticipant is bounded to the shared org under imperson
     expect(await isAppParticipant(impCtx, userOwnedApp)).toBe(false);
   });
 
+  it('appNodes gives a support session the IN-SCOPE team space, and not the out-of-scope one', async () => {
+    // PR #1107 review, @codex P2. Fixing the predicate made a caller-level veto
+    // obsolete: `appNodes` set `participant = !ctx.impersonation && …` as a #1093
+    // stopgap, which denied the arm for IN-SCOPE sessions too — a support
+    // session lost the team chat, worklog and epics of an App inside the very
+    // org it was scoped to, while the dedicated surfaces admitted them.
+    //
+    // This asserts the pair, because removing a veto is only correct if the
+    // thing underneath it still refuses: in-scope team space visible,
+    // out-of-scope App refused outright.
+    const mkTeamSpace = async (app: { id: string }, orgId: string, slug: string) => {
+      // `sharedMemoryOfAgentId` is what makes this row RECOGNISABLE as the
+      // App's team space (the #723 "adopted" key). Without it
+      // resolveAppTeamSpaceMemoryIds falls through to the legacy arm, which
+      // recognises a row by its URN shape — so a plainly-named fixture is not a
+      // team space at all, and the assertion below would have failed for a
+      // reason that has nothing to do with impersonation.
+      const agent = await db.agent.create({
+        data: { id: generateId(), organizationId: orgId, urn: `${slug}:ag-${generateId().slice(-6)}`, name: 'ag' } as never,
+      });
+      const mem = await db.memory.create({
+        data: {
+          id: generateId(), organizationId: orgId, appId: app.id,
+          sharedMemoryOfAgentId: agent.id,
+          urn: `${slug}:team`, name: `${slug}-team`, class: 'app',
+        } as never,
+      });
+      await db.node.create({
+        data: { id: generateId(), memoryId: mem.id, loc: `chats:team`, name: 'team chat', tags: [] },
+      });
+      return mem;
+    };
+    await mkTeamSpace(appInSharedOrg, orgA.id, 'imp-org-a');
+    await mkTeamSpace(appInOtherOrg, orgB.id, 'imp-org-b');
+
+    const appNodes = resolvers.Query.appNodes as (
+      p: unknown, a: { appRef: string }, c: Context,
+    ) => Promise<{ loc: string }[]>;
+
+    const inScope = await appNodes({}, { appRef: appInSharedOrg.id }, impCtx);
+    expect(inScope.map((n) => n.loc)).toContain('chats:team');
+
+    // The out-of-scope App is refused entirely — the org bound, not merely a
+    // narrower scope.
+    await expect(appNodes({}, { appRef: appInOtherOrg.id }, impCtx)).rejects.toThrow();
+  });
+
   it('the bound is impersonation-specific: mike himself is still a participant everywhere', async () => {
     // Without this, a fix that simply denied the AppMember arm would pass every
     // assertion above while breaking ordinary participation.

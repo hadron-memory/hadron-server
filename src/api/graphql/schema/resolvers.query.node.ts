@@ -1868,17 +1868,21 @@ export const nodeQueries = {
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       // Resolved ONCE: the gate here and the team-space scope below ask the
       // same question, and two calls would be two identical queries per read.
-      // NEVER under impersonation (PR #1093 review, Codex P1 — the #876 class,
-      // fifth instance). `isAppParticipant` guards impersonation on its OWNER
-      // branch and not on its AppMember branch, so an impersonated session
-      // whose TARGET is an AppMember of an App outside the shared org would be
-      // admitted by this arm — the org bound the impersonation session exists
-      // to enforce, bypassed by a predicate keyed on the target's identity.
-      // `canReadMemoryRecord` takes exactly this posture two hundred lines over
-      // ("Identity-scoped — never via impersonation"). Guarded here rather than
-      // in the shared predicate because changing that changes every caller;
-      // filed separately.
-      const participant = !ctx.impersonation && (await isAppParticipant(ctx, app));
+      //
+      // #1094 REMOVED a `!ctx.impersonation &&` veto that used to sit here. It
+      // was a deliberate stopgap from PR #1093 (Codex P1): `isAppParticipant`
+      // guarded impersonation on its owner branch and not its AppMember branch,
+      // so this caller vetoed the whole arm rather than change a shared
+      // predicate mid-PR — and said so, "filed separately". That filing was
+      // #1094, and the predicate is now bounded to the session's shared org.
+      //
+      // Keeping the veto would not be defence in depth, it would be a WRONG
+      // ANSWER: it denies the arm for in-scope sessions too, so a support
+      // session lost the team chat, worklog and epics of an App inside the very
+      // org it was scoped to — while the dedicated surfaces admitted them. A
+      // second copy of a rule that has since been fixed properly one level down
+      // is exactly the stale-mechanism shape this repo keeps finding.
+      const participant = await isAppParticipant(ctx, app);
       // ADMISSION only, and the distinction is load-bearing. A soft-uninstalled
       // App must not be revived by a retained `AppMember` row: `resolveAppRef`
       // resolves the historical row by id on purpose, membership survives
