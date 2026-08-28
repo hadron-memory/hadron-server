@@ -1403,10 +1403,18 @@ export const memoryMutations = {
         // "owner-only" because it is contrasting with org-wide audiences; in an
         // error message aimed at someone choosing their next action, that
         // shorthand is simply wrong.
+        // The remedy is addressed to the OWNER, not to the caller (PR #1106
+        // review, @codex P2). The principal who reaches this refusal is an org
+        // ADMIN — and `createMemoryShare` gates on `isMemorySharePrincipal`,
+        // which is a bare `memory.userId === ctx.userId` with no admin path. So
+        // "use createMemoryShare" sent an authorized agent administrator into a
+        // guaranteed FORBIDDEN: two correct gates composing into a dead end,
+        // which is only visible if you check that the ACTOR the message speaks
+        // to can perform the act it names.
         throw new GraphQLError(
           memory.class === 'private'
-            ? 'A private-class memory is readable only by its owner and cannot be attached to an agent, which would grant the agent’s whole audience. Private memories are never shareable — if this content needs another reader, it belongs in a personal-class memory, which can be shared with a named person via createMemoryShare.'
-            : 'A personal-class memory is readable by its owner and by anyone they have shared it with, and cannot be attached to an agent — an attach grants the agent’s whole audience, which is not a set this class has. Use createMemoryShare to grant a specific person instead.',
+            ? 'A private-class memory cannot be attached to an agent, which would grant the agent’s whole audience. Private memories are readable by their owner alone and are never shareable — not even by that owner. If this content needs to reach an agent, it has to live in a memory whose class has an audience.'
+            : 'A personal-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, which is not a set this class has. Its owner (and anyone they have already shared it with) can read it, and only the OWNER can grant further access, one named person at a time, via createMemoryShare. If you are not the owner, ask them.',
           {
             extensions: {
               code: 'UNSUPPORTED_MEMORY_CLASS',

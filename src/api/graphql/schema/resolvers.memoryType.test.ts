@@ -520,10 +520,24 @@ describe('AGENT_SYSTEM memory guards', () => {
       const message = (err as Error).message;
       if (klass === 'private') {
         expect(message).toMatch(/never shareable/i);
-        expect(message).not.toMatch(/readable by its owner and by anyone/i);
+        // Must NOT point at a share: this class has no such path, for anyone.
+        expect(message).not.toMatch(/createMemoryShare/);
       } else {
-        expect(message).toMatch(/anyone they have shared it with/i);
+        // Substance, not phrasing: the message must not repeat cor:acl:010:01's
+        // "owner-only" shorthand, because a MemoryShare grantee reads this class
+        // (#1104). Matching the claim rather than a sentence keeps the assertion
+        // from breaking on a reword — which it just did.
+        expect(message).toMatch(/shared it with/i);
+        expect(message).not.toMatch(/readable only by its owner/i);
         expect(message).toMatch(/createMemoryShare/);
+        // The remedy must name the ACTOR who can perform it (#1106 review,
+        // @codex P2). `createMemoryShare` gates on `isMemorySharePrincipal` —
+        // a bare owner check with no admin path — so telling the org ADMIN who
+        // reaches this refusal to "use createMemoryShare" sent them into a
+        // guaranteed FORBIDDEN. Two correct gates composing into a dead end,
+        // catchable only by asking whether the actor the message ADDRESSES can
+        // do the thing it names.
+        expect(message).toMatch(/only the OWNER|ask them/i);
       }
 
       // …and nothing was written: a refusal that half-applies is worse than none.
