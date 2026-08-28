@@ -60,7 +60,20 @@ describe('updateAgent → PUBLIC', () => {
     const personal = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:mine`, name: 'mine', class: 'personal', userId: admin.id },
     });
-    await M.addMemoryToAgent({}, { agentRef: agent.id, memoryRef: personal.id }, ctx());
+    // The LINK is now built directly rather than through addMemoryToAgent,
+    // which refuses a strict-owner class as of #1101 (an attach is a grant to
+    // an audience, and personal/private have exactly one legitimate reader).
+    //
+    // The property under test is UNCHANGED and still worth pinning: the covered
+    // set excludes personal/private, so such a link does not block PUBLIC. That
+    // arm of `cor:acl:080:03` is now reachable only by rows attached BEFORE the
+    // refusal existed — which is precisely why it must keep working, and why
+    // this test builds the row the way those rows exist rather than deleting
+    // the case. See #1101 for the open question of whether the spec's wording
+    // should say "legacy" here.
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId: agent.id, memoryId: personal.id, role: 'read' },
+    });
     expect((await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
   });
 });
