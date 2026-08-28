@@ -1078,13 +1078,23 @@ export async function granteeShareAccess(
  * THIS consumer: a **`personal`/`private` class filter**.
  *
  * That filter is not defensive decoration. The MCP map is documented
- * personal-free, but nothing enforces the claim: `addMemoryToAgent` rejects only
- * class `system`, so an org ADMIN can attach a `personal` memory as an agent
- * memory item and it folds in (#1101). MCP survives that because `canReadMemory`
- * strict-gates personal/private ABOVE the map; this gate has no such per-row
- * check — its output becomes `memoryId IN (…)` directly. Inheriting an
- * invariant that the upstream does not enforce is how a latent hole reaches a
- * wider audience, and #1092 widens the audience.
+ * personal-free, and when #1092 shipped NOTHING enforced the claim:
+ * `addMemoryToAgent` rejected only class `system`, so an org ADMIN could attach
+ * a `personal` memory as an agent memory item and it folded in. MCP survived
+ * that because `canReadMemory` strict-gates personal/private ABOVE the map;
+ * this gate has no such per-row check — its output becomes `memoryId IN (…)`
+ * directly. Inheriting an invariant that the upstream does not enforce is how a
+ * latent hole reaches a wider audience, and #1092 widened the audience.
+ *
+ * **#1101 has since closed that front door** — the attach gate now refuses
+ * strict-owner classes outright. This filter STAYS anyway, and deliberately:
+ *   - rows attached BEFORE that refusal existed are unaffected by it;
+ *   - a read gate that depends on a write gate having done its job is one
+ *     refactor away from being wrong, and this one guards a cross-tenant leak
+ *     with five instances in three months behind it (#362 class);
+ *   - it is one indexed predicate on a query this function already makes.
+ * So do not delete it as now-redundant: "the writer prevents it" is an argument
+ * about today's writers, and `AgentMemoryItem` gains one every few months.
  *
  * The filter is also what keeps this gate's own contract: `getAccessibleMemoryIds`
  * admits personal/private ONLY through its identity-scoped clauses (owner,

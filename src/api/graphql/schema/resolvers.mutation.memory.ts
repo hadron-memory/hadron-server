@@ -1373,6 +1373,36 @@ export const memoryMutations = {
       if (memory.class === 'system') {
         throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
       }
+      // #1101 — strict-owner classes are not attachable, for a different reason
+      // than `system` above. `AgentMemoryItem` is a fold INPUT: an attached
+      // memory lands in `getAppMemoryAccess`, which the MCP access map and the
+      // GraphQL enumeration gate (#1092) both build on, and which is DOCUMENTED
+      // personal-free with `getAccessibleMemoryIds` consumers told to rely on
+      // it. Nothing enforced that. Measured before this gate existed: a pure
+      // App key's accessible set returned another user's personal memory, while
+      // MCP's `canReadMemory` refused the same principal the same row.
+      //
+      // The deeper reason it cannot be right is that an attach is a GRANT to an
+      // audience, and these two classes HAVE no audience beyond their owner
+      // (`cor:acl:010:01`/`:02` — not even a platform ADMIN). So the org ADMIN
+      // authorized to run this mutation is, by construction, granting reach over
+      // a memory they may not themselves read. There is no correct role for it,
+      // which is why this is a refusal rather than a stricter permission.
+      //
+      // MemoryShare is the supported way to give someone else a personal
+      // memory, and it is per-user rather than per-audience.
+      if (memory.class === 'personal' || memory.class === 'private') {
+        throw new GraphQLError(
+          `A ${memory.class}-class memory is readable only by its owner and cannot be attached to an agent. Share it with a specific person instead (createMemoryShare); ${memory.class === 'private' ? 'private memories are never shareable' : 'a share grants one named user, not the agent’s whole audience'}.`,
+          {
+            extensions: {
+              code: 'UNSUPPORTED_MEMORY_CLASS',
+              memoryId: resolvedMemoryId,
+              memoryClass: memory.class,
+            },
+          },
+        );
+      }
       // cor:acl:080:03 — a PUBLIC agent may reference only PUBLIC knowledge:
       // reject linking a covered (non-per-user, non-app-scoped), non-PUBLIC
       // memory to a PUBLIC agent.
