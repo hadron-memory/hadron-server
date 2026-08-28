@@ -523,13 +523,17 @@ describe('AGENT_SYSTEM memory guards', () => {
         // Must NOT point at a share: this class has no such path, for anyone.
         expect(message).not.toMatch(/createMemoryShare/);
       } else {
-        // Substance, not phrasing: the message must not repeat cor:acl:010:01's
-        // "owner-only" shorthand, because a MemoryShare grantee reads this class
-        // (#1104). Matching the claim rather than a sentence keeps the assertion
-        // from breaking on a reword — which it just did.
-        expect(message).toMatch(/shared it with/i);
-        expect(message).not.toMatch(/readable only by its owner/i);
         expect(message).toMatch(/createMemoryShare/);
+        // It must NOT describe the read audience at all. Three review rounds
+        // produced three different wrong descriptions of it — "owner only"
+        // ignores share grantees (#1104), and "owner plus grantees" is false
+        // for an AGENT-SCOPED personal row, where the share is excluded outright
+        // and an active AgentSubscription is additionally required. The refusal
+        // rests on "this class has no audience to grant to", which needs no
+        // claim about who currently reads it. Assert the ABSENCE, so the next
+        // person to helpfully add one reds here.
+        expect(message).not.toMatch(/readable (only )?by/i);
+        expect(message).toMatch(/no audience to grant/i);
         // The remedy must name the ACTOR who can perform it (#1106 review,
         // @codex P2). `createMemoryShare` gates on `isMemorySharePrincipal` —
         // a bare owner check with no admin path — so telling the org ADMIN who

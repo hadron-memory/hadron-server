@@ -1411,10 +1411,32 @@ export const memoryMutations = {
         // guaranteed FORBIDDEN: two correct gates composing into a dead end,
         // which is only visible if you check that the ACTOR the message speaks
         // to can perform the act it names.
+        // THIS MESSAGE DELIBERATELY DOES NOT DESCRIBE WHO CAN READ THE MEMORY,
+        // and that is the third round of review talking (PR #1106: @copilot,
+        // then @codex ×2). Every attempt to state the read audience was wrong
+        // in a new way — "owner only" ignores share grantees (#1104); "owner
+        // and anyone they shared with" is false for an AGENT-SCOPED personal
+        // row, where `granteeShareAccess` excludes the share outright and
+        // `resolveMemoryAuthorization` additionally demands an active
+        // AgentSubscription. Three wordings, three wrong claims.
+        //
+        // The refusal never needed any of them. It rests on one property —
+        // this class has no AUDIENCE to grant to — which is true of every row
+        // in both classes and cannot rot. Stating the read set was a second
+        // claim the rule does not need, from a surface the rule does not
+        // govern; the same discipline `cor:urn:010:04` records for specs.
+        //
+        // What the message DOES owe the caller is the actor: access is the
+        // owner's to give and not an administrator's, so a non-owner is told to
+        // ask rather than sent to a mutation that will refuse them (@codex P2 —
+        // `isMemorySharePrincipal` is a bare owner check). Note it names
+        // createMemoryShare as the MECHANISM and the owner as the only caller,
+        // without claiming a share is by itself SUFFICIENT — for an
+        // agent-scoped row it is not.
         throw new GraphQLError(
           memory.class === 'private'
-            ? 'A private-class memory cannot be attached to an agent, which would grant the agent’s whole audience. Private memories are readable by their owner alone and are never shareable — not even by that owner. If this content needs to reach an agent, it has to live in a memory whose class has an audience.'
-            : 'A personal-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, which is not a set this class has. Its owner (and anyone they have already shared it with) can read it, and only the OWNER can grant further access, one named person at a time, via createMemoryShare. If you are not the owner, ask them.',
+            ? 'A private-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Private memories are never shareable either, not even by their owner. If this content needs to reach an agent, it has to live in a memory whose class has readers.'
+            : 'A personal-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Giving another person access is the owner’s to do, not an administrator’s: createMemoryShare is the mechanism and only the owner may call it, so if you are not the owner, ask them.',
           {
             extensions: {
               code: 'UNSUPPORTED_MEMORY_CLASS',
