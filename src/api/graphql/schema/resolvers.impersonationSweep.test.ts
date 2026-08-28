@@ -17,6 +17,18 @@
  * This cannot prove the guard is in the RIGHT place — only that the module's
  * author considered impersonation at all. The per-surface assertions in
  * resolvers.impersonation.test.ts are the real behavioural proof.
+ *
+ * KNOWN BLIND SPOT, stated because this file otherwise reads as broader
+ * coverage than it has (#1094). A SHARED PREDICATE in a module that already
+ * mentions `ctx.impersonation` is invisible here: `resolvers.helpers.ts`
+ * mentions it a dozen times, so `isAppParticipant` shipped with an unguarded
+ * AppMember arm and this sweep stayed green — the fifth #876 instance, and the
+ * first inside a predicate rather than a resolver. Making the check line-level
+ * would catch it and is exactly the brittleness rejected above, so the coverage
+ * for that class is behavioural instead: a case per PREDICATE in
+ * resolvers.impersonation.test.ts (see the #1094 block), not per module.
+ * When you add a shared authorization predicate, that is where it belongs —
+ * a green run here says nothing about it.
  */
 
 import { describe, it, expect } from 'vitest';

@@ -23,7 +23,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolveAuthContext, type AuthContext } from '../../../middleware/auth.js';
 import { resolvers } from './resolvers.js';
-import { type Context, requireOrgRole, requireEmailConnection } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, requireEmailConnection, isAppParticipant } from './resolvers.helpers.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { impersonationReadOnlyPlugin } from '../impersonationReadOnlyPlugin.js';
 
@@ -623,6 +623,67 @@ describe('org-scope: the impersonated context sees only the shared org', () => {
 // the class sweep. Each of these resolvers authorizes on ctx.userId as an
 // identity/owner and was never reached by the org-scope narrowing; because
 // the read-only plugin only inspects MUTATIONS, none were intercepted.
+describe('#1094 — isAppParticipant is bounded to the shared org under impersonation', () => {
+  // A case per PREDICATE, not per surface. `impersonationSweep.test.ts` has a
+  // case per resolver module and did not catch this arm, because the gap was
+  // inside a SHARED predicate that several surfaces reach through — the
+  // fifth instance of the #876 class, in a predicate written after that sweep.
+  let appInSharedOrg: { id: string; organizationId: string | null; ownerUserId: string | null };
+  let appInOtherOrg: { id: string; organizationId: string | null; ownerUserId: string | null };
+  let userOwnedApp: { id: string; organizationId: string | null; ownerUserId: string | null };
+  let impCtx: Context;
+
+  beforeEach(async () => {
+    const mkApp = (data: Record<string, unknown>) =>
+      db.app.create({ data: { id: generateId(), name: 'a', ...data } as never });
+    appInSharedOrg = (await mkApp({ organizationId: orgA.id, urn: 'imp-org-a:app' })) as never;
+    appInOtherOrg = (await mkApp({ organizationId: orgB.id, urn: 'imp-org-b:app' })) as never;
+    userOwnedApp = (await mkApp({ ownerUserId: mike.id, urn: `${mike.id}:own-app` })) as never;
+    // mike is an AppMember of all three. Crucially he is NOT an org
+    // CONTRIBUTOR of orgB via the App — he is a member of orgB directly, so
+    // the org arm would admit him too; the App used for the negative case
+    // therefore has to be judged on the AppMember arm alone, which is why the
+    // out-of-scope assertion below ALSO pins the org arm staying closed.
+    for (const app of [appInSharedOrg, appInOtherOrg, userOwnedApp]) {
+      await db.appMember.create({ data: { appId: app.id, userId: mike.id, role: 'member' } });
+    }
+    ({ impCtx } = await startAsAdmin());
+  });
+
+  it('DENIES an App outside the shared org, even though the target is an AppMember', async () => {
+    // The bug: the AppMember arm ran a bare `appMember.findUnique` on
+    // ctx.userId, which under impersonation is the TARGET — so it answered a
+    // question about the target's memberships anywhere, bypassing the org
+    // bound that makes a support session safe.
+    expect(await isAppParticipant(impCtx, appInOtherOrg)).toBe(false);
+  });
+
+  it('still ADMITS an App inside the shared org — the bound narrows, it does not deny', async () => {
+    // The narrowing control, and the reason this is bounded rather than a flat
+    // `if (ctx.impersonation) return false`. `requireOrgRole` and
+    // `isOrgMemberOrAdmin` both already say "under impersonation only the
+    // session's shared org may admit"; this arm now says the same thing. A
+    // blanket denial would have been a different rule from the two neighbours.
+    expect(await isAppParticipant(impCtx, appInSharedOrg)).toBe(true);
+  });
+
+  it('DENIES a user-owned App under impersonation (unchanged, and for a different reason)', async () => {
+    // The owner arm denies outright — not because identity-scoped things are
+    // always denied, but because a user-owned App has NO org, so it can never
+    // satisfy a shared-org bound. Same rule, degenerate case.
+    expect(await isAppParticipant(impCtx, userOwnedApp)).toBe(false);
+  });
+
+  it('the bound is impersonation-specific: mike himself is still a participant everywhere', async () => {
+    // Without this, a fix that simply denied the AppMember arm would pass every
+    // assertion above while breaking ordinary participation.
+    const mikeCtx = { db, userId: mike.id, roles: ['READER'] } as Context;
+    expect(await isAppParticipant(mikeCtx, appInOtherOrg)).toBe(true);
+    expect(await isAppParticipant(mikeCtx, appInSharedOrg)).toBe(true);
+    expect(await isAppParticipant(mikeCtx, userOwnedApp)).toBe(true);
+  });
+});
+
 describe('#876 — identity-scoped read surfaces are denied under impersonation', () => {
   let impCtx: Context;
 

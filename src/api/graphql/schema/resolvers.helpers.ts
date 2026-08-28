@@ -649,6 +649,12 @@ export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<b
  * gate's org branch, and platform ADMIN/OWNER via `requireOrgRole`), or the
  * owner of a user-owned App.
  *
+ * Under IMPERSONATION this narrows to the session's ONE shared org (#1094):
+ * every arm answers about the TARGET, so an unbounded one would admit an App in
+ * an org the support session was never scoped to. Same bound `requireOrgRole`
+ * and `isOrgMemberOrAdmin` apply; the owner arm's outright denial is that rule's
+ * degenerate case, since a user-owned App has no org to match.
+ *
  * This is the USER branch only. Callers own their principal-shape policy
  * around it (findings:auth-appid-credential-vs-selection): a caller with no
  * `userId` is a pure App-key (or anonymous) principal and is false here —
@@ -674,6 +680,26 @@ export async function isAppParticipant(
     if (ctx.impersonation) return false;
     return ctx.userId === app.ownerUserId;
   }
+  // #1094 — impersonation NARROWS this predicate to the session's ONE shared
+  // org, stated once here rather than per arm. `ctx.userId` is the TARGET under
+  // impersonation, so the AppMember lookup below would otherwise answer a
+  // question about the target's memberships ANYWHERE — admitting an App in an
+  // org the support session was never scoped to. Fifth instance of the #876
+  // class (`ctx.userId = target` fails open against identity-keyed predicates),
+  // and the first one inside a shared predicate rather than a resolver, which
+  // is why `impersonationSweep.test.ts` — a case per resolver MODULE — could
+  // not see it.
+  //
+  // Bounded, not denied, and that is the neighbours' rule rather than a choice
+  // made here: `requireOrgRole` and `isOrgMemberOrAdmin` both already read
+  // "under impersonation only the shared org may admit". A blanket
+  // `if (ctx.impersonation) return false` would have made this arm the only one
+  // of the three saying something different, and would have cost an impersonated
+  // admin the in-scope team chat and worklog they can legitimately support.
+  //
+  // The owner arm above denies outright for the SAME rule, not a different one:
+  // a user-owned App has no org, so it can never satisfy this bound.
+  if (ctx.impersonation && app.organizationId !== ctx.impersonation.orgId) return false;
   const member = await ctx.db.appMember.findUnique({
     where: { appId_userId: { appId: app.id, userId: ctx.userId } },
     select: { userId: true },
