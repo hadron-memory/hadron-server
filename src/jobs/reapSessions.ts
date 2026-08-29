@@ -295,10 +295,24 @@ export function startSessionReaperLoop(
 
   // Every tick goes through here so the in-flight promise is always held
   // somewhere stop() can reach it.
+  //
+  // Both guards below exist because a sweep can outlast `intervalMs`, and the
+  // naive version broke the drain in exactly the way the drain exists to
+  // prevent (PR #1108 review, @codex P2):
+  //
+  //   - **Do not replace an active promise.** A skipped tick's `run()` returns
+  //     IMMEDIATELY on the `inFlight` guard, so assigning its
+  //     already-resolved promise to `running` would hide the sweep that is
+  //     still writing, and `stop()` would await nothing.
+  //   - **Only clear what you set.** Without the identity check that skipped
+  //     tick's `.finally` nulls `running` while the real sweep is mid-flight,
+  //     which is the same early resolve by a second route.
   const tick = () => {
-    running = run().finally(() => {
-      running = null;
+    if (running) return;
+    const p: Promise<void> = run().finally(() => {
+      if (running === p) running = null;
     });
+    running = p;
   };
   let timer: NodeJS.Timeout = setTimeout(() => {
     tick();

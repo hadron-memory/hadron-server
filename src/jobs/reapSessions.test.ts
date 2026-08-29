@@ -314,6 +314,52 @@ describe('startSessionReaperLoop', () => {
     expect(stopResolvedAt - started).toBeGreaterThanOrEqual(HOLD_MS / 2);
   });
 
+  it('stop() still drains when the sweep outlasts the interval (#1108 review)', async () => {
+    // @codex P2 on the first version of the drain. When a sweep runs longer
+    // than `intervalMs`, the next tick calls run(), which returns IMMEDIATELY
+    // on the inFlight guard — and the naive `running = run().finally(...)`
+    // then replaced the real sweep's promise with that resolved one and nulled
+    // it, so stop() awaited nothing and resolved while the sweep was still
+    // writing. The drain recreated the very race it was added to close.
+    //
+    // Interval deliberately SHORTER than the sweep, which is the case the
+    // first test could not reach.
+    await seedSession({ startedAt: new Date(Date.now() - 30 * HOUR) });
+
+    const HOLD_MS = 300;
+    const INTERVAL_MS = 40;
+    let sweepFinished = false;
+    const slowDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'session') return Reflect.get(target, prop, receiver);
+        const session = Reflect.get(target, prop, receiver) as typeof db.session;
+        return new Proxy(session, {
+          get(sTarget, sProp, sReceiver) {
+            const orig = Reflect.get(sTarget, sProp, sReceiver);
+            if (sProp !== 'findMany' || typeof orig !== 'function') return orig;
+            return async (...args: unknown[]) => {
+              await new Promise((r) => setTimeout(r, HOLD_MS));
+              const out = await (orig as (...a: unknown[]) => Promise<unknown>).apply(sTarget, args);
+              sweepFinished = true;
+              return out;
+            };
+          },
+        });
+      },
+    }) as typeof db;
+
+    loop = startSessionReaperLoop(slowDb, INTERVAL_MS, 1);
+    // Long enough that several ticks have been SKIPPED by the inFlight guard
+    // while the first sweep is still blocked.
+    await new Promise((r) => setTimeout(r, INTERVAL_MS * 3));
+    expect(sweepFinished).toBe(false); // the sweep really is still in flight
+
+    await loop.stop();
+    loop = null;
+
+    expect(sweepFinished).toBe(true);
+  });
+
   it('fires on its own schedule (the #888 no-scheduler lesson)', async () => {
     // Idle by real "now", not the fixture instant — the loop calls
     // runSessionReaper with no `now` argument, which is the production path.
