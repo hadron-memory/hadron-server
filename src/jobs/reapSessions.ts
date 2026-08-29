@@ -227,10 +227,25 @@ async function claim(
   return count;
 }
 
-/** Handle for a running reaper loop — `stop()` cancels whichever timer is
- * currently armed (the initial delay OR the interval that replaces it). */
+/**
+ * Handle for a running reaper loop.
+ *
+ * `stop()` cancels whichever timer is currently armed (the initial delay OR the
+ * interval that replaces it), refuses any further run, and RESOLVES ONLY ONCE
+ * an in-flight sweep has finished — so `await loop.stop()` is a guarantee that
+ * this loop will not write again (#1091).
+ *
+ * Awaiting matters because the timer is not the only thing running. Clearing it
+ * stops the loop from STARTING work; a sweep already in flight keeps writing
+ * from a floating promise nobody holds. In the suite that lands in whatever
+ * runs next: `cleanDb` begins deleting while the sweep is still updating
+ * sessions, in the same worker DB, and the result is a `40P01` deadlock in a
+ * FILE THAT NEVER TOUCHED THE REAPER — the shape #1091 was filed for. Callers
+ * that do not await get the old behaviour and no error, which is why the return
+ * is a promise rather than a second method.
+ */
 export interface SessionReaperLoop {
-  stop: () => void;
+  stop: () => Promise<void>;
 }
 
 /**
@@ -256,8 +271,13 @@ export function startSessionReaperLoop(
   initialDelayMs = 3 * 60 * 1000,
 ): SessionReaperLoop {
   let inFlight = false;
+  let stopped = false;
+  // The promise of the sweep currently running, so stop() can await it. Held
+  // deliberately: `void run()` below would otherwise leave a floating promise
+  // that outlives the handle and keeps writing (#1091).
+  let running: Promise<void> | null = null;
   const run = async () => {
-    if (inFlight) return;
+    if (inFlight || stopped) return;
     inFlight = true;
     try {
       const o = await runSessionReaper(db);
@@ -273,15 +293,28 @@ export function startSessionReaperLoop(
     }
   };
 
+  // Every tick goes through here so the in-flight promise is always held
+  // somewhere stop() can reach it.
+  const tick = () => {
+    running = run().finally(() => {
+      running = null;
+    });
+  };
   let timer: NodeJS.Timeout = setTimeout(() => {
-    void run();
-    timer = setInterval(() => void run(), intervalMs);
+    tick();
+    timer = setInterval(tick, intervalMs);
   }, initialDelayMs);
   return {
-    stop: () => {
+    stop: async () => {
+      // Order is load-bearing: refuse first, THEN cancel, then drain. Setting
+      // `stopped` before clearing the timer closes the window where an
+      // already-queued tick starts a sweep between the two statements.
+      stopped = true;
       // One variable holds whichever timer is armed; clearTimeout and
       // clearInterval are interchangeable on a Node timer handle.
       clearTimeout(timer);
+      // `run` swallows its own errors, so this cannot reject.
+      await running;
     },
   };
 }

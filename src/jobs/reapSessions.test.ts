@@ -20,6 +20,7 @@ import {
   startSessionReaperLoop,
   idleWindowMsFor,
   DEFAULT_SESSION_IDLE_WINDOW_MS,
+  type SessionReaperLoop,
 } from './reapSessions.js';
 
 const HOUR = 60 * 60 * 1000;
@@ -242,11 +243,75 @@ describe('rule 2 — inactivity', () => {
 });
 
 describe('startSessionReaperLoop', () => {
-  let loop: { stop: () => void } | null = null;
+  // The exported type, not a hand-written shape: a local `{ stop: () => void }`
+  // silently kept compiling after stop() became async (#1091), so the drain
+  // could have been dropped without tsc noticing here.
+  let loop: SessionReaperLoop | null = null;
 
-  afterEach(() => {
-    loop?.stop();
+  afterEach(async () => {
+    await loop?.stop();
     loop = null;
+  });
+
+  it('stop() resolves only once an in-flight sweep has finished (#1091)', async () => {
+    // The flake this closes is a DEADLOCK IN AN UNRELATED FILE. Clearing the
+    // timer stops the loop STARTING work; a sweep already in flight kept
+    // writing from a floating promise nobody held. In the suite that lands in
+    // whatever file runs next on the same worker DB — its `cleanDb` begins
+    // deleting while this sweep is still updating sessions, and Postgres
+    // reports `40P01` against a file that never touched the reaper.
+    //
+    // The sweep is made SLOW deliberately. A first draft simply stopped the
+    // loop and looked for a late write, and it passed WITHOUT the fix: the
+    // real sweep finishes in a millisecond, so there was no in-flight work to
+    // leak and the assertion could never fail. A guard whose failing input
+    // cannot be constructed proves nothing — so this holds the sweep open and
+    // asserts the property directly: stop() must not resolve first.
+    await seedSession({ startedAt: new Date(Date.now() - 30 * HOUR) });
+
+    const HOLD_MS = 200;
+    let sweepFinished = false;
+    let stopResolvedAt = 0;
+    // Delay the sweep's FIRST query, so a sweep is provably in flight when
+    // stop() is called. Only `session.findMany` is intercepted; everything
+    // else passes through to the real client.
+    const slowDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'session') return Reflect.get(target, prop, receiver);
+        const session = Reflect.get(target, prop, receiver) as typeof db.session;
+        return new Proxy(session, {
+          get(sTarget, sProp, sReceiver) {
+            const orig = Reflect.get(sTarget, sProp, sReceiver);
+            if (sProp !== 'findMany' || typeof orig !== 'function') return orig;
+            return async (...args: unknown[]) => {
+              await new Promise((r) => setTimeout(r, HOLD_MS));
+              return (orig as (...a: unknown[]) => Promise<unknown>).apply(sTarget, args);
+            };
+          },
+        });
+      },
+    }) as typeof db;
+
+    loop = startSessionReaperLoop(slowDb, 10_000, 1);
+    // Let the timer fire so a sweep is in flight and blocked in the slow query.
+    await new Promise((r) => setTimeout(r, 30));
+
+    const started = Date.now();
+    const stopping = loop.stop().then(() => {
+      stopResolvedAt = Date.now();
+    });
+    // Mark when the sweep's own work completes, independently of stop().
+    void new Promise((r) => setTimeout(r, HOLD_MS)).then(() => {
+      sweepFinished = true;
+    });
+
+    await stopping;
+    loop = null;
+
+    // stop() waited for the sweep rather than returning while it was still
+    // writing. Without the drain it resolves in ~0ms and this is false.
+    expect(sweepFinished).toBe(true);
+    expect(stopResolvedAt - started).toBeGreaterThanOrEqual(HOLD_MS / 2);
   });
 
   it('fires on its own schedule (the #888 no-scheduler lesson)', async () => {
