@@ -334,6 +334,61 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'x.test.ts': src }).offenders).toHaveLength(1);
   });
 
+  it('FAILS on a backtick that ENDS a -- comment line (@codex P2, #1109)', () => {
+    // The false negative that dropping the POSITION rule created: with position
+    // relaxed, an EMPTY remainder satisfies the shape check, so this backtick
+    // was accepted as the literal's terminator and the real closer below was
+    // never examined. A silent pass, which is the failure this gate exists to
+    // prevent.
+    const src = lines(
+      'const r = await db.$queryRaw' + BACKTICK,
+      '  SELECT 1',
+      '  -- accidental backtick at end of comment ' + BACKTICK,
+      '  FROM t' + BACKTICK + ';',
+      '',
+    );
+    const { offenders } = scanFiles({ 'a.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].line).toBe(3);
+  });
+
+  it('scans a literal whose GENERIC spans lines (@codex P2, #1109)', () => {
+    // `<[^`\n]*>` skipped four real literals outright — and a skipped literal
+    // is invisible: no offender, while the anti-phantom count stays healthy on
+    // the other hundred. Bounded by "no backtick" instead of "no newline".
+    const src = lines(
+      'const rows = await ctx.db.$queryRaw<',
+      '  { workerId: string; live: boolean }[]',
+      '>' + BACKTICK,
+      '  SELECT s.worker_id',
+      '  -- ' + BACKTICK + 'worker_id' + BACKTICK + ' is the column',
+      '  FROM sessions' + BACKTICK + ';',
+      '',
+    );
+    const { offenders, documents } = scanFiles({ 'b.ts': src });
+    expect(documents).toBe(1);
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].line).toBe(5);
+  });
+
+  it('does NOT fire when the closer sits on the NEXT line', () => {
+    // The three legitimate shapes that a "require a non-empty closer" rule
+    // rejected — the second wrong proxy on the way to keying on comment
+    // context. A ternary branch and a query closing on its own line both leave
+    // the terminator's line empty after the backtick.
+    const src = lines(
+      'const p = cond',
+      '  ? Prisma.sql' + BACKTICK + 'e.memory_id IN (${ids})' + BACKTICK,
+      '  : Prisma.sql' + BACKTICK + 'e.user_id = ${uid}' + BACKTICK + ';',
+      'const q = await db.$queryRaw<{ xmin: string }[]>' + BACKTICK,
+      '  SELECT xmin::text FROM memories WHERE id = ${id}',
+      BACKTICK,
+      ';',
+      '',
+    );
+    expect(scanFiles({ 'c.ts': src }).offenders).toEqual([]);
+  });
+
   it('finds the real repo tagged literals, and they are all intact', () => {
     // Anti-phantom, the same property the SDL half asserts: a scan that found
     // nothing to check must not read as a clean one.

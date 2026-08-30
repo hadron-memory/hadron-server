@@ -91,8 +91,11 @@ const SDL_OPEN = /(?:(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*)?`#graphql/g;
  *     bit;
  *   - `Prisma.sql`, the fragment builder.
  *
- * The generic is matched without crossing a backtick or a newline, so a `<` in
- * ordinary prose cannot swallow its way to a later literal.
+ * The generic may span LINES — `$queryRaw<\n  { … }[]\n>` is real in this repo
+ * (resolvers.worker.ts) — so it is bounded by "no backtick" rather than by "no
+ * newline". Forbidding newlines skipped four literals entirely, and a skipped
+ * literal is a SILENT false negative while the anti-phantom count stays healthy
+ * on the other 101 (PR #1109 review, @codex P2).
  *
  * The `(?<!\`)` is load-bearing and was found by running this, not by reading
  * it. Prose in this repo MENTIONS these tags inside markdown code spans —
@@ -102,7 +105,7 @@ const SDL_OPEN = /(?:(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*)?`#graphql/g;
  * tag preceded by `.` or whitespace is a call.
  */
 const TAGGED_OPEN =
-  /(?:(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*)?(?<!`)(?:\$(?:query|execute)Raw(?:Unsafe)?|Prisma\.sql)(?:<[^`\n]*>)?`/g;
+  /(?:(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*)?(?<!`)(?:\$(?:query|execute)Raw(?:Unsafe)?|Prisma\.sql)(?:<[^`]*>)?`/g;
 
 /** 1-indexed line number of `index` in `text`, so the report is clickable. */
 function lineOf(text, index) {
@@ -184,6 +187,23 @@ export function findBrokenLiterals(file, text, opts = {}) {
   // first version of the #1087 widening dropped this distinction and told a SQL
   // author about a "# comment", which is the wrong language.
   const commentMarker = opts.commentMarker ?? '#';
+  // A backtick with the comment marker EARLIER ON ITS LINE is never a real
+  // terminator, whatever its shape or position.
+  //
+  // This is the precise statement of the hazard rather than a proxy for it, and
+  // it took two wrong proxies to get here (PR #1109 review, @codex P2). With
+  // POSITION relaxed for SQL, an EMPTY remainder satisfies the shape check — so
+  // a stray backtick ending a `-- comment` line was accepted as the terminator
+  // and the real closer below was never examined. Demanding a non-empty closer
+  // instead then rejected three legitimate literals whose `;` or `)` sits on
+  // the NEXT line (`Prisma.sql\`…\`` as a ternary branch, and a query closing
+  // on its own line).
+  //
+  // The comment marker is what actually separates them: a comment runs to
+  // end-of-line in both languages, so a closer can never legitimately follow one
+  // — while in JS that same backtick ends the literal. No legitimate terminator
+  // has `--` (or `#`) before it on its line, and every instance of this bug
+  // does.
   const offenders = [];
   // Counted by the SAME walk that finds the offenders. Counting openings with a
   // second, separately-written matcher is how the anti-phantom count and the
@@ -243,16 +263,26 @@ export function findBrokenLiterals(file, text, opts = {}) {
     // twice means the SHAPE is wrong rather than the width — a prefix cannot
     // separate syntax from prose that begins like it, however many characters
     // it inspects, so the whole line is the unit (findings, #1032).
-    const closesAnExpression = /^[\s;,)\]}]*(\/\/.*)?$/.test(
-      text.slice(i + 1, lineEnd === -1 ? text.length : lineEnd),
-    );
+    const afterClose = text.slice(i + 1, lineEnd === -1 ? text.length : lineEnd);
+    const closesAnExpression = /^[\s;,)\]}]*(\/\/.*)?$/.test(afterClose);
+    // Computed before the verdict because it IS part of the verdict now, not
+    // only part of the message.
+    //
+    // Never on the OPENING line: SDL's own marker is `#graphql`, so the prefix
+    // of a single-line document always contains the comment marker and every
+    // such document would be flagged. (Caught by the existing single-line test
+    // — the reason to widen a shared walker inside a suite that already pins
+    // the old behaviour.) A stray backtick on the opening line is still caught
+    // by the shape check.
+    const inComment =
+      !sameLineAsOpening && line.slice(0, i - closeLineStart).includes(commentMarker);
 
     const positionOk = !requireFirstOnLine || sameLineAsOpening || firstOnItsLine;
-    if (!positionOk || !closesAnExpression) {
-      const inComment = line.slice(0, i - closeLineStart).includes(commentMarker);
+    if (!positionOk || !closesAnExpression || inComment) {
       // Position-legal but shape-illegal: a line that STARTS with a backtick,
       // i.e. prose — a code span or a fenced block — that looks like a closer.
-      const looksLikeATerminator = requireFirstOnLine && firstOnItsLine && !sameLineAsOpening;
+      const looksLikeATerminator =
+        !inComment && requireFirstOnLine && firstOnItsLine && !sameLineAsOpening;
       const why = looksLikeATerminator
         ? [
             'this backtick starts the line like a terminator, but the rest of the',
