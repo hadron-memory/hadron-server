@@ -479,7 +479,11 @@ function executorInOperandPosition(node) {
   if (ts.isBinaryExpression(parent) && parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken) {
     return parent.operatorToken.getText();
   }
-  if (ts.isConditionalExpression(parent) && parent.condition !== current) return '?:';
+  // No carve-out for the CONDITION position (@codex P1, #1109). The first
+  // version excluded it — defensively, and with no reason behind it. An
+  // executor is not a composable value anywhere in a conditional: not as a
+  // branch, and not as the test either.
+  if (ts.isConditionalExpression(parent)) return '?:';
   return null;
 }
 
