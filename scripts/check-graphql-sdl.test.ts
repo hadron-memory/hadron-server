@@ -22,7 +22,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { scanSdlDir, findBrokenSdlLiterals } from './check-graphql-sdl.mjs';
+import { scanSdlDir, findBrokenSdlLiterals, scanTaggedLiterals } from './check-graphql-sdl.mjs';
 
 const BACKTICK = '`';
 const SCRIPT = join(process.cwd(), 'scripts', 'check-graphql-sdl.mjs');
@@ -252,5 +252,93 @@ describe('check-graphql-sdl — against the real SDL', () => {
     const scan = scanSdlDir();
     expect(scan.documents).toBe(1);
     expect(scan.offenders).toEqual([]);
+  });
+});
+
+/**
+ * #1087 — the same hazard in TAGGED literals ($queryRaw / $executeRaw /
+ * Prisma.sql), which is where it actually bit an hour after #1076 shipped.
+ *
+ * The three PASS cases are not padding: each is a false positive the first
+ * draft of this widening actually produced against the real repo. The issue
+ * claimed the detection rule "ports without change"; it does not, and these
+ * pin the two ways it had to change.
+ */
+describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
+  /** Write files into a throwaway src-like tree and scan it. */
+  function scanFiles(files: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), 'sql-gate-'));
+    try {
+      for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+      return scanTaggedLiterals(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('FAILS on the incident: a backtick in a SQL comment (#1087)', () => {
+    const src = lines(
+      'const rows = await ctx.db.$queryRaw<Row[]>' + BACKTICK,
+      '  SELECT id,',
+      '    -- ' + BACKTICK + 'auto_expired_at' + BACKTICK + ' is set on precisely those rows',
+      '    CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END',
+      '  FROM sessions' + BACKTICK + ';',
+      '',
+    );
+    const { offenders, documents } = scanFiles({ 'q.ts': src });
+    expect(documents).toBe(1);
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].line).toBe(3);
+    expect(offenders[0].errors.join(' ')).toMatch(/ends the raw-SQL template literal early/);
+    // The message names the SQL comment marker, not GraphQL's. The first
+    // version of this widening said "# comment" to a SQL author.
+    expect(offenders[0].errors.join(' ')).toMatch(/in this -- comment/);
+  });
+
+  it('does NOT fire on a terminator at the END of a content line', () => {
+    // The POSITION half of the SDL rule does not port. SQL closes on its last
+    // content line far more often than on a line of its own, and requiring
+    // first-on-line reported 41 offenders across a repo that compiles cleanly.
+    const src = lines(
+      'const rows = await db.$queryRaw<{ cname: string }[]>' + BACKTICK,
+      '    SELECT c.name AS cname',
+      '    FROM unnest(${names}::text[]) AS c(name)' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('does NOT fire on PROSE that mentions a tag inside a code span', () => {
+    // Eight of the first reports were comments talking ABOUT raw SQL: the code
+    // span's closing backtick in ``$executeRawUnsafe`` looked exactly like a
+    // literal's opening one. A tag preceded by a backtick is a mention.
+    const src = lines(
+      '// The identifier loops cannot use this form and stay ' +
+        BACKTICK + '$executeRawUnsafe' + BACKTICK + ' with a',
+      '// documented safety argument (#665).',
+      'const x = await tx.$executeRaw' + BACKTICK + 'UPDATE t SET a = ${b}' + BACKTICK + ';',
+      '',
+    );
+    const { offenders, documents } = scanFiles({ 'm.ts': src });
+    expect(documents).toBe(1); // the mention is not counted as a document either
+    expect(offenders).toEqual([]);
+  });
+
+  it('scans .test.ts too — a broken literal there breaks tsc repo-wide', () => {
+    const src = lines(
+      'const r = await db.$queryRaw' + BACKTICK,
+      '  -- see ' + BACKTICK + 'workers' + BACKTICK,
+      '  SELECT 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.test.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('finds the real repo tagged literals, and they are all intact', () => {
+    // Anti-phantom, the same property the SDL half asserts: a scan that found
+    // nothing to check must not read as a clean one.
+    const { offenders, documents } = scanTaggedLiterals();
+    expect(documents).toBeGreaterThan(50);
+    expect(offenders).toEqual([]);
   });
 });

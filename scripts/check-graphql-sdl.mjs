@@ -1,11 +1,21 @@
 #!/usr/bin/env node
 /**
- * GraphQL SDL gate — two checks, in the order the second one needs.
+ * Template-literal + SDL gate — three checks, in the order the last one needs.
+ *
+ * #1087 widened this past SDL. The hazard was never GraphQL: it is PROSE INSIDE
+ * A TEMPLATE LITERAL, and the #1076 guard was scoped to where its author had
+ * been bitten. One hour after that merged, the identical trap landed in a
+ * `$queryRaw` SQL comment — a file this gate did not scan. Check 1b is that
+ * widening.
  *
  * 1. THE LITERAL IS INTACT (#1076). `typeDefs.ts` is one `#graphql`-tagged
  *    template literal; a BARE backtick inside a GraphQL description or `#`
  *    comment terminates it, and everything after it is parsed as TypeScript.
  *    This half reads the file as TEXT and names the offending line.
+ * 1b. THE TAGGED LITERALS ARE INTACT (#1087). The same scan over every
+ *    `$queryRaw` / `$executeRaw` / `Prisma.sql` literal in `src/`, with the
+ *    POSITION half of the rule relaxed — see `findBrokenLiterals`, since that
+ *    difference is the one thing the port could not carry across.
  * 2. THE SDL PARSES. Imports `typeDefs` from
  *    `src/api/graphql/schema/typeDefs.ts` (the single SDL source) and runs
  *    `graphql.parse()` on it.
@@ -57,6 +67,42 @@ const SDL_MARKER = '#graphql';
  * would make this check fire on prose.
  */
 const SDL_OPEN = /(?:(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*)?`#graphql/g;
+
+/**
+ * Every TAGGED prose-carrying template literal (#1087). The hazard was never
+ * SDL — it is PROSE INSIDE A TEMPLATE LITERAL, and #1076's guard was scoped to
+ * where I had happened to be bitten. One hour after merging it I hit the
+ * identical trap in a `$queryRaw` SQL comment, which that guard does not scan.
+ *
+ * Keyed on a TAG rather than on "any multi-line template literal", for the same
+ * reason `SDL_OPEN` is keyed on its marker: an ordinary TS template literal
+ * legitimately closes wherever its author put the backtick, so scanning
+ * untagged ones would fire on prose. A tag is the author saying "this body is a
+ * foreign language", which is exactly the population where a stray backtick is
+ * a mistake rather than punctuation.
+ *
+ * The tag set is MEASURED, not guessed, and the issue's own suggestion (`gql`,
+ * `sql`) would have been wrong: bare `` sql` `` matches `` `…/post-push.sql` ``
+ * in a doc comment and bare `` graphql` `` matches every `` `${base}/graphql` ``
+ * URL in the repo. Only two families survive contact with the codebase:
+ *
+ *   - `$queryRaw` / `$executeRaw` (+`Unsafe`), optionally generic-annotated —
+ *     `$queryRaw<{ c: bigint }[]>` — which is 100+ call sites and the one that
+ *     bit;
+ *   - `Prisma.sql`, the fragment builder.
+ *
+ * The generic is matched without crossing a backtick or a newline, so a `<` in
+ * ordinary prose cannot swallow its way to a later literal.
+ *
+ * The `(?<!\`)` is load-bearing and was found by running this, not by reading
+ * it. Prose in this repo MENTIONS these tags inside markdown code spans —
+ * ``stay \`$executeRawUnsafe\```— and the span's own closing backtick then looks
+ * exactly like the literal's opening one. Eight of the first reports were
+ * comments talking ABOUT raw SQL. A tag preceded by a backtick is a mention; a
+ * tag preceded by `.` or whitespace is a call.
+ */
+const TAGGED_OPEN =
+  /(?:(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*)?(?<!`)(?:\$(?:query|execute)Raw(?:Unsafe)?|Prisma\.sql)(?:<[^`\n]*>)?`/g;
 
 /** 1-indexed line number of `index` in `text`, so the report is clickable. */
 function lineOf(text, index) {
@@ -113,16 +159,40 @@ function lineOf(text, index) {
  * loudly and wrongly rather than passing quietly and wrongly, which is the
  * right way round for a gate.
  */
-export function findBrokenSdlLiterals(file, text) {
+export function findBrokenLiterals(file, text, opts = {}) {
+  const pattern = opts.pattern ?? SDL_OPEN;
+  // The noun in every message. #1087 widened this walker past SDL, and a guard
+  // that reports "SDL template literal" over a SQL comment sends the reader to
+  // the wrong file.
+  const kind = opts.kind ?? 'SDL';
+  // Whether a legitimate terminator must also be FIRST ON ITS LINE.
+  //
+  // True for SDL, where `typeDefs.ts` closes with a `\`;` line by convention.
+  // FALSE for raw SQL, and #1087 claimed the rule "ports without change" —
+  // measured, it does not. SQL closes on the last content line
+  // (`… lower(c.name)\`;`) far more often than on its own, and requiring the
+  // position reported 41 offenders across a repo that compiles cleanly.
+  //
+  // The SHAPE half is the part that actually generalises: a template literal is
+  // an expression, so its real terminator is followed by whatever consumed it
+  // and nothing else. That alone catches the incident this widening is for — a
+  // backtick in `-- \`auto_expired_at\` is set …` is followed by prose, not by
+  // a close.
+  const requireFirstOnLine = opts.requireFirstOnLine ?? true;
+  // The comment marker of the embedded language, so the message can say WHERE
+  // the stray backtick is. GraphQL comments open with `#`, SQL with `--`; the
+  // first version of the #1087 widening dropped this distinction and told a SQL
+  // author about a "# comment", which is the wrong language.
+  const commentMarker = opts.commentMarker ?? '#';
   const offenders = [];
   // Counted by the SAME walk that finds the offenders. Counting openings with a
   // second, separately-written matcher is how the anti-phantom count and the
   // thing it certifies drift apart (PR #1085 review).
   let documents = 0;
-  SDL_OPEN.lastIndex = 0;
+  pattern.lastIndex = 0;
   let match;
-  while ((match = SDL_OPEN.exec(text)) !== null) {
-    const openIndex = match.index + match[0].indexOf('`');
+  while ((match = pattern.exec(text)) !== null) {
+    const openIndex = match.index + match[0].lastIndexOf('`');
     const name = match[1] ?? file;
     documents += 1;
 
@@ -139,7 +209,7 @@ export function findBrokenSdlLiterals(file, text) {
         file,
         line: lineOf(text, openIndex),
         errors: [
-          'this SDL template literal is never terminated — no backtick below it',
+          `this ${kind} template literal is never terminated — no backtick below it`,
           'closes it, so the rest of the file is inside the literal. Most likely',
           'the closing `; line was deleted.',
         ],
@@ -177,16 +247,17 @@ export function findBrokenSdlLiterals(file, text) {
       text.slice(i + 1, lineEnd === -1 ? text.length : lineEnd),
     );
 
-    if ((!sameLineAsOpening && !firstOnItsLine) || !closesAnExpression) {
-      const inComment = line.slice(0, i - closeLineStart).includes('#');
+    const positionOk = !requireFirstOnLine || sameLineAsOpening || firstOnItsLine;
+    if (!positionOk || !closesAnExpression) {
+      const inComment = line.slice(0, i - closeLineStart).includes(commentMarker);
       // Position-legal but shape-illegal: a line that STARTS with a backtick,
       // i.e. prose — a code span or a fenced block — that looks like a closer.
-      const looksLikeATerminator = firstOnItsLine && !sameLineAsOpening;
+      const looksLikeATerminator = requireFirstOnLine && firstOnItsLine && !sameLineAsOpening;
       const why = looksLikeATerminator
         ? [
             'this backtick starts the line like a terminator, but the rest of the',
             'line is not a plain close (`;` `,` `)`) — so this gate reads it as',
-            'prose, a code span or a fenced block, that ended the SDL template',
+            `prose, a code span or a fenced block, that ended the ${kind} template`,
             'literal here. Escape it (\\`).',
             'If instead this IS the terminator and the line is a valid expression',
             'continuation (`.trim()`, `as const`), this gate does not model those:',
@@ -194,8 +265,8 @@ export function findBrokenSdlLiterals(file, text) {
           ]
         : [
             inComment
-              ? 'a backtick in this # comment ends the SDL template literal early —'
-              : 'a backtick here ends the SDL template literal early —',
+              ? `a backtick in this ${commentMarker} comment ends the ${kind} template literal early —`
+              : `a backtick here ends the ${kind} template literal early —`,
             'everything below it is then parsed as TypeScript, which reports',
             'TS1005 / TS1443 wherever it stops making sense — sometimes here,',
             'sometimes hundreds of lines away, and never as "unterminated',
@@ -203,9 +274,14 @@ export function findBrokenSdlLiterals(file, text) {
           ];
       offenders.push({ name, file, line: lineOf(text, i), errors: [...why, `    ${line.trim()}`] });
     }
-    SDL_OPEN.lastIndex = i + 1;
+    pattern.lastIndex = i + 1;
   }
   return { offenders, documents };
+}
+
+/** Back-compat wrapper: the SDL scan, which is what the existing tests call. */
+export function findBrokenSdlLiterals(file, text) {
+  return findBrokenLiterals(file, text, { pattern: SDL_OPEN, kind: 'SDL' });
 }
 
 /**
@@ -229,6 +305,57 @@ export function scanSdlDir(dir = DEFAULT_SDL_DIR) {
     const fromRoot = relative(ROOT, path);
     const file = fromRoot.startsWith('..') ? relative(dir, path) : fromRoot;
     const found = findBrokenSdlLiterals(file, text);
+    documents += found.documents;
+    offenders.push(...found.offenders);
+  }
+  return { offenders, documents };
+}
+
+/** Directories under `src/` that carry no hand-written source. */
+const SKIP_DIRS = new Set(['generated', 'node_modules']);
+
+/** Every `.ts` file under `dir`, recursively. */
+function* tsFilesUnder(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      yield* tsFilesUnder(join(dir, entry.name));
+    } else if (entry.name.endsWith('.ts')) {
+      yield join(dir, entry.name);
+    }
+  }
+}
+
+/**
+ * Scan every `.ts` file under `dir` for TAGGED prose-carrying literals (#1087).
+ *
+ * `.test.ts` is INCLUDED here, unlike the SDL scan. 15 test files use
+ * `$queryRaw`, and a broken literal in any of them breaks `tsc` for the whole
+ * repo — the blast radius is identical, so excluding them would be scoping the
+ * guard to where it is convenient rather than to where the hazard is, which is
+ * the mistake #1087 exists to correct.
+ *
+ * The guard's OWN test (`scripts/check-graphql-sdl.test.ts`) plants deliberately
+ * broken literals as fixtures and would be a false positive — it is outside
+ * `src/`, so this walk never reaches it. That is luck rather than design, so if
+ * a fixture-bearing test is ever added under `src/`, this comment is the place
+ * that has to change.
+ */
+export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
+  const offenders = [];
+  let documents = 0;
+  for (const path of tsFilesUnder(dir)) {
+    const text = readFileSync(path, 'utf8');
+    // Cheap pre-filter: the walk is over ~700 files and most carry no tag.
+    if (!/\$(?:query|execute)Raw|Prisma\.sql/.test(text)) continue;
+    const fromRoot = relative(ROOT, path);
+    const file = fromRoot.startsWith('..') ? relative(dir, path) : fromRoot;
+    const found = findBrokenLiterals(file, text, {
+      pattern: TAGGED_OPEN,
+      kind: 'raw-SQL',
+      requireFirstOnLine: false,
+      commentMarker: '--',
+    });
     documents += found.documents;
     offenders.push(...found.offenders);
   }
@@ -277,8 +404,34 @@ async function main(argv) {
   // far as the literal is concerned. Dynamic, so that stays true — see header.
   if (dirFlag !== -1) {
     console.log("… SDL parse skipped: --dir only checks the literal, not this repo's typeDefs.");
+    console.log('… raw-SQL scan skipped: --dir checks one directory for SDL only.');
     return 0;
   }
+
+  // Check 1b (#1087) — the same hazard in the OTHER prose-carrying literals.
+  // Runs over all of src/, because a `$queryRaw` lives wherever its query does.
+  let tagged;
+  try {
+    tagged = scanTaggedLiterals();
+  } catch (e) {
+    console.error(`✗ could not scan src/ for tagged template literals: ${e.message}`);
+    return 1;
+  }
+  if (tagged.documents === 0) {
+    console.error('✗ no tagged ($queryRaw / $executeRaw / Prisma.sql) template literal found under src/.');
+    console.error('  Either they were all removed or the tag set is stale — either way this half');
+    console.error('  of the gate was checking nothing. Update TAGGED_OPEN.');
+    return 1;
+  }
+  if (tagged.offenders.length > 0) {
+    for (const offender of tagged.offenders) {
+      console.error(`✗ ${offender.file}:${offender.line}  ${offender.name}`);
+      for (const message of offender.errors) console.error(`    ${message}`);
+    }
+    console.error(`\n✗ ${tagged.offenders.length} broken raw-SQL template literal(s).`);
+    return 1;
+  }
+  console.log(`✓ ${tagged.documents} tagged (raw-SQL) template literal(s) intact.`);
 
   try {
     const { typeDefs } = await import('../src/api/graphql/schema/typeDefs.js');
