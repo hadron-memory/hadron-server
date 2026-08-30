@@ -388,6 +388,22 @@ function* tsFilesUnder(dir) {
 const RAW_SQL_TAGS = /\$(?:query|execute)Raw(?:Unsafe)?$|^sql$/;
 
 /**
+ * EXECUTOR tags — the ones that RUN a query. Distinguished from fragment tags
+ * (`Prisma.sql`) because the difference is semantic and load-bearing (#1109,
+ * @codex P1 ×3): a fragment is composed, so it legitimately appears as an
+ * operand of a ternary or a binary expression. An executor never does — you do
+ * not `&&` two queries together — so an executor in operand position is a
+ * literal that ended early and re-paired, whatever the tail turned out to be.
+ *
+ * This is what the "unowned literal" rule below could not settle on its own: a
+ * re-paired tail is not always unowned. If the SQL comment happens to name a
+ * tag — ``-- use `&& Prisma.sql` for overlap`` — the tail becomes a perfectly
+ * OWNED `Prisma.sql` literal, and only the executor's own position gives it
+ * away.
+ */
+const EXECUTOR_TAGS = /\$(?:query|execute)Raw(?:Unsafe)?$/;
+
+/**
  * Does the STATEMENT containing this tagged template also contain a template
  * literal that belongs to nobody? That is the signature of a literal that ended
  * early and re-paired into something valid (#1109, @codex P1 ×2).
@@ -428,15 +444,43 @@ function orphanedTemplateInStatement(node, ts_) {
 }
 
 /** Is this AST node a tagged template whose tag is one of ours? */
-function isRawSqlTag(node) {
-  if (!ts.isTaggedTemplateExpression(node)) return false;
+function tagNameOf(node) {
+  if (!ts.isTaggedTemplateExpression(node)) return null;
   const tag = node.tag;
-  const text = ts.isPropertyAccessExpression(tag)
+  return ts.isPropertyAccessExpression(tag)
     ? tag.name.text
     : ts.isIdentifier(tag)
       ? tag.text
       : '';
-  return RAW_SQL_TAGS.test(text);
+}
+
+function isRawSqlTag(node) {
+  const name = tagNameOf(node);
+  return name !== null && RAW_SQL_TAGS.test(name);
+}
+
+/**
+ * Is this EXECUTOR tagged template sitting in operand position? Returns the
+ * enclosing expression's kind for the message, or null.
+ *
+ * Walks up through `await` and parentheses, which sit between the call and the
+ * operator in the real instances.
+ */
+function executorInOperandPosition(node) {
+  const name = tagNameOf(node);
+  if (name === null || !EXECUTOR_TAGS.test(name)) return null;
+  let current = node;
+  let parent = current.parent;
+  while (parent && (ts.isAwaitExpression(parent) || ts.isParenthesizedExpression(parent))) {
+    current = parent;
+    parent = parent.parent;
+  }
+  if (!parent) return null;
+  if (ts.isBinaryExpression(parent) && parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken) {
+    return parent.operatorToken.getText();
+  }
+  if (ts.isConditionalExpression(parent) && parent.condition !== current) return '?:';
+  return null;
 }
 
 /**
@@ -549,8 +593,9 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
     const visit = (node) => {
       if (isRawSqlTag(node)) {
         documents += 1;
-        const repaired = orphanedTemplateInStatement(node, ts);
-        if (repaired) {
+        const operand = executorInOperandPosition(node);
+        const repaired = operand ? null : orphanedTemplateInStatement(node, ts);
+        if (operand || repaired) {
           offenders.push({
             name: file,
             file,
@@ -558,9 +603,13 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
             errors: [
               'a backtick here ended the raw-SQL template literal early, and the',
               'remainder RE-PAIRED into a valid expression — so TypeScript has no',
-              'complaint and half the query is silently gone — its tail became a',
-              `separate template literal on line ${lineOf(text, repaired.getStart())}. Quoting a JS`,
-              'operator (&&, ?, :) in a SQL comment is the usual cause.',
+              operand
+                ? `complaint — the query became an operand of \`${operand}\`, which a`
+                : 'complaint and half the query is silently gone — its tail became a',
+              operand
+                ? 'query executor never legitimately is, so its tail re-paired.'
+                : `separate template literal on line ${lineOf(text, repaired.getStart())}.`,
+              'Quoting a JS operator (&&, ?, :) in a SQL comment is the usual cause.',
               'Escape it (\\`) or spell the symbol out.',
             ],
           });

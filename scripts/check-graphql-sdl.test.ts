@@ -474,6 +474,23 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'c.ts': src }).offenders).toHaveLength(1);
   });
 
+  it('FAILS when the re-paired tail is OWNED by a tag named in the comment (@codex P1, #1109)', () => {
+    // The unowned-literal rule cannot settle this one: `-- use `&& Prisma.sql``
+    // leaves a perfectly OWNED Prisma.sql literal as the tail. What gives it
+    // away is the EXECUTOR's own position — you do not `&&` two queries
+    // together, so `$executeRaw` in operand position is broken whatever the
+    // tail turned out to be. Fragments may compose; executors may not.
+    const src = lines(
+      'const a = await db.$executeRaw' + BACKTICK + 'UPDATE u SET x=false -- use ' +
+        BACKTICK + '&& Prisma.sql' + BACKTICK + ' for overlap',
+      'WHERE id=${id}' + BACKTICK + ';',
+      '',
+    );
+    const { offenders } = scanFiles({ 'o.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].errors.join(' ')).toMatch(/operand of/);
+  });
+
   it('does NOT fire on a composed Prisma.sql fragment in a ternary', () => {
     // The narrowing control for the rule above: `Prisma.sql`…`` literals in a
     // conditional are OWNED by their tag, which is what separates a legitimate
