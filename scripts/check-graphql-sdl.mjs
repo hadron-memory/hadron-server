@@ -388,25 +388,43 @@ function* tsFilesUnder(dir) {
 const RAW_SQL_TAGS = /\$(?:query|execute)Raw(?:Unsafe)?$|^sql$/;
 
 /**
- * If this tagged template is an OPERAND of a binary expression whose other side
- * is a template literal, return the operator's text — the signature of a
- * literal that ended early and re-paired (#1109, @codex P1).
+ * Does the STATEMENT containing this tagged template also contain a template
+ * literal that belongs to nobody? That is the signature of a literal that ended
+ * early and re-paired into something valid (#1109, @codex P1 ×2).
  *
- * Walks up through `await` and parentheses, which sit between the call and the
- * operator in the real instance.
+ * The first version of this check enumerated expression kinds — it handled
+ * `` `…` && `…` `` and was then shown a conditional, `` `…` ? `…` : `…` ``.
+ * Enumerating kinds is the same too-narrow mistake as enumerating SQL comment
+ * syntaxes, one level up, so this asks the structural question instead:
+ *
+ *   a raw-SQL tagged template is a complete expression, so every template
+ *   literal in its statement should be OWNED by a tag — its own, or a nested
+ *   `Prisma.sql` fragment's. An UNOWNED literal is the tail of one that broke.
+ *
+ * Owned means "its parent is a TaggedTemplateExpression", which is exactly what
+ * distinguishes a legitimate composed fragment (`Prisma.sql\`a = ${x}\`` inside
+ * a ternary, real in usageActivity.ts) from the orphaned remainder of a query.
+ *
+ * Known limit, stated: a statement that legitimately mixes a raw-SQL call with
+ * an unrelated bare literal — `$queryRaw\`…\`.catch(() => new Error(\`x\`))` —
+ * would be a false positive. None exists in the repo, and it fails LOUDLY,
+ * which is the right direction for a gate.
  */
-function binaryTemplatePartner(node) {
-  let current = node;
-  let parent = current.parent;
-  while (parent && (ts.isAwaitExpression(parent) || ts.isParenthesizedExpression(parent))) {
-    current = parent;
-    parent = parent.parent;
-  }
-  if (!parent || !ts.isBinaryExpression(parent)) return null;
-  const other = parent.left === current ? parent.right : parent.left;
-  const isTemplate =
-    ts.isTemplateExpression(other) || ts.isNoSubstitutionTemplateLiteral(other);
-  return isTemplate ? parent.operatorToken.getText() : null;
+function orphanedTemplateInStatement(node, ts_) {
+  let statement = node;
+  while (statement.parent && !ts_.isStatement(statement)) statement = statement.parent;
+  let found = null;
+  const walk = (n) => {
+    if (found) return;
+    const isLiteral = ts_.isTemplateExpression(n) || ts_.isNoSubstitutionTemplateLiteral(n);
+    if (isLiteral && !(n.parent && ts_.isTaggedTemplateExpression(n.parent))) {
+      found = n;
+      return;
+    }
+    ts_.forEachChild(n, walk);
+  };
+  walk(statement);
+  return found;
 }
 
 /** Is this AST node a tagged template whose tag is one of ours? */
@@ -531,7 +549,7 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
     const visit = (node) => {
       if (isRawSqlTag(node)) {
         documents += 1;
-        const repaired = binaryTemplatePartner(node);
+        const repaired = orphanedTemplateInStatement(node, ts);
         if (repaired) {
           offenders.push({
             name: file,
@@ -540,8 +558,9 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
             errors: [
               'a backtick here ended the raw-SQL template literal early, and the',
               'remainder RE-PAIRED into a valid expression — so TypeScript has no',
-              `complaint and half the query is silently gone (it became a \`${repaired}\``,
-              'operand). Quoting a JS operator in a SQL comment is the usual cause.',
+              'complaint and half the query is silently gone — its tail became a',
+              `separate template literal on line ${lineOf(text, repaired.getStart())}. Quoting a JS`,
+              'operator (&&, ?, :) in a SQL comment is the usual cause.',
               'Escape it (\\`) or spell the symbol out.',
             ],
           });

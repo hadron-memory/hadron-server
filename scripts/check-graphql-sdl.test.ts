@@ -459,6 +459,35 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(offenders[0].errors.join(' ')).toMatch(/RE-PAIRED into a valid expression/);
   });
 
+  it('FAILS on a CONDITIONAL re-pair too, not just a binary one (@codex P1, #1109)', () => {
+    // The first version of the re-pair check enumerated expression kinds and
+    // handled `&&` only. Enumerating kinds is the same too-narrow mistake as
+    // enumerating SQL comment syntaxes, one level up — so the check now asks a
+    // structural question (is there an UNOWNED template literal in this
+    // statement?) and this case needed no new clause.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET a=false -- choose ' +
+        BACKTICK + ' ? ' + BACKTICK + ' or ' + BACKTICK + ' : ' + BACKTICK + ' for fallback',
+      'WHERE id=${id}' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'c.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('does NOT fire on a composed Prisma.sql fragment in a ternary', () => {
+    // The narrowing control for the rule above: `Prisma.sql`…`` literals in a
+    // conditional are OWNED by their tag, which is what separates a legitimate
+    // composed fragment from the orphaned tail of a broken query. Real shape,
+    // from usageActivity.ts.
+    const src = lines(
+      'const p = c',
+      '  ? Prisma.sql' + BACKTICK + 'a = ${x}' + BACKTICK,
+      '  : Prisma.sql' + BACKTICK + 'b = ${y}' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'ok.ts': src }).offenders).toEqual([]);
+  });
+
   it('finds the real repo tagged literals, and they are all intact', () => {
     // Anti-phantom, the same property the SDL half asserts: a scan that found
     // nothing to check must not read as a clean one.
