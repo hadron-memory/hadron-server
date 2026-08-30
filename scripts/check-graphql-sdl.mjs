@@ -47,6 +47,7 @@
  * check-graphql-sdl.test.ts can prove this gate still FAILS on a planted
  * backtick — a gate that only ever passes is a line of setup.
  */
+import ts from 'typescript';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -383,20 +384,57 @@ function* tsFilesUnder(dir) {
   }
 }
 
+/** Tag names whose template literal carries a foreign language, not JS prose. */
+const RAW_SQL_TAGS = /\$(?:query|execute)Raw(?:Unsafe)?$|^sql$/;
+
+/** Is this AST node a tagged template whose tag is one of ours? */
+function isRawSqlTag(node) {
+  if (!ts.isTaggedTemplateExpression(node)) return false;
+  const tag = node.tag;
+  const text = ts.isPropertyAccessExpression(tag)
+    ? tag.name.text
+    : ts.isIdentifier(tag)
+      ? tag.text
+      : '';
+  return RAW_SQL_TAGS.test(text);
+}
+
 /**
- * Scan every `.ts` file under `dir` for TAGGED prose-carrying literals (#1087).
+ * Scan every `.ts` file under `dir` for BROKEN prose-carrying literals (#1087).
  *
- * `.test.ts` is INCLUDED here, unlike the SDL scan. 15 test files use
- * `$queryRaw`, and a broken literal in any of them breaks `tsc` for the whole
- * repo — the blast radius is identical, so excluding them would be scoping the
- * guard to where it is convenient rather than to where the hazard is, which is
- * the mistake #1087 exists to correct.
+ * **This asks the TypeScript parser where a template literal ends rather than
+ * deciding for itself, and that is the whole design — arrived at the hard way.**
+ * The first version ported check 1's text heuristics to raw SQL and took FIVE
+ * review rounds, each trading one edge for another:
  *
- * The guard's OWN test (`scripts/check-graphql-sdl.test.ts`) plants deliberately
- * broken literals as fixtures and would be a false positive — it is outside
- * `src/`, so this walk never reaches it. That is luck rather than design, so if
- * a fixture-bearing test is ever added under `src/`, this comment is the place
- * that has to change.
+ *   - position + shape (the SDL rule) — 41 false positives: SQL closes on its
+ *     last content line, not on a line of its own;
+ *   - shape only — a backtick ENDING a `--` comment read as the terminator;
+ *   - require a non-empty closer — rejected literals whose `;` sits on the NEXT
+ *     line (`Prisma.sql` as a ternary branch);
+ *   - comment context over the line — flagged every single-line SDL document,
+ *     because SDL's own marker IS a `#`;
+ *   - comment context over the literal body — false positive on the ordinary
+ *     `` `SELECT 1 -- explanation` ``, and blind to block comments.
+ *
+ * Being told "narrower" five times means the SHAPE is wrong, not the width —
+ * which this file already says one function up, about a prefix test. Each fix
+ * was another clause of a SQL lexer (line comments, strings, quote parity,
+ * block comments) hand-rolled inside a gate whose value is being simple.
+ *
+ * The parser has no such problem: it DEFINES where a template literal ends. A
+ * bare backtick in SQL ends the literal, the rest of the file stops being valid
+ * TypeScript, and `parseDiagnostics` is non-empty — precisely the condition
+ * this gate exists to detect. All six cases above classify correctly with zero
+ * SQL knowledge.
+ *
+ * What this still adds over `tsc`, and why it is not redundant: `tsc` reports
+ * TS1005 wherever the remainder stops making sense — sometimes hundreds of
+ * lines from the cause, never as "unterminated literal". This names the TAGGED
+ * LITERAL the error falls inside, and says what to do about it.
+ *
+ * `.test.ts` is included: 15 test files use raw SQL, and a broken literal in any
+ * of them breaks `tsc` repo-wide, so the blast radius is identical.
  */
 export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
   const offenders = [];
@@ -407,14 +445,59 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
     if (!/\$(?:query|execute)Raw|Prisma\.sql/.test(text)) continue;
     const fromRoot = relative(ROOT, path);
     const file = fromRoot.startsWith('..') ? relative(dir, path) : fromRoot;
-    const found = findBrokenLiterals(file, text, {
-      pattern: TAGGED_OPEN,
-      kind: 'raw-SQL',
-      requireFirstOnLine: false,
-      commentMarker: '--',
-    });
-    documents += found.documents;
-    offenders.push(...found.offenders);
+
+    const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+    // Not in the public typings, but stable and what `tsc` itself reports from.
+    const diagnostics = source.parseDiagnostics ?? [];
+
+    if (diagnostics.length > 0) {
+      const at = diagnostics[0].start ?? 0;
+      // The tagged literal the error falls inside or after — what the author has
+      // to look at, as opposed to where TypeScript gave up.
+      // Also the count for this file: `documents` means "literals EXAMINED",
+      // and a broken one was examined — it is the whole reason there is a
+      // report. The AST cannot supply it (a broken file has no usable AST), so
+      // it comes from the same TAGGED_OPEN walk that locates the literal rather
+      // than from a second, separately-written matcher.
+      let opensAt = -1;
+      TAGGED_OPEN.lastIndex = 0;
+      let m;
+      while ((m = TAGGED_OPEN.exec(text)) !== null) {
+        const openIndex = m.index + m[0].lastIndexOf('`');
+        documents += 1;
+        if (openIndex <= at) opensAt = openIndex;
+      }
+      // Report where the PARSER stopped, not where the literal opened: that is
+      // at or next to the stray backtick in every case measured, and it is the
+      // line the author has to edit. The literal's own opening line is named in
+      // the message, because that is the context the bare TS error omits.
+      const openLine = opensAt === -1 ? null : lineOf(text, opensAt);
+      offenders.push({
+        name: file,
+        file,
+        line: lineOf(text, at),
+        errors: [
+          'a backtick here ends the raw-SQL template literal early —',
+          openLine === null
+            ? 'a `--` comment or a quoted identifier is the usual cause.'
+            : `the literal opens on line ${openLine}, and a \`--\` comment or a quoted`,
+          'identifier is the usual cause. Everything below is then parsed as',
+          'TypeScript, which reports TS1005 / TS1443 wherever it stops making',
+          'sense — never as "unterminated literal". Escape it (\\`) or spell the',
+          'symbol out.',
+        ],
+      });
+      continue;
+    }
+
+    // Intact: count the tagged literals so an empty scan cannot read as a clean
+    // one. Counted from the AST, so the count and the verdict share a source
+    // rather than coming from two separately-written matchers.
+    const visit = (node) => {
+      if (isRawSqlTag(node)) documents += 1;
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
   }
   return { offenders, documents };
 }

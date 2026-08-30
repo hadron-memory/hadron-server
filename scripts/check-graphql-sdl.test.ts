@@ -290,9 +290,9 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(offenders).toHaveLength(1);
     expect(offenders[0].line).toBe(3);
     expect(offenders[0].errors.join(' ')).toMatch(/ends the raw-SQL template literal early/);
-    // The message names the SQL comment marker, not GraphQL's. The first
-    // version of this widening said "# comment" to a SQL author.
-    expect(offenders[0].errors.join(' ')).toMatch(/in this -- comment/);
+    // The message names the literal's OPENING line, which is the context a bare
+    // TS1005 omits and the reason this gate is not redundant with tsc.
+    expect(offenders[0].errors.join(' ')).toMatch(/the literal opens on line 1/);
   });
 
   it('does NOT fire on a terminator at the END of a content line', () => {
@@ -349,7 +349,12 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     );
     const { offenders } = scanFiles({ 'a.ts': src });
     expect(offenders).toHaveLength(1);
-    expect(offenders[0].line).toBe(3);
+    // Line 4, not 3: the parser reports where IT stopped, which is at or just
+    // past the stray backtick rather than exactly on it. That is the one
+    // precision the tokeniser costs against the old text scanner, and it buys
+    // correctness on six edges the scanner got wrong — the message names the
+    // literal's opening line so the reader has both ends of the range.
+    expect(offenders[0].line).toBe(4);
   });
 
   it('scans a literal whose GENERIC spans lines (@codex P2, #1109)', () => {
@@ -401,7 +406,31 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     );
     const { offenders } = scanFiles({ 'a.ts': src });
     expect(offenders).toHaveLength(1);
-    expect(offenders[0].line).toBe(1);
+    expect(offenders[0].line).toBe(2);
+  });
+
+  it('does NOT fire on a valid query ENDING in a line comment (@codex P2, #1109)', () => {
+    // The false POSITIVE that finally showed the heuristic approach was wrong:
+    // here the backtick IS the terminator and the SQL comment simply runs to
+    // the end of the literal. Ordinary code, flagged as broken.
+    const src = lines(
+      'const a = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- explanation' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'a.ts': src }).offenders).toEqual([]);
+  });
+
+  it('FAILS on a backtick inside a /* block */ comment (@codex P2, #1109)', () => {
+    // The text scanner only ever learned `--`; the parser needs no SQL lexicon
+    // at all, so block comments come for free rather than as a sixth clause.
+    const src = lines(
+      'const b = await db.$queryRaw' + BACKTICK,
+      '  SELECT 1',
+      '  /* explanation ' + BACKTICK,
+      '  */ FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'b.ts': src }).offenders).toHaveLength(1);
   });
 
   it('does NOT fire on -- inside a SQL STRING literal (@codex P2, #1109)', () => {
