@@ -107,6 +107,28 @@ const SDL_OPEN = /(?:(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*)?`#graphql/g;
 const TAGGED_OPEN =
   /(?:(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*)?(?<!`)(?:\$(?:query|execute)Raw(?:Unsafe)?|Prisma\.sql)(?:<[^`]*>)?`/g;
 
+/**
+ * Does `prefix` open a line comment that is still in effect at its end?
+ *
+ * The naive `.includes('--')` reports a legitimate query as broken when the
+ * dashes sit inside a SQL string — `` $queryRaw`SELECT '--'`; `` (PR #1109,
+ * @codex). Quote parity is enough to tell them apart: a marker inside an odd
+ * number of preceding quotes is inside a string literal, not opening a comment.
+ *
+ * Known limit, stated rather than silently handled: SQL escapes a quote by
+ * doubling it (`''`), which this counts as two and therefore as balanced —
+ * correct for `'it''s'`, and it degrades to a LOUD false positive rather than a
+ * silent miss in any case it gets wrong, which is the right way round here.
+ */
+function hasLineComment(prefix, marker) {
+  let quoted = false;
+  for (let k = 0; k < prefix.length; k += 1) {
+    if (prefix[k] === "'") quoted = !quoted;
+    else if (!quoted && prefix.startsWith(marker, k)) return true;
+  }
+  return false;
+}
+
 /** 1-indexed line number of `index` in `text`, so the report is clickable. */
 function lineOf(text, index) {
   return text.slice(0, index).split('\n').length;
@@ -268,14 +290,19 @@ export function findBrokenLiterals(file, text, opts = {}) {
     // Computed before the verdict because it IS part of the verdict now, not
     // only part of the message.
     //
-    // Never on the OPENING line: SDL's own marker is `#graphql`, so the prefix
-    // of a single-line document always contains the comment marker and every
-    // such document would be flagged. (Caught by the existing single-line test
-    // — the reason to widen a shared walker inside a suite that already pins
-    // the old behaviour.) A stray backtick on the opening line is still caught
-    // by the shape check.
-    const inComment =
-      !sameLineAsOpening && line.slice(0, i - closeLineStart).includes(commentMarker);
+    // Measured over the literal's BODY on this line, not the whole line, and
+    // that distinction took a third review round to get right (PR #1109,
+    // @codex). Scanning the whole line flags every single-line SDL document,
+    // because SDL's own opening marker IS a `#`. Suppressing the opening line
+    // instead — the fix I reached for first — then hid a SQL comment that
+    // starts immediately after the tag (`$queryRaw\`-- accidental \``), which is
+    // a false NEGATIVE and therefore the worse trade.
+    //
+    // Starting from the body skips the SDL tag by construction and leaves an
+    // opening-line SQL comment fully visible.
+    const bodyStart = openIndex + 1 + (text.startsWith(SDL_MARKER, openIndex + 1) ? SDL_MARKER.length : 0);
+    const prefix = text.slice(Math.max(closeLineStart, bodyStart), i);
+    const inComment = hasLineComment(prefix, commentMarker);
 
     const positionOk = !requireFirstOnLine || sameLineAsOpening || firstOnItsLine;
     if (!positionOk || !closesAnExpression || inComment) {

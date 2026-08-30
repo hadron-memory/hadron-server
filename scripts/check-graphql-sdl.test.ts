@@ -389,6 +389,31 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'c.ts': src }).offenders).toEqual([]);
   });
 
+  it('FAILS on a comment that starts on the OPENING line (@codex P2, #1109)', () => {
+    // The hole my first fix for the single-line-SDL regression opened:
+    // suppressing the comment test on the opening line hid a SQL comment that
+    // begins immediately after the tag. Keying on the literal's BODY rather
+    // than on the line handles both without a special case.
+    const src = lines(
+      'const a = await db.$queryRaw' + BACKTICK + '-- accidental ' + BACKTICK,
+      '  SELECT 1' + BACKTICK + ';',
+      '',
+    );
+    const { offenders } = scanFiles({ 'a.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].line).toBe(1);
+  });
+
+  it('does NOT fire on -- inside a SQL STRING literal (@codex P2, #1109)', () => {
+    // `.includes('--')` called a legitimate query broken. Quote parity tells a
+    // comment marker from the same characters inside a string.
+    const src = lines(
+      "const b = await db.$queryRaw" + BACKTICK + "SELECT '--' AS x" + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'b.ts': src }).offenders).toEqual([]);
+  });
+
   it('finds the real repo tagged literals, and they are all intact', () => {
     // Anti-phantom, the same property the SDL half asserts: a scan that found
     // nothing to check must not read as a clean one.
