@@ -443,6 +443,22 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'b.ts': src }).offenders).toEqual([]);
   });
 
+  it('FAILS when the stray backticks RE-PAIR into valid TypeScript (@codex P1, #1109)', () => {
+    // The parser's own blind spot, and the reason the AST check exists beside
+    // the diagnostic one: quoting a JS operator in a SQL comment leaves
+    // `taggedTemplate && templateExpression` — two literals and an operator,
+    // all valid — so TypeScript has NO complaint and half the query is gone.
+    const src = lines(
+      'const x = await db.$executeRaw' +
+        BACKTICK + 'UPDATE u SET a = false -- use ' + BACKTICK + '&&' + BACKTICK + ' for overlap',
+      'WHERE id = ${id}' + BACKTICK + ';',
+      '',
+    );
+    const { offenders } = scanFiles({ 'r.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].errors.join(' ')).toMatch(/RE-PAIRED into a valid expression/);
+  });
+
   it('finds the real repo tagged literals, and they are all intact', () => {
     // Anti-phantom, the same property the SDL half asserts: a scan that found
     // nothing to check must not read as a clean one.

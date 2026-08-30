@@ -387,6 +387,28 @@ function* tsFilesUnder(dir) {
 /** Tag names whose template literal carries a foreign language, not JS prose. */
 const RAW_SQL_TAGS = /\$(?:query|execute)Raw(?:Unsafe)?$|^sql$/;
 
+/**
+ * If this tagged template is an OPERAND of a binary expression whose other side
+ * is a template literal, return the operator's text — the signature of a
+ * literal that ended early and re-paired (#1109, @codex P1).
+ *
+ * Walks up through `await` and parentheses, which sit between the call and the
+ * operator in the real instance.
+ */
+function binaryTemplatePartner(node) {
+  let current = node;
+  let parent = current.parent;
+  while (parent && (ts.isAwaitExpression(parent) || ts.isParenthesizedExpression(parent))) {
+    current = parent;
+    parent = parent.parent;
+  }
+  if (!parent || !ts.isBinaryExpression(parent)) return null;
+  const other = parent.left === current ? parent.right : parent.left;
+  const isTemplate =
+    ts.isTemplateExpression(other) || ts.isNoSubstitutionTemplateLiteral(other);
+  return isTemplate ? parent.operatorToken.getText() : null;
+}
+
 /** Is this AST node a tagged template whose tag is one of ours? */
 function isRawSqlTag(node) {
   if (!ts.isTaggedTemplateExpression(node)) return false;
@@ -490,11 +512,41 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
       continue;
     }
 
-    // Intact: count the tagged literals so an empty scan cannot read as a clean
-    // one. Counted from the AST, so the count and the verdict share a source
-    // rather than coming from two separately-written matchers.
+    // Parsed clean — but that is not yet "intact". If the stray backticks
+    // happen to RE-PAIR into a valid expression, TypeScript has no complaint
+    // and the diagnostic test above sees nothing (PR #1109 review, @codex P1):
+    //
+    //   $executeRaw`UPDATE u SET a = false -- use `&&` for overlap
+    //   WHERE id = ${id}`;
+    //
+    // parses as `taggedTemplate && templateExpression` — two literals and an
+    // operator, all valid, and half the SQL silently gone. The parser cannot
+    // help here because nothing is wrong with the TYPESCRIPT.
+    //
+    // The AST shape is the tell, and it is exact: a raw-SQL tagged template is
+    // an expression in its own right, never an OPERAND of a binary expression
+    // whose other side is another template literal. Nobody writes
+    // `` $queryRaw`…` && `…` `` on purpose, so this needs no heuristic about
+    // what SQL looks like — only about what the call site looks like.
     const visit = (node) => {
-      if (isRawSqlTag(node)) documents += 1;
+      if (isRawSqlTag(node)) {
+        documents += 1;
+        const repaired = binaryTemplatePartner(node);
+        if (repaired) {
+          offenders.push({
+            name: file,
+            file,
+            line: lineOf(text, node.template.getEnd() - 1),
+            errors: [
+              'a backtick here ended the raw-SQL template literal early, and the',
+              'remainder RE-PAIRED into a valid expression — so TypeScript has no',
+              `complaint and half the query is silently gone (it became a \`${repaired}\``,
+              'operand). Quoting a JS operator in a SQL comment is the usual cause.',
+              'Escape it (\\`) or spell the symbol out.',
+            ],
+          });
+        }
+      }
       ts.forEachChild(node, visit);
     };
     visit(source);
