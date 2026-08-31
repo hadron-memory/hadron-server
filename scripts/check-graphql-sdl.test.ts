@@ -289,14 +289,12 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(documents).toBe(1);
     expect(offenders).toHaveLength(1);
     expect(offenders[0].line).toBe(3);
-    // The message names the literal's OPENING line, which is the context a bare
-    // TS1005 omits and the reason this gate is not redundant with tsc.
-    expect(offenders[0].errors.join(' ')).toMatch(/opens on line 1/);
-    // …and it does NOT assert a cause the diagnostic has not established: this
-    // branch fires on any parse error in a file containing raw-SQL tags, so a
-    // flat "a backtick ended the literal early" would misdiagnose an unrelated
-    // missing brace (PR #1109 review, @copilot).
-    expect(offenders[0].errors.join(' ')).toMatch(/Check that literal first/);
+    // The message points at the nearest literal — the context a bare TS1005
+    // omits, and the reason this gate is not redundant with tsc — WITHOUT
+    // claiming it is the cause, which a parse diagnostic cannot establish
+    // (PR #1109 review, @copilot then @codex).
+    expect(offenders[0].errors.join(' ')).toMatch(/nearest opening on line 1/);
+    expect(offenders[0].errors.join(' ')).toMatch(/cannot tell it from an ordinary syntax error/);
   });
 
   it('does NOT fire on a terminator at the END of a content line', () => {
@@ -492,7 +490,7 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     );
     const { offenders } = scanFiles({ 'o.ts': src });
     expect(offenders).toHaveLength(1);
-    expect(offenders[0].errors.join(' ')).toMatch(/operand of/);
+    expect(offenders[0].errors.join(' ')).toMatch(/RE-PAIRED into a valid expression/);
   });
 
   it('does NOT fire on a composed Prisma.sql fragment in a ternary', () => {
@@ -527,6 +525,49 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     const message = offenders[0].errors.join(' ');
     expect(message).toMatch(/probably an ordinary syntax error/);
     expect(message).not.toMatch(/opens on line/);
+  });
+
+  it('FAILS on a re-pair in an ARRAY element (@codex P1, #1109)', () => {
+    // The fourth re-pair shape. The executor's parent is an array, not a binary
+    // or conditional — so a rule enumerating parent kinds missed it, and the
+    // tail is owned by a tag so the unowned rule missed it too. The positional
+    // rule needs no clause for it: the second literal is a SIBLING rather than
+    // nested in a `${}` slot.
+    const src = lines(
+      'await Promise.all([db.$executeRaw' + BACKTICK + 'UPDATE u SET x=false -- sep with ' +
+        BACKTICK + ', Prisma.sql' + BACKTICK + ' frag',
+      'WHERE id=${id}' + BACKTICK + ',]);',
+      '',
+    );
+    expect(scanFiles({ 'arr.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('does NOT fire on a Prisma.sql fragment NESTED in a query slot', () => {
+    // The control the positional rule turns on: a composed fragment inside a
+    // `${}` slot lies WITHIN the executor's own literal, which is exactly what
+    // separates legitimate composition from a severed tail.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT ${Prisma.sql' + BACKTICK +
+        'a = 1' + BACKTICK + '} FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'n.ts': src }).offenders).toEqual([]);
+  });
+
+  it('stays cause-neutral when a VALID query precedes an unrelated error (@codex P2, #1109)', () => {
+    // My first cause-neutral fix only handled the error-BEFORE-any-tag ordering
+    // — the ordering I happened to write a test for. A literal opening before
+    // the diagnostic does not establish that the diagnostic belongs to it.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1' + BACKTICK + ';',
+      'function f( {',
+      '  return 1;',
+      '}',
+      '',
+    );
+    const { offenders } = scanFiles({ 'v.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].errors.join(' ')).toMatch(/cannot tell it from an ordinary syntax error/);
   });
 
   it('finds the real repo tagged literals, and they are all intact', () => {

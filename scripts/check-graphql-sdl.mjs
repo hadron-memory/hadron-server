@@ -16,8 +16,8 @@
  *    `$executeRaw` / `Prisma.sql` literal in `src/`. NOT the same scan as
  *    check 1 — it does not text-scan at all. `scanTaggedLiterals` asks the
  *    TypeScript parser where each literal ends and then checks two things the
- *    parser cannot: that the file has no parse diagnostics, and that an
- *    executor is not sitting in operand position (a literal whose stray
+ *    parser cannot: that the file has no parse diagnostics, and that no
+ *    template literal sits BESIDE an executor's own (a literal whose stray
  *    backticks RE-PAIRED into something valid). Porting check 1's text rules
  *    here took five review rounds and never worked; the header of that
  *    function records why, and this line said otherwise until PR #1109 review
@@ -467,32 +467,59 @@ function isRawSqlTag(node) {
 }
 
 /**
- * Is this EXECUTOR tagged template sitting in operand position? Returns the
- * enclosing expression's kind for the message, or null.
+ * A raw-SQL EXECUTOR's statement must contain no template literal outside the
+ * executor's own — that is the single rule replacing two earlier ones (#1109,
+ * @codex P1 ×4).
  *
- * Walks up through `await` and parentheses, which sit between the call and the
- * operator in the real instances.
+ * The story of those four rounds is the finding. Each fix named the shapes a
+ * re-pair could take, and each was shown one it lacked:
+ *
+ *   - operand of `&&`            → then a conditional
+ *   - operand of a conditional   → then a conditional's TEST
+ *   - an UNOWNED tail literal    → then a tail owned by a tag the comment named
+ *                                  (`-- use \`&& Prisma.sql\``)
+ *   - binary/conditional parents → then an ARRAY element, inside Promise.all([…])
+ *
+ * Enumerating parent kinds is the same mistake as enumerating SQL comment
+ * syntaxes, one level up, and it fails the same way every time. The property
+ * that actually holds is POSITIONAL and needs no list:
+ *
+ *   an executor runs one query. Any other template literal in its statement is
+ *   either NESTED INSIDE its own literal — a composed `Prisma.sql` fragment in a
+ *   `${…}` slot, which is legitimate — or it is a sibling, which means the
+ *   executor's literal ended early and the remainder became its own.
+ *
+ * Fragments (`Prisma.sql`) are exempt: composing them IS their purpose, so two
+ * fragment literals in one statement (the ternary in usageActivity.ts) is
+ * ordinary code. Only executors make the claim "this literal is the whole
+ * query".
+ *
+ * Returns the stray literal, or null.
  */
-function executorInOperandPosition(node) {
+function strayTemplateBesideExecutor(node) {
   const name = tagNameOf(node);
   if (name === null || !EXECUTOR_TAGS.test(name)) return null;
-  let current = node;
-  let parent = current.parent;
-  while (parent && (ts.isAwaitExpression(parent) || ts.isParenthesizedExpression(parent))) {
-    current = parent;
-    parent = parent.parent;
-  }
-  if (!parent) return null;
-  if (ts.isBinaryExpression(parent) && parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken) {
-    return parent.operatorToken.getText();
-  }
-  // No carve-out for the CONDITION position (@codex P1, #1109). The first
-  // version excluded it — defensively, and with no reason behind it. An
-  // executor is not a composable value anywhere in a conditional: not as a
-  // branch, and not as the test either.
-  if (ts.isConditionalExpression(parent)) return '?:';
-  return null;
+  let statement = node;
+  while (statement.parent && !ts.isStatement(statement)) statement = statement.parent;
+  const ownStart = node.template.getStart();
+  const ownEnd = node.template.getEnd();
+  let stray = null;
+  const walk = (n) => {
+    if (stray) return;
+    const isLiteral = ts.isTemplateExpression(n) || ts.isNoSubstitutionTemplateLiteral(n);
+    if (isLiteral && n !== node.template) {
+      const inside = n.getStart() >= ownStart && n.getEnd() <= ownEnd;
+      if (!inside) {
+        stray = n;
+        return;
+      }
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(statement);
+  return stray;
 }
+
 
 /**
  * Scan every `.ts` file under `dir` for BROKEN prose-carrying literals (#1087).
@@ -583,6 +610,14 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
         file,
         line: lineOf(text, at),
         errors:
+          // ALWAYS cause-neutral here (PR #1109 review, @copilot then @codex).
+          // A literal opening BEFORE the diagnostic does not establish that the
+          // diagnostic belongs to it — a completed query followed by a
+          // malformed function has exactly that shape, and my first fix only
+          // handled the opposite ordering because that is the ordering I wrote
+          // a test for. When a literal really did break, the AST rule above
+          // fires and says so with evidence; this branch has none, so it names
+          // a suspect rather than a cause.
           openLine === null
             ? [
                 'this file does not parse, and it contains raw-SQL template literals.',
@@ -592,12 +627,12 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
                 'this gate reports it instead of staying silent.',
               ]
             : [
-                `a raw-SQL template literal opens on line ${openLine} and this file no`,
-                'longer parses. A bare backtick inside it — a `--` comment or a quoted',
-                'identifier — ends it early, and everything after is parsed as',
-                'TypeScript, which reports TS1005 / TS1443 wherever it stops making',
-                'sense, never as "unterminated literal". Check that literal first;',
-                'escape the backtick (\\`) or spell the symbol out.',
+                'this file does not parse. It contains raw-SQL template literals, the',
+                `nearest opening on line ${openLine} — and a bare backtick inside one (a`,
+                '`--` comment, a quoted identifier) ends it early, which TypeScript',
+                'then reports as TS1005 / TS1443 somewhere below rather than as an',
+                'unterminated literal. That is worth checking FIRST, but this gate',
+                'cannot tell it from an ordinary syntax error, and does not claim to.',
               ],
       });
       continue;
@@ -622,24 +657,20 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
     const visit = (node) => {
       if (isRawSqlTag(node)) {
         documents += 1;
-        const operand = executorInOperandPosition(node);
-        const repaired = operand ? null : orphanedTemplateInStatement(node, ts);
-        if (operand || repaired) {
+        const stray = strayTemplateBesideExecutor(node);
+        if (stray) {
           offenders.push({
             name: file,
             file,
             line: lineOf(text, node.template.getEnd() - 1),
             errors: [
-              'a backtick here ended the raw-SQL template literal early, and the',
-              'remainder RE-PAIRED into a valid expression — so TypeScript has no',
-              operand
-                ? `complaint — the query became an operand of \`${operand}\`, which a`
-                : 'complaint and half the query is silently gone — its tail became a',
-              operand
-                ? 'query executor never legitimately is, so its tail re-paired.'
-                : `separate template literal on line ${lineOf(text, repaired.getStart())}.`,
-              'Quoting a JS operator (&&, ?, :) in a SQL comment is the usual cause.',
-              'Escape it (\\`) or spell the symbol out.',
+              'a backtick here ended this raw-SQL query early, and the remainder',
+              'RE-PAIRED into a valid expression — so TypeScript has no complaint',
+              `and part of the query became a separate template literal on line ${lineOf(text, stray.getStart())}.`,
+              'An executor runs ONE query, so a second literal beside it (rather',
+              'than nested in a ${} slot) means this one was cut short.',
+              'Quoting a JS operator in a SQL comment is the usual cause — escape',
+              'the backtick (\\`) or spell the symbol out.',
             ],
           });
         }
