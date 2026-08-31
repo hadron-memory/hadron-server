@@ -16,9 +16,9 @@
  *    `$executeRaw` / `Prisma.sql` literal in `src/`. NOT the same scan as
  *    check 1 — it does not text-scan at all. `scanTaggedLiterals` asks the
  *    TypeScript parser where each literal ends and then checks two things the
- *    parser cannot: that the file has no parse diagnostics, and that no
- *    template literal sits BESIDE an executor's own (a literal whose stray
- *    backticks RE-PAIRED into something valid). Porting check 1's text rules
+ *    parser cannot decide for it: that the file has no parse diagnostics.
+ *    A break that RE-PAIRS into valid TypeScript is out of scope and tracked
+ *    as #1110 — see the note above `scanTaggedLiterals`. Porting check 1's text rules
  *    here took five review rounds and never worked; the header of that
  *    function records why, and this line said otherwise until PR #1109 review
  *    caught it — prose outliving its mechanism, in the header of the PR about
@@ -467,58 +467,27 @@ function isRawSqlTag(node) {
 }
 
 /**
- * A raw-SQL EXECUTOR's statement must contain no template literal outside the
- * executor's own — that is the single rule replacing two earlier ones (#1109,
- * @codex P1 ×4).
+ * NOT IMPLEMENTED HERE, deliberately: detecting a literal whose stray backticks
+ * RE-PAIR into valid TypeScript. Tracked as #1110.
  *
- * The story of those four rounds is the finding. Each fix named the shapes a
- * re-pair could take, and each was shown one it lacked:
+ * The parser arm above catches every break that leaves the file unparseable,
+ * which is the incident #1087 was filed for and the overwhelming majority. It
+ * cannot catch a break that happens to re-pair, because nothing is wrong with
+ * the TypeScript — and four attempts at an AST rule for that each fell to a
+ * construction the previous one had not imagined (`&&`, a conditional, a
+ * conditional's TEST, a tail owned by a tag the comment named, an array
+ * element). The fifth, a positional "no literal beside an executor's own",
+ * finally produced a FALSE POSITIVE on ordinary code:
  *
- *   - operand of `&&`            → then a conditional
- *   - operand of a conditional   → then a conditional's TEST
- *   - an UNOWNED tail literal    → then a tail owned by a tag the comment named
- *                                  (`-- use \`&& Prisma.sql\``)
- *   - binary/conditional parents → then an ARRAY element, inside Promise.all([…])
+ *   await Promise.all([db.$queryRaw`SELECT 1`, db.$queryRaw`SELECT 2`])
  *
- * Enumerating parent kinds is the same mistake as enumerating SQL comment
- * syntaxes, one level up, and it fails the same way every time. The property
- * that actually holds is POSITIONAL and needs no list:
- *
- *   an executor runs one query. Any other template literal in its statement is
- *   either NESTED INSIDE its own literal — a composed `Prisma.sql` fragment in a
- *   `${…}` slot, which is legitimate — or it is a sibling, which means the
- *   executor's literal ended early and the remainder became its own.
- *
- * Fragments (`Prisma.sql`) are exempt: composing them IS their purpose, so two
- * fragment literals in one statement (the ternary in usageActivity.ts) is
- * ordinary code. Only executors make the claim "this literal is the whole
- * query".
- *
- * Returns the stray literal, or null.
+ * Two legitimate queries in one statement, both flagged. **A gate that blocks
+ * valid code gets switched off, which costs more than the gap it was closing** —
+ * so the arm is removed rather than tightened a sixth time. #1110 records every
+ * construction found, so whoever takes it starts from the evidence instead of
+ * from a fresh guess.
  */
-function strayTemplateBesideExecutor(node) {
-  const name = tagNameOf(node);
-  if (name === null || !EXECUTOR_TAGS.test(name)) return null;
-  let statement = node;
-  while (statement.parent && !ts.isStatement(statement)) statement = statement.parent;
-  const ownStart = node.template.getStart();
-  const ownEnd = node.template.getEnd();
-  let stray = null;
-  const walk = (n) => {
-    if (stray) return;
-    const isLiteral = ts.isTemplateExpression(n) || ts.isNoSubstitutionTemplateLiteral(n);
-    if (isLiteral && n !== node.template) {
-      const inside = n.getStart() >= ownStart && n.getEnd() <= ownEnd;
-      if (!inside) {
-        stray = n;
-        return;
-      }
-    }
-    ts.forEachChild(n, walk);
-  };
-  walk(statement);
-  return stray;
-}
+
 
 
 /**
@@ -657,23 +626,6 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
     const visit = (node) => {
       if (isRawSqlTag(node)) {
         documents += 1;
-        const stray = strayTemplateBesideExecutor(node);
-        if (stray) {
-          offenders.push({
-            name: file,
-            file,
-            line: lineOf(text, node.template.getEnd() - 1),
-            errors: [
-              'a backtick here ended this raw-SQL query early, and the remainder',
-              'RE-PAIRED into a valid expression — so TypeScript has no complaint',
-              `and part of the query became a separate template literal on line ${lineOf(text, stray.getStart())}.`,
-              'An executor runs ONE query, so a second literal beside it (rather',
-              'than nested in a ${} slot) means this one was cut short.',
-              'Quoting a JS operator in a SQL comment is the usual cause — escape',
-              'the backtick (\\`) or spell the symbol out.',
-            ],
-          });
-        }
       }
       ts.forEachChild(node, visit);
     };

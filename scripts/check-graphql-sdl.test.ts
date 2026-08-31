@@ -445,54 +445,6 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'b.ts': src }).offenders).toEqual([]);
   });
 
-  it('FAILS when the stray backticks RE-PAIR into valid TypeScript (@codex P1, #1109)', () => {
-    // The parser's own blind spot, and the reason the AST check exists beside
-    // the diagnostic one: quoting a JS operator in a SQL comment leaves
-    // `taggedTemplate && templateExpression` — two literals and an operator,
-    // all valid — so TypeScript has NO complaint and half the query is gone.
-    const src = lines(
-      'const x = await db.$executeRaw' +
-        BACKTICK + 'UPDATE u SET a = false -- use ' + BACKTICK + '&&' + BACKTICK + ' for overlap',
-      'WHERE id = ${id}' + BACKTICK + ';',
-      '',
-    );
-    const { offenders } = scanFiles({ 'r.ts': src });
-    expect(offenders).toHaveLength(1);
-    expect(offenders[0].errors.join(' ')).toMatch(/RE-PAIRED into a valid expression/);
-  });
-
-  it('FAILS on a CONDITIONAL re-pair too, not just a binary one (@codex P1, #1109)', () => {
-    // The first version of the re-pair check enumerated expression kinds and
-    // handled `&&` only. Enumerating kinds is the same too-narrow mistake as
-    // enumerating SQL comment syntaxes, one level up — so the check now asks a
-    // structural question (is there an UNOWNED template literal in this
-    // statement?) and this case needed no new clause.
-    const src = lines(
-      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET a=false -- choose ' +
-        BACKTICK + ' ? ' + BACKTICK + ' or ' + BACKTICK + ' : ' + BACKTICK + ' for fallback',
-      'WHERE id=${id}' + BACKTICK + ';',
-      '',
-    );
-    expect(scanFiles({ 'c.ts': src }).offenders).toHaveLength(1);
-  });
-
-  it('FAILS when the re-paired tail is OWNED by a tag named in the comment (@codex P1, #1109)', () => {
-    // The unowned-literal rule cannot settle this one: `-- use `&& Prisma.sql``
-    // leaves a perfectly OWNED Prisma.sql literal as the tail. What gives it
-    // away is the EXECUTOR's own position — you do not `&&` two queries
-    // together, so `$executeRaw` in operand position is broken whatever the
-    // tail turned out to be. Fragments may compose; executors may not.
-    const src = lines(
-      'const a = await db.$executeRaw' + BACKTICK + 'UPDATE u SET x=false -- use ' +
-        BACKTICK + '&& Prisma.sql' + BACKTICK + ' for overlap',
-      'WHERE id=${id}' + BACKTICK + ';',
-      '',
-    );
-    const { offenders } = scanFiles({ 'o.ts': src });
-    expect(offenders).toHaveLength(1);
-    expect(offenders[0].errors.join(' ')).toMatch(/RE-PAIRED into a valid expression/);
-  });
-
   it('does NOT fire on a composed Prisma.sql fragment in a ternary', () => {
     // The narrowing control for the rule above: `Prisma.sql`…`` literals in a
     // conditional are OWNED by their tag, which is what separates a legitimate
@@ -527,19 +479,34 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(message).not.toMatch(/opens on line/);
   });
 
-  it('FAILS on a re-pair in an ARRAY element (@codex P1, #1109)', () => {
-    // The fourth re-pair shape. The executor's parent is an array, not a binary
-    // or conditional — so a rule enumerating parent kinds missed it, and the
-    // tail is owned by a tag so the unowned rule missed it too. The positional
-    // rule needs no clause for it: the second literal is a SIBLING rather than
-    // nested in a `${}` slot.
+  it('does NOT fire on two legitimate executors in one statement (@codex P2, #1109)', () => {
+    // The false positive that ended the re-pair heuristic. Two ordinary
+    // queries grouped in a Promise.all were flagged twice, because each
+    // executor saw the other's literal as a severed tail. A gate that blocks
+    // valid code gets switched off, so the arm was removed rather than
+    // tightened a sixth time — re-pair detection is #1110.
     const src = lines(
-      'await Promise.all([db.$executeRaw' + BACKTICK + 'UPDATE u SET x=false -- sep with ' +
-        BACKTICK + ', Prisma.sql' + BACKTICK + ' frag',
-      'WHERE id=${id}' + BACKTICK + ',]);',
+      'const [a, b] = await Promise.all([',
+      '  db.$queryRaw' + BACKTICK + 'SELECT 1' + BACKTICK + ',',
+      '  db.$queryRaw' + BACKTICK + 'SELECT 2' + BACKTICK + ',',
+      ']);',
       '',
     );
-    expect(scanFiles({ 'arr.ts': src }).offenders).toHaveLength(1);
+    expect(scanFiles({ 't.ts': src }).offenders).toEqual([]);
+  });
+
+  it('KNOWN GAP: a break that re-pairs into valid TypeScript is not caught (#1110)', () => {
+    // Pinned as a gap rather than left to be rediscovered. The parser has no
+    // complaint here — `taggedTemplate && templateExpression` is valid — so the
+    // diagnostic arm cannot see it. Stated as a test so #1110 has a red to turn
+    // green, and so nobody reads the gate's silence as coverage.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET a = false -- use ' +
+        BACKTICK + '&&' + BACKTICK + ' for overlap',
+      'WHERE id = ${id}' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'g.ts': src }).offenders).toEqual([]);
   });
 
   it('does NOT fire on a Prisma.sql fragment NESTED in a query slot', () => {
