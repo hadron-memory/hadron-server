@@ -22,7 +22,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { scanSdlDir, findBrokenSdlLiterals } from './check-graphql-sdl.mjs';
+import { scanSdlDir, findBrokenSdlLiterals, scanTaggedLiterals } from './check-graphql-sdl.mjs';
 
 const BACKTICK = '`';
 const SCRIPT = join(process.cwd(), 'scripts', 'check-graphql-sdl.mjs');
@@ -252,5 +252,296 @@ describe('check-graphql-sdl — against the real SDL', () => {
     const scan = scanSdlDir();
     expect(scan.documents).toBe(1);
     expect(scan.offenders).toEqual([]);
+  });
+});
+
+/**
+ * #1087 — the same hazard in TAGGED literals ($queryRaw / $executeRaw /
+ * Prisma.sql), which is where it actually bit an hour after #1076 shipped.
+ *
+ * The three PASS cases are not padding: each is a false positive the first
+ * draft of this widening actually produced against the real repo. The issue
+ * claimed the detection rule "ports without change"; it does not, and these
+ * pin the two ways it had to change.
+ */
+describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
+  /** Write files into a throwaway src-like tree and scan it. */
+  function scanFiles(files: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), 'sql-gate-'));
+    try {
+      for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+      return scanTaggedLiterals(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('FAILS on the incident: a backtick in a SQL comment (#1087)', () => {
+    const src = lines(
+      'const rows = await ctx.db.$queryRaw<Row[]>' + BACKTICK,
+      '  SELECT id,',
+      '    -- ' + BACKTICK + 'auto_expired_at' + BACKTICK + ' is set on precisely those rows',
+      '    CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END',
+      '  FROM sessions' + BACKTICK + ';',
+      '',
+    );
+    const { offenders, documents } = scanFiles({ 'q.ts': src });
+    expect(documents).toBe(1);
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].line).toBe(3);
+    // The message points at the nearest literal — the context a bare TS1005
+    // omits, and the reason this gate is not redundant with tsc — WITHOUT
+    // claiming it is the cause, which a parse diagnostic cannot establish
+    // (PR #1109 review, @copilot then @codex).
+    expect(offenders[0].errors.join(' ')).toMatch(/nearest opening on line 1/);
+    expect(offenders[0].errors.join(' ')).toMatch(/cannot tell it from an ordinary syntax error/);
+  });
+
+  it('does NOT fire on a terminator at the END of a content line', () => {
+    // The POSITION half of the SDL rule does not port. SQL closes on its last
+    // content line far more often than on a line of its own, and requiring
+    // first-on-line reported 41 offenders across a repo that compiles cleanly.
+    const src = lines(
+      'const rows = await db.$queryRaw<{ cname: string }[]>' + BACKTICK,
+      '    SELECT c.name AS cname',
+      '    FROM unnest(${names}::text[]) AS c(name)' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('does NOT fire on PROSE that mentions a tag inside a code span', () => {
+    // Eight of the first reports were comments talking ABOUT raw SQL: the code
+    // span's closing backtick in ``$executeRawUnsafe`` looked exactly like a
+    // literal's opening one. A tag preceded by a backtick is a mention.
+    const src = lines(
+      '// The identifier loops cannot use this form and stay ' +
+        BACKTICK + '$executeRawUnsafe' + BACKTICK + ' with a',
+      '// documented safety argument (#665).',
+      'const x = await tx.$executeRaw' + BACKTICK + 'UPDATE t SET a = ${b}' + BACKTICK + ';',
+      '',
+    );
+    const { offenders, documents } = scanFiles({ 'm.ts': src });
+    expect(documents).toBe(1); // the mention is not counted as a document either
+    expect(offenders).toEqual([]);
+  });
+
+  it('scans .test.ts too — a broken literal there breaks tsc repo-wide', () => {
+    const src = lines(
+      'const r = await db.$queryRaw' + BACKTICK,
+      '  -- see ' + BACKTICK + 'workers' + BACKTICK,
+      '  SELECT 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.test.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('FAILS on a backtick that ENDS a -- comment line (@codex P2, #1109)', () => {
+    // The false negative that dropping the POSITION rule created: with position
+    // relaxed, an EMPTY remainder satisfies the shape check, so this backtick
+    // was accepted as the literal's terminator and the real closer below was
+    // never examined. A silent pass, which is the failure this gate exists to
+    // prevent.
+    const src = lines(
+      'const r = await db.$queryRaw' + BACKTICK,
+      '  SELECT 1',
+      '  -- accidental backtick at end of comment ' + BACKTICK,
+      '  FROM t' + BACKTICK + ';',
+      '',
+    );
+    const { offenders } = scanFiles({ 'a.ts': src });
+    expect(offenders).toHaveLength(1);
+    // Line 4, not 3: the parser reports where IT stopped, which is at or just
+    // past the stray backtick rather than exactly on it. That is the one
+    // precision the tokeniser costs against the old text scanner, and it buys
+    // correctness on six edges the scanner got wrong — the message names the
+    // literal's opening line so the reader has both ends of the range.
+    expect(offenders[0].line).toBe(4);
+  });
+
+  it('scans a literal whose GENERIC spans lines (@codex P2, #1109)', () => {
+    // `<[^`\n]*>` skipped four real literals outright — and a skipped literal
+    // is invisible: no offender, while the anti-phantom count stays healthy on
+    // the other hundred. Bounded by "no backtick" instead of "no newline".
+    const src = lines(
+      'const rows = await ctx.db.$queryRaw<',
+      '  { workerId: string; live: boolean }[]',
+      '>' + BACKTICK,
+      '  SELECT s.worker_id',
+      '  -- ' + BACKTICK + 'worker_id' + BACKTICK + ' is the column',
+      '  FROM sessions' + BACKTICK + ';',
+      '',
+    );
+    const { offenders, documents } = scanFiles({ 'b.ts': src });
+    expect(documents).toBe(1);
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].line).toBe(5);
+  });
+
+  it('does NOT fire when the closer sits on the NEXT line', () => {
+    // The three legitimate shapes that a "require a non-empty closer" rule
+    // rejected — the second wrong proxy on the way to keying on comment
+    // context. A ternary branch and a query closing on its own line both leave
+    // the terminator's line empty after the backtick.
+    const src = lines(
+      'const p = cond',
+      '  ? Prisma.sql' + BACKTICK + 'e.memory_id IN (${ids})' + BACKTICK,
+      '  : Prisma.sql' + BACKTICK + 'e.user_id = ${uid}' + BACKTICK + ';',
+      'const q = await db.$queryRaw<{ xmin: string }[]>' + BACKTICK,
+      '  SELECT xmin::text FROM memories WHERE id = ${id}',
+      BACKTICK,
+      ';',
+      '',
+    );
+    expect(scanFiles({ 'c.ts': src }).offenders).toEqual([]);
+  });
+
+  it('FAILS on a comment that starts on the OPENING line (@codex P2, #1109)', () => {
+    // The hole my first fix for the single-line-SDL regression opened:
+    // suppressing the comment test on the opening line hid a SQL comment that
+    // begins immediately after the tag. Keying on the literal's BODY rather
+    // than on the line handles both without a special case.
+    const src = lines(
+      'const a = await db.$queryRaw' + BACKTICK + '-- accidental ' + BACKTICK,
+      '  SELECT 1' + BACKTICK + ';',
+      '',
+    );
+    const { offenders } = scanFiles({ 'a.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].line).toBe(2);
+  });
+
+  it('does NOT fire on a valid query ENDING in a line comment (@codex P2, #1109)', () => {
+    // The false POSITIVE that finally showed the heuristic approach was wrong:
+    // here the backtick IS the terminator and the SQL comment simply runs to
+    // the end of the literal. Ordinary code, flagged as broken.
+    const src = lines(
+      'const a = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- explanation' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'a.ts': src }).offenders).toEqual([]);
+  });
+
+  it('FAILS on a backtick inside a /* block */ comment (@codex P2, #1109)', () => {
+    // The text scanner only ever learned `--`; the parser needs no SQL lexicon
+    // at all, so block comments come for free rather than as a sixth clause.
+    const src = lines(
+      'const b = await db.$queryRaw' + BACKTICK,
+      '  SELECT 1',
+      '  /* explanation ' + BACKTICK,
+      '  */ FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'b.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('does NOT fire on -- inside a SQL STRING literal (@codex P2, #1109)', () => {
+    // `.includes('--')` called a legitimate query broken. Quote parity tells a
+    // comment marker from the same characters inside a string.
+    const src = lines(
+      "const b = await db.$queryRaw" + BACKTICK + "SELECT '--' AS x" + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'b.ts': src }).offenders).toEqual([]);
+  });
+
+  it('does NOT fire on a composed Prisma.sql fragment in a ternary', () => {
+    // The narrowing control for the rule above: `Prisma.sql`…`` literals in a
+    // conditional are OWNED by their tag, which is what separates a legitimate
+    // composed fragment from the orphaned tail of a broken query. Real shape,
+    // from usageActivity.ts.
+    const src = lines(
+      'const p = c',
+      '  ? Prisma.sql' + BACKTICK + 'a = ${x}' + BACKTICK,
+      '  : Prisma.sql' + BACKTICK + 'b = ${y}' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'ok.ts': src }).offenders).toEqual([]);
+  });
+
+  it('does not blame a backtick for an UNRELATED syntax error (@copilot, #1109)', () => {
+    // This branch fires on ANY parse diagnostic in a file that happens to
+    // contain raw-SQL tags. Asserting "a backtick ended the literal early"
+    // would send the reader hunting for a backtick that is not there — the
+    // same over-assertion this session kept producing in refusal messages.
+    // What the diagnostic establishes is only that the file does not parse.
+    const src = lines(
+      'function f( {',
+      '  return 1;',
+      '}',
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1' + BACKTICK + ';',
+      '',
+    );
+    const { offenders } = scanFiles({ 'u.ts': src });
+    expect(offenders).toHaveLength(1);
+    const message = offenders[0].errors.join(' ');
+    expect(message).toMatch(/probably an ordinary syntax error/);
+    expect(message).not.toMatch(/opens on line/);
+  });
+
+  it('does NOT fire on two legitimate executors in one statement (@codex P2, #1109)', () => {
+    // The false positive that ended the re-pair heuristic. Two ordinary
+    // queries grouped in a Promise.all were flagged twice, because each
+    // executor saw the other's literal as a severed tail. A gate that blocks
+    // valid code gets switched off, so the arm was removed rather than
+    // tightened a sixth time — re-pair detection is #1110.
+    const src = lines(
+      'const [a, b] = await Promise.all([',
+      '  db.$queryRaw' + BACKTICK + 'SELECT 1' + BACKTICK + ',',
+      '  db.$queryRaw' + BACKTICK + 'SELECT 2' + BACKTICK + ',',
+      ']);',
+      '',
+    );
+    expect(scanFiles({ 't.ts': src }).offenders).toEqual([]);
+  });
+
+  it('KNOWN GAP: a break that re-pairs into valid TypeScript is not caught (#1110)', () => {
+    // Pinned as a gap rather than left to be rediscovered. The parser has no
+    // complaint here — `taggedTemplate && templateExpression` is valid — so the
+    // diagnostic arm cannot see it. Stated as a test so #1110 has a red to turn
+    // green, and so nobody reads the gate's silence as coverage.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET a = false -- use ' +
+        BACKTICK + '&&' + BACKTICK + ' for overlap',
+      'WHERE id = ${id}' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'g.ts': src }).offenders).toEqual([]);
+  });
+
+  it('does NOT fire on a Prisma.sql fragment NESTED in a query slot', () => {
+    // The control the positional rule turns on: a composed fragment inside a
+    // `${}` slot lies WITHIN the executor's own literal, which is exactly what
+    // separates legitimate composition from a severed tail.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT ${Prisma.sql' + BACKTICK +
+        'a = 1' + BACKTICK + '} FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'n.ts': src }).offenders).toEqual([]);
+  });
+
+  it('stays cause-neutral when a VALID query precedes an unrelated error (@codex P2, #1109)', () => {
+    // My first cause-neutral fix only handled the error-BEFORE-any-tag ordering
+    // — the ordering I happened to write a test for. A literal opening before
+    // the diagnostic does not establish that the diagnostic belongs to it.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1' + BACKTICK + ';',
+      'function f( {',
+      '  return 1;',
+      '}',
+      '',
+    );
+    const { offenders } = scanFiles({ 'v.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].errors.join(' ')).toMatch(/cannot tell it from an ordinary syntax error/);
+  });
+
+  it('finds the real repo tagged literals, and they are all intact', () => {
+    // Anti-phantom, the same property the SDL half asserts: a scan that found
+    // nothing to check must not read as a clean one.
+    const { offenders, documents } = scanTaggedLiterals();
+    expect(documents).toBeGreaterThan(50);
+    expect(offenders).toEqual([]);
   });
 });

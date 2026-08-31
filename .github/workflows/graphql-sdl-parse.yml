@@ -1,4 +1,4 @@
-name: GraphQL SDL parse
+name: Template literals + GraphQL SDL
 
 # Two checks, in one script, in the order the second one needs.
 #
@@ -9,6 +9,14 @@ name: GraphQL SDL parse
 # reads the file as text and names the offending line. It runs first
 # because the parse below cannot IMPORT a module the backtick broke
 # — which is also why that import is dynamic.
+#
+# FIRST-B (#1087): the SAME hazard in every TAGGED prose-carrying
+# literal — $queryRaw / $executeRaw / Prisma.sql — across all of
+# src/. The hazard was never SDL; #1076 was scoped to where its
+# author had been bitten, and the identical trap landed in a SQL
+# comment an hour after it merged. This is why the path filter below
+# is src/**.ts and not the schema directory: a widened guard behind
+# a narrow trigger is a guard that does not run.
 #
 # SECOND: the SDL parses.
 # Imports the `typeDefs` template literal from
@@ -25,7 +33,9 @@ name: GraphQL SDL parse
 on:
   pull_request:
     paths:
-      - 'src/api/graphql/schema/**.ts'
+      # #1087: all of src/, not just the schema dir — $queryRaw lives
+      # wherever its query does.
+      - 'src/**.ts'
       - 'scripts/check-graphql-sdl.mjs'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
@@ -33,7 +43,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'src/api/graphql/schema/**.ts'
+      - 'src/**.ts'
       - 'scripts/check-graphql-sdl.mjs'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
