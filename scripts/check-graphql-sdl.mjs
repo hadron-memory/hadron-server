@@ -394,63 +394,9 @@ function* tsFilesUnder(dir) {
 /** Tag names whose template literal carries a foreign language, not JS prose. */
 const RAW_SQL_TAGS = /\$(?:query|execute)Raw(?:Unsafe)?$|^sql$/;
 
-/**
- * EXECUTOR tags — the ones that RUN a query. Distinguished from fragment tags
- * (`Prisma.sql`) because the difference is semantic and load-bearing (#1109,
- * @codex P1 ×3): a fragment is composed, so it legitimately appears as an
- * operand of a ternary or a binary expression. An executor never does — you do
- * not `&&` two queries together — so an executor in operand position is a
- * literal that ended early and re-paired, whatever the tail turned out to be.
- *
- * This is what the "unowned literal" rule below could not settle on its own: a
- * re-paired tail is not always unowned. If the SQL comment happens to name a
- * tag — ``-- use `&& Prisma.sql` for overlap`` — the tail becomes a perfectly
- * OWNED `Prisma.sql` literal, and only the executor's own position gives it
- * away.
- */
-const EXECUTOR_TAGS = /\$(?:query|execute)Raw(?:Unsafe)?$/;
 
-/**
- * Does the STATEMENT containing this tagged template also contain a template
- * literal that belongs to nobody? That is the signature of a literal that ended
- * early and re-paired into something valid (#1109, @codex P1 ×2).
- *
- * The first version of this check enumerated expression kinds — it handled
- * `` `…` && `…` `` and was then shown a conditional, `` `…` ? `…` : `…` ``.
- * Enumerating kinds is the same too-narrow mistake as enumerating SQL comment
- * syntaxes, one level up, so this asks the structural question instead:
- *
- *   a raw-SQL tagged template is a complete expression, so every template
- *   literal in its statement should be OWNED by a tag — its own, or a nested
- *   `Prisma.sql` fragment's. An UNOWNED literal is the tail of one that broke.
- *
- * Owned means "its parent is a TaggedTemplateExpression", which is exactly what
- * distinguishes a legitimate composed fragment (`Prisma.sql\`a = ${x}\`` inside
- * a ternary, real in usageActivity.ts) from the orphaned remainder of a query.
- *
- * Known limit, stated: a statement that legitimately mixes a raw-SQL call with
- * an unrelated bare literal — `$queryRaw\`…\`.catch(() => new Error(\`x\`))` —
- * would be a false positive. None exists in the repo, and it fails LOUDLY,
- * which is the right direction for a gate.
- */
-function orphanedTemplateInStatement(node, ts_) {
-  let statement = node;
-  while (statement.parent && !ts_.isStatement(statement)) statement = statement.parent;
-  let found = null;
-  const walk = (n) => {
-    if (found) return;
-    const isLiteral = ts_.isTemplateExpression(n) || ts_.isNoSubstitutionTemplateLiteral(n);
-    if (isLiteral && !(n.parent && ts_.isTaggedTemplateExpression(n.parent))) {
-      found = n;
-      return;
-    }
-    ts_.forEachChild(n, walk);
-  };
-  walk(statement);
-  return found;
-}
 
-/** Is this AST node a tagged template whose tag is one of ours? */
+/** The tag identifier of a tagged template, or null if this is not one. */
 function tagNameOf(node) {
   if (!ts.isTaggedTemplateExpression(node)) return null;
   const tag = node.tag;
@@ -461,6 +407,7 @@ function tagNameOf(node) {
       : '';
 }
 
+/** Is this AST node a tagged template whose tag is one of ours? */
 function isRawSqlTag(node) {
   const name = tagNameOf(node);
   return name !== null && RAW_SQL_TAGS.test(name);
@@ -607,22 +554,12 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
       continue;
     }
 
-    // Parsed clean — but that is not yet "intact". If the stray backticks
-    // happen to RE-PAIR into a valid expression, TypeScript has no complaint
-    // and the diagnostic test above sees nothing (PR #1109 review, @codex P1):
-    //
-    //   $executeRaw`UPDATE u SET a = false -- use `&&` for overlap
-    //   WHERE id = ${id}`;
-    //
-    // parses as `taggedTemplate && templateExpression` — two literals and an
-    // operator, all valid, and half the SQL silently gone. The parser cannot
-    // help here because nothing is wrong with the TYPESCRIPT.
-    //
-    // The AST shape is the tell, and it is exact: a raw-SQL tagged template is
-    // an expression in its own right, never an OPERAND of a binary expression
-    // whose other side is another template literal. Nobody writes
-    // `` $queryRaw`…` && `…` `` on purpose, so this needs no heuristic about
-    // what SQL looks like — only about what the call site looks like.
+    // Parsed clean. Count the tagged literals so an empty scan cannot read as
+    // a clean one, and do nothing else — re-pair detection is out of scope
+    // here and tracked as #1110 (see the note above this function). This
+    // comment previously described an AST check that no longer exists, three
+    // commits after the check was removed: the same prose-outliving-its-
+    // mechanism defect this whole PR is about, for the third time in it.
     const visit = (node) => {
       if (isRawSqlTag(node)) {
         documents += 1;
