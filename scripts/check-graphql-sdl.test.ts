@@ -289,10 +289,14 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(documents).toBe(1);
     expect(offenders).toHaveLength(1);
     expect(offenders[0].line).toBe(3);
-    expect(offenders[0].errors.join(' ')).toMatch(/ends the raw-SQL template literal early/);
     // The message names the literal's OPENING line, which is the context a bare
     // TS1005 omits and the reason this gate is not redundant with tsc.
-    expect(offenders[0].errors.join(' ')).toMatch(/the literal opens on line 1/);
+    expect(offenders[0].errors.join(' ')).toMatch(/opens on line 1/);
+    // …and it does NOT assert a cause the diagnostic has not established: this
+    // branch fires on any parse error in a file containing raw-SQL tags, so a
+    // flat "a backtick ended the literal early" would misdiagnose an unrelated
+    // missing brace (PR #1109 review, @copilot).
+    expect(offenders[0].errors.join(' ')).toMatch(/Check that literal first/);
   });
 
   it('does NOT fire on a terminator at the END of a content line', () => {
@@ -503,6 +507,26 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
       '',
     );
     expect(scanFiles({ 'ok.ts': src }).offenders).toEqual([]);
+  });
+
+  it('does not blame a backtick for an UNRELATED syntax error (@copilot, #1109)', () => {
+    // This branch fires on ANY parse diagnostic in a file that happens to
+    // contain raw-SQL tags. Asserting "a backtick ended the literal early"
+    // would send the reader hunting for a backtick that is not there — the
+    // same over-assertion this session kept producing in refusal messages.
+    // What the diagnostic establishes is only that the file does not parse.
+    const src = lines(
+      'function f( {',
+      '  return 1;',
+      '}',
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1' + BACKTICK + ';',
+      '',
+    );
+    const { offenders } = scanFiles({ 'u.ts': src });
+    expect(offenders).toHaveLength(1);
+    const message = offenders[0].errors.join(' ');
+    expect(message).toMatch(/probably an ordinary syntax error/);
+    expect(message).not.toMatch(/opens on line/);
   });
 
   it('finds the real repo tagged literals, and they are all intact', () => {

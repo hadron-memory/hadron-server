@@ -12,10 +12,17 @@
  *    template literal; a BARE backtick inside a GraphQL description or `#`
  *    comment terminates it, and everything after it is parsed as TypeScript.
  *    This half reads the file as TEXT and names the offending line.
- * 1b. THE TAGGED LITERALS ARE INTACT (#1087). The same scan over every
- *    `$queryRaw` / `$executeRaw` / `Prisma.sql` literal in `src/`, with the
- *    POSITION half of the rule relaxed — see `findBrokenLiterals`, since that
- *    difference is the one thing the port could not carry across.
+ * 1b. THE TAGGED LITERALS ARE INTACT (#1087). Every `$queryRaw` /
+ *    `$executeRaw` / `Prisma.sql` literal in `src/`. NOT the same scan as
+ *    check 1 — it does not text-scan at all. `scanTaggedLiterals` asks the
+ *    TypeScript parser where each literal ends and then checks two things the
+ *    parser cannot: that the file has no parse diagnostics, and that an
+ *    executor is not sitting in operand position (a literal whose stray
+ *    backticks RE-PAIRED into something valid). Porting check 1's text rules
+ *    here took five review rounds and never worked; the header of that
+ *    function records why, and this line said otherwise until PR #1109 review
+ *    caught it — prose outliving its mechanism, in the header of the PR about
+ *    prose outliving its mechanism.
  * 2. THE SDL PARSES. Imports `typeDefs` from
  *    `src/api/graphql/schema/typeDefs.ts` (the single SDL source) and runs
  *    `graphql.parse()` on it.
@@ -560,20 +567,38 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
       // line the author has to edit. The literal's own opening line is named in
       // the message, because that is the context the bare TS error omits.
       const openLine = opensAt === -1 ? null : lineOf(text, opensAt);
+      // Say only what the diagnostic ESTABLISHES (PR #1109 review, @copilot).
+      // This branch fires on ANY parse error in a file that happens to contain
+      // raw-SQL tags — so asserting "a backtick ended the literal early" would
+      // misdiagnose an unrelated missing brace, and send the reader hunting for
+      // a backtick that is not there. Which of the two it is turns on whether a
+      // raw-SQL literal actually OPENS before the error: if none does, the
+      // error cannot be a broken one of ours.
+      //
+      // The same over-assertion this session kept producing in refusal
+      // messages (#1101, four wordings): a remedy is only as good as the claim
+      // under it, and a confident wrong cause is worse than an honest vague one.
       offenders.push({
         name: file,
         file,
         line: lineOf(text, at),
-        errors: [
-          'a backtick here ends the raw-SQL template literal early —',
+        errors:
           openLine === null
-            ? 'a `--` comment or a quoted identifier is the usual cause.'
-            : `the literal opens on line ${openLine}, and a \`--\` comment or a quoted`,
-          'identifier is the usual cause. Everything below is then parsed as',
-          'TypeScript, which reports TS1005 / TS1443 wherever it stops making',
-          'sense — never as "unterminated literal". Escape it (\\`) or spell the',
-          'symbol out.',
-        ],
+            ? [
+                'this file does not parse, and it contains raw-SQL template literals.',
+                'No such literal opens before the error, so this is probably an',
+                'ordinary syntax error rather than a backtick that ended a literal',
+                'early — but the two are indistinguishable from here, which is why',
+                'this gate reports it instead of staying silent.',
+              ]
+            : [
+                `a raw-SQL template literal opens on line ${openLine} and this file no`,
+                'longer parses. A bare backtick inside it — a `--` comment or a quoted',
+                'identifier — ends it early, and everything after is parsed as',
+                'TypeScript, which reports TS1005 / TS1443 wherever it stops making',
+                'sense, never as "unterminated literal". Check that literal first;',
+                'escape the backtick (\\`) or spell the symbol out.',
+              ],
       });
       continue;
     }
