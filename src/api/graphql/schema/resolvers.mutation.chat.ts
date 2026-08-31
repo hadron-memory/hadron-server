@@ -47,6 +47,17 @@ import {
   loadPublishedSnapshot,
 } from './resolvers.helpers.js';
 
+/**
+ * How many of a chat's most recent messages `sendChatMessage` hands the model.
+ *
+ * Named rather than inline because it is a CEILING on the model's view of the
+ * conversation, not a page size: past it the transcript is silently truncated,
+ * and #1111 is what that costs when the truncation takes the wrong end. A
+ * summary-aware assembly (feeding `saveChatSummary`'s output back in place of
+ * the messages it covers) is the real answer and is deliberately not this.
+ */
+const MODEL_HISTORY_LIMIT = 50;
+
 export const chatMutations = {
     startChat: async (
       _: unknown,
@@ -846,16 +857,31 @@ export const chatMutations = {
         tools = await buildRespondToolSchema(ctx.db, systemMemoryId, activeConvName, stageData);
       }
 
-      // Build message history (recent messages). For encrypted memories,
-      // decrypt each message's content before formatting.
+      // Build message history — the most recent MODEL_HISTORY_LIMIT messages.
+      // For encrypted memories, decrypt each message's content before
+      // formatting.
+      //
+      // #1111: this used to sort ASCENDING and `take` from the head, which is
+      // the OLDEST N, not the newest. Past the cap the model was handed the
+      // opening of the conversation on every turn and never saw the message it
+      // was being asked to answer — the user's current turn is written to the
+      // transcript above, so it fell outside the window along with everything
+      // else recent. Same defect as the `chatHistory` reader; fixed the same
+      // way, and for the same reason the inversion covers all three keys:
+      // (seq, createdAt, loc) is a total order, so taking from the far end and
+      // reversing yields exactly the last N.
+      //
+      // #919: the deterministic tiebreak the chatHistory reader uses — the
+      // model's view of the transcript must not reorder between turns.
       const messages = await ctx.db.node.findMany({
         where: { loc: { startsWith: `${chatId}:messages:` }, memoryId: chatNode.memoryId, deletedAt: null },
-        // #919: same deterministic tiebreak the chatHistory reader uses — the
-        // model's view of the transcript must not reorder between turns.
-        orderBy: [{ seq: 'asc' }, { createdAt: 'asc' }, { loc: 'asc' }],
-        take: 50,
+        orderBy: [{ seq: 'desc' }, { createdAt: 'desc' }, { loc: 'desc' }],
+        take: MODEL_HISTORY_LIMIT,
         select: { loc: true, content: true, data: true, seq: true, nodeType: true, memoryId: true },
       });
+      // Chronological again: the window is the newest N, but a model reads a
+      // transcript oldest-first like everyone else.
+      messages.reverse();
       if (memEncInfo.isEncrypted) {
         for (const m of messages) decryptNodeFields(m, memEncInfo);
       }

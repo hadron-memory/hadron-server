@@ -4915,6 +4915,13 @@ export const typeDefs = `#graphql
 
     # Message history for a saved chat. Returns plain role/content pairs
     # suitable for feeding back into an LLM.
+    #
+    # limit bounds the transcript to its MOST RECENT messages (default 100),
+    # and they are returned oldest-first. Stated because it was not: the window
+    # used to be taken from the other end, so a chat longer than the limit
+    # returned its opening forever (#1111), and a client author had no written
+    # contract to check that against. There is no backward cursor yet -- see
+    # hadron-portal#793 -- so this cannot page further into the past.
     chatHistory(chatId: String!, limit: Int): [ChatMessage!]!
 
     """

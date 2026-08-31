@@ -231,16 +231,29 @@ export const chatQueries = {
           loc: { startsWith: `${chatId}:messages:` },
           deletedAt: null,
         },
-        // #919: transcript order must be the same on every read. `seq` is
+        // #1111: `limit` bounds the transcript to its MOST RECENT slice, so the
+        // sort is inverted and the take reversed below. An ascending sort with
+        // a plain `take` is a HEAD-take — it returned the oldest N, freezing a
+        // long chat at its opening while every later message stayed invisible.
+        //
+        // Inverting all three keys (rather than `seq` alone) is what makes this
+        // exactly the tail rather than an approximation of it: `loc` is unique
+        // per memory, so (seq, createdAt, loc) is a TOTAL order, and the reverse
+        // of a total order taken from the other end is precisely its last N.
+        //
+        // #919: that tiebreak also has to stay, and stay complete. `seq` is
         // allocated atomically now, but chats written before that hold
         // colliding values, and a tie left to the planner can order two
         // members' messages differently from one read to the next.
-        orderBy: [{ seq: 'asc' as const }, { createdAt: 'asc' as const }, { loc: 'asc' as const }],
+        orderBy: [{ seq: 'desc' as const }, { createdAt: 'desc' as const }, { loc: 'desc' as const }],
         take: limit ?? 100,
         // `id` rides along for the #1061 usage attribution; the projection
         // below doesn't use it (a transcript entry is addressed by loc/seq).
         select: { id: true, loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },
       });
+      // #1111: back to ascending. The window is the newest N; the ORDER a
+      // client renders is still oldest-first, so only the slice moved.
+      rows.reverse();
       // Decrypt before reading `data.role` / returning `content` — for
       // encrypted memories `data` is an opaque wrapper until decrypted, so
       // role detection would otherwise always fall through to the loc
