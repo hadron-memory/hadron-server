@@ -165,7 +165,7 @@ export const chatQueries = {
 
     chatHistory: async (
       _: unknown,
-      { chatId, limit }: { chatId: string; limit?: number },
+      { chatId, limit, beforeSeq }: { chatId: string; limit?: number; beforeSeq?: number | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
@@ -230,6 +230,20 @@ export const chatQueries = {
           memoryId: chatNode.memoryId,
           loc: { startsWith: `${chatId}:messages:` },
           deletedAt: null,
+          // #1116: `beforeSeq` is the backward mirror of `teamChatMessages`'
+          // `sinceSeq` — strictly LESS THAN, so a client pages back by passing
+          // the oldest seq it holds. It NARROWS the candidate set; the window
+          // below then returns the newest `limit` of what remains, which is the
+          // page immediately preceding the cursor. The two compose rather than
+          // competing, so paging never changes which END a window comes from.
+          //
+          // A counterless message is included by every cursor, because it is
+          // OLDER than every numbered one (cor:cht:050:02) — excluding it here
+          // would make the oldest part of a legacy transcript the one part
+          // paging could never reach.
+          ...(beforeSeq != null
+            ? { OR: [{ seq: null }, { seq: { lt: beforeSeq } }] }
+            : {}),
         },
         // #1111: `limit` bounds the transcript to its MOST RECENT slice, so the
         // sort is inverted and the take reversed below. An ascending sort with

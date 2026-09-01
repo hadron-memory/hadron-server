@@ -711,12 +711,14 @@ export const teamChatQueries = {
     {
       appRef,
       sinceSeq,
+      beforeSeq,
       mentionsRef,
       limit,
       offset,
     }: {
       appRef: string;
       sinceSeq?: number | null;
+      beforeSeq?: number | null;
       mentionsRef?: string | null;
       limit?: number | null;
       offset?: number | null;
@@ -741,7 +743,17 @@ export const teamChatQueries = {
       // prefix must not surface as fabricated transcript entries.
       nodeType: 'chat-message',
       deletedAt: null,
-      seq: sinceSeq != null ? { gt: sinceSeq } : { not: null },
+      // #1116: the two cursors are opposite ends of one range and compose —
+      // sinceSeq is exclusive-above, beforeSeq exclusive-below, and passing
+      // both reads a bounded slice. A team message always carries a seq, so
+      // the not-null floor only applies when neither cursor narrows it.
+      seq:
+        sinceSeq != null || beforeSeq != null
+          ? {
+              ...(sinceSeq != null ? { gt: sinceSeq } : {}),
+              ...(beforeSeq != null ? { lt: beforeSeq } : {}),
+            }
+          : { not: null },
     };
     // #919 reader order: seq is unique going forward; createdAt + loc break
     // ties on pre-fix rows so the order is at least stable between reads.
@@ -750,6 +762,24 @@ export const teamChatQueries = {
       { createdAt: 'asc' as const },
       { loc: 'asc' as const },
     ];
+    // #1116: `beforeSeq` pages BACKWARD, so it needs the NEWEST page of what it
+    // narrowed to — the messages immediately before the cursor — where the
+    // forward reader wants the oldest. Selecting that means reading from the
+    // other end and flipping back, exactly as the agent-transcript window does
+    // (cor:cht:050:01), rather than an ascending read at a computed offset.
+    //
+    // `offset` is deliberately IGNORED alongside `beforeSeq`: a cursor exists
+    // because a position is unstable under concurrent posting, so honouring
+    // both would reintroduce the race the cursor was added to remove. Stated
+    // in the SDL rather than silently applied.
+    const backward = beforeSeq != null;
+    const readOrder = backward
+      ? [
+          { seq: 'desc' as const },
+          { createdAt: 'desc' as const },
+          { loc: 'desc' as const },
+        ]
+      : orderBy;
     // `loc` is selected for the #1061 usage attribution only — the projection
     // itself doesn't use it, but a UsageEvent without a loc is far less legible
     // in the raw event feed.
@@ -773,18 +803,33 @@ export const teamChatQueries = {
     if (mentionsRef) {
       const tokens = await resolveMentionTokens(ctx, appId, mentionsRef);
       if (!tokens) return { items: [], total: 0 };
+      // Always scanned ASCENDING regardless of paging direction: this branch
+      // filters in memory, so the direction is applied to the RESULT below.
       const rows = await ctx.db.node.findMany({ where, orderBy, select });
       const matching = rows
         .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo) }))
         .filter((m) => m.msg.mentions.some((t) => tokens.includes(t)));
-      const page = take === 0 ? [] : matching.slice(skip, skip + take);
+      const page =
+        take === 0
+          ? []
+          : backward
+            ? matching.slice(Math.max(0, matching.length - take))
+            : matching.slice(skip, skip + take);
       recordRead(page.map((m) => m.row));
       return { items: page.map((m) => m.msg), total: matching.length };
     }
 
     const total = await ctx.db.node.count({ where });
     if (take === 0) return { items: [], total };
-    const rows = await ctx.db.node.findMany({ where, orderBy, select, skip, take });
+    const rows = await ctx.db.node.findMany({
+      where,
+      orderBy: readOrder,
+      select,
+      ...(backward ? {} : { skip }),
+      take,
+    });
+    // Back to ascending: the window moved, the render order never does.
+    if (backward) rows.reverse();
     // Project BEFORE recording (PR #1062 review — Copilot): `projectMessage`
     // decrypts, and on an encrypted memory with no live session key it throws
     // SESSION_EXPIRED — so recording first would count reads for a transcript

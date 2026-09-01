@@ -4920,15 +4920,36 @@ export const typeDefs = `#graphql
     # and they are returned oldest-first. Stated because it was not: the window
     # used to be taken from the other end, so a chat longer than the limit
     # returned its opening forever (#1111), and a client author had no written
-    # contract to check that against. There is no backward cursor yet -- see
-    # hadron-portal#793 -- so this cannot page further into the past.
-    chatHistory(chatId: String!, limit: Int): [ChatMessage!]!
+    # contract to check that against. Contract: cor:cht:050:01.
+    #
+    # beforeSeq (#1116) pages BACKWARD: only messages with seq strictly LESS
+    # than it are considered, and the window then returns the newest "limit"
+    # of those -- the page immediately preceding the cursor, still oldest-first.
+    # It is the mirror of teamChatMessages' sinceSeq: pass the OLDEST seq you
+    # hold, as you would pass the newest to page forward. Omit it for the tail.
+    #
+    # Two boundaries worth knowing before you build on it:
+    #   - A message with NO seq is older than every numbered one
+    #     (cor:cht:050:02), so every cursor includes such messages. They are
+    #     reachable, but they cannot themselves BE a cursor -- a legacy chat
+    #     holding more counterless messages than one page cannot be paged
+    #     through them. Only pre-#919 transcripts are affected.
+    #   - seq is unique going forward but NOT on pre-#919 rows. Where two
+    #     legacy messages share a seq, a cursor at that value excludes both,
+    #     so paging can skip the sibling. See #992 for the underlying gap.
+    chatHistory(chatId: String!, limit: Int, beforeSeq: Int): [ChatMessage!]!
 
     """
     Read a team App's chat (#939), seq-ordered ascending, as a uniform
     { items, total } page. sinceSeq is a watermark cursor: only messages with
     seq STRICTLY GREATER than it are returned (pass the last seq you have
-    seen). mentionsRef filters to messages whose stored envelope mentions the
+    seen). beforeSeq (#1116) is its BACKWARD mirror for scroll-up paging: only
+    messages with seq STRICTLY LESS than it are considered, and the NEWEST
+    limit of those come back -- the page immediately before the cursor, still
+    ascending. The two compose, so passing both reads a bounded slice.
+    offset is IGNORED when beforeSeq is given: a cursor exists precisely
+    because a position is unstable while workers keep posting, and honouring
+    both would put that race back. mentionsRef filters to messages whose stored envelope mentions the
     referenced worker (a Worker id or name of THIS App, retired included) or
     user (handle/id) — matching runs against the mention tokens extracted at
     write time, never by re-parsing bodies. The ref must name this App's own
@@ -4946,6 +4967,7 @@ export const typeDefs = `#graphql
     teamChatMessages(
       appRef: ID!
       sinceSeq: Int
+      beforeSeq: Int
       mentionsRef: ID
       limit: Int
       offset: Int
