@@ -6511,7 +6511,12 @@ function ageOf(at: Date, now: Date = new Date()): string {
             workerId: worker.id, endedAt: null, deletedAt: null,
             ...recentlyTouchedFilter(nowHere0),
           },
-          orderBy: { startedAt: 'desc' },
+          // Heartbeat order, matching the bind path — the cap keeps a prefix,
+          // so what it is ordered by decides what survives it (#1120 review).
+          orderBy: [
+            { updatedAt: { sort: 'desc' as const, nulls: 'last' as const } },
+            { startedAt: 'desc' as const },
+          ],
           select: {
             id: true, userId: true, startedAt: true,
             type: true, updatedAt: true, autoExpiredAt: true, endedAt: true,

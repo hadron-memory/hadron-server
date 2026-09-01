@@ -720,7 +720,29 @@ export const sessionMutations = {
               workerId: worker.id, endedAt: null, deletedAt: null,
               ...recentlyTouchedFilter(nowForLiveness),
             },
-            orderBy: { startedAt: 'desc' },
+            // ORDERED BY HEARTBEAT, not by bind time (#1120 review, Codex P2).
+            // The cap keeps a prefix, so what the prefix is ordered BY decides
+            // what survives it. `startedAt` is when a stint began, which says
+            // nothing about who drove it last — so an older-started session
+            // with a fresh heartbeat could be cut, and `mostRecentlyActive`
+            // would then name the wrong driver in the refusal. That is the
+            // hadron-cli#492 harm arriving inside the message written to
+            // prevent it.
+            //
+            // RESIDUAL, stated rather than papered over: `updatedAt` is two of
+            // the three heartbeat inputs, and the third (the latest attributed
+            // UsageEvent) cannot be an `orderBy` without a join. So a session
+            // winning purely on a usage event, behind more than
+            // OPEN_SESSION_SCAN_CAP others with newer `updatedAt`, can still be
+            // cut. That needs >200 CONCURRENTLY LIVE sessions on one worker —
+            // reachable only through repeated explicit `force`, each of which
+            // takes a human override — and it costs a misnamed driver in a
+            // refusal, never a wrong allow/deny. The gate itself is unaffected:
+            // ANY live session refuses.
+            orderBy: [
+              { updatedAt: { sort: 'desc' as const, nulls: 'last' as const } },
+              { startedAt: 'desc' as const },
+            ],
             take: OPEN_SESSION_SCAN_CAP,
             select: {
               id: true, userId: true, startedAt: true, updatedAt: true,
