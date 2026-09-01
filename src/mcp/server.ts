@@ -6525,8 +6525,17 @@ function ageOf(at: Date, now: Date = new Date()): string {
         });
         const eventsHere = await loadLastEventBySession(db as never, openHere.map((r) => r.id));
         const nowHere = nowHere0;
-        const driving =
-          openHere.find((r) => isSessionLive(r, eventsHere.get(r.id), nowHere)) ?? null;
+        const liveHere = openHere.filter((r) => isSessionLive(r, eventsHere.get(r.id), nowHere));
+        // TWO QUESTIONS, TWO ANSWERS (#1120 review, Codex P2). "Is anyone
+        // driving this" is about ANY live row; "what is MY session id" is
+        // about the caller's own. Answering both from the first row made the
+        // second depend on the ORDER of the first — so another user's session
+        // sorting ahead silently omitted the caller's own id from the one read
+        // whose purpose is handing it back after a context compaction.
+        const driving = liveHere[0] ?? null;
+        const mine = auth.userId
+          ? (liveHere.find((r) => r.userId === auth.userId) ?? null)
+          : null;
 
         const flags: string[] = [];
         if (worker.retiredAt) flags.push('RETIRED');
@@ -6544,8 +6553,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
-            (driving && auth.userId && driving.userId === auth.userId
-              ? `Your active session: ${driving.id} (since ${driving.startedAt.toISOString()})\n`
+            (mine
+              ? `Your active session: ${mine.id} (since ${mine.startedAt.toISOString()})\n`
               : '') +
             // Shown separately from the briefing, and labelled as the editable
             // part, so hadron_update_worker's replace semantics have something
