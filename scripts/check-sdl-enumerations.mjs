@@ -135,12 +135,21 @@ function collectDescriptions(sdl) {
         typeof node.kind === 'string' &&
         (node.kind.endsWith('TypeDefinition') ||
           node.kind.endsWith('TypeExtension') ||
-          node.kind === 'DirectiveDefinition');
-      if (isDefinition) typeName = node.name?.value ?? null;
+          node.kind === 'DirectiveDefinition' ||
+          node.kind === 'SchemaDefinition' ||
+          node.kind === 'SchemaExtension');
+      if (isDefinition) {
+        // A schema definition is nameless, so it needs a label of its own —
+        // without one it inherited the PREVIOUS type's name and pointed the
+        // author at `SomeOtherType.undefined` (#1123 review, Codex P3). The
+        // violation was still detected; the coordinate sent them to the wrong
+        // file position, which for a diagnostic is most of its value.
+        typeName = node.name?.value ?? (node.kind.startsWith('Schema') ? 'schema' : null);
+      }
 
       if (!node.description?.value) return;
       const own = node.name?.value;
-      const coord = isDefinition || !typeName ? (own ?? '<anonymous>') : `${typeName}.${own}`;
+      const coord = isDefinition ? (typeName ?? '<anonymous>') : typeName ? `${typeName}.${own}` : (own ?? '<anonymous>');
       out.push({ coord, text: node.description.value });
     },
   });

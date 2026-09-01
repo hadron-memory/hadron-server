@@ -91,6 +91,16 @@ type B { x: String }
     });
   }
 
+  it('labels a nameless schema definition rather than inheriting the last type', () => {
+    // Without its own label the coordinate read `SomeType.undefined` — the
+    // violation still found, the author still sent to the wrong place, which
+    // for a diagnostic is most of what it is for.
+    const doc = `type Q { f: String }\n"""${partial}"""\nschema { query: Q }`;
+    const v = findPartialEnumerations(doc, SET as never);
+    expect(v).toHaveLength(1);
+    expect(v[0].coord).toBe('schema');
+  });
+
   it('gives a navigable coordinate rather than a bare name', () => {
     const v = findPartialEnumerations(
       `interface I { """${partial}""" f: String }`,
