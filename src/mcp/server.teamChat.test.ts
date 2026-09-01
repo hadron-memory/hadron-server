@@ -83,6 +83,31 @@ describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
     expect(row!.seq).toBe(1);
   });
 
+  /**
+   * #1116 — the MCP tool is a THIN wrapper, and an argument it does not forward
+   * fails in the worst possible way: MCP drops unknown arguments, so a caller
+   * passing `beforeSeq` to a server that ignores it is handed the OLDEST page
+   * in silence. Not an error, not an empty result — the wrong end of the
+   * conversation, looking exactly like the right one. (Codex P2 on PR #1119.)
+   */
+  it('forwards beforeSeq, so a backward page is not silently the oldest one', async () => {
+    const srv = createTestableMcpServer(hybridAuth(admin.id));
+    for (let i = 1; i <= 6; i++) {
+      await srv.callToolText('hadron_team_chat_post', { body: `msg-${i}` });
+    }
+
+    const page = await srv.callToolText('hadron_team_chat_read', { beforeSeq: 5, limit: 2 });
+    // The two immediately BEFORE seq 5.
+    expect(page).toContain('msg-3');
+    expect(page).toContain('msg-4');
+    // An unforwarded beforeSeq yields the oldest page, which is this:
+    expect(page).not.toContain('msg-1');
+    expect(page).not.toContain('msg-2');
+    // And never the cursor itself, nor anything after it.
+    expect(page).not.toContain('msg-5');
+    expect(page).not.toContain('msg-6');
+  });
+
   it('accepts an explicit app URN and a replyToSeq', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     await srv.callToolText('hadron_team_chat_post', { body: 'question?', app: app.urn });

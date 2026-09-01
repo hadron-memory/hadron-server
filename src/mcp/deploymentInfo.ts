@@ -69,7 +69,14 @@
 // next connection instead of losing them to a reconnect; the `client-session-state`
 // capability token advertises it. Caller-detectable: the header is new input, and
 // the same client now observes different post-reconnect behaviour.
-export const HADRON_SERVER_VERSION = '0.15.0';
+// 0.16.0: #1116 — a BACKWARD cursor on both transcript readers. New optional
+// `beforeSeq` on the GraphQL `chatHistory` and `teamChatMessages` queries and
+// on the `hadron_team_chat_read` MCP tool, plus the `transcript-backward-cursor`
+// capability token. Caller-detectable, and the reason it must be: MCP DROPS
+// unknown arguments, so a client sending `beforeSeq` to a build without it does
+// not get an error — it gets the OLDEST page instead of the newest, which is a
+// silently wrong answer rather than a missing feature.
+export const HADRON_SERVER_VERSION = '0.16.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
@@ -119,6 +126,14 @@ export const MCP_SURFACE_CAPABILITIES = [
    * per-connection only, and the header is ignored.
    */
   'client-session-state',
+  /**
+   * #1116 — `beforeSeq` on the transcript readers: page BACKWARD from a stable
+   * cursor rather than a positional offset. Worth a token rather than a version
+   * comparison alone, because MCP drops unknown arguments: a client that sends
+   * `beforeSeq` to a build lacking it is handed the OLDEST page in silence,
+   * which reads as a working call returning the wrong end of the conversation.
+   */
+  'transcript-backward-cursor',
 ] as const;
 
 /**
