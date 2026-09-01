@@ -6526,16 +6526,40 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const eventsHere = await loadLastEventBySession(db as never, openHere.map((r) => r.id));
         const nowHere = nowHere0;
         const liveHere = openHere.filter((r) => isSessionLive(r, eventsHere.get(r.id), nowHere));
-        // TWO QUESTIONS, TWO ANSWERS (#1120 review, Codex P2). "Is anyone
-        // driving this" is about ANY live row; "what is MY session id" is
-        // about the caller's own. Answering both from the first row made the
-        // second depend on the ORDER of the first — so another user's session
-        // sorting ahead silently omitted the caller's own id from the one read
-        // whose purpose is handing it back after a context compaction.
+        // TWO QUESTIONS, TWO QUERIES (#1120 review, Codex P2, twice).
+        //
+        // "Is anyone driving this" is about ANY live row and tolerates a cap:
+        // one live session is as good as another for a taken flag. "What is MY
+        // session id" tolerates neither a cap nor an ordering, because there is
+        // exactly one right answer and losing it defeats the whole read — this
+        // is the post-compaction recovery path.
+        //
+        // Selecting `mine` out of the capped set was two fixes deep and still
+        // wrong: first it depended on the first row, then on surviving the
+        // shared cap. Scoping the query to the caller's own sessions is what
+        // actually makes the guarantee independent — and it is naturally
+        // bounded, since it is one person's sessions on one worker.
         const driving = liveHere[0] ?? null;
-        const mine = auth.userId
-          ? (liveHere.find((r) => r.userId === auth.userId) ?? null)
-          : null;
+        const myRows = auth.userId
+          ? await db.session.findMany({
+              where: {
+                workerId: worker.id, endedAt: null, deletedAt: null,
+                userId: auth.userId,
+                ...recentlyTouchedFilter(nowHere0),
+              },
+              orderBy: [
+                { updatedAt: { sort: 'desc' as const, nulls: 'last' as const } },
+                { startedAt: 'desc' as const },
+              ],
+              take: OPEN_SESSION_SCAN_CAP,
+              select: {
+                id: true, userId: true, startedAt: true,
+                type: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+              },
+            })
+          : [];
+        const myEvents = await loadLastEventBySession(db as never, myRows.map((r) => r.id));
+        const mine = myRows.find((r) => isSessionLive(r, myEvents.get(r.id), nowHere)) ?? null;
 
         const flags: string[] = [];
         if (worker.retiredAt) flags.push('RETIRED');
