@@ -91,3 +91,47 @@ describe('recentlyTouchedFilter is WIDER than isSessionLive, on purpose', () => 
     expect(OPEN_SESSION_SCAN_CAP).toBeGreaterThan(0);
   });
 });
+
+describe('every open-session scan pairs the filter with the cap (#1120 review)', () => {
+  /**
+   * Three call sites now derive liveness from open rows, and each must bound
+   * that scan the SAME way: filter first, cap only as a backstop.
+   *
+   * This is a source-level assertion because the failure is silent and
+   * behavioural tests cannot reach it — it needs more than
+   * OPEN_SESSION_SCAN_CAP open sessions on one worker to show up, and by then
+   * the symptom is one surface saying `free` while two say `taken`.
+   *
+   * It caught a real regression: the first fix for the MCP read took the cap
+   * WITHOUT the filter, in the same commit whose message argued that a cap
+   * alone is the wrong fix. Knowing a rule and reaching for it are separate
+   * skills, so this reaches for it mechanically.
+   */
+  it('no scan takes the cap without the filter', async () => {
+    const { readFileSync } = await import('node:fs');
+    const files = [
+      '../mcp/server.ts',
+      '../api/graphql/schema/resolvers.mutation.session.ts',
+    ];
+    for (const rel of files) {
+      const src = readFileSync(new URL(rel, import.meta.url), 'utf8');
+      const caps = src.split('OPEN_SESSION_SCAN_CAP').length - 1;
+      // One import mention plus one use per scan; every use must sit in a
+      // query that also names the filter.
+      if (caps === 0) continue;
+      const filters = src.split('recentlyTouchedFilter').length - 1;
+      expect(filters, `${rel}: uses the cap but not the filter`).toBeGreaterThan(0);
+
+      // Tighter: each `take: OPEN_SESSION_SCAN_CAP` must have a
+      // recentlyTouchedFilter within the same findMany call.
+      for (const idx of [...src.matchAll(/take: OPEN_SESSION_SCAN_CAP/g)].map((m) => m.index!)) {
+        const callStart = src.lastIndexOf('findMany({', idx);
+        expect(callStart, `${rel}: cap outside a findMany`).toBeGreaterThan(-1);
+        expect(
+          src.slice(callStart, idx),
+          `${rel}: a scan caps without filtering first`,
+        ).toContain('recentlyTouchedFilter');
+      }
+    }
+  });
+});

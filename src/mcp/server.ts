@@ -105,7 +105,12 @@ import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js'
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
-import { isSessionLive, loadLastEventBySession, OPEN_SESSION_SCAN_CAP } from '../lib/sessionActivity.js';
+import {
+  isSessionLive,
+  loadLastEventBySession,
+  recentlyTouchedFilter,
+  OPEN_SESSION_SCAN_CAP,
+} from '../lib/sessionActivity.js';
 import {
   decryptNodeFieldsWithKey,
   encryptNodeFieldsWithKey,
@@ -6492,8 +6497,20 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // "driving" here while the roster said idle and a bind succeeded —
         // three surfaces, two answers, which is precisely what cor:agt:020:11
         // exists to forbid. The predicate is the shared one now.
+        const nowHere0 = new Date();
         const openHere = await db.session.findMany({
-          where: { workerId: worker.id, endedAt: null, deletedAt: null },
+          // The SAME bound as the bind path, filter AND cap (#1120 review,
+          // Codex P2 — second round). The first fix here took the cap without
+          // the filter, which is the mistake the filter exists to prevent:
+          // `startedAt: desc` is not liveness, so past the cap an OLDER
+          // session with a recent heartbeat is dropped before isSessionLive
+          // is asked — and this read then says `free` while the roster and
+          // the binder both say taken. The cap orders a set the filter has
+          // already made small; alone it silently decides the answer.
+          where: {
+            workerId: worker.id, endedAt: null, deletedAt: null,
+            ...recentlyTouchedFilter(nowHere0),
+          },
           orderBy: { startedAt: 'desc' },
           select: {
             id: true, userId: true, startedAt: true,
@@ -6502,7 +6519,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           take: OPEN_SESSION_SCAN_CAP,
         });
         const eventsHere = await loadLastEventBySession(db as never, openHere.map((r) => r.id));
-        const nowHere = new Date();
+        const nowHere = nowHere0;
         const driving =
           openHere.find((r) => isSessionLive(r, eventsHere.get(r.id), nowHere)) ?? null;
 
