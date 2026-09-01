@@ -3304,7 +3304,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_unlock_memory',
-    'Unlock an encrypted PRIVATE memory for THIS MCP session (spec 041). Supply exactly one of passphrase / dataKey; owner-only. While unlocked, reads return plaintext and writes encrypt; other sessions are unaffected. The key lives only in server memory and is dropped when the session closes (or via hadron_lock_memory).',
+    'Unlock an encrypted PRIVATE memory for THIS MCP session (spec 041). Supply exactly one of passphrase / dataKey; owner-only. While unlocked, reads return plaintext and writes encrypt; other sessions are unaffected. The key lives only in server memory — never on disk — and is dropped when the session closes, via hadron_lock_memory, or after the memory goes UNUSED for the key-cache idle window (#1114; 24h by default, and every read or write refreshes it, so an unlock you are actually using does not expire under you). That last case is the one to expect: after a long quiet stretch a read may report the memory locked again with no lock and no disconnect having happened — call this tool again. Key material outliving all use is a worse failure than an extra unlock, which is why the expiry exists rather than the promise being unconditional.',
     {
       memoryUrn: z.string().describe('Memory URN or id'),
       passphrase: z.string().optional().describe('The passphrase the memory was encrypted with'),
