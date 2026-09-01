@@ -54,6 +54,52 @@ describe('catches a partial enumeration', () => {
   });
 });
 
+describe('sees a description wherever GraphQL allows one (#1123 review)', () => {
+  /**
+   * The collector's first version registered a HAND-LISTED set of node kinds,
+   * and so skipped interfaces, unions, scalars and directives in silence — a
+   * gate reporting success while missing sites, which is worse than no gate
+   * and is the same shape of defect as the hand-maintained scope list it
+   * exists to catch.
+   *
+   * One case per description-bearing kind, because "exhaustive" is a claim and
+   * this is what checking it looks like.
+   */
+  const partial = 'Scopes: mail.read, mail.send, calendar.read.';
+  const cases: Array<[string, string]> = [
+    ['object field', `type Q { """${partial}""" f: String }`],
+    ['object type', `"""${partial}""" type Q { f: String }`],
+    ['interface', `"""${partial}""" interface I { f: String }`],
+    ['interface field', `interface I { """${partial}""" f: String }`],
+    ['union', `type A { x: String }
+type B { x: String }
+"""${partial}""" union U = A | B`],
+    ['scalar', `"""${partial}""" scalar S`],
+    ['enum', `"""${partial}""" enum E { A }`],
+    ['enum value', `enum E { """${partial}""" A }`],
+    ['input object', `"""${partial}""" input In { f: String }`],
+    ['input field', `input In { """${partial}""" f: String }`],
+    ['argument', `type Q { f("""${partial}""" a: String): String }`],
+    ['directive', `"""${partial}""" directive @d on FIELD`],
+  ];
+
+  for (const [label, doc] of cases) {
+    it(`catches a partial enumeration on a ${label}`, () => {
+      const v = findPartialEnumerations(doc, SET as never);
+      expect(v, `${label} was not inspected`).toHaveLength(1);
+      expect(v[0].missing).toEqual(['drive.read']);
+    });
+  }
+
+  it('gives a navigable coordinate rather than a bare name', () => {
+    const v = findPartialEnumerations(
+      `interface I { """${partial}""" f: String }`,
+      SET as never,
+    );
+    expect(v[0].coord).toBe('I.f');
+  });
+});
+
 describe('does NOT fire on the cases that only look like one', () => {
   it('a single member is documenting a field, not enumerating a set', () => {
     // The two-member floor. "Grant scope: drive.read." appears on several real

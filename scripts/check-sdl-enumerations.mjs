@@ -108,49 +108,40 @@ function spellsOut(text, member) {
   return new RegExp(`(?<![\\w-])(?<!\\w\\.)${escaped}(?![\\w-])(?!\\.\\w)`).test(text);
 }
 
-/** Every description in the SDL, with a coordinate a human can navigate to. */
+/**
+ * Every description in the SDL, with a coordinate a human can navigate to.
+ *
+ * EXHAUSTIVE BY CONSTRUCTION, not by enumeration (#1123 review, Codex P2). The
+ * first version registered visitors for object, input-object and enum
+ * definitions plus their fields — which silently skipped descriptions on
+ * interfaces, unions, scalars and directives. **A gate that reports success
+ * while missing sites is worse than no gate**, and it is precisely the failure
+ * this file's docstring warns about elsewhere; a hand-maintained list of node
+ * kinds is the same shape of defect as a hand-maintained list of scopes.
+ *
+ * So: one generic `enter` that records ANY node carrying a description. New
+ * description-bearing kinds are covered the day graphql-js adds them, with
+ * nothing here to update.
+ */
 function collectDescriptions(sdl) {
   const out = [];
-  let path = [];
-  const record = (node, label) => {
-    if (node.description?.value) out.push({ coord: label, text: node.description.value });
-  };
+  let typeName = null;
   visit(parse(sdl), {
-    ObjectTypeDefinition: {
-      enter(node) {
-        path = [node.name.value];
-        record(node, node.name.value);
-      },
-      leave() {
-        path = [];
-      },
-    },
-    InputObjectTypeDefinition: {
-      enter(node) {
-        path = [node.name.value];
-        record(node, node.name.value);
-      },
-      leave() {
-        path = [];
-      },
-    },
-    EnumTypeDefinition: {
-      enter(node) {
-        path = [node.name.value];
-        record(node, node.name.value);
-      },
-      leave() {
-        path = [];
-      },
-    },
-    FieldDefinition(node) {
-      record(node, `${path[0] ?? '?'}.${node.name.value}`);
-    },
-    InputValueDefinition(node) {
-      record(node, `${path[0] ?? '?'}.${node.name.value}`);
-    },
-    EnumValueDefinition(node) {
-      record(node, `${path[0] ?? '?'}.${node.name.value}`);
+    enter(node) {
+      // Track the enclosing definition so a field's coordinate is navigable.
+      // Covers *TypeDefinition, *TypeExtension and DirectiveDefinition alike,
+      // without naming any of them.
+      const isDefinition =
+        typeof node.kind === 'string' &&
+        (node.kind.endsWith('TypeDefinition') ||
+          node.kind.endsWith('TypeExtension') ||
+          node.kind === 'DirectiveDefinition');
+      if (isDefinition) typeName = node.name?.value ?? null;
+
+      if (!node.description?.value) return;
+      const own = node.name?.value;
+      const coord = isDefinition || !typeName ? (own ?? '<anonymous>') : `${typeName}.${own}`;
+      out.push({ coord, text: node.description.value });
     },
   });
   return out;
