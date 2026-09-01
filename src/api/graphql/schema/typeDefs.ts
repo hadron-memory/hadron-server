@@ -685,8 +685,11 @@ export const typeDefs = `#graphql
   A **chat session** is NOT one of these and has no row here: it is the
   conversation a human is in — the Claude Desktop window, the Claude Code
   session, the IDE chat. The two are independent and **ending one does not end
-  the other**: a chat session that closes leaves its worker session open, and
-  its worker taken, until endSession or the #930 reaper. Do not use "chat
+  the other**: a chat session that closes leaves its worker session open
+  until endSession. Since #1114 nothing ends it for inactivity — silence is not
+  evidence of abandonment — but it stops reading as LIVE once nobody has driven
+  it inside its idle window, so an abandoned name frees itself for binding
+  without the session being ended or its unwritten handoff lost. Do not use "chat
   session" for a Chat (the agent conversation entity) — that is an **agent
   chat**, a third concept.
   """
@@ -2026,16 +2029,30 @@ export const typeDefs = `#graphql
     """
     heldAt: DateTime
     """
-    hadron-cli#487 — whether a worker session is OPEN on this name right now.
+    hadron-cli#487 — whether anyone is DRIVING this name right now.
 
     Not availability: availability is the HOLD above (\`cor:agt:020:09\`), and an
-    ended, idle or reaped session never frees a name. This says only whether
-    someone is mid-stint, which is the question a coordinator asks about a name
-    already theirs. Conflating the two is the CLI bug this field exists for.
+    ended or idle session never frees a name. This says only whether someone is
+    mid-stint, which is the question a coordinator asks about a name already
+    theirs. Conflating the two is the CLI bug this field exists for.
 
-    Derived from the session lifecycle with no lease (\`cor:agt:020:03\`), using
-    the SAME predicate startSession refuses WORKER_TAKEN on — a reader must not
-    be told a worker is busy that a binder can take.
+    #1114 — COMPUTED, never stored. It is "the session has not ended AND it was
+    driven inside its type's idle window", not "a row is open". Nothing ends a
+    session for inactivity any more, because silence is not evidence of
+    abandonment — an agent used once a year is not abandoned in month two — so
+    an open row proves only that nobody closed it. Deriving the answer at read
+    time says exactly what the evidence supports; the previous design expressed
+    the same judgement by ENDING the session, which wrote a guess into the
+    record as a fact and destroyed the handoff that stint had not written yet.
+
+    A worker that reads false is not gone: its session is untouched, and it
+    reads true again the moment it is driven.
+
+    Uses the SAME predicate startSession refuses WORKER_TAKEN on
+    (\`cor:agt:020:11\`) — a reader must not be told a worker is busy that a
+    binder can take, and since #1114 that is load-bearing rather than tidy:
+    with nothing ending abandoned sessions, an \`endedAt IS NULL\` gate would
+    refuse a bind forever and leave force as the only route.
 
     Nullable BECAUSE of the read gate, not because the answer is unknown: this
     is a working-state field like heldByUserId, masked to null on deny rather
@@ -2051,8 +2068,9 @@ export const typeDefs = `#graphql
 
     The instant is the platform's one derivation of session activity — the
     greatest of startedAt, updatedAt, and the newest attributed usage event — so
-    it agrees with the takeover prompt and with the idle window the reaper acts
-    on. Masked to null on deny, like heldByUserId.
+    it agrees with the takeover prompt and with the idle window hasLiveSession
+    is derived from (#1114: that window DESCRIBES a session, it no longer ends
+    one). Masked to null on deny, like heldByUserId.
     """
     lastActiveAt: DateTime
     "The role-agent behind the casting."
@@ -5623,16 +5641,20 @@ export const typeDefs = `#graphql
     The binding is held server-side and is independent of the caller's CHAT
     SESSION (the human's Desktop window, Claude Code session or IDE chat).
     **Ending your chat session does not end a worker session** (#1034): a chat
-    session that closes leaves this session open and its worker taken until
-    endSession or the #930 reaper. A client that ties its lifetime to a conversation must call
-    endSession itself; nothing about closing a window reaches this server.
+    session that closes leaves this session open until endSession — #1114
+    removed inactivity as a reason to end one, so nothing else will. The worker
+    stops reading as LIVE once its idle window passes without a drive, which is
+    what lets an abandoned name be bound again; the session itself, and any
+    handoff still unwritten, survive. A client that ties its lifetime to a
+    conversation must call endSession itself; nothing about closing a window
+    reaches this server.
     """
     startSession(input: SessionInput!): Session!
     """
     #931: update a live session's mutable provenance fields (a PR is usually
     opened after startSession already ran). Explicit null clears; omitted
     preserves; an empty update is a valid liveness touch (bumps updatedAt,
-    which the #930 inactivity reaper counts). id-only - sessions have no URN.
+    which liveness counts — #1114). id-only - sessions have no URN.
     Gate: platform admin, the session's App, or the attributed user (not via
     impersonation). Updates on an ended session stay allowed (late PR-merge
     attribution).
@@ -5641,9 +5663,11 @@ export const typeDefs = `#graphql
 
     """
     End a session, and — for a worker-bound one — write its closing handoff
-    (#1029). This is the CLIENT operation that ends a worker session — the #930
-    reaper ends one too, without a client. A client's chat session ending **does
-    not end a worker session**, and never reaches this server (#1034).
+    (#1029). This is the CLIENT operation that ends a worker session. Since
+    #1114 it is very nearly the ONLY one: the reaper ends a session only when a
+    hard expiresAt promised at session start has passed, never for going
+    quiet. A client's chat session ending **does not end a worker session**, and
+    never reaches this server (#1034).
 
     It ends the SESSION, not any HOLD. Where a person bound the worker the name
     stays theirs until explicitly released (#1050,

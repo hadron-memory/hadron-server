@@ -189,6 +189,106 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
     expect(after).not.toContain('on this team.');
   });
 
+  /**
+   * #1120 review (Codex P2) — the recovery read must hand back YOUR session id
+   * even when someone else's live session sorts ahead of it.
+   *
+   * Two questions were being answered from one row: "is anyone driving this"
+   * (any live session) and "what is my session id" (the caller's own). While
+   * the scan was ordered by `startedAt` that mostly coincided; ordering by
+   * heartbeat made it come apart, and the id silently vanished from the ONE
+   * read whose purpose is restoring it after a context compaction.
+   */
+  it('names the CALLER\'s own live session, not whichever sorts first', async () => {
+    const w = await worker('Iris', 'iris');
+    const older = new Date(Date.now() - 60 * 60 * 1000);
+
+    // The caller's own session, started EARLIER and with no recent heartbeat.
+    const mine = generateId();
+    await db.session.create({
+      data: {
+        id: mine, workerId: w.id, appId: app.id, userId: user.id,
+        startedAt: older, updatedAt: older,
+      },
+    });
+    // Someone else's, started later AND touched a moment ago — so it sorts
+    // first under heartbeat ordering.
+    await db.session.create({
+      data: {
+        id: generateId(), workerId: w.id, appId: app.id, userId: outsider.id,
+        startedAt: new Date(), updatedAt: new Date(),
+      },
+    });
+
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
+      workerRef: 'Iris',
+    });
+
+    // Taken — any live session answers that.
+    expect(out).toContain('taken');
+    // ...and the caller still gets their OWN id back, which is the point.
+    expect(out).toContain(`Your active session: ${mine}`);
+  });
+
+  it("finds the caller's session even when it would not survive the shared cap", async () => {
+    // #1120 review, Codex P2 (second time on this line). Selecting `mine` out
+    // of the CAPPED set was still order-dependent: past the cap, the caller's
+    // own session is simply absent. The recovery guarantee cannot be a
+    // by-product of surviving a bound shared with everyone else's sessions, so
+    // it gets its own query scoped to the caller.
+    //
+    // Seeded PAST the cap for real. A first draft simulated it with four rows
+    // and "worst possible ordering", and the discriminating mutation — putting
+    // `mine` back inside the capped set — still passed, because with four rows
+    // the cap never bites. A bound can only be tested by exceeding it.
+    const w = await worker('Mira', 'mira');
+    const ancient = new Date(Date.now() - 10 * 60 * 60 * 1000);
+    const mine = generateId();
+    await db.session.create({
+      data: {
+        id: mine, workerId: w.id, appId: app.id, userId: user.id,
+        startedAt: ancient, updatedAt: ancient,
+      },
+    });
+    // Live ONLY through a usage event — the heartbeat input the ordering
+    // cannot see, so nothing keeps this row inside a shared prefix.
+    await db.usageEvent.create({
+      data: { id: generateId(), sessionId: mine, type: 'read', createdAt: new Date() },
+    });
+    // More live sessions than OPEN_SESSION_SCAN_CAP, all newer by updatedAt.
+    const now = new Date();
+    await db.session.createMany({
+      data: Array.from({ length: 220 }, () => ({
+        id: generateId(), workerId: w.id, appId: app.id, userId: outsider.id,
+        startedAt: now, updatedAt: now,
+      })),
+    });
+
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
+      workerRef: 'Mira',
+    });
+    expect(out).toContain('taken');
+    expect(out).toContain(`Your active session: ${mine}`);
+  });
+
+  it('does NOT name a session belonging to someone else', async () => {
+    // The control, and the privacy half: whose session it is otherwise stays
+    // behind the takeover refusal, which is a deliberate act rather than a
+    // listing.
+    const w = await worker('Jonas', 'jonas');
+    await db.session.create({
+      data: {
+        id: generateId(), workerId: w.id, appId: app.id, userId: outsider.id,
+        startedAt: new Date(), updatedAt: new Date(),
+      },
+    });
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
+      workerRef: 'Jonas',
+    });
+    expect(out).toContain('taken');
+    expect(out).not.toContain('Your active session');
+  });
+
   it('composes promptOverride into the briefing', async () => {
     await worker('Iris', 'iris', { promptOverride: 'You authored the Academy history.' });
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {

@@ -57,6 +57,7 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
+import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
@@ -1446,14 +1447,20 @@ export async function createServer(): Promise<Express> {
     startOrphanObjectReaperLoop(db);
   }
 
-  // Background job (#930): end sessions past `expiresAt` and sessions with
-  // no heartbeat inside their type's idle window, stamping `autoExpiredAt`.
-  // Until this loop existed both columns were schema-only fiction and an
-  // abandoned session stayed "active" forever — which is what every
-  // liveness/presence reader (the persona "taken right now" check first)
-  // hangs on.
+  // Background job (#930, narrowed by #1114): end sessions past `expiresAt`,
+  // stamping `autoExpiredAt`. Inactivity no longer ends anything — liveness is
+  // derived at read time — so this loop honours the hard-expiry promise and
+  // nothing else.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_SESSION_REAPER !== 'true') {
     startSessionReaperLoop(db);
+  }
+
+  // #1114 — the session-key cache's TTL sweep, on its OWN timer.
+  // Deliberately NOT gated on DISABLE_SESSION_REAPER: an eviction policy for
+  // process-held key material must not be reachable through another
+  // subsystem's off switch (#1120 review, Codex P2).
+  if (process.env.NODE_ENV !== 'test') {
+    startSessionKeySweepLoop();
   }
 
   // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in

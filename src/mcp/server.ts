@@ -106,6 +106,12 @@ import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import {
+  isSessionLive,
+  loadLastEventBySession,
+  recentlyTouchedFilter,
+  OPEN_SESSION_SCAN_CAP,
+} from '../lib/sessionActivity.js';
+import {
   decryptNodeFieldsWithKey,
   encryptNodeFieldsWithKey,
   getMemoryEncryptionInfo,
@@ -3298,7 +3304,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_unlock_memory',
-    'Unlock an encrypted PRIVATE memory for THIS MCP session (spec 041). Supply exactly one of passphrase / dataKey; owner-only. While unlocked, reads return plaintext and writes encrypt; other sessions are unaffected. The key lives only in server memory and is dropped when the session closes (or via hadron_lock_memory).',
+    'Unlock an encrypted PRIVATE memory for THIS MCP session (spec 041). Supply exactly one of passphrase / dataKey; owner-only. While unlocked, reads return plaintext and writes encrypt; other sessions are unaffected. The key lives only in server memory — never on disk — and is dropped when the session closes, via hadron_lock_memory, or after the memory goes UNUSED for the key-cache idle window (#1114; 24h by default, and every read or write refreshes it, so an unlock you are actually using does not expire under you). That last case is the one to expect: after a long quiet stretch a read may report the memory locked again with no lock and no disconnect having happened — call this tool again. Key material outliving all use is a worse failure than an extra unlock, which is why the expiry exists rather than the promise being unconditional.',
     {
       memoryUrn: z.string().describe('Memory URN or id'),
       passphrase: z.string().optional().describe('The passphrase the memory was encrypted with'),
@@ -5482,7 +5488,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open and the worker taken, until hadron_end_session or the server reaper. All subsequent tool calls can reference this session ID for attribution. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker that already has an open worker session refuses WORKER_TAKEN with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
+    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open and the worker taken, until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment — so nothing but an explicit end closes a DEVELOPER worker session. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so an untouched session reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. All subsequent tool calls can reference this session ID for attribution. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not a live one — an untouched session is not being driven, so it does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
     {
       description: z.string().describe("What this session is about"),
       type: z.string().optional().describe('Session type: DEVELOPER, CHATBOT, AUTOMATION, EDGE'),
@@ -5495,7 +5501,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       parentSessionId: z.string().optional().describe('Parent session ID'),
       prevSessionId: z.string().optional().describe('Previous session ID'),
       workerRef: z.string().optional().describe('The Worker (named casting) this session works as. Three forms resolve: the worker\'s NAME ("Iris" — unique within the App, case-insensitive, and what a human will say), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its bare id. Prefer the name for a human-driven pickup; the URN when addressing a worker across App context. Must belong to this App; stamps the session\'s agentId from the casting and returns the worker\'s boot briefing.'),
-      force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker — one with a worker session still open. That open session may be someone else\'s live work, or your own left behind by a chat session that ended without ending it (ending a chat session never ends a worker session); the server cannot tell which, so neither should you assume. Use only on the user\'s explicit override, after showing who last drove it.'),
+      force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker — one someone drove RECENTLY (#1114: a merely-open session no longer refuses, so if you are seeing this refusal the session is live rather than just unclosed). That open session may be someone else\'s live work, or your own left behind by a chat session that ended without ending it (ending a chat session never ends a worker session); the server cannot tell which, so neither should you assume. Use only on the user\'s explicit override, after showing who last drove it.'),
     },
     async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId, workerRef, force }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
@@ -6396,7 +6402,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
     {
       workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
-      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so it is not reaped as idle while you are working (#1081).'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
     },
     async ({ workerRef, app, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The
@@ -6484,11 +6490,76 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // the same predicate hadron_start_session refuses WORKER_TAKEN on, and
         // hadron_list_workers reports. It answers "is someone driving this?",
         // which is what an agent unsure of its own state needs to see.
-        const driving = await db.session.findFirst({
-          where: { workerId: worker.id, endedAt: null, deletedAt: null },
-          orderBy: { startedAt: 'desc' },
-          select: { id: true, userId: true, startedAt: true },
+        //
+        // #1114/#1120 review (Codex P2): that parity claim was TRUE of the
+        // comment and FALSE of the code the moment liveness stopped being
+        // `endedAt IS NULL`. An open-but-stale session would have read as
+        // "driving" here while the roster said idle and a bind succeeded —
+        // three surfaces, two answers, which is precisely what cor:agt:020:11
+        // exists to forbid. The predicate is the shared one now.
+        const nowHere0 = new Date();
+        const openHere = await db.session.findMany({
+          // The SAME bound as the bind path, filter AND cap (#1120 review,
+          // Codex P2 — second round). The first fix here took the cap without
+          // the filter, which is the mistake the filter exists to prevent:
+          // `startedAt: desc` is not liveness, so past the cap an OLDER
+          // session with a recent heartbeat is dropped before isSessionLive
+          // is asked — and this read then says `free` while the roster and
+          // the binder both say taken. The cap orders a set the filter has
+          // already made small; alone it silently decides the answer.
+          where: {
+            workerId: worker.id, endedAt: null, deletedAt: null,
+            ...recentlyTouchedFilter(nowHere0),
+          },
+          // Heartbeat order, matching the bind path — the cap keeps a prefix,
+          // so what it is ordered by decides what survives it (#1120 review).
+          orderBy: [
+            { updatedAt: { sort: 'desc' as const, nulls: 'last' as const } },
+            { startedAt: 'desc' as const },
+          ],
+          select: {
+            id: true, userId: true, startedAt: true,
+            type: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+          },
+          take: OPEN_SESSION_SCAN_CAP,
         });
+        const eventsHere = await loadLastEventBySession(db as never, openHere.map((r) => r.id));
+        const nowHere = nowHere0;
+        const liveHere = openHere.filter((r) => isSessionLive(r, eventsHere.get(r.id), nowHere));
+        // TWO QUESTIONS, TWO QUERIES (#1120 review, Codex P2, twice).
+        //
+        // "Is anyone driving this" is about ANY live row and tolerates a cap:
+        // one live session is as good as another for a taken flag. "What is MY
+        // session id" tolerates neither a cap nor an ordering, because there is
+        // exactly one right answer and losing it defeats the whole read — this
+        // is the post-compaction recovery path.
+        //
+        // Selecting `mine` out of the capped set was two fixes deep and still
+        // wrong: first it depended on the first row, then on surviving the
+        // shared cap. Scoping the query to the caller's own sessions is what
+        // actually makes the guarantee independent — and it is naturally
+        // bounded, since it is one person's sessions on one worker.
+        const driving = liveHere[0] ?? null;
+        const myRows = auth.userId
+          ? await db.session.findMany({
+              where: {
+                workerId: worker.id, endedAt: null, deletedAt: null,
+                userId: auth.userId,
+                ...recentlyTouchedFilter(nowHere0),
+              },
+              orderBy: [
+                { updatedAt: { sort: 'desc' as const, nulls: 'last' as const } },
+                { startedAt: 'desc' as const },
+              ],
+              take: OPEN_SESSION_SCAN_CAP,
+              select: {
+                id: true, userId: true, startedAt: true,
+                type: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+              },
+            })
+          : [];
+        const myEvents = await loadLastEventBySession(db as never, myRows.map((r) => r.id));
+        const mine = myRows.find((r) => isSessionLive(r, myEvents.get(r.id), nowHere)) ?? null;
 
         const flags: string[] = [];
         if (worker.retiredAt) flags.push('RETIRED');
@@ -6506,8 +6577,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
-            (driving && auth.userId && driving.userId === auth.userId
-              ? `Your active session: ${driving.id} (since ${driving.startedAt.toISOString()})\n`
+            (mine
+              ? `Your active session: ${mine.id} (since ${mine.startedAt.toISOString()})\n`
               : '') +
             // Shown separately from the briefing, and labelled as the editable
             // part, so hadron_update_worker's replace semantics have something
@@ -6541,7 +6612,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // offering the option at all.
       promptOverride: z.string().optional().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it; omit it to leave the override untouched."),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
-      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so it is not reaped as idle while you are working (#1081).'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
     },
     async ({ workerRef, promptOverride, app, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The

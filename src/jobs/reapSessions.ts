@@ -12,35 +12,37 @@
  * check (hadron-cli#369, cor:agt:020:03) first among them — inherited
  * that lie.
  *
- * Two reap rules, both idempotent:
+ * ONE reap rule, idempotent:
  *
  *   1. **Hard expiry** — `endedAt IS NULL AND expiresAt < now`. The
  *      CHATBOT path (`startAgentSession`) stamps `expiresAt` from the
  *      App's `sessionTimeoutSeconds`, so this is that surface's rule.
- *   2. **Inactivity** — `endedAt IS NULL AND expiresAt IS NULL` and last
- *      activity older than the session type's idle window. Last activity
- *      is the greatest of `startedAt`, `updatedAt`, and the session's most
- *      recent `UsageEvent.createdAt`: any write attributed to the session
- *      is a heartbeat, which is exactly the "a session log / chat post
- *      touches liveness" behavior the persona design wants
- *      (`updateSession`'s `updatedAt` bump is the explicit touch, #931).
+ *      It is a **promise made at session start**, not an inference from
+ *      silence, which is precisely why it survives #1114.
  *
- *      This said "for free" until #1081, and that word was the defect: on the
- *      MCP desktop track a chat post touched nothing, because a
- *      user-credential caller has no transport binding and its events are
- *      therefore unattributed. The only heartbeat was an accident of
- *      `record_work(kind:'pr')` writing `Session.prNumber`, so workers who
- *      open PRs lived and coordinators were reaped mid-work. The touch is now
- *      explicit on every MCP tool handed a session id — the behaviour this
- *      comment always described is finally true on both tracks.
+ * **There is no inactivity rule any more (#1114).** It used to end a session
+ * whose last heartbeat fell outside its type's idle window, and Holger's
+ * ruling retired it outright: *"If I have my personal taxes agent, I use it
+ * once a year."* Silence is not evidence of abandonment. The old rule inferred
+ * abandonment from quiet and then wrote that inference into `endedAt` as a
+ * fact — destructively, because ending a session forecloses the handoff it had
+ * not written yet.
+ *
+ * What replaced it is not another sweep but a **derivation**: liveness is now
+ * computed at READ time from the same three heartbeat inputs
+ * (`lib/sessionActivity.ts` — `isSessionLive`), by every surface that asks "is
+ * anyone driving this". Nothing is mutated to express it, so a session that
+ * goes quiet for a year and comes back is simply described as idle in the
+ * meantime, and is still there when its driver returns.
  *
  * Reaping sets **both** `endedAt` and `autoExpiredAt` to the same instant,
  * so "active" stays the single predicate `endedAt IS NULL` everywhere and
  * `autoExpiredAt` records *how* it ended (auto vs explicit `endSession`).
  *
  * Deliberately NOT here: `startSession` still leaves `expiresAt` null for
- * DEVELOPER sessions (rule 2 covers them; the client contract is
- * unchanged), and explicit `endSession` is untouched.
+ * DEVELOPER sessions, which since #1114 means nothing ends them but an
+ * explicit `endSession` — the intended outcome, not an oversight. Explicit
+ * `endSession` is untouched.
  *
  * Run one sweep by hand:
  *   tsx src/jobs/reapSessions.ts
@@ -50,105 +52,22 @@ import type { PrismaClient, SessionType } from '../generated/prisma/index.js';
 import { db as defaultDb } from '../integrations/db/client.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 
-/** Every `SessionType` — the per-type idle windows are keyed on this. */
-const SESSION_TYPES: SessionType[] = ['DEVELOPER', 'CHATBOT', 'AUTOMATION', 'EDGE'];
-
-/**
- * Fleet-wide default idle window: a session with no heartbeat for a day is
- * over by any reading. Deliberately generous — too SHORT is the worse
- * failure for personas (it frees one mid-lunch and a takeover interleaves
- * her working memory, the caveat on D-2026-08-11-006), while too long only
- * delays a takeover the CLI can already force.
- */
-export const DEFAULT_SESSION_IDLE_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/** Per-sweep cap for each rule. The next sweep continues where this one
- * left off (oldest first), so a first run against a long backlog drains
- * over several sweeps instead of one giant transaction. */
+/** Per-sweep cap. The next sweep continues where this one left off (oldest
+ * first), so a first run against a long backlog drains over several sweeps
+ * instead of one giant transaction. */
 const REAP_BATCH_SIZE = 500;
 
-/** Env var carrying the per-type idle-window override for `type`. */
-function idleWindowEnvName(type: SessionType): string {
-  return `SESSION_IDLE_WINDOW_${type}_MS`;
-}
-
-/** Env vars already warned about, so a permanently-malformed value doesn't
- * reprint on every sweep (PR-933 Copilot). Keyed by name AND value, so
- * fixing one typo into another is still reported. */
-const warnedWindowValues = new Set<string>();
-
-/**
- * Parse a positive-integer millisecond env value; returns null for anything
- * else (warning once per distinct bad value), so a typo degrades to the
- * default rather than reaping every session immediately or never.
- */
-function parseWindowMs(name: string, raw: string | undefined): number | null {
-  if (raw === undefined || raw.trim() === '') return null;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
-    const seen = `${name}=${raw}`;
-    if (!warnedWindowValues.has(seen)) {
-      warnedWindowValues.add(seen);
-      // eslint-disable-next-line no-console
-      console.warn(`[reaper:sessions] ignoring ${name}="${raw}" — expected a positive integer of milliseconds`);
-    }
-    return null;
-  }
-  return n;
-}
-
-/**
- * Idle window for a session type: the per-type override wins, then the
- * fleet-wide `SESSION_IDLE_WINDOW_MS`, then the 24h default. Read per call
- * (not memoized) so an operator's change lands on the next sweep and tests
- * can set it without re-importing the module.
- */
-export function idleWindowMsFor(type: SessionType): number {
-  const perType = parseWindowMs(idleWindowEnvName(type), process.env[idleWindowEnvName(type)]);
-  if (perType !== null) return perType;
-  const fleet = parseWindowMs('SESSION_IDLE_WINDOW_MS', process.env.SESSION_IDLE_WINDOW_MS);
-  if (fleet !== null) return fleet;
-  return DEFAULT_SESSION_IDLE_WINDOW_MS;
-}
-
 export interface SessionReapOutcome {
-  /** Sessions ended by rule 1 (`expiresAt` in the past). */
+  /** Sessions ended by hard expiry (`expiresAt` in the past). */
   expired: number;
-  /** Sessions ended by rule 2 (no heartbeat within the idle window). */
-  idle: number;
-  /** Candidates selected across both rules. Exceeds `expired + idle` only
-   * when a heartbeat or an explicit `endSession` landed between selection
-   * and the guarded claim — i.e. it counts sessions the race spared. */
+  /** Candidates selected. Exceeds `expired` only when an explicit
+   * `endSession` landed between selection and the guarded claim — i.e. it
+   * counts sessions the race spared. */
   examined: number;
 }
 
 /**
- * Predicate for rule 2 on one session type: no hard expiry, and none of the
- * three heartbeat sources inside the window.
- *
- * The `UsageEvent` check lives IN the query rather than in a post-filter
- * (PR-933 Codex P2): with a post-filter, 500 stale-looking-but-actually-busy
- * sessions would re-fill the batch every sweep and genuinely idle rows
- * ordered behind them would never be examined at all. Selecting only rows
- * that are truly idle makes the batch cap a real drain, not a stall.
- *
- * `updatedAt` is null on a session never updated since its insert, which
- * reads as "no touch since startedAt" — `startedAt` then decides.
- */
-function idlePredicate(type: SessionType, cutoff: Date) {
-  return {
-    type,
-    endedAt: null,
-    deletedAt: null,
-    expiresAt: null,
-    startedAt: { lt: cutoff },
-    OR: [{ updatedAt: null }, { updatedAt: { lt: cutoff } }],
-    events: { none: { createdAt: { gte: cutoff } } },
-  };
-}
-
-/**
- * End the sessions the two rules select, stamping `endedAt` +
+ * End the sessions hard expiry selects, stamping `endedAt` +
  * `autoExpiredAt`. Safe to re-run and safe to run concurrently with
  * `endSession` or with a live driver: the claim re-applies the FULL
  * selecting predicate (not just `endedAt: null`), so a heartbeat or an
@@ -159,9 +78,9 @@ export async function runSessionReaper(
   db: PrismaClient = defaultDb,
   now: Date = new Date(),
 ): Promise<SessionReapOutcome> {
-  const outcome: SessionReapOutcome = { expired: 0, idle: 0, examined: 0 };
+  const outcome: SessionReapOutcome = { expired: 0, examined: 0 };
 
-  // ── Rule 1: hard expiry ────────────────────────────────────────────
+  // ── Hard expiry: the one rule (#1114) ──────────────────────────────
   // Ids first (not a bare updateMany) so the in-process session-key cache
   // can release the reaped sessions' keys, mirroring endAgentSession.
   const expiredWhere = { endedAt: null, deletedAt: null, expiresAt: { lt: now } };
@@ -174,24 +93,6 @@ export async function runSessionReaper(
   if (hardExpired.length > 0) {
     outcome.examined += hardExpired.length;
     outcome.expired = await claim(db, hardExpired.map((s) => s.id), expiredWhere, now);
-  }
-
-  // ── Rule 2: inactivity ─────────────────────────────────────────────
-  // Only sessions with NO hard expiry: one with an `expiresAt` is governed
-  // by rule 1, and an idle window must not end it early. One pass per type,
-  // since each type's window makes its own cutoff.
-  for (const type of SESSION_TYPES) {
-    const cutoff = new Date(now.getTime() - idleWindowMsFor(type));
-    const where = idlePredicate(type, cutoff);
-    const candidates = await db.session.findMany({
-      where,
-      select: { id: true },
-      orderBy: { startedAt: 'asc' },
-      take: REAP_BATCH_SIZE,
-    });
-    if (candidates.length === 0) continue;
-    outcome.examined += candidates.length;
-    outcome.idle += await claim(db, candidates.map((s) => s.id), where, now);
   }
 
   return outcome;
@@ -262,8 +163,10 @@ export interface SessionReaperLoop {
  * `reapSessions.test.ts` can start the loop, watch it fire, and shut it
  * down without leaking a timer into the rest of the run.
  *
- * 15 minutes is well under any sane idle window; the cadence only affects
- * how promptly a dead session's persona is freed after its window closes.
+ * Since #1114 the loop exists for HARD EXPIRY alone. The cadence therefore
+ * only affects how promptly a session whose promised `expiresAt` has passed
+ * is closed — nothing here infers an ending from silence any more, so a slow
+ * tick delays a promise being honoured rather than leaving a worker held.
  */
 export function startSessionReaperLoop(
   db?: PrismaClient,
@@ -281,9 +184,9 @@ export function startSessionReaperLoop(
     inFlight = true;
     try {
       const o = await runSessionReaper(db);
-      if (o.expired > 0 || o.idle > 0) {
+      if (o.expired > 0) {
         // eslint-disable-next-line no-console
-        console.log(`[reaper:sessions] auto-expired ${o.expired} past-expiry, ${o.idle} idle`);
+        console.log(`[reaper:sessions] auto-expired ${o.expired} past-expiry`);
       }
     } catch (err) {
       // eslint-disable-next-line no-console

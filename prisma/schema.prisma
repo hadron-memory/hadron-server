@@ -1352,10 +1352,15 @@ model Session {
   /// unambiguous one. Resolves the multi-writable-memory ambiguity.
   memoryId        String?     @map("memory_id")
   /// Hard expiry; the session reaper (src/jobs/reapSessions.ts, #930) ends
-  /// sessions past this point. NULL means no hard expiry — those are
-  /// governed by the reaper's inactivity rule instead. Set by
-  /// startAgentSession from the App's sessionTimeoutSeconds; startSession
-  /// deliberately leaves it null (the client contract carries no TTL).
+  /// sessions past this point. Since #1114 this is the ONLY thing the reaper
+  /// acts on: a NULL here means the session is never ended automatically at
+  /// all, because inactivity stopped being a reason to end one. It still
+  /// stops reading as LIVE once nobody drives it inside its idle window, but
+  /// that is derived at read time (lib/sessionActivity.ts) and mutates
+  /// nothing. Set by startAgentSession from the App's sessionTimeoutSeconds —
+  /// a promise made at session start rather than an inference from silence;
+  /// startSession deliberately leaves it null (the client contract carries no
+  /// TTL), so an explicit endSession is what closes those.
   expiresAt       DateTime?   @map("expires_at")
   /// Git repo slug.
   repo            String?
@@ -1401,11 +1406,15 @@ model Session {
   outcomeMeta     Json?       @map("outcome_meta")
   startedAt       DateTime    @default(now()) @map("started_at")
   endedAt         DateTime?   @map("ended_at")
-  /// Set by the reaper (#930) when the session was auto-expired — past
-  /// `expiresAt`, or no heartbeat inside its type's idle window — rather
-  /// than explicitly ended. Always written together with `endedAt` and to
-  /// the same instant, so "active" stays the single predicate
-  /// `endedAt IS NULL` and this column records only HOW it ended.
+  /// Set by the reaper (#930) when the session was auto-expired — meaning
+  /// past `expiresAt`, and since #1114 nothing else. It no longer records an
+  /// idle-window expiry, because there is no longer such a thing: inactivity
+  /// never ends a session. Rows carrying this from before that change are the
+  /// only ones stamped for idleness, which is why the liveness derivation
+  /// still drops `updatedAt` on an auto-expired row (the reap overwrote it).
+  /// Always written together with `endedAt` and to the same instant, so
+  /// "ended" stays the single predicate `endedAt IS NULL` and this column
+  /// records only HOW it ended.
   autoExpiredAt   DateTime?   @map("auto_expired_at")
   createdAt       DateTime    @default(now()) @map("created_at")
   createdBy       String?     @map("created_by")

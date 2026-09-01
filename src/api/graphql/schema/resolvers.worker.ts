@@ -37,6 +37,7 @@ import {
   continuityStatusOf,
 } from '../../../lib/workerHandoff.js';
 import { resolveMemoryRoot } from './chat-scope.js';
+import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
 import {
   type Context,
   requireOrgRole,
@@ -1429,8 +1430,9 @@ export type WorkerActivity = { hasLiveSession: boolean; lastActiveAt: Date | nul
 export async function loadAppWorkerActivity(
   ctx: Context,
   appId: string,
-  opts?: { memoize?: boolean },
+  opts?: { memoize?: boolean; now?: Date },
 ): Promise<Map<string, WorkerActivity>> {
+  const now = opts?.now ?? new Date();
   type Cache = Map<string, Promise<Map<string, WorkerActivity>>>;
   const holder = ctx as Context & { workerActivityCache?: Cache };
   const cache = opts?.memoize ? (holder.workerActivityCache ??= new Map()) : null;
@@ -1469,11 +1471,38 @@ export async function loadAppWorkerActivity(
     //  - `CASE WHEN auto_expired_at IS NULL THEN updated_at END` — see below.
     //    `GREATEST` ignores NULL arguments in Postgres, so a dropped term is
     //    simply not considered rather than poisoning the row.
+    // #1114 — per-type cutoffs for the DERIVED liveness below, bound as
+    // naive-UTC literals rather than JS Dates. Prisma binds a Date as
+    // `timestamptz`, and these columns are `timestamp WITHOUT time zone`, so a
+    // bare comparison coerces the COLUMN using the session zone — silently
+    // correct on a UTC server and wrong everywhere else
+    // (findings:prisma-naive-timestamp-raw-sql).
+    const cut = idleCutoffs(now);
     const rows = await ctx.db.$queryRaw<
       { workerId: string; live: boolean; lastActiveAt: Date | null }[]
     >`
       SELECT s.worker_id AS "workerId",
-             bool_or(s.ended_at IS NULL) AS "live",
+             -- #1114: LIVE IS DERIVED, not stored. It was bool_or(ended_at IS
+             -- NULL), which was only ever true because a reaper eventually
+             -- ended abandoned sessions — an inference from silence, written
+             -- into the record. With that rule gone, an open row proves only
+             -- that nobody CLOSED it, so the reader computes "is anyone
+             -- driving this" from the same three heartbeat inputs the takeover
+             -- gate uses (cor:agt:020:11 — one predicate, or the roster and
+             -- the binder disagree about the same worker in the same second).
+             bool_or(
+               s.ended_at IS NULL
+               AND GREATEST(
+                     s.started_at,
+                     CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
+                     ue.max_created
+                   ) >= (CASE s.type::text
+                           WHEN 'DEVELOPER'  THEN ${toNaiveUtc(cut.DEVELOPER)}::timestamp
+                           WHEN 'CHATBOT'    THEN ${toNaiveUtc(cut.CHATBOT)}::timestamp
+                           WHEN 'AUTOMATION' THEN ${toNaiveUtc(cut.AUTOMATION)}::timestamp
+                           WHEN 'EDGE'       THEN ${toNaiveUtc(cut.EDGE)}::timestamp
+                         END)
+             ) AS "live",
              max(LEAST(GREATEST(
                s.started_at,
                -- The REAPER ends an idle session with an updateMany, and

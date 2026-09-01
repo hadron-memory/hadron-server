@@ -49,7 +49,13 @@ import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
-import { loadLastEventBySession, mostRecentlyActive } from '../../../lib/sessionActivity.js';
+import {
+  loadLastEventBySession,
+  mostRecentlyActive,
+  isSessionLive,
+  recentlyTouchedFilter,
+  OPEN_SESSION_SCAN_CAP,
+} from '../../../lib/sessionActivity.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import {
   type Context,
@@ -702,10 +708,68 @@ export const sessionMutations = {
           // Copilot): force allows several to coexist, and the most recent
           // ACTIVITY can be on an older one — the takeover prompt must name
           // whoever actually drove the worker last.
-          const activeSessions = await ctx.db.session.findMany({
-            where: { workerId: worker.id, endedAt: null, deletedAt: null },
-            select: { id: true, userId: true, startedAt: true, updatedAt: true },
+          const nowForLiveness = new Date();
+          const openSessions = await ctx.db.session.findMany({
+            // #1120 review (Codex P2): BOUNDED. Nothing closes abandoned
+            // sessions any more, so open rows accumulate per worker and an
+            // unbounded scan — plus every id in an `IN (...)` — grows with the
+            // worker's whole history. The filter drops rows that cannot be
+            // live under ANY type's window; the cap is only a backstop behind
+            // it, because a cap alone could drop the live row itself.
+            where: {
+              workerId: worker.id, endedAt: null, deletedAt: null,
+              ...recentlyTouchedFilter(nowForLiveness),
+            },
+            // ORDERED BY HEARTBEAT, not by bind time (#1120 review, Codex P2).
+            // The cap keeps a prefix, so what the prefix is ordered BY decides
+            // what survives it. `startedAt` is when a stint began, which says
+            // nothing about who drove it last — so an older-started session
+            // with a fresh heartbeat could be cut, and `mostRecentlyActive`
+            // would then name the wrong driver in the refusal. That is the
+            // hadron-cli#492 harm arriving inside the message written to
+            // prevent it.
+            //
+            // RESIDUAL, stated rather than papered over: `updatedAt` is two of
+            // the three heartbeat inputs, and the third (the latest attributed
+            // UsageEvent) cannot be an `orderBy` without a join. So a session
+            // winning purely on a usage event, behind more than
+            // OPEN_SESSION_SCAN_CAP others with newer `updatedAt`, can still be
+            // cut. That needs >200 CONCURRENTLY LIVE sessions on one worker —
+            // reachable only through repeated explicit `force`, each of which
+            // takes a human override — and it costs a misnamed driver in a
+            // refusal, never a wrong allow/deny. The gate itself is unaffected:
+            // ANY live session refuses.
+            orderBy: [
+              { updatedAt: { sort: 'desc' as const, nulls: 'last' as const } },
+              { startedAt: 'desc' as const },
+            ],
+            take: OPEN_SESSION_SCAN_CAP,
+            select: {
+              id: true, userId: true, startedAt: true, updatedAt: true,
+              // #1114: liveness is DERIVED, so the gate needs the inputs.
+              type: true, autoExpiredAt: true, endedAt: true,
+            },
           });
+          // #1114 — AN OPEN SESSION IS NOT A LIVE ONE. Nothing ends a session
+          // for inactivity any more (silence is not evidence of abandonment),
+          // so `endedAt IS NULL` alone would refuse a bind forever on any
+          // worker whose driver simply walked away — leaving `force: true` as
+          // the only route, which is the reflexive override this refusal exists
+          // to prevent.
+          //
+          // The predicate is the SHARED one (`isSessionLive`), not a second
+          // reading of the same idea: `cor:agt:020:11` requires that what a
+          // roster SHOWS and what a bind ENFORCES be one computation, and the
+          // roster's copy lives in SQL because it must aggregate. Two
+          // derivations that must agree are pinned by a differential test
+          // rather than by hoping.
+          const lastEventForLiveness = await loadLastEventBySession(
+            ctx.db as never,
+            openSessions.map((s) => s.id),
+          );
+          const activeSessions = openSessions.filter((s) =>
+            isSessionLive(s, lastEventForLiveness.get(s.id), nowForLiveness),
+          );
           if (activeSessions.length > 0) {
             // lastSeenAt mirrors the #930 reaper's activity derivation:
             // greatest of startedAt, updatedAt (the explicit heartbeat), and
