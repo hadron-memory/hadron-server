@@ -245,7 +245,20 @@ export const chatQueries = {
         // allocated atomically now, but chats written before that hold
         // colliding values, and a tie left to the planner can order two
         // members' messages differently from one read to the next.
-        orderBy: [{ seq: 'desc' as const }, { createdAt: 'desc' as const }, { loc: 'desc' as const }],
+        //
+        // `nulls: 'last'` is load-bearing and is NOT the Postgres default:
+        // `Node.seq` is nullable, and PG sorts NULLs FIRST on DESC (it sorts
+        // them last on ASC, which is why the old head-take never met them).
+        // Left at the default, a chat holding enough null-seq rows would fill
+        // the whole window with them and push out the numbered messages —
+        // reproducing this very bug for legacy transcripts. A row with no
+        // counter predates the counter, so it sorts as the OLDEST; within that
+        // group `createdAt` still orders them. (Codex P2 on PR #1112.)
+        orderBy: [
+          { seq: { sort: 'desc' as const, nulls: 'last' as const } },
+          { createdAt: 'desc' as const },
+          { loc: 'desc' as const },
+        ],
         take: limit ?? 100,
         // `id` rides along for the #1061 usage attribution; the projection
         // below doesn't use it (a transcript entry is addressed by loc/seq).

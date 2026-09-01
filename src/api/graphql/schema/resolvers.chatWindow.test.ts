@@ -183,6 +183,87 @@ describe('chatHistory returns the most recent window (#1111)', () => {
     ]);
   });
 
+  /**
+   * `Node.seq` is nullable and Postgres sorts NULLs FIRST on DESC — not last,
+   * as it does on ASC. So the descending window meets null-seq rows the old
+   * ascending head-take never did: left at the default they would fill the
+   * whole window and push the numbered messages out, reproducing this bug for
+   * legacy transcripts. A row with no counter predates the counter, so it
+   * sorts as the OLDEST. (Codex P2 on PR #1112.)
+   *
+   * Seeds MORE null-seq rows than the window so the failure is reachable — a
+   * handful of them would be carried by the window regardless and prove
+   * nothing.
+   */
+  it('treats null-seq legacy rows as oldest, so they cannot crowd out the newest', async () => {
+    await cleanDb(db);
+    const admin = await db.user.create({
+      data: { id: generateId(), githubId: 990103, githubUsername: 'nullseq-admin' },
+    });
+    adminId = admin.id;
+    const { graph } = await createDbOrgAndGraph(db, { orgName: 'nullseq-org' });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: graph.id,
+        loc: CHAT_ID,
+        name: 'legacy chat',
+        nodeType: 'chat',
+        data: { messageCount: 5 },
+      },
+    });
+
+    // 12 rows with NO seq at all, then 5 numbered ones.
+    for (let n = 1; n <= 12; n++) {
+      await db.node.create({
+        data: {
+          id: generateId(),
+          memoryId: graph.id,
+          loc: `${CHAT_ID}:messages:legacy-${String(n).padStart(3, '0')}`,
+          name: `legacy-${String(n).padStart(3, '0')}`,
+          nodeType: 'message',
+          content: `legacy-${n}`,
+          seq: null,
+          createdAt: new Date(Date.parse('2026-01-01T00:00:00.000Z') + n * 1000),
+        },
+      });
+    }
+    for (let n = 1; n <= 5; n++) {
+      await db.node.create({
+        data: {
+          id: generateId(),
+          memoryId: graph.id,
+          loc: `${CHAT_ID}:messages:${String(n).padStart(3, '0')}-user`,
+          name: `${String(n).padStart(3, '0')}-user`,
+          nodeType: 'message',
+          content: `message-${n}`,
+          seq: n,
+          createdAt: new Date(Date.parse('2026-02-01T00:00:00.000Z') + n * 1000),
+        },
+      });
+    }
+
+    // A window smaller than the null-seq population: with NULLs sorted first
+    // on DESC they would take the entire window and no numbered message would
+    // survive.
+    const rows = await read(5);
+    expect(rows.map((r) => r.content)).toEqual([
+      'message-1',
+      'message-2',
+      'message-3',
+      'message-4',
+      'message-5',
+    ]);
+
+    // And with room for everything, the legacy rows come back as the OLDEST,
+    // chronological among themselves.
+    const all = await read(50);
+    expect(all.map((r) => r.content)).toEqual([
+      ...Array.from({ length: 12 }, (_, i) => `legacy-${i + 1}`),
+      ...Array.from({ length: 5 }, (_, i) => `message-${i + 1}`),
+    ]);
+  });
+
   it('applies the same tail window to the default limit of 100', async () => {
     await seedTranscript(130);
     const rows = await read(undefined);
@@ -354,5 +435,39 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
       .map((h) => h.content)
       .filter((c) => c.startsWith('legacy-'));
     expect(legacyOrder).toEqual(['legacy-1', 'legacy-2', 'legacy-3', 'legacy-4']);
+  });
+
+  /**
+   * The model-side twin of the null-seq test on `chatHistory`. Sharper here:
+   * enough null-seq legacy rows would fill the model's entire window and
+   * exclude the turn being answered — this bug returning by another door.
+   * Seeds MODEL_HISTORY_LIMIT + 10 of them so the window cannot carry both.
+   */
+  it('null-seq legacy rows cannot crowd the current turn out of the model window', async () => {
+    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+
+    for (let n = 1; n <= 60; n++) {
+      await db.node.create({
+        data: {
+          id: generateId(),
+          memoryId: chatNode.memoryId,
+          loc: `${start.chatId}:messages:legacy-${String(n).padStart(3, '0')}`,
+          name: `legacy-${String(n).padStart(3, '0')}`,
+          nodeType: 'message',
+          content: `legacy-${n}`,
+          seq: null,
+          createdAt: new Date(Date.parse('2026-01-01T00:00:00.000Z') + n * 1000),
+        },
+      });
+    }
+
+    const res = (await resolvers.Mutation.sendChatMessage(
+      {},
+      { chatId: start.chatId, userMessage: 'the question being asked' },
+      adminCtx(),
+    )) as { messageHistory: Array<{ content: string }> };
+
+    expect(res.messageHistory.map((h) => h.content)).toContain('the question being asked');
   });
 });

@@ -873,9 +873,21 @@ export const chatMutations = {
       //
       // #919: the deterministic tiebreak the chatHistory reader uses — the
       // model's view of the transcript must not reorder between turns.
+      //
+      // `nulls: 'last'` is load-bearing here for the same reason it is in
+      // `chatHistory`, and the consequence is sharper: `Node.seq` is nullable
+      // and Postgres sorts NULLs FIRST on DESC, so a chat holding 50+ null-seq
+      // legacy rows would fill the model's whole window with them and exclude
+      // the just-appended user turn — the exact defect this change fixes,
+      // returning by a different door. A row with no counter predates the
+      // counter, so it sorts OLDEST. (Codex P2 on PR #1112.)
       const messages = await ctx.db.node.findMany({
         where: { loc: { startsWith: `${chatId}:messages:` }, memoryId: chatNode.memoryId, deletedAt: null },
-        orderBy: [{ seq: 'desc' }, { createdAt: 'desc' }, { loc: 'desc' }],
+        orderBy: [
+          { seq: { sort: 'desc', nulls: 'last' } },
+          { createdAt: 'desc' },
+          { loc: 'desc' },
+        ],
         take: MODEL_HISTORY_LIMIT,
         select: { loc: true, content: true, data: true, seq: true, nodeType: true, memoryId: true },
       });
