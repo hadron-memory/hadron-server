@@ -246,14 +246,48 @@ export interface SessionKeySweepLoop {
  * A cache's eviction policy must not be reachable through another subsystem's
  * off switch. Hence its own loop, started unconditionally outside tests.
  */
-export function startSessionKeySweepLoop(intervalMs = 15 * 60 * 1000): SessionKeySweepLoop {
-  const timer = setInterval(() => {
+export function startSessionKeySweepLoop(intervalMs?: number): SessionKeySweepLoop {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
+
+  // CADENCE FOLLOWS THE TTL (#1120 review, Codex P2). A fixed 15-minute tick
+  // left key material resident for up to 15 minutes past its advertised
+  // retention whenever the TTL was configured shorter than that — the
+  // point-of-use check makes it unusable, but "cannot be used" and "is not in
+  // process memory" are different promises, and for key material it is the
+  // second one that was advertised.
+  //
+  // Re-derived on every tick rather than once at start, so a TTL read from the
+  // environment at runtime is honoured without a restart, and clamped: half the
+  // TTL is prompt enough, a floor keeps a tiny TTL from spinning the loop, and
+  // the 15-minute ceiling is what a long TTL costs nothing to keep.
+  const cadence = (): number => {
+    if (intervalMs !== undefined) return intervalMs;
+    return Math.min(15 * 60 * 1000, Math.max(1000, Math.floor(ttlMs() / 2)));
+  };
+
+  const tick = () => {
+    if (stopped) return;
     const evicted = sessionKeyCache.sweepExpired();
     if (evicted > 0) {
       // eslint-disable-next-line no-console
       console.log(`[session-keys] evicted ${evicted} idle memory key(s)`);
     }
-  }, intervalMs);
-  timer.unref?.();
-  return { stop: () => clearInterval(timer) };
+    schedule();
+  };
+
+  const schedule = () => {
+    if (stopped) return;
+    timer = setTimeout(tick, cadence());
+    timer.unref?.();
+  };
+
+  schedule();
+  return {
+    stop: () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    },
+  };
 }
+

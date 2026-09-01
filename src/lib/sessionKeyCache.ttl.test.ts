@@ -281,3 +281,41 @@ describe('the TTL default inherits the deployment\'s idle tuning (#1120 review)'
     expect(c.sweepExpired()).toBe(1);
   });
 });
+
+describe('the sweep cadence follows the TTL (#1120 review)', () => {
+  it('a short TTL is swept promptly, not on a fixed 15-minute tick', async () => {
+    // "Cannot be used" and "is not in process memory" are different promises,
+    // and for key material it is the second one the contract advertises. A
+    // fixed tick left an expired key resident for up to 15 minutes past its
+    // retention window whenever the TTL was configured shorter than that.
+    process.env.SESSION_KEY_CACHE_TTL_MS = String(60_000); // 1 minute
+    globalCache.clear();
+    globalCache.set('s1', 'mem1', key(11));
+
+    const loop = startSessionKeySweepLoop();
+    try {
+      // Past the TTL, and well inside the OLD fixed 15-minute cadence.
+      advance(90_000);
+      await vi.advanceTimersByTimeAsync(90_000);
+      // Gone from the map itself, not merely refused on read.
+      expect(globalCache.refCount('mem1')).toBe(0);
+    } finally {
+      loop.stop();
+      globalCache.clear();
+    }
+  });
+
+  it('stop() is honoured even between scheduled ticks', async () => {
+    // Self-rescheduling timers are easy to leak: a cancelled interval stays
+    // cancelled, a chain of setTimeouts has to be told.
+    globalCache.clear();
+    globalCache.set('s1', 'mem1', key(12));
+    const loop = startSessionKeySweepLoop();
+    loop.stop();
+    advance(DEFAULT_SESSION_KEY_TTL_MS + 60_000);
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    // Stopped means stopped: nothing swept it.
+    expect(globalCache.refCount('mem1')).toBe(1);
+    globalCache.clear();
+  });
+});
