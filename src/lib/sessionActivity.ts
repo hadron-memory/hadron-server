@@ -245,3 +245,44 @@ export function isSessionLive(
   const cutoff = now.getTime() - idleWindowMsFor(session.type);
   return sessionActivityAt(session, lastEventAt).getTime() >= cutoff;
 }
+
+/**
+ * Backstop cap on how many OPEN sessions any liveness read will scan.
+ *
+ * #1114 removed the only thing that closed abandoned sessions, so the count of
+ * open rows on one worker now grows with every stint whose driver never ran
+ * `endSession` — which, on the desktop track, is the ordinary ending. An
+ * unbounded `findMany` plus an `IN (...)` of every id was fine while a reaper
+ * kept that set small and is a slow leak now (#1120 review, Codex P2).
+ *
+ * A cap alone would be the WRONG fix on its own — it would silently drop the
+ * live session if it sorted late — which is why it sits behind
+ * `recentlyTouchedFilter` below rather than in front of it: the filter removes
+ * rows that cannot be live, and this only bounds the pathological remainder.
+ */
+export const OPEN_SESSION_SCAN_CAP = 200;
+
+/**
+ * A Prisma filter admitting every session that COULD still be live.
+ *
+ * Deliberately wider than `isSessionLive`: it uses the LARGEST configured
+ * window across all types, so it can never exclude a row the exact per-type
+ * predicate would have called live. Narrowing happens in JS afterwards, where
+ * the type is known. Over-admitting costs a few rows; under-admitting would
+ * report a live worker as free, which is the failure that matters.
+ *
+ * All three heartbeat inputs are represented, including the usage-event one —
+ * dropping it would miss a session driven entirely through surfaces that write
+ * provenance rather than touching the row, which is #1081's exact lesson.
+ */
+export function recentlyTouchedFilter(now: Date) {
+  const widest = Math.max(...SESSION_TYPES.map((t) => idleWindowMsFor(t)));
+  const cutoff = new Date(now.getTime() - widest);
+  return {
+    OR: [
+      { startedAt: { gte: cutoff } },
+      { updatedAt: { gte: cutoff } },
+      { events: { some: { createdAt: { gte: cutoff } } } },
+    ],
+  };
+}

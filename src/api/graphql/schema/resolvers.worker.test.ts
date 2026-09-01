@@ -16,14 +16,14 @@
  * unauthenticated, pure App-key, hybrid user+selection, impersonation.
  */
 
-import { describe, it, expect, beforeEach, vi , afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
-import { sessionActivityAt, loadLastEventBySession , isSessionLive } from '../../../lib/sessionActivity.js';
+import { sessionActivityAt, loadLastEventBySession, isSessionLive } from '../../../lib/sessionActivity.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),

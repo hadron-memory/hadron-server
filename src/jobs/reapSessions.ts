@@ -188,17 +188,6 @@ export function startSessionReaperLoop(
         // eslint-disable-next-line no-console
         console.log(`[reaper:sessions] auto-expired ${o.expired} past-expiry`);
       }
-      // #1114 — the key cache's OWN idle policy, run on this tick because the
-      // tick is a convenient clock, NOT because the cache depends on session
-      // lifecycle. That dependence is precisely what this change removes:
-      // `sweepExpired` consults the cache's TTL and nothing else, so it evicts
-      // correctly whether or not any session ever ends. Kept here rather than
-      // in a second timer because one loop is easier to reason about than two.
-      const evicted = sessionKeyCache.sweepExpired();
-      if (evicted > 0) {
-        // eslint-disable-next-line no-console
-        console.log(`[reaper:sessions] evicted ${evicted} idle memory key(s)`);
-      }
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[reaper:sessions] sweep failed:', err);

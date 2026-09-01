@@ -105,6 +105,7 @@ import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js'
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+import { isSessionLive, loadLastEventBySession, OPEN_SESSION_SCAN_CAP } from '../lib/sessionActivity.js';
 import {
   decryptNodeFieldsWithKey,
   encryptNodeFieldsWithKey,
@@ -6484,11 +6485,26 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // the same predicate hadron_start_session refuses WORKER_TAKEN on, and
         // hadron_list_workers reports. It answers "is someone driving this?",
         // which is what an agent unsure of its own state needs to see.
-        const driving = await db.session.findFirst({
+        //
+        // #1114/#1120 review (Codex P2): that parity claim was TRUE of the
+        // comment and FALSE of the code the moment liveness stopped being
+        // `endedAt IS NULL`. An open-but-stale session would have read as
+        // "driving" here while the roster said idle and a bind succeeded —
+        // three surfaces, two answers, which is precisely what cor:agt:020:11
+        // exists to forbid. The predicate is the shared one now.
+        const openHere = await db.session.findMany({
           where: { workerId: worker.id, endedAt: null, deletedAt: null },
           orderBy: { startedAt: 'desc' },
-          select: { id: true, userId: true, startedAt: true },
+          select: {
+            id: true, userId: true, startedAt: true,
+            type: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+          },
+          take: OPEN_SESSION_SCAN_CAP,
         });
+        const eventsHere = await loadLastEventBySession(db as never, openHere.map((r) => r.id));
+        const nowHere = new Date();
+        const driving =
+          openHere.find((r) => isSessionLive(r, eventsHere.get(r.id), nowHere)) ?? null;
 
         const flags: string[] = [];
         if (worker.retiredAt) flags.push('RETIRED');

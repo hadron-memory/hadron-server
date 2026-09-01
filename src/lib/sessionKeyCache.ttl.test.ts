@@ -10,7 +10,12 @@
  * precisely because something else happened to end sessions.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { SessionKeyCache, DEFAULT_SESSION_KEY_TTL_MS } from './sessionKeyCache.js';
+import {
+  SessionKeyCache,
+  DEFAULT_SESSION_KEY_TTL_MS,
+  startSessionKeySweepLoop,
+  sessionKeyCache as globalCache,
+} from './sessionKeyCache.js';
 import type { EncryptionKey } from './crypto.js';
 
 const key = (byte: number): EncryptionKey =>
@@ -129,5 +134,61 @@ describe('sessionKeyCache TTL (#1114)', () => {
     advance(DEFAULT_SESSION_KEY_TTL_MS + 1);
     expect(cache.sweepExpired()).toBe(1);
     expect(cache.refCount('mem1')).toBe(0);
+  });
+});
+
+describe('the sweep has its OWN loop (#1120 review)', () => {
+  it('evicts on its own timer, with no reaper involved', async () => {
+    // The first draft swept inside the session reaper's tick. That loop is
+    // gated on DISABLE_SESSION_REAPER, so a deployment with the reaper off got
+    // no key eviction at all — SESSION_KEY_CACHE_TTL_MS silently inert and
+    // keys immortal, which is the exact defect #1114 set out to remove
+    // surviving in the one configuration nobody would check.
+    //
+    // An eviction policy for key material must not be reachable through
+    // another subsystem's off switch. This test drives the loop directly, so
+    // it fails if the sweep is ever folded back into someone else's tick.
+    globalCache.clear();
+    globalCache.set('s1', 'mem1', key(9));
+    expect(globalCache.hasMemory('mem1')).toBe(true);
+
+    const loop = startSessionKeySweepLoop(10);
+    try {
+      advance(DEFAULT_SESSION_KEY_TTL_MS + 1000);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(globalCache.hasMemory('mem1')).toBe(false);
+    } finally {
+      loop.stop();
+      globalCache.clear();
+    }
+  });
+});
+
+describe('the sweep is actually WIRED, and not behind the reaper switch', () => {
+  /**
+   * A source-level assertion, and the reason it is worth one: the defect Codex
+   * found on #1120 was not in the sweep — it was in WHERE the sweep was
+   * started. Every behavioural test above passes with the loop never started
+   * at all, because they drive it directly. So the only thing that can catch a
+   * regression here is a check on the wiring itself.
+   *
+   * Two properties, and the second is the one that was wrong:
+   *   1. the loop is started in the server bootstrap at all;
+   *   2. it is NOT inside the `DISABLE_SESSION_REAPER` branch — an eviction
+   *      policy for key material must not be reachable through another
+   *      subsystem's off switch.
+   */
+  it('server bootstrap starts it, outside the DISABLE_SESSION_REAPER gate', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../server.ts', import.meta.url), 'utf8');
+
+    expect(src).toContain('startSessionKeySweepLoop()');
+
+    // Find the reaper's gated block and assert the sweep call is not in it.
+    const gate = src.indexOf("process.env.DISABLE_SESSION_REAPER !== 'true'");
+    expect(gate).toBeGreaterThan(-1);
+    const blockEnd = src.indexOf('\n  }', gate);
+    const gatedBlock = src.slice(gate, blockEnd);
+    expect(gatedBlock).not.toContain('startSessionKeySweepLoop');
   });
 });

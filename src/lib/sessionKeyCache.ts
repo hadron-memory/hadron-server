@@ -153,7 +153,10 @@ export class SessionKeyCache {
     const cutoff = now - ttlMs();
     let evicted = 0;
     for (const [memoryId, entry] of this.byMemory) {
-      if (entry.lastUsedAt > cutoff) continue;
+      // Strictly older than the cutoff. At EXACTLY the TTL a key has not yet
+      // been "untouched for longer than the TTL", and the doc above says
+      // longer (#1120 review, Copilot).
+      if (entry.lastUsedAt >= cutoff) continue;
       this.byMemory.delete(memoryId);
       evicted++;
       for (const sessionId of entry.sessionIds) {
@@ -178,3 +181,34 @@ export class SessionKeyCache {
 }
 
 export const sessionKeyCache = new SessionKeyCache();
+
+/** Handle for the sweep loop, so a test can stop it without leaking a timer. */
+export interface SessionKeySweepLoop {
+  stop: () => void;
+}
+
+/**
+ * Run the cache's TTL sweep on its OWN timer (#1120 review, Codex P2).
+ *
+ * The first draft swept inside the session reaper's tick, on the reasoning
+ * that the tick was "a convenient clock, not a lifecycle dependency". That
+ * reasoning was fine and the placement was still wrong: the reaper loop is
+ * gated on `DISABLE_SESSION_REAPER`, so any deployment that turned the reaper
+ * off got no key eviction at all — `SESSION_KEY_CACHE_TTL_MS` silently inert
+ * and keys immortal, which is the exact defect #1114 set out to remove,
+ * surviving in the one configuration nobody would think to check.
+ *
+ * A cache's eviction policy must not be reachable through another subsystem's
+ * off switch. Hence its own loop, started unconditionally outside tests.
+ */
+export function startSessionKeySweepLoop(intervalMs = 15 * 60 * 1000): SessionKeySweepLoop {
+  const timer = setInterval(() => {
+    const evicted = sessionKeyCache.sweepExpired();
+    if (evicted > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[session-keys] evicted ${evicted} idle memory key(s)`);
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
+}

@@ -49,7 +49,13 @@ import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
-import { loadLastEventBySession, mostRecentlyActive , isSessionLive } from '../../../lib/sessionActivity.js';
+import {
+  loadLastEventBySession,
+  mostRecentlyActive,
+  isSessionLive,
+  recentlyTouchedFilter,
+  OPEN_SESSION_SCAN_CAP,
+} from '../../../lib/sessionActivity.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import {
   type Context,
@@ -702,8 +708,20 @@ export const sessionMutations = {
           // Copilot): force allows several to coexist, and the most recent
           // ACTIVITY can be on an older one — the takeover prompt must name
           // whoever actually drove the worker last.
+          const nowForLiveness = new Date();
           const openSessions = await ctx.db.session.findMany({
-            where: { workerId: worker.id, endedAt: null, deletedAt: null },
+            // #1120 review (Codex P2): BOUNDED. Nothing closes abandoned
+            // sessions any more, so open rows accumulate per worker and an
+            // unbounded scan — plus every id in an `IN (...)` — grows with the
+            // worker's whole history. The filter drops rows that cannot be
+            // live under ANY type's window; the cap is only a backstop behind
+            // it, because a cap alone could drop the live row itself.
+            where: {
+              workerId: worker.id, endedAt: null, deletedAt: null,
+              ...recentlyTouchedFilter(nowForLiveness),
+            },
+            orderBy: { startedAt: 'desc' },
+            take: OPEN_SESSION_SCAN_CAP,
             select: {
               id: true, userId: true, startedAt: true, updatedAt: true,
               // #1114: liveness is DERIVED, so the gate needs the inputs.
@@ -727,7 +745,6 @@ export const sessionMutations = {
             ctx.db as never,
             openSessions.map((s) => s.id),
           );
-          const nowForLiveness = new Date();
           const activeSessions = openSessions.filter((s) =>
             isSessionLive(s, lastEventForLiveness.get(s.id), nowForLiveness),
           );
