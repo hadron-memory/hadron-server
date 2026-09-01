@@ -1,10 +1,14 @@
 /**
- * runSessionReaper (#930) — the janitor `Session.expiresAt` and
- * `Session.autoExpiredAt` always claimed existed. Two rules: hard expiry
- * (`expiresAt` in the past) and inactivity (no heartbeat inside the type's
- * idle window, where a heartbeat is `startedAt` / `updatedAt` / the latest
- * attributed `UsageEvent`). Reaping stamps BOTH `endedAt` and
+ * runSessionReaper — ONE rule since #1114: hard expiry (`expiresAt` in the
+ * past), a promise made at session start. Reaping stamps BOTH `endedAt` and
  * `autoExpiredAt`, so "active" stays `endedAt IS NULL` everywhere.
+ *
+ * The inactivity rule was REMOVED, and the second suite below is the guard on
+ * that: every case that used to end a session now asserts it survives. Those
+ * inversions are the point of the change rather than a side effect —
+ * "silence is not evidence of abandonment" is only true if nothing acts on
+ * silence, and a sweep that used to is the thing most likely to grow the
+ * behaviour back.
  *
  * The scheduling test at the bottom is deliberate: the asset janitor
  * shipped with no scheduler at all (#888), so proving the loop fires is
@@ -18,10 +22,9 @@ import type { SessionType } from '../generated/prisma/index.js';
 import {
   runSessionReaper,
   startSessionReaperLoop,
-  idleWindowMsFor,
-  DEFAULT_SESSION_IDLE_WINDOW_MS,
   type SessionReaperLoop,
 } from './reapSessions.js';
+import { idleWindowMsFor } from '../lib/sessionActivity.js';
 
 const HOUR = 60 * 60 * 1000;
 const now = new Date('2026-08-11T12:00:00.000Z');
@@ -66,26 +69,7 @@ beforeEach(async () => {
   }
 });
 
-describe('idle window configuration', () => {
-  it('defaults to 24h for every type, per-type override beats the fleet default', () => {
-    expect(idleWindowMsFor('DEVELOPER')).toBe(DEFAULT_SESSION_IDLE_WINDOW_MS);
-    process.env.SESSION_IDLE_WINDOW_MS = String(2 * HOUR);
-    expect(idleWindowMsFor('DEVELOPER')).toBe(2 * HOUR);
-    expect(idleWindowMsFor('CHATBOT')).toBe(2 * HOUR);
-    process.env.SESSION_IDLE_WINDOW_CHATBOT_MS = String(HOUR);
-    expect(idleWindowMsFor('CHATBOT')).toBe(HOUR);
-    expect(idleWindowMsFor('DEVELOPER')).toBe(2 * HOUR);
-  });
-
-  it('ignores a malformed override rather than reaping everything or nothing', () => {
-    process.env.SESSION_IDLE_WINDOW_MS = 'twenty minutes';
-    expect(idleWindowMsFor('DEVELOPER')).toBe(DEFAULT_SESSION_IDLE_WINDOW_MS);
-    process.env.SESSION_IDLE_WINDOW_MS = '-1';
-    expect(idleWindowMsFor('DEVELOPER')).toBe(DEFAULT_SESSION_IDLE_WINDOW_MS);
-  });
-});
-
-describe('rule 1 — hard expiry', () => {
+describe('hard expiry — the one rule that survives (#1114)', () => {
   it('ends a session past expiresAt, stamping endedAt and autoExpiredAt together', async () => {
     const s = await seedSession({ startedAt: ago(HOUR), expiresAt: ago(10 * 60 * 1000) });
 
@@ -119,13 +103,15 @@ describe('rule 1 — hard expiry', () => {
 
   it('is idempotent — a second sweep reaps nothing', async () => {
     await seedSession({ expiresAt: ago(HOUR) });
+    // The second session is idle but has no hard expiry: since #1114 it is
+    // not a candidate at all, so the first sweep reaps exactly one.
     await seedSession({ startedAt: ago(72 * HOUR) });
 
     const first = await runSessionReaper(db, now);
     const second = await runSessionReaper(db, now);
 
-    expect(first.expired + first.idle).toBe(2);
-    expect(second.expired + second.idle).toBe(0);
+    expect(first.expired).toBe(1);
+    expect(second.expired).toBe(0);
   });
 
   it('ignores soft-deleted sessions', async () => {
@@ -138,107 +124,78 @@ describe('rule 1 — hard expiry', () => {
   });
 });
 
-describe('rule 2 — inactivity', () => {
-  it('ends a session whose last activity predates its idle window', async () => {
-    const s = await seedSession({ startedAt: ago(30 * HOUR) });
+describe('inactivity is NEVER a reason to end a session (#1114)', () => {
+  /**
+   * Holger's ruling, and the case that decides it: "If I have my personal
+   * taxes agent, I use it once a year." Every test here seeds a session the
+   * OLD inactivity rule would have ended, and asserts it is still open.
+   *
+   * Asserting `autoExpiredAt` stays null alongside `endedAt` is deliberate:
+   * the old rule stamped both together, so a partial regression that ended
+   * sessions without labelling them would slip past an `endedAt`-only check.
+   */
+  const stillOpen = async (id: string) => {
+    const row = await reload(id);
+    expect(row.endedAt).toBeNull();
+    expect(row.autoExpiredAt).toBeNull();
+  };
 
+  it('spares a session whose last activity is far outside any idle window', async () => {
+    const s = await seedSession({ startedAt: ago(72 * HOUR), updatedAt: ago(72 * HOUR) });
     const outcome = await runSessionReaper(db, now);
-
-    expect(outcome.idle).toBe(1);
-    const reaped = await reload(s.id);
-    expect(reaped.endedAt).toEqual(now);
-    expect(reaped.autoExpiredAt).toEqual(now);
+    expect(outcome.expired).toBe(0);
+    await stillOpen(s.id);
   });
 
-  it('spares a session started long ago but touched recently (updateSession heartbeat)', async () => {
-    const s = await seedSession({ startedAt: ago(30 * HOUR), updatedAt: ago(HOUR) });
-
-    const outcome = await runSessionReaper(db, now);
-
-    expect(outcome.idle).toBe(0);
-    expect((await reload(s.id)).endedAt).toBeNull();
+  it('spares a session idle for a YEAR — the taxes-agent case, stated literally', async () => {
+    const year = 365 * 24 * HOUR;
+    const s = await seedSession({ startedAt: ago(year), updatedAt: ago(year) });
+    await runSessionReaper(db, now);
+    await stillOpen(s.id);
   });
 
-  it('spares a session whose own columns are stale but which has recent usage', async () => {
-    const s = await seedSession({ startedAt: ago(30 * HOUR) });
-    await seedUsage(s.id, ago(20 * 60 * 1000));
-
-    const outcome = await runSessionReaper(db, now);
-
-    // Never even a candidate: the heartbeat check is IN the query, so a busy
-    // session cannot occupy a slot in the batch (PR-933 Codex P2).
-    expect(outcome.examined).toBe(0);
-    expect(outcome.idle).toBe(0);
-    expect((await reload(s.id)).endedAt).toBeNull();
-  });
-
-  it('does not end a session that comes back to life between selection and claim', async () => {
-    // The claim re-applies the full selecting predicate, so a heartbeat that
-    // lands mid-sweep spares the row instead of losing the race (PR-933).
-    const s = await seedSession({ startedAt: ago(30 * HOUR) });
-    let raced = false;
-    const spy = db.session.findMany.bind(db.session);
-    const patched = async (...args: Parameters<typeof spy>) => {
-      const result = await spy(...args);
-      // Fire once, right after the query that selected this session as a
-      // candidate — i.e. in the window between selection and the claim.
-      if (!raced && Array.isArray(result) && result.some((r) => r.id === s.id)) {
-        raced = true;
-        await seedUsage(s.id, ago(60_000)); // the driver is still working
-      }
-      return result;
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (db.session as any).findMany = patched;
-    try {
-      const outcome = await runSessionReaper(db, now);
-      expect(outcome.examined).toBe(1);
-      expect(outcome.idle).toBe(0);
-    } finally {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (db.session as any).findMany = spy;
+  it('spares it for every session type, not just DEVELOPER', async () => {
+    const types: SessionType[] = ['DEVELOPER', 'CHATBOT', 'AUTOMATION', 'EDGE'];
+    const ids: string[] = [];
+    for (const type of types) {
+      ids.push((await seedSession({ type, startedAt: ago(72 * HOUR), updatedAt: ago(72 * HOUR) })).id);
     }
-    const after = await reload(s.id);
-    expect(after.endedAt).toBeNull();
-    expect(after.autoExpiredAt).toBeNull();
+    await runSessionReaper(db, now);
+    for (const id of ids) await stillOpen(id);
   });
 
-  it('reaps when the latest attributed usage is itself outside the window', async () => {
-    const s = await seedSession({ startedAt: ago(72 * HOUR) });
-    await seedUsage(s.id, ago(70 * HOUR));
-    await seedUsage(s.id, ago(48 * HOUR));
-
+  it('spares it even with the idle window configured to something tiny', async () => {
+    // The window survives as a DISPLAY setting. If it still reached the
+    // reaper, a one-second window would end everything — which is exactly how
+    // this rule would grow back unnoticed.
+    process.env.SESSION_IDLE_WINDOW_MS = '1000';
+    process.env.SESSION_IDLE_WINDOW_DEVELOPER_MS = '1000';
+    const s = await seedSession({ startedAt: ago(72 * HOUR), updatedAt: ago(72 * HOUR) });
     const outcome = await runSessionReaper(db, now);
-
-    expect(outcome.idle).toBe(1);
-    expect((await reload(s.id)).autoExpiredAt).toEqual(now);
+    expect(outcome.expired).toBe(0);
+    await stillOpen(s.id);
   });
 
-  it('never applies the idle window to a session that carries a hard expiry', async () => {
-    // A CHATBOT session with a long App timeout: rule 1 owns it, and an
-    // idle window must not end it early.
+  it('spares a session with no usage events at all', async () => {
+    const s = await seedSession({ startedAt: ago(90 * HOUR), updatedAt: null });
+    await runSessionReaper(db, now);
+    await stillOpen(s.id);
+  });
+
+  it('still ends an idle session that ALSO carries a past hard expiry', async () => {
+    // The two are independent: dropping inactivity must not weaken a promise
+    // made at session start, which is the one ending that was never an
+    // inference.
     const s = await seedSession({
-      type: 'CHATBOT',
       startedAt: ago(72 * HOUR),
-      expiresAt: new Date(now.getTime() + HOUR),
+      updatedAt: ago(72 * HOUR),
+      expiresAt: ago(1 * HOUR),
     });
-
     const outcome = await runSessionReaper(db, now);
-
-    expect(outcome.idle).toBe(0);
-    expect((await reload(s.id)).endedAt).toBeNull();
-  });
-
-  it('honors the per-type window — a short CHATBOT window leaves DEVELOPER alone', async () => {
-    process.env.SESSION_IDLE_WINDOW_CHATBOT_MS = String(HOUR);
-    const chat = await seedSession({ type: 'CHATBOT', startedAt: ago(3 * HOUR) });
-    const dev = await seedSession({ type: 'DEVELOPER', startedAt: ago(3 * HOUR) });
-
-    const outcome = await runSessionReaper(db, now);
-
-    expect(outcome.idle).toBe(1);
-    expect((await reload(chat.id)).autoExpiredAt).toEqual(now);
-    expect((await reload(dev.id)).endedAt).toBeNull();
+    expect(outcome.expired).toBe(1);
+    const row = await reload(s.id);
+    expect(row.endedAt).not.toBeNull();
+    expect(row.autoExpiredAt).not.toBeNull();
   });
 });
 
@@ -267,7 +224,10 @@ describe('startSessionReaperLoop', () => {
     // leak and the assertion could never fail. A guard whose failing input
     // cannot be constructed proves nothing — so this holds the sweep open and
     // asserts the property directly: stop() must not resolve first.
-    await seedSession({ startedAt: new Date(Date.now() - 30 * HOUR) });
+    // A HARD-EXPIRED session, not an idle one: since #1114 inactivity is not a
+    // candidate at all, so an idle seed would leave the sweep nothing to do and
+    // these loop tests would pass while observing nothing.
+    await seedSession({ expiresAt: new Date(Date.now() - HOUR) });
 
     const HOLD_MS = 200;
     let sweepFinished = false;
@@ -324,7 +284,10 @@ describe('startSessionReaperLoop', () => {
     //
     // Interval deliberately SHORTER than the sweep, which is the case the
     // first test could not reach.
-    await seedSession({ startedAt: new Date(Date.now() - 30 * HOUR) });
+    // A HARD-EXPIRED session, not an idle one: since #1114 inactivity is not a
+    // candidate at all, so an idle seed would leave the sweep nothing to do and
+    // these loop tests would pass while observing nothing.
+    await seedSession({ expiresAt: new Date(Date.now() - HOUR) });
 
     const HOLD_MS = 300;
     const INTERVAL_MS = 40;
@@ -363,7 +326,7 @@ describe('startSessionReaperLoop', () => {
   it('fires on its own schedule (the #888 no-scheduler lesson)', async () => {
     // Idle by real "now", not the fixture instant — the loop calls
     // runSessionReaper with no `now` argument, which is the production path.
-    const s = await seedSession({ startedAt: new Date(Date.now() - 30 * HOUR) });
+    const s = await seedSession({ expiresAt: new Date(Date.now() - HOUR) });
 
     loop = startSessionReaperLoop(db, 10_000, 5);
 

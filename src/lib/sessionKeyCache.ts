@@ -18,6 +18,33 @@ import { getRequestKey } from './requestKeys.js';
 interface MemoryKeyEntry {
   key: EncryptionKey;
   sessionIds: Set<string>;
+  /** Epoch ms of the last `set` or successful lookup — the TTL clock below. */
+  lastUsedAt: number;
+}
+
+/**
+ * How long an unused key stays resident (#1114).
+ *
+ * **This cache had no expiry of its own.** A key was released when the last
+ * holding session ENDED, and for an abandoned session that meant when the
+ * reaper's inactivity rule ended it — so the eviction policy for process-held
+ * key material was a side effect of a durable record's lifecycle. Removing that
+ * rule would have made these keys immortal, which is why the finding stands on
+ * its own: a cache should never have depended on that, and the dependence was
+ * invisible while something else happened to end sessions.
+ *
+ * 24h matches the effective lifetime the reaper's default window gave a key, so
+ * this preserves today's behaviour rather than tightening it in the same change
+ * that removes the coupling. It is refreshed on every use, so a long-lived
+ * session that is genuinely working never loses its key mid-flight.
+ */
+export const DEFAULT_SESSION_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+
+function ttlMs(): number {
+  const raw = process.env.SESSION_KEY_CACHE_TTL_MS;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_SESSION_KEY_TTL_MS;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_SESSION_KEY_TTL_MS;
 }
 
 export class SessionKeyCache {
@@ -40,8 +67,13 @@ export class SessionKeyCache {
         throw new Error('Session key conflict: different key provided for an active memory');
       }
       existing.sessionIds.add(sessionId);
+      existing.lastUsedAt = Date.now();
     } else {
-      this.byMemory.set(memoryId, { key, sessionIds: new Set([sessionId]) });
+      this.byMemory.set(memoryId, {
+        key,
+        sessionIds: new Set([sessionId]),
+        lastUsedAt: Date.now(),
+      });
     }
     let memories = this.sessionToMemories.get(sessionId);
     if (!memories) {
@@ -59,7 +91,14 @@ export class SessionKeyCache {
    * (PR-514 review, Codex P1). Session-lived keys come from the global map.
    */
   getByMemoryId(memoryId: string): EncryptionKey | null {
-    return getRequestKey(memoryId) ?? this.byMemory.get(memoryId)?.key ?? null;
+    const staged = getRequestKey(memoryId);
+    if (staged) return staged;
+    const entry = this.byMemory.get(memoryId);
+    if (!entry) return null;
+    // Touch on READ, not only on set: the TTL below is an idle timer, so a
+    // memory being actively decrypted must never expire under its own session.
+    entry.lastUsedAt = Date.now();
+    return entry.key;
   }
 
   /** True if a key is available for the given memory (request or session). */
@@ -98,6 +137,32 @@ export class SessionKeyCache {
         this.byMemory.delete(memoryId);
       }
     }
+  }
+
+  /**
+   * Drop every key untouched for longer than the TTL, whatever the state of the
+   * sessions holding it (#1114).
+   *
+   * The session references are dropped with it: a session whose key expired is
+   * simply no longer holding one, which is the honest state. It does NOT end
+   * the session — ending is an act, and a cache has no business inferring one.
+   *
+   * Returns the number of memories evicted, so a caller can log a real number.
+   */
+  sweepExpired(now: number = Date.now()): number {
+    const cutoff = now - ttlMs();
+    let evicted = 0;
+    for (const [memoryId, entry] of this.byMemory) {
+      if (entry.lastUsedAt > cutoff) continue;
+      this.byMemory.delete(memoryId);
+      evicted++;
+      for (const sessionId of entry.sessionIds) {
+        const memories = this.sessionToMemories.get(sessionId);
+        if (!memories?.delete(memoryId)) continue;
+        if (memories.size === 0) this.sessionToMemories.delete(sessionId);
+      }
+    }
+    return evicted;
   }
 
   /** How many sessions currently hold a key for this memory. */

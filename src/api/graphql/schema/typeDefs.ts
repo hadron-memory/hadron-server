@@ -2026,16 +2026,30 @@ export const typeDefs = `#graphql
     """
     heldAt: DateTime
     """
-    hadron-cli#487 — whether a worker session is OPEN on this name right now.
+    hadron-cli#487 — whether anyone is DRIVING this name right now.
 
     Not availability: availability is the HOLD above (\`cor:agt:020:09\`), and an
-    ended, idle or reaped session never frees a name. This says only whether
-    someone is mid-stint, which is the question a coordinator asks about a name
-    already theirs. Conflating the two is the CLI bug this field exists for.
+    ended or idle session never frees a name. This says only whether someone is
+    mid-stint, which is the question a coordinator asks about a name already
+    theirs. Conflating the two is the CLI bug this field exists for.
 
-    Derived from the session lifecycle with no lease (\`cor:agt:020:03\`), using
-    the SAME predicate startSession refuses WORKER_TAKEN on — a reader must not
-    be told a worker is busy that a binder can take.
+    #1114 — COMPUTED, never stored. It is "the session has not ended AND it was
+    driven inside its type's idle window", not "a row is open". Nothing ends a
+    session for inactivity any more, because silence is not evidence of
+    abandonment — an agent used once a year is not abandoned in month two — so
+    an open row proves only that nobody closed it. Deriving the answer at read
+    time says exactly what the evidence supports; the previous design expressed
+    the same judgement by ENDING the session, which wrote a guess into the
+    record as a fact and destroyed the handoff that stint had not written yet.
+
+    A worker that reads false is not gone: its session is untouched, and it
+    reads true again the moment it is driven.
+
+    Uses the SAME predicate startSession refuses WORKER_TAKEN on
+    (\`cor:agt:020:11\`) — a reader must not be told a worker is busy that a
+    binder can take, and since #1114 that is load-bearing rather than tidy:
+    with nothing ending abandoned sessions, an \`endedAt IS NULL\` gate would
+    refuse a bind forever and leave force as the only route.
 
     Nullable BECAUSE of the read gate, not because the answer is unknown: this
     is a working-state field like heldByUserId, masked to null on deny rather

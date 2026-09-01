@@ -49,7 +49,7 @@ import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
-import { loadLastEventBySession, mostRecentlyActive } from '../../../lib/sessionActivity.js';
+import { loadLastEventBySession, mostRecentlyActive , isSessionLive } from '../../../lib/sessionActivity.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import {
   type Context,
@@ -702,10 +702,35 @@ export const sessionMutations = {
           // Copilot): force allows several to coexist, and the most recent
           // ACTIVITY can be on an older one — the takeover prompt must name
           // whoever actually drove the worker last.
-          const activeSessions = await ctx.db.session.findMany({
+          const openSessions = await ctx.db.session.findMany({
             where: { workerId: worker.id, endedAt: null, deletedAt: null },
-            select: { id: true, userId: true, startedAt: true, updatedAt: true },
+            select: {
+              id: true, userId: true, startedAt: true, updatedAt: true,
+              // #1114: liveness is DERIVED, so the gate needs the inputs.
+              type: true, autoExpiredAt: true, endedAt: true,
+            },
           });
+          // #1114 — AN OPEN SESSION IS NOT A LIVE ONE. Nothing ends a session
+          // for inactivity any more (silence is not evidence of abandonment),
+          // so `endedAt IS NULL` alone would refuse a bind forever on any
+          // worker whose driver simply walked away — leaving `force: true` as
+          // the only route, which is the reflexive override this refusal exists
+          // to prevent.
+          //
+          // The predicate is the SHARED one (`isSessionLive`), not a second
+          // reading of the same idea: `cor:agt:020:11` requires that what a
+          // roster SHOWS and what a bind ENFORCES be one computation, and the
+          // roster's copy lives in SQL because it must aggregate. Two
+          // derivations that must agree are pinned by a differential test
+          // rather than by hoping.
+          const lastEventForLiveness = await loadLastEventBySession(
+            ctx.db as never,
+            openSessions.map((s) => s.id),
+          );
+          const nowForLiveness = new Date();
+          const activeSessions = openSessions.filter((s) =>
+            isSessionLive(s, lastEventForLiveness.get(s.id), nowForLiveness),
+          );
           if (activeSessions.length > 0) {
             // lastSeenAt mirrors the #930 reaper's activity derivation:
             // greatest of startedAt, updatedAt (the explicit heartbeat), and

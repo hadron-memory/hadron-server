@@ -16,14 +16,14 @@
  * unauthenticated, pure App-key, hybrid user+selection, impersonation.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi , afterEach } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
-import { sessionActivityAt, loadLastEventBySession } from '../../../lib/sessionActivity.js';
+import { sessionActivityAt, loadLastEventBySession , isSessionLive } from '../../../lib/sessionActivity.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -893,6 +893,101 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       {}, { input: { id: generateId(), workerRef: workerId, appRef: app.id } }, ctx(userId),
     );
 
+  /**
+   * #1114 — the cases the differential above cannot decide.
+   *
+   * That test pins the two derivations to EACH OTHER; it would pass with both
+   * of them wrong in the same direction. These assert the answer absolutely,
+   * and every one of them was unreachable before this change: the reaper ended
+   * any session idle enough to produce them, so an open-and-stale row could not
+   * exist to be asked about.
+   */
+  describe('liveness is derived, not "the row is open" (#1114)', () => {
+    const mins = (n: number) => new Date(Date.now() - n * 60_000);
+
+    /** An OPEN session on a worker, with activity stamps we choose. */
+    async function openSession(workerId: string, over: {
+      startedAt: Date; updatedAt?: Date | null; eventAt?: Date;
+    }) {
+      const id = generateId();
+      await db.session.create({
+        data: {
+          id, workerId, appId: app.id, userId: appMember.id,
+          startedAt: over.startedAt, updatedAt: over.updatedAt ?? null,
+          endedAt: null, autoExpiredAt: null,
+        },
+      });
+      if (over.eventAt) {
+        await db.usageEvent.create({
+          data: { id: generateId(), sessionId: id, type: 'read', createdAt: over.eventAt },
+        });
+      }
+      return id;
+    }
+
+    afterEach(() => {
+      delete process.env.SESSION_IDLE_WINDOW_MS;
+      delete process.env.SESSION_IDLE_WINDOW_DEVELOPER_MS;
+    });
+
+    it('an OPEN session nobody has driven for days does not read as live', async () => {
+      const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+      await openSession(w.id, { startedAt: mins(4320), updatedAt: mins(4320) }); // 3 days
+      expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+      // ...and the session is STILL OPEN. Liveness described it; nothing ended
+      // it, which is the whole point of the change.
+      const row = await db.session.findFirstOrThrow({ where: { workerId: w.id } });
+      expect(row.endedAt).toBeNull();
+    });
+
+    it('the same session reads live again the moment it is driven', async () => {
+      // Recovery matters more than the negative case: an idle session is not
+      // dead, and coming back must need no takeover and no repair.
+      const w = await cast({ agentRef: roleAgent.id, name: 'Jonas' });
+      const id = await openSession(w.id, { startedAt: mins(4320), updatedAt: mins(4320) });
+      expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+
+      await db.session.update({ where: { id }, data: { updatedAt: new Date() } });
+      expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
+    });
+
+    it('a usage event inside the window is enough on its own', async () => {
+      // The heartbeat input that lives OUTSIDE the session row — #1081's whole
+      // subject, and the one a narrowed activity set would drop first.
+      const w = await cast({ agentRef: roleAgent.id, name: 'Mira' });
+      await openSession(w.id, {
+        startedAt: mins(4320), updatedAt: mins(4320), eventAt: mins(1),
+      });
+      expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
+    });
+
+    it('honours the configured window rather than a hardcoded one', async () => {
+      const w = await cast({ agentRef: roleAgent.id, name: 'Pia' });
+      await openSession(w.id, { startedAt: mins(120), updatedAt: mins(120) }); // 2h idle
+      expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true); // 24h default
+
+      process.env.SESSION_IDLE_WINDOW_MS = String(60 * 60 * 1000); // 1h
+      expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(false);
+    });
+
+    it('a per-type window beats the fleet-wide one', async () => {
+      const w = await cast({ agentRef: roleAgent.id, name: 'Tove' });
+      await openSession(w.id, { startedAt: mins(120), updatedAt: mins(120) });
+      process.env.SESSION_IDLE_WINDOW_MS = String(60 * 60 * 1000); // 1h -> stale
+      process.env.SESSION_IDLE_WINDOW_DEVELOPER_MS = String(10 * 60 * 60 * 1000); // 10h -> live
+      expect(await W.hasLiveSession(w, {}, ctx(admin.id))).toBe(true);
+    });
+
+    it('one stale worker does not drag a live sibling down', async () => {
+      const live = await cast({ agentRef: roleAgent.id, name: 'Ada' });
+      const stale = await cast({ agentRef: roleAgent.id, name: 'Udo' });
+      await openSession(live.id, { startedAt: mins(1), updatedAt: mins(1) });
+      await openSession(stale.id, { startedAt: mins(4320), updatedAt: mins(4320) });
+      expect(await W.hasLiveSession(live, {}, ctx(admin.id))).toBe(true);
+      expect(await W.hasLiveSession(stale, {}, ctx(admin.id))).toBe(false);
+    });
+  });
+
   it('a cast-but-never-driven worker reads null, NOT a zero timestamp', async () => {
     // The distinction the whole issue is about: "nobody has ever picked this
     // up" must not render as "idle since the epoch" or as "idle since it was
@@ -1092,6 +1187,15 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       Pia: { startedAt: t(-800), updatedAt: t(-10), endedAt: t(-700), autoExpiredAt: null },
       // Never touched after bind.
       Tove: { startedAt: t(-50), updatedAt: null, endedAt: null, autoExpiredAt: null },
+      // #1114 — OPEN BUT STALE. Impossible before: the reaper ended a session
+      // this idle, so no fixture could hold one and both derivations agreed by
+      // never being asked. It is now the ordinary state of a worker whose
+      // driver walked away, and it is the shape liveness has to get right.
+      Gil: { startedAt: t(-5000), updatedAt: t(-4000), endedAt: null, autoExpiredAt: null },
+      // Open and recently driven only by a usage event — the heartbeat input
+      // that lives outside the session row.
+      Udo: { startedAt: t(-5000), updatedAt: t(-4000), endedAt: null, autoExpiredAt: null,
+             eventAt: t(-1) },
     };
 
     const workers: Record<string, { id: string; appId: string }> = {};
@@ -1119,6 +1223,15 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       const row = rows.find((r) => r.workerId === w.id)!;
       const expected = sessionActivityAt(row, lastEvent.get(row.id));
       const actual = (await W.lastActiveAt(w, {}, ctx(admin.id))) as Date;
+      // #1114: LIVENESS is now derived by both implementations too, so it joins
+      // the differential rather than getting its own looser test. cor:agt:020:11
+      // requires the roster and the binder to share one predicate; two copies
+      // that must agree are pinned here or they drift.
+      const nowForLiveness = new Date();
+      expect(
+        await W.hasLiveSession(w, {}, ctx(admin.id)),
+        `${name}: SQL liveness disagrees with isSessionLive`,
+      ).toBe(isSessionLive(row, lastEvent.get(row.id), nowForLiveness));
       // Second-precision: updated_at is timestamp WITHOUT time zone, so a raw
       // round-trip is not bit-identical.
       expect(
@@ -1242,6 +1355,53 @@ describe('#1050 — worker name holding', () => {
     await expectCode(bind(contrib.id, w.id), 'WORKER_TAKEN');
     const forced = await bind(contrib.id, w.id, true);
     expect(forced.workerId).toBe(w.id);
+  });
+
+  it('a STALE open session no longer refuses forever — no force needed (#1114)', async () => {
+    // The consumer #1114 obligated. With nothing ending an abandoned session,
+    // an `endedAt IS NULL` gate would refuse this bind for good, leaving
+    // `force: true` as the only route — the reflexive override this refusal
+    // exists to prevent. Derived liveness answers it: nobody is driving that
+    // session, so the name is simply available.
+    const w = await heldBy(contrib.id);
+    const first = await bind(contrib.id, w.id);
+    // Age the session past the window WITHOUT ending it.
+    const old = new Date(Date.now() - 72 * 60 * 60 * 1000);
+    await db.session.updateMany({
+      where: { id: first.id }, data: { startedAt: old, updatedAt: old },
+    });
+
+    const second = await bind(contrib.id, w.id);
+    expect(second.workerId).toBe(w.id);
+
+    // And the old session was NOT ended to make room — binding describes
+    // liveness, it does not mutate the record to express it.
+    const prior = await db.session.findUniqueOrThrow({ where: { id: first.id } });
+    expect(prior.endedAt).toBeNull();
+    expect(prior.autoExpiredAt).toBeNull();
+  });
+
+  it('a session driven a moment ago still refuses, so the gate did not just go away', async () => {
+    // The control. Without it, deleting the WORKER_TAKEN check entirely would
+    // pass the test above.
+    const w = await heldBy(contrib.id);
+    await bind(contrib.id, w.id);
+    await expectCode(bind(contrib.id, w.id), 'WORKER_TAKEN');
+  });
+
+  it('a stale session that gets a usage event refuses again', async () => {
+    // Liveness is recency of DRIVING, and a usage event is one of the three
+    // heartbeat inputs — so the gate must see it, not just the session row.
+    const w = await heldBy(contrib.id);
+    const first = await bind(contrib.id, w.id);
+    const old = new Date(Date.now() - 72 * 60 * 60 * 1000);
+    await db.session.updateMany({
+      where: { id: first.id }, data: { startedAt: old, updatedAt: old },
+    });
+    await db.usageEvent.create({
+      data: { id: generateId(), sessionId: first.id, type: 'read', createdAt: new Date() },
+    });
+    await expectCode(bind(contrib.id, w.id), 'WORKER_TAKEN');
   });
 
   // #1034: the WORKER_TAKEN message is where the worker-session/chat-session
