@@ -6402,7 +6402,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
     {
       workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
-      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so it is not reaped as idle while you are working (#1081).'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
     },
     async ({ workerRef, app, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The
@@ -6612,7 +6612,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // offering the option at all.
       promptOverride: z.string().optional().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it; omit it to leave the override untouched."),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
-      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so it is not reaped as idle while you are working (#1081).'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
     },
     async ({ workerRef, promptOverride, app, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The

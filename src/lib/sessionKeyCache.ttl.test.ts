@@ -44,6 +44,10 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   delete process.env.SESSION_KEY_CACHE_TTL_MS;
+  delete process.env.SESSION_IDLE_WINDOW_MS;
+  for (const t of ['DEVELOPER', 'CHATBOT', 'AUTOMATION', 'EDGE']) {
+    delete process.env[`SESSION_IDLE_WINDOW_${t}_MS`];
+  }
 });
 
 describe('sessionKeyCache TTL (#1114)', () => {
@@ -233,5 +237,47 @@ describe('an expired key is not resurrected by reading it (#1120 review)', () =>
       advance(30_000);
       expect(c.getByMemoryId('mem1'), `read ${i}`).not.toBeNull();
     }
+  });
+});
+
+describe('the TTL default inherits the deployment\'s idle tuning (#1120 review)', () => {
+  it('a deployment that lengthened its idle window keeps its key retention', async () => {
+    // The regression this pins: a fixed 24h default silently SHORTENED
+    // retention for a fleet on a 48h window — which is the configuration we
+    // believe production runs — and silently LENGTHENED it for anyone on a
+    // short window, holding key material well past what they had chosen.
+    process.env.SESSION_IDLE_WINDOW_DEVELOPER_MS = String(48 * HOUR);
+    const c = new SessionKeyCache();
+    c.set('s1', 'mem1', key(7));
+
+    // NOTE: probe with sweepExpired/refCount, never getByMemoryId — a read
+    // REFRESHES the clock by design, so reading between advances measures the
+    // gap since the probe rather than since the last real use. That is the
+    // same broken ruler this suite already fixed once.
+    advance(30 * HOUR); // past the old fixed 24h default
+    expect(c.sweepExpired()).toBe(0);
+    expect(c.refCount('mem1')).toBe(1);
+
+    advance(20 * HOUR); // now past 48h since last use
+    expect(c.sweepExpired()).toBe(1);
+    expect(c.refCount('mem1')).toBe(0);
+  });
+
+  it('an explicit SESSION_KEY_CACHE_TTL_MS still wins over the inherited value', async () => {
+    process.env.SESSION_IDLE_WINDOW_MS = String(48 * HOUR);
+    process.env.SESSION_KEY_CACHE_TTL_MS = String(HOUR);
+    const c = new SessionKeyCache();
+    c.set('s1', 'mem1', key(8));
+    advance(2 * HOUR);
+    expect(c.getByMemoryId('mem1')).toBeNull();
+  });
+
+  it('with nothing configured it is unchanged at 24h', async () => {
+    const c = new SessionKeyCache();
+    c.set('s1', 'mem1', key(9));
+    advance(23 * HOUR);
+    expect(c.sweepExpired()).toBe(0);
+    advance(2 * HOUR);
+    expect(c.sweepExpired()).toBe(1);
   });
 });

@@ -1,5 +1,10 @@
+import type { SessionType } from '../generated/prisma/index.js';
 import type { EncryptionKey } from './crypto.js';
 import { getRequestKey } from './requestKeys.js';
+import { idleWindowMsFor, DEFAULT_SESSION_IDLE_WINDOW_MS } from './sessionActivity.js';
+
+/** Types the TTL default ranges over — the same set the windows are keyed on. */
+const SESSION_TYPES_FOR_TTL: SessionType[] = ['DEVELOPER', 'CHATBOT', 'AUTOMATION', 'EDGE'];
 
 /**
  * In-memory, ref-counted cache mapping session IDs to the data keys needed to
@@ -33,18 +38,32 @@ interface MemoryKeyEntry {
  * its own: a cache should never have depended on that, and the dependence was
  * invisible while something else happened to end sessions.
  *
- * 24h matches the effective lifetime the reaper's default window gave a key, so
- * this preserves today's behaviour rather than tightening it in the same change
- * that removes the coupling. It is refreshed on every use, so a long-lived
- * session that is genuinely working never loses its key mid-flight.
+ * The default INHERITS the deployment's configured idle windows rather than
+ * being a fixed 24h (#1120 review, Codex P2). The fixed value silently changed
+ * retention for anyone who had tuned one: a fleet on a 48h window kept keys
+ * ~48h before this change and would have dropped to 24h, and one on a short
+ * window would have had its keys held far LONGER than it had chosen — a
+ * security-relevant regression in the direction nobody would notice.
+ *
+ * The widest configured window is used, and the imprecision is stated rather
+ * than hidden: an entry is keyed by MEMORY and may be held by sessions of
+ * different types, so there is no single per-type window that is correct for
+ * it. Widest preserves availability (a key never disappears earlier than the
+ * old lifecycle would have released it) and is the safe direction for a cache
+ * whose early eviction breaks decryption mid-stint. `SESSION_KEY_CACHE_TTL_MS`
+ * overrides it outright for a deployment that wants the retention decided
+ * independently of liveness.
  */
-export const DEFAULT_SESSION_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_SESSION_KEY_TTL_MS = DEFAULT_SESSION_IDLE_WINDOW_MS;
 
 function ttlMs(): number {
   const raw = process.env.SESSION_KEY_CACHE_TTL_MS;
-  if (raw === undefined || raw.trim() === '') return DEFAULT_SESSION_KEY_TTL_MS;
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : DEFAULT_SESSION_KEY_TTL_MS;
+  if (raw !== undefined && raw.trim() !== '') {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  // Inherit the deployment's own idle tuning — see the constant's docstring.
+  return Math.max(...SESSION_TYPES_FOR_TTL.map((t) => idleWindowMsFor(t)));
 }
 
 export class SessionKeyCache {
