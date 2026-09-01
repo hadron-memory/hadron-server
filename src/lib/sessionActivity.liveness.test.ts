@@ -68,23 +68,59 @@ describe('isSessionLive', () => {
   });
 });
 
-describe('recentlyTouchedFilter is WIDER than isSessionLive, on purpose', () => {
-  it('uses the LARGEST configured window, so a per-type outlier is not excluded', () => {
+describe('recentlyTouchedFilter is TYPE-AWARE, so a cap can only drop live rows', () => {
+  type Arm = { type: string; OR: { startedAt?: { gte: Date }; updatedAt?: { gte: Date }; events?: unknown }[] };
+  const arms = (now: Date) => (recentlyTouchedFilter(now) as unknown as { OR: Arm[] }).OR;
+
+  it('gives each type its OWN cutoff, not one shared widest window', () => {
+    // The regression this pins (#1120 review, Codex P2): with a single widest
+    // cutoff, rows STALE for their own type are admitted, fill a
+    // `startedAt DESC` cap, and push out an older row that is genuinely live
+    // under a longer window. The binder then permits a takeover while the
+    // uncapped roster SQL still says taken.
     process.env.SESSION_IDLE_WINDOW_MS = String(1 * HOUR);
     process.env.SESSION_IDLE_WINDOW_EDGE_MS = String(100 * HOUR);
-    const f = recentlyTouchedFilter(NOW) as { OR: { startedAt?: { gte: Date } }[] };
-    const cutoff = f.OR[0].startedAt!.gte;
-    // 100h, not 1h: narrowing to the fleet default would exclude a live EDGE
-    // session before isSessionLive was ever asked about it.
-    expect(NOW.getTime() - cutoff.getTime()).toBe(100 * HOUR);
+
+    const byType = new Map(arms(NOW).map((a) => [a.type, a]));
+    const cutoffOf = (t: string) =>
+      NOW.getTime() - byType.get(t)!.OR[0].startedAt!.gte.getTime();
+
+    expect(cutoffOf('DEVELOPER')).toBe(1 * HOUR);
+    expect(cutoffOf('EDGE')).toBe(100 * HOUR);
+    // The tell for the old behaviour: every type sharing one number.
+    expect(cutoffOf('DEVELOPER')).not.toBe(cutoffOf('EDGE'));
   });
 
-  it('admits all three heartbeat inputs, including usage events', () => {
-    const f = recentlyTouchedFilter(NOW) as { OR: Record<string, unknown>[] };
-    const keys = f.OR.map((o) => Object.keys(o)[0]).sort();
-    // Dropping the events arm would miss a session driven entirely through
-    // surfaces that write provenance rather than touching the row (#1081).
-    expect(keys).toEqual(['events', 'startedAt', 'updatedAt']);
+  it('covers every session type, so none falls outside the filter entirely', () => {
+    const types = arms(NOW).map((a) => a.type).sort();
+    expect(types).toEqual(['AUTOMATION', 'CHATBOT', 'DEVELOPER', 'EDGE']);
+  });
+
+  it('each arm admits all three heartbeat inputs, including usage events', () => {
+    for (const arm of arms(NOW)) {
+      const keys = arm.OR.flatMap((o) =>
+        Object.entries(o).filter(([, v]) => v !== undefined).map(([k]) => k),
+      ).sort();
+      // Dropping the events arm would miss a session driven entirely through
+      // surfaces that write provenance rather than touching the row (#1081).
+      expect(keys, `${arm.type} arm`).toEqual(['events', 'startedAt', 'updatedAt']);
+    }
+  });
+
+  it('agrees with isSessionLive on the boundary rows the cap then orders', () => {
+    // Filter and predicate must now select the SAME set — that agreement is
+    // what makes capping safe, because everything admitted is genuinely a
+    // candidate and the cap can only choose between live rows.
+    process.env.SESSION_IDLE_WINDOW_DEVELOPER_MS = String(2 * HOUR);
+    const inside = { type: 'DEVELOPER' as const, startedAt: ago(1 * HOUR) };
+    const outside = { type: 'DEVELOPER' as const, startedAt: ago(3 * HOUR) };
+    expect(isSessionLive(inside, null, NOW)).toBe(true);
+    expect(isSessionLive(outside, null, NOW)).toBe(false);
+
+    const devArm = arms(NOW).find((a) => a.type === 'DEVELOPER')!;
+    const cutoff = devArm.OR[0].startedAt!.gte;
+    expect(inside.startedAt.getTime()).toBeGreaterThanOrEqual(cutoff.getTime());
+    expect(outside.startedAt.getTime()).toBeLessThan(cutoff.getTime());
   });
 
   it('the scan cap is a backstop, not the primary bound', () => {

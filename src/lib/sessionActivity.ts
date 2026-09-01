@@ -263,26 +263,37 @@ export function isSessionLive(
 export const OPEN_SESSION_SCAN_CAP = 200;
 
 /**
- * A Prisma filter admitting every session that COULD still be live.
+ * A Prisma filter admitting exactly the sessions that could still be live,
+ * evaluated PER TYPE.
  *
- * Deliberately wider than `isSessionLive`: it uses the LARGEST configured
- * window across all types, so it can never exclude a row the exact per-type
- * predicate would have called live. Narrowing happens in JS afterwards, where
- * the type is known. Over-admitting costs a few rows; under-admitting would
- * report a live worker as free, which is the failure that matters.
+ * The first version used the single widest window across all types. That was
+ * safe on its own — it can never exclude a live row — but not safe in front of
+ * a cap (#1120 review, Codex P2): with a 1h DEVELOPER window and a 30d EDGE
+ * window, 200 day-old DEVELOPER rows are admitted, fill a `startedAt DESC`
+ * cap, and push out an older EDGE session with a current usage event. The
+ * binder then permits a takeover while the uncapped roster SQL still reports
+ * taken — the three-surfaces-two-answers failure again, arriving through the
+ * bound rather than the predicate.
+ *
+ * Type-aware, the filter and `isSessionLive` agree on every row, so everything
+ * admitted is genuinely a candidate and the cap can only ever drop one live
+ * row in favour of another. "Is anyone driving this" is unchanged by which of
+ * several live sessions answers it.
  *
  * All three heartbeat inputs are represented, including the usage-event one —
  * dropping it would miss a session driven entirely through surfaces that write
  * provenance rather than touching the row, which is #1081's exact lesson.
  */
 export function recentlyTouchedFilter(now: Date) {
-  const widest = Math.max(...SESSION_TYPES.map((t) => idleWindowMsFor(t)));
-  const cutoff = new Date(now.getTime() - widest);
+  const cutoffs = idleCutoffs(now);
   return {
-    OR: [
-      { startedAt: { gte: cutoff } },
-      { updatedAt: { gte: cutoff } },
-      { events: { some: { createdAt: { gte: cutoff } } } },
-    ],
+    OR: SESSION_TYPES.map((type) => ({
+      type,
+      OR: [
+        { startedAt: { gte: cutoffs[type] } },
+        { updatedAt: { gte: cutoffs[type] } },
+        { events: { some: { createdAt: { gte: cutoffs[type] } } } },
+      ],
+    })),
   };
 }

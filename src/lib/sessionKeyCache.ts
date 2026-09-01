@@ -95,15 +95,30 @@ export class SessionKeyCache {
     if (staged) return staged;
     const entry = this.byMemory.get(memoryId);
     if (!entry) return null;
-    // Touch on READ, not only on set: the TTL below is an idle timer, so a
-    // memory being actively decrypted must never expire under its own session.
+    // EXPIRE BEFORE TOUCHING (#1120 review, Codex P2). Touching first meant a
+    // read after the TTL but before the next sweep returned the key AND reset
+    // its clock — so a caller polling slower than the TTL and faster than the
+    // sweep kept key material resident forever, while every idle gap exceeded
+    // the promise. The sweep is a background convenience; the TTL has to hold
+    // at the point of USE or it is not a TTL.
+    if (this.isExpired(entry)) {
+      this.dropEntry(memoryId, entry);
+      return null;
+    }
+    // Touch on READ, not only on set: the TTL is an idle timer, so a memory
+    // being actively decrypted must never expire under its own session.
     entry.lastUsedAt = Date.now();
     return entry.key;
   }
 
-  /** True if a key is available for the given memory (request or session). */
+  /**
+   * True if a key is available for the given memory (request or session).
+   *
+   * Routed through `getByMemoryId` so an EXPIRED entry answers false here too
+   * — two readers of one cache must not disagree about whether a key exists.
+   */
   hasMemory(memoryId: string): boolean {
-    return getRequestKey(memoryId) != null || this.byMemory.has(memoryId);
+    return getRequestKey(memoryId) != null || this.getByMemoryId(memoryId) != null;
   }
 
   /**
@@ -150,22 +165,33 @@ export class SessionKeyCache {
    * Returns the number of memories evicted, so a caller can log a real number.
    */
   sweepExpired(now: number = Date.now()): number {
-    const cutoff = now - ttlMs();
     let evicted = 0;
     for (const [memoryId, entry] of this.byMemory) {
-      // Strictly older than the cutoff. At EXACTLY the TTL a key has not yet
-      // been "untouched for longer than the TTL", and the doc above says
-      // longer (#1120 review, Copilot).
-      if (entry.lastUsedAt >= cutoff) continue;
-      this.byMemory.delete(memoryId);
+      if (!this.isExpired(entry, now)) continue;
+      this.dropEntry(memoryId, entry);
       evicted++;
-      for (const sessionId of entry.sessionIds) {
-        const memories = this.sessionToMemories.get(sessionId);
-        if (!memories?.delete(memoryId)) continue;
-        if (memories.size === 0) this.sessionToMemories.delete(sessionId);
-      }
     }
     return evicted;
+  }
+
+  /**
+   * Strictly older than the cutoff: at EXACTLY the TTL a key has not yet been
+   * "untouched for LONGER than the TTL" (#1120 review, Copilot). Shared by the
+   * sweep and the read path so the two cannot disagree about what expired
+   * means.
+   */
+  private isExpired(entry: MemoryKeyEntry, now: number = Date.now()): boolean {
+    return entry.lastUsedAt < now - ttlMs();
+  }
+
+  /** Remove one memory's key and every session reference to it. */
+  private dropEntry(memoryId: string, entry: MemoryKeyEntry): void {
+    this.byMemory.delete(memoryId);
+    for (const sessionId of entry.sessionIds) {
+      const memories = this.sessionToMemories.get(sessionId);
+      if (!memories?.delete(memoryId)) continue;
+      if (memories.size === 0) this.sessionToMemories.delete(sessionId);
+    }
   }
 
   /** How many sessions currently hold a key for this memory. */

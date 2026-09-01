@@ -192,3 +192,46 @@ describe('the sweep is actually WIRED, and not behind the reaper switch', () => 
     expect(gatedBlock).not.toContain('startSessionKeySweepLoop');
   });
 });
+
+describe('an expired key is not resurrected by reading it (#1120 review)', () => {
+  it('a read past the TTL returns null and drops the entry, rather than touching it', async () => {
+    // The hole: touching before checking meant a caller polling SLOWER than the
+    // TTL but FASTER than the sweep kept key material resident indefinitely,
+    // while every single idle gap exceeded the promise. The sweep is a
+    // background convenience; a TTL has to hold at the point of USE.
+    const c = new SessionKeyCache();
+    c.set('s1', 'mem1', key(3));
+
+    advance(DEFAULT_SESSION_KEY_TTL_MS + 1000);
+    expect(c.getByMemoryId('mem1')).toBeNull();
+    expect(c.hasMemory('mem1')).toBe(false);
+    // Dropped, not merely hidden: a later sweep has nothing left to find.
+    expect(c.sweepExpired()).toBe(0);
+    expect(c.refCount('mem1')).toBe(0);
+  });
+
+  it('polling slower than the TTL cannot keep a key alive forever', async () => {
+    // The scenario stated directly, because it is the one that motivated the
+    // finding and it is invisible in a single-read test.
+    process.env.SESSION_KEY_CACHE_TTL_MS = String(60_000); // 1 min, well under any sweep
+    const c = new SessionKeyCache();
+    c.set('s1', 'mem1', key(4));
+
+    for (let i = 0; i < 3; i++) {
+      advance(90_000); // every gap exceeds the TTL
+      expect(c.getByMemoryId('mem1'), `read ${i}`).toBeNull();
+    }
+  });
+
+  it('CONTROL: polling FASTER than the TTL does keep it alive', async () => {
+    // Without this, "expire on read" could have been implemented as "always
+    // expire", and the suite above would not notice.
+    process.env.SESSION_KEY_CACHE_TTL_MS = String(60_000);
+    const c = new SessionKeyCache();
+    c.set('s1', 'mem1', key(5));
+    for (let i = 0; i < 5; i++) {
+      advance(30_000);
+      expect(c.getByMemoryId('mem1'), `read ${i}`).not.toBeNull();
+    }
+  });
+});
