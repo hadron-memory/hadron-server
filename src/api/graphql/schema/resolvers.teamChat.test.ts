@@ -1074,3 +1074,111 @@ describe('#1029 — worker handoff', () => {
     expect(await resolvers.Worker.continuity(fresh as any, {}, ctx(outsider.id))).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #1116 — beforeSeq: the backward mirror of sinceSeq
+// ---------------------------------------------------------------------------
+
+describe('teamChatMessages beforeSeq (#1116)', () => {
+  /** Post n messages, bodies "m1".."mn", seq 1..n. */
+  async function postN(n: number) {
+    for (let i = 1; i <= n; i++) await post(ctx(admin.id), { body: `m${i}` });
+  }
+  const bodies = (page: { items: Array<{ body: string }> }) => page.items.map((m) => m.body);
+
+  it('returns the page immediately BEFORE the cursor, still ascending', async () => {
+    await postN(12);
+    const page = await read(ctx(admin.id), { beforeSeq: 9, limit: 3 });
+    // The three before 9 — not the three oldest, which is what an ascending
+    // read of the same narrowed set would have returned.
+    expect(bodies(page)).toEqual(['m6', 'm7', 'm8']);
+  });
+
+  it('is strictly less than — the cursor message is never returned', async () => {
+    await postN(12);
+    const page = await read(ctx(admin.id), { beforeSeq: 9, limit: 3 });
+    expect(bodies(page)).not.toContain('m9');
+  });
+
+  it('composes with sinceSeq as a bounded slice', async () => {
+    await postN(12);
+    const page = await read(ctx(admin.id), { sinceSeq: 4, beforeSeq: 9, limit: 50 });
+    expect(bodies(page)).toEqual(['m5', 'm6', 'm7', 'm8']);
+  });
+
+  /**
+   * Unlike `chatHistory`, this query's DEFAULT page is the OLDEST one — it is a
+   * forward reader with a watermark, not a tail window, and #1116 deliberately
+   * did not change that. So a scroll-up client seeks the end once (the
+   * total-then-offset step it already performs) and pages back from there.
+   * The walk is asserted end-to-end because a cursor that is correct per-page
+   * can still lose a message at the seam between two pages.
+   */
+  it('walks the whole transcript backward without a gap or a repeat', async () => {
+    await postN(11);
+    const { total } = await read(ctx(admin.id), { limit: 0 });
+    const seen: string[] = [];
+    let cursor: number | undefined;
+    for (let guard = 0; guard < 10; guard++) {
+      const page = await read(
+        ctx(admin.id),
+        cursor === undefined
+          ? { limit: 4, offset: Math.max(0, total - 4) }
+          : { beforeSeq: cursor, limit: 4 },
+      );
+      if (page.items.length === 0) break;
+      seen.unshift(...bodies(page));
+      cursor = page.items[0].seq;
+    }
+    expect(seen).toEqual(Array.from({ length: 11 }, (_, i) => `m${i + 1}`));
+  });
+
+  it('CONTROL: without beforeSeq the forward reader is unchanged', async () => {
+    await postN(12);
+    const page = await read(ctx(admin.id), { limit: 3 });
+    // Forward paging still starts at the OLDEST — this query is not a tail
+    // window, and adding a backward cursor must not have turned it into one.
+    expect(bodies(page)).toEqual(['m1', 'm2', 'm3']);
+  });
+
+  it('reports the full narrowed total, not the page size', async () => {
+    await postN(12);
+    const page = await read(ctx(admin.id), { beforeSeq: 9, limit: 3 });
+    expect(page.total).toBe(8);
+  });
+
+  it('returns an empty page once paged past the beginning', async () => {
+    await postN(5);
+    expect((await read(ctx(admin.id), { beforeSeq: 1, limit: 5 })).items).toEqual([]);
+  });
+
+  /**
+   * The mentions branch filters IN MEMORY rather than in SQL (the envelope is
+   * ciphertext on an encrypted memory), so it slices the result itself and does
+   * not inherit the backward read order from the query. That makes it a second
+   * implementation of the same paging rule, and nothing above reaches it.
+   */
+  it('applies the backward window to the mentions branch too', async () => {
+    const s = await workerSession(appMember.id);
+    for (let i = 1; i <= 6; i++) {
+      await post(ctx(appMember.id), { body: `@${s.workerName} note ${i}` });
+    }
+    await post(ctx(admin.id), { body: 'unrelated, mentions nobody' });
+
+    const all = await read(ctx(appMember.id), { mentionsRef: s.workerId, limit: 50 });
+    expect(all.items).toHaveLength(6);
+    const cursor = all.items[4].seq; // the 5th mention
+
+    const page = await read(ctx(appMember.id), {
+      mentionsRef: s.workerId,
+      beforeSeq: cursor,
+      limit: 2,
+    });
+    // The two mentions immediately BEFORE the cursor — not the two oldest,
+    // which is what an unmodified head-slice would have returned.
+    expect(bodies(page)).toEqual([
+      '@' + s.workerName + ' note 3',
+      '@' + s.workerName + ' note 4',
+    ]);
+  });
+});

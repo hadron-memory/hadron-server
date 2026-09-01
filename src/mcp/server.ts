@@ -6096,16 +6096,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_read',
-    'Read the team App\'s chat (#939), oldest first by seq. Pass sinceSeq to fetch only messages AFTER a watermark (strictly greater — pass the last seq you have seen). Pass mentions (a worker name or id, or a user handle/id) to filter to messages that mention them. Returns seq, author, timestamp, and body per message plus the total count.',
+    'Read the team App\'s chat (#939), oldest first by seq. Pass sinceSeq to fetch only messages AFTER a watermark (strictly greater — pass the last seq you have seen). Pass beforeSeq to page BACKWARD (#1116): only messages with seq strictly LESS are considered and the NEWEST page of those comes back — the messages immediately before the cursor, still oldest-first. That is the stable way to walk back through history; offset is a position in a list other people are appending to, so it skips or repeats under a chat being posted to. offset is IGNORED when beforeSeq is given. Pass mentions (a worker name or id, or a user handle/id) to filter to messages that mention them. Returns seq, author, timestamp, and body per message plus the total count.',
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
+      beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
       mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
       session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
-    async ({ sinceSeq, mentions, limit, offset, session, app }) => {
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app }) => {
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -6132,6 +6133,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           {
             appRef,
             sinceSeq: sinceSeq ?? null,
+            beforeSeq: beforeSeq ?? null,
             mentionsRef: mentions ?? null,
             limit: limit ?? null,
             offset: offset ?? null,

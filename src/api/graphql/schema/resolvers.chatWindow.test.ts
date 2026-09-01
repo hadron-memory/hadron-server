@@ -471,3 +471,107 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     expect(res.messageHistory.map((h) => h.content)).toContain('the question being asked');
   });
 });
+
+// ---------------------------------------------------------------------------
+// #1116 — beforeSeq, the backward cursor
+// ---------------------------------------------------------------------------
+
+describe('chatHistory beforeSeq pages backward (#1116)', () => {
+  const CHAT_ID = 'chats:202609010001-cur50r42-cursor';
+  let adminId: string;
+
+  async function seed(rows: Array<{ n: number; seq: number | null }>) {
+    await cleanDb(db);
+    const admin = await db.user.create({
+      data: { id: generateId(), githubId: 990201, githubUsername: 'cursor-admin' },
+    });
+    adminId = admin.id;
+    const { graph } = await createDbOrgAndGraph(db, { orgName: 'cursor-org' });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: graph.id, loc: CHAT_ID,
+        name: 'cursor chat', nodeType: 'chat', data: { messageCount: rows.length },
+      },
+    });
+    for (const r of rows) {
+      await db.node.create({
+        data: {
+          id: generateId(), memoryId: graph.id,
+          loc: `${CHAT_ID}:messages:${String(r.n).padStart(3, '0')}-user`,
+          name: `${String(r.n).padStart(3, '0')}-user`,
+          nodeType: 'message', content: `message-${r.n}`, seq: r.seq,
+          createdAt: new Date(Date.parse('2026-01-01T00:00:00.000Z') + r.n * 1000),
+        },
+      });
+    }
+  }
+
+  async function read(vars: Record<string, unknown>) {
+    const res = await gql(
+      `query($chatId: String!, $limit: Int, $beforeSeq: Int) {
+         chatHistory(chatId: $chatId, limit: $limit, beforeSeq: $beforeSeq) { content seq }
+       }`,
+      { userId: adminId, roles: ['ADMIN'] },
+      { chatId: CHAT_ID, ...vars },
+    );
+    expect(res.errors).toBeUndefined();
+    return (res.data as { chatHistory: Array<{ seq: number; content: string }> }).chatHistory;
+  }
+
+  const numbered = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ n: i + 1, seq: i + 1 }));
+
+  it('returns the page immediately preceding the cursor, still oldest-first', async () => {
+    await seed(numbered(60));
+    const page = await read({ limit: 10, beforeSeq: 31 });
+    // The ten before 31 — not the ten oldest, and not the ten newest.
+    expect(page.map((r) => r.seq)).toEqual([21, 22, 23, 24, 25, 26, 27, 28, 29, 30]);
+  });
+
+  it('is strictly less than — the cursor message is never returned twice', async () => {
+    await seed(numbered(60));
+    const page = await read({ limit: 10, beforeSeq: 31 });
+    expect(page.map((r) => r.seq)).not.toContain(31);
+  });
+
+  it('walks the whole transcript without a gap or a repeat', async () => {
+    await seed(numbered(25));
+    const seen: number[] = [];
+    let cursor: number | undefined;
+    for (let guard = 0; guard < 10; guard++) {
+      const page: Array<{ seq: number }> = await read(
+        cursor === undefined ? { limit: 10 } : { limit: 10, beforeSeq: cursor },
+      );
+      if (page.length === 0) break;
+      seen.unshift(...page.map((r) => r.seq));
+      cursor = page[0].seq;
+    }
+    // Every message exactly once, in order — the property a scroll-up client
+    // depends on, and the one a positional offset loses under concurrent writes.
+    expect(seen).toEqual(Array.from({ length: 25 }, (_, i) => i + 1));
+  });
+
+  it('CONTROL: without a cursor the window is unchanged (the tail)', async () => {
+    await seed(numbered(60));
+    const page = await read({ limit: 10 });
+    expect(page.map((r) => r.seq)).toEqual([51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
+  });
+
+  it('returns an empty page once the caller has paged past the beginning', async () => {
+    await seed(numbered(25));
+    expect(await read({ limit: 10, beforeSeq: 1 })).toEqual([]);
+  });
+
+  it('every cursor reaches counterless messages, which are older than all of them', async () => {
+    // Two legacy rows with no seq, then three numbered ones.
+    await seed([
+      { n: 1, seq: null }, { n: 2, seq: null },
+      { n: 3, seq: 1 }, { n: 4, seq: 2 }, { n: 5, seq: 3 },
+    ]);
+    // Paging back from the oldest NUMBERED message must not strand the
+    // counterless ones — they are the oldest part of the transcript, and
+    // excluding them would make it the one part paging can never reach.
+    const page = await read({ limit: 10, beforeSeq: 1 });
+    expect(page.map((r) => r.content)).toEqual(['message-1', 'message-2']);
+  });
+});
