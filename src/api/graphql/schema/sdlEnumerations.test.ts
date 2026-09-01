@@ -1,0 +1,90 @@
+/**
+ * #1103 — the SDL-description enumeration gate.
+ *
+ * Two things are tested here, and the second is the one that decides whether
+ * the gate survives contact with the team:
+ *
+ *   1. It catches a partial enumeration — the defect it was built for.
+ *   2. It does NOT fire on the cases that merely LOOK like one. A gate that
+ *      cries wolf on a documented happy path gets bypassed reflexively, which
+ *      is worse than no gate: it trains people past a real finding later.
+ *
+ * The live SDL is asserted separately by `pnpm check:sdl-enums` in CI. These
+ * run the predicate against synthetic schemas, so a fixture cannot go stale
+ * with the real one and the boundary cases stay legible.
+ */
+import { describe, it, expect } from 'vitest';
+import { findPartialEnumerations } from '../../../../scripts/check-sdl-enumerations.mjs';
+
+const SET = [
+  {
+    name: 'TEST_SCOPES',
+    source: 'test',
+    members: ['mail.read', 'mail.send', 'calendar.read', 'drive.read'] as const,
+  },
+];
+
+const sdl = (description: string) => `
+  type Query {
+    """${description}"""
+    thing: String
+  }
+`;
+
+const violations = (description: string) =>
+  findPartialEnumerations(sdl(description), SET as never);
+
+describe('catches a partial enumeration', () => {
+  it('flags a description listing some members but not all', () => {
+    const v = violations('Scopes: mail.read, mail.send, calendar.read.');
+    expect(v).toHaveLength(1);
+    expect(v[0].missing).toEqual(['drive.read']);
+    expect(v[0].coord).toBe('Query.thing');
+  });
+
+  it('names EVERY missing member, not just the first', () => {
+    // A gate that reports one omission at a time turns a two-line fix into two
+    // review rounds.
+    const v = violations('Scopes: mail.read, mail.send.');
+    expect(v[0].missing).toEqual(['calendar.read', 'drive.read']);
+  });
+
+  it('accepts a complete enumeration in any order or punctuation', () => {
+    expect(violations('One of {drive.read, mail.send, calendar.read, mail.read}.')).toEqual([]);
+  });
+});
+
+describe('does NOT fire on the cases that only look like one', () => {
+  it('a single member is documenting a field, not enumerating a set', () => {
+    // The two-member floor. "Grant scope: drive.read." appears on several real
+    // fields and is correct; firing on it would gate the documented happy path.
+    expect(violations('Grant scope: drive.read.')).toEqual([]);
+    expect(violations('Requires mail.send.')).toEqual([]);
+  });
+
+  it('a member ending a SENTENCE still counts as present', () => {
+    // The first draft of the token boundary excluded a following '.' outright,
+    // and so reported drive.read missing from a description that ended with
+    // "…, drive.read." — a member reported absent from the very sentence
+    // listing it. Found by running the gate against correct data.
+    expect(violations('Scopes: mail.read, mail.send, calendar.read, drive.read.')).toEqual([]);
+  });
+
+  it('a LONGER value that merely starts with a member does not count', () => {
+    // calendar.readonly is a real adjacent value. Counting it as calendar.read
+    // would let a genuinely partial list pass — the gate failing OPEN, which is
+    // the direction that matters.
+    const v = violations('Scopes: mail.read, mail.send, calendar.readonly, drive.read.');
+    expect(v).toHaveLength(1);
+    expect(v[0].missing).toEqual(['calendar.read']);
+  });
+
+  it('a member embedded in a longer token does not count', () => {
+    expect(violations('See xmail.read and ymail.send for details.')).toEqual([]);
+  });
+
+  it('descriptions that name the TYPE instead cannot drift', () => {
+    // The remedy the gate recommends, and it must not itself be flagged.
+    expect(violations('scopes must be a subset of ConnectionGrantScope.')).toEqual([]);
+  });
+});

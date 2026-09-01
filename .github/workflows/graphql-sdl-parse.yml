@@ -18,6 +18,19 @@ name: Template literals + GraphQL SDL
 # is src/**.ts and not the schema directory: a widened guard behind
 # a narrow trigger is a guard that does not run.
 #
+# THIRD (#1103): SDL DESCRIPTIONS agree with the code they describe.
+# Nothing ever checked one, and four instances of that drift reached
+# the PUBLISHED reference before this existed — the motivating one
+# enumerated four of five grant scopes in a document that named the
+# fifth three fields away, and a hand-written docs page copied the
+# wrong half. A description is a published surface, so its staleness
+# is a defect in the product, not in a comment.
+#
+# It lives in this workflow rather than its own because the trigger
+# is identical (typeDefs.ts plus the constants it describes) and a
+# guard behind a second, narrower trigger is a guard that does not
+# run — the #1087 lesson one line up.
+#
 # SECOND: the SDL parses.
 # Imports the `typeDefs` template literal from
 # `src/api/graphql/schema/typeDefs.ts` and runs `graphql.parse()` on
@@ -37,6 +50,7 @@ on:
       # wherever its query does.
       - 'src/**.ts'
       - 'scripts/check-graphql-sdl.mjs'
+      - 'scripts/check-sdl-enumerations.mjs'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -45,6 +59,7 @@ on:
     paths:
       - 'src/**.ts'
       - 'scripts/check-graphql-sdl.mjs'
+      - 'scripts/check-sdl-enumerations.mjs'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -76,3 +91,6 @@ jobs:
 
       - name: Check the SDL literal, then parse the SDL
         run: pnpm tsx scripts/check-graphql-sdl.mjs
+
+      - name: SDL descriptions agree with the code they enumerate (#1103)
+        run: pnpm check:sdl-enums

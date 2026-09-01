@@ -3156,7 +3156,7 @@ export const typeDefs = `#graphql
     "Canonical URN of the grantee App (hrn:app:<root>:<slug>), or null if unresolvable."
     granteeAppUrn: String
     granteeAppName: String
-    "Covered scopes: mail.read, mail.send, calendar.freebusy, calendar.read."
+    "Covered scopes: mail.read, mail.send, calendar.freebusy, calendar.read, drive.read."
     scopes: [String!]!
     "ISO-8601 expiry, or null for perpetual (until revoked)."
     expiresAt: DateTime
@@ -5598,8 +5598,9 @@ export const typeDefs = `#graphql
     # Spec 042 Track B (#593) — user->App connection delegation. Owner-only.
     """
     Grant an App install scoped access to a connection you OWN. scopes must be a
-    subset of {mail.read, mail.send, calendar.freebusy, calendar.read}; expiresAt
-    (ISO-8601) is optional and must be in the future. appRef is a PK or App URN.
+    subset of {mail.read, mail.send, calendar.freebusy, calendar.read, drive.read};
+    expiresAt (ISO-8601) is optional and must be in the future. appRef is a PK or
+    App URN.
     """
     createConnectionGrant(connectionRef: String!, appRef: String!, scopes: [String!]!, expiresAt: String): ConnectionGrant!
     "Revoke a connection grant you created (soft delete). Owner-only."
