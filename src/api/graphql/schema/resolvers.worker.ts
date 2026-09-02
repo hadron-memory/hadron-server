@@ -934,7 +934,17 @@ export const workerMutations = {
       if (assertsHolder) throw holdStale(worker.id, null);
       // Idempotent rather than an error: "nobody holds this" is the state the
       // caller asked for, and a release racing another release is not a fault.
-      return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+      //
+      // #1073: nothing was released, so the payload says so rather than
+      // implying an act. `releasedFrom` null is what makes `forced: false`
+      // unambiguous here — it is not claiming the holder was you, it is
+      // reporting that there was no holder.
+      return {
+        worker: await ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } }),
+        releasedFromUserId: null,
+        forced: false,
+        notified: null,
+      };
     }
     // Held, but the caller asserted it was not. This is the dangerous case
     // #1073 names: a client whose pre-read said "unheld" does not prompt, so
@@ -1013,6 +1023,11 @@ export const workerMutations = {
       throw holdStale(worker.id, current?.heldByUserId ?? null);
     }
 
+    // #1073 — THREE states, and the middle one is why it is not a boolean:
+    // null = no notice was owed, false = one was owed and FAILED. A client
+    // cannot honestly render "we may have silently failed to announce this",
+    // so collapsing them would make saying nothing the only truthful UI.
+    let notified: boolean | null = null;
     if (released.count > 0 && !isHolder) {
       // Best-effort: an unreachable chat must not block an admin recovering a
       // departed colleague's names. Narrow enough to be honest — this is the
@@ -1068,7 +1083,12 @@ export const workerMutations = {
           },
           ctx,
         );
+        notified = true;
       } catch (e) {
+        // The release STOOD; only the announcement failed. Reporting that is
+        // the whole point of the tri-state — before #1073 this warning was the
+        // only trace, and no caller could see it.
+        notified = false;
         console.warn(
           `[releaseWorker] force-release of ${worker.id} succeeded but the team-chat notice failed:`,
           e,
@@ -1076,7 +1096,19 @@ export const workerMutations = {
       }
     }
 
-    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    return {
+      worker: await ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } }),
+      // The holder the WRITE ended — `worker.heldByUserId` is the value the
+      // authorization decision was made against AND the value the updateMany
+      // guarded on, which #1084 made the same user by construction. Reporting
+      // a pre-read holder here would reintroduce exactly the gap that closed.
+      releasedFromUserId: released.count > 0 ? worker.heldByUserId : null,
+      // Known, never guessed: reaching here as a non-holder means the admin
+      // gate passed, which requires ctx.userId. So `false` always means the
+      // holder was the caller — or that nothing was released.
+      forced: released.count > 0 ? !isHolder : false,
+      notified,
+    };
   },
 
   /**
@@ -1650,6 +1682,32 @@ async function resolveWorkerUrnField(
 }
 
 export const workerFieldResolvers = {
+  /**
+   * #1073 — the release receipt's holder, resolved lazily.
+   *
+   * The mutation returns `releasedFromUserId`; this loads the `User` only when
+   * a client actually selects `releasedFrom`, so a caller that just wants
+   * `forced` / `notified` pays no extra query. Null propagates unchanged,
+   * which is the idempotent "nothing was released" case.
+   *
+   * No gate of its own, deliberately: reaching this payload at all means the
+   * caller passed `releaseWorker`'s authorization — they are the holder, or an
+   * App/org ADMIN of the App this worker belongs to. That audience can already
+   * read the same `User` object through `AppMember.user`, so naming the person
+   * whose hold they just ended discloses nothing new to them. It is a
+   * SANITIZED question — "who did I release" — answered to the one caller
+   * entitled to have asked.
+   */
+  ReleaseWorkerPayload: {
+    releasedFrom: async (
+      parent: { releasedFromUserId?: string | null },
+      _args: unknown,
+      ctx: Context,
+    ) => {
+      if (!parent.releasedFromUserId) return null;
+      return ctx.db.user.findUnique({ where: { id: parent.releasedFromUserId } });
+    },
+  },
   Worker: {
     /**
      * The worker's URN (#991). See `resolveWorkerUrnField`.

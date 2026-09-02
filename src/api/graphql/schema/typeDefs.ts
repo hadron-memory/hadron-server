@@ -1220,6 +1220,60 @@ export const typeDefs = `#graphql
 
   # 008-agent-installation: User↔App membership join carrying a per-App role
   # validated against the parent Agent's installation_policy.memberRoles.
+  """
+  #1073 — what a releaseWorker call actually DID, rather than what the caller
+  predicted it would do.
+
+  releaseWorker used to return the post-release Worker, whose
+  heldByUserId is null by construction — so a client could report only who
+  held the name when it last looked. Per cor:agt:020:09 the two release
+  paths are different ACTS: the holder's own release notifies nobody, an admin
+  force-release must announce itself in the team chat. A receipt that cannot
+  tell them apart describes an act that may not have happened.
+  """
+  type ReleaseWorkerPayload {
+    "The worker after the release. Its heldByUserId is null."
+    worker: Worker!
+    """
+    The holder the WRITE ended — not the one a pre-read saw. Null when nothing
+    was released, i.e. the name was already unheld (the idempotent path).
+
+    This is the value the authorization decision was made against AND the value
+    the guarded write matched on; #1084 made those the same user by
+    construction, so this cannot name somebody other than whoever actually
+    lost the name.
+    """
+    releasedFrom: User
+    """
+    True when the caller released SOMEBODY ELSE'S hold — the admin
+    force-release path, the one act that takes a name without its holder
+    acting, and the one that posts to the team chat.
+
+    Computed server-side, from the authenticated principal and the hold the
+    write ended in the same transaction. A client computing it would have to
+    compare a value it was given against one it had to fetch, and that fetch
+    fails on exactly the path where the answer matters.
+
+    false always means the holder was YOU, or that nothing was released
+    (releasedFrom null) — never "the server could not tell".
+    """
+    forced: Boolean!
+    """
+    Whether the team-chat notice was posted. THREE states, deliberately:
+
+    - null — no notice was owed. A self-release, or nothing released.
+    - true — a notice was owed and posted.
+    - false — a notice was OWED AND FAILED. The release still happened; an
+      unreachable chat must not stop an admin recovering a departed
+      colleague's names.
+
+    A plain boolean would collapse the first and last, and a client cannot
+    render "we may have silently failed to announce this" honestly — so the
+    only truthful UI would be to say nothing, throwing the field away.
+    """
+    notified: Boolean
+  }
+
   type AppMember {
     appId: ID!
     userId: ID!
@@ -6826,7 +6880,7 @@ export const typeDefs = `#graphql
       expectedHolderUserId: ID
       "Assert the name is held by nobody. Mismatch refuses WORKER_HOLD_STALE."
       expectUnheld: Boolean
-    ): Worker!
+    ): ReleaseWorkerPayload!
 
     """
     #1010 — amend a casting's individuality after the fact.
