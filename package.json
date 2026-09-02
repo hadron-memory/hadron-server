@@ -1,7 +1,7 @@
 {
   "name": "@hadron/controller",
   "version": "0.1.0",
-  "description": "Hadron Controller — GraphQL API, usage DB, and node collection",
+  "description": "Hadron Controller \u2014 GraphQL API, usage DB, and node collection",
   "type": "module",
   "main": "dist/index.js",
   "packageManager": "pnpm@11.5.2+sha512.71c631e382066efc25625d5cf029075de07b61b37f6e27350fbd84b1bda5864c8c1967adc280776b45c30a715c0359a3be08fef42d5bb09e2b99029979692916",
@@ -30,7 +30,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "check:urn-alias": "node scripts/check-urn-rename-aliased.mjs"
+    "check:urn-alias": "node scripts/check-urn-rename-aliased.mjs",
+    "check:sdl-enums": "tsx scripts/check-sdl-enumerations.mjs"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^5.0.10",
