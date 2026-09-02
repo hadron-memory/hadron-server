@@ -101,6 +101,38 @@ type B { x: String }
     expect(v[0].coord).toBe('schema');
   });
 
+  it('names the enclosing FIELD in an argument coordinate', () => {
+    // Two fields with the same argument name both reported `Mutation.scopes`
+    // — one coordinate for two definitions, which an author cannot act on
+    // (#1123 review, Codex P3).
+    const doc = `type Mutation {
+      foo("""${partial}""" scopes: [String!]!): String
+      bar("""${partial}""" scopes: [String!]!): String
+    }`;
+    const v = findPartialEnumerations(doc, SET as never);
+    expect(v).toHaveLength(2);
+    expect(v.map((x) => x.coord).sort()).toEqual([
+      'Mutation.bar(scopes:)',
+      'Mutation.foo(scopes:)',
+    ]);
+  });
+
+  it('an INPUT-OBJECT field is not an argument, and keeps the plain coordinate', () => {
+    // Both are InputValueDefinition; only the one inside a field is an
+    // argument. Treating them alike would put a phantom field name on an
+    // input-object field.
+    //
+    // The input object is placed AFTER a type with a field, deliberately. With
+    // it first, `fieldName` is null anyway and the test passes whether or not
+    // the visitor ever clears it — a spare assertion that cannot tell the two
+    // implementations apart. Ordering it this way is what reaches the leak.
+    const doc = `type Q { earlier(a: String): String }
+    input In { """${partial}""" scopes: [String!]! }`;
+    const v = findPartialEnumerations(doc, SET as never);
+    expect(v).toHaveLength(1);
+    expect(v[0].coord).toBe('In.scopes');
+  });
+
   it('gives a navigable coordinate rather than a bare name', () => {
     const v = findPartialEnumerations(
       `interface I { """${partial}""" f: String }`,

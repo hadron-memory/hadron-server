@@ -126,8 +126,17 @@ function spellsOut(text, member) {
 function collectDescriptions(sdl) {
   const out = [];
   let typeName = null;
+  // The enclosing FIELD, so an argument's coordinate names it. Without this,
+  // `Mutation.foo(scopes:)` and `Mutation.bar(scopes:)` both reported
+  // `Mutation.scopes` — one coordinate for two definitions, which is a
+  // diagnostic that cannot be acted on (#1123 review, Codex P3).
+  let fieldName = null;
   visit(parse(sdl), {
+    leave(node) {
+      if (node.kind === 'FieldDefinition') fieldName = null;
+    },
     enter(node) {
+      if (node.kind === 'FieldDefinition') fieldName = node.name?.value ?? null;
       // Track the enclosing definition so a field's coordinate is navigable.
       // Covers *TypeDefinition, *TypeExtension and DirectiveDefinition alike,
       // without naming any of them.
@@ -149,7 +158,16 @@ function collectDescriptions(sdl) {
 
       if (!node.description?.value) return;
       const own = node.name?.value;
-      const coord = isDefinition ? (typeName ?? '<anonymous>') : typeName ? `${typeName}.${own}` : (own ?? '<anonymous>');
+      // An InputValueDefinition is either a field ARGUMENT (inside a field) or
+      // an input-object field (not). Only the first needs the field name.
+      const isArgument = node.kind === 'InputValueDefinition' && fieldName !== null;
+      const coord = isDefinition
+        ? (typeName ?? '<anonymous>')
+        : isArgument
+          ? `${typeName}.${fieldName}(${own}:)`
+          : typeName
+            ? `${typeName}.${own}`
+            : (own ?? '<anonymous>');
       out.push({ coord, text: node.description.value });
     },
   });
