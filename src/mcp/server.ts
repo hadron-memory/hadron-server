@@ -98,7 +98,7 @@ import {
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
-import { computeContentHash } from '../lib/contentHash.js';
+import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
 import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
 import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
@@ -916,17 +916,11 @@ async function renderNodeReadProjection(
   // for legacy rows (without it `null !== "abc"` is true and the marker
   // false-fires on every pre-spec-032 node).
   const shouldCheckStale = scope === 'abstract' || scope === 'all';
-  let includeStaleMarker = false;
-  if (
-    shouldCheckStale &&
-    !node.memory.isEncrypted &&
-    hasAbstract &&
-    hasContent &&
-    node.abstractOriginHash != null
-  ) {
-    includeStaleMarker =
-      node.abstractOriginHash !== computeContentHash(node.content);
-  }
+  // #1128 — the predicate itself now lives in isAbstractUnverified (ONE home
+  // for all three surfaces). The encryption and scope gates stay here: they
+  // are properties of this call, not of the node.
+  const includeStaleMarker =
+    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node);
 
   // #881: the node's portal URL, ready to hand a human. Emitted so no agent
   // ever *constructs* one — constructing means guessing which URN spelling
@@ -2360,11 +2354,9 @@ export function createMcpServerInstance(
         // expand-neighbours are skipped (they weren't matched via an abstract).
         const isStale =
           score != null &&
-          n.abstract != null && n.abstract.length > 0 &&
-          n.content != null && n.content.length > 0 &&
+          n.content != null &&
           !isCiphertext(n.content) &&
-          n.abstractOriginHash != null &&
-          n.abstractOriginHash !== computeContentHash(n.content);
+          isAbstractUnverified(n);
         if (isStale) parts.push('  Source: abstract-stale');
         // #881 — the hit's portal URL, so an agent citing a search result hands
         // over a working link instead of assembling one from the URN above.

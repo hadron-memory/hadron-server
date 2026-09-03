@@ -152,14 +152,20 @@ describe('validateMemory — the five checks (#819)', () => {
     expect(r.findings.map((f: { kind: string }) => f.kind)).toContain('STALE_ABSTRACT');
   });
 
-  it('STALE_ABSTRACT stays quiet on legacy rows with no origin hash', async () => {
+  it('STALE_ABSTRACT reports rows with NO origin hash (#1128)', async () => {
+    // EXPECTATION INVERTED by #1128. The GraphQL validator shares
+    // isAbstractUnverified with the MCP surfaces, so this moves with them —
+    // which is the point of extracting the predicate: three copies of a rule
+    // stay in step only until someone edits one.
+    //
+    // A never-fingerprinted abstract is precisely what an audit should report.
     const n = await createDbNode(db, { loc: 'legacy', memoryId: mem.id, name: 'L', content: 'BODY' });
     await db.node.update({
       where: { id: n.id },
       data: { abstract: 'summary', abstractOriginHash: null },
     });
     const r = await validate();
-    expect(r.findings.map((f: { kind: string }) => f.kind)).not.toContain('STALE_ABSTRACT');
+    expect(r.findings.map((f: { kind: string }) => f.kind)).toContain('STALE_ABSTRACT');
   });
 
   it('EMBED_FAILED: surfaces the failure reason', async () => {

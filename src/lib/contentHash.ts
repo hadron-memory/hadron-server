@@ -34,3 +34,50 @@ export function computeContentHash(content: string | null | undefined): string |
   if (content == null || content === '') return null;
   return createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 8);
 }
+
+/**
+ * Spec 032 FR-010 — is this node's abstract UNCONFIRMED against its current
+ * content? The one home for the `Source: abstract-stale` / `[stale-abstract]`
+ * predicate, shared by `hadron_get_node`, `hadron_find_nodes` and
+ * `hadron_validate` (#1128). It was written out three times before, which is
+ * the drift this repo already warns about for access gates: three copies of a
+ * rule stay in step only until someone edits one.
+ *
+ * True when the node HAS both an abstract and content, and the fingerprint
+ * either DISAGREES with the content or is ABSENT.
+ *
+ * The absent case is the #1128 change, and it is a correction rather than a
+ * widening. The old predicate required a non-null hash, so it could not fire
+ * for an abstract written before the body existed: FR-007 gives such an
+ * abstract a null hash, a later content-only update preserves that null, and
+ * the guard then read the null as "nothing to check". The result was that the
+ * ordering most likely to produce a mismatched abstract — write the summary,
+ * add the body afterwards — was the one ordering that raised no signal, and a
+ * missing marker there was indistinguishable from a verified one.
+ *
+ * That guard was correct when spec 032 shipped, because every row predated it
+ * and would have fired. Its premise has since drained away: on 2026-09-03,
+ * production held 1024 live nodes with both an abstract and content, and
+ * exactly **2** with no fingerprint (dev: 786 and 2). Every write since spec
+ * 032 re-stamps the hash, so "legacy" is now a rounding error — and both
+ * surviving rows genuinely DO have unverified abstracts, so arming on them is
+ * accurate, not noise. A gate can outlive its premise; this one did.
+ *
+ * Deliberately NOT a second marker string. The reader's action is identical
+ * either way — open both and compare — so `abstract-stale` keeps its meaning
+ * of "do not trust this abstract until you have checked it" and gains no
+ * competing vocabulary that clients would have to learn and parse.
+ *
+ * Callers keep their own ENCRYPTION gates: this compares plaintext, and
+ * whether plaintext is in hand is a property of the call site (an unlocked
+ * session, a non-encrypted memory), not of the node.
+ */
+export function isAbstractUnverified(node: {
+  abstract: string | null;
+  content: string | null;
+  abstractOriginHash: string | null;
+}): boolean {
+  if (node.abstract == null || node.abstract.length === 0) return false;
+  if (node.content == null || node.content.length === 0) return false;
+  return node.abstractOriginHash !== computeContentHash(node.content);
+}
