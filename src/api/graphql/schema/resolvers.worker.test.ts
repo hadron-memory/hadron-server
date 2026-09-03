@@ -35,6 +35,8 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
 const W = (resolvers as any).Worker;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const F = resolvers as any; // payload field resolvers (#1073)
 
 /** Minimal resolver Context for a given principal shape. */
 function ctx(userId?: string, appId?: string): Context {
@@ -1721,7 +1723,178 @@ describe('#1050 — worker name holding', () => {
     const w = await heldBy(contrib.id);
     await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
     const again = await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
-    expect(again.heldByUserId).toBeNull();
+    expect(again.worker.heldByUserId).toBeNull();
+    // #1073: nothing was released, and the payload says so rather than
+    // implying an act. This is what makes `forced: false` unambiguous here.
+    expect(again.releasedFromUserId).toBeNull();
+    expect(again.forced).toBe(false);
+    expect(again.notified).toBeNull();
+  });
+
+  // ── #1073 — the payload: what the call DID, not what the caller predicted ──
+  //
+  // `releaseWorker` used to return the post-release Worker, whose
+  // heldByUserId is null by construction, so a client could report only who
+  // held the name when it last looked. Per cor:agt:020:09 the two paths are
+  // different ACTS, and a receipt that cannot tell them apart describes an act
+  // that may not have happened.
+  describe('the release payload (#1073)', () => {
+    it('a SELF-release: names the holder ended, forced false, no notice owed', async () => {
+      const w = await heldBy(contrib.id);
+      const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+
+      expect(out.worker.heldByUserId).toBeNull();
+      // The holder the WRITE ended — reported even though the returned Worker
+      // can no longer carry it, which is the whole gap this closes.
+      expect(out.releasedFromUserId).toBe(contrib.id);
+      expect(out.forced).toBe(false);
+      // null, NOT false: no notice was owed. Collapsing these is what would
+      // make "we may have silently failed to announce this" unrenderable.
+      expect(out.notified).toBeNull();
+    });
+
+    it('an ADMIN force-release: forced true, and the notice reported as posted', async () => {
+      const w = await heldBy(contrib.id);
+      const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+
+      expect(out.releasedFromUserId).toBe(contrib.id);
+      expect(out.forced).toBe(true);
+      expect(out.notified).toBe(true);
+    });
+
+    it('forced distinguishes the ACTS, not the callers — same admin, both paths', async () => {
+      // The discriminating pair. `forced` is "was that holder someone other
+      // than me", not "am I an admin" — an admin releasing their OWN name is
+      // not a force-release and owes no notice.
+      const own = await heldBy(admin.id, 'Ada');
+      const ownOut = await M.releaseWorker({}, { workerRef: own.id }, ctx(admin.id));
+      expect(ownOut.forced).toBe(false);
+      expect(ownOut.notified).toBeNull();
+
+      const other = await heldBy(contrib.id, 'Gil');
+      const otherOut = await M.releaseWorker({}, { workerRef: other.id }, ctx(admin.id));
+      expect(otherOut.forced).toBe(true);
+      expect(otherOut.notified).toBe(true);
+    });
+
+    it('releasedFrom resolves to the user, and is null when nothing was released', async () => {
+      const w = await heldBy(contrib.id);
+      const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+      const user = await F.ReleaseWorkerPayload.releasedFrom(out, {}, ctx(contrib.id));
+      expect(user?.id).toBe(contrib.id);
+
+      const again = await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+      expect(await F.ReleaseWorkerPayload.releasedFrom(again, {}, ctx(contrib.id))).toBeNull();
+    });
+
+    // ── PR #1124 review, Codex P1 — releasedFrom is SANITIZED ────────────────
+    //
+    // It shipped as a full `User` on the argument that this audience can
+    // already read the same object through `AppMember.user`. Both halves of
+    // that are false where it matters: `leaveApp` DELETES the AppMember row
+    // and leaves the hold standing, which is the departed colleague the
+    // force-release path exists for; and `Worker` only ever exposed
+    // `heldByUserId`, a bare id, so there was no route from this surface to a
+    // `User` to inherit.
+    it('releasedFrom carries ONLY the sanitized projection, never User’s ungated tail', async () => {
+      // The discriminating assertion is on the KEY SET, not on a sample of
+      // field values: `policy`, `identityProvider`, `externalId`, `githubId`,
+      // `roles` and `maxReferrals` default-resolve on `User` with no gate of
+      // their own. Dropping the `select` puts every one of them back, and only
+      // a key-set assertion reds on that.
+      const w = await heldBy(contrib.id);
+      const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+      const projection = await F.ReleaseWorkerPayload.releasedFrom(out, {}, ctx(contrib.id));
+
+      expect(Object.keys(projection!).sort()).toEqual(['handle', 'id', 'name']);
+      for (const leaked of ['policy', 'identityProvider', 'externalId', 'githubId', 'roles']) {
+        expect(projection).not.toHaveProperty(leaked);
+      }
+    });
+
+    it('an app-only holder’s name is withheld from the admin who released them', async () => {
+      // The case the P1 named, built rather than argued. `appMember` holds a
+      // name and is in the App but in NO org, which is what a departed
+      // colleague looks like after `leaveApp` — so the org ADMIN who may force
+      // -release them has no other route to their `User`, and the #384 gate
+      // must still answer for `name`.
+      await db.user.update({
+        where: { id: appMember.id },
+        data: { name: 'Departed Colleague', handle: 'departed-colleague' },
+      });
+      const w = await heldBy(appMember.id, 'Ada');
+      const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+      expect(out.forced).toBe(true);
+
+      const seenByAdmin = await F.ReleaseWorkerPayload.releasedFrom(out, {}, ctx(admin.id));
+      // Who, yes — the release is unusable otherwise. Their name, no.
+      expect(seenByAdmin!.id).toBe(appMember.id);
+      expect(seenByAdmin!.handle).toBe('departed-colleague');
+      expect(await F.ReleasedFromUser.name(seenByAdmin, {}, ctx(admin.id))).toBeNull();
+      // And the gate is the shared one, so the user themselves still sees it.
+      expect(await F.ReleasedFromUser.name(seenByAdmin, {}, ctx(appMember.id))).toBe(
+        'Departed Colleague',
+      );
+    });
+
+    it('a co-member DOES see the name — the gate, not a blanket withholding', async () => {
+      // The other side of the pair. Without this, replacing the gate with
+      // `() => null` would pass, and the field would be decorative.
+      await db.user.update({ where: { id: contrib.id }, data: { name: 'Contrib Person' } });
+      const w = await heldBy(contrib.id);
+      const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+      const seen = await F.ReleaseWorkerPayload.releasedFrom(out, {}, ctx(admin.id));
+      expect(await F.ReleasedFromUser.name(seen, {}, ctx(admin.id))).toBe('Contrib Person');
+    });
+
+    it('worker is read back BEFORE the team-chat notice, not after', async () => {
+      // Codex P2. The notice is a network call; re-reading after it widened the
+      // window in which another caller could bind to the length of that call,
+      // so the payload could carry a NEW holder. Driven by binding the name
+      // from inside the notice — the interval, made observable.
+      const w = await heldBy(contrib.id);
+      const teamChat = await import('./resolvers.teamChat.js');
+      const spy = vi
+        .spyOn(teamChat.teamChatMutations, 'createTeamChatMessage')
+        .mockImplementation(async () => {
+          await db.worker.update({
+            where: { id: w.id },
+            data: { heldByUserId: outsider.id, heldAt: new Date() },
+          });
+          return {} as never;
+        });
+      try {
+        const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+        // Reading after the notice would report the interloper's hold while
+        // documenting a null one.
+        expect(out.worker.heldByUserId).toBeNull();
+        expect(out.releasedFromUserId).toBe(contrib.id);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('reports notified: false when the notice was OWED and failed', async () => {
+      // The state a plain boolean cannot express, and the reason for the
+      // tri-state: the release STOOD and the announcement did not happen. An
+      // unreachable chat must never block an admin recovering a departed
+      // colleague's names — but the caller has to be able to see it.
+      const w = await heldBy(contrib.id);
+      const teamChat = await import('./resolvers.teamChat.js');
+      const spy = vi
+        .spyOn(teamChat.teamChatMutations, 'createTeamChatMessage')
+        .mockRejectedValue(new Error('chat unreachable'));
+      try {
+        const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+        expect(out.forced).toBe(true);
+        expect(out.notified).toBe(false);
+        // The release itself still happened — that is the contract.
+        expect(out.worker.heldByUserId).toBeNull();
+        expect(out.releasedFromUserId).toBe(contrib.id);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 
   // ── #1073 — the optional hold precondition ────────────────────────────────
@@ -1776,7 +1949,8 @@ describe('#1050 — worker name holding', () => {
   it('expectUnheld: true on an actually-unheld name is the idempotent no-op', async () => {
     const w = await cast({ agentRef: roleAgent.id, name: 'Nia' }, ctx(admin.id));
     const out = await M.releaseWorker({}, { workerRef: w.id, expectUnheld: true }, ctx(admin.id));
-    expect((out as { heldByUserId: string | null }).heldByUserId).toBeNull();
+    expect((out.worker as { heldByUserId: string | null }).heldByUserId).toBeNull();
+    expect(out.releasedFromUserId).toBeNull();
   });
 
   it('expectUnheld: true refuses when a hold was taken in the interval — the silent force-release', async () => {

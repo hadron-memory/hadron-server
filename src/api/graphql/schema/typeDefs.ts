@@ -1220,6 +1220,102 @@ export const typeDefs = `#graphql
 
   # 008-agent-installation: User↔App membership join carrying a per-App role
   # validated against the parent Agent's installation_policy.memberRoles.
+  """
+  #1073 — what a releaseWorker call actually DID, rather than what the caller
+  predicted it would do.
+
+  releaseWorker used to return the post-release Worker, whose
+  heldByUserId is null by construction — so a client could report only who
+  held the name when it last looked. Per cor:agt:020:09 the two release
+  paths are different ACTS: the holder's own release notifies nobody, an admin
+  force-release must announce itself in the team chat. A receipt that cannot
+  tell them apart describes an act that may not have happened.
+  """
+  type ReleaseWorkerPayload {
+    """
+    The worker, re-read immediately after the guarded release and BEFORE the
+    team-chat notice — so the interval in which another caller could bind is as
+    narrow as it can be made. It is NOT zero, and this is a re-read rather than
+    a snapshot of the write.
+
+    So a non-null heldByUserId here is a LATER hold somebody else took, never a
+    failed release. releasedFrom is what says the release happened; this field
+    is current state, and the two answer different questions.
+    """
+    worker: Worker!
+    """
+    The holder the WRITE ended — not the one a pre-read saw. Null when nothing
+    was released, i.e. the name was already unheld (the idempotent path).
+
+    This is the value the authorization decision was made against AND the value
+    the guarded write matched on; #1084 made those the same user by
+    construction, so this cannot name somebody other than whoever actually
+    lost the name.
+    """
+    releasedFrom: ReleasedFromUser
+    """
+    True when the caller released SOMEBODY ELSE'S hold — the admin
+    force-release path, the one act that takes a name without its holder
+    acting, and the one that posts to the team chat.
+
+    Computed server-side, from the authenticated principal and the hold the
+    write ended in the same transaction. A client computing it would have to
+    compare a value it was given against one it had to fetch, and that fetch
+    fails on exactly the path where the answer matters.
+
+    false always means the holder was YOU, or that nothing was released
+    (releasedFrom null) — never "the server could not tell".
+    """
+    forced: Boolean!
+    """
+    Whether the team-chat notice was posted. THREE states, deliberately:
+
+    - null — no notice was owed. A self-release, or nothing released.
+    - true — a notice was owed and posted.
+    - false — a notice was OWED AND FAILED. The release still happened; an
+      unreachable chat must not stop an admin recovering a departed
+      colleague's names.
+
+    A plain boolean would collapse the first and last, and a client cannot
+    render "we may have silently failed to announce this" honestly — so the
+    only truthful UI would be to say nothing, throwing the field away.
+    """
+    notified: Boolean
+  }
+
+  """
+  #1073 — a sanitized identity for the person a release took a name FROM.
+
+  Deliberately a SEPARATE type from User, on the cor:acl:080:02 /
+  PublicOrganization precedent: a field returning another entity's object hands
+  the caller that entity's field resolvers, and User's default-resolved tail
+  (policy, identityProvider, externalId, githubId, roles, maxReferrals) carries
+  no gate of its own — it relies on the surface that returned it.
+
+  releaseWorker cannot lean on that. Its admin path exists for the departed
+  colleague, and leaveApp DELETES the AppMember row while the hold survives —
+  so the very case this path serves is the one where the caller has no other
+  route to that User. Worker itself only ever exposed heldByUserId, a bare id,
+  so a full User here would be a NEW disclosure rather than an inherited one.
+
+  Exposes what answers "who did I release", and nothing that grows back toward
+  User. name keeps the same #384 gate it has on User rather than a second copy
+  of the rule; the rest is public identity a URN already discloses.
+  """
+  type ReleasedFromUser {
+    id: ID!
+    handle: String
+    "Canonical hrn:user:<handle> URN (cor:urn:010:01). Null for a handle-less user."
+    urn: String
+    """
+    Withheld (null) from a viewer who is not the user themselves, a platform
+    admin, or a co-member of one of their orgs — the SAME #384 gate as
+    User.name, reused rather than restated. An admin releasing a colleague who
+    has left the org sees null here, and still gets id/handle/urn.
+    """
+    name: String
+  }
+
   type AppMember {
     appId: ID!
     userId: ID!
@@ -6826,7 +6922,7 @@ export const typeDefs = `#graphql
       expectedHolderUserId: ID
       "Assert the name is held by nobody. Mismatch refuses WORKER_HOLD_STALE."
       expectUnheld: Boolean
-    ): Worker!
+    ): ReleaseWorkerPayload!
 
     """
     #1010 — amend a casting's individuality after the fact.

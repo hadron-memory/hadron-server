@@ -38,6 +38,8 @@ import {
 } from '../../../lib/workerHandoff.js';
 import { resolveMemoryRoot } from './chat-scope.js';
 import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
+import { userUrn } from '../../../lib/userHandle.js';
+import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import {
   type Context,
   requireOrgRole,
@@ -934,7 +936,17 @@ export const workerMutations = {
       if (assertsHolder) throw holdStale(worker.id, null);
       // Idempotent rather than an error: "nobody holds this" is the state the
       // caller asked for, and a release racing another release is not a fault.
-      return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+      //
+      // #1073: nothing was released, so the payload says so rather than
+      // implying an act. `releasedFrom` null is what makes `forced: false`
+      // unambiguous here — it is not claiming the holder was you, it is
+      // reporting that there was no holder.
+      return {
+        worker: await ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } }),
+        releasedFromUserId: null,
+        forced: false,
+        notified: null,
+      };
     }
     // Held, but the caller asserted it was not. This is the dangerous case
     // #1073 names: a client whose pre-read said "unheld" does not prompt, so
@@ -1013,6 +1025,22 @@ export const workerMutations = {
       throw holdStale(worker.id, current?.heldByUserId ?? null);
     }
 
+    // Read the worker back HERE, not after the notice (PR #1124 review, Codex
+    // P2). The team-chat post below is a network call, and re-reading after it
+    // widened the window in which another caller could bind to the length of
+    // that call — so the payload could carry a NEW holder while documenting a
+    // null one. The notice does not touch the worker row, so reading before it
+    // changes nothing except how much can happen in between. The window is
+    // narrowed, not closed: `worker` is current state and `releasedFrom` is
+    // what attests the release, and the SDL now says so rather than promising
+    // a null hold it cannot guarantee.
+    const releasedWorker = await ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+
+    // #1073 — THREE states, and the middle one is why it is not a boolean:
+    // null = no notice was owed, false = one was owed and FAILED. A client
+    // cannot honestly render "we may have silently failed to announce this",
+    // so collapsing them would make saying nothing the only truthful UI.
+    let notified: boolean | null = null;
     if (released.count > 0 && !isHolder) {
       // Best-effort: an unreachable chat must not block an admin recovering a
       // departed colleague's names. Narrow enough to be honest — this is the
@@ -1068,7 +1096,12 @@ export const workerMutations = {
           },
           ctx,
         );
+        notified = true;
       } catch (e) {
+        // The release STOOD; only the announcement failed. Reporting that is
+        // the whole point of the tri-state — before #1073 this warning was the
+        // only trace, and no caller could see it.
+        notified = false;
         console.warn(
           `[releaseWorker] force-release of ${worker.id} succeeded but the team-chat notice failed:`,
           e,
@@ -1076,7 +1109,19 @@ export const workerMutations = {
       }
     }
 
-    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    return {
+      worker: releasedWorker,
+      // The holder the WRITE ended — `worker.heldByUserId` is the value the
+      // authorization decision was made against AND the value the updateMany
+      // guarded on, which #1084 made the same user by construction. Reporting
+      // a pre-read holder here would reintroduce exactly the gap that closed.
+      releasedFromUserId: released.count > 0 ? worker.heldByUserId : null,
+      // Known, never guessed: reaching here as a non-holder means the admin
+      // gate passed, which requires ctx.userId. So `false` always means the
+      // holder was the caller — or that nothing was released.
+      forced: released.count > 0 ? !isHolder : false,
+      notified,
+    };
   },
 
   /**
@@ -1650,6 +1695,62 @@ async function resolveWorkerUrnField(
 }
 
 export const workerFieldResolvers = {
+  /**
+   * #1073 — the release receipt's holder, resolved lazily as a SANITIZED
+   * projection (`ReleasedFromUser`), not as a `User`.
+   *
+   * The mutation returns `releasedFromUserId`; this loads the row only when a
+   * client actually selects `releasedFrom`, so a caller that just wants
+   * `forced` / `notified` pays no extra query. Null propagates unchanged,
+   * which is the idempotent "nothing was released" case.
+   *
+   * **Why not `User`** (PR #1124 review, Codex P1 — and it disproved the
+   * justification this resolver originally shipped with). That justification
+   * was: the caller is the holder or an App/org ADMIN, and that audience can
+   * already read the same object through `AppMember.user`. Both halves fail on
+   * the path that matters:
+   *
+   * - `leaveApp` DELETES the `AppMember` row and does not touch the hold, so an
+   *   app-only holder who has left keeps the name with no membership row behind
+   *   it. That is the departed colleague — the exact case force-release exists
+   *   to serve — and for them the `AppMember.user` route does not exist.
+   * - `Worker` only ever exposed `heldByUserId`, a bare id. There was no path
+   *   from this surface to a `User` at all, so returning one would have been a
+   *   NEW disclosure rather than an inherited one.
+   *
+   * And what it discloses is not nothing: `User`'s gated fields are `name`,
+   * `email`, `googleId`, `appleId`; `policy`, `identityProvider`, `externalId`,
+   * `githubId`, `githubUsername`, `roles` and `maxReferrals` default-resolve
+   * with no gate of their own, because they lean on the surface that returned
+   * the object. That is the CLAUDE.md invariant verbatim — relaxing a read gate
+   * re-derives the whole field surface it admits.
+   *
+   * So: id / handle / urn, plus `name` behind the SAME shared `#384` gate it
+   * has on `User` rather than a second copy of the rule (a bespoke per-resolver
+   * gate drifts). An admin releasing someone who has left the org sees a null
+   * name and still learns who they released.
+   */
+  ReleaseWorkerPayload: {
+    releasedFrom: async (
+      parent: { releasedFromUserId?: string | null },
+      _args: unknown,
+      ctx: Context,
+    ) => {
+      if (!parent.releasedFromUserId) return null;
+      return ctx.db.user.findUnique({
+        where: { id: parent.releasedFromUserId },
+        // Selected, not spread: a projection that reads the whole row is one
+        // schema change away from leaking the field it forgot to think about.
+        select: { id: true, handle: true, name: true },
+      });
+    },
+  },
+  ReleasedFromUser: {
+    urn: (u: { handle?: string | null }) => userUrn(u.handle),
+    /** The #384 gate, reused — see `User.name` in resolvers.types.ts. */
+    name: async (u: { id: string; name?: string | null }, _args: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.name ?? null) : null,
+  },
   Worker: {
     /**
      * The worker's URN (#991). See `resolveWorkerUrnField`.
