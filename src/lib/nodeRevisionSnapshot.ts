@@ -236,6 +236,14 @@ export const TRACKED_NODE_FIELDS = [
   // changed ONLY objectType recorded an empty `changes` (PR #977 review,
   // Copilot). Every diff caller already passes it.
   'objectType',
+  // Spec 032's staleness fingerprint. Same defect as objectType above, found
+  // the same way (PR #1127 review, Codex): captured by the snapshot and
+  // restored by restorableNodeFields, but absent here — so an update that
+  // changed ONLY the hash recorded an empty `changes`. #1126's
+  // `abstractStillAccurate` is exactly such an update, and it SUPPRESSES a
+  // correctness check, so a revision that does not name it hides the one
+  // thing a reader of the history would want to see.
+  'abstractOriginHash',
   'isLink',
   'properties',
   'data',

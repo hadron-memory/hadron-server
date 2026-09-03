@@ -2441,7 +2441,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_get_node',
-    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give.",
+    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). It means the content changed after the abstract was written, NOT that the abstract is known to be wrong. To clear it: read both, then either rewrite the abstract, or — if it still describes the node — re-save the identical text via hadron_update_node (or assert `abstractStillAccurate`). Rewriting an abstract you have not first found inaccurate is the wrong move; the marker is a prompt to check, not a verdict. Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give.",
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:architecture" (legacy :: forms still accepted)'),
       contentScope: z
@@ -3641,6 +3641,18 @@ export function createMcpServerInstance(
               description: description ?? null,
               abstract: storedAbstract,
               content: storedContent,
+              // #1127 review — an overwrite that only re-stamps the
+              // fingerprint is still a change to restorable state, so this
+              // snapshot reports it. NOT every diff caller passes this field
+              // (@copilot, same review): the move paths omit it because a move
+              // cannot change the hash, `restoreNodeRevision` already carries
+              // it via restorableNodeFields, and the GraphQL upsert computes
+              // its hash AFTER its diff — the same ordering this tool had. That
+              // last one is a cosmetic omission rather than the defect fixed
+              // here: with no `abstractStillAccurate` on that surface, a hash
+              // change always rides along with an abstract or content change
+              // the diff already names, so `changes` is never empty there.
+              abstractOriginHash: nextAbstractOriginHash,
               seq,
               tags: tags ?? [],
               properties,
@@ -3768,8 +3780,9 @@ export function createMcpServerInstance(
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by hadron_run_task. Pass true/false; omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
       description: z.string().optional().describe('New short description'),
-      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. Spec 031.'),
-      content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007).'),
+      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. CAVEAT: that marker only ever arms for an abstract written while the node HAD content — an abstract saved against an empty node carries no fingerprint (FR-007), and adding a body later arms nothing, so do not read the absence of a marker as confirmation that an abstract matches a body it was never written against (#1128). Spec 031/032.'),
+      content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
+      abstractStillAccurate: z.boolean().optional().describe('ASSERTION, NOT A SETTING — and it SUPPRESSES A CORRECTNESS CHECK. Setting this true tells the server you have RE-READ the existing abstract against the content this call is writing and it still describes it, so the `abstract-stale` marker is cleared instead of armed. It changes no text: it only re-fingerprints the abstract you already have. Do NOT set it to make a marker go away, to save a call, or by default — the marker exists to catch an abstract that quietly stopped matching its node, and this is the one flag that can hide exactly that. If you have not actually compared the two, OMIT IT: a stale marker on an accurate abstract is cheap and self-correcting, a suppressed marker on an inaccurate one is neither, and it misleads every later reader and every RAG hit. Ignored when `abstract` is also supplied (that path already re-fingerprints) or when the node has no abstract. CONCURRENCY — it binds to NEITHER half: it re-fingerprints whatever abstract is STORED when this write lands, against whatever content this write LEAVES. Neither is checked against what you read, so if another writer changed either one in between, you certify text you never saw and the marker is suppressed on it. The fully-bound form needs no flag at all — pass `abstract` AND `content` together and you are writing exactly the two things you compared. Prefer that whenever the node might have another writer; use this flag when re-sending the abstract is not worth it and you accept that trade.'),
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: tagsInputSchema.optional().describe('Replace tags'),
       properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
@@ -3785,7 +3798,7 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -3903,31 +3916,19 @@ export function createMcpServerInstance(
       // Spec 032 — capture existing.abstractOriginHash so the revision
       // history round-trips the staleness signal. On an encrypted memory
       // `existing` still holds CIPHERTEXT here — revisions store the
-      // at-rest form, deliberately (the decrypt happens just below).
-      // #620 — shared builder: editedBy carries the user PK (when the MCP
-      // caller is a user token), `reason` rides in revLabel, and `changes`
-      // records the fields this update supplies with a different value.
-      await createNodeRevision(db, {
-        id: generateId(),
-        ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
-            revLabel: reason,
-            changes: diffNodeChanges(existing, {
-              name,
-              nodeType,
-              objectType,
-              isRunnable,
-              description,
-              abstract: normalizedAbstract,
-              content,
-              seq,
-              tags,
-              properties,
-              data: nodeData,
-              llmModel,
-              aiAgent,
-            }),
-          }),
-      }).catch(() => {});
+      // at-rest form, deliberately (the decrypt happens just below), so the
+      // AT-REST image is captured now and the row is written further down,
+      // once the abstractOriginHash matrix has run.
+      //
+      // #1127 review (@codex P2): the write is DEFERRED rather than done here
+      // because `changes` must be able to report `abstractOriginHash`, and
+      // that value does not exist until after the decrypt. Leaving it out is
+      // what made `abstractStillAccurate` used alone record an EMPTY `changes`
+      // on a revision that really did change restorable state — a suppression
+      // of a correctness check, invisible in history. Diffing still runs
+      // against this at-rest image, so nothing else about the comparison
+      // moves.
+      const preAtRest = { ...existing };
 
       // Spec 041 (PR-517 review, Codex P2): decrypt `existing` in place NOW
       // — everything below (the abstractOriginHash matrix, the embedding
@@ -3945,13 +3946,69 @@ export function createMcpServerInstance(
       // plaintext here — decrypted above for encrypted memories).
       let nextAbstractOriginHash: string | null | undefined;
       if (normalizedAbstract === undefined) {
-        nextAbstractOriginHash = undefined;
+        // #1126 — the caller's assertion that the EXISTING abstract survives
+        // this edit. Row 2 (content updated, abstract absent) arms staleness
+        // on purpose, and that is right by default: the server cannot know
+        // whether an abstract written against the old content still describes
+        // the new one. `abstractStillAccurate` is the caller saying they
+        // checked — so this re-fingerprints the abstract already on the node
+        // against the content this call is writing, exactly as re-saving that
+        // identical text would (row 4). It writes no text of its own.
+        //
+        // Guarded on the node ACTUALLY having an abstract: FR-006/FR-007 hold
+        // that no abstract means no hash, and an unguarded assertion here
+        // would mint a ghost hash on an abstract-less node — a fingerprint
+        // for a thing that does not exist, which later reads would compare
+        // against and quietly trust.
+        const hasStoredAbstract =
+          typeof existing.abstract === 'string' && existing.abstract.trim() !== '';
+        if (abstractStillAccurate === true && hasStoredAbstract) {
+          const nextContent = content !== undefined ? content : existing.content;
+          // computeContentHash(null) is null, so clearing content through this
+          // path lands on FR-007's "abstract but no content ⇒ no hash" rather
+          // than needing its own branch.
+          nextAbstractOriginHash = computeContentHash(nextContent ?? null);
+        } else {
+          nextAbstractOriginHash = undefined;
+        }
       } else if (normalizedAbstract === null) {
         nextAbstractOriginHash = null;
       } else {
+        // `abstract` supplied: this already re-fingerprints against the new
+        // content, so `abstractStillAccurate` is redundant here and ignored
+        // rather than rejected — both spellings mean the same thing and the
+        // outcome is identical either way.
         const nextContent = content !== undefined ? content : existing.content;
         nextAbstractOriginHash = computeContentHash(nextContent ?? null);
       }
+
+      // #620 — shared builder: editedBy carries the user PK (when the MCP
+      // caller is a user token), `reason` rides in revLabel, and `changes`
+      // records the fields this update supplies with a different value.
+      // Written HERE (not before the decrypt) so `abstractOriginHash` can be
+      // part of that delta — see the preAtRest comment above.
+      await createNodeRevision(db, {
+        id: generateId(),
+        ...buildNodeRevisionSnapshot(preAtRest, editorFromAuth(auth), {
+            revLabel: reason,
+            changes: diffNodeChanges(preAtRest, {
+              name,
+              nodeType,
+              objectType,
+              isRunnable,
+              description,
+              abstract: normalizedAbstract,
+              content,
+              abstractOriginHash: nextAbstractOriginHash,
+              seq,
+              tags,
+              properties,
+              data: nodeData,
+              llmModel,
+              aiAgent,
+            }),
+          }),
+      }).catch(() => {});
 
       // Build partial update — only fields that were provided
       const data: Record<string, unknown> = {};
