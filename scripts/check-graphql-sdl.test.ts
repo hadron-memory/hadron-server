@@ -650,6 +650,31 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
   });
 
+  it('#1110: a DECOMPOSED unicode dollar tag is recognised (@codex P2, #1131)', () => {
+    // Round two of the same finding. I first answered `$\u00e9$` with `\\p{L}`, and
+    // `\\p{L}`/`\\p{N}` omit combining MARKS — so a decomposed `a` + U+0301 still
+    // failed. The charset is now Postgres's own rule (any non-ASCII character is
+    // an identifier character) rather than one more category guessed at.
+    const tag = 'a\u0301';
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE t SET v = $' + tag +
+        "$owner's$" + tag + '$ -- use ' + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a decomposed unicode dollar body carrying its own --', () => {
+    const tag = 'a\u0301';
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'UPDATE t SET v = $' + tag +
+        '$ x -- y $' + tag + '$ WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
   it('#1110: silent on an interpolation with no comment at all', () => {
     // The control for the `?` substitution: replacing spans must not invent a
     // comment where the SQL has none.
@@ -820,9 +845,9 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
   });
 
   it('#1110: silent when -- sits inside a SQL STRING on the closing line', () => {
-    // hasLineComment is quote-aware, and that is what makes this arm safe rather
-    // than merely narrow: `SELECT '--'` closes legitimately on a line containing
-    // two dashes.
+    // endsInsideLineComment is quote-aware, and that is what makes this arm safe
+    // rather than merely narrow: `SELECT '--'` closes legitimately on a line
+    // containing two dashes. (hasLineComment is the SDL half, not this one.)
     const src = lines('const q = await db.$queryRaw' + BACKTICK + "SELECT '--'" + BACKTICK + ';', '');
     expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
   });

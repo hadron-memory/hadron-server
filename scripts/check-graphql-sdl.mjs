@@ -478,9 +478,10 @@ function isRawSqlTag(node) {
  * backtick in a comment, and a comment on a line the literal does not close on
  * all stay silent.
  *
- * `hasLineComment` is quote-aware, so `SELECT '--'` is a string and not a
- * comment — the distinction that keeps this a ban on one shape rather than on
- * every line containing two dashes.
+ * `endsInsideLineComment` is quote-aware, so `SELECT '--'` is a string and not
+ * a comment — the distinction that keeps this a ban on one shape rather than on
+ * every line containing two dashes. (`hasLineComment` is the SDL half's
+ * simpler cousin and is NOT what runs here; PR #1131 review, @copilot.)
  *
  * NOT a SQL parser and NOT an ESLint rule, the two options #1110 proposed and
  * flagged as technology decisions. Neither is needed: the invariant is lexical,
@@ -620,14 +621,22 @@ function endsInsideLineComment(sql) {
  * letters, DIGITS or underscores. The digits matter: `$tag1$` is legal, and
  * omitting them left its body unskipped (PR #1131 review, @copilot).
  *
- * UNICODE letters, not ASCII: Postgres identifiers admit them, so `$é$` is a
- * legal tag (@codex P2, same PR). An ASCII-only class fails to enter that body,
- * and an unmatched apostrophe inside it — which is perfectly valid there — then
- * reads as an unterminated string and hides the closing `--`. Written with
- * `\p{L}` rather than by adding the letters somebody happened to name, since
- * that is the mistake this arm has already made five times.
+ * NON-ASCII is admitted wholesale, which is Postgres's ACTUAL rule rather than
+ * an approximation of it: its identifier lexer accepts "letters with diacritical
+ * marks and non-Latin letters" — implemented as any character outside ASCII.
+ *
+ * Two review rounds arrived here (@codex P2, twice). The first was `$é$` and I
+ * answered it with `\p{L}`; the second pointed out that `\p{L}`/`\p{N}` omit
+ * combining MARKS, so a decomposed `$á$` still failed. Rather than add `\p{M}`
+ * and wait to be told about `\p{Pc}`, this now matches what Postgres documents.
+ * Guessing a category at a time is the same mistake as guessing a SQL context
+ * at a time, which this file already made five times over.
  */
-const DOLLAR_TAG = /^\$(?:[\p{L}_][\p{L}\p{N}_]*)?\$/u;
+const NON_ASCII = '[^\\x00-\\x7F]';
+const DOLLAR_TAG = new RegExp(`^\\$(?:(?:[A-Za-z_]|${NON_ASCII})(?:[A-Za-z0-9_]|${NON_ASCII})*)?\\$`, 'u');
+
+/** Any character Postgres allows INSIDE an unquoted identifier, `$` included. */
+const IDENT_CHAR = new RegExp(`[A-Za-z0-9_$]|${NON_ASCII}`, 'u');
 
 /**
  * Is position `k` the START of a dollar-quoted string?
@@ -644,10 +653,10 @@ const DOLLAR_TAG = /^\$(?:[\p{L}_][\p{L}\p{N}_]*)?\$/u;
  * and it needed both to be right.
  */
 function isDollarQuoteAt(sql, k) {
-  // Unicode-aware for the same reason as the tag itself: `café$t$` is one
-  // identifier, and an ASCII boundary test would read `$t$` in it as a
-  // delimiter.
-  if (/[\p{L}\p{N}_$]/u.test(sql[k - 1] ?? ' ')) return false;
+  // The same charset as the tag, for the same reason: `café$t$` is ONE
+  // identifier, so an ASCII-only boundary test would read the `$t$` inside it
+  // as a delimiter and skip past the real comment.
+  if (IDENT_CHAR.test(sql[k - 1] ?? ' ')) return false;
   return DOLLAR_TAG.test(sql.slice(k));
 }
 
