@@ -339,6 +339,44 @@ describe('hadron_update_node — abstractStillAccurate (#1126)', () => {
     expect(await readNode('gap1', 'all')).not.toContain('Source: abstract-stale');
   });
 
+  it('binds to NEITHER half — an interleaved abstract swap is certified unseen', async () => {
+    // PR #1127 review, @codex, second pass. The flag re-fingerprints whatever
+    // abstract is STORED when the write lands, not the one the caller read.
+    // Here the caller reviewed 'X' against "Y'"; another writer replaced the
+    // abstract with 'Z' in between; the assertion then stamps 'Z' as reviewed
+    // and the marker stays silent on text nobody checked.
+    //
+    // @Holger's call (2026-09-03) is to ship the flag and document both
+    // halves, so this pins the behaviour rather than guarding against it: the
+    // residual hole is a suppressed marker that self-corrects at the next
+    // content edit, and the fully-bound form (pass `abstract` AND `content`)
+    // already exists and needs no flag. The description says so in those
+    // words. This test exists so the trade is visible in the suite and not
+    // only in a parameter string somebody may not read.
+    await addNode({ loc: 'race1', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'race1', abstract: 'Z' }); // the interloper
+    await updateNode({ loc: 'race1', content: "Y'", abstractStillAccurate: true });
+
+    const row = await readRow('race1');
+    expect(row?.abstract).toBe('Z'); // NOT the 'X' the caller reviewed
+    expect(row?.abstractOriginHash).toBe(computeContentHash("Y'"));
+    expect(await readNode('race1', 'all')).not.toContain('Source: abstract-stale');
+  });
+
+  it('the fully-bound form writes both things the caller compared', async () => {
+    // The counterpart, and the one the description points at: supplying both
+    // leaves no gap for an interloper to occupy — whatever happened in
+    // between, the row ends up holding exactly the pair that was reviewed.
+    await addNode({ loc: 'race2', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'race2', abstract: 'Z' }); // same interloper
+    await updateNode({ loc: 'race2', abstract: 'X', content: "Y'" });
+
+    const row = await readRow('race2');
+    expect(row?.abstract).toBe('X');
+    expect(row?.abstractOriginHash).toBe(computeContentHash("Y'"));
+    expect(await readNode('race2', 'all')).not.toContain('Source: abstract-stale');
+  });
+
   it('#1128 — but asserting on such a node still mints no ghost hash', async () => {
     // The guard has to hold on this path too: the node HAS an abstract, so
     // hasStoredAbstract is true, and the hash comes from the new content.
