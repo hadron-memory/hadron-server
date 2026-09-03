@@ -317,6 +317,37 @@ describe('hadron_update_node — abstractStillAccurate (#1126)', () => {
     await updateNode({ loc: 'asa9', content: null, abstractStillAccurate: true });
     expect((await readRow('asa9'))?.abstractOriginHash).toBeNull();
   });
+
+  it('#1128 — abstract-first-then-body arms NOTHING (documents the gap)', async () => {
+    // PR #1127 review, @codex P2, and it is the sequence #1126 is ABOUT.
+    // An abstract saved against an empty node gets a null hash (FR-007);
+    // adding a body later preserves that null (row 2); and the read predicate
+    // suppresses the marker on a null hash (the load-bearing legacy guard).
+    // So the workflow most likely to produce a mismatched abstract is the one
+    // that raises no signal at all.
+    //
+    // Pinned as the CURRENT behaviour, not endorsed: closing it means either
+    // arming on a null hash — which false-fires on every pre-spec-032 row —
+    // or backfilling those rows. That is a spec-032 contract decision, filed
+    // as #1128. This test is here so the gap is visible and so whoever closes
+    // it has to change a test that says what it is doing.
+    await addNode({ loc: 'gap1', abstract: 'X' });
+    expect((await readRow('gap1'))?.abstractOriginHash).toBeNull();
+
+    await updateNode({ loc: 'gap1', content: 'a body the abstract never saw' });
+    expect((await readRow('gap1'))?.abstractOriginHash).toBeNull();
+    expect(await readNode('gap1', 'all')).not.toContain('Source: abstract-stale');
+  });
+
+  it('#1128 — but asserting on such a node still mints no ghost hash', async () => {
+    // The guard has to hold on this path too: the node HAS an abstract, so
+    // hasStoredAbstract is true, and the hash comes from the new content.
+    // That is correct — the caller is asserting they read both — and it is
+    // also the one way to give such a node a fingerprint at all.
+    await addNode({ loc: 'gap2', abstract: 'X' });
+    await updateNode({ loc: 'gap2', content: 'B', abstractStillAccurate: true });
+    expect((await readRow('gap2'))?.abstractOriginHash).toBe(computeContentHash('B'));
+  });
 });
 
 describe('NodeRevision snapshots capture abstractOriginHash', () => {
