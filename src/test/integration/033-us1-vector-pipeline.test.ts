@@ -129,14 +129,52 @@ describe('SC-001 — semantic vector retrieval', () => {
 
 describe('SC-002 — write is non-blocking', () => {
   it('sets the durable pending marker without awaiting the embed', async () => {
-    setEmbeddingClientForTests(stubClient({}));
+    // #1091 — this test used to RACE the code it tests, and lost under load.
+    //
+    // `beforeEach` sets EMBEDDING_API_URL, so `isEmbeddingConfigured()` is true
+    // and `enqueueNodeEmbedding` really does fire its `setImmediate` drain. With
+    // an instant stub, `embedNode` can run to completion — and `clearMarkers`
+    // NULLS `embeddingPendingAt` on success — before this test's read returns.
+    // The assertion then failed on a marker the code had correctly set and
+    // correctly cleared, which reads as a timing flake and is not one: nothing
+    // here is slow (18ms in isolation against a 5000ms limit), it is ordering.
+    //
+    // So gate the embed rather than trying to outrun it. Parking INSIDE
+    // `embed()` splits the drain in half: it has demonstrably started, and it
+    // demonstrably cannot have finished. That makes the assertion deterministic
+    // AND strengthens it — while the embed is parked, "the write did not await
+    // the embed" is the only thing that can explain `enqueueNodeEmbedding`
+    // having already returned. The old version could pass with a blocking
+    // enqueue as long as the read happened to win.
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    // Never settles, deliberately: releasing it would let `embedNode` finish
+    // asynchronously and write into the next test's `cleanDb`. Parked before
+    // any write, it holds no transaction and no connection, so leaving it is
+    // the cheaper end — the drain simply never completes.
+    const parked = new Promise<number[][]>(() => {});
+    setEmbeddingClientForTests({
+      provider: 'test',
+      model: 'stub-model',
+      dim: DIM,
+      async embed() {
+        markStarted();
+        return parked;
+      },
+    });
+
     const id = await makeNode(memId, 'n', 'abstract');
     await enqueueNodeEmbedding(db, {
       nodeId: id,
       memoryId: memId,
       plaintext: { content: 'c', abstract: 'abstract' },
     });
-    // Immediately after enqueue: marker set, vector not yet written (setImmediate).
+
+    // The drain has entered `embed()` and is stuck there — so the marker cannot
+    // have been cleared, whatever the scheduler did.
+    await started;
     const node = await db.node.findUniqueOrThrow({ where: { id }, select: { embeddingPendingAt: true } });
     expect(node.embeddingPendingAt).not.toBeNull();
   });
