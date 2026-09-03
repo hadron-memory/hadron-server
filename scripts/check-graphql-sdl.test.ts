@@ -495,18 +495,94 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 't.ts': src }).offenders).toEqual([]);
   });
 
-  it('KNOWN GAP: a break that re-pairs into valid TypeScript is not caught (#1110)', () => {
-    // Pinned as a gap rather than left to be rediscovered. The parser has no
-    // complaint here — `taggedTemplate && templateExpression` is valid — so the
-    // diagnostic arm cannot see it. Stated as a test so #1110 has a red to turn
-    // green, and so nobody reads the gate's silence as coverage.
+  it('CLOSED (#1110): a break that re-pairs into valid TypeScript IS caught', () => {
+    // Was pinned as a KNOWN GAP asserting silence, so #1110 would have a red to
+    // turn green. This is that red turning green.
+    //
+    // The parser has no complaint — `taggedTemplate && templateExpression` is
+    // valid TypeScript — so the diagnostic arm still cannot see it. What catches
+    // it is the literal's OWN property: it closes after a `--` on its line, and
+    // a SQL comment runs to end-of-line, so no legitimate close can sit there.
     const src = lines(
       'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET a = false -- use ' +
         BACKTICK + '&&' + BACKTICK + ' for overlap',
       'WHERE id = ${id}' + BACKTICK + ';',
       '',
     );
-    expect(scanFiles({ 'g.ts': src }).offenders).toEqual([]);
+    const { offenders } = scanFiles({ 'g.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].line).toBe(1);
+    expect(offenders[0].errors.join(' ')).toMatch(/re-paired into valid TypeScript/);
+  });
+
+  it('#1110: catches a tail owned by a tag the comment NAMED', () => {
+    // Defeated the third earlier attempt (the "unowned tail" rule): naming a tag
+    // inside the comment gave the severed tail an owner, so an ownership test
+    // read it as legitimate. Ownership is not consulted here.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u -- use ' + BACKTICK +
+        '&& Prisma.sql' + BACKTICK + ' now',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'g.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: catches an array element inside Promise.all', () => {
+    // Defeated the fourth attempt, which walked binary/conditional parents and
+    // never reached an array element.
+    const src = lines(
+      'await Promise.all([',
+      '  db.$executeRaw' + BACKTICK + 'UPDATE u -- ' + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ',',
+      ']);',
+      '',
+    );
+    expect(scanFiles({ 'g.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: catches a backtick pair enclosing a SEMICOLON', () => {
+    // The construction #1110 listed that NO earlier version reached: the pair
+    // splits the remainder into a separate STATEMENT, so a statement-scoped walk
+    // never visits it. This arm never walks outward, so the split is irrelevant.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u -- a ' + BACKTICK +
+        '; const y = 1; ' + BACKTICK + ' b',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'g.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a legitimate SQL comment the literal does not close on', () => {
+    // The control that separates "closes inside a comment" from "contains one".
+    // A comment is ordinary in raw SQL; only closing INSIDE it is the bug.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- explain why',
+      'FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: silent on an ESCAPED backtick inside a SQL comment', () => {
+    // The repo's actual idiom for naming a column in a comment. An escaped
+    // backtick terminates nothing, so the literal closes where it should.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- see \\' + BACKTICK +
+        'col\\' + BACKTICK + ' here',
+      'FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: silent when -- sits inside a SQL STRING on the closing line', () => {
+    // hasLineComment is quote-aware, and that is what makes this arm safe rather
+    // than merely narrow: `SELECT '--'` closes legitimately on a line containing
+    // two dashes.
+    const src = lines('const q = await db.$queryRaw' + BACKTICK + "SELECT '--'" + BACKTICK + ';', '');
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
   });
 
   it('does NOT fire on a Prisma.sql fragment NESTED in a query slot', () => {

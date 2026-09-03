@@ -12,17 +12,22 @@
  *    template literal; a BARE backtick inside a GraphQL description or `#`
  *    comment terminates it, and everything after it is parsed as TypeScript.
  *    This half reads the file as TEXT and names the offending line.
- * 1b. THE TAGGED LITERALS ARE INTACT (#1087). Every `$queryRaw` /
+ * 1b. THE TAGGED LITERALS ARE INTACT (#1087, #1110). Every `$queryRaw` /
  *    `$executeRaw` / `Prisma.sql` literal in `src/`. NOT the same scan as
- *    check 1 — it does not text-scan at all. `scanTaggedLiterals` asks the
- *    TypeScript parser where each literal ends and then checks two things the
- *    parser cannot decide for it: that the file has no parse diagnostics.
- *    A break that RE-PAIRS into valid TypeScript is out of scope and tracked
- *    as #1110 — see the note above `scanTaggedLiterals`. Porting check 1's text rules
- *    here took five review rounds and never worked; the header of that
- *    function records why, and this line said otherwise until PR #1109 review
- *    caught it — prose outliving its mechanism, in the header of the PR about
- *    prose outliving its mechanism.
+ *    check 1 — it does not text-scan the file at all. `scanTaggedLiterals`
+ *    asks the TypeScript parser where each literal ends, and then covers the
+ *    two ways a stray backtick can end one:
+ *      - it leaves the file UNPARSEABLE — reported against the nearest tagged
+ *        literal, since `tsc` blames wherever the remainder stops making sense
+ *        and never says "unterminated literal";
+ *      - it RE-PAIRS into valid TypeScript, so the parser has no complaint at
+ *        all and the truncated query still runs. Caught by
+ *        `closesInsideSqlComment` (#1110), which asks only about the literal
+ *        itself: did it close after a `--` on its line, with the query
+ *        continuing past it. Five earlier attempts asked where the EXECUTOR sat
+ *        and each fell to a construction the last had not imagined — that
+ *        header records the whole sequence, because the lesson is that
+ *        enumerating shapes was the error, not the width of any one list.
  * 2. THE SDL PARSES. Imports `typeDefs` from
  *    `src/api/graphql/schema/typeDefs.ts` (the single SDL source) and runs
  *    `graphql.parse()` on it.
@@ -128,6 +133,17 @@ const TAGGED_OPEN =
  * correct for `'it''s'`, and it degrades to a LOUD false positive rather than a
  * silent miss in any case it gets wrong, which is the right way round here.
  */
+/**
+ * The rest of a closing backtick's line, for a REAL terminator.
+ *
+ * A template literal is an expression, so its true closer is followed by
+ * whatever consumed it and nothing else: `;` here, or `,` / `)` / `]` / `}`,
+ * plus an optional trailing `//`. ONE definition, used by the SDL scanner's
+ * shape test and by the #1110 re-pair arm — two copies of this would drift, and
+ * the second one is what a future reader would edit.
+ */
+const CLOSES_AN_EXPRESSION = /^[\s;,)\]}]*(\/\/.*)?$/;
+
 function hasLineComment(prefix, marker) {
   let quoted = false;
   for (let k = 0; k < prefix.length; k += 1) {
@@ -294,7 +310,7 @@ export function findBrokenLiterals(file, text, opts = {}) {
     // separate syntax from prose that begins like it, however many characters
     // it inspects, so the whole line is the unit (findings, #1032).
     const afterClose = text.slice(i + 1, lineEnd === -1 ? text.length : lineEnd);
-    const closesAnExpression = /^[\s;,)\]}]*(\/\/.*)?$/.test(afterClose);
+    const closesAnExpression = CLOSES_AN_EXPRESSION.test(afterClose);
     // Computed before the verdict because it IS part of the verdict now, not
     // only part of the message.
     //
@@ -414,26 +430,91 @@ function isRawSqlTag(node) {
 }
 
 /**
- * NOT IMPLEMENTED HERE, deliberately: detecting a literal whose stray backticks
- * RE-PAIR into valid TypeScript. Tracked as #1110.
+ * Does this raw-SQL literal CLOSE inside one of its own `--` comments? (#1110)
  *
- * The parser arm above catches every break that leaves the file unparseable,
- * which is the incident #1087 was filed for and the overwhelming majority. It
- * cannot catch a break that happens to re-pair, because nothing is wrong with
- * the TypeScript — and four attempts at an AST rule for that each fell to a
- * construction the previous one had not imagined (`&&`, a conditional, a
- * conditional's TEST, a tail owned by a tag the comment named, an array
- * element). The fifth, a positional "no literal beside an executor's own",
- * finally produced a FALSE POSITIVE on ordinary code:
+ * The re-pair case, and the arm that five earlier attempts could not build. A
+ * stray backtick whose remainder happens to re-pair leaves the file PARSEABLE,
+ * so the diagnostic arm above is blind to it:
+ *
+ *   db.$executeRaw`UPDATE u SET a = false -- use `&&` for overlap
+ *   WHERE id = ${id}`;
+ *
+ * is `taggedTemplate && templateExpression` — valid TypeScript, `WHERE` gone,
+ * and the truncated UPDATE still runs.
+ *
+ * WHY THE EARLIER ATTEMPTS FAILED, since the difference is the whole point.
+ * Each asked where the EXECUTOR sat: an operand of `&&`, a branch of a
+ * conditional, an unowned tail, a parent shape, "no literal beside its own".
+ * Every one of those names the SHAPES a re-pair can take, so every one was
+ * shown a shape it lacked — a conditional, then the conditional's TEST, then a
+ * tail owned by a tag the comment named, then an array element — until the
+ * fifth finally flagged ordinary code and had to come out:
  *
  *   await Promise.all([db.$queryRaw`SELECT 1`, db.$queryRaw`SELECT 2`])
  *
- * Two legitimate queries in one statement, both flagged. **A gate that blocks
- * valid code gets switched off, which costs more than the gap it was closing** —
- * so the arm is removed rather than tightened a sixth time. #1110 records every
- * construction found, so whoever takes it starts from the evidence instead of
- * from a fresh guess.
+ * A gate that blocks valid code gets switched off, which costs more than the
+ * gap it closes. Enumerating shapes was the error, not the width of any
+ * particular enumeration.
+ *
+ * WHAT THIS ASKS INSTEAD is a property of the literal alone, with no reference
+ * to what encloses it: **a SQL line comment runs to end-of-line, so nothing can
+ * legitimately close a literal after `--` on that line.** Where the executor
+ * sits, what consumed it, and what the remainder re-paired into are all
+ * irrelevant — which is exactly why no construction defeats it. It is also not
+ * a new idea: it is the same predicate `findBrokenLiterals` already applies to
+ * SDL (`#`) and the parse-failure path already names for SQL. It had simply
+ * never been run over files that PARSE.
+ *
+ * Measured before it was written, over the real corpus: 105 raw-SQL literals
+ * examined, **0 flagged**. Against the constructions #1110 recorded: the `&&`
+ * head case, the tag-owned tail, the array element, and the backtick pair
+ * enclosing a semicolon (which no previous version reached at all) are all
+ * caught; the two conditional shapes leave the file unparseable and belong to
+ * the arm above. `Promise.all` with two real queries, a nested `Prisma.sql`
+ * fragment, `SELECT '--'`, an escaped backtick in a comment, and a comment on a
+ * line the literal does not close on all stay silent.
+ *
+ * `hasLineComment` is quote-aware, so `SELECT '--'` is a string and not a
+ * comment — the distinction that makes this safe rather than merely narrow.
+ *
+ * NOT a SQL parser and NOT an ESLint rule, the two options #1110 proposed and
+ * flagged as technology decisions. Neither is needed: the invariant is lexical,
+ * and the helper for it was already in this file.
  */
+function closesInsideSqlComment(node, text, source) {
+  // The template's last character is its closing backtick — true for both a
+  // NoSubstitutionTemplateLiteral and a TemplateExpression with `${}` spans, so
+  // interpolation needs no special handling here.
+  const closeIndex = node.template.end - 1;
+  if (text[closeIndex] !== '`') return null;
+  // Bounded by the literal's own body, so a `--` in the JS BEFORE the tag (a
+  // decrement, a comment about the query) can never be read as SQL's.
+  const bodyStart = node.template.getStart(source) + 1;
+  const lineStart = text.lastIndexOf('\n', closeIndex) + 1;
+  const prefix = text.slice(Math.max(lineStart, bodyStart), closeIndex);
+  if (!hasLineComment(prefix, '--')) return null;
+
+  // BOTH halves are required, and the second is not a tightening bolted on — it
+  // is what separates the hazard from its legitimate twin (@codex P2 on #1109,
+  // which this arm re-broke and which the existing test caught):
+  //
+  //   db.$queryRaw`SELECT 1 -- explanation`;
+  //
+  // closes INSIDE a comment and is perfectly correct — the comment simply runs
+  // to the end of the query. So "closes after `--`" alone is over-broad, and
+  // shipping it would have flagged ordinary code, which is precisely how the
+  // five earlier attempts died.
+  //
+  // What distinguishes them is what FOLLOWS the close. A real terminator is
+  // followed by whatever consumed the expression and nothing else; a severed
+  // literal is followed by the rest of the SQL, now re-paired into TypeScript
+  // (`&&`, another literal, a fresh statement). The comment establishes that
+  // the backtick sits somewhere no deliberate terminator can; the tail
+  // establishes that the query did not end there.
+  const lineEnd = text.indexOf('\n', closeIndex);
+  const afterClose = text.slice(closeIndex + 1, lineEnd === -1 ? text.length : lineEnd);
+  return CLOSES_AN_EXPRESSION.test(afterClose) ? null : closeIndex;
+}
 
 
 
@@ -555,14 +636,32 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
     }
 
     // Parsed clean. Count the tagged literals so an empty scan cannot read as
-    // a clean one, and do nothing else — re-pair detection is out of scope
-    // here and tracked as #1110 (see the note above this function). This
-    // comment previously described an AST check that no longer exists, three
-    // commits after the check was removed: the same prose-outliving-its-
-    // mechanism defect this whole PR is about, for the third time in it.
+    // a clean one — and check each for the RE-PAIR case (#1110), which by
+    // definition only occurs in files that parse.
     const visit = (node) => {
       if (isRawSqlTag(node)) {
         documents += 1;
+        const closeIndex = closesInsideSqlComment(node, text, source);
+        if (closeIndex !== null) {
+          const lineEnd = text.indexOf('\n', closeIndex);
+          const line = text.slice(
+            text.lastIndexOf('\n', closeIndex) + 1,
+            lineEnd === -1 ? text.length : lineEnd,
+          );
+          offenders.push({
+            name: file,
+            file,
+            line: lineOf(text, closeIndex),
+            errors: [
+              'a backtick in this -- comment ends the raw-SQL template literal early,',
+              'and the rest re-paired into valid TypeScript — so nothing fails to',
+              'compile and the TRUNCATED query still runs. Everything below this',
+              'point left the SQL. Escape it (\\`), use single quotes, or spell the',
+              'symbol out.',
+              `    ${line.trim()}`,
+            ],
+          });
+        }
       }
       ts.forEachChild(node, visit);
     };
