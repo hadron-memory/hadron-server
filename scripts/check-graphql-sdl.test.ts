@@ -411,15 +411,64 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(offenders[0].line).toBe(2);
   });
 
-  it('does NOT fire on a valid query ENDING in a line comment (@codex P2, #1109)', () => {
-    // The false POSITIVE that finally showed the heuristic approach was wrong:
-    // here the backtick IS the terminator and the SQL comment simply runs to
-    // the end of the literal. Ordinary code, flagged as broken.
+  it('DOES fire on a valid query ending in a line comment — the shape is banned (#1110)', () => {
+    // EXPECTATION INVERTED, and deliberately: @Holger's ruling (2026-09-03).
+    //
+    // This was @codex's P2 on #1109 and it is genuinely valid code — the
+    // backtick IS the terminator and the SQL comment simply runs to the end of
+    // the literal. It is refused anyway, because separating this from the
+    // identical-looking broken shape is what six attempts could not do: the
+    // version that tried (a second "the query continues past the close"
+    // condition) was broken from BOTH sides in one review — an end-of-line
+    // backtick passed silently, and `…-- explanation`.then(…)` was flagged.
+    //
+    // So the shape is banned rather than diagnosed. It costs this idiom; the
+    // fix is one line (move the comment up, or close on the next line), and it
+    // occurs 0 times in the 105 raw-SQL literals here.
     const src = lines(
       'const a = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- explanation' + BACKTICK + ';',
       '',
     );
-    expect(scanFiles({ 'a.ts': src }).offenders).toEqual([]);
+    const { offenders } = scanFiles({ 'a.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].errors.join(' ')).toMatch(/CLOSES on a line carrying a -- comment/);
+  });
+
+  it('#1110: catches a stray backtick at END of its comment line (@codex P2, #1131)', () => {
+    // The false NEGATIVE that killed the "query continues past the close"
+    // condition: with the backtick last on its line the tail is EMPTY, which
+    // that condition read as a clean close while the re-paired continuation sat
+    // on the next line. No tail is consulted now.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET a = false -- use ' + BACKTICK,
+      '&& ' + BACKTICK + 'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: an interpolated apostrophe cannot hide the comment (@codex P2, #1131)', () => {
+    // Reading the RAW source dragged each `${…}`'s TypeScript through a scanner
+    // that tracks `'` to tell a SQL string from a comment, so `${"'"}` toggled
+    // the quote state and hid the `--` behind it. The cooked segments are read
+    // instead, with spans replaced by `?` — which is what the database receives.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET n = ${"\'"} -- x ' +
+        BACKTICK + '&&' + BACKTICK + ' y',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on an interpolation with no comment at all', () => {
+    // The control for the `?` substitution: replacing spans must not invent a
+    // comment where the SQL has none.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT ${id} FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
   });
 
   it('FAILS on a backtick inside a /* block */ comment (@codex P2, #1109)', () => {
@@ -512,7 +561,11 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     const { offenders } = scanFiles({ 'g.ts': src });
     expect(offenders).toHaveLength(1);
     expect(offenders[0].line).toBe(1);
-    expect(offenders[0].errors.join(' ')).toMatch(/re-paired into valid TypeScript/);
+    // The message has to name the RE-PAIR, because that is the part a reader
+    // will not believe: the file compiles, so "broken literal" sounds wrong
+    // until you are told the truncated query still runs.
+    expect(offenders[0].errors.join(' ')).toMatch(/re-pair into valid\s+TypeScript/);
+    expect(offenders[0].errors.join(' ')).toMatch(/TRUNCATED/);
   });
 
   it('#1110: catches a tail owned by a tag the comment NAMED', () => {

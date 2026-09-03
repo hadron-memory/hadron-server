@@ -133,17 +133,6 @@ const TAGGED_OPEN =
  * correct for `'it''s'`, and it degrades to a LOUD false positive rather than a
  * silent miss in any case it gets wrong, which is the right way round here.
  */
-/**
- * The rest of a closing backtick's line, for a REAL terminator.
- *
- * A template literal is an expression, so its true closer is followed by
- * whatever consumed it and nothing else: `;` here, or `,` / `)` / `]` / `}`,
- * plus an optional trailing `//`. ONE definition, used by the SDL scanner's
- * shape test and by the #1110 re-pair arm — two copies of this would drift, and
- * the second one is what a future reader would edit.
- */
-const CLOSES_AN_EXPRESSION = /^[\s;,)\]}]*(\/\/.*)?$/;
-
 function hasLineComment(prefix, marker) {
   let quoted = false;
   for (let k = 0; k < prefix.length; k += 1) {
@@ -310,7 +299,7 @@ export function findBrokenLiterals(file, text, opts = {}) {
     // separate syntax from prose that begins like it, however many characters
     // it inspects, so the whole line is the unit (findings, #1032).
     const afterClose = text.slice(i + 1, lineEnd === -1 ? text.length : lineEnd);
-    const closesAnExpression = CLOSES_AN_EXPRESSION.test(afterClose);
+    const closesAnExpression = /^[\s;,)\]}]*(\/\/.*)?$/.test(afterClose);
     // Computed before the verdict because it IS part of the verdict now, not
     // only part of the message.
     //
@@ -456,64 +445,79 @@ function isRawSqlTag(node) {
  * gap it closes. Enumerating shapes was the error, not the width of any
  * particular enumeration.
  *
- * WHAT THIS ASKS INSTEAD is a property of the literal alone, with no reference
- * to what encloses it: **a SQL line comment runs to end-of-line, so nothing can
- * legitimately close a literal after `--` on that line.** Where the executor
- * sits, what consumed it, and what the remainder re-paired into are all
- * irrelevant — which is exactly why no construction defeats it. It is also not
- * a new idea: it is the same predicate `findBrokenLiterals` already applies to
- * SDL (`#`) and the parse-failure path already names for SQL. It had simply
- * never been run over files that PARSE.
+ * WHAT THIS ASKS INSTEAD is one property of the literal alone, with no
+ * reference to what encloses it: **does it close on a line whose SQL contains a
+ * `--` comment.** Where the executor sits, what consumed it, and what the
+ * remainder re-paired into are all irrelevant — which is why no construction
+ * defeats it.
  *
- * Measured before it was written, over the real corpus: 105 raw-SQL literals
- * examined, **0 flagged**. Against the constructions #1110 recorded: the `&&`
- * head case, the tag-owned tail, the array element, and the backtick pair
- * enclosing a semicolon (which no previous version reached at all) are all
- * caught; the two conditional shapes leave the file unparseable and belong to
- * the arm above. `Promise.all` with two real queries, a nested `Prisma.sql`
- * fragment, `SELECT '--'`, an escaped backtick in a comment, and a comment on a
- * line the literal does not close on all stay silent.
+ * THE RULE IS DELIBERATELY A BAN, NOT A DIAGNOSIS, and that was @Holger's call
+ * (2026-09-03) after a first version tried to be clever. That version added a
+ * second condition — the query must also continue past the close — so that the
+ * legitimate `` `SELECT 1 -- explanation` `` kept working. @codex broke it from
+ * BOTH sides within one review: a stray backtick at end-of-line left an empty
+ * tail and passed (false negative), while a valid query ending in a comment and
+ * followed by `.then(…)` or `as T` was flagged (false positive on valid code).
+ * Repairing that means modelling TypeScript continuations in a text scanner —
+ * the exact trap this file's SDL half already documents, and the one that
+ * killed five attempts.
+ *
+ * So the shape is banned outright: **do not end a raw-SQL literal on a comment
+ * line.** It costs one valid idiom, which is worth stating plainly rather than
+ * pretending away — but that idiom is one keystroke from the bug, the fix is to
+ * move the comment up a line or close on the next one, and it appears **0
+ * times in 105 raw-SQL literals** here. Making the hazardous shape
+ * unrepresentable is cheaper and more honest than telling its safe instances
+ * from its unsafe ones, which is what nobody managed six times running.
+ *
+ * Against the constructions #1110 recorded: the `&&` head case, the tag-owned
+ * tail, the array element, and the backtick pair enclosing a semicolon (which
+ * no previous version reached at all) are caught; the two conditional shapes
+ * leave the file unparseable and belong to the arm above. `Promise.all` with
+ * two real queries, a nested `Prisma.sql` fragment, `SELECT '--'`, an escaped
+ * backtick in a comment, and a comment on a line the literal does not close on
+ * all stay silent.
  *
  * `hasLineComment` is quote-aware, so `SELECT '--'` is a string and not a
- * comment — the distinction that makes this safe rather than merely narrow.
+ * comment — the distinction that keeps this a ban on one shape rather than on
+ * every line containing two dashes.
  *
  * NOT a SQL parser and NOT an ESLint rule, the two options #1110 proposed and
  * flagged as technology decisions. Neither is needed: the invariant is lexical,
  * and the helper for it was already in this file.
  */
-function closesInsideSqlComment(node, text, source) {
+function closesInsideSqlComment(node, text) {
   // The template's last character is its closing backtick — true for both a
-  // NoSubstitutionTemplateLiteral and a TemplateExpression with `${}` spans, so
-  // interpolation needs no special handling here.
+  // NoSubstitutionTemplateLiteral and a TemplateExpression with `${}` spans.
   const closeIndex = node.template.end - 1;
   if (text[closeIndex] !== '`') return null;
-  // Bounded by the literal's own body, so a `--` in the JS BEFORE the tag (a
-  // decrement, a comment about the query) can never be read as SQL's.
-  const bodyStart = node.template.getStart(source) + 1;
-  const lineStart = text.lastIndexOf('\n', closeIndex) + 1;
-  const prefix = text.slice(Math.max(lineStart, bodyStart), closeIndex);
-  if (!hasLineComment(prefix, '--')) return null;
+  return hasLineComment(lastSqlLine(node.template), '--') ? closeIndex : null;
+}
 
-  // BOTH halves are required, and the second is not a tightening bolted on — it
-  // is what separates the hazard from its legitimate twin (@codex P2 on #1109,
-  // which this arm re-broke and which the existing test caught):
-  //
-  //   db.$queryRaw`SELECT 1 -- explanation`;
-  //
-  // closes INSIDE a comment and is perfectly correct — the comment simply runs
-  // to the end of the query. So "closes after `--`" alone is over-broad, and
-  // shipping it would have flagged ordinary code, which is precisely how the
-  // five earlier attempts died.
-  //
-  // What distinguishes them is what FOLLOWS the close. A real terminator is
-  // followed by whatever consumed the expression and nothing else; a severed
-  // literal is followed by the rest of the SQL, now re-paired into TypeScript
-  // (`&&`, another literal, a fresh statement). The comment establishes that
-  // the backtick sits somewhere no deliberate terminator can; the tail
-  // establishes that the query did not end there.
-  const lineEnd = text.indexOf('\n', closeIndex);
-  const afterClose = text.slice(closeIndex + 1, lineEnd === -1 ? text.length : lineEnd);
-  return CLOSES_AN_EXPRESSION.test(afterClose) ? null : closeIndex;
+/**
+ * The SQL on a template's LAST line — its COOKED text, with `${}` spans
+ * replaced by `?`.
+ *
+ * Reading the raw source instead was wrong in a way worth recording, because it
+ * looked equivalent (PR #1131 review, @codex P2). `hasLineComment` tracks `'`
+ * to tell a SQL string from a comment, and raw source drags the embedded
+ * TypeScript of every interpolation through that scan — so `${"'"}` toggles the
+ * quote state and HIDES a real `--` behind it, turning a truncated query into a
+ * silent pass. Interpolations become bound parameters, never literal SQL, so
+ * they have no business being lexed as SQL at all.
+ *
+ * Cooked text also disposes of escapes for free: `` \` `` arrives as a plain
+ * backtick that terminated nothing, which is this repo's actual idiom for
+ * naming a column inside a comment.
+ */
+function lastSqlLine(template) {
+  const sql = ts.isNoSubstitutionTemplateLiteral(template)
+    ? template.text
+    : // `?` rather than the expression: a bound parameter is what the database
+      // receives, and it carries no quote or dash to confuse the scan.
+      template.head.text +
+      template.templateSpans.map((span) => `?${span.literal.text}`).join('');
+  return sql.slice(sql.lastIndexOf('\n') + 1);
 }
 
 
@@ -641,7 +645,7 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
     const visit = (node) => {
       if (isRawSqlTag(node)) {
         documents += 1;
-        const closeIndex = closesInsideSqlComment(node, text, source);
+        const closeIndex = closesInsideSqlComment(node, text);
         if (closeIndex !== null) {
           const lineEnd = text.indexOf('\n', closeIndex);
           const line = text.slice(
@@ -653,11 +657,16 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
             file,
             line: lineOf(text, closeIndex),
             errors: [
-              'a backtick in this -- comment ends the raw-SQL template literal early,',
-              'and the rest re-paired into valid TypeScript — so nothing fails to',
-              'compile and the TRUNCATED query still runs. Everything below this',
-              'point left the SQL. Escape it (\\`), use single quotes, or spell the',
-              'symbol out.',
+              'this raw-SQL template literal CLOSES on a line carrying a -- comment.',
+              'A SQL comment runs to end-of-line, so a bare backtick anywhere in it',
+              'ends the literal early — and the remainder can re-pair into valid',
+              'TypeScript, in which case nothing fails to compile and the TRUNCATED',
+              'query still runs.',
+              'Fix: move the comment up a line, or close the literal on the next',
+              'line. If the backtick is the problem, escape it (\\`) or spell the',
+              'symbol out. This shape is refused even when it happens to be safe —',
+              'telling the safe instances from the broken ones is what six attempts',
+              'could not do (#1110).',
               `    ${line.trim()}`,
             ],
           });
