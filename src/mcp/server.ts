@@ -3641,6 +3641,10 @@ export function createMcpServerInstance(
               description: description ?? null,
               abstract: storedAbstract,
               content: storedContent,
+              // #1127 review — every diff caller passes the newly-tracked
+              // field, same as objectType. An overwrite that only re-stamps
+              // the fingerprint is still a change to restorable state.
+              abstractOriginHash: nextAbstractOriginHash,
               seq,
               tags: tags ?? [],
               properties,
@@ -3904,31 +3908,19 @@ export function createMcpServerInstance(
       // Spec 032 — capture existing.abstractOriginHash so the revision
       // history round-trips the staleness signal. On an encrypted memory
       // `existing` still holds CIPHERTEXT here — revisions store the
-      // at-rest form, deliberately (the decrypt happens just below).
-      // #620 — shared builder: editedBy carries the user PK (when the MCP
-      // caller is a user token), `reason` rides in revLabel, and `changes`
-      // records the fields this update supplies with a different value.
-      await createNodeRevision(db, {
-        id: generateId(),
-        ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
-            revLabel: reason,
-            changes: diffNodeChanges(existing, {
-              name,
-              nodeType,
-              objectType,
-              isRunnable,
-              description,
-              abstract: normalizedAbstract,
-              content,
-              seq,
-              tags,
-              properties,
-              data: nodeData,
-              llmModel,
-              aiAgent,
-            }),
-          }),
-      }).catch(() => {});
+      // at-rest form, deliberately (the decrypt happens just below), so the
+      // AT-REST image is captured now and the row is written further down,
+      // once the abstractOriginHash matrix has run.
+      //
+      // #1127 review (@codex P2): the write is DEFERRED rather than done here
+      // because `changes` must be able to report `abstractOriginHash`, and
+      // that value does not exist until after the decrypt. Leaving it out is
+      // what made `abstractStillAccurate` used alone record an EMPTY `changes`
+      // on a revision that really did change restorable state — a suppression
+      // of a correctness check, invisible in history. Diffing still runs
+      // against this at-rest image, so nothing else about the comparison
+      // moves.
+      const preAtRest = { ...existing };
 
       // Spec 041 (PR-517 review, Codex P2): decrypt `existing` in place NOW
       // — everything below (the abstractOriginHash matrix, the embedding
@@ -3981,6 +3973,34 @@ export function createMcpServerInstance(
         const nextContent = content !== undefined ? content : existing.content;
         nextAbstractOriginHash = computeContentHash(nextContent ?? null);
       }
+
+      // #620 — shared builder: editedBy carries the user PK (when the MCP
+      // caller is a user token), `reason` rides in revLabel, and `changes`
+      // records the fields this update supplies with a different value.
+      // Written HERE (not before the decrypt) so `abstractOriginHash` can be
+      // part of that delta — see the preAtRest comment above.
+      await createNodeRevision(db, {
+        id: generateId(),
+        ...buildNodeRevisionSnapshot(preAtRest, editorFromAuth(auth), {
+            revLabel: reason,
+            changes: diffNodeChanges(preAtRest, {
+              name,
+              nodeType,
+              objectType,
+              isRunnable,
+              description,
+              abstract: normalizedAbstract,
+              content,
+              abstractOriginHash: nextAbstractOriginHash,
+              seq,
+              tags,
+              properties,
+              data: nodeData,
+              llmModel,
+              aiAgent,
+            }),
+          }),
+      }).catch(() => {});
 
       // Build partial update — only fields that were provided
       const data: Record<string, unknown> = {};

@@ -377,6 +377,27 @@ describe('hadron_update_node — abstractStillAccurate (#1126)', () => {
     expect(await readNode('race2', 'all')).not.toContain('Source: abstract-stale');
   });
 
+  it('records the suppression in revision history — `changes` names the hash', async () => {
+    // PR #1127 review, @codex P2. Used alone, the flag changes restorable
+    // state (abstractOriginHash) and nothing else — so before this fix the
+    // revision recorded an EMPTY `changes`, and the one operation in this
+    // tool that suppresses a correctness check was the one operation
+    // invisible in history. Exactly the objectType defect from PR #977,
+    // which is why `abstractOriginHash` now joins TRACKED_NODE_FIELDS.
+    await addNode({ loc: 'rev1', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'rev1', content: "Y'" }); // arms the marker
+    const node = await readRow('rev1');
+
+    await updateNode({ loc: 'rev1', abstractStillAccurate: true });
+
+    const revs = await db.nodeRevision.findMany({
+      where: { nodeId: node!.id },
+      orderBy: { createdAt: 'desc' },
+      select: { changes: true },
+    });
+    expect(revs[0]?.changes).toContain('abstractOriginHash');
+  });
+
   it('#1128 — but asserting on such a node still mints no ghost hash', async () => {
     // The guard has to hold on this path too: the node HAS an abstract, so
     // hasStoredAbstract is true, and the hash comes from the new content.
