@@ -582,6 +582,36 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'c.ts': c }).offenders).toEqual([]);
   });
 
+  it('#1110: a dollar-quote TAG may contain digits (@copilot, #1131)', () => {
+    // `$fn1$` is a legal delimiter. Excluding digits left its body unskipped,
+    // so the `--` inside was read as a real comment that then ran to the close.
+    //
+    // The fixture is deliberately free of apostrophes: my first version used
+    // `owner's` inside the body, and an UNTERMINATED string swallowed the rest
+    // either way — so the test passed with the digit support removed. It proved
+    // nothing until the mutation said so.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'DO $fn1$ x -- y $fn1$' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: `owner$tag$` is an IDENTIFIER, not a dollar-quote (@codex P2, #1131)', () => {
+    // Postgres allows `$` inside unquoted identifiers, so a legal column name
+    // can contain a perfect `$tag$` that opens nothing. Treating it as a
+    // delimiter entered a body with no close, ran to the end of the literal,
+    // and swallowed the real `--` — a silent pass on a truncated query. A real
+    // dollar-quote cannot directly follow an identifier character.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE t SET owner$tag$ = 1 -- use ' +
+        BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
   it('#1110: silent on an interpolation with no comment at all', () => {
     // The control for the `?` substitution: replacing spans must not invent a
     // comment where the SQL has none.

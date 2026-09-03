@@ -599,7 +599,7 @@ function endsInsideLineComment(sql) {
         else if (sql.startsWith('*/', k)) { depth -= 1; k += 2; }
         else k += 1;
       }
-    } else if (DOLLAR_TAG.test(sql.slice(k))) {
+    } else if (isDollarQuoteAt(sql, k)) {
       const tag = sql.slice(k).match(DOLLAR_TAG)[0];
       const close = sql.indexOf(tag, k + tag.length);
       k = close === -1 ? sql.length : close + tag.length;
@@ -613,8 +613,33 @@ function endsInsideLineComment(sql) {
   return inComment;
 }
 
-/** A dollar-quote delimiter: `$$` or `$tag$`, anchored at the scan position. */
-const DOLLAR_TAG = /^\$[A-Za-z_]*\$/;
+/**
+ * A dollar-quote delimiter: `$$` or `$tag$`, anchored at the scan position.
+ *
+ * The tag follows Postgres identifier rules — a letter or underscore, then
+ * letters, DIGITS or underscores. The digits matter: `$tag1$` is legal, and
+ * omitting them left its body unskipped (PR #1131 review, @copilot).
+ */
+const DOLLAR_TAG = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/;
+
+/**
+ * Is position `k` the START of a dollar-quoted string?
+ *
+ * The delimiter alone is not enough, because Postgres permits `$` INSIDE an
+ * unquoted identifier — so a legal column like `owner$tag$` contains a perfect
+ * `$tag$` that opens nothing (PR #1131 review, @codex P2). Treating it as a
+ * delimiter enters a body with no close, runs the scan to the end of the
+ * literal, and swallows a later real `--` — a silent pass on a truncated query.
+ *
+ * A real dollar-quote therefore cannot directly follow an identifier character.
+ * Both bots landed on this one line from opposite sides in the same round —
+ * @copilot that the tag was too NARROW, @codex that the boundary was too WIDE —
+ * and it needed both to be right.
+ */
+function isDollarQuoteAt(sql, k) {
+  if (/[\w$]/.test(sql[k - 1] ?? ' ')) return false;
+  return DOLLAR_TAG.test(sql.slice(k));
+}
 
 
 
