@@ -3641,9 +3641,17 @@ export function createMcpServerInstance(
               description: description ?? null,
               abstract: storedAbstract,
               content: storedContent,
-              // #1127 review — every diff caller passes the newly-tracked
-              // field, same as objectType. An overwrite that only re-stamps
-              // the fingerprint is still a change to restorable state.
+              // #1127 review — an overwrite that only re-stamps the
+              // fingerprint is still a change to restorable state, so this
+              // snapshot reports it. NOT every diff caller passes this field
+              // (@copilot, same review): the move paths omit it because a move
+              // cannot change the hash, `restoreNodeRevision` already carries
+              // it via restorableNodeFields, and the GraphQL upsert computes
+              // its hash AFTER its diff — the same ordering this tool had. That
+              // last one is a cosmetic omission rather than the defect fixed
+              // here: with no `abstractStillAccurate` on that surface, a hash
+              // change always rides along with an abstract or content change
+              // the diff already names, so `changes` is never empty there.
               abstractOriginHash: nextAbstractOriginHash,
               seq,
               tags: tags ?? [],
