@@ -22,12 +22,12 @@
  *        and never says "unterminated literal";
  *      - it RE-PAIRS into valid TypeScript, so the parser has no complaint at
  *        all and the truncated query still runs. Caught by
- *        `closesInsideSqlComment` (#1110), which asks only about the literal
- *        itself: did it close after a `--` on its line, with the query
- *        continuing past it. Five earlier attempts asked where the EXECUTOR sat
- *        and each fell to a construction the last had not imagined — that
- *        header records the whole sequence, because the lesson is that
- *        enumerating shapes was the error, not the width of any one list.
+ *        `closesInsideSqlComment` (#1110), which asks one question about the
+ *        literal itself: does its SQL END inside a `--` comment. Nothing about
+ *        the surrounding expression is consulted. The shape is BANNED rather
+ *        than diagnosed — a valid query whose comment simply runs to the close
+ *        is refused too — because six attempts at telling those apart all
+ *        failed; that function's header records the sequence and the ruling.
  * 2. THE SDL PARSES. Imports `typeDefs` from
  *    `src/api/graphql/schema/typeDefs.ts` (the single SDL source) and runs
  *    `graphql.parse()` on it.
@@ -549,19 +549,32 @@ function cookedSql(template) {
  * the direction a gate must never fail. Documented limitations deserve the same
  * "which way does it fail" check as code.
  *
- * Handled: `'…'` strings (with `''` doubling), `"…"` identifiers (with `""`),
- * and `E'…'` escape strings, where a backslash escapes the next character.
+ * EVERY Postgres context that can carry a quote or a dash is skipped, not just
+ * the ones that had bitten yet. Rounds three, four and five of this review were
+ * each "you missed another context" (`"…"` identifiers, then `/* … *\/` blocks,
+ * then dollar-quoting), and answering them one at a time was inviting a sixth.
+ * So: `'…'` (with `''`), `E'…'` (backslash escapes), `"…"` (with `""`),
+ * `/* … *\/` — which NESTS in Postgres, unlike C — and `$tag$ … $tag$`.
  *
- * NOT handled: dollar-quoting (`$tag$ … $tag$`), which appears 0 times here (as
- * do `E'` strings — that one is covered anyway because it was free). A `--`
- * inside a dollar-quoted body would be read as a comment and the literal
- * REFUSED — loud, with a one-line fix — and an unterminated quote runs to the
- * end and reports nothing, which is a silent pass but only on SQL that is
- * already malformed.
+ * The remaining limit, stated in BOTH directions because the last version of
+ * this note only gave the flattering one: an UNTERMINATED quote or block runs
+ * to the end of the literal and reports nothing. That is a silent pass, but
+ * only on SQL that is already malformed — and such a literal cannot have closed
+ * where its author intended either, so the parse arm or `tsc` gets it first.
  */
 function endsInsideLineComment(sql) {
   let inComment = false;
   let k = 0;
+  /** Advance past a delimited run, honouring a doubled delimiter as an escape. */
+  const skipQuoted = (delim, backslashEscapes) => {
+    k += 1;
+    while (k < sql.length) {
+      if (backslashEscapes && sql[k] === '\\') k += 2;
+      else if (sql[k] !== delim) k += 1;
+      else if (sql[k + 1] === delim) k += 2;
+      else return void (k += 1);
+    }
+  };
   while (k < sql.length) {
     const ch = sql[k];
     if (ch === '\n') {
@@ -569,17 +582,27 @@ function endsInsideLineComment(sql) {
       k += 1;
     } else if (inComment) {
       k += 1;
-    } else if (ch === "'" || ch === '"') {
-      // `E'…'` (or `e'…'`) gives backslash its C-style escaping meaning; a
-      // plain string does not, and doubling the delimiter escapes it in both.
-      const escapes = ch === "'" && /[Ee]/.test(sql[k - 1] ?? '') && !/[\w$]/.test(sql[k - 2] ?? ' ');
-      k += 1;
-      while (k < sql.length) {
-        if (escapes && sql[k] === '\\') k += 2;
-        else if (sql[k] !== ch) k += 1;
-        else if (sql[k + 1] === ch) k += 2;
-        else { k += 1; break; }
+    } else if (ch === "'") {
+      // `E'…'` / `e'…'` gives backslash its C-style meaning; a plain string
+      // does not. The preceding character must be a standalone E, not the tail
+      // of an identifier like `TABLE'…'`.
+      skipQuoted("'", /[Ee]/.test(sql[k - 1] ?? '') && !/[\w$]/.test(sql[k - 2] ?? ' '));
+    } else if (ch === '"') {
+      skipQuoted('"', false);
+    } else if (sql.startsWith('/*', k)) {
+      // Postgres block comments NEST, so a depth counter is required rather
+      // than a scan to the first `*/`.
+      let depth = 1;
+      k += 2;
+      while (k < sql.length && depth > 0) {
+        if (sql.startsWith('/*', k)) { depth += 1; k += 2; }
+        else if (sql.startsWith('*/', k)) { depth -= 1; k += 2; }
+        else k += 1;
       }
+    } else if (DOLLAR_TAG.test(sql.slice(k))) {
+      const tag = sql.slice(k).match(DOLLAR_TAG)[0];
+      const close = sql.indexOf(tag, k + tag.length);
+      k = close === -1 ? sql.length : close + tag.length;
     } else if (sql.startsWith('--', k)) {
       inComment = true;
       k += 2;
@@ -589,6 +612,9 @@ function endsInsideLineComment(sql) {
   }
   return inComment;
 }
+
+/** A dollar-quote delimiter: `$$` or `$tag$`, anchored at the scan position. */
+const DOLLAR_TAG = /^\$[A-Za-z_]*\$/;
 
 
 

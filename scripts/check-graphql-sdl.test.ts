@@ -530,6 +530,58 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
   });
 
+  it('#1110: an apostrophe in a /* block comment */ cannot hide the -- (@codex P2, #1131)', () => {
+    // Round five of the same shape: a context whose contents were being lexed
+    // as SQL. Every Postgres context that can carry a quote or a dash is now
+    // skipped whole, rather than adding them one review round at a time.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK +
+        "UPDATE t /* owner's note */ SET a = 1 -- use " + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: block comments NEST, unlike C', () => {
+    // Postgres nests `/* */`, so scanning to the first `*/` would leave the
+    // walk inside the comment and mis-read everything after it.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK +
+        "UPDATE t /* a /* b */ owner's */ SET a = 1 -- use " + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: an apostrophe in a $$ dollar-quoted body cannot hide the --', () => {
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK +
+        "DO $$ BEGIN owner's END $$ -- use " + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a block comment / dollar body with no line comment', () => {
+    // The controls: skipping a context must not INVENT a line comment, and a
+    // `--` INSIDE a block comment is not one either.
+    const a = lines(
+      'const q = await db.$queryRaw' + BACKTICK + "SELECT 1 /* owner's note */ FROM t" + BACKTICK + ';',
+      '',
+    );
+    const b = lines('const q = await db.$queryRaw' + BACKTICK + "DO $$ owner's $$" + BACKTICK + ';', '');
+    const c = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 /* -- not a line comment */ FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'a.ts': a }).offenders).toEqual([]);
+    expect(scanFiles({ 'b.ts': b }).offenders).toEqual([]);
+    expect(scanFiles({ 'c.ts': c }).offenders).toEqual([]);
+  });
+
   it('#1110: silent on an interpolation with no comment at all', () => {
     // The control for the `?` substitution: replacing spans must not invent a
     // comment where the SQL has none.
