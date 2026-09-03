@@ -105,6 +105,7 @@ async function updateNode(args: {
   abstract?: string | null;
   content?: string | null;
   name?: string;
+  abstractStillAccurate?: boolean;
 }) {
   const srv = createTestableMcpServer(adminAuth());
   const params: Record<string, unknown> = {
@@ -113,6 +114,9 @@ async function updateNode(args: {
   if ('abstract' in args) params.abstract = args.abstract;
   if ('content' in args) params.content = args.content;
   if (args.name !== undefined) params.name = args.name;
+  if (args.abstractStillAccurate !== undefined) {
+    params.abstractStillAccurate = args.abstractStillAccurate;
+  }
   return srv.callToolText('hadron_update_node', params);
 }
 
@@ -233,6 +237,87 @@ describe('hadron_update_node — abstractOriginHash 9-row matrix', () => {
 });
 
 // ─── NodeRevision snapshots capture the hash ────────────────────────────
+
+// ─── #1126: abstractStillAccurate — the caller's assertion ───────────────────
+
+describe('hadron_update_node — abstractStillAccurate (#1126)', () => {
+  it('re-fingerprints the EXISTING abstract against the new content', async () => {
+    await addNode({ loc: 'asa1', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa1', content: "Y'", abstractStillAccurate: true });
+    const row = await readRow('asa1');
+    expect(row?.abstractOriginHash).toBe(computeContentHash("Y'"));
+    // It asserts, it does not author: the abstract text is untouched.
+    expect(row?.abstract).toBe('X');
+  });
+
+  it('clears the marker a reader would otherwise see — the observable claim', async () => {
+    // The column is the mechanism; this is the behaviour the flag exists for,
+    // and the one a refactor could break while the hash test still passed.
+    await addNode({ loc: 'asa2', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa2', content: "Y'", abstractStillAccurate: true });
+    expect(await readNode('asa2', 'all')).not.toContain('Source: abstract-stale');
+  });
+
+  it('omitted still ARMS staleness — the default is unchanged', async () => {
+    // The paired negative. Without it, a bug that always re-fingerprints
+    // would pass every other test in this block.
+    await addNode({ loc: 'asa3', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa3', content: "Y'" });
+    expect(await readNode('asa3', 'all')).toContain('Source: abstract-stale');
+  });
+
+  it('false behaves exactly like omitted', async () => {
+    await addNode({ loc: 'asa4', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa4', content: "Y'", abstractStillAccurate: false });
+    const row = await readRow('asa4');
+    expect(row?.abstractOriginHash).toBe(computeContentHash('Y'));
+    expect(await readNode('asa4', 'all')).toContain('Source: abstract-stale');
+  });
+
+  it('does NOT mint a ghost hash on a node with no abstract (FR-006)', async () => {
+    // The guard that matters. An unguarded assertion would fingerprint an
+    // abstract that does not exist — a hash later reads compare against and
+    // quietly trust.
+    await addNode({ loc: 'asa5', content: 'Y' });
+    await updateNode({ loc: 'asa5', content: "Y'", abstractStillAccurate: true });
+    expect((await readRow('asa5'))?.abstractOriginHash).toBeNull();
+  });
+
+  it('treats a whitespace-only abstract as no abstract', async () => {
+    await addNode({ loc: 'asa6', abstract: '   ', content: 'Y' });
+    await updateNode({ loc: 'asa6', content: "Y'", abstractStillAccurate: true });
+    expect((await readRow('asa6'))?.abstractOriginHash).toBeNull();
+  });
+
+  it('re-affirms with NO content change — clears an already-armed marker', async () => {
+    // The review case: the abstract was right all along and the marker is
+    // the only thing to fix. Equivalent to re-saving the identical text.
+    await addNode({ loc: 'asa7', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa7', content: "Y'" });
+    expect(await readNode('asa7', 'all')).toContain('Source: abstract-stale');
+    await updateNode({ loc: 'asa7', abstractStillAccurate: true });
+    expect(await readNode('asa7', 'all')).not.toContain('Source: abstract-stale');
+  });
+
+  it('is ignored when `abstract` is also supplied (row 5 already covers it)', async () => {
+    await addNode({ loc: 'asa8', abstract: 'X', content: 'Y' });
+    await updateNode({
+      loc: 'asa8',
+      abstract: 'X2',
+      content: "Y'",
+      abstractStillAccurate: true,
+    });
+    const row = await readRow('asa8');
+    expect(row?.abstract).toBe('X2');
+    expect(row?.abstractOriginHash).toBe(computeContentHash("Y'"));
+  });
+
+  it('clearing content while asserting lands on FR-007 (no content ⇒ no hash)', async () => {
+    await addNode({ loc: 'asa9', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa9', content: null, abstractStillAccurate: true });
+    expect((await readRow('asa9'))?.abstractOriginHash).toBeNull();
+  });
+});
 
 describe('NodeRevision snapshots capture abstractOriginHash', () => {
   it('hadron_update_node snapshot captures existing.abstractOriginHash', async () => {
