@@ -675,6 +675,19 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
   });
 
+  it('#1110: a carriage return ends a SQL line comment too (@codex P2, #1131)', () => {
+    // Postgres terminates `--` at CR as well as LF. Handling only LF left this
+    // valid query marked as ending inside a comment and REFUSED — the loud
+    // direction, but a gate that rejects correct code is the one that gets
+    // switched off. The `\r` is COOKED, so it is a real carriage return in the
+    // SQL the database receives.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- explanation\\r, 2' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
   it('#1110: silent on an interpolation with no comment at all', () => {
     // The control for the `?` substitution: replacing spans must not invent a
     // comment where the SQL has none.

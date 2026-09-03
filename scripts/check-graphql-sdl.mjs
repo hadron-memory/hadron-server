@@ -578,7 +578,12 @@ function endsInsideLineComment(sql) {
   };
   while (k < sql.length) {
     const ch = sql[k];
-    if (ch === '\n') {
+    if (ch === '\n' || ch === '\r') {
+      // CR ends a line comment in Postgres too, and a cooked `\r` really can
+      // appear in one of these literals (@codex P2, #1131). Missing it left a
+      // valid query marked as ending inside a comment and REFUSED — the loud
+      // direction, but a gate that rejects correct code is the one that gets
+      // switched off.
       inComment = false;
       k += 1;
     } else if (inComment) {
