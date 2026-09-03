@@ -84,10 +84,20 @@ export function workerDbName(poolId: string | number, base = baseDbName()): stri
  * An explicit `connection_limit` already on TEST_DATABASE_URL wins — an
  * operator who set one meant it, and silently overriding it is how a knob stops
  * being a knob.
+ *
+ * But PRESENT is not the test; a non-empty VALUE is (PR #1125 review, Copilot).
+ * A trailing `?connection_limit=` — which is what `?connection_limit=$VAR`
+ * becomes with `$VAR` unset, i.e. how it actually reaches CI from a script —
+ * satisfies `has()` while meaning nothing. Deferring to it would hand the pool
+ * back to Prisma's unbounded default and present as the very flake this exists
+ * to remove. Same shape as hadron-cli's `an-empty-flag-is-not-an-absent-flag`:
+ * "did the caller set it?" and "did the caller set it to nothing?" are
+ * different questions and a presence check answers only the first.
  */
 export function workerDbUrl(poolId: string | number): string {
   const u = new URL(withDbName(baseTestDbUrl(), workerDbName(poolId)));
-  if (!u.searchParams.has('connection_limit')) {
+  const explicit = u.searchParams.get('connection_limit');
+  if (explicit === null || explicit.trim() === '') {
     u.searchParams.set('connection_limit', String(WORKER_CONNECTION_LIMIT));
   }
   return u.toString();
@@ -99,5 +109,11 @@ export function workerDbUrl(poolId: string | number): string {
  * database — the always-present `postgres` maintenance DB.
  */
 export function maintenanceUrl(): string {
-  return withDbName(baseTestDbUrl(), 'postgres');
+  const u = new URL(withDbName(baseTestDbUrl(), 'postgres'));
+  // Strip rather than merely not-adding (PR #1125 review, Copilot). This is a
+  // bare `pg.Client` that does not pool and does not read `connection_limit` —
+  // but it INHERITS whatever TEST_DATABASE_URL carries, so an operator who set
+  // the knob would leave a meaningless param here for somebody to later debug.
+  u.searchParams.delete('connection_limit');
+  return u.toString();
 }

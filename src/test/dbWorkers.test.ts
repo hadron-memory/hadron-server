@@ -9,7 +9,13 @@
  * different test, weeks later. Pin it where the reason is written down.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { workerDbUrl, workerDbName, baseDbName, maintenanceUrl } from './dbWorkers.js';
+import {
+  workerDbUrl,
+  workerDbName,
+  baseDbName,
+  maintenanceUrl,
+  WORKER_CONNECTION_LIMIT,
+} from './dbWorkers.js';
 
 const ORIGINAL = process.env.TEST_DATABASE_URL;
 
@@ -24,9 +30,23 @@ describe('workerDbUrl', () => {
     process.env.TEST_DATABASE_URL = 'postgresql://holger@localhost:5432/hadron_test';
     const u = new URL(workerDbUrl(3));
     expect(u.pathname).toBe('/hadron_test_3');
-    // The assertion that matters: without this param Prisma defaults to
-    // `cpus * 2 + 1` PER FORK, which is what oversubscribed Postgres.
-    expect(u.searchParams.get('connection_limit')).toBe('5');
+    // Asserted against the imported constant, NOT a hard-coded 5 (PR #1125
+    // review, Codex P2). Hard-coding it would make `HADRON_TEST_CONNECTION_LIMIT=9
+    // pnpm test` fail this test — so the override this PR advertises could not
+    // be used for a full run, which is the only run anyone would want it for.
+    // A test that forbids a documented knob is worse than no test.
+    expect(u.searchParams.get('connection_limit')).toBe(String(WORKER_CONNECTION_LIMIT));
+  });
+
+  it('treats a BLANK connection_limit as absent, not as an operator choice', () => {
+    // `?connection_limit=$VAR` with $VAR unset — how it actually arrives from a
+    // script. `has()` is true and the value means nothing; deferring to it hands
+    // the pool back to Prisma's unbounded default and reintroduces the flake.
+    process.env.TEST_DATABASE_URL =
+      'postgresql://holger@localhost:5432/hadron_test?connection_limit=';
+    expect(new URL(workerDbUrl(1)).searchParams.get('connection_limit')).toBe(
+      String(WORKER_CONNECTION_LIMIT),
+    );
   });
 
   it('does NOT override a connection_limit the operator set explicitly', () => {
@@ -42,6 +62,14 @@ describe('workerDbUrl', () => {
     const u = new URL(maintenanceUrl());
     expect(u.pathname).toBe('/postgres');
     expect(u.searchParams.has('connection_limit')).toBe(false);
+  });
+
+  it('STRIPS an inherited connection_limit from the maintenance URL', () => {
+    // The previous test passes trivially when the base URL never had one; this
+    // is the case that actually exercises the strip.
+    process.env.TEST_DATABASE_URL =
+      'postgresql://holger@localhost:5432/hadron_test?connection_limit=17';
+    expect(new URL(maintenanceUrl()).searchParams.has('connection_limit')).toBe(false);
   });
 
   it('derives the clone name from the base DB', () => {
