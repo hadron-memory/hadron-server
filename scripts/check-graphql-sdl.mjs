@@ -619,8 +619,15 @@ function endsInsideLineComment(sql) {
  * The tag follows Postgres identifier rules — a letter or underscore, then
  * letters, DIGITS or underscores. The digits matter: `$tag1$` is legal, and
  * omitting them left its body unskipped (PR #1131 review, @copilot).
+ *
+ * UNICODE letters, not ASCII: Postgres identifiers admit them, so `$é$` is a
+ * legal tag (@codex P2, same PR). An ASCII-only class fails to enter that body,
+ * and an unmatched apostrophe inside it — which is perfectly valid there — then
+ * reads as an unterminated string and hides the closing `--`. Written with
+ * `\p{L}` rather than by adding the letters somebody happened to name, since
+ * that is the mistake this arm has already made five times.
  */
-const DOLLAR_TAG = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/;
+const DOLLAR_TAG = /^\$(?:[\p{L}_][\p{L}\p{N}_]*)?\$/u;
 
 /**
  * Is position `k` the START of a dollar-quoted string?
@@ -637,7 +644,10 @@ const DOLLAR_TAG = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/;
  * and it needed both to be right.
  */
 function isDollarQuoteAt(sql, k) {
-  if (/[\w$]/.test(sql[k - 1] ?? ' ')) return false;
+  // Unicode-aware for the same reason as the tag itself: `café$t$` is one
+  // identifier, and an ASCII boundary test would read `$t$` in it as a
+  // delimiter.
+  if (/[\p{L}\p{N}_$]/u.test(sql[k - 1] ?? ' ')) return false;
   return DOLLAR_TAG.test(sql.slice(k));
 }
 

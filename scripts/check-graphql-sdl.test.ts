@@ -612,6 +612,44 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
   });
 
+  it('#1110: a dollar-quote tag may be NON-ASCII (@codex P2, #1131)', () => {
+    // Postgres identifiers admit unicode letters, so `$é$` is a legal tag. An
+    // ASCII-only class never entered that body, and an unmatched apostrophe
+    // inside it — valid there — then read as an unterminated string and hid the
+    // closing `--`. Written with `\p{L}` rather than by adding the letters
+    // somebody happened to name.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + "UPDATE t SET v = $é$owner's$é$ -- use " +
+        BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a non-ASCII dollar body carrying its own --', () => {
+    // The control: the body really is skipped, so a `--` inside it is not a
+    // line comment and the literal closes cleanly.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'UPDATE t SET v = $é$ x -- y $é$ WHERE id = 1' +
+        BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: a unicode identifier boundary is respected too', () => {
+    // `café$t$` is one identifier; an ASCII-only boundary test would read the
+    // `$t$` inside it as a delimiter and swallow the real comment.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE t SET café$t$ = 1 -- use ' +
+        BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
   it('#1110: silent on an interpolation with no comment at all', () => {
     // The control for the `?` substitution: replacing spans must not invent a
     // comment where the SQL has none.
