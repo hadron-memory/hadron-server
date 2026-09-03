@@ -172,9 +172,16 @@ describe('US4 — stale abstract-vector hits served + marked', () => {
     expect(out).not.toContain('Source: abstract-stale');
   });
 
-  it('legacy node (abstractOriginHash IS NULL): hit returned, marker suppressed', async () => {
-    // Spec 032's load-bearing legacy short-circuit — pre-spec rows have a null
-    // hash even when abstract + content are populated.
+  it('unfingerprinted node (abstractOriginHash IS NULL): hit returned AND marked (#1128)', async () => {
+    // EXPECTATION INVERTED by #1128 — the marker half only. The hit is still
+    // RETURNED, which is US4's actual subject: an unverified abstract is
+    // downranked in trust, never withheld.
+    //
+    // The old suppression was spec 032's legacy short-circuit, correct when
+    // every row predated the column. Production now has 2 unfingerprinted
+    // rows out of 1024 with abstract+content, and a search hit ranked BY its
+    // abstract is the place a reader most needs to know that abstract was
+    // never checked against the body.
     await seedEmbedded({
       loc: 'legacy-1',
       abstract: 'Older note.',
@@ -187,7 +194,7 @@ describe('US4 — stale abstract-vector hits served + marked', () => {
 
     const out = await findNodesVector('older');
     expect(out).toContain('legacy-1');
-    expect(out).not.toContain('Source: abstract-stale');
+    expect(out).toContain('Source: abstract-stale');
   });
 
   it('self-heal: after re-embed restamps abstractOriginHash, the marker disappears', async () => {
