@@ -491,33 +491,68 @@ function closesInsideSqlComment(node, text) {
   // NoSubstitutionTemplateLiteral and a TemplateExpression with `${}` spans.
   const closeIndex = node.template.end - 1;
   if (text[closeIndex] !== '`') return null;
-  return hasLineComment(lastSqlLine(node.template), '--') ? closeIndex : null;
+  return endsInsideLineComment(cookedSql(node.template)) ? closeIndex : null;
 }
 
 /**
- * The SQL on a template's LAST line — its COOKED text, with `${}` spans
- * replaced by `?`.
+ * A template's SQL as the DATABASE would see it: cooked text, with every
+ * `${…}` span replaced by `?`.
  *
  * Reading the raw source instead was wrong in a way worth recording, because it
- * looked equivalent (PR #1131 review, @codex P2). `hasLineComment` tracks `'`
- * to tell a SQL string from a comment, and raw source drags the embedded
- * TypeScript of every interpolation through that scan — so `${"'"}` toggles the
- * quote state and HIDES a real `--` behind it, turning a truncated query into a
- * silent pass. Interpolations become bound parameters, never literal SQL, so
- * they have no business being lexed as SQL at all.
+ * looked equivalent (PR #1131 review, @codex P2). The scan tracks `'` to tell a
+ * SQL string from a comment, and raw source drags the embedded TypeScript of
+ * every interpolation through it — so `${"'"}` toggles the quote state and
+ * HIDES a real `--` behind it, turning a truncated query into a silent pass.
+ * Interpolations become bound parameters, never literal SQL, so they have no
+ * business being lexed as SQL at all; `?` is what actually arrives, and it
+ * carries no quote or dash.
  *
  * Cooked text also disposes of escapes for free: `` \` `` arrives as a plain
- * backtick that terminated nothing, which is this repo's actual idiom for
- * naming a column inside a comment.
+ * backtick that terminated nothing, which is this repo's idiom for naming a
+ * column inside a comment.
  */
-function lastSqlLine(template) {
-  const sql = ts.isNoSubstitutionTemplateLiteral(template)
+function cookedSql(template) {
+  return ts.isNoSubstitutionTemplateLiteral(template)
     ? template.text
-    : // `?` rather than the expression: a bound parameter is what the database
-      // receives, and it carries no quote or dash to confuse the scan.
-      template.head.text +
-      template.templateSpans.map((span) => `?${span.literal.text}`).join('');
-  return sql.slice(sql.lastIndexOf('\n') + 1);
+    : template.head.text +
+        template.templateSpans.map((span) => `?${span.literal.text}`).join('');
+}
+
+/**
+ * Does this SQL END inside a `--` line comment?
+ *
+ * Scanned from the START of the literal rather than from its last line, and
+ * that is the whole point (PR #1131 review, @codex P2). A SQL string may SPAN
+ * lines:
+ *
+ *   UPDATE t SET a = 'hello
+ *   world' -- use `…`
+ *
+ * Starting at the final line meets that closing `'` first, reads it as an
+ * OPENING quote, and then treats the real `--` as quoted — hiding a truncated
+ * UPDATE. Quote state is only meaningful from where the string actually began,
+ * so the scan has to carry it across newlines.
+ *
+ * A comment ends at the newline, so `inComment` resets there; the answer is
+ * simply whether the walk finishes inside one. Doubling (`''`) is SQL's escape
+ * and needs no special case — two toggles return the state unchanged.
+ *
+ * Only `'` is tracked, matching `hasLineComment`. A `--` inside a `"`-quoted
+ * identifier or a `$$` block would read as a comment and be refused; both are
+ * absent from this repo's 105 literals, and the failure is LOUD (a rejected
+ * shape with a one-line fix) rather than a silent pass.
+ */
+function endsInsideLineComment(sql) {
+  let quoted = false;
+  let inComment = false;
+  for (let k = 0; k < sql.length; k += 1) {
+    const ch = sql[k];
+    if (ch === '\n') inComment = false;
+    else if (inComment) continue;
+    else if (ch === "'") quoted = !quoted;
+    else if (!quoted && sql.startsWith('--', k)) inComment = true;
+  }
+  return inComment;
 }
 
 

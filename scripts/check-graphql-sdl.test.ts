@@ -461,6 +461,42 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
   });
 
+  it('#1110: a SQL string spanning LINES cannot hide the comment (@codex P2, #1131)', () => {
+    // Scanning only the closing line met the string's CLOSING quote first, read
+    // it as an opening one, and treated the real `--` as quoted — hiding a
+    // truncated UPDATE. Quote state is only meaningful from where the string
+    // began, so the scan carries it across newlines.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + "UPDATE t SET a = 'hello",
+      "world' -- use " + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a multi-line SQL string with no comment', () => {
+    // The control for the above: carrying quote state must not invent a comment.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + "UPDATE t SET a = 'hello",
+      "world'",
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: silent when a comment is followed by a STRING on a later line', () => {
+    // A comment ends at the newline, so it must not swallow the rest of the
+    // query — the reset half of the same walk.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- note',
+      "WHERE a = 'x'" + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
   it('#1110: silent on an interpolation with no comment at all', () => {
     // The control for the `?` substitution: replacing spans must not invent a
     // comment where the SQL has none.
