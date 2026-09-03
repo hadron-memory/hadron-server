@@ -533,24 +533,59 @@ function cookedSql(template) {
  * UPDATE. Quote state is only meaningful from where the string actually began,
  * so the scan has to carry it across newlines.
  *
- * A comment ends at the newline, so `inComment` resets there; the answer is
- * simply whether the walk finishes inside one. Doubling (`''`) is SQL's escape
- * and needs no special case — two toggles return the state unchanged.
+ * A comment ends at the newline, so the walk resets there; the answer is simply
+ * whether it finishes inside one.
  *
- * Only `'` is tracked, matching `hasLineComment`. A `--` inside a `"`-quoted
- * identifier or a `$$` block would read as a comment and be refused; both are
- * absent from this repo's 105 literals, and the failure is LOUD (a rejected
- * shape with a one-line fix) rather than a silent pass.
+ * QUOTED CONTEXTS ARE SKIPPED WHOLE rather than toggled on `'` alone, and that
+ * distinction is load-bearing (PR #1131 review, @codex P2). A toggle treats
+ * every apostrophe as SQL string syntax, so an apostrophe inside a
+ * `"`-quoted IDENTIFIER — `SET "owner's" = 1 -- use …` — flips the state and
+ * then hides the real comment behind it: a truncated UPDATE, passed silently.
+ * 11 of this repo's 105 literals contain `"`.
+ *
+ * My earlier note here claimed the only `"` risk was a `--` INSIDE an
+ * identifier being falsely refused — loud, and therefore acceptable. That was
+ * half the story: the same gap runs the other way and fails SILENTLY, which is
+ * the direction a gate must never fail. Documented limitations deserve the same
+ * "which way does it fail" check as code.
+ *
+ * Handled: `'…'` strings (with `''` doubling), `"…"` identifiers (with `""`),
+ * and `E'…'` escape strings, where a backslash escapes the next character.
+ *
+ * NOT handled: dollar-quoting (`$tag$ … $tag$`), which appears 0 times here (as
+ * do `E'` strings — that one is covered anyway because it was free). A `--`
+ * inside a dollar-quoted body would be read as a comment and the literal
+ * REFUSED — loud, with a one-line fix — and an unterminated quote runs to the
+ * end and reports nothing, which is a silent pass but only on SQL that is
+ * already malformed.
  */
 function endsInsideLineComment(sql) {
-  let quoted = false;
   let inComment = false;
-  for (let k = 0; k < sql.length; k += 1) {
+  let k = 0;
+  while (k < sql.length) {
     const ch = sql[k];
-    if (ch === '\n') inComment = false;
-    else if (inComment) continue;
-    else if (ch === "'") quoted = !quoted;
-    else if (!quoted && sql.startsWith('--', k)) inComment = true;
+    if (ch === '\n') {
+      inComment = false;
+      k += 1;
+    } else if (inComment) {
+      k += 1;
+    } else if (ch === "'" || ch === '"') {
+      // `E'…'` (or `e'…'`) gives backslash its C-style escaping meaning; a
+      // plain string does not, and doubling the delimiter escapes it in both.
+      const escapes = ch === "'" && /[Ee]/.test(sql[k - 1] ?? '') && !/[\w$]/.test(sql[k - 2] ?? ' ');
+      k += 1;
+      while (k < sql.length) {
+        if (escapes && sql[k] === '\\') k += 2;
+        else if (sql[k] !== ch) k += 1;
+        else if (sql[k + 1] === ch) k += 2;
+        else { k += 1; break; }
+      }
+    } else if (sql.startsWith('--', k)) {
+      inComment = true;
+      k += 2;
+    } else {
+      k += 1;
+    }
   }
   return inComment;
 }

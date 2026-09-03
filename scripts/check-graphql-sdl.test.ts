@@ -497,6 +497,39 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
   });
 
+  it('#1110: an apostrophe in a "quoted identifier" cannot hide the comment (@codex P2, #1131)', () => {
+    // Toggling on `'` alone treated every apostrophe as string syntax, so one
+    // inside a double-quoted IDENTIFIER flipped the state and hid the real
+    // comment behind it — a truncated UPDATE, passed silently. 11 of this
+    // repo's 105 literals contain `"`. Quoted contexts are now skipped whole.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE t SET "owner\'s" = 1 -- use ' +
+        BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a quoted identifier containing an apostrophe', () => {
+    // The control: skipping quoted contexts must not INVENT a comment either.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT "owner\'s" FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it("#1110: silent on SQL's doubled '' escape", () => {
+    // `''` escapes a quote inside a string, so the `--` here is text, not a
+    // comment — and the literal closes legitimately.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + "SELECT 'it''s -- not a comment'" + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
   it('#1110: silent on an interpolation with no comment at all', () => {
     // The control for the `?` substitution: replacing spans must not invent a
     // comment where the SQL has none.
