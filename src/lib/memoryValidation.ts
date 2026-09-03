@@ -14,7 +14,7 @@
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { computeContentHash, isAbstractUnverified } from './contentHash.js';
+import { isAbstractUnverified } from './contentHash.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import type { MemorySchema } from './memorySchema.js';

@@ -56,12 +56,11 @@ export function computeContentHash(content: string | null | undefined): string |
  * missing marker there was indistinguishable from a verified one.
  *
  * That guard was correct when spec 032 shipped, because every row predated it
- * and would have fired. Its premise has since drained away: on 2026-09-03,
- * production held 1024 live nodes with both an abstract and content, and
- * exactly **2** with no fingerprint (dev: 786 and 2). Every write since spec
- * 032 re-stamps the hash, so "legacy" is now a rounding error — and both
- * surviving rows genuinely DO have unverified abstracts, so arming on them is
- * accurate, not noise. A gate can outlive its premise; this one did.
+ * and would have fired. Its premise then drained away: every write since
+ * re-stamps the hash, so the unfingerprinted population fell to a rounding
+ * error, and the rows that remained genuinely DID have unverified abstracts —
+ * arming on them is accurate, not noise. A gate can outlive its premise; this
+ * one did. (Counts as measured are on #1128 rather than here, since they move.)
  *
  * Deliberately NOT a second marker string. The reader's action is identical
  * either way — open both and compare — so `abstract-stale` keeps its meaning

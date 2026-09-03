@@ -912,13 +912,16 @@ async function renderNodeReadProjection(
   // memories and is (correctly) skipped only while locked. Scope gate:
   // the marker only fires under scopes that surface the abstract (`abstract` /
   // `all`); the default `content` scope omits it (the abstract isn't in the
-  // response). The explicit `abstractOriginHash != null` guard is load-bearing
-  // for legacy rows (without it `null !== "abc"` is true and the marker
-  // false-fires on every pre-spec-032 node).
+  // response).
+  //
+  // #1128 removed the `abstractOriginHash != null` guard this comment used to
+  // describe as load-bearing. It WAS, when every row predated spec 032; it had
+  // since become the reason a never-fingerprinted abstract could not be
+  // flagged. The predicate now lives in isAbstractUnverified — ONE home for
+  // all four surfaces — and arms on a missing fingerprint as well as a
+  // disagreeing one. The encryption and scope gates stay here: they are
+  // properties of this call, not of the node.
   const shouldCheckStale = scope === 'abstract' || scope === 'all';
-  // #1128 — the predicate itself now lives in isAbstractUnverified (ONE home
-  // for all three surfaces). The encryption and scope gates stay here: they
-  // are properties of this call, not of the node.
   const includeStaleMarker =
     shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node);
 
@@ -3772,7 +3775,7 @@ export function createMcpServerInstance(
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by hadron_run_task. Pass true/false; omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
       description: z.string().optional().describe('New short description'),
-      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. CAVEAT: that marker only ever arms for an abstract written while the node HAD content — an abstract saved against an empty node carries no fingerprint (FR-007), and adding a body later arms nothing, so do not read the absence of a marker as confirmation that an abstract matches a body it was never written against (#1128). Spec 031/032.'),
+      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Absence of the marker therefore means the abstract was checked against this exact content, which is what makes it worth trusting. Spec 031/032.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
       abstractStillAccurate: z.boolean().optional().describe('ASSERTION, NOT A SETTING — and it SUPPRESSES A CORRECTNESS CHECK. Setting this true tells the server you have RE-READ the existing abstract against the content this call is writing and it still describes it, so the `abstract-stale` marker is cleared instead of armed. It changes no text: it only re-fingerprints the abstract you already have. Do NOT set it to make a marker go away, to save a call, or by default — the marker exists to catch an abstract that quietly stopped matching its node, and this is the one flag that can hide exactly that. If you have not actually compared the two, OMIT IT: a stale marker on an accurate abstract is cheap and self-correcting, a suppressed marker on an inaccurate one is neither, and it misleads every later reader and every RAG hit. Ignored when `abstract` is also supplied (that path already re-fingerprints) or when the node has no abstract. CONCURRENCY — it binds to NEITHER half: it re-fingerprints whatever abstract is STORED when this write lands, against whatever content this write LEAVES. Neither is checked against what you read, so if another writer changed either one in between, you certify text you never saw and the marker is suppressed on it. The fully-bound form needs no flag at all — pass `abstract` AND `content` together and you are writing exactly the two things you compared. Prefer that whenever the node might have another writer; use this flag when re-sending the abstract is not worth it and you accept that trade.'),
       seq: z.number().optional().describe('New sort order among siblings'),
