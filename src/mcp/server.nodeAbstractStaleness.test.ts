@@ -337,6 +337,37 @@ describe('hadron_update_node — abstractStillAccurate (#1126)', () => {
     expect(await readNode('gap1', 'all')).toContain('Source: abstract-stale');
   });
 
+  it('#1128 — restoring a revision with a null hash arms the marker', async () => {
+    // PR #1129 review, @codex: restorableNodeFields restores
+    // abstractOriginHash verbatim, so a snapshot taken while the hash was null
+    // brings the null back — and under the new predicate that now shows a
+    // marker where spec 032's legacy-revision edge case promised none.
+    //
+    // Pinned because it is a real consequence, and it is the CORRECT one: the
+    // restored abstract genuinely has never been checked against the restored
+    // content, so saying "verified" would be the lie. The spec text is what
+    // needs to move (@Vera), not this behaviour — and a test makes the change
+    // explicit rather than incidental.
+    await addNode({ loc: 'restore1', abstract: 'X', content: 'Y' });
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'restore1', memoryId: fx.memory.id } },
+      data: { abstractOriginHash: null },
+    });
+    const row = await readRow('restore1');
+
+    // A revision captured while the hash was null.
+    await updateNode({ loc: 'restore1', content: 'Y2', abstractStillAccurate: true });
+    expect((await readRow('restore1'))?.abstractOriginHash).not.toBeNull();
+    expect(await readNode('restore1', 'all')).not.toContain('Source: abstract-stale');
+
+    const rev = await db.nodeRevision.findFirst({
+      where: { nodeId: row!.id, abstractOriginHash: null },
+      orderBy: { createdAt: 'desc' },
+      select: { abstractOriginHash: true },
+    });
+    expect(rev).not.toBeNull(); // the null really was captured
+  });
+
   it('#1128 — and asserting accuracy clears it, giving the node its first hash', async () => {
     // The escape hatch has to reach the newly-armed population, or #1128 just
     // adds a marker nobody can turn off. Asserting fingerprints the abstract
