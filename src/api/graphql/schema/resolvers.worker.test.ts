@@ -1787,6 +1787,93 @@ describe('#1050 — worker name holding', () => {
       expect(await F.ReleaseWorkerPayload.releasedFrom(again, {}, ctx(contrib.id))).toBeNull();
     });
 
+    // ── PR #1124 review, Codex P1 — releasedFrom is SANITIZED ────────────────
+    //
+    // It shipped as a full `User` on the argument that this audience can
+    // already read the same object through `AppMember.user`. Both halves of
+    // that are false where it matters: `leaveApp` DELETES the AppMember row
+    // and leaves the hold standing, which is the departed colleague the
+    // force-release path exists for; and `Worker` only ever exposed
+    // `heldByUserId`, a bare id, so there was no route from this surface to a
+    // `User` to inherit.
+    it('releasedFrom carries ONLY the sanitized projection, never User’s ungated tail', async () => {
+      // The discriminating assertion is on the KEY SET, not on a sample of
+      // field values: `policy`, `identityProvider`, `externalId`, `githubId`,
+      // `roles` and `maxReferrals` default-resolve on `User` with no gate of
+      // their own. Dropping the `select` puts every one of them back, and only
+      // a key-set assertion reds on that.
+      const w = await heldBy(contrib.id);
+      const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(contrib.id));
+      const projection = await F.ReleaseWorkerPayload.releasedFrom(out, {}, ctx(contrib.id));
+
+      expect(Object.keys(projection!).sort()).toEqual(['handle', 'id', 'name']);
+      for (const leaked of ['policy', 'identityProvider', 'externalId', 'githubId', 'roles']) {
+        expect(projection).not.toHaveProperty(leaked);
+      }
+    });
+
+    it('an app-only holder’s name is withheld from the admin who released them', async () => {
+      // The case the P1 named, built rather than argued. `appMember` holds a
+      // name and is in the App but in NO org, which is what a departed
+      // colleague looks like after `leaveApp` — so the org ADMIN who may force
+      // -release them has no other route to their `User`, and the #384 gate
+      // must still answer for `name`.
+      await db.user.update({
+        where: { id: appMember.id },
+        data: { name: 'Departed Colleague', handle: 'departed-colleague' },
+      });
+      const w = await heldBy(appMember.id, 'Ada');
+      const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+      expect(out.forced).toBe(true);
+
+      const seenByAdmin = await F.ReleaseWorkerPayload.releasedFrom(out, {}, ctx(admin.id));
+      // Who, yes — the release is unusable otherwise. Their name, no.
+      expect(seenByAdmin!.id).toBe(appMember.id);
+      expect(seenByAdmin!.handle).toBe('departed-colleague');
+      expect(await F.ReleasedFromUser.name(seenByAdmin, {}, ctx(admin.id))).toBeNull();
+      // And the gate is the shared one, so the user themselves still sees it.
+      expect(await F.ReleasedFromUser.name(seenByAdmin, {}, ctx(appMember.id))).toBe(
+        'Departed Colleague',
+      );
+    });
+
+    it('a co-member DOES see the name — the gate, not a blanket withholding', async () => {
+      // The other side of the pair. Without this, replacing the gate with
+      // `() => null` would pass, and the field would be decorative.
+      await db.user.update({ where: { id: contrib.id }, data: { name: 'Contrib Person' } });
+      const w = await heldBy(contrib.id);
+      const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+      const seen = await F.ReleaseWorkerPayload.releasedFrom(out, {}, ctx(admin.id));
+      expect(await F.ReleasedFromUser.name(seen, {}, ctx(admin.id))).toBe('Contrib Person');
+    });
+
+    it('worker is read back BEFORE the team-chat notice, not after', async () => {
+      // Codex P2. The notice is a network call; re-reading after it widened the
+      // window in which another caller could bind to the length of that call,
+      // so the payload could carry a NEW holder. Driven by binding the name
+      // from inside the notice — the interval, made observable.
+      const w = await heldBy(contrib.id);
+      const teamChat = await import('./resolvers.teamChat.js');
+      const spy = vi
+        .spyOn(teamChat.teamChatMutations, 'createTeamChatMessage')
+        .mockImplementation(async () => {
+          await db.worker.update({
+            where: { id: w.id },
+            data: { heldByUserId: outsider.id, heldAt: new Date() },
+          });
+          return {} as never;
+        });
+      try {
+        const out = await M.releaseWorker({}, { workerRef: w.id }, ctx(admin.id));
+        // Reading after the notice would report the interloper's hold while
+        // documenting a null one.
+        expect(out.worker.heldByUserId).toBeNull();
+        expect(out.releasedFromUserId).toBe(contrib.id);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('reports notified: false when the notice was OWED and failed', async () => {
       // The state a plain boolean cannot express, and the reason for the
       // tri-state: the release STOOD and the announcement did not happen. An
