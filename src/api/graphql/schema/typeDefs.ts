@@ -6549,7 +6549,18 @@ export const typeDefs = `#graphql
     sendChatMessage(chatId: String!, userMessage: String!): ChatPromptResult!
     # Process the LLM's tool response (extract data, transition stage, save assistant message)
     processChatResponse(chatId: String!, toolResponse: JSON!): ChatResponseResult!
-    # Save a chat summary
+    # Persist a caller-produced chat summary.
+    #
+    # #1115 — READ THIS BEFORE CALLING. The summary is STORED and nothing reads
+    # it back as a summary: no query excludes the messages it covers, and the
+    # model-history builder has no summary branch, so the node is replayed as an
+    # ordinary user turn ALONGSIDE the messages it summarises. Calling this
+    # makes the transcript longer, never shorter.
+    #
+    # The compression this was built for does not exist yet, and the trigger
+    # that used to request it (ChatPromptResult.summarizationNeeded) now always
+    # returns null. Kept working so existing callers do not break; re-arming it
+    # needs the design in #1115, not a flag.
     saveChatSummary(chatId: String!, summary: String!): Boolean!
     # Rename a saved chat (user must own it)
     updateChatTitle(chatId: String!, title: String!): Boolean!
@@ -7582,9 +7593,18 @@ export const typeDefs = `#graphql
     systemMessage: String!
     tools: JSON
     messageHistory: JSON!
+    # #1115 — ALWAYS NULL since 2026-09-04. It used to fire every 20 messages
+    # and ask the caller to produce a summary, but the summary it asked for is
+    # replayed to the model as an ordinary user turn beside the messages it
+    # summarises, so the loop made the transcript longer. Disarmed rather than
+    # removed: the field is nullable, was absent 19 turns in 20, and every
+    # caller already handles that. Re-arming needs the design in #1115.
     summarizationNeeded: SummarizationRequest
   }
 
+  # Retained for ChatPromptResult.summarizationNeeded, which is currently always
+  # null (#1115). Kept so the schema does not break clients that still select
+  # the field.
   type SummarizationRequest {
     messageCount: Int!
     prompt: String!

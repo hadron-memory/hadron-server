@@ -922,15 +922,42 @@ export const chatMutations = {
         return { role, content: m.content ?? '' };
       });
 
-      // Check if summarization is needed
-      const triggerCount = 20; // TODO: read from agent/conversation config
-      let summarizationNeeded = null;
-      if (messageCount > 0 && messageCount % triggerCount === 0) {
-        summarizationNeeded = {
-          messageCount: triggerCount,
-          prompt: 'Summarize the following conversation messages. Focus on key facts, decisions made, and any action items. Keep the summary concise but include all important details.',
-        };
-      }
+      // SUMMARIZATION IS DISARMED, deliberately (#1115; @Holger's call
+      // 2026-09-04: neutralize now, design later).
+      //
+      // The loop this used to start makes the transcript LONGER. Firing it told
+      // the caller to produce a summary and POST it back via `saveChatSummary`,
+      // which writes an `abstract` node under `${chatId}:messages:` — and
+      // nothing anywhere reads that node back AS a summary:
+      //
+      //   * no predicate excludes the messages a summary covers; the window
+      //     query above is the whole `:messages:` subtree;
+      //   * role detection has no summary branch, so the node falls through to
+      //     'user' (see the comment at that site, which says so outright).
+      //
+      // So the model received the summary as one more user turn ALONGSIDE
+      // everything it summarised, and it competed for the 50-message window
+      // with the recent messages it was supposed to replace.
+      //
+      // Not removed, because the loop is BUILT on the client side: hadron-portal
+      // calls `saveChatSummary` and reads this field, and three hadron-docs
+      // pages document it. Returning null breaks the loop at its first link
+      // without a breaking schema change — the field stays nullable and every
+      // caller already handles its absence, since it was absent 19 turns in 20.
+      //
+      // Nothing is lost by disarming it. Measured 2026-09-04: ZERO summary
+      // nodes have ever been written, in production or dev, and the longest
+      // ordinary chat in production is 11 messages — so the 20-message trigger
+      // has never fired. This removes a latent regression rather than a
+      // capability: the first real chat to reach 20 messages would have started
+      // growing its own transcript.
+      //
+      // What re-arming needs is a DESIGN, not a flag, and #1115 states it:
+      // does a summary REPLACE the messages it covers or sit alongside a
+      // smaller window; what marks the covered range (today `messageCount`
+      // lives only in the node's NAME, which is not a queryable boundary); and
+      // should `chatHistory` hide summaries from human readers.
+      const summarizationNeeded = null;
 
       return { systemMessage, tools, messageHistory, summarizationNeeded };
     },
