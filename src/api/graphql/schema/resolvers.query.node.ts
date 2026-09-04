@@ -1974,7 +1974,7 @@ export const nodeQueries = {
       // platform's own answer for their principal — the same fold MCP uses —
       // rather than this resolver's historically wider walk. An org member's
       // scope is untouched.
-      const memoryIds = orgAuthorized
+      const candidateMemoryIds = orgAuthorized
         ? [...new Set([...agentMemoryIds, ...teamSpaceIds])]
         : await (async () => {
             // DELEGATED, after four review rounds of hand-copying this
@@ -2018,24 +2018,45 @@ export const nodeQueries = {
             );
             const readable = allowed.filter((id): id is string => id !== null);
 
-            // THIS App's memories only (PR #1093 review, Codex P1). One Agent
-            // installed in two Apps carries BOTH Apps' app-scoped memories in
-            // its global `memoryItems`, so the fold for B contains A's — and
-            // `canReadMemory` enforces `appId` for personal/private rows only,
-            // admitting an app-class KNOWLEDGE memory of A on its non-personal
-            // branch. This is a SCOPE rule about what `appNodes(B)` means, not
-            // another copy of the access gate: the resolver's own contract is
-            // "the App's memories are the authoritative scope", and the fold
-            // does not honour it.
-            //
-            // The org path has the SAME bleed through the same fold and is
-            // untouched here — pre-existing, wider than this arm, and filed.
-            const scoped = await ctx.db.memory.findMany({
-              where: { id: { in: readable }, OR: [{ appId: null }, { appId: resolvedAppId }] },
-              select: { id: true },
-            });
-            return scoped.map((m) => m.id);
+            return readable;
           })();
+
+      // THIS App's memories only — for EVERY principal (#1097; the participant
+      // half was #1093 review, Codex P1).
+      //
+      // One Agent installed in two Apps carries BOTH Apps' app-scoped memories
+      // in its global `memoryItems`, so the fold for B contains A's. On the
+      // participant path `canReadMemory` enforces `appId` for personal/private
+      // rows only, admitting an app-class KNOWLEDGE memory of A on its
+      // non-personal branch; on the ORG path nothing enforced it at all, and an
+      // org READER of B read A's internals.
+      //
+      // Applied ONCE, to both branches, rather than added to the second one.
+      // #1093 shipped this rule inside the participant arm and left the org arm
+      // out, which is how #1092 (the predicates disagreeing about the same
+      // question) and this issue both exist. A second copy would have been the
+      // third answer to one question — and this resolver's own comment, four
+      // lines up, quotes the invariant it would be breaking.
+      //
+      // It is a SCOPE rule about what `appNodes(B)` MEANS, not an access gate:
+      // the resolver's contract is already "the App's installed-agent memories
+      // are the authoritative scope", and the fold does not honour it. Nothing
+      // here decides who may read a memory — that is `canReadMemory`'s job on
+      // the participant path and the org role gate's above.
+      //
+      // `appId IS NULL` keeps what genuinely belongs to the Agent rather than to
+      // a sibling App: its `system` memory (where `app_id` is FORBIDDEN by
+      // `chk_memory_class_app_id`) and any free-standing knowledge it carries.
+      // #1097 weighed dropping those too; this keeps cross-App agent knowledge
+      // working and drops only another App's internals.
+      const scoped = await ctx.db.memory.findMany({
+        where: {
+          id: { in: candidateMemoryIds },
+          OR: [{ appId: null }, { appId: resolvedAppId }],
+        },
+        select: { id: true },
+      });
+      const memoryIds = scoped.map((m) => m.id);
       if (memoryIds.length === 0) return [];
 
       // #525 — optional node-level NodeFilter, pushed server-side so callers
