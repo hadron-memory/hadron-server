@@ -828,17 +828,18 @@ describe('appNodes', () => {
     // app-class memory, so `canReadMemory` refuses it before the scope rule is
     // consulted.
     //
-    // So this is a regression test for the ACCESS GATE, not for #1097's fix. It
-    // is kept anyway: "a participant of two Apps cannot read the other's
-    // internals" is a cross-tenant property worth pinning whichever layer
-    // enforces it, and if that layer ever moves, this fails.
+    // So this is a regression test for the ACCESS GATE, not for #1097's
+    // resolver fix. Kept anyway: "a participant of two Apps cannot read the
+    // other's internals" is a cross-tenant property worth pinning whichever
+    // layer enforces it, and if that layer moves, this fails.
     //
-    // It also flags something I did not chase: the #1093 comment asserted that
-    // `canReadMemory` "admits an app-class KNOWLEDGE memory of A on its
-    // non-personal branch". In this configuration it does not. Either that
-    // scoping was already redundant for app-class rows, or it catches a shape
-    // this fixture does not build. Not resolved here, and not removed — the
-    // #1097 hoist preserves it either way.
+    // WHY that layer holds it — I first left this unresolved and @copilot
+    // answered it (PR #1132 review): #1102 moved the App-scope rule into
+    // `admissibleFoldRows`, the shared predicate behind `getMemoryAccess`, and
+    // that docstring calls itself "the enumeration half of #1097". So #1093's
+    // claim here — that `canReadMemory` admits an app-class memory of A — was
+    // true when written and is now false. The ORG branch leaked because it
+    // bypasses that predicate entirely, which is the half this PR fixes.
     const { app: appB } = await withTeamSpace('app-nodes-part-cross-b');
     const { app: appA } = await createDbAppWithKey(db, 'app-nodes-part-cross-a', orgId);
     await db.appAgent.create({ data: { appId: appA.id, agentId } });

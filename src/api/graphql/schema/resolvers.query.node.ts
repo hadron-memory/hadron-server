@@ -2025,11 +2025,23 @@ export const nodeQueries = {
       // half was #1093 review, Codex P1).
       //
       // One Agent installed in two Apps carries BOTH Apps' app-scoped memories
-      // in its global `memoryItems`, so the fold for B contains A's. On the
-      // participant path `canReadMemory` enforces `appId` for personal/private
-      // rows only, admitting an app-class KNOWLEDGE memory of A on its
-      // non-personal branch; on the ORG path nothing enforced it at all, and an
-      // org READER of B read A's internals.
+      // in its global `memoryItems`, so the fold for B contains A's.
+      //
+      // WHICH PATH ACTUALLY LEAKED, corrected (PR #1132 review, @copilot; the
+      // claim below is what #1093 wrote here and I repeated):
+      //
+      // #1093's comment said `canReadMemory` enforces `appId` for
+      // personal/private rows only and so admits an app-class memory of A. That
+      // was true when written and is now FALSE — #1102 moved the rule into
+      // `admissibleFoldRows`, the shared predicate behind `getMemoryAccess`,
+      // whose own docstring calls itself "the enumeration half of #1097". A
+      // participant is therefore already refused A's app-class memory before
+      // this filter is consulted.
+      //
+      // The leak was specific to the ORG branch, which bypasses that predicate
+      // entirely and reads the raw installed-agent walk: nothing enforced
+      // `appId`, and an org READER of B read A's internals. This is the other
+      // half of the same issue.
       //
       // Applied ONCE, to both branches, rather than added to the second one.
       // #1093 shipped this rule inside the participant arm and left the org arm
