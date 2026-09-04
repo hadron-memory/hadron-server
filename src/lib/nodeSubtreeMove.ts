@@ -266,14 +266,14 @@ export async function moveNodeSubtree(
     // source-key-bound ciphertext the dest key can't read). #781 follow-up.
     if (srcMem?.isEncrypted || destMem?.isEncrypted) {
       throw new CrossMemoryMoveUnsupportedError(
-        `Cannot move ${describeMoved(source.loc, subtree.length)} across memories when ` +
-          'either memory is encrypted (' +
+        `Cannot move ${describeMoved(source.loc, subtree.length)} across memories: ` +
           (srcMem?.isEncrypted && destMem?.isEncrypted
-            ? 'both are'
+            ? 'both memories are encrypted'
             : srcMem?.isEncrypted
-              ? 'the source is'
-              : 'the destination is') +
-          '). Move it within its memory, or clone the nodes into the destination.',
+              ? 'the source memory is encrypted'
+              : 'the destination memory is encrypted') +
+          ', and a cross-memory move cannot re-key the nodes. ' +
+          'Move it within its memory, or clone the nodes into the destination.',
       );
     }
     // Git-backed memories are NO LONGER refused (#1095). The move-aware mirror
