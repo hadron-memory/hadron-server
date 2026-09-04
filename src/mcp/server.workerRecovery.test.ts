@@ -844,6 +844,85 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
 // #1029 — handoff delivery on the MCP surface
 // ---------------------------------------------------------------------------
 
+describe('#1100 — ending with `summary` instead of `handoff` is called out', () => {
+  const endWith = async (
+    srv: ReturnType<typeof createTestableMcpServer>,
+    args: Record<string, unknown>,
+  ) => {
+    const started = await srv.callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint one',
+    });
+    const id = started.match(/Session started: (\S+)/)![1];
+    return { id, receipt: await srv.callToolText('hadron_end_session', { id, ...args }) };
+  };
+
+  it('warns when a worker-bound session ends with summary set and no handoff', async () => {
+    // The footgun: `summary` reads like the closing note and is display-only,
+    // so choosing it succeeds, returns a normal receipt, and writes NO
+    // continuity. Said in the receipt because this is the last moment it is
+    // still fixable — the prose is still in the caller's context.
+    await worker('Iris', 'iris');
+    const { receipt } = await endWith(createTestableMcpServer(hybridAuth()), {
+      summary: 'shipped the parser rewrite',
+    });
+    expect(receipt).toContain('summary` is display-only');
+    expect(receipt).toContain('receive NOTHING');
+  });
+
+  it('does NOT warn when no handoff and no summary — that is a legitimate choice', async () => {
+    // The spare. Ending without a handoff on purpose keeps its quieter wording;
+    // a warning on every such end would train the reader to skip it.
+    await worker('Iris', 'iris');
+    const { receipt } = await endWith(createTestableMcpServer(hybridAuth()), {});
+    expect(receipt).toContain('No handoff written.');
+    expect(receipt).not.toContain('display-only');
+  });
+
+  it('does NOT warn when a handoff WAS written, even alongside a summary', async () => {
+    await worker('Iris', 'iris');
+    const { receipt } = await endWith(createTestableMcpServer(hybridAuth()), {
+      summary: 'shipped it', handoff: 'the migration is half-applied',
+    });
+    expect(receipt).toContain('Handoff written');
+    expect(receipt).not.toContain('display-only');
+  });
+
+  it('the recovery the warning ADVISES is the one that actually works', async () => {
+    // I first wrote this test against "re-end the same session with `handoff`",
+    // which is what I had drafted into the receipt. It FAILED: the server
+    // refuses a second handoff for an ended stint — "the sequence is
+    // append-only … start a new session to record new state."
+    //
+    // So the mistake is NOT recoverable in place, and the receipt now says the
+    // remedy the server itself names. Pinned here because the receipt makes a
+    // promise to a caller at their worst moment; if this stops working, the
+    // promise becomes a dead end and this fails instead.
+    await worker('Iris', 'iris');
+    const srv = createTestableMcpServer(hybridAuth());
+    const { id } = await endWith(srv, { summary: 'wrote it into the wrong field' });
+
+    // Re-ending the SAME stint is refused, and says why.
+    const retry = await srv.callToolText('hadron_end_session', {
+      id, handoff: 'PR #1134 merged; #1100 is next.',
+    });
+    expect(retry).toContain('append-only');
+
+    // The remedy that works: bind again and end THAT stint with the handoff.
+    const second = await srv.callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint two',
+    });
+    await srv.callToolText('hadron_end_session', {
+      id: second.match(/Session started: (\S+)/)![1],
+      handoff: 'PR #1134 merged; #1100 is next.',
+    });
+
+    const rebound = await srv.callToolText('hadron_start_session', {
+      workerRef: 'Iris', description: 'stint three',
+    });
+    expect(rebound).toContain('#1100 is next');
+  });
+});
+
 describe('#1029 — the handoff arrives at bind, and recovery re-fetches it', () => {
   it('hadron_start_session renders the previous stint\'s handoff after the briefing', async () => {
     const w = await worker('Iris', 'iris');

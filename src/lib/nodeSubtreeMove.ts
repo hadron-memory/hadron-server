@@ -174,6 +174,20 @@ export async function lockSourceForMove(
  * {@link SubtreeMoveCollisionError} / {@link SubtreeMoveSourceChangedError}; the
  * caller maps these to its surface.
  */
+/**
+ * How to NAME what is moving, in a refusal (#1099).
+ *
+ * The refusals used to say "a subtree" whatever was moving. For a LEAF — the
+ * common case — that is simply wrong, and it sends the reader looking for
+ * descendants that do not exist. The count is already in hand at every refusal
+ * site, so the message can say the true shape instead of the worst case.
+ */
+export function describeMoved(loc: string, size: number): string {
+  return size === 1
+    ? `node "${loc}"`
+    : `"${loc}" and its ${size - 1} descendant${size === 2 ? '' : 's'}`;
+}
+
 export async function moveNodeSubtree(
   tx: Prisma.TransactionClient,
   opts: {
@@ -252,7 +266,8 @@ export async function moveNodeSubtree(
     // source-key-bound ciphertext the dest key can't read). #781 follow-up.
     if (srcMem?.isEncrypted || destMem?.isEncrypted) {
       throw new CrossMemoryMoveUnsupportedError(
-        'Cannot move a subtree across memories when either memory is encrypted. ' +
+        `Cannot move ${describeMoved(source.loc, subtree.length)} across memories when ` +
+          `either memory is encrypted (${srcMem?.isEncrypted ? 'source' : 'destination'} is). ` +
           'Move it within its memory, or clone the nodes into the destination.',
       );
     }
@@ -269,14 +284,18 @@ export async function moveNodeSubtree(
     // (validateChatScopeInvariants) — moving it to a different memory class can
     // make the chat unusable (CHAT_MEMORY_OUT_OF_SCOPE). Refuse a subtree that
     // contains a chat-root. #781 follow-up.
-    const hasChatRoot = subtree.some((n) => {
+    const chatRoot = subtree.find((n) => {
       const d = n.data as { scope?: unknown } | null;
       return d != null && typeof d === 'object' && !Array.isArray(d) && (d.scope === 'private' || d.scope === 'shared');
     });
-    if (hasChatRoot) {
+    if (chatRoot) {
+      // #1099 — NAME the chat root. A caller moving a large subtree has no way
+      // to tell which of its nodes triggered this, and the whole subtree is
+      // refused for one of them.
       throw new CrossMemoryMoveUnsupportedError(
-        'Cannot move a chat across memories — its scope is tied to the memory class. ' +
-          'Move it within its memory.',
+        `Cannot move ${describeMoved(source.loc, subtree.length)} across memories: it ` +
+          `${chatRoot.loc === source.loc ? 'is a chat' : `contains the chat "${chatRoot.loc}"`}, ` +
+          'and a chat\'s scope is tied to its memory class. Move it within its memory.',
       );
     }
     destVectorIndexEnabled = destMem?.vectorIndexEnabled ?? false;

@@ -5783,6 +5783,17 @@ export const typeDefs = `#graphql
     goes (the worker's working memory, under the \`handoffs\` parent, at a
     lexically-ordered loc), so no client re-derives the convention.
 
+    \`summary\` is NOT a smaller \`handoff\` (#1100). It sets \`Session.summary\`,
+    a display-only label with no read path — nothing delivers it to anyone. The
+    two sit side by side and only one of them reaches the next driver, so a
+    caller writing a closing note picks by name: it is \`handoff\`. The cost is
+    asymmetric and silent — choosing \`summary\` succeeds, returns a normal
+    receipt, and produces no continuity at all, which is discovered only once
+    the context that could have written the handoff is gone. And it cannot be
+    corrected in place: the sequence is append-only and the stint has ended, so
+    re-ending is refused — the remedy is to bind again and end THAT session with
+    the prose.
+
     Written BEFORE the session ends, and a failed write REFUSES the end
     (HANDOFF_WRITE_FAILED) rather than ending anyway: a still-bound worker is
     recoverable — retry, or end without a handoff deliberately — while an ended
