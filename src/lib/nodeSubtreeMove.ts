@@ -168,13 +168,6 @@ export async function lockSourceForMove(
 }
 
 /**
- * Relocate `source` and its loc-subtree to `destLoc` (in `destMemoryId`, which
- * defaults to the source's own memory). See the module doc for the caller's
- * responsibilities. Throws {@link SubtreeMoveIntoSelfError} /
- * {@link SubtreeMoveCollisionError} / {@link SubtreeMoveSourceChangedError}; the
- * caller maps these to its surface.
- */
-/**
  * How to NAME what is moving, in a refusal (#1099).
  *
  * The refusals used to say "a subtree" whatever was moving. For a LEAF — the
@@ -188,6 +181,13 @@ export function describeMoved(loc: string, size: number): string {
     : `"${loc}" and its ${size - 1} descendant${size === 2 ? '' : 's'}`;
 }
 
+/**
+ * Relocate `source` and its loc-subtree to `destLoc` (in `destMemoryId`, which
+ * defaults to the source's own memory). See the module doc for the caller's
+ * responsibilities. Throws {@link SubtreeMoveIntoSelfError} /
+ * {@link SubtreeMoveCollisionError} / {@link SubtreeMoveSourceChangedError}; the
+ * caller maps these to its surface.
+ */
 export async function moveNodeSubtree(
   tx: Prisma.TransactionClient,
   opts: {
@@ -267,8 +267,13 @@ export async function moveNodeSubtree(
     if (srcMem?.isEncrypted || destMem?.isEncrypted) {
       throw new CrossMemoryMoveUnsupportedError(
         `Cannot move ${describeMoved(source.loc, subtree.length)} across memories when ` +
-          `either memory is encrypted (${srcMem?.isEncrypted ? 'source' : 'destination'} is). ` +
-          'Move it within its memory, or clone the nodes into the destination.',
+          'either memory is encrypted (' +
+          (srcMem?.isEncrypted && destMem?.isEncrypted
+            ? 'both are'
+            : srcMem?.isEncrypted
+              ? 'the source is'
+              : 'the destination is') +
+          '). Move it within its memory, or clone the nodes into the destination.',
       );
     }
     // Git-backed memories are NO LONGER refused (#1095). The move-aware mirror

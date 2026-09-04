@@ -5784,15 +5784,19 @@ export const typeDefs = `#graphql
     lexically-ordered loc), so no client re-derives the convention.
 
     \`summary\` is NOT a smaller \`handoff\` (#1100). It sets \`Session.summary\`,
-    a display-only label with no read path — nothing delivers it to anyone. The
-    two sit side by side and only one of them reaches the next driver, so a
-    caller writing a closing note picks by name: it is \`handoff\`. The cost is
-    asymmetric and silent — choosing \`summary\` succeeds, returns a normal
-    receipt, and produces no continuity at all, which is discovered only once
-    the context that could have written the handoff is gone. And it cannot be
-    corrected in place: the sequence is append-only and the stint has ended, so
-    re-ending is refused — the remedy is to bind again and end THAT session with
-    the prose.
+    a label on the session row — readable back through \`session\` / \`sessions\`,
+    but read by no worker-continuity path, so the next driver never sees it. The
+    two sit side by side and only one of them reaches that driver, so a caller
+    writing a closing note picks by name: it is \`handoff\`.
+
+    The two mistakes are not symmetric, and that is the whole hazard. Putting
+    continuity prose in \`summary\` succeeds, returns a normal receipt, and
+    produces NO handoff — discovered only once the context that could have
+    written one is gone, and not correctable in place, since the sequence is
+    append-only and the stint has ended (re-ending is refused). The remedy is to
+    bind again and end THAT session with the prose. Putting a label in
+    \`handoff\` is merely untidy: the row lacks its label and the text reaches
+    the next driver anyway.
 
     Written BEFORE the session ends, and a failed write REFUSES the end
     (HANDOFF_WRITE_FAILED) rather than ending anyway: a still-bound worker is

@@ -5773,9 +5773,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         .string()
         .optional()
         .describe(
-          'Display-only label for the session row. NOT read back by anything, and NOT the continuity record — if you are writing something for whoever comes next, that is `handoff` (#1100). ' +
-            'It used to be described as "Summary of what was accomplished", which is exactly what a departing worker thinks it is writing: choosing it succeeds, returns a normal receipt, and produces no continuity at all. ' +
-            'The cost is asymmetric — picking `handoff` when you meant `summary` loses nothing; picking `summary` when you meant `handoff` destroys the one artifact that cannot be reconstructed, because the context that would compose it ends with the stint.',
+          'A label on the session ROW, readable via the `session` / `sessions` GraphQL queries. It is NOT the continuity record: no worker-handoff path reads it, so the next driver of this worker never sees it (#1100). ' +
+            'If you are writing something for whoever comes next, that is `handoff`. ' +
+            'This used to be described as "Summary of what was accomplished", which is exactly what a departing worker thinks it is writing: choosing it succeeds, returns a normal receipt, and delivers nothing to anyone. ' +
+            'The two mistakes are not symmetric. Putting continuity prose here produces NO handoff, and cannot be corrected afterwards — the sequence is append-only and the stint has ended, so the remedy is to bind again and end that session with the prose. Putting a label in `handoff` is merely untidy: the label is missing from the row and the prose reaches the next driver anyway.',
         ),
       handoff: z
         .string()
@@ -5891,11 +5892,20 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             : session.workerId && closed.endedByThisCall
               ? // #1100: a worker-bound end with `summary` set and `handoff`
                 // absent is almost certainly the mistake this receipt exists to
-                // catch — the caller wrote a closing note into the one field
-                // nothing reads. Said HERE because this is the last moment it is
-                // still fixable: the session is ended but the context that
-                // composed the prose is still in front of them, so re-ending
-                // with `handoff` costs one call. A minute later it is gone.
+                // catch — the caller wrote a closing note into a field no
+                // continuity path reads.
+                //
+                // Said HERE because it is the last moment the prose still
+                // EXISTS. This stint can no longer take a handoff (the sequence
+                // is append-only and the session has ended, so re-ending is
+                // refused — pinned by a test), but the caller can still bind
+                // again and end THAT session with it. Once the context goes,
+                // nothing can reconstruct it.
+                //
+                // My first draft of this told the caller to re-end the same
+                // session; the test written to pin that advice is what proved
+                // it refused (PR #1135). A remedy in a message is a promise —
+                // it needs a test like any other.
                 //
                 // Distinguished from an ordinary no-handoff end, which is a
                 // legitimate choice and keeps its quieter wording.
