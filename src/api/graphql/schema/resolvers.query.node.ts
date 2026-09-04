@@ -1972,8 +1972,14 @@ export const nodeQueries = {
       //
       // A participant who is not also org-authorized therefore gets the
       // platform's own answer for their principal — the same fold MCP uses —
-      // rather than this resolver's historically wider walk. An org member's
-      // scope is untouched.
+      // rather than this resolver's historically wider walk.
+      //
+      // #1093 added "An org member's scope is untouched" here, which was true
+      // then and is NOT any more (PR #1132 review, @copilot): #1097 applies the
+      // per-App filter below to EVERY principal, so an org member's scope is
+      // narrowed too — deliberately, and that is the whole point of this
+      // change. Left as a correction rather than a deletion so the next reader
+      // can see the org path used to return the unscoped raw walk.
       const candidateMemoryIds = orgAuthorized
         ? [...new Set([...agentMemoryIds, ...teamSpaceIds])]
         : await (async () => {
@@ -2061,6 +2067,11 @@ export const nodeQueries = {
       // `chk_memory_class_app_id`) and any free-standing knowledge it carries.
       // #1097 weighed dropping those too; this keeps cross-App agent knowledge
       // working and drops only another App's internals.
+      // Short-circuit before the query, not after it (PR #1132 review,
+      // @copilot): an App with no installed Agents reaches here with an empty
+      // candidate set, and `findMany({ id: { in: [] } })` is a round-trip whose
+      // answer is already known.
+      if (candidateMemoryIds.length === 0) return [];
       const scoped = await ctx.db.memory.findMany({
         where: {
           id: { in: candidateMemoryIds },
