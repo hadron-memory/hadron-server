@@ -759,6 +759,132 @@ describe('appNodes', () => {
     expect(inA).toContain('a.only');
   });
 
+  it("does not leak another App's app-scoped memory to an ORG member (#1097)", async () => {
+    // The org half of the #1093 P1 bleed. `appNodes` builds an org member's
+    // scope from the raw installed-agent walk — every agent's systemMemoryId +
+    // memoryItems — and `memoryItems` is global to the AGENT, not per-App. So
+    // one Agent installed in Apps A and B carries A's app-scoped memory into
+    // the fold for B, and an org READER of B reads A's internal knowledge.
+    //
+    // The participant arm was scoped on #1093; this path was left because it is
+    // pre-existing and wider. It matters exactly where the seed fixtures say it
+    // does: two Apps meant to be separate tenancies inside ONE org (Juno @
+    // Mentor Co / Juno @ Client Co), where "they are org members anyway" is the
+    // wrong answer.
+    const { app: appB } = await withTeamSpace('app-nodes-org-cross-b');
+    const { app: appA } = await createDbAppWithKey(db, 'app-nodes-org-cross-a', orgId);
+    await db.appAgent.create({ data: { appId: appA.id, agentId } });
+
+    // An APP-CLASS memory of App A on the shared agent. Not personal, so the
+    // #1093 personal-row rules do not apply — and the ORG branch reaches it
+    // through the raw installed-agent walk without consulting the access map
+    // at all, which is the leak. (A participant would be refused it by
+    // `admissibleFoldRows`; only this path lacked a scope rule.)
+    const knowledgeInA = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, appId: appA.id,
+        urn: `${orgId}:app-knowledge-a-${Date.now()}`, name: 'A internal',
+        class: 'app', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: knowledgeInA.id, loc: 'a.internal',
+        isLink: false, name: 'A internal', tags: [],
+      },
+    });
+
+    // An ORG member — passes appNodes' org READER+ gate, and is NOT a
+    // participant of either App, so this is the org branch specifically.
+    const orgReader = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771099,
+        githubUsername: `an-org-cross-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.orgMember.create({
+      data: { organizationId: orgId, userId: orgReader.id, role: 'READER' },
+    });
+    const ctx = { db, roles: ['READER'], userId: orgReader.id } as Context;
+
+    const inB = (await resolvers.Query.appNodes({}, { appRef: appB.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(inB).not.toContain('a.internal');
+
+    // The spare, and the reason this is per-App scoping rather than a blanket
+    // exclusion: reading App A, the same org member still gets it.
+    const inA = (await resolvers.Query.appNodes({}, { appRef: appA.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(inA).toContain('a.internal');
+  });
+
+  it("does not leak another App's app-scoped memory to a PARTICIPANT either (#1097)", async () => {
+    // WHAT THIS PINS, stated precisely because a mutation showed it is not what
+    // I first assumed: the participant path holds this property WITHOUT the
+    // scope predicate. Dropping that predicate reds the ORG test above and NOT
+    // this one — `getMemoryAccess(auth{appId: B})` never admits App A's
+    // app-class memory, so `canReadMemory` refuses it before the scope rule is
+    // consulted.
+    //
+    // So this is a regression test for the ACCESS GATE, not for #1097's
+    // resolver fix. Kept anyway: "a participant of two Apps cannot read the
+    // other's internals" is a cross-tenant property worth pinning whichever
+    // layer enforces it, and if that layer moves, this fails.
+    //
+    // WHY that layer holds it — I first left this unresolved and @copilot
+    // answered it (PR #1132 review): #1102 moved the App-scope rule into
+    // `admissibleFoldRows`, the shared predicate behind `getMemoryAccess`, and
+    // that docstring calls itself "the enumeration half of #1097". So #1093's
+    // claim here — that `canReadMemory` admits an app-class memory of A — was
+    // true when written and is now false. The ORG branch leaked because it
+    // bypasses that predicate entirely, which is the half this PR fixes.
+    const { app: appB } = await withTeamSpace('app-nodes-part-cross-b');
+    const { app: appA } = await createDbAppWithKey(db, 'app-nodes-part-cross-a', orgId);
+    await db.appAgent.create({ data: { appId: appA.id, agentId } });
+
+    const knowledgeInA = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, appId: appA.id,
+        urn: `${orgId}:part-knowledge-a-${Date.now()}`, name: 'A internal',
+        class: 'app', acceptsUploads: false,
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: knowledgeInA.id, loc: 'a.part.internal',
+        isLink: false, name: 'A internal', tags: [],
+      },
+    });
+
+    // A participant of BOTH Apps who is NOT org-authorized — so this takes the
+    // delegated branch rather than the org one.
+    const member = await db.user.create({
+      data: {
+        id: generateId(), githubId: 771088,
+        githubUsername: `an-part-cross-${Date.now()}`, roles: ['READER'],
+      },
+    });
+    await db.appMember.create({ data: { appId: appA.id, userId: member.id, role: 'member' } });
+    await db.appMember.create({ data: { appId: appB.id, userId: member.id, role: 'member' } });
+    await db.agentSubscription.create({
+      data: { userId: member.id, agentId, activatedAt: new Date() },
+    });
+    const ctx = { db, roles: ['READER'], userId: member.id } as Context;
+
+    const inB = (await resolvers.Query.appNodes({}, { appRef: appB.id }, ctx)).map(
+      (n: { loc: string }) => n.loc,
+    );
+    expect(inB).not.toContain('a.part.internal');
+  });
+
   it('honours subscription REVOCATION on a personal memory (#1093 P1, delegated)', async () => {
     // The clause I would have missed a fifth time. `canReadMemory` requires an
     // ACTIVE AgentSubscription for an agent-scoped personal memory, so
