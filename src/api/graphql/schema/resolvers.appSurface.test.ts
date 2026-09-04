@@ -775,8 +775,11 @@ describe('appNodes', () => {
     const { app: appA } = await createDbAppWithKey(db, 'app-nodes-org-cross-a', orgId);
     await db.appAgent.create({ data: { appId: appA.id, agentId } });
 
-    // An APP-CLASS memory of App A on the shared agent — not personal, so the
-    // #1093 fix's branch never sees it and `canReadMemory` admits it.
+    // An APP-CLASS memory of App A on the shared agent. Not personal, so the
+    // #1093 personal-row rules do not apply — and the ORG branch reaches it
+    // through the raw installed-agent walk without consulting the access map
+    // at all, which is the leak. (A participant would be refused it by
+    // `admissibleFoldRows`; only this path lacked a scope rule.)
     const knowledgeInA = await db.memory.create({
       data: {
         id: generateId(), organizationId: orgId, appId: appA.id,
