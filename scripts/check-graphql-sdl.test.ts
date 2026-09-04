@@ -411,15 +411,291 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(offenders[0].line).toBe(2);
   });
 
-  it('does NOT fire on a valid query ENDING in a line comment (@codex P2, #1109)', () => {
-    // The false POSITIVE that finally showed the heuristic approach was wrong:
-    // here the backtick IS the terminator and the SQL comment simply runs to
-    // the end of the literal. Ordinary code, flagged as broken.
+  it('DOES fire on a valid query ending in a line comment — the shape is banned (#1110)', () => {
+    // EXPECTATION INVERTED, and deliberately: @Holger's ruling (2026-09-03).
+    //
+    // This was @codex's P2 on #1109 and it is genuinely valid code — the
+    // backtick IS the terminator and the SQL comment simply runs to the end of
+    // the literal. It is refused anyway, because separating this from the
+    // identical-looking broken shape is what six attempts could not do: the
+    // version that tried (a second "the query continues past the close"
+    // condition) was broken from BOTH sides in one review — an end-of-line
+    // backtick passed silently, and `…-- explanation`.then(…)` was flagged.
+    //
+    // So the shape is banned rather than diagnosed. It costs this idiom; the
+    // fix is one line (move the comment up, or close on the next line), and it
+    // occurs 0 times in the 105 raw-SQL literals here.
     const src = lines(
       'const a = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- explanation' + BACKTICK + ';',
       '',
     );
-    expect(scanFiles({ 'a.ts': src }).offenders).toEqual([]);
+    const { offenders } = scanFiles({ 'a.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].errors.join(' ')).toMatch(/CLOSES on a line carrying a -- comment/);
+  });
+
+  it('#1110: catches a stray backtick at END of its comment line (@codex P2, #1131)', () => {
+    // The false NEGATIVE that killed the "query continues past the close"
+    // condition: with the backtick last on its line the tail is EMPTY, which
+    // that condition read as a clean close while the re-paired continuation sat
+    // on the next line. No tail is consulted now.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET a = false -- use ' + BACKTICK,
+      '&& ' + BACKTICK + 'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: an interpolated apostrophe cannot hide the comment (@codex P2, #1131)', () => {
+    // Reading the RAW source dragged each `${…}`'s TypeScript through a scanner
+    // that tracks `'` to tell a SQL string from a comment, so `${"'"}` toggled
+    // the quote state and hid the `--` behind it. The cooked segments are read
+    // instead, with spans replaced by `?` — which is what the database receives.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET n = ${"\'"} -- x ' +
+        BACKTICK + '&&' + BACKTICK + ' y',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: a SQL string spanning LINES cannot hide the comment (@codex P2, #1131)', () => {
+    // Scanning only the closing line met the string's CLOSING quote first, read
+    // it as an opening one, and treated the real `--` as quoted — hiding a
+    // truncated UPDATE. Quote state is only meaningful from where the string
+    // began, so the scan carries it across newlines.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + "UPDATE t SET a = 'hello",
+      "world' -- use " + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a multi-line SQL string with no comment', () => {
+    // The control for the above: carrying quote state must not invent a comment.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + "UPDATE t SET a = 'hello",
+      "world'",
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: silent when a comment is followed by a STRING on a later line', () => {
+    // A comment ends at the newline, so it must not swallow the rest of the
+    // query — the reset half of the same walk.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- note',
+      "WHERE a = 'x'" + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: an apostrophe in a "quoted identifier" cannot hide the comment (@codex P2, #1131)', () => {
+    // Toggling on `'` alone treated every apostrophe as string syntax, so one
+    // inside a double-quoted IDENTIFIER flipped the state and hid the real
+    // comment behind it — a truncated UPDATE, passed silently. 11 of this
+    // repo's 105 literals contain `"`. Quoted contexts are now skipped whole.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE t SET "owner\'s" = 1 -- use ' +
+        BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a quoted identifier containing an apostrophe', () => {
+    // The control: skipping quoted contexts must not INVENT a comment either.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT "owner\'s" FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it("#1110: silent on SQL's doubled '' escape", () => {
+    // `''` escapes a quote inside a string, so the `--` here is text, not a
+    // comment — and the literal closes legitimately.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + "SELECT 'it''s -- not a comment'" + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: an apostrophe in a /* block comment */ cannot hide the -- (@codex P2, #1131)', () => {
+    // Round five of the same shape: a context whose contents were being lexed
+    // as SQL. Every Postgres context that can carry a quote or a dash is now
+    // skipped whole, rather than adding them one review round at a time.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK +
+        "UPDATE t /* owner's note */ SET a = 1 -- use " + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: block comments NEST, unlike C', () => {
+    // Postgres nests `/* */`, so scanning to the first `*/` would leave the
+    // walk inside the comment and mis-read everything after it.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK +
+        "UPDATE t /* a /* b */ owner's */ SET a = 1 -- use " + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: an apostrophe in a $$ dollar-quoted body cannot hide the --', () => {
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK +
+        "DO $$ BEGIN owner's END $$ -- use " + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a block comment / dollar body with no line comment', () => {
+    // The controls: skipping a context must not INVENT a line comment, and a
+    // `--` INSIDE a block comment is not one either.
+    const a = lines(
+      'const q = await db.$queryRaw' + BACKTICK + "SELECT 1 /* owner's note */ FROM t" + BACKTICK + ';',
+      '',
+    );
+    const b = lines('const q = await db.$queryRaw' + BACKTICK + "DO $$ owner's $$" + BACKTICK + ';', '');
+    const c = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 /* -- not a line comment */ FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'a.ts': a }).offenders).toEqual([]);
+    expect(scanFiles({ 'b.ts': b }).offenders).toEqual([]);
+    expect(scanFiles({ 'c.ts': c }).offenders).toEqual([]);
+  });
+
+  it('#1110: a dollar-quote TAG may contain digits (@copilot, #1131)', () => {
+    // `$fn1$` is a legal delimiter. Excluding digits left its body unskipped,
+    // so the `--` inside was read as a real comment that then ran to the close.
+    //
+    // The fixture is deliberately free of apostrophes: my first version used
+    // `owner's` inside the body, and an UNTERMINATED string swallowed the rest
+    // either way — so the test passed with the digit support removed. It proved
+    // nothing until the mutation said so.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'DO $fn1$ x -- y $fn1$' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: `owner$tag$` is an IDENTIFIER, not a dollar-quote (@codex P2, #1131)', () => {
+    // Postgres allows `$` inside unquoted identifiers, so a legal column name
+    // can contain a perfect `$tag$` that opens nothing. Treating it as a
+    // delimiter entered a body with no close, ran to the end of the literal,
+    // and swallowed the real `--` — a silent pass on a truncated query. A real
+    // dollar-quote cannot directly follow an identifier character.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE t SET owner$tag$ = 1 -- use ' +
+        BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: a dollar-quote tag may be NON-ASCII (@codex P2, #1131)', () => {
+    // Postgres identifiers admit unicode letters, so `$é$` is a legal tag. An
+    // ASCII-only class never entered that body, and an unmatched apostrophe
+    // inside it — valid there — then read as an unterminated string and hid the
+    // closing `--`. Written with `\p{L}` rather than by adding the letters
+    // somebody happened to name.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + "UPDATE t SET v = $é$owner's$é$ -- use " +
+        BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a non-ASCII dollar body carrying its own --', () => {
+    // The control: the body really is skipped, so a `--` inside it is not a
+    // line comment and the literal closes cleanly.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'UPDATE t SET v = $é$ x -- y $é$ WHERE id = 1' +
+        BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: a unicode identifier boundary is respected too', () => {
+    // `café$t$` is one identifier; an ASCII-only boundary test would read the
+    // `$t$` inside it as a delimiter and swallow the real comment.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE t SET café$t$ = 1 -- use ' +
+        BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: a DECOMPOSED unicode dollar tag is recognised (@codex P2, #1131)', () => {
+    // Round two of the same finding. I first answered `$\u00e9$` with `\\p{L}`, and
+    // `\\p{L}`/`\\p{N}` omit combining MARKS — so a decomposed `a` + U+0301 still
+    // failed. The charset is now Postgres's own rule (any non-ASCII character is
+    // an identifier character) rather than one more category guessed at.
+    const tag = 'a\u0301';
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE t SET v = $' + tag +
+        "$owner's$" + tag + '$ -- use ' + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'x.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a decomposed unicode dollar body carrying its own --', () => {
+    const tag = 'a\u0301';
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'UPDATE t SET v = $' + tag +
+        '$ x -- y $' + tag + '$ WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: a carriage return ends a SQL line comment too (@codex P2, #1131)', () => {
+    // Postgres terminates `--` at CR as well as LF. Handling only LF left this
+    // valid query marked as ending inside a comment and REFUSED — the loud
+    // direction, but a gate that rejects correct code is the one that gets
+    // switched off. The `\r` is COOKED, so it is a real carriage return in the
+    // SQL the database receives.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- explanation\\r, 2' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: silent on an interpolation with no comment at all', () => {
+    // The control for the `?` substitution: replacing spans must not invent a
+    // comment where the SQL has none.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT ${id} FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
   });
 
   it('FAILS on a backtick inside a /* block */ comment (@codex P2, #1109)', () => {
@@ -495,18 +771,98 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     expect(scanFiles({ 't.ts': src }).offenders).toEqual([]);
   });
 
-  it('KNOWN GAP: a break that re-pairs into valid TypeScript is not caught (#1110)', () => {
-    // Pinned as a gap rather than left to be rediscovered. The parser has no
-    // complaint here — `taggedTemplate && templateExpression` is valid — so the
-    // diagnostic arm cannot see it. Stated as a test so #1110 has a red to turn
-    // green, and so nobody reads the gate's silence as coverage.
+  it('CLOSED (#1110): a break that re-pairs into valid TypeScript IS caught', () => {
+    // Was pinned as a KNOWN GAP asserting silence, so #1110 would have a red to
+    // turn green. This is that red turning green.
+    //
+    // The parser has no complaint — `taggedTemplate && templateExpression` is
+    // valid TypeScript — so the diagnostic arm still cannot see it. What catches
+    // it is the literal's OWN property: it closes after a `--` on its line, and
+    // a SQL comment runs to end-of-line, so no legitimate close can sit there.
     const src = lines(
       'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u SET a = false -- use ' +
         BACKTICK + '&&' + BACKTICK + ' for overlap',
       'WHERE id = ${id}' + BACKTICK + ';',
       '',
     );
-    expect(scanFiles({ 'g.ts': src }).offenders).toEqual([]);
+    const { offenders } = scanFiles({ 'g.ts': src });
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].line).toBe(1);
+    // The message has to name the RE-PAIR, because that is the part a reader
+    // will not believe: the file compiles, so "broken literal" sounds wrong
+    // until you are told the truncated query still runs.
+    expect(offenders[0].errors.join(' ')).toMatch(/re-pair into valid\s+TypeScript/);
+    expect(offenders[0].errors.join(' ')).toMatch(/TRUNCATED/);
+  });
+
+  it('#1110: catches a tail owned by a tag the comment NAMED', () => {
+    // Defeated the third earlier attempt (the "unowned tail" rule): naming a tag
+    // inside the comment gave the severed tail an owner, so an ownership test
+    // read it as legitimate. Ownership is not consulted here.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u -- use ' + BACKTICK +
+        '&& Prisma.sql' + BACKTICK + ' now',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'g.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: catches an array element inside Promise.all', () => {
+    // Defeated the fourth attempt, which walked binary/conditional parents and
+    // never reached an array element.
+    const src = lines(
+      'await Promise.all([',
+      '  db.$executeRaw' + BACKTICK + 'UPDATE u -- ' + BACKTICK + '&&' + BACKTICK + ' z',
+      'WHERE id = 1' + BACKTICK + ',',
+      ']);',
+      '',
+    );
+    expect(scanFiles({ 'g.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: catches a backtick pair enclosing a SEMICOLON', () => {
+    // The construction #1110 listed that NO earlier version reached: the pair
+    // splits the remainder into a separate STATEMENT, so a statement-scoped walk
+    // never visits it. This arm never walks outward, so the split is irrelevant.
+    const src = lines(
+      'const x = await db.$executeRaw' + BACKTICK + 'UPDATE u -- a ' + BACKTICK +
+        '; const y = 1; ' + BACKTICK + ' b',
+      'WHERE id = 1' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'g.ts': src }).offenders).toHaveLength(1);
+  });
+
+  it('#1110: silent on a legitimate SQL comment the literal does not close on', () => {
+    // The control that separates "closes inside a comment" from "contains one".
+    // A comment is ordinary in raw SQL; only closing INSIDE it is the bug.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- explain why',
+      'FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: silent on an ESCAPED backtick inside a SQL comment', () => {
+    // The repo's actual idiom for naming a column in a comment. An escaped
+    // backtick terminates nothing, so the literal closes where it should.
+    const src = lines(
+      'const q = await db.$queryRaw' + BACKTICK + 'SELECT 1 -- see \\' + BACKTICK +
+        'col\\' + BACKTICK + ' here',
+      'FROM t' + BACKTICK + ';',
+      '',
+    );
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
+  });
+
+  it('#1110: silent when -- sits inside a SQL STRING on the closing line', () => {
+    // endsInsideLineComment is quote-aware, and that is what makes this arm safe
+    // rather than merely narrow: `SELECT '--'` closes legitimately on a line
+    // containing two dashes. (hasLineComment is the SDL half, not this one.)
+    const src = lines('const q = await db.$queryRaw' + BACKTICK + "SELECT '--'" + BACKTICK + ';', '');
+    expect(scanFiles({ 'q.ts': src }).offenders).toEqual([]);
   });
 
   it('does NOT fire on a Prisma.sql fragment NESTED in a query slot', () => {

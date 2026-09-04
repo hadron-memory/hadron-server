@@ -12,17 +12,22 @@
  *    template literal; a BARE backtick inside a GraphQL description or `#`
  *    comment terminates it, and everything after it is parsed as TypeScript.
  *    This half reads the file as TEXT and names the offending line.
- * 1b. THE TAGGED LITERALS ARE INTACT (#1087). Every `$queryRaw` /
+ * 1b. THE TAGGED LITERALS ARE INTACT (#1087, #1110). Every `$queryRaw` /
  *    `$executeRaw` / `Prisma.sql` literal in `src/`. NOT the same scan as
- *    check 1 — it does not text-scan at all. `scanTaggedLiterals` asks the
- *    TypeScript parser where each literal ends and then checks two things the
- *    parser cannot decide for it: that the file has no parse diagnostics.
- *    A break that RE-PAIRS into valid TypeScript is out of scope and tracked
- *    as #1110 — see the note above `scanTaggedLiterals`. Porting check 1's text rules
- *    here took five review rounds and never worked; the header of that
- *    function records why, and this line said otherwise until PR #1109 review
- *    caught it — prose outliving its mechanism, in the header of the PR about
- *    prose outliving its mechanism.
+ *    check 1 — it does not text-scan the file at all. `scanTaggedLiterals`
+ *    asks the TypeScript parser where each literal ends, and then covers the
+ *    two ways a stray backtick can end one:
+ *      - it leaves the file UNPARSEABLE — reported against the nearest tagged
+ *        literal, since `tsc` blames wherever the remainder stops making sense
+ *        and never says "unterminated literal";
+ *      - it RE-PAIRS into valid TypeScript, so the parser has no complaint at
+ *        all and the truncated query still runs. Caught by
+ *        `closesInsideSqlComment` (#1110), which asks one question about the
+ *        literal itself: does its SQL END inside a `--` comment. Nothing about
+ *        the surrounding expression is consulted. The shape is BANNED rather
+ *        than diagnosed — a valid query whose comment simply runs to the close
+ *        is refused too — because six attempts at telling those apart all
+ *        failed; that function's header records the sequence and the ruling.
  * 2. THE SDL PARSES. Imports `typeDefs` from
  *    `src/api/graphql/schema/typeDefs.ts` (the single SDL source) and runs
  *    `graphql.parse()` on it.
@@ -414,26 +419,251 @@ function isRawSqlTag(node) {
 }
 
 /**
- * NOT IMPLEMENTED HERE, deliberately: detecting a literal whose stray backticks
- * RE-PAIR into valid TypeScript. Tracked as #1110.
+ * Does this raw-SQL literal CLOSE inside one of its own `--` comments? (#1110)
  *
- * The parser arm above catches every break that leaves the file unparseable,
- * which is the incident #1087 was filed for and the overwhelming majority. It
- * cannot catch a break that happens to re-pair, because nothing is wrong with
- * the TypeScript — and four attempts at an AST rule for that each fell to a
- * construction the previous one had not imagined (`&&`, a conditional, a
- * conditional's TEST, a tail owned by a tag the comment named, an array
- * element). The fifth, a positional "no literal beside an executor's own",
- * finally produced a FALSE POSITIVE on ordinary code:
+ * The re-pair case, and the arm that five earlier attempts could not build. A
+ * stray backtick whose remainder happens to re-pair leaves the file PARSEABLE,
+ * so the diagnostic arm above is blind to it:
+ *
+ *   db.$executeRaw`UPDATE u SET a = false -- use `&&` for overlap
+ *   WHERE id = ${id}`;
+ *
+ * is `taggedTemplate && templateExpression` — valid TypeScript, `WHERE` gone,
+ * and the truncated UPDATE still runs.
+ *
+ * WHY THE EARLIER ATTEMPTS FAILED, since the difference is the whole point.
+ * Each asked where the EXECUTOR sat: an operand of `&&`, a branch of a
+ * conditional, an unowned tail, a parent shape, "no literal beside its own".
+ * Every one of those names the SHAPES a re-pair can take, so every one was
+ * shown a shape it lacked — a conditional, then the conditional's TEST, then a
+ * tail owned by a tag the comment named, then an array element — until the
+ * fifth finally flagged ordinary code and had to come out:
  *
  *   await Promise.all([db.$queryRaw`SELECT 1`, db.$queryRaw`SELECT 2`])
  *
- * Two legitimate queries in one statement, both flagged. **A gate that blocks
- * valid code gets switched off, which costs more than the gap it was closing** —
- * so the arm is removed rather than tightened a sixth time. #1110 records every
- * construction found, so whoever takes it starts from the evidence instead of
- * from a fresh guess.
+ * A gate that blocks valid code gets switched off, which costs more than the
+ * gap it closes. Enumerating shapes was the error, not the width of any
+ * particular enumeration.
+ *
+ * WHAT THIS ASKS INSTEAD is one property of the literal alone, with no
+ * reference to what encloses it: **does it close on a line whose SQL contains a
+ * `--` comment.** Where the executor sits, what consumed it, and what the
+ * remainder re-paired into are all irrelevant — which is why no construction
+ * defeats it.
+ *
+ * THE RULE IS DELIBERATELY A BAN, NOT A DIAGNOSIS, and that was @Holger's call
+ * (2026-09-03) after a first version tried to be clever. That version added a
+ * second condition — the query must also continue past the close — so that the
+ * legitimate `` `SELECT 1 -- explanation` `` kept working. @codex broke it from
+ * BOTH sides within one review: a stray backtick at end-of-line left an empty
+ * tail and passed (false negative), while a valid query ending in a comment and
+ * followed by `.then(…)` or `as T` was flagged (false positive on valid code).
+ * Repairing that means modelling TypeScript continuations in a text scanner —
+ * the exact trap this file's SDL half already documents, and the one that
+ * killed five attempts.
+ *
+ * So the shape is banned outright: **do not end a raw-SQL literal on a comment
+ * line.** It costs one valid idiom, which is worth stating plainly rather than
+ * pretending away — but that idiom is one keystroke from the bug, the fix is to
+ * move the comment up a line or close on the next one, and it appears **0
+ * times in 105 raw-SQL literals** here. Making the hazardous shape
+ * unrepresentable is cheaper and more honest than telling its safe instances
+ * from its unsafe ones, which is what nobody managed six times running.
+ *
+ * Against the constructions #1110 recorded: the `&&` head case, the tag-owned
+ * tail, the array element, and the backtick pair enclosing a semicolon (which
+ * no previous version reached at all) are caught; the two conditional shapes
+ * leave the file unparseable and belong to the arm above. `Promise.all` with
+ * two real queries, a nested `Prisma.sql` fragment, `SELECT '--'`, an escaped
+ * backtick in a comment, and a comment on a line the literal does not close on
+ * all stay silent.
+ *
+ * `endsInsideLineComment` is quote-aware, so `SELECT '--'` is a string and not
+ * a comment — the distinction that keeps this a ban on one shape rather than on
+ * every line containing two dashes. (`hasLineComment` is the SDL half's
+ * simpler cousin and is NOT what runs here; PR #1131 review, @copilot.)
+ *
+ * NOT a SQL parser and NOT an ESLint rule, the two options #1110 proposed and
+ * flagged as technology decisions. Neither is needed: the invariant is lexical,
+ * and the helper for it was already in this file.
  */
+function closesInsideSqlComment(node, text) {
+  // The template's last character is its closing backtick — true for both a
+  // NoSubstitutionTemplateLiteral and a TemplateExpression with `${}` spans.
+  const closeIndex = node.template.end - 1;
+  if (text[closeIndex] !== '`') return null;
+  return endsInsideLineComment(cookedSql(node.template)) ? closeIndex : null;
+}
+
+/**
+ * A template's SQL as the DATABASE would see it: cooked text, with every
+ * `${…}` span replaced by `?`.
+ *
+ * Reading the raw source instead was wrong in a way worth recording, because it
+ * looked equivalent (PR #1131 review, @codex P2). The scan tracks `'` to tell a
+ * SQL string from a comment, and raw source drags the embedded TypeScript of
+ * every interpolation through it — so `${"'"}` toggles the quote state and
+ * HIDES a real `--` behind it, turning a truncated query into a silent pass.
+ * Interpolations become bound parameters, never literal SQL, so they have no
+ * business being lexed as SQL at all; `?` is what actually arrives, and it
+ * carries no quote or dash.
+ *
+ * Cooked text also disposes of escapes for free: `` \` `` arrives as a plain
+ * backtick that terminated nothing, which is this repo's idiom for naming a
+ * column inside a comment.
+ */
+function cookedSql(template) {
+  return ts.isNoSubstitutionTemplateLiteral(template)
+    ? template.text
+    : template.head.text +
+        template.templateSpans.map((span) => `?${span.literal.text}`).join('');
+}
+
+/**
+ * Does this SQL END inside a `--` line comment?
+ *
+ * Scanned from the START of the literal rather than from its last line, and
+ * that is the whole point (PR #1131 review, @codex P2). A SQL string may SPAN
+ * lines:
+ *
+ *   UPDATE t SET a = 'hello
+ *   world' -- use `…`
+ *
+ * Starting at the final line meets that closing `'` first, reads it as an
+ * OPENING quote, and then treats the real `--` as quoted — hiding a truncated
+ * UPDATE. Quote state is only meaningful from where the string actually began,
+ * so the scan has to carry it across newlines.
+ *
+ * A comment ends at the newline, so the walk resets there; the answer is simply
+ * whether it finishes inside one.
+ *
+ * QUOTED CONTEXTS ARE SKIPPED WHOLE rather than toggled on `'` alone, and that
+ * distinction is load-bearing (PR #1131 review, @codex P2). A toggle treats
+ * every apostrophe as SQL string syntax, so an apostrophe inside a
+ * `"`-quoted IDENTIFIER — `SET "owner's" = 1 -- use …` — flips the state and
+ * then hides the real comment behind it: a truncated UPDATE, passed silently.
+ * 11 of this repo's 105 literals contain `"`.
+ *
+ * My earlier note here claimed the only `"` risk was a `--` INSIDE an
+ * identifier being falsely refused — loud, and therefore acceptable. That was
+ * half the story: the same gap runs the other way and fails SILENTLY, which is
+ * the direction a gate must never fail. Documented limitations deserve the same
+ * "which way does it fail" check as code.
+ *
+ * EVERY Postgres context that can carry a quote or a dash is skipped, not just
+ * the ones that had bitten yet. Rounds three, four and five of this review were
+ * each "you missed another context" (`"…"` identifiers, then `/* … *\/` blocks,
+ * then dollar-quoting), and answering them one at a time was inviting a sixth.
+ * So: `'…'` (with `''`), `E'…'` (backslash escapes), `"…"` (with `""`),
+ * `/* … *\/` — which NESTS in Postgres, unlike C — and `$tag$ … $tag$`.
+ *
+ * The remaining limit, stated in BOTH directions because the last version of
+ * this note only gave the flattering one: an UNTERMINATED quote or block runs
+ * to the end of the literal and reports nothing. That is a silent pass, but
+ * only on SQL that is already malformed — and such a literal cannot have closed
+ * where its author intended either, so the parse arm or `tsc` gets it first.
+ */
+function endsInsideLineComment(sql) {
+  let inComment = false;
+  let k = 0;
+  /** Advance past a delimited run, honouring a doubled delimiter as an escape. */
+  const skipQuoted = (delim, backslashEscapes) => {
+    k += 1;
+    while (k < sql.length) {
+      if (backslashEscapes && sql[k] === '\\') k += 2;
+      else if (sql[k] !== delim) k += 1;
+      else if (sql[k + 1] === delim) k += 2;
+      else return void (k += 1);
+    }
+  };
+  while (k < sql.length) {
+    const ch = sql[k];
+    if (ch === '\n' || ch === '\r') {
+      // CR ends a line comment in Postgres too, and a cooked `\r` really can
+      // appear in one of these literals (@codex P2, #1131). Missing it left a
+      // valid query marked as ending inside a comment and REFUSED — the loud
+      // direction, but a gate that rejects correct code is the one that gets
+      // switched off.
+      inComment = false;
+      k += 1;
+    } else if (inComment) {
+      k += 1;
+    } else if (ch === "'") {
+      // `E'…'` / `e'…'` gives backslash its C-style meaning; a plain string
+      // does not. The preceding character must be a standalone E, not the tail
+      // of an identifier like `TABLE'…'`.
+      skipQuoted("'", /[Ee]/.test(sql[k - 1] ?? '') && !/[\w$]/.test(sql[k - 2] ?? ' '));
+    } else if (ch === '"') {
+      skipQuoted('"', false);
+    } else if (sql.startsWith('/*', k)) {
+      // Postgres block comments NEST, so a depth counter is required rather
+      // than a scan to the first `*/`.
+      let depth = 1;
+      k += 2;
+      while (k < sql.length && depth > 0) {
+        if (sql.startsWith('/*', k)) { depth += 1; k += 2; }
+        else if (sql.startsWith('*/', k)) { depth -= 1; k += 2; }
+        else k += 1;
+      }
+    } else if (isDollarQuoteAt(sql, k)) {
+      const tag = sql.slice(k).match(DOLLAR_TAG)[0];
+      const close = sql.indexOf(tag, k + tag.length);
+      k = close === -1 ? sql.length : close + tag.length;
+    } else if (sql.startsWith('--', k)) {
+      inComment = true;
+      k += 2;
+    } else {
+      k += 1;
+    }
+  }
+  return inComment;
+}
+
+/**
+ * A dollar-quote delimiter: `$$` or `$tag$`, anchored at the scan position.
+ *
+ * The tag follows Postgres identifier rules — a letter or underscore, then
+ * letters, DIGITS or underscores. The digits matter: `$tag1$` is legal, and
+ * omitting them left its body unskipped (PR #1131 review, @copilot).
+ *
+ * NON-ASCII is admitted wholesale, which is Postgres's ACTUAL rule rather than
+ * an approximation of it: its identifier lexer accepts "letters with diacritical
+ * marks and non-Latin letters" — implemented as any character outside ASCII.
+ *
+ * Two review rounds arrived here (@codex P2, twice). The first was `$é$` and I
+ * answered it with `\p{L}`; the second pointed out that `\p{L}`/`\p{N}` omit
+ * combining MARKS, so a decomposed `$á$` still failed. Rather than add `\p{M}`
+ * and wait to be told about `\p{Pc}`, this now matches what Postgres documents.
+ * Guessing a category at a time is the same mistake as guessing a SQL context
+ * at a time, which this file already made five times over.
+ */
+const NON_ASCII = '[^\\x00-\\x7F]';
+const DOLLAR_TAG = new RegExp(`^\\$(?:(?:[A-Za-z_]|${NON_ASCII})(?:[A-Za-z0-9_]|${NON_ASCII})*)?\\$`, 'u');
+
+/** Any character Postgres allows INSIDE an unquoted identifier, `$` included. */
+const IDENT_CHAR = new RegExp(`[A-Za-z0-9_$]|${NON_ASCII}`, 'u');
+
+/**
+ * Is position `k` the START of a dollar-quoted string?
+ *
+ * The delimiter alone is not enough, because Postgres permits `$` INSIDE an
+ * unquoted identifier — so a legal column like `owner$tag$` contains a perfect
+ * `$tag$` that opens nothing (PR #1131 review, @codex P2). Treating it as a
+ * delimiter enters a body with no close, runs the scan to the end of the
+ * literal, and swallows a later real `--` — a silent pass on a truncated query.
+ *
+ * A real dollar-quote therefore cannot directly follow an identifier character.
+ * Both bots landed on this one line from opposite sides in the same round —
+ * @copilot that the tag was too NARROW, @codex that the boundary was too WIDE —
+ * and it needed both to be right.
+ */
+function isDollarQuoteAt(sql, k) {
+  // The same charset as the tag, for the same reason: `café$t$` is ONE
+  // identifier, so an ASCII-only boundary test would read the `$t$` inside it
+  // as a delimiter and skip past the real comment.
+  if (IDENT_CHAR.test(sql[k - 1] ?? ' ')) return false;
+  return DOLLAR_TAG.test(sql.slice(k));
+}
 
 
 
@@ -555,14 +785,37 @@ export function scanTaggedLiterals(dir = join(ROOT, 'src')) {
     }
 
     // Parsed clean. Count the tagged literals so an empty scan cannot read as
-    // a clean one, and do nothing else — re-pair detection is out of scope
-    // here and tracked as #1110 (see the note above this function). This
-    // comment previously described an AST check that no longer exists, three
-    // commits after the check was removed: the same prose-outliving-its-
-    // mechanism defect this whole PR is about, for the third time in it.
+    // a clean one — and check each for the RE-PAIR case (#1110), which by
+    // definition only occurs in files that parse.
     const visit = (node) => {
       if (isRawSqlTag(node)) {
         documents += 1;
+        const closeIndex = closesInsideSqlComment(node, text);
+        if (closeIndex !== null) {
+          const lineEnd = text.indexOf('\n', closeIndex);
+          const line = text.slice(
+            text.lastIndexOf('\n', closeIndex) + 1,
+            lineEnd === -1 ? text.length : lineEnd,
+          );
+          offenders.push({
+            name: file,
+            file,
+            line: lineOf(text, closeIndex),
+            errors: [
+              'this raw-SQL template literal CLOSES on a line carrying a -- comment.',
+              'A SQL comment runs to end-of-line, so a bare backtick anywhere in it',
+              'ends the literal early — and the remainder can re-pair into valid',
+              'TypeScript, in which case nothing fails to compile and the TRUNCATED',
+              'query still runs.',
+              'Fix: move the comment up a line, or close the literal on the next',
+              'line. If the backtick is the problem, escape it (\\`) or spell the',
+              'symbol out. This shape is refused even when it happens to be safe —',
+              'telling the safe instances from the broken ones is what six attempts',
+              'could not do (#1110).',
+              `    ${line.trim()}`,
+            ],
+          });
+        }
       }
       ts.forEachChild(node, visit);
     };
