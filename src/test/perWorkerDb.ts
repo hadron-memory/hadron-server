@@ -17,7 +17,14 @@
  * rewrite it, defeating the isolation.
  */
 import { Client } from 'pg';
-import { PARALLEL_DBS, workerDbUrl, workerDbName, baseDbName, maintenanceUrl } from './dbWorkers.js';
+import {
+  PARALLEL_DBS,
+  workerDbUrl,
+  workerDbName,
+  runTemplateDbName,
+  testRunId,
+  maintenanceUrl,
+} from './dbWorkers.js';
 
 if (PARALLEL_DBS) {
   const poolId = process.env.VITEST_POOL_ID ?? '1';
@@ -29,7 +36,11 @@ if (PARALLEL_DBS) {
   try {
     const { rowCount } = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [name]);
     if (!rowCount) {
-      const template = baseDbName();
+      // THIS RUN's snapshot of the template, not the shared base (#1136 review,
+      // Codex P1): a concurrent suite from another checkout provisions the base
+      // with its own constraints, and cloning that would run this branch's
+      // tests against another branch's schema.
+      const template = runTemplateDbName(testRunId());
       // Clone the fully-provisioned template (schema, pgvector, tsv, all CHECK
       // constraints). Identifier is code-derived.
       //
@@ -39,8 +50,8 @@ if (PARALLEL_DBS) {
       // a dev's GUI or psql. That reasoning was wrong in the same way the rest
       // of #1091 was: a CONCURRENT RUN's globalSetup is connected to the
       // template while it provisions, so terminating "stray" connections
-      // evicted somebody else's suite. WAIT instead — the blocker is another
-      // run's setup, it is short, and it finishes on its own.
+      // evicted somebody else's suite. WAIT instead — the blocker is short and
+      // finishes on its own.
       for (let attempt = 0; ; attempt++) {
         try {
           await admin.query(`CREATE DATABASE "${name}" TEMPLATE "${template}"`);

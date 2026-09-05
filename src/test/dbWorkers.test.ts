@@ -15,6 +15,7 @@ import {
   baseDbName,
   maintenanceUrl,
   testRunId,
+  runTemplateDbName,
   parseWorkerDbName,
   isRunAlive,
   templateLockKey,
@@ -109,6 +110,23 @@ describe('run scoping', () => {
     );
   });
 
+  it('gives two runs different TEMPLATES, not just different clone names', () => {
+    // Run-scoped names alone left the base template shared, so a suite from
+    // another checkout could rewrite the constraints between our DDL and our
+    // first worker clone — and the bad outcome is not a crash, it is passing
+    // against a schema this branch never wrote (#1136 review, Codex P1).
+    expect(runTemplateDbName('100', 'hadron_test')).toBe('hadron_test_r100_tpl');
+    expect(runTemplateDbName('100', 'hadron_test')).not.toBe(
+      runTemplateDbName('200', 'hadron_test'),
+    );
+  });
+
+  it('never collides a run template with a worker clone of the same run', () => {
+    expect(runTemplateDbName('100', 'hadron_test')).not.toBe(
+      workerDbName(1, 'hadron_test', '100'),
+    );
+  });
+
   it.each([undefined, '', 'abc', '12x'])(
     'throws rather than falling back when the run id is %s',
     (bad) => {
@@ -128,6 +146,17 @@ describe('parseWorkerDbName', () => {
       datname: 'hadron_test_r512_3',
       runId: '512',
       poolId: '3',
+    });
+  });
+
+  it('reads a run TEMPLATE, so the same orphan sweep collects it', () => {
+    // The run template is garbage after a crash in exactly the way a worker
+    // clone is; giving it its own shape would have meant a second sweep, and a
+    // second sweep is a second thing to forget.
+    expect(parseWorkerDbName('hadron_test_r512_tpl', 'hadron_test')).toEqual({
+      datname: 'hadron_test_r512_tpl',
+      runId: '512',
+      poolId: 'tpl',
     });
   });
 

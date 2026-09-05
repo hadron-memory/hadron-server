@@ -141,7 +141,27 @@ export function templateLockKey(base = baseDbName()): number {
   return h & 0x7fffffff;
 }
 
-/** A parsed worker clone. `runId` is null for a pre-#1091 `<base>_<digits>` name. */
+/**
+ * This run's private copy of the template, which its workers clone from.
+ *
+ * Run-scoped clone NAMES alone leave the template itself shared, and two suites
+ * from different checkouts provision it with different constraints — so a run
+ * could clone the other branch's schema and pass against constraints it never
+ * wrote (PR #1136 review, Codex P1). `globalSetup` takes this snapshot while
+ * holding the template lock, which is what makes the run's schema its own.
+ *
+ * Named in the worker-clone shape with `tpl` where a pool id goes, so the same
+ * parse and the same orphan cleanup collect it — a run template left by a
+ * crashed run is garbage in exactly the same way.
+ */
+export function runTemplateDbName(runId: string, base = baseDbName()): string {
+  return `${base}_r${runId}_tpl`;
+}
+
+/**
+ * A parsed clone. `runId` is null for a pre-#1091 `<base>_<digits>` name;
+ * `poolId` is `tpl` for a run template rather than a worker DB.
+ */
 export type WorkerCloneName = { datname: string; runId: string | null; poolId: string };
 
 /**
@@ -159,7 +179,7 @@ export function parseWorkerDbName(datname: string, base = baseDbName()): WorkerC
   if (!datname.startsWith(prefix)) return null;
   const rest = datname.slice(prefix.length);
 
-  const scoped = /^r([0-9]+)_([0-9]+)$/.exec(rest);
+  const scoped = /^r([0-9]+)_([0-9]+|tpl)$/.exec(rest);
   if (scoped) return { datname, runId: scoped[1], poolId: scoped[2] };
 
   if (/^[0-9]+$/.test(rest)) return { datname, runId: null, poolId: rest };

@@ -17,6 +17,7 @@ import {
   baseDbName,
   maintenanceUrl,
   testRunId,
+  runTemplateDbName,
   templateLockKey,
   isRunAlive,
   parseWorkerDbName,
@@ -31,16 +32,36 @@ export async function setup() {
   // the shell cannot quietly make two runs share a name-space again.
   process.env.HADRON_TEST_RUN_ID = String(process.pid);
 
+  // Serialize template provisioning across concurrent runs (#1091). The DDL
+  // below is DROP + ADD on shared catalog rows, so two runs doing it at once
+  // kill one of them with `XX000 tuple concurrently updated`.
+  //
+  // The lock lives on the MAINTENANCE connection rather than on the template
+  // connection, because it has to outlive `client.end()`: run-scoped clone
+  // NAMES are not enough on their own. Two suites from different CHECKOUTS
+  // share this one base template, so releasing the lock as soon as the DDL
+  // finished would let the next run rewrite the constraints before our workers
+  // had cloned anything — and they would then clone the OTHER checkout's
+  // schema, which fails confusingly or, worse, passes against constraints this
+  // branch never wrote (PR #1136 review, Codex P1). We take a run-scoped
+  // SNAPSHOT of the template below, still holding the lock, and the workers
+  // clone from that.
+  const admin = new Client({ connectionString: maintenanceUrl() });
+  await admin.connect();
+  await admin.query('SELECT pg_advisory_lock($1)', [templateLockKey()]);
+
+  try {
+    return await provision(admin);
+  } finally {
+    // Releases the advisory lock — session-scoped, so disconnecting is enough.
+    await admin.end();
+  }
+}
+
+async function provision(admin: Client) {
   const databaseUrl = baseTestDbUrl();
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
-
-  // Serialize template provisioning across concurrent runs (#1091). The DDL
-  // below is DROP + ADD on shared catalog rows, so two runs doing it at once
-  // kill one of them with `XX000 tuple concurrently updated`. Session-scoped:
-  // released by `client.end()` below, BEFORE any worker clones the template —
-  // holding it for the whole run would serialize the runs themselves.
-  await client.query('SELECT pg_advisory_lock($1)', [templateLockKey()]);
 
   // 005-agent-subscription, re-keyed by 034-memory-class-access: ownership is
   // class-based — personal/private ⇔ user_id IS NOT NULL (allows private+owner
@@ -235,28 +256,34 @@ export async function setup() {
     CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
   `);
 
-  // The base DB above is now the fully-provisioned TEMPLATE. Must be closed
-  // before it can be used as a CREATE DATABASE template (no open connections) —
-  // and closing it is also what releases the advisory lock taken above, so a
-  // run waiting to provision proceeds from here.
+  // The base DB above is now the fully-provisioned template. Must be closed
+  // before it can be used as a CREATE DATABASE template (no open connections).
   await client.end();
 
   if (!PARALLEL_DBS) return;
 
-  // Worker DBs are cloned from this template LAZILY, per worker (perWorkerDb.ts),
-  // because VITEST_POOL_ID isn't statically bounded. Nothing to create up front;
-  // just collect clones left behind by runs that are no longer alive, so a
-  // schema change to the template can't be masked by a stale clone.
   const base = baseDbName();
   const runId = testRunId();
-  const admin = new Client({ connectionString: maintenanceUrl() });
-  await admin.connect();
-  try {
-    await dropOrphanWorkerDbs(admin, base, runId);
-  } finally {
-    await admin.end();
-  }
 
+  await dropOrphanWorkerDbs(admin, base, runId);
+
+  // Snapshot the shared template into a RUN-SCOPED one, while still holding the
+  // lock, and have the workers clone from that (#1136 review, Codex P1).
+  //
+  // Without this the run-scoping is only half done: the destination names are
+  // per-run but their CONTENT is not, so a second checkout's setup could
+  // rewrite the shared constraints between our DDL and our first lazy worker
+  // clone. The failure mode that makes it worth an extra clone is not the noisy
+  // one — it is a run passing against another branch's constraints.
+  //
+  // One extra `CREATE DATABASE` per run against ~13 worker clones. The template
+  // holds schema, not rows.
+  const runTemplate = runTemplateDbName(runId, base);
+  await admin.query(`DROP DATABASE IF EXISTS "${runTemplate}" WITH (FORCE)`);
+  await admin.query(`CREATE DATABASE "${runTemplate}" TEMPLATE "${base}"`);
+
+  // Worker DBs are cloned from the run template LAZILY, per worker
+  // (perWorkerDb.ts), because VITEST_POOL_ID isn't statically bounded.
   return async function teardown() {
     const a = new Client({ connectionString: maintenanceUrl() });
     await a.connect();
