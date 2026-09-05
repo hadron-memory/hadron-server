@@ -2,7 +2,9 @@
  * vitest setupFile — runs in every worker BEFORE any test file imports the
  * Prisma client, so the client's `new PrismaClient()` (which reads DATABASE_URL
  * at construction) connects to THIS worker's private database
- * (`hadron_test_<VITEST_POOL_ID>`). Files then run in parallel without racing.
+ * (`hadron_test_r<runId>_<VITEST_POOL_ID>`). Files then run in parallel without
+ * racing — and since #1091 the name is scoped by RUN as well as by worker, so
+ * two SUITES on one machine do not race either.
  *
  * The DB is created LAZILY here rather than pre-provisioned in globalSetup:
  * VITEST_POOL_ID is a concurrency-slot id (bounded by the fork count, reused
@@ -28,24 +30,32 @@ if (PARALLEL_DBS) {
     const { rowCount } = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [name]);
     if (!rowCount) {
       const template = baseDbName();
-      // Best-effort: terminate any stray connection to the template (a dev's GUI
-      // or psql) so CREATE DATABASE ... TEMPLATE isn't blocked by "source
-      // database is being accessed by other users". The workers themselves use
-      // their clones, not the template, and CREATE's own backend runs on the
-      // maintenance DB — so this only kills unrelated external sessions.
-      await admin
-        .query(
-          'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
-          [template],
-        )
-        .catch(() => {});
-      try {
-        // Clone the fully-provisioned template (schema, pgvector, tsv, all CHECK
-        // constraints). Identifier is code-derived.
-        await admin.query(`CREATE DATABASE "${name}" TEMPLATE "${template}"`);
-      } catch (e) {
-        // 42P04 = duplicate_database: another slot won a benign create race.
-        if ((e as { code?: string }).code !== '42P04') throw e;
+      // Clone the fully-provisioned template (schema, pgvector, tsv, all CHECK
+      // constraints). Identifier is code-derived.
+      //
+      // `CREATE DATABASE ... TEMPLATE` refuses (55006) while anything else is
+      // connected to the source, so this used to `pg_terminate_backend` the
+      // template first, on the reasoning that the only sessions there could be
+      // a dev's GUI or psql. That reasoning was wrong in the same way the rest
+      // of #1091 was: a CONCURRENT RUN's globalSetup is connected to the
+      // template while it provisions, so terminating "stray" connections
+      // evicted somebody else's suite. WAIT instead — the blocker is another
+      // run's setup, it is short, and it finishes on its own.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await admin.query(`CREATE DATABASE "${name}" TEMPLATE "${template}"`);
+          break;
+        } catch (e) {
+          const code = (e as { code?: string }).code;
+          // 42P04 = duplicate_database: another slot won a benign create race.
+          if (code === '42P04') break;
+          // 55006 = object_in_use: the template has a connection. Back off and
+          // retry rather than killing whoever holds it. Fail LOUD after ~5s —
+          // a genuinely stuck holder (that dev's psql) should be named, not
+          // waited on forever.
+          if (code !== '55006' || attempt >= 25) throw e;
+          await new Promise((r) => setTimeout(r, 200));
+        }
       }
     }
   } finally {

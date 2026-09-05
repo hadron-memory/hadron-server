@@ -14,22 +14,32 @@ import {
   workerDbName,
   baseDbName,
   maintenanceUrl,
+  testRunId,
+  parseWorkerDbName,
+  isRunAlive,
+  templateLockKey,
   WORKER_CONNECTION_LIMIT,
 } from './dbWorkers.js';
 
 const ORIGINAL = process.env.TEST_DATABASE_URL;
+const ORIGINAL_RUN = process.env.HADRON_TEST_RUN_ID;
 
 afterEach(() => {
   if (ORIGINAL === undefined) delete process.env.TEST_DATABASE_URL;
   else process.env.TEST_DATABASE_URL = ORIGINAL;
+  // workerDbUrl reads the run id, so a case that pins a name must be able to
+  // set one without leaking it into the next.
+  if (ORIGINAL_RUN === undefined) delete process.env.HADRON_TEST_RUN_ID;
+  else process.env.HADRON_TEST_RUN_ID = ORIGINAL_RUN;
   vi.resetModules();
 });
 
 describe('workerDbUrl', () => {
   it('points at the worker clone AND carries the pool bound', () => {
     process.env.TEST_DATABASE_URL = 'postgresql://holger@localhost:5432/hadron_test';
+    process.env.HADRON_TEST_RUN_ID = '4242';
     const u = new URL(workerDbUrl(3));
-    expect(u.pathname).toBe('/hadron_test_3');
+    expect(u.pathname).toBe('/hadron_test_r4242_3');
     // Asserted against the imported constant, NOT a hard-coded 5 (PR #1125
     // review, Codex P2). Hard-coding it would make `HADRON_TEST_CONNECTION_LIMIT=9
     // pnpm test` fail this test — so the override this PR advertises could not
@@ -75,7 +85,113 @@ describe('workerDbUrl', () => {
   it('derives the clone name from the base DB', () => {
     process.env.TEST_DATABASE_URL = 'postgresql://holger@localhost:5432/hadron_test';
     expect(baseDbName()).toBe('hadron_test');
-    expect(workerDbName(7)).toBe('hadron_test_7');
+    expect(workerDbName(7, 'hadron_test', '99')).toBe('hadron_test_r99_7');
+  });
+});
+
+/**
+ * #1091 — the run scope. These pin the property the old name did NOT have:
+ * that two runs cannot land on the same database. The old name was
+ * `<base>_<VITEST_POOL_ID>`, and a pool id restarts at 1 every run, so two
+ * suites on one machine deleted from each other's tables mid-test while the
+ * loser's failure pointed at `cleanDb` and read as somebody's diff.
+ */
+describe('run scoping', () => {
+  const ORIGINAL_RUN_ID = process.env.HADRON_TEST_RUN_ID;
+  afterEach(() => {
+    if (ORIGINAL_RUN_ID === undefined) delete process.env.HADRON_TEST_RUN_ID;
+    else process.env.HADRON_TEST_RUN_ID = ORIGINAL_RUN_ID;
+  });
+
+  it('gives two runs different databases for the SAME pool id', () => {
+    expect(workerDbName(1, 'hadron_test', '100')).not.toBe(
+      workerDbName(1, 'hadron_test', '200'),
+    );
+  });
+
+  it.each([undefined, '', 'abc', '12x'])(
+    'throws rather than falling back when the run id is %s',
+    (bad) => {
+      // A fallback would silently rebuild the shared name-space this exists to
+      // remove, and it would present as the original flake rather than as a
+      // configuration error.
+      if (bad === undefined) delete process.env.HADRON_TEST_RUN_ID;
+      else process.env.HADRON_TEST_RUN_ID = bad;
+      expect(() => testRunId()).toThrow(/HADRON_TEST_RUN_ID/);
+    },
+  );
+});
+
+describe('parseWorkerDbName', () => {
+  it('reads a run-scoped clone', () => {
+    expect(parseWorkerDbName('hadron_test_r512_3', 'hadron_test')).toEqual({
+      datname: 'hadron_test_r512_3',
+      runId: '512',
+      poolId: '3',
+    });
+  });
+
+  it('still recognizes a LEGACY unscoped clone', () => {
+    // A checkout from before this change still creates these, and a machine
+    // running both will have both — cleanup has to be able to see the old ones.
+    expect(parseWorkerDbName('hadron_test_3', 'hadron_test')).toEqual({
+      datname: 'hadron_test_3',
+      runId: null,
+      poolId: '3',
+    });
+  });
+
+  it.each([
+    'hadron_test', // the template itself
+    'hadron_test_objtype', // a real hand-made DB on this box
+    'hadron_test_a',
+    'hadron_test_r512', // scoped prefix, no pool id
+    'hadron_test_rx_1',
+    'hadron_testX_1', // prefix is `<base>_`, not `<base>`
+    'other_test_1',
+  ])('refuses to claim %s', (name) => {
+    expect(parseWorkerDbName(name, 'hadron_test')).toBeNull();
+  });
+
+  it('cannot over-match a base name carrying regex metacharacters', () => {
+    // Matching happens in JS, not a SQL regex, precisely so `.` stays a literal
+    // — the alternative drops an unrelated database.
+    expect(parseWorkerDbName('haXron_test_r1_1', 'ha.ron_test')).toBeNull();
+  });
+});
+
+describe('isRunAlive', () => {
+  it('reports THIS process as alive', () => {
+    expect(isRunAlive(String(process.pid))).toBe(true);
+  });
+
+  it('reports an unassignable pid as dead', () => {
+    // pid 0 is not a process you can address; `kill(0, 0)` addresses the
+    // process GROUP, which would answer "alive" and make every orphan sweep a
+    // no-op — so it is rejected before it reaches process.kill.
+    expect(isRunAlive('0')).toBe(false);
+    expect(isRunAlive('-1')).toBe(false);
+    expect(isRunAlive('nope')).toBe(false);
+  });
+
+  it('reports a dead pid as dead', () => {
+    // 2^22 is above every default pid_max on the platforms this runs on, so it
+    // cannot be a live process.
+    expect(isRunAlive(String(2 ** 22))).toBe(false);
+  });
+});
+
+describe('templateLockKey', () => {
+  it('is a stable positive integer a pg bigint accepts', () => {
+    const k = templateLockKey('hadron_test');
+    expect(k).toBe(templateLockKey('hadron_test'));
+    expect(Number.isInteger(k)).toBe(true);
+    expect(k).toBeGreaterThanOrEqual(0);
+    expect(k).toBeLessThanOrEqual(0x7fffffff);
+  });
+
+  it('differs per template, so a private TEST_DATABASE_URL never waits on the shared one', () => {
+    expect(templateLockKey('hadron_test')).not.toBe(templateLockKey('hadron_test_mine'));
   });
 });
 

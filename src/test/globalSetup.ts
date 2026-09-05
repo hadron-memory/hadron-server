@@ -11,12 +11,36 @@
  */
 
 import { Client } from 'pg';
-import { PARALLEL_DBS, baseTestDbUrl, baseDbName, maintenanceUrl } from './dbWorkers.js';
+import {
+  PARALLEL_DBS,
+  baseTestDbUrl,
+  baseDbName,
+  maintenanceUrl,
+  testRunId,
+  templateLockKey,
+  isRunAlive,
+  parseWorkerDbName,
+  type WorkerCloneName,
+} from './dbWorkers.js';
 
 export async function setup() {
+  // Stamp this run's id BEFORE any worker is forked (#1091). globalSetup runs
+  // in the vitest MAIN process and workers inherit its env, which is what
+  // carries the id to `perWorkerDb.ts` — nothing else crosses that boundary.
+  // Set unconditionally rather than defaulted, so a stale value exported into
+  // the shell cannot quietly make two runs share a name-space again.
+  process.env.HADRON_TEST_RUN_ID = String(process.pid);
+
   const databaseUrl = baseTestDbUrl();
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
+
+  // Serialize template provisioning across concurrent runs (#1091). The DDL
+  // below is DROP + ADD on shared catalog rows, so two runs doing it at once
+  // kill one of them with `XX000 tuple concurrently updated`. Session-scoped:
+  // released by `client.end()` below, BEFORE any worker clones the template —
+  // holding it for the whole run would serialize the runs themselves.
+  await client.query('SELECT pg_advisory_lock($1)', [templateLockKey()]);
 
   // 005-agent-subscription, re-keyed by 034-memory-class-access: ownership is
   // class-based — personal/private ⇔ user_id IS NOT NULL (allows private+owner
@@ -212,23 +236,23 @@ export async function setup() {
   `);
 
   // The base DB above is now the fully-provisioned TEMPLATE. Must be closed
-  // before it can be used as a CREATE DATABASE template (no open connections).
+  // before it can be used as a CREATE DATABASE template (no open connections) —
+  // and closing it is also what releases the advisory lock taken above, so a
+  // run waiting to provision proceeds from here.
   await client.end();
 
   if (!PARALLEL_DBS) return;
 
   // Worker DBs are cloned from this template LAZILY, per worker (perWorkerDb.ts),
   // because VITEST_POOL_ID isn't statically bounded. Nothing to create up front;
-  // just drop any leftover `hadron_test_<n>` clones from a prior run so a schema
-  // change to the template can't be masked by a stale clone.
+  // just collect clones left behind by runs that are no longer alive, so a
+  // schema change to the template can't be masked by a stale clone.
   const base = baseDbName();
+  const runId = testRunId();
   const admin = new Client({ connectionString: maintenanceUrl() });
   await admin.connect();
   try {
-    // Pre-run cleanup fails LOUD (swallow: false): if a stale clone can't be
-    // dropped, perWorkerDb would see it exists, skip CREATE, and run the suite
-    // against an old schema — masking failures. Better to abort setup (Codex).
-    await dropWorkerDbs(admin, base, { swallow: false });
+    await dropOrphanWorkerDbs(admin, base, runId);
   } finally {
     await admin.end();
   }
@@ -237,9 +261,9 @@ export async function setup() {
     const a = new Client({ connectionString: maintenanceUrl() });
     await a.connect();
     try {
-      // Post-run cleanup is best-effort (swallow: true) — a failure here can't
-      // affect correctness (the next run's setup drops loudly first).
-      await dropWorkerDbs(a, base, { swallow: true });
+      // Best-effort: a failure here leaks a clone, and the next run whose pid
+      // differs collects it as an orphan.
+      await dropWorkerDbs(a, base, (c) => c.runId === runId, { swallow: true });
     } finally {
       await a.end();
     }
@@ -247,16 +271,78 @@ export async function setup() {
 }
 
 /**
- * Drop every `<base>_<digits>` worker clone. Matches by exact prefix + numeric
- * suffix in JS (not a SQL regex) so a base name with regex metachars can never
- * over-match and drop an unrelated database.
+ * Drop clones that no live run owns, before this run creates its own (#1091).
+ *
+ * This replaced a blanket "drop every `<base>_<digits>`", which was the second
+ * half of the collision it was meant to prevent: names were not run-scoped, so
+ * the blanket drop reached into a CONCURRENT run's databases, and `WITH (FORCE)`
+ * meant it terminated that run's connections rather than failing. A suite that
+ * outlived its terminal — a `vitest` piped to `head` SIGPIPEs the pipe and
+ * leaves the run alive — was enough to make somebody else's suite collapse with
+ * `Database … does not exist` or a `40P01` inside `cleanDb`.
+ *
+ * The pre-run pass exists at all so a schema change to the template can't be
+ * masked by a stale clone that `perWorkerDb` would adopt instead of creating.
+ * Run-scoped names make that impossible for a FOREIGN clone — this run's names
+ * cannot collide with another run's — so the remaining job is garbage
+ * collection, and it is best-effort: an orphan we fail to drop is wasted disk,
+ * not a wrong result.
+ *
+ * Ownership is decided by {@link isRunAlive}, never by "has no open
+ * connections": a run that has just issued `CREATE DATABASE` and not yet
+ * connected has no connections either, and dropping it there is precisely the
+ * bug being fixed. A LEGACY unscoped clone names no run, so it gets the
+ * connection check as its only available signal — no worse than the blanket
+ * drop it replaces, and it stops evicting a live pre-#1091 checkout.
  */
-async function dropWorkerDbs(admin: Client, base: string, opts: { swallow: boolean }): Promise<void> {
-  const prefix = `${base}_`;
-  const { rows } = await admin.query<{ datname: string }>('SELECT datname FROM pg_database');
-  const clones = rows.filter(
-    (r) => r.datname.startsWith(prefix) && /^[0-9]+$/.test(r.datname.slice(prefix.length)),
+async function dropOrphanWorkerDbs(admin: Client, base: string, runId: string): Promise<void> {
+  const { rows } = await admin.query<{ datname: string; connections: string }>(
+    `SELECT d.datname,
+            (SELECT count(*) FROM pg_stat_activity a WHERE a.datname = d.datname) AS connections
+       FROM pg_database d`,
   );
+
+  await dropWorkerDbs(
+    admin,
+    base,
+    (clone) => {
+      // Ours already (a pid reused within this machine's uptime): it cannot be
+      // this run's live data, and adopting it would run against a stale schema.
+      if (clone.runId === runId) return true;
+      if (clone.runId !== null) return !isRunAlive(clone.runId);
+      const idle = rows.find((r) => r.datname === clone.datname)?.connections === '0';
+      return idle;
+    },
+    { swallow: true },
+    rows.map((r) => r.datname),
+  );
+}
+
+/**
+ * Drop the worker clones `select` accepts. Clone names are recognized by
+ * `parseWorkerDbName` — exact prefix + shape, in JS rather than a SQL regex, so
+ * a base name carrying regex metacharacters can never over-match and drop an
+ * unrelated database.
+ *
+ * `select` is mandatory rather than defaulted, because every caller of the
+ * blanket version this replaces was the #1091 bug.
+ */
+async function dropWorkerDbs(
+  admin: Client,
+  base: string,
+  select: (clone: WorkerCloneName) => boolean,
+  opts: { swallow: boolean },
+  datnames?: string[],
+): Promise<void> {
+  const names =
+    datnames ??
+    (await admin.query<{ datname: string }>('SELECT datname FROM pg_database')).rows.map(
+      (r) => r.datname,
+    );
+  const clones = names
+    .map((n) => parseWorkerDbName(n, base))
+    .filter((c): c is WorkerCloneName => c !== null && select(c));
+
   for (const { datname } of clones) {
     const drop = admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);
     if (opts.swallow) await drop.catch(() => {});

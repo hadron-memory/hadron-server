@@ -5,10 +5,18 @@
  *
  * Model: `globalSetup` provisions the base `hadron_test` template (schema +
  * pgvector + tsv column/index + CHECK constraints), then clones it into one DB
- * per worker (`hadron_test_1..N`). `perWorkerDb.ts` (a setupFile) points each
- * worker's `DATABASE_URL` at its own clone before the Prisma client is
- * constructed. Every worker still runs `cleanDb` per test — but only against
+ * per worker (`hadron_test_r<runId>_<poolId>`). `perWorkerDb.ts` (a setupFile)
+ * points each worker's `DATABASE_URL` at its own clone before the Prisma client
+ * is constructed. Every worker still runs `cleanDb` per test — but only against
  * its own DB, so files never collide.
+ *
+ * The name is scoped by RUN as well as by worker (#1091). It used to be
+ * `<base>_<VITEST_POOL_ID>`, and a pool id is a concurrency slot that restarts
+ * at 1 every run — so two suites on one machine claimed the same databases and
+ * deleted from each other's tables mid-test, while `globalSetup`'s pre-run
+ * cleanup dropped them `WITH (FORCE)` and evicted whichever run was already
+ * there. Isolation held over workers within a run and over nothing else, which
+ * is why it read as sound. See {@link testRunId}.
  *
  * Escape hatch: `HADRON_TEST_PARALLEL=0` falls back to the old single-DB,
  * serial behavior (one `hadron_test`, `fileParallelism: false`).
@@ -68,8 +76,121 @@ export function baseDbName(url = baseTestDbUrl()): string {
   return new URL(url).pathname.replace(/^\//, '');
 }
 
-export function workerDbName(poolId: string | number, base = baseDbName()): string {
-  return `${base}_${poolId}`;
+/**
+ * This run's id — the vitest MAIN process's pid, stamped into `process.env` by
+ * `globalSetup` before any worker is forked, and inherited from there.
+ *
+ * It exists because `VITEST_POOL_ID` is a concurrency-SLOT id that restarts at 1
+ * for every run, so a name built from it alone is not unique to a run: two
+ * suites on one machine claim the SAME `hadron_test_1..N` and then delete from
+ * each other's tables. That is the #1091 `cleanDb` deadlock — per-worker
+ * isolation was holding the whole time, over workers WITHIN a run, which is a
+ * narrower thing than it reads as.
+ *
+ * A pid rather than a random token because it is the only run id that can be
+ * INTERROGATED afterwards: a clone left behind by a crashed run is identifiable
+ * as garbage precisely because its pid is gone (see {@link isRunAlive}). A
+ * random token would need a liveness heuristic — "no open connections" — whose
+ * failure mode is dropping a live run's database in the window between
+ * `CREATE DATABASE` and its first connection.
+ *
+ * Throws when unset rather than falling back: a fallback would silently rebuild
+ * the shared name-space this exists to remove, and it would present as the
+ * original flake.
+ */
+export function testRunId(): string {
+  const raw = process.env.HADRON_TEST_RUN_ID;
+  if (raw === undefined || !/^[0-9]+$/.test(raw)) {
+    throw new Error(
+      `HADRON_TEST_RUN_ID must be set to the vitest main process pid (globalSetup stamps it), got: ${raw}`,
+    );
+  }
+  return raw;
+}
+
+export function workerDbName(
+  poolId: string | number,
+  base = baseDbName(),
+  runId = testRunId(),
+): string {
+  return `${base}_r${runId}_${poolId}`;
+}
+
+/**
+ * Advisory-lock key serializing TEMPLATE provisioning across concurrent runs
+ * (#1091).
+ *
+ * `globalSetup` re-applies the template's CHECK constraints with DROP + ADD on
+ * every run. Two runs doing that to the SAME `hadron_test` at once update the
+ * same catalog rows and one of them dies with `XX000 tuple concurrently
+ * updated` out of `heapam.c` — observed once in three paired runs. Run-scoped
+ * clone names do not help: the template is shared by construction, since it is
+ * the thing being cloned.
+ *
+ * Derived from the base name so a run using `TEST_DATABASE_URL` to get a
+ * private template takes a different lock and never waits on the shared one.
+ */
+export function templateLockKey(base = baseDbName()): number {
+  // FNV-1a, masked to 31 bits: positive, fits a pg bigint, and stable across
+  // processes (unlike anything derived from a hash seed).
+  let h = 0x811c9dc5;
+  for (let i = 0; i < base.length; i++) {
+    h ^= base.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h & 0x7fffffff;
+}
+
+/** A parsed worker clone. `runId` is null for a pre-#1091 `<base>_<digits>` name. */
+export type WorkerCloneName = { datname: string; runId: string | null; poolId: string };
+
+/**
+ * Recognize a worker clone by exact prefix + shape, in JS rather than a SQL
+ * regex, so a base name carrying regex metacharacters can never over-match and
+ * drop an unrelated database.
+ *
+ * Both shapes are recognized on purpose. The LEGACY `<base>_<digits>` form is
+ * what a checkout from before this change still creates, and a machine running
+ * both will have both — so cleanup has to be able to see the old ones, and
+ * cannot tell which run owns them.
+ */
+export function parseWorkerDbName(datname: string, base = baseDbName()): WorkerCloneName | null {
+  const prefix = `${base}_`;
+  if (!datname.startsWith(prefix)) return null;
+  const rest = datname.slice(prefix.length);
+
+  const scoped = /^r([0-9]+)_([0-9]+)$/.exec(rest);
+  if (scoped) return { datname, runId: scoped[1], poolId: scoped[2] };
+
+  if (/^[0-9]+$/.test(rest)) return { datname, runId: null, poolId: rest };
+  return null;
+}
+
+/**
+ * Is the run that owns this clone still running?
+ *
+ * `kill(pid, 0)` sends no signal and only asks whether the pid is addressable.
+ * EPERM means the process EXISTS and belongs to somebody else, so it counts as
+ * alive — the direction that matters is never reporting a live run as dead.
+ *
+ * Pid reuse can report a dead run as alive, which leaves one orphan clone
+ * un-dropped. That is the harmless direction, and the next run with a free pid
+ * collects it.
+ *
+ * Assumes the Postgres server is local to the runs using it, which is what
+ * `postgresql://…@localhost` in `baseTestDbUrl` already assumes. A SHARED test
+ * server would need a different liveness signal — pids from another host mean
+ * nothing here.
+ */
+export function isRunAlive(runId: string): boolean {
+  const pid = Number(runId);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as { code?: string }).code === 'EPERM';
+  }
 }
 
 /**
