@@ -48,6 +48,25 @@ export async function setup() {
   // branch never wrote (PR #1136 review, Codex P1). We take a run-scoped
   // SNAPSHOT of the template below, still holding the lock, and the workers
   // clone from that.
+  // SERIAL MODE touches the test database and NOTHING ELSE (#1136 review, Codex
+  // P2). `HADRON_TEST_PARALLEL=0` is the escape hatch for a setup that has no
+  // CREATE DATABASE infrastructure — including a role that can reach the test
+  // database but not the `postgres` maintenance one — so opening a maintenance
+  // connection up front would have broken exactly the configuration the hatch
+  // exists for. The lock still serializes the DDL between two serial runs; it
+  // just lives on the connection serial mode already has.
+  if (!PARALLEL_DBS) {
+    const client = new Client({ connectionString: baseTestDbUrl() });
+    await client.connect();
+    try {
+      await client.query('SELECT pg_advisory_lock($1)', [templateLockKey()]);
+      await applyTemplateConstraints(client);
+    } finally {
+      await client.end();
+    }
+    return;
+  }
+
   const admin = new Client({ connectionString: maintenanceUrl() });
   await admin.connect();
   await admin.query('SELECT pg_advisory_lock($1)', [templateLockKey()]);
@@ -61,9 +80,21 @@ export async function setup() {
 }
 
 async function provision(admin: Client) {
-  const databaseUrl = baseTestDbUrl();
-  const client = new Client({ connectionString: databaseUrl });
+  const client = new Client({ connectionString: baseTestDbUrl() });
   await client.connect();
+  await applyTemplateConstraints(client);
+
+  // The base DB above is now the fully-provisioned template. Must be closed
+  // before it can be used as a CREATE DATABASE template (no open connections).
+  await client.end();
+
+  const base = baseDbName();
+  const runId = testRunId();
+  return await provisionParallel(admin, base, runId);
+}
+
+/** The CHECK constraints `prisma db push` cannot express. Source of truth: prisma/post-push.sql. */
+async function applyTemplateConstraints(client: Client) {
 
   // 005-agent-subscription, re-keyed by 034-memory-class-access: ownership is
   // class-based — personal/private ⇔ user_id IS NOT NULL (allows private+owner
@@ -258,15 +289,9 @@ async function provision(admin: Client) {
     CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
   `);
 
-  // The base DB above is now the fully-provisioned template. Must be closed
-  // before it can be used as a CREATE DATABASE template (no open connections).
-  await client.end();
+}
 
-  if (!PARALLEL_DBS) return;
-
-  const base = baseDbName();
-  const runId = testRunId();
-
+async function provisionParallel(admin: Client, base: string, runId: string) {
   await dropOrphanWorkerDbs(admin, base, runId);
 
   // Snapshot the shared template into a RUN-SCOPED one, while still holding the

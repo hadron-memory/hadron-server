@@ -23,6 +23,7 @@ import {
   templateLockKey,
   createDatabaseFromTemplate,
   quoteDbIdent,
+  PARALLEL_DBS,
   WORKER_CONNECTION_LIMIT,
 } from './dbWorkers.js';
 
@@ -323,10 +324,15 @@ describe('HADRON_TEST_CONNECTION_LIMIT', () => {
  * Postgres does not fail a busy-source clone immediately, it blocks ~8s first,
  * which is what made an attempt-counted budget report a fabricated elapsed time.
  */
-describe('createDatabaseFromTemplate (live pg)', () => {
+// Skipped under HADRON_TEST_PARALLEL=0: this exercises the PARALLEL path's
+// plumbing, and serial mode creates no run template to source a private probe
+// from. It cannot fall back to the base database either — in serial mode the
+// suite IS connected to the base, so cloning from it would block forever, which
+// is the 55006 case these very tests cover.
+describe.skipIf(!PARALLEL_DBS)('createDatabaseFromTemplate (live pg)', () => {
   const url = maintenanceUrl();
   const made: string[] = [];
-  let admin: PgClient;
+  let admin: PgClient | undefined;
   // A template PRIVATE to this test, not the shared `hadron_test` (@copilot,
   // #1136). The busy-source case below deliberately holds a session on the
   // template for the duration — against the shared base that would block a
@@ -339,14 +345,19 @@ describe('createDatabaseFromTemplate (live pg)', () => {
   const template = `hadron_test_probesrc_${process.pid}`;
 
   beforeAll(async () => {
-    admin = new PgClient({ connectionString: url });
-    await admin.connect();
+    const c = new PgClient({ connectionString: url });
+    await c.connect();
+    admin = c;
     made.push(template);
-    await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(template)} WITH (FORCE)`);
-    await createDatabaseFromTemplate(admin, template, runTemplateDbName(testRunId()));
+    await c.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(template)} WITH (FORCE)`);
+    await createDatabaseFromTemplate(c, template, runTemplateDbName(testRunId()));
   }, 60_000);
 
   afterAll(async () => {
+    // If beforeAll failed early (no local Postgres, auth error), `admin` is
+    // undefined and cleaning up would throw a SECOND error that buries the real
+    // one (@copilot, #1136).
+    if (!admin) return;
     for (const d of made)
       await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(d)} WITH (FORCE)`).catch(() => {});
     await admin.end();
@@ -355,13 +366,13 @@ describe('createDatabaseFromTemplate (live pg)', () => {
   it('clones a free template, and reports a second call as EXISTS rather than created', async () => {
     const name = `hadron_test_probe_${process.pid}`;
     made.push(name);
-    await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(name)} WITH (FORCE)`);
+    await admin!.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(name)} WITH (FORCE)`);
 
-    expect(await createDatabaseFromTemplate(admin, name, template)).toBe('created');
+    expect(await createDatabaseFromTemplate(admin!, name, template)).toBe('created');
     // 42P04 is reported, not swallowed as creation — a caller that needs a FRESH
     // database cannot tell the two apart otherwise, and that is precisely how a
     // truncated name let two workers share one database.
-    expect(await createDatabaseFromTemplate(admin, name, template)).toBe('exists');
+    expect(await createDatabaseFromTemplate(admin!, name, template)).toBe('exists');
   }, 60_000);
 
   it('names the blocking session instead of hanging or reporting a made-up wait', async () => {
@@ -373,7 +384,7 @@ describe('createDatabaseFromTemplate (live pg)', () => {
       const started = Date.now();
       // timeoutMs 0 — give up on the FIRST refusal, so the test does not pay
       // Postgres's ~8s busy-source wait more than once.
-      const err = await createDatabaseFromTemplate(admin, name, template, {
+      const err = await createDatabaseFromTemplate(admin!, name, template, {
         timeoutMs: 0,
       }).then(
         () => null,
