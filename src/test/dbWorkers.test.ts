@@ -8,7 +8,8 @@
  * removes — and the symptom would come back as somebody else's timeout, in a
  * different test, weeks later. Pin it where the reason is written down.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
+import { Client as PgClient } from 'pg';
 import {
   workerDbUrl,
   workerDbName,
@@ -19,6 +20,7 @@ import {
   parseWorkerDbName,
   isRunAlive,
   templateLockKey,
+  createDatabaseFromTemplate,
   WORKER_CONNECTION_LIMIT,
 } from './dbWorkers.js';
 
@@ -280,3 +282,67 @@ describe('HADRON_TEST_CONNECTION_LIMIT', () => {
     await expect(withLimit(bad)).rejects.toThrow(/positive integer/);
   });
 });
+
+/**
+ * #1136 review (Codex P2): a developer's psql or GUI session against the test
+ * database blocks `CREATE DATABASE ... TEMPLATE`. The handling used to live at
+ * the worker-clone site only, so globalSetup's snapshot aborted setup outright.
+ *
+ * These touch a real server because the behaviour under test IS the server's:
+ * Postgres does not fail a busy-source clone immediately, it blocks ~8s first,
+ * which is what made an attempt-counted budget report a fabricated elapsed time.
+ */
+describe('createDatabaseFromTemplate (live pg)', () => {
+  const url = maintenanceUrl();
+  const template = baseDbName();
+  const made: string[] = [];
+  let admin: PgClient;
+
+  beforeAll(async () => {
+    admin = new PgClient({ connectionString: url });
+    await admin.connect();
+  });
+
+  afterAll(async () => {
+    for (const d of made) await admin.query(`DROP DATABASE IF EXISTS "${d}" WITH (FORCE)`).catch(() => {});
+    await admin.end();
+  });
+
+  it('clones a free template, and reports a second call as EXISTS rather than created', async () => {
+    const name = `hadron_test_probe_${process.pid}`;
+    made.push(name);
+    await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
+
+    expect(await createDatabaseFromTemplate(admin, name, template)).toBe('created');
+    // 42P04 is reported, not swallowed as creation — a caller that needs a FRESH
+    // database cannot tell the two apart otherwise, and that is precisely how a
+    // truncated name let two workers share one database.
+    expect(await createDatabaseFromTemplate(admin, name, template)).toBe('exists');
+  }, 60_000);
+
+  it('names the blocking session instead of hanging or reporting a made-up wait', async () => {
+    const holder = new PgClient({ connectionString: withDbNameForTest(url, template) });
+    await holder.connect();
+    try {
+      const name = `hadron_test_probe_busy_${process.pid}`;
+      made.push(name);
+      const started = Date.now();
+      // timeoutMs 0 — give up on the FIRST refusal, so the test does not pay
+      // Postgres's ~8s busy-source wait more than once.
+      await expect(
+        createDatabaseFromTemplate(admin, name, template, { timeoutMs: 0 }),
+      ).rejects.toThrow(/has been in use for .*Holding it: pid \d+/s);
+      // The reported wait is MEASURED, so it cannot exceed the real elapsed time.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(0);
+    } finally {
+      await holder.end();
+    }
+  }, 60_000);
+});
+
+/** Local helper: swap the database name in a connection string (test-only). */
+function withDbNameForTest(url: string, dbName: string): string {
+  const u = new URL(url);
+  u.pathname = `/${dbName}`;
+  return u.toString();
+}

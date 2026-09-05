@@ -22,6 +22,7 @@ import {
   workerDbUrl,
   workerDbName,
   runTemplateDbName,
+  createDatabaseFromTemplate,
   testRunId,
   maintenanceUrl,
 } from './dbWorkers.js';
@@ -42,32 +43,12 @@ if (PARALLEL_DBS) {
       // tests against another branch's schema.
       const template = runTemplateDbName(testRunId());
       // Clone the fully-provisioned template (schema, pgvector, tsv, all CHECK
-      // constraints). Identifier is code-derived.
-      //
-      // `CREATE DATABASE ... TEMPLATE` refuses (55006) while anything else is
-      // connected to the source, so this used to `pg_terminate_backend` the
-      // template first, on the reasoning that the only sessions there could be
-      // a dev's GUI or psql. That reasoning was wrong in the same way the rest
-      // of #1091 was: a CONCURRENT RUN's globalSetup is connected to the
-      // template while it provisions, so terminating "stray" connections
-      // evicted somebody else's suite. WAIT instead — the blocker is short and
-      // finishes on its own.
-      for (let attempt = 0; ; attempt++) {
-        try {
-          await admin.query(`CREATE DATABASE "${name}" TEMPLATE "${template}"`);
-          break;
-        } catch (e) {
-          const code = (e as { code?: string }).code;
-          // 42P04 = duplicate_database: another slot won a benign create race.
-          if (code === '42P04') break;
-          // 55006 = object_in_use: the template has a connection. Back off and
-          // retry rather than killing whoever holds it. Fail LOUD after ~5s —
-          // a genuinely stuck holder (that dev's psql) should be named, not
-          // waited on forever.
-          if (code !== '55006' || attempt >= 25) throw e;
-          await new Promise((r) => setTimeout(r, 200));
-        }
-      }
+      // constraints). The busy-source handling — WAIT for a connected template
+      // rather than `pg_terminate_backend` it, which is how this used to evict a
+      // concurrent run's globalSetup — lives in the shared helper, because
+      // globalSetup's snapshot needs exactly the same thing and having it at
+      // only one of the two sites is what #1136's review found twice.
+      await createDatabaseFromTemplate(admin, name, template);
     }
   } finally {
     await admin.end();

@@ -1,3 +1,5 @@
+import type { Client } from 'pg';
+
 /**
  * Per-worker test-database plumbing so the vitest suite can run files in
  * PARALLEL without racing on one shared `hadron_test` DB (the constraint that
@@ -160,6 +162,79 @@ export function runTemplateDbName(runId: string, base = baseDbName()): string {
 
 /** Postgres NAMEDATALEN - 1. Longer identifiers are TRUNCATED, not rejected. */
 const PG_MAX_IDENTIFIER_BYTES = 63;
+
+/**
+ * `CREATE DATABASE <name> TEMPLATE <template>`, tolerating a busy source.
+ *
+ * Shared by BOTH cloning sites — `globalSetup`'s run-template snapshot and
+ * `perWorkerDb`'s worker clones — because the busy-source problem belongs to
+ * the operation, not to either caller. It was previously handled at one site
+ * and not the other, which is how #1136's review found the snapshot aborting
+ * setup on a developer's open `psql` (Codex P2); fixing only the site that was
+ * named would have left the same gap one call away.
+ *
+ * Two conditions, deliberately different answers:
+ *
+ * - **42P04** (duplicate_database) — somebody already made it. Benign; report
+ *   it rather than treating it as creation, since a caller that cares whether
+ *   the database is FRESH cannot tell otherwise.
+ * - **55006** (object_in_use) — the source has a connection. WAIT. It used to
+ *   `pg_terminate_backend` the template instead, on the reasoning that the only
+ *   sessions there could be a dev's GUI; a concurrent run's `globalSetup` is
+ *   connected to the template the whole time it provisions, so that reasoning
+ *   evicted somebody else's suite (#1091).
+ *
+ * A holder that never leaves gets a NAMED error rather than an endless wait —
+ * the pids and users are the whole diagnosis, and "it hung" is not.
+ *
+ * Budgeted by DEADLINE, not by attempt count, and the reported wait is MEASURED.
+ * The first draft counted attempts and computed the elapsed time as
+ * `attempts * delayMs` — which testing against a real server showed to be
+ * fiction: Postgres does not fail `CREATE DATABASE` on a busy source
+ * immediately, it blocks ~8s first. So "25 attempts, 200ms apart" was a ~205s
+ * budget wearing a 5s label, and the error would have told the reader a number
+ * nothing measured. A wall-clock deadline is the thing the caller actually
+ * cares about, and it stays true if that server-side wait ever changes.
+ */
+export async function createDatabaseFromTemplate(
+  admin: Client,
+  name: string,
+  template: string,
+  { timeoutMs = 30_000, delayMs = 200 } = {},
+): Promise<'created' | 'exists'> {
+  const startedAt = Date.now();
+  for (;;) {
+    try {
+      // Identifiers are code-derived and length-checked; see assertFitsIdentifier.
+      await admin.query(`CREATE DATABASE "${name}" TEMPLATE "${template}"`);
+      return 'created';
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      if (code === '42P04') return 'exists';
+      if (code !== '55006') throw e;
+
+      const waited = Date.now() - startedAt;
+      if (waited >= timeoutMs) {
+        const { rows } = await admin.query<{ pid: number; usename: string; app: string }>(
+          `SELECT pid, usename, coalesce(application_name, '') AS app
+             FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [template],
+        );
+        const who = rows.map((r) => `pid ${r.pid} (${r.usename}${r.app && ` — ${r.app}`})`);
+        throw new Error(
+          `Cannot clone the test template "${template}": it has been in use for ` +
+            `${Math.round(waited / 1000)}s. ` +
+            (who.length
+              ? `Holding it: ${who.join(', ')}. Close that session — a psql or GUI connected to the ` +
+                `test database blocks CREATE DATABASE ... TEMPLATE — then re-run.`
+              : `Nothing is holding it now, so this was a transient race — re-run.`),
+          { cause: e },
+        );
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
 
 /**
  * Refuse a generated database name that Postgres would silently truncate

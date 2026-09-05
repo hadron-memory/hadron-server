@@ -18,6 +18,7 @@ import {
   maintenanceUrl,
   testRunId,
   runTemplateDbName,
+  createDatabaseFromTemplate,
   templateLockKey,
   isRunAlive,
   parseWorkerDbName,
@@ -280,7 +281,10 @@ async function provision(admin: Client) {
   // holds schema, not rows.
   const runTemplate = runTemplateDbName(runId, base);
   await admin.query(`DROP DATABASE IF EXISTS "${runTemplate}" WITH (FORCE)`);
-  await admin.query(`CREATE DATABASE "${runTemplate}" TEMPLATE "${base}"`);
+  // Waits on a busy base rather than aborting setup — a developer's open psql
+  // against the test DB blocks CREATE ... TEMPLATE, and the previous code
+  // handled that at the worker-clone site only (#1136 review, Codex P2).
+  await createDatabaseFromTemplate(admin, runTemplate, base);
 
   // Worker DBs are cloned from the run template LAZILY, per worker
   // (perWorkerDb.ts), because VITEST_POOL_ID isn't statically bounded.
