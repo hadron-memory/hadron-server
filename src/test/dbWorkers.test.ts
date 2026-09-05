@@ -329,11 +329,25 @@ describe('createDatabaseFromTemplate (live pg)', () => {
       const started = Date.now();
       // timeoutMs 0 — give up on the FIRST refusal, so the test does not pay
       // Postgres's ~8s busy-source wait more than once.
-      await expect(
-        createDatabaseFromTemplate(admin, name, template, { timeoutMs: 0 }),
-      ).rejects.toThrow(/has been in use for .*Holding it: pid \d+/s);
-      // The reported wait is MEASURED, so it cannot exceed the real elapsed time.
-      expect(Date.now() - started).toBeGreaterThanOrEqual(0);
+      const err = await createDatabaseFromTemplate(admin, name, template, {
+        timeoutMs: 0,
+      }).then(
+        () => null,
+        (e: Error) => e,
+      );
+
+      expect(err?.message).toMatch(/has been in use for \d+s.*Holding it: pid \d+/s);
+
+      // The reported wait must MATCH real elapsed time, not merely be bounded by
+      // it (PR #1136 review, Copilot). The bug this pins reported
+      // `attempts * delayMs` — a constant, independent of how long anything
+      // actually took — and a one-sided `>= 0` or `<= elapsed` assertion passes
+      // against a constant just as happily as against a measurement. Only a
+      // two-sided band around the observed time can tell them apart: Postgres
+      // blocks ~8s on a busy source, so the old constant 5 lands outside it.
+      const elapsedS = (Date.now() - started) / 1000;
+      const reportedS = Number(/in use for (\d+)s/.exec(err!.message)![1]);
+      expect(Math.abs(reportedS - elapsedS)).toBeLessThanOrEqual(2);
     } finally {
       await holder.end();
     }
