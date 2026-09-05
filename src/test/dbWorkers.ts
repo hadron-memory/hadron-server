@@ -115,6 +115,19 @@ export function workerDbName(
   base = baseDbName(),
   runId = testRunId(),
 ): string {
+  // A pool id must be NUMERIC, and this is a guard rather than a type (@copilot,
+  // PR #1136). `tpl` is a legal string and would build this run's TEMPLATE name
+  // — handing the worker the database every other worker also clones from,
+  // which is the isolation loss this whole change exists to prevent, in its
+  // quietest form. VITEST_POOL_ID is a number today, so this is defence against
+  // a future caller rather than a live bug; it is also the second way these two
+  // name-spaces could collide, after truncation, and both are silent.
+  if (!/^[0-9]+$/.test(String(poolId))) {
+    throw new Error(
+      `Worker pool id must be numeric, got: ${String(poolId)}. A non-numeric id can collide ` +
+        `with the run template's "_tpl" suffix and silently point a worker at the shared template.`,
+    );
+  }
   return assertFitsIdentifier(`${base}_r${runId}_${poolId}`, base);
 }
 

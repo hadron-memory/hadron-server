@@ -129,6 +129,17 @@ describe('run scoping', () => {
     );
   });
 
+  it('refuses a non-numeric pool id, which could BUILD the template name', () => {
+    // `tpl` is a legal string and would produce this run's template name,
+    // handing the worker the database every other worker clones from — the
+    // isolation loss this change exists to prevent, in its quietest form
+    // (@copilot, #1136). Second collision path between the two name-spaces
+    // after truncation; both are silent, so both are guarded.
+    expect(() => workerDbName('tpl', 'hadron_test', '100')).toThrow(/must be numeric/);
+    expect(() => workerDbName('1a', 'hadron_test', '100')).toThrow(/must be numeric/);
+    expect(workerDbName('2', 'hadron_test', '100')).toBe('hadron_test_r100_2');
+  });
+
   it('refuses a name Postgres would silently TRUNCATE', () => {
     // Verified against a real server: `CREATE DATABASE "<64+ bytes>"` emits a
     // NOTICE and creates the 63-byte prefix. With a long enough base,
