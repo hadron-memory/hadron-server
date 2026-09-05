@@ -20,7 +20,7 @@
  * suite and the drop should fail rather than evict it.
  */
 import { Client } from 'pg';
-import { baseDbName, maintenanceUrl, parseWorkerDbName } from './dbWorkers.js';
+import { baseDbName, maintenanceUrl, parseWorkerDbName, quoteDbIdent } from './dbWorkers.js';
 
 const apply = process.argv.includes('--apply');
 
@@ -41,7 +41,7 @@ try {
   } else {
     for (const c of legacy) {
       try {
-        await admin.query(`DROP DATABASE IF EXISTS "${c!.datname}"`);
+        await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(c!.datname)}`);
         console.log(`dropped ${c!.datname}`);
       } catch (e) {
         // Almost always 55006: a pre-#1091 suite is using it right now. Say so

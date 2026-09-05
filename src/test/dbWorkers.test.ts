@@ -22,6 +22,7 @@ import {
   isRunAlive,
   templateLockKey,
   createDatabaseFromTemplate,
+  quoteDbIdent,
   WORKER_CONNECTION_LIMIT,
 } from './dbWorkers.js';
 
@@ -258,6 +259,17 @@ describe('isRunAlive', () => {
   });
 });
 
+describe('quoteDbIdent', () => {
+  it('doubles an embedded quote instead of breaking the statement', () => {
+    // CREATE/DROP DATABASE cannot take a bind parameter, so the name is
+    // interpolated. The run and pool halves are code-derived; the BASE comes
+    // from TEST_DATABASE_URL, which the old "identifier is code-derived"
+    // comments waved away (@copilot, #1136).
+    expect(quoteDbIdent('hadron_test')).toBe('"hadron_test"');
+    expect(quoteDbIdent('we"ird')).toBe('"we""ird"');
+  });
+});
+
 describe('templateLockKey', () => {
   it('is a stable positive integer a pg bigint accepts', () => {
     const k = templateLockKey('hadron_test');
@@ -323,14 +335,15 @@ describe('createDatabaseFromTemplate (live pg)', () => {
   });
 
   afterAll(async () => {
-    for (const d of made) await admin.query(`DROP DATABASE IF EXISTS "${d}" WITH (FORCE)`).catch(() => {});
+    for (const d of made)
+      await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(d)} WITH (FORCE)`).catch(() => {});
     await admin.end();
   });
 
   it('clones a free template, and reports a second call as EXISTS rather than created', async () => {
     const name = `hadron_test_probe_${process.pid}`;
     made.push(name);
-    await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
+    await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(name)} WITH (FORCE)`);
 
     expect(await createDatabaseFromTemplate(admin, name, template)).toBe('created');
     // 42P04 is reported, not swallowed as creation — a caller that needs a FRESH

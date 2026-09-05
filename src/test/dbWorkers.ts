@@ -177,6 +177,22 @@ export function runTemplateDbName(runId: string, base = baseDbName()): string {
 const PG_MAX_IDENTIFIER_BYTES = 63;
 
 /**
+ * Quote a database name for use as an SQL identifier (@copilot, PR #1136).
+ *
+ * `CREATE DATABASE` and `DROP DATABASE` cannot take a bind parameter — the name
+ * has to be interpolated — so it is quoted here instead. The comments at those
+ * sites used to say "identifier is code-derived" and wave the question away;
+ * that is only half true. The RUN and POOL halves are code-derived, but the BASE
+ * comes from `TEST_DATABASE_URL`, and a name containing a double quote would
+ * break the statement rather than being rejected.
+ *
+ * Doubling embedded quotes is the Postgres rule for a quoted identifier.
+ */
+export function quoteDbIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+/**
  * `CREATE DATABASE <name> TEMPLATE <template>`, tolerating a busy source.
  *
  * Shared by BOTH cloning sites — `globalSetup`'s run-template snapshot and
@@ -218,8 +234,12 @@ export async function createDatabaseFromTemplate(
   const startedAt = Date.now();
   for (;;) {
     try {
-      // Identifiers are code-derived and length-checked; see assertFitsIdentifier.
-      await admin.query(`CREATE DATABASE "${name}" TEMPLATE "${template}"`);
+      // Length-checked by assertFitsIdentifier, quoted by quoteDbIdent — the
+      // base half comes from TEST_DATABASE_URL, so "code-derived" was only ever
+      // true of the run and pool halves.
+      await admin.query(
+        `CREATE DATABASE ${quoteDbIdent(name)} TEMPLATE ${quoteDbIdent(template)}`,
+      );
       return 'created';
     } catch (e) {
       const code = (e as { code?: string }).code;

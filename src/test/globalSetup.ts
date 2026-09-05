@@ -19,6 +19,7 @@ import {
   testRunId,
   runTemplateDbName,
   createDatabaseFromTemplate,
+  quoteDbIdent,
   templateLockKey,
   isRunAlive,
   parseWorkerDbName,
@@ -280,7 +281,7 @@ async function provision(admin: Client) {
   // One extra `CREATE DATABASE` per run against ~13 worker clones. The template
   // holds schema, not rows.
   const runTemplate = runTemplateDbName(runId, base);
-  await admin.query(`DROP DATABASE IF EXISTS "${runTemplate}" WITH (FORCE)`);
+  await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(runTemplate)} WITH (FORCE)`);
   // Waits on a busy base rather than aborting setup — a developer's open psql
   // against the test DB blocks CREATE ... TEMPLATE, and the previous code
   // handled that at the worker-clone site only (#1136 review, Codex P2).
@@ -381,7 +382,7 @@ async function dropWorkerDbs(
     .filter((c): c is WorkerCloneName => c !== null && select(c));
 
   for (const { datname } of clones) {
-    const drop = admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);
+    const drop = admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(datname)} WITH (FORCE)`);
     if (opts.swallow) await drop.catch(() => {});
     else await drop;
   }
