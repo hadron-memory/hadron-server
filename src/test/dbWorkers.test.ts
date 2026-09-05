@@ -325,14 +325,26 @@ describe('HADRON_TEST_CONNECTION_LIMIT', () => {
  */
 describe('createDatabaseFromTemplate (live pg)', () => {
   const url = maintenanceUrl();
-  const template = baseDbName();
   const made: string[] = [];
   let admin: PgClient;
+  // A template PRIVATE to this test, not the shared `hadron_test` (@copilot,
+  // #1136). The busy-source case below deliberately holds a session on the
+  // template for the duration — against the shared base that would block a
+  // concurrent run's snapshot for ~8s, which is precisely the cross-run
+  // contention this PR removes. A test that reintroduces the hazard it is
+  // testing the fix for is worse than no test.
+  //
+  // Sourced from THIS RUN's template, and named outside the worker-clone shape
+  // so no orphan sweep can claim it.
+  const template = `hadron_test_probesrc_${process.pid}`;
 
   beforeAll(async () => {
     admin = new PgClient({ connectionString: url });
     await admin.connect();
-  });
+    made.push(template);
+    await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(template)} WITH (FORCE)`);
+    await createDatabaseFromTemplate(admin, template, runTemplateDbName(testRunId()));
+  }, 60_000);
 
   afterAll(async () => {
     for (const d of made)
