@@ -319,19 +319,14 @@ async function provision(admin: Client) {
  * collection, and it is best-effort: an orphan we fail to drop is wasted disk,
  * not a wrong result.
  *
- * Ownership is decided by {@link isRunAlive}, never by "has no open
- * connections": a run that has just issued `CREATE DATABASE` and not yet
- * connected has no connections either, and dropping it there is precisely the
- * bug being fixed. A LEGACY unscoped clone names no run, so it gets the
- * connection check as its only available signal — no worse than the blanket
- * drop it replaces, and it stops evicting a live pre-#1091 checkout.
+ * Ownership is decided by {@link isRunAlive} and by NOTHING else — in
+ * particular never by "has no open connections", since a run that has just
+ * issued `CREATE DATABASE` and not yet connected has no connections either, and
+ * dropping it there is precisely the bug being fixed. That rule now has no
+ * exceptions: a clone this sweep cannot prove is dead is left alone.
  */
 async function dropOrphanWorkerDbs(admin: Client, base: string, runId: string): Promise<void> {
-  const { rows } = await admin.query<{ datname: string; connections: string }>(
-    `SELECT d.datname,
-            (SELECT count(*) FROM pg_stat_activity a WHERE a.datname = d.datname) AS connections
-       FROM pg_database d`,
-  );
+  const { rows } = await admin.query<{ datname: string }>('SELECT datname FROM pg_database');
 
   await dropWorkerDbs(
     admin,
@@ -340,9 +335,22 @@ async function dropOrphanWorkerDbs(admin: Client, base: string, runId: string): 
       // Ours already (a pid reused within this machine's uptime): it cannot be
       // this run's live data, and adopting it would run against a stale schema.
       if (clone.runId === runId) return true;
-      if (clone.runId !== null) return !isRunAlive(clone.runId);
-      const idle = rows.find((r) => r.datname === clone.datname)?.connections === '0';
-      return idle;
+
+      // LEGACY `<base>_<digits>` clones are left ALONE (#1136 review, Codex
+      // P2). The first draft fell back to "has no open connections" for them,
+      // which contradicts the rule stated above in the one case it was applied:
+      // a pre-change worker sitting between its CREATE DATABASE and its first
+      // connection has no connections either, so this would drop the database
+      // out from under it — the exact bug being fixed, reintroduced for the
+      // checkout least able to cope with it.
+      //
+      // Leaving them costs disk and nothing else: they cannot be adopted, since
+      // no run-scoped name can ever equal an unscoped one, and nothing creates
+      // them any more. `pnpm db:test-prune-legacy` clears them when the last
+      // pre-#1091 checkout is gone.
+      if (clone.runId === null) return false;
+
+      return !isRunAlive(clone.runId);
     },
     { swallow: true },
     rows.map((r) => r.datname),

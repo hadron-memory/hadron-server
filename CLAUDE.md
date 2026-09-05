@@ -118,6 +118,12 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 # by the next run whose pid is not alive; nothing is dropped while its run is.
 pnpm test
 
+# Drop pre-#1091 `hadron_test_<n>` clones (from a checkout older than run-scoped
+# names). The automated sweep leaves these alone on purpose — it can prove a
+# run-scoped clone is dead, and can prove nothing about an unscoped one. They
+# cost disk only; no run can adopt one. Lists by default, drops with --apply.
+pnpm db:test-prune-legacy
+
 # Typecheck
 pnpm tsc --noEmit
 

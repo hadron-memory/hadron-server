@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
 import { Client as PgClient } from 'pg';
+import { spawnSync } from 'node:child_process';
 import {
   workerDbUrl,
   workerDbName,
@@ -244,9 +245,16 @@ describe('isRunAlive', () => {
   });
 
   it('reports a dead pid as dead', () => {
-    // 2^22 is above every default pid_max on the platforms this runs on, so it
-    // cannot be a live process.
-    expect(isRunAlive(String(2 ** 22))).toBe(false);
+    // A pid observed to have EXITED, not a large number assumed to be unused
+    // (@copilot, #1136). The first version used 2^22 as "above every default
+    // pid_max" — true on macOS (99999), false on Linux, whose default pid_max
+    // IS 4194304. So on CI it could name a live process and this would flake,
+    // in the test whose job is proving the orphan sweep can tell dead from
+    // alive. Spawning and reaping a child gives a pid that is dead by
+    // construction on every platform.
+    const child = spawnSync(process.execPath, ['-e', '']);
+    expect(child.pid).toBeGreaterThan(0);
+    expect(isRunAlive(String(child.pid))).toBe(false);
   });
 });
 
