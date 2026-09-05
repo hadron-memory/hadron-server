@@ -173,6 +173,38 @@ export function runTemplateDbName(runId: string, base = baseDbName()): string {
   return assertFitsIdentifier(`${base}_r${runId}_tpl`, base);
 }
 
+/** A plain (unpooled) URL for this run's private template. */
+export function runTemplateUrl(runId: string, base = baseDbName()): string {
+  const u = new URL(withDbName(baseTestDbUrl(), runTemplateDbName(runId, base)));
+  u.searchParams.delete('connection_limit');
+  return u.toString();
+}
+
+/**
+ * Is the test database on THIS machine?
+ *
+ * The run id is a pid, and a pid means nothing across hosts (@codex, PR #1136):
+ * two containers pointing at one Postgres both run as pid 1 and would claim the
+ * same clone names, while a foreign pid checked against the local process table
+ * reads as dead and would be dropped `WITH (FORCE)` out from under a live run.
+ *
+ * Parallel mode therefore REFUSES a non-local endpoint rather than guessing.
+ * That is not a regression for anyone: before run-scoped names such a setup
+ * collided unconditionally, so this turns silent corruption into a message. A
+ * unix socket (no host) is local by construction.
+ */
+export function isLocalDbHost(url = baseTestDbUrl()): boolean {
+  const host = new URL(url).hostname;
+  return (
+    host === '' ||
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '[::1]' ||
+    host === '::1' ||
+    host.endsWith('.localhost')
+  );
+}
+
 /** Postgres NAMEDATALEN - 1. Longer identifiers are TRUNCATED, not rejected. */
 const PG_MAX_IDENTIFIER_BYTES = 63;
 

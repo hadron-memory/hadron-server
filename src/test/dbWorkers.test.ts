@@ -23,6 +23,8 @@ import {
   templateLockKey,
   createDatabaseFromTemplate,
   quoteDbIdent,
+  isLocalDbHost,
+  runTemplateUrl,
   PARALLEL_DBS,
   WORKER_CONNECTION_LIMIT,
 } from './dbWorkers.js';
@@ -257,6 +259,40 @@ describe('isRunAlive', () => {
     const child = spawnSync(process.execPath, ['-e', '']);
     expect(child.pid).toBeGreaterThan(0);
     expect(isRunAlive(String(child.pid))).toBe(false);
+  });
+});
+
+describe('isLocalDbHost', () => {
+  it.each([
+    'postgresql://holger@localhost:5432/hadron_test',
+    'postgresql://holger@127.0.0.1:5432/hadron_test',
+    'postgresql://holger@db.localhost:5432/hadron_test',
+  ])('accepts %s', (url) => {
+    expect(isLocalDbHost(url)).toBe(true);
+  });
+
+  it.each([
+    'postgresql://holger@db.internal:5432/hadron_test',
+    'postgresql://holger@10.0.0.5:5432/hadron_test',
+  ])('rejects %s', (url) => {
+    // A run id is this machine's pid, and cleanup DROPs on the strength of one.
+    // Two containers on a shared server both run as pid 1 and claim the same
+    // clone names; a foreign pid reads as dead and would be force-dropped under
+    // a live run (@codex, #1136). Parallel mode refuses rather than guessing.
+    expect(isLocalDbHost(url)).toBe(false);
+  });
+});
+
+describe('runTemplateUrl', () => {
+  it('points at the run template and carries no pool bound', () => {
+    // The template is provisioned over ONE short-lived connection, so a
+    // connection_limit inherited from TEST_DATABASE_URL would be noise in a
+    // connection string somebody later debugs — same reasoning as maintenanceUrl.
+    process.env.TEST_DATABASE_URL =
+      'postgresql://holger@localhost:5432/hadron_test?connection_limit=17';
+    const u = new URL(runTemplateUrl('77'));
+    expect(u.pathname).toBe('/hadron_test_r77_tpl');
+    expect(u.searchParams.has('connection_limit')).toBe(false);
   });
 });
 

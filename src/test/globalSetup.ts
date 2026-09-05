@@ -18,6 +18,8 @@ import {
   maintenanceUrl,
   testRunId,
   runTemplateDbName,
+  runTemplateUrl,
+  isLocalDbHost,
   createDatabaseFromTemplate,
   quoteDbIdent,
   templateLockKey,
@@ -34,20 +36,6 @@ export async function setup() {
   // the shell cannot quietly make two runs share a name-space again.
   process.env.HADRON_TEST_RUN_ID = String(process.pid);
 
-  // Serialize template provisioning across concurrent runs (#1091). The DDL
-  // below is DROP + ADD on shared catalog rows, so two runs doing it at once
-  // kill one of them with `XX000 tuple concurrently updated`.
-  //
-  // The lock lives on the MAINTENANCE connection rather than on the template
-  // connection, because it has to outlive `client.end()`: run-scoped clone
-  // NAMES are not enough on their own. Two suites from different CHECKOUTS
-  // share this one base template, so releasing the lock as soon as the DDL
-  // finished would let the next run rewrite the constraints before our workers
-  // had cloned anything — and they would then clone the OTHER checkout's
-  // schema, which fails confusingly or, worse, passes against constraints this
-  // branch never wrote (PR #1136 review, Codex P1). We take a run-scoped
-  // SNAPSHOT of the template below, still holding the lock, and the workers
-  // clone from that.
   // SERIAL MODE touches the test database and NOTHING ELSE (#1136 review, Codex
   // P2). `HADRON_TEST_PARALLEL=0` is the escape hatch for a setup that has no
   // CREATE DATABASE infrastructure — including a role that can reach the test
@@ -67,6 +55,21 @@ export async function setup() {
     return;
   }
 
+  // A pid is meaningless across hosts, and cleanup drops on the strength of one
+  // (@codex, #1136). Refuse rather than guess — see isLocalDbHost.
+  if (!isLocalDbHost()) {
+    throw new Error(
+      `Parallel test databases need a LOCAL Postgres: the run id is this machine's pid, ` +
+        `so a shared server cannot tell one host's run from another's (equal pids collide, ` +
+        `and a foreign pid reads as dead and would be dropped WITH (FORCE) under a live run). ` +
+        `Point TEST_DATABASE_URL at a local server, or set HADRON_TEST_PARALLEL=0.`,
+    );
+  }
+
+  // Serialize provisioning against other lock-honouring runs (#1091). Since
+  // this checkout applies its DDL to its OWN template rather than to the shared
+  // base, the lock no longer protects a DDL window — it just keeps concurrent
+  // clones of the base from thrashing on 55006.
   const admin = new Client({ connectionString: maintenanceUrl() });
   await admin.connect();
   await admin.query('SELECT pg_advisory_lock($1)', [templateLockKey()]);
@@ -80,16 +83,18 @@ export async function setup() {
 }
 
 async function provision(admin: Client) {
-  const client = new Client({ connectionString: baseTestDbUrl() });
-  await client.connect();
-  await applyTemplateConstraints(client);
-
-  // The base DB above is now the fully-provisioned template. Must be closed
-  // before it can be used as a CREATE DATABASE template (no open connections).
-  await client.end();
-
   const base = baseDbName();
   const runId = testRunId();
+
+  // CLONE FIRST, then apply this checkout's DDL to the COPY — the shared base
+  // is only ever READ (#1136 review, Codex P1).
+  //
+  // Applying the constraints to the base and snapshotting afterwards left a
+  // window that the advisory lock could not close, because a lock only binds
+  // peers that take it: a checkout from before this change rewrites the base
+  // without one, and could land between our DDL and our snapshot. Doing the DDL
+  // on a database whose name nobody else knows removes the window rather than
+  // narrowing it — there is no shared mutable state left to race for.
   return await provisionParallel(admin, base, runId);
 }
 
@@ -311,6 +316,16 @@ async function provisionParallel(admin: Client, base: string, runId: string) {
   // against the test DB blocks CREATE ... TEMPLATE, and the previous code
   // handled that at the worker-clone site only (#1136 review, Codex P2).
   await createDatabaseFromTemplate(admin, runTemplate, base);
+
+  // This checkout's constraints, applied to this run's copy.
+  const client = new Client({ connectionString: runTemplateUrl(runId, base) });
+  await client.connect();
+  try {
+    await applyTemplateConstraints(client);
+  } finally {
+    // Must be closed before the workers can clone from it.
+    await client.end();
+  }
 
   // Worker DBs are cloned from the run template LAZILY, per worker
   // (perWorkerDb.ts), because VITEST_POOL_ID isn't statically bounded.
