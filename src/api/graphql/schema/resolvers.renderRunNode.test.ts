@@ -33,15 +33,28 @@ import { compileTemplate } from '../../../lib/template.js';
  * is why that file never flaked.
  */
 async function waitForReads(ids: string[]): Promise<void> {
+  let seen: string[] = [];
   for (let i = 0; i < 50; i++) {
-    const seen = await db.usageEvent.findMany({
-      where: { type: 'read', nodeId: { in: ids } },
-      select: { nodeId: true },
-      distinct: ['nodeId'],
-    });
+    seen = (
+      await db.usageEvent.findMany({
+        where: { type: 'read', nodeId: { in: ids } },
+        select: { nodeId: true },
+        distinct: ['nodeId'],
+      })
+    ).map((r) => r.nodeId!);
     if (seen.length >= ids.length) return;
     await new Promise((r) => setTimeout(r, 20));
   }
+  // Throw rather than fall through (@copilot, PR #1138). Falling through hands
+  // the failure to whatever assertion runs next, which reports a missing id and
+  // not the fact that the recorder never wrote — and a future edit that stops
+  // asserting on the ids would turn a broken recorder into a passing test.
+  const missing = ids.filter((id) => !seen.includes(id));
+  throw new Error(
+    `Timed out after 1s waiting for read UsageEvents on ${missing.length} node(s): ` +
+      `${missing.join(', ')}. Recording is fire-and-forget, so either it never ran or it failed ` +
+      `silently in the recorder's .catch().`,
+  );
 }
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
