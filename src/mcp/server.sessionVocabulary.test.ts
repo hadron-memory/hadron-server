@@ -183,6 +183,37 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     expect(d.toLowerCase()).not.toMatch(/only thing that ends/);
   });
 
+  it('#1100 — the `summary` parameter says it is display-only and points at handoff', () => {
+    // The schema is the ONLY thing guaranteed to be in front of the caller at
+    // the moment of choosing: the end-worker-session skill is not always
+    // loaded, and a worker recovering from a compaction has neither. It used to
+    // read "Summary of what was accomplished", which is exactly what a
+    // departing worker thinks it is writing.
+    const desc = srv().toolParamDescription('hadron_end_session', 'summary');
+    expect(desc).toMatch(/NOT the continuity record/i);
+    expect(desc).toContain('handoff');
+    expect(desc).not.toMatch(/^Summary of what was accomplished$/);
+  });
+
+  it('#1100 — the GraphQL endSession description carries the same warning', () => {
+    // Same footgun, second surface. A description fixed on one surface only is
+    // how the two come apart.
+    // The needle is asserted BEFORE slicing (PR #1135 review, @copilot): a
+    // missing `endSession` would make indexOf return -1, and `slice(-4001, -1)`
+    // silently pulls unrelated text from the END of the SDL — which can fail
+    // confusingly or, worse, pass.
+    const at = typeDefs.indexOf('endSession(id: ID!');
+    expect(at).toBeGreaterThan(0);
+    const block = typeDefs.slice(Math.max(0, at - 4000), at);
+    // The FACTS, not the phrasing — per this file's own rule that re-wording
+    // stays free and deleting the fact does not: (a) the two fields are not
+    // interchangeable, (b) no continuity path reads `summary`, (c) the mistake
+    // is one-way.
+    expect(block).toMatch(/summary.*is NOT a smaller/s);
+    expect(block).toMatch(/worker-continuity path/);
+    expect(block).toMatch(/not symmetric/);
+  });
+
   it('hadron_whoami — the recovery surface — explains that a listed binding may have outlived its chat session', () => {
     const d = srv().toolDescription('hadron_whoami');
 

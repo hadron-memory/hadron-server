@@ -213,6 +213,7 @@ export interface TestableMcpServer {
    * a renamed tool fails the assertion loudly instead of vacuously passing.
    */
   toolDescription(name: string): string;
+  toolParamDescription(name: string, param: string): string;
 }
 
 export function createTestableMcpServer(
@@ -263,6 +264,36 @@ export function createTestableMcpServer(
       const tool = tools[name];
       if (!tool) throw new Error(`Tool not registered: ${name}`);
       return tool.description ?? '';
+    },
+    /**
+     * A single PARAMETER's description (#1100).
+     *
+     * Tool descriptions were already testable; parameter descriptions were not,
+     * and this repo leans on them heavily — `hadron_end_session.summary` read
+     * "Summary of what was accomplished" while being display-only, which is a
+     * footgun no test could see. Reads the registered zod shape rather than the
+     * source text, so it tests what the CLIENT receives.
+     *
+     * Tolerates both shapes the SDK has used: an `inputSchema` ZodObject (has
+     * `.shape`) and a bare raw-shape record. Throws rather than returning ''
+     * for an unknown param — an empty string would make a missing description
+     * indistinguishable from a wrong one, and this exists to catch wrong ones.
+     */
+    toolParamDescription(name: string, param: string) {
+      const tool = tools[name] as unknown as {
+        inputSchema?: { shape?: Record<string, { description?: string }> } & Record<
+          string,
+          unknown
+        >;
+      };
+      if (!tool) throw new Error(`Tool not registered: ${name}`);
+      const schema = tool.inputSchema;
+      const shape = (schema?.shape ?? schema) as
+        | Record<string, { description?: string }>
+        | undefined;
+      const entry = shape?.[param];
+      if (!entry) throw new Error(`Tool "${name}" has no parameter "${param}"`);
+      return entry.description ?? '';
     },
     async callToolText(name: string, args: unknown = {}) {
       const result = await this.callTool(name, args);
@@ -5738,7 +5769,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     'End a session, and for a worker-bound one write its closing HANDOFF (#1029) — the record the next stint of this worker inherits automatically at bind. This is the CLIENT operation that ends a WORKER SESSION, and the server\'s reaper can end one without you. Ending your CHAT SESSION does not end a worker session (#1034). It ends the SESSION, not any HOLD: if a person bound the worker, the name stays theirs until released (#1050) and only they can bind it again. An App-key BIND takes no hold — a fact about the bind, not a promise about the worker afterwards, since an eligible user may have forced a binding meanwhile and taken the name. Archiving the Desktop window, closing the Claude Code session, or losing the conversation any other way leaves this binding open server-side and the worker taken until you call this tool or the reaper claims it. Call it deliberately when you stop working, not when the window closes — by then it is too late to write a handoff, because the context that would compose one has gone. Pass `handoff` whenever you are stopping deliberately: what landed, what is open, what is blocked, what the next driver should not repeat. Route rather than restate — point at the live artifacts instead of summarizing them, since a restatement drifts while a pointer does not. The server owns where it goes; you supply the prose. A failed handoff write REFUSES the end and leaves the session open, so retrying is safe; ending with no handoff is a deliberate choice, and the next driver is told the stint ended without one.',
     {
       id: z.string().describe('Id of the session to end — a Hadron session id (the worker session id, when one is bound), never anything about your chat session'),
-      summary: z.string().optional().describe('Summary of what was accomplished'),
+      summary: z
+        .string()
+        .optional()
+        .describe(
+          'A label on the session ROW, readable via the `session` / `sessions` GraphQL queries. It is NOT the continuity record: no worker-handoff path reads it, so the next driver of this worker never sees it (#1100). ' +
+            'If you are writing something for whoever comes next, that is `handoff`. ' +
+            'This used to be described as "Summary of what was accomplished", which is exactly what a departing worker thinks it is writing: choosing it succeeds, returns a normal receipt, and delivers nothing to anyone. ' +
+            'The two mistakes are not symmetric. Putting continuity prose here produces NO handoff, and cannot be corrected afterwards — the sequence is append-only and the stint has ended, so the remedy is to bind again and end that session with the prose. Putting a label in `handoff` is merely untidy: the label is missing from the row and the prose reaches the next driver anyway.',
+        ),
       handoff: z
         .string()
         .optional()
@@ -5851,7 +5890,33 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           (handoffBody
             ? '\nHandoff written — the next worker session bound to this worker receives it automatically.'
             : session.workerId && closed.endedByThisCall
-              ? '\n(No handoff written. The next driver will be told this stint ended without one.)'
+              ? // #1100: a worker-bound end with `summary` set and `handoff`
+                // absent is almost certainly the mistake this receipt exists to
+                // catch — the caller wrote a closing note into a field no
+                // continuity path reads.
+                //
+                // Said HERE because it is the last moment the prose still
+                // EXISTS. This stint can no longer take a handoff (the sequence
+                // is append-only and the session has ended, so re-ending is
+                // refused — pinned by a test), but the caller can still bind
+                // again and end THAT session with it. Once the context goes,
+                // nothing can reconstruct it.
+                //
+                // My first draft of this told the caller to re-end the same
+                // session; the test written to pin that advice is what proved
+                // it refused (PR #1135). A remedy in a message is a promise —
+                // it needs a test like any other.
+                //
+                // Distinguished from an ordinary no-handoff end, which is a
+                // legitimate choice and keeps its quieter wording.
+                summary?.trim()
+                ? '\n⚠ No handoff written, but a `summary` was supplied — and `summary` is display-only.' +
+                  '\n  The next driver of this worker will receive NOTHING.' +
+                  '\n  This stint can no longer take one: the handoff sequence is append-only and this' +
+                  '\n  session has ended, so re-ending it is refused. If that prose was meant for whoever' +
+                  '\n  comes next, bind the worker again and end THAT session with `handoff` — while you' +
+                  '\n  still have the prose. See #1100.'
+                : '\n(No handoff written. The next driver will be told this stint ended without one.)'
               : ''),
       );
     },
