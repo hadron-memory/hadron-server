@@ -2,7 +2,9 @@
  * vitest setupFile — runs in every worker BEFORE any test file imports the
  * Prisma client, so the client's `new PrismaClient()` (which reads DATABASE_URL
  * at construction) connects to THIS worker's private database
- * (`hadron_test_<VITEST_POOL_ID>`). Files then run in parallel without racing.
+ * (`hadron_test_r<runId>_<VITEST_POOL_ID>`). Files then run in parallel without
+ * racing — and since #1091 the name is scoped by RUN as well as by worker, so
+ * two SUITES on one machine do not race either.
  *
  * The DB is created LAZILY here rather than pre-provisioned in globalSetup:
  * VITEST_POOL_ID is a concurrency-slot id (bounded by the fork count, reused
@@ -15,7 +17,15 @@
  * rewrite it, defeating the isolation.
  */
 import { Client } from 'pg';
-import { PARALLEL_DBS, workerDbUrl, workerDbName, baseDbName, maintenanceUrl } from './dbWorkers.js';
+import {
+  PARALLEL_DBS,
+  workerDbUrl,
+  workerDbName,
+  runTemplateDbName,
+  createDatabaseFromTemplate,
+  testRunId,
+  maintenanceUrl,
+} from './dbWorkers.js';
 
 if (PARALLEL_DBS) {
   const poolId = process.env.VITEST_POOL_ID ?? '1';
@@ -27,26 +37,18 @@ if (PARALLEL_DBS) {
   try {
     const { rowCount } = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [name]);
     if (!rowCount) {
-      const template = baseDbName();
-      // Best-effort: terminate any stray connection to the template (a dev's GUI
-      // or psql) so CREATE DATABASE ... TEMPLATE isn't blocked by "source
-      // database is being accessed by other users". The workers themselves use
-      // their clones, not the template, and CREATE's own backend runs on the
-      // maintenance DB — so this only kills unrelated external sessions.
-      await admin
-        .query(
-          'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
-          [template],
-        )
-        .catch(() => {});
-      try {
-        // Clone the fully-provisioned template (schema, pgvector, tsv, all CHECK
-        // constraints). Identifier is code-derived.
-        await admin.query(`CREATE DATABASE "${name}" TEMPLATE "${template}"`);
-      } catch (e) {
-        // 42P04 = duplicate_database: another slot won a benign create race.
-        if ((e as { code?: string }).code !== '42P04') throw e;
-      }
+      // THIS RUN's snapshot of the template, not the shared base (#1136 review,
+      // Codex P1): a concurrent suite from another checkout provisions the base
+      // with its own constraints, and cloning that would run this branch's
+      // tests against another branch's schema.
+      const template = runTemplateDbName(testRunId());
+      // Clone the fully-provisioned template (schema, pgvector, tsv, all CHECK
+      // constraints). The busy-source handling — WAIT for a connected template
+      // rather than `pg_terminate_backend` it, which is how this used to evict a
+      // concurrent run's globalSetup — lives in the shared helper, because
+      // globalSetup's snapshot needs exactly the same thing and having it at
+      // only one of the two sites is what #1136's review found twice.
+      await createDatabaseFromTemplate(admin, name, template);
     }
   } finally {
     await admin.end();

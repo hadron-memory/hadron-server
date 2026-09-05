@@ -102,14 +102,27 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 
 ```bash
 # Run the test suite. Files run in PARALLEL, each vitest worker against its own
-# clone of hadron_test (`hadron_test_<VITEST_POOL_ID>`, created lazily from the
+# clone of hadron_test (`hadron_test_r<runId>_<poolId>`, created lazily from the
 # template by src/test/perWorkerDb.ts and dropped at teardown) — ~6-7x faster
 # than the old serial mode. `hadron_test` is still the template you build with
 # `pnpm db:test-setup`. Set HADRON_TEST_PARALLEL=0 to fall back to the single-DB
 # serial mode (e.g. to debug a suspected cross-file ordering issue). A test that
 # opens its OWN raw pg connection must read `process.env.DATABASE_URL` (the
 # per-worker URL), NOT `TEST_DATABASE_URL`, or it splits across two DBs.
+#
+# `<runId>` is the vitest MAIN process pid, stamped into HADRON_TEST_RUN_ID by
+# globalSetup (#1091). It is there because a pool id alone is NOT unique to a
+# run — it restarts at 1 every time — so two suites on this machine used to
+# claim the same databases and delete from each other's tables mid-test. Two
+# concurrent runs are now safe. Orphan clones from a crashed run are collected
+# by the next run whose pid is not alive; nothing is dropped while its run is.
 pnpm test
+
+# Drop pre-#1091 `hadron_test_<n>` clones (from a checkout older than run-scoped
+# names). The automated sweep leaves these alone on purpose — it can prove a
+# run-scoped clone is dead, and can prove nothing about an unscoped one. They
+# cost disk only; no run can adopt one. Lists by default, drops with --apply.
+pnpm db:test-prune-legacy
 
 # Typecheck
 pnpm tsc --noEmit
