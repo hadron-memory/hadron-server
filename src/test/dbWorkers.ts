@@ -113,7 +113,7 @@ export function workerDbName(
   base = baseDbName(),
   runId = testRunId(),
 ): string {
-  return `${base}_r${runId}_${poolId}`;
+  return assertFitsIdentifier(`${base}_r${runId}_${poolId}`, base);
 }
 
 /**
@@ -155,7 +155,40 @@ export function templateLockKey(base = baseDbName()): number {
  * crashed run is garbage in exactly the same way.
  */
 export function runTemplateDbName(runId: string, base = baseDbName()): string {
-  return `${base}_r${runId}_tpl`;
+  return assertFitsIdentifier(`${base}_r${runId}_tpl`, base);
+}
+
+/** Postgres NAMEDATALEN - 1. Longer identifiers are TRUNCATED, not rejected. */
+const PG_MAX_IDENTIFIER_BYTES = 63;
+
+/**
+ * Refuse a generated database name that Postgres would silently truncate
+ * (PR #1136 review, Codex P2).
+ *
+ * Verified rather than assumed: `CREATE DATABASE "<64+ bytes>"` emits
+ * `NOTICE: identifier … will be truncated` and creates the 63-byte prefix. That
+ * is quiet on its own, but it is not quiet in what it does here — with a long
+ * enough base, `<base>_r<runId>_1` and `<base>_r<runId>_tpl` truncate to the
+ * SAME identifier. The worker's `CREATE DATABASE` then fails `42P04`, which
+ * `perWorkerDb` treats as a benign create race and swallows, and the worker
+ * ends up pointed at the run TEMPLATE that every other worker also shares —
+ * silently undoing the isolation this whole change exists to establish.
+ *
+ * The run-scoped suffix is longer than the `_<poolId>` it replaced, so a base
+ * that fit before can stop fitting: this is loud on purpose, and names the
+ * remedy. Bytes, not characters — the limit is NAMEDATALEN.
+ */
+function assertFitsIdentifier(name: string, base: string): string {
+  const bytes = Buffer.byteLength(name, 'utf8');
+  if (bytes > PG_MAX_IDENTIFIER_BYTES) {
+    throw new Error(
+      `Test database name "${name}" is ${bytes} bytes, over Postgres's ${PG_MAX_IDENTIFIER_BYTES}-byte limit. ` +
+        `Postgres would TRUNCATE it, collapsing a worker clone and the run template onto one database and ` +
+        `silently sharing it between workers. Shorten the database name in TEST_DATABASE_URL — ` +
+        `"${base}" leaves too little room for the per-run suffix.`,
+    );
+  }
+  return name;
 }
 
 /**

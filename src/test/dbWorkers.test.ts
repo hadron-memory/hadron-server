@@ -127,6 +127,33 @@ describe('run scoping', () => {
     );
   });
 
+  it('refuses a name Postgres would silently TRUNCATE', () => {
+    // Verified against a real server: `CREATE DATABASE "<64+ bytes>"` emits a
+    // NOTICE and creates the 63-byte prefix. With a long enough base,
+    // `…_r<runId>_1` and `…_r<runId>_tpl` truncate to the SAME identifier — the
+    // worker's CREATE then fails 42P04, perWorkerDb reads that as a benign
+    // create race, and the worker silently shares the run template with every
+    // other worker. Loud beats a fallback (#1136 review, Codex P2).
+    const tooLong = 'z'.repeat(60);
+    expect(() => workerDbName(1, tooLong, '99999')).toThrow(/63-byte limit/);
+    expect(() => runTemplateDbName('99999', tooLong)).toThrow(/63-byte limit/);
+  });
+
+  it('counts BYTES, not characters', () => {
+    // The limit is NAMEDATALEN. A name of 40 multi-byte characters fits the
+    // character count and not the byte count.
+    const multibyte = 'é'.repeat(40);
+    expect(Buffer.byteLength(multibyte, 'utf8')).toBeGreaterThan(63);
+    expect(() => workerDbName(1, multibyte, '1')).toThrow(/63-byte limit/);
+  });
+
+  it('accepts a name that exactly fits', () => {
+    // 63 bytes is legal; the guard must not be off by one and reject a working
+    // configuration.
+    const base = 'b'.repeat(63 - '_r7_1'.length);
+    expect(workerDbName(1, base, '7')).toHaveLength(63);
+  });
+
   it.each([undefined, '', 'abc', '12x'])(
     'throws rather than falling back when the run id is %s',
     (bad) => {
