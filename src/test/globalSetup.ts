@@ -327,33 +327,31 @@ async function provision(admin: Client) {
  */
 async function dropOrphanWorkerDbs(admin: Client, base: string, runId: string): Promise<void> {
   const { rows } = await admin.query<{ datname: string }>('SELECT datname FROM pg_database');
+  const datnames = rows.map((r) => r.datname);
 
+  // OUR OWN name, left by a crashed run whose pid the OS has since handed to us.
+  // This one fails LOUD (#1136 review, Codex P2): a swallowed failure here means
+  // `perWorkerDb` finds the database already present, skips CREATE, and runs the
+  // suite against the CRASHED run's schema — the stale-clone masking that the
+  // pre-run pass exists to prevent, and the one case where being best-effort
+  // produces a wrong result rather than wasted disk.
+  await dropWorkerDbs(admin, base, (c) => c.runId === runId, { swallow: false }, datnames);
+
+  // Everything else is garbage collection, so best-effort is right: an orphan we
+  // fail to drop costs disk, and the next run with a free pid collects it.
+  //
+  // LEGACY `<base>_<digits>` clones are deliberately NOT here. They name no run,
+  // so nothing can prove them dead, and the only available signal — "has no open
+  // connections" — is the heuristic this function refuses on the grounds above.
+  // Leaving them is free: no run-scoped name can equal an unscoped one, so no
+  // run can adopt one, and nothing creates them any more.
+  // `pnpm db:test-prune-legacy` clears them once the last pre-#1091 checkout is.
   await dropWorkerDbs(
     admin,
     base,
-    (clone) => {
-      // Ours already (a pid reused within this machine's uptime): it cannot be
-      // this run's live data, and adopting it would run against a stale schema.
-      if (clone.runId === runId) return true;
-
-      // LEGACY `<base>_<digits>` clones are left ALONE (#1136 review, Codex
-      // P2). The first draft fell back to "has no open connections" for them,
-      // which contradicts the rule stated above in the one case it was applied:
-      // a pre-change worker sitting between its CREATE DATABASE and its first
-      // connection has no connections either, so this would drop the database
-      // out from under it — the exact bug being fixed, reintroduced for the
-      // checkout least able to cope with it.
-      //
-      // Leaving them costs disk and nothing else: they cannot be adopted, since
-      // no run-scoped name can ever equal an unscoped one, and nothing creates
-      // them any more. `pnpm db:test-prune-legacy` clears them when the last
-      // pre-#1091 checkout is gone.
-      if (clone.runId === null) return false;
-
-      return !isRunAlive(clone.runId);
-    },
+    (clone) => clone.runId !== null && clone.runId !== runId && !isRunAlive(clone.runId),
     { swallow: true },
-    rows.map((r) => r.datname),
+    datnames,
   );
 }
 
