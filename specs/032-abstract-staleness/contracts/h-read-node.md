@@ -40,8 +40,11 @@ const shouldCheckStale = scope === 'abstract' || scope === 'all';
 // properties of THIS call, not of the node.
 const includeStaleMarker =
   shouldCheckStale &&
-  !node.memory.isEncrypted &&     // false for an UNLOCKED encrypted memory
-                                  // since spec 041 — mcpDecryptOrMark flips it
+  // TRUE for an unlocked encrypted memory: since spec 041,
+  // mcpDecryptOrMark sets node.memory.isEncrypted = false on the
+  // PROJECTION once it has decrypted, so the gate ADMITS that case and
+  // the marker is checked. Only a LOCKED memory is skipped here.
+  !node.memory.isEncrypted &&
   isAbstractUnverified(node);
 
 // Marker emission:
