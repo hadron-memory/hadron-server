@@ -1,5 +1,7 @@
 # Specification Quality Checklist: Node `abstractOriginHash` — stale-abstract detection
 
+> **Post-ship note (#1128, 2026-09-03).** Items below record the state at sign-off. The staleness rule has since changed — an unfingerprinted node with both an abstract and a body now raises the marker — so the open questions about *legacy abstracts staying quiet* are answered differently today. Current rule: spec.md FR-010.
+
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-05-31
 **Feature**: [spec.md](../spec.md)
