@@ -5,6 +5,8 @@ description: "Implementation tasks for spec 032 — Node `abstractOriginHash`"
 # Tasks: Node `abstractOriginHash` — stale-abstract detection
 
 > **Post-ship note (#1128, 2026-09-03).** Individual task entries below describe the tests and behaviour **as completed at the time**. The staleness rule has since changed: the `abstractOriginHash != null` short-circuit is gone, so an unfingerprinted node holding both an abstract and a body now DOES raise the marker and the validator warning. Task lines saying *"legacy null-hash node (no marker)"* record what was built, not what is true now — the current rule is spec.md **FR-010**, and the tests were updated with the change. Left as written rather than rewritten, because a completed checklist is a record.
+>
+> **Do not copy the database commands below.** They name `hadron_dev`, which CLAUDE.md now documents as deprecated/unused, and they run bare `prisma db push`, which drops the pgvector HNSW index Prisma cannot model. Today's equivalents are `hadron` and `pnpm db:dev-setup` / `pnpm db:test-setup`. Recorded as run, not as guidance (@copilot, PR #1139).
 
 **Input**: Design documents from `specs/032-abstract-staleness/`
 **Prerequisites**: [spec.md](./spec.md), [plan.md](./plan.md), [research.md](./research.md), [data-model.md](./data-model.md), [contracts/](./contracts/), [quickstart.md](./quickstart.md)

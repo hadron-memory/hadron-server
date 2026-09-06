@@ -115,7 +115,7 @@ type Node {
   content: String
   "SHA-256(content)[0:8] — system-managed change-detection fingerprint."
   contentHash: String
-  "Spec 032 — fingerprint of the `content` value at the time `abstract` was authored. When this differs from `contentHash` and both are non-null, the abstract is stale. Read-only; never settable via NodeInput."
+  "Spec 032 — fingerprint of the `content` value at the time `abstract` was authored. The abstract is UNVERIFIED when this differs from `computeContentHash(content)` recomputed at read time — or when it is absent while both texts exist (#1128). NOT compared against the `contentHash` column, which has its own external-producer domain (PR-207 design pivot). Read-only; never settable via NodeInput."
   abstractOriginHash: String
   # ... rest unchanged ...
 }

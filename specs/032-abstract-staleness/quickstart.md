@@ -6,7 +6,6 @@ Manual smoke recipe for verifying staleness end-to-end against a local dev serve
 
 - Local Postgres with `hadron` — the canonical dev DB per CLAUDE.md. *(This doc said `hadron_dev`, which CLAUDE.md now documents as deprecated/unused; running these steps there verifies nothing.)*
 - The schema delta is applied (the new `abstract_origin_hash` columns on both `nodes` and `node_revisions`) via **`pnpm db:dev-setup`**. *(This said bare `prisma db push`; CLAUDE.md warns against that on the dev DB — Prisma cannot model the pgvector HNSW index, so a bare push DROPS it and never rebuilds it. @copilot, PR #1139.)*
-- `prisma/post-push.sql` re-applied.
 - Dev server running locally: `pnpm tsx src/index.ts` (default port 4000).
 - A valid App Key (`hdr_app_…`) — get one from `prisma/seed.ts` output.
 
