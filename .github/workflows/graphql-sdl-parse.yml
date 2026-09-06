@@ -1,5 +1,37 @@
-name: GraphQL SDL parse
+name: Template literals + GraphQL SDL
 
+# Two checks, in one script, in the order the second one needs.
+#
+# FIRST (#1076): the SDL template literal is intact. A bare backtick
+# inside a GraphQL description or `#` comment terminates it, and the
+# TypeScript error that follows names a field as though it were a
+# statement, sometimes hundreds of lines from the cause. This half
+# reads the file as text and names the offending line. It runs first
+# because the parse below cannot IMPORT a module the backtick broke
+# — which is also why that import is dynamic.
+#
+# FIRST-B (#1087): the SAME hazard in every TAGGED prose-carrying
+# literal — $queryRaw / $executeRaw / Prisma.sql — across all of
+# src/. The hazard was never SDL; #1076 was scoped to where its
+# author had been bitten, and the identical trap landed in a SQL
+# comment an hour after it merged. This is why the path filter below
+# is src/**.ts and not the schema directory: a widened guard behind
+# a narrow trigger is a guard that does not run.
+#
+# THIRD (#1103): SDL DESCRIPTIONS agree with the code they describe.
+# Nothing ever checked one, and four instances of that drift reached
+# the PUBLISHED reference before this existed — the motivating one
+# enumerated four of five grant scopes in a document that named the
+# fifth three fields away, and a hand-written docs page copied the
+# wrong half. A description is a published surface, so its staleness
+# is a defect in the product, not in a comment.
+#
+# It lives in this workflow rather than its own because the trigger
+# is identical (typeDefs.ts plus the constants it describes) and a
+# guard behind a second, narrower trigger is a guard that does not
+# run — the #1087 lesson one line up.
+#
+# SECOND: the SDL parses.
 # Imports the `typeDefs` template literal from
 # `src/api/graphql/schema/typeDefs.ts` and runs `graphql.parse()` on
 # it. Catches the class of bug from PR #136: two adjacent
@@ -14,16 +46,20 @@ name: GraphQL SDL parse
 on:
   pull_request:
     paths:
-      - 'src/api/graphql/schema/**.ts'
+      # #1087: all of src/, not just the schema dir — $queryRaw lives
+      # wherever its query does.
+      - 'src/**.ts'
       - 'scripts/check-graphql-sdl.mjs'
+      - 'scripts/check-sdl-enumerations.mjs'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
   push:
     branches: [main]
     paths:
-      - 'src/api/graphql/schema/**.ts'
+      - 'src/**.ts'
       - 'scripts/check-graphql-sdl.mjs'
+      - 'scripts/check-sdl-enumerations.mjs'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -53,5 +89,8 @@ jobs:
       # can resolve without crashing on a missing client.
       - run: pnpm prisma generate
 
-      - name: Parse the GraphQL SDL
+      - name: Check the SDL literal, then parse the SDL
         run: pnpm tsx scripts/check-graphql-sdl.mjs
+
+      - name: SDL descriptions agree with the code they enumerate (#1103)
+        run: pnpm check:sdl-enums

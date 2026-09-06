@@ -2,6 +2,13 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
+  type UsageNodeRef,
+  recordNodeRead,
+  recordNodeUsage,
+  recordNodeWrite,
+  toUsageNodeRefs,
+} from '../lib/usageRecorder.js';
+import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
   editorFromAuth,
@@ -13,10 +20,20 @@ import {
   splitNodeUrn,
   validateUrnType,
   normalizeUrnForLookup,
+  hasSchemePrefix,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
-import { emitEntityUrnV2, emitNodeUrnV2, emitEdgeUrnV2 } from '../lib/urnEmit.js';
+import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
+import {
+  emitEntityUrnV2,
+  emitNodeUrnV2,
+  safeNodeUrnV2,
+  safeNodeUrnV2Result,
+  safeEdgeUrnV2,
+  type SafeUrnEmission,
+} from '../lib/urnEmit.js';
 import { portalUrlForUrn } from '../lib/portalUrl.js';
+import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
@@ -29,7 +46,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
-import { ancestorLocs, lockAncestorsForCreate, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
+import { ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
@@ -37,7 +54,9 @@ import {
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
   SubtreeMoveSchemaViolationError,
+  type MoveNodeSubtreeResult,
 } from '../lib/nodeSubtreeMove.js';
+import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
 import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
 import {
   resolveAppForRequest,
@@ -77,14 +96,21 @@ import {
   type SearchPrincipal,
 } from '../lib/global-search/index.js';
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
+import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
-import { computeContentHash } from '../lib/contentHash.js';
+import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
 import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
 import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+import {
+  isSessionLive,
+  loadLastEventBySession,
+  recentlyTouchedFilter,
+  OPEN_SESSION_SCAN_CAP,
+} from '../lib/sessionActivity.js';
 import {
   decryptNodeFieldsWithKey,
   encryptNodeFieldsWithKey,
@@ -101,9 +127,51 @@ import {
   InvalidContentScopeError,
 } from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
+import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
-import { HADRON_SERVER_VERSION, getDeploymentInfo } from './deploymentInfo.js';
+import { resolveAppRef } from '../lib/entityRef/appRef.js';
+import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
+import { WorkerNotFoundError } from '../lib/entityRef/errors.js';
+import {
+  renderWorkerContinuity,
+  type RenderableContinuity,
+} from '../lib/workerHandoff.js';
+import {
+  writeSessionHandoff,
+  endSessionFirstWins,
+} from '../api/graphql/schema/resolvers.mutation.session.js';
+import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+// #1005: the SHARED App-participation predicate (#943) — reused here so
+// reconnect recovery admits exactly whom startSession admitted, rather than a
+// narrower member-row copy that would drift from it.
+import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
+import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
+import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
+
+/**
+ * Annotate a node projection that was reached through a `#<fragment>` URN.
+ *
+ * #696: the fragment addresses a resource OF the node, and neither read tool
+ * projects one separately — so returning the parent's projection unannotated
+ * answers a question the caller did not ask (hadron-server#994's harm on a read
+ * surface). ONE spelling, shared by hadron_get_node and hadron_get_nodes,
+ * because cor:api:040:01 makes their per-node output the same thing and two
+ * copies of a notice drift (PR #1088 review, Codex P2 — the batch dropped it).
+ */
+function noteFragment(projection: string, fragment: string | undefined): string {
+  return fragment
+    ? `Note: "#${fragment}" addresses this node's ${fragment}, which this tool does not project separately — showing the node itself.\n\n${projection}`
+    : projection;
+}
+// #1012 — durable per-client MCP selections (active App / active memory).
+import {
+  CLIENT_KEY_HEADER,
+  normalizeClientKey,
+  loadMcpSessionState,
+  saveActiveApp,
+  saveActiveMemory,
+} from '../lib/mcpSessionState.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 
@@ -138,16 +206,38 @@ export interface TestableMcpServer {
     args?: unknown,
   ): Promise<{ content: Array<{ type: string; text: string }> }>;
   callToolText(name: string, args?: unknown): Promise<string>;
+  /**
+   * A registered tool's DESCRIPTION — the prose an LLM reads when choosing the
+   * tool, which is the only part of a tool that can rot with nothing going red
+   * (#1034). Throws on an unregistered name rather than returning undefined, so
+   * a renamed tool fails the assertion loudly instead of vacuously passing.
+   */
+  toolDescription(name: string): string;
+  toolParamDescription(name: string, param: string): string;
 }
 
 export function createTestableMcpServer(
   auth: AuthContext,
-  opts?: { sessionId?: string; cachedAppResolution?: AppResolution | null },
+  opts?: {
+    sessionId?: string;
+    cachedAppResolution?: AppResolution | null;
+    /** #1009 — simulate a session rebuilt from a stale id (a client reconnect). */
+    isReconnect?: boolean;
+    /** #1012 — the client instance id whose durable selections apply. */
+    clientKey?: string | null;
+    /** #1012 — a pre-authorized active-memory URN, as the boundary restores it. */
+    restoredMemoryUrn?: string;
+  },
 ): TestableMcpServer {
   const server = createMcpServerInstance(
     auth,
     () => opts?.sessionId,
     opts?.cachedAppResolution ?? null,
+    {
+      isReconnect: opts?.isReconnect,
+      clientKey: opts?.clientKey,
+      restoredMemoryUrn: opts?.restoredMemoryUrn,
+    },
   );
   const tools = (server as unknown as {
     _registeredTools: Record<
@@ -158,6 +248,7 @@ export function createTestableMcpServer(
           extra: unknown,
         ) => Promise<{ content: Array<{ type: string; text: string }> }>;
         enabled: boolean;
+        description?: string;
       }
     >;
   })._registeredTools;
@@ -168,6 +259,41 @@ export function createTestableMcpServer(
       if (!tool) throw new Error(`Tool not registered: ${name}`);
       if (!tool.enabled) throw new Error(`Tool disabled: ${name}`);
       return tool.handler(args, {});
+    },
+    toolDescription(name: string) {
+      const tool = tools[name];
+      if (!tool) throw new Error(`Tool not registered: ${name}`);
+      return tool.description ?? '';
+    },
+    /**
+     * A single PARAMETER's description (#1100).
+     *
+     * Tool descriptions were already testable; parameter descriptions were not,
+     * and this repo leans on them heavily — `hadron_end_session.summary` read
+     * "Summary of what was accomplished" while being display-only, which is a
+     * footgun no test could see. Reads the registered zod shape rather than the
+     * source text, so it tests what the CLIENT receives.
+     *
+     * Tolerates both shapes the SDK has used: an `inputSchema` ZodObject (has
+     * `.shape`) and a bare raw-shape record. Throws rather than returning ''
+     * for an unknown param — an empty string would make a missing description
+     * indistinguishable from a wrong one, and this exists to catch wrong ones.
+     */
+    toolParamDescription(name: string, param: string) {
+      const tool = tools[name] as unknown as {
+        inputSchema?: { shape?: Record<string, { description?: string }> } & Record<
+          string,
+          unknown
+        >;
+      };
+      if (!tool) throw new Error(`Tool not registered: ${name}`);
+      const schema = tool.inputSchema;
+      const shape = (schema?.shape ?? schema) as
+        | Record<string, { description?: string }>
+        | undefined;
+      const entry = shape?.[param];
+      if (!entry) throw new Error(`Tool "${name}" has no parameter "${param}"`);
+      return entry.description ?? '';
     },
     async callToolText(name: string, args: unknown = {}) {
       const result = await this.callTool(name, args);
@@ -343,7 +469,12 @@ export async function addEdge(args: {
       if (e instanceof UrnNotQualifiedError) return { error: `Source: ${e.message}` };
       throw e;
     }
-    const { memoryUrn: sourceMemoryUrn, loc: sourceLoc } = splitNodeUrn(rawSource);
+    const { memoryUrn: sourceMemoryUrn, loc: sourceLoc, fragment: sourceFrag } =
+      splitNodeUrn(rawSource);
+    // An edge is drawn between NODES: a fragment source would silently anchor
+    // it to the parent and bake that into a derived edge loc.
+    const sourceFragRefusal = nodeFragmentRefusal(rawSource, sourceFrag);
+    if (sourceFragRefusal) return { error: `Source: ${sourceFragRefusal}` };
     const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
     if (!sourceMem) {
       return { error: `Source memory not found: "${sourceMemoryUrn}".` };
@@ -410,6 +541,13 @@ export async function addEdge(args: {
     update: {},
   });
 
+  // #1061 — an edge write is a graph write, attributed to the SOURCE node (the
+  // edge lives in the source's memory and UsageEvent has no edge dimension —
+  // same rule as the GraphQL createEdge). This helper also backs the edge set
+  // hadron_update_node replaces, but that path already records its own write on
+  // the node, so it is called only from hadron_create_edge.
+  recordNodeWrite(db, sourceNode, auth);
+
   const savedSourceUrn = await nodeUrn(sourceNode.loc, sourceNode.memoryId);
   const savedTargetUrn = await nodeUrn(target.loc, target.memoryId);
   const savedEdgeUrn = await edgeUrn(edgeLoc, sourceNode.memoryId);
@@ -461,12 +599,41 @@ export async function replaceOutgoingEdges(args: {
  * to the raw stored bare urn if a row can't compose to v2 — display strings must
  * never crash a tool (serve-and-fall-back).
  */
-function safeEmitEntityUrnV2(type: 'memory' | 'app', bareUrn: string): string {
+function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent', bareUrn: string): string {
   try {
     return emitEntityUrnV2(type, bareUrn);
   } catch {
     return bareUrn;
   }
+}
+
+/**
+ * The portal link for a worker URN, or null (#1026).
+ *
+ * ONE resolver for every MCP surface that prints a worker URN — the cast
+ * receipt, the bind receipt, the roster, the single read, and `hadron_whoami`.
+ * The rule those surfaces now share is flat: **wherever a worker URN is
+ * printed, the link that opens it is printed with it**, so an agent never has
+ * to assemble `<origin>/app/u/<urn>` itself. That is the same instruction every
+ * role-agent prompt already gives for node reads (#881), and #1008's identity
+ * signature was the one place the platform could not honour it.
+ *
+ * Takes the URN the caller ALREADY has rather than re-resolving through
+ * `Worker.portalUrl`: the field resolver would repeat the App lookup that
+ * produced that URN, and `portalUrlForUrn` is the same pure function it ends in
+ * — so this cannot drift from the GraphQL field, and costs nothing.
+ *
+ * Null for a null URN (an App URN the fixed arity cannot take) and for an unset
+ * or malformed `FRONTEND_URL`. Callers omit the line entirely rather than emit
+ * a guess: a link to the wrong host is worse than no link (lib/portalUrl.ts).
+ *
+ * Returns the URL rather than a formatted line because the surfaces disagree on
+ * framing — the block reads print `URL: <x>` on its own line, the list reads
+ * indent it under their item — and a helper that owned both shapes would take a
+ * format argument to save nothing.
+ */
+function workerPortalUrl(urn: string | null | undefined): string | null {
+  return urn ? portalUrlForUrn(urn) : null;
 }
 
 /** Build a full urn:node: URN from a loc and memoryId. Caches memory URNs. */
@@ -479,9 +646,29 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
     memoryUrnCache.set(memoryId, memUrn);
   }
   // Grammar-v2 node URN (#697 emission flip). Shared with the global-search
-  // node adapter via emitNodeUrnV2 (src/lib/urnEmit.ts) so the two surfaces
-  // can't drift on node-URN shape.
-  return emitNodeUrnV2(memUrn, loc);
+  // node adapter via urnEmit (src/lib/urnEmit.ts) so the two surfaces can't
+  // drift on node-URN shape. The SAFE variant is load-bearing here: this is
+  // called once per rendered node AND once per edge neighbour, so a single
+  // corrupt stored loc would otherwise fail the entire tool response.
+  return safeNodeUrnV2(memUrn, loc);
+}
+
+/**
+ * {@link nodeUrn} for the SUBJECT of a projection, reporting whether the URN is
+ * the unvalidated best-effort fallback. Only needed where the URN becomes a
+ * portal LINK — a fallback URN can carry `/`, `?`, or `#` straight out of a
+ * corrupt stored loc, and `portalUrlForUrn` interpolates the URN raw, so the
+ * emitted href could point somewhere other than the node being displayed.
+ * Edge-neighbour URNs are display-only and use the plain string form.
+ */
+async function nodeUrnResult(loc: string, memoryId: string): Promise<SafeUrnEmission> {
+  let memUrn = memoryUrnCache.get(memoryId);
+  if (!memUrn) {
+    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+    memUrn = mem?.urn ?? memoryId;
+    memoryUrnCache.set(memoryId, memUrn);
+  }
+  return safeNodeUrnV2Result(memUrn, loc);
 }
 
 /** Build a full hrn:edge: URN from an edge loc and its memoryId (spec 037). */
@@ -492,7 +679,7 @@ async function edgeUrn(loc: string, memoryId: string): Promise<string> {
     memUrn = mem?.urn ?? memoryId;
     memoryUrnCache.set(memoryId, memUrn);
   }
-  return emitEdgeUrnV2(memUrn, loc);
+  return safeEdgeUrnV2(memUrn, loc);
 }
 
 // The `hadron_find_nodes` tool delegates retrieval to resolvers.Query.findNodes
@@ -537,8 +724,15 @@ async function resolveLocFromUrn(
       // Memory unknown / inaccessible — fall through to the legacy
       // best-effort path below so behavior degrades gracefully for the
       // (rare) caller passing a stale or out-of-scope URN.
-    } catch {
-      // splitNodeUrn rejects malformed inputs — fall through.
+    } catch (err) {
+      // ONLY splitNodeUrn's malformed-input rejection degrades to the
+      // best-effort path below. Anything else — an AmbiguousLegacyUrnError from
+      // the #697 alias fallback in resolveMemoryByUrn, a DB failure — must
+      // escape: silently falling through would answer a genuinely ambiguous
+      // reference with unrelated best-effort loc matches instead of failing
+      // loudly, which is the one outcome the alias map is designed to prevent
+      // (PR #963 review).
+      if (!(err instanceof UrnNotQualifiedError)) throw err;
     }
   }
 
@@ -577,6 +771,22 @@ async function resolveLocFromUrn(
  *
  * Soft-deleted memories are treated as not found, matching the convention
  * in `resolveMemoryRef` and the entity-ref helpers under `src/lib/entityRef/`.
+ *
+ * #697 STORED ALIAS MAP: after the primary `urn` lookup misses, a URN that
+ * addressed this row BEFORE the grammar-v2 migration re-minted it is redirected
+ * via `legacyUrn` — the same fallback `resolveMemoryRef` already had, and the
+ * whole reason the migration records the old value instead of rewriting
+ * references. Every MCP memory-scope path (all 22 call sites: the `memoryUrn` /
+ * `memoryUrns` scopes, node reads that split a node URN, edge endpoints, move,
+ * sync) funnels through here, so its absence made a re-minted memory
+ * unreachable by any stored reference to its old URN — which is exactly what a
+ * user hits after #723 flattens their team memory (found running the prod
+ * backfill: `hadron_find_nodes memoryUrn:'<old compound urn>'` answered "Memory
+ * not found" the moment the row was re-minted).
+ *
+ * Ambiguity (two live rows claiming the same `legacyUrn`) throws
+ * `AmbiguousLegacyUrnError` rather than picking one — the #697 rule is fail
+ * loudly, never silently resolve to the wrong tenant's row.
  */
 async function resolveMemoryByUrn(
   rawUrn: string,
@@ -595,13 +805,55 @@ async function resolveMemoryByUrn(
   const canonicalForm = legacyForm.includes(':')
     ? legacyForm.split(':').join('::')
     : legacyForm;
-  return await db.memory.findFirst({
+  const direct = await db.memory.findFirst({
     where: {
       deletedAt: null,
       OR: [{ urn: legacyForm }, { urn: canonicalForm }],
     },
     select: { id: true, urn: true },
   });
+  if (direct) return direct;
+  // Alias fallback, from BOTH sources: the #697 `legacy_urn` column and the
+  // #1079 rename map.
+  //
+  // The rename map arm is not optional here (PR #1080 review, Copilot P2).
+  // Every MCP memory / node / edge scope funnels through this one function
+  // rather than through `resolveMemoryRef`, so without it a memory renamed
+  // through #1079 — and every node and edge URN beneath it — still answered
+  // "not found" over MCP while resolving fine over GraphQL. Two surfaces, two
+  // answers, which is the drift #1079 exists to remove.
+  const [legacyRows, aliasRows] = await Promise.all([
+    db.memory.findMany({
+      where: { deletedAt: null, legacyUrn: { in: [legacyForm, canonicalForm] } },
+      select: { id: true, urn: true },
+      take: 2,
+    }),
+    // Through the shared PAGED walk, not the one-page primitive (PR #1080
+    // third review, Codex P2). Calling `findUrnAliasTargetIds` directly took
+    // only its first page before liveness, so a live claimant sitting past
+    // page one resolved over GraphQL and 404'd over MCP — reintroducing, on
+    // this surface alone, the very drift wiring MCP up was meant to remove.
+    // Liveness is re-applied inside the walk and never read off the alias
+    // (cor:urn:030:02).
+    (async () => {
+      const perForm = await Promise.all(
+        [legacyForm, canonicalForm].map((u) =>
+          findLiveUrnAliasTargets(db, 'MEMORY', u, (ids) =>
+            db.memory.findMany({
+              where: { deletedAt: null, id: { in: ids } },
+              select: { id: true, urn: true },
+            }),
+          ),
+        ),
+      );
+      return perForm.flat();
+    })(),
+  ]);
+  // Deduplicated by id before the ambiguity check: the two alias sources overlap
+  // by construction, and the two URN spellings can resolve the same row twice.
+  const candidates = dedupeById(legacyRows, aliasRows);
+  const aliased = resolveLegacyAlias(rawUrn, candidates);
+  return aliased ? (candidates.find((m) => m.id === aliased.id) ?? null) : null;
 }
 
 // Access control lives in ./access-control.ts.
@@ -664,7 +916,7 @@ async function renderNodeReadProjection(
   scope: 'content' | 'abstract' | 'all',
   opts: { locked?: boolean } = {},
 ): Promise<string> {
-  const urn = await nodeUrn(node.loc, node.memoryId);
+  const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
   const outgoingLines = await Promise.all(
     node.outgoingEdges.map(async (e) => {
       const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
@@ -691,28 +943,28 @@ async function renderNodeReadProjection(
   // memories and is (correctly) skipped only while locked. Scope gate:
   // the marker only fires under scopes that surface the abstract (`abstract` /
   // `all`); the default `content` scope omits it (the abstract isn't in the
-  // response). The explicit `abstractOriginHash != null` guard is load-bearing
-  // for legacy rows (without it `null !== "abc"` is true and the marker
-  // false-fires on every pre-spec-032 node).
+  // response).
+  //
+  // #1128 removed the `abstractOriginHash != null` guard this comment used to
+  // describe as load-bearing. It WAS, when every row predated spec 032; it had
+  // since become the reason a never-fingerprinted abstract could not be
+  // flagged. The predicate now lives in isAbstractUnverified — ONE home for
+  // all four surfaces — and arms on a missing fingerprint as well as a
+  // disagreeing one. The encryption and scope gates stay here: they are
+  // properties of this call, not of the node.
   const shouldCheckStale = scope === 'abstract' || scope === 'all';
-  let includeStaleMarker = false;
-  if (
-    shouldCheckStale &&
-    !node.memory.isEncrypted &&
-    hasAbstract &&
-    hasContent &&
-    node.abstractOriginHash != null
-  ) {
-    includeStaleMarker =
-      node.abstractOriginHash !== computeContentHash(node.content);
-  }
+  const includeStaleMarker =
+    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node);
 
   // #881: the node's portal URL, ready to hand a human. Emitted so no agent
   // ever *constructs* one — constructing means guessing which URN spelling
   // /app/u/<urn> resolves, and an agent that has been reading `::` forms all
   // session guesses wrong (see src/lib/portalUrl.ts). Omitted when no portal
-  // origin is configured.
-  const portalUrl = portalUrlForUrn(urn);
+  // origin is configured — and when the URN is the best-effort fallback for a
+  // corrupt stored loc, since that string is unvalidated and could carry URL
+  // structure (`/`, `?`, `#`) into the href. Same rule as a malformed base
+  // URL: a link that points somewhere other than the node is worse than none.
+  const portalUrl = urnFellBack ? null : portalUrlForUrn(urn);
 
   // #186: surface nodeType so callers can tell `parent` from `info`.
   const meta = [
@@ -769,7 +1021,45 @@ export function createMcpServerInstance(
   auth: AuthContext,
   getSessionId: () => string | undefined,
   cachedAppResolution: AppResolution | null,
+  opts: {
+    isReconnect?: boolean;
+    clientKey?: string | null;
+    /** #1012 — an already-re-authorized active-memory URN to start from. */
+    restoredMemoryUrn?: string;
+  } = {},
 ): McpServer {
+  /**
+   * #1012 — this client instance's stable id (`X-Hadron-Client-Id`), or null
+   * when the client did not send one. Null means "do not persist": that client
+   * keeps the pre-#1012 in-memory-only behaviour, so opting out costs nothing.
+   */
+  const clientKey = opts.clientKey ?? null;
+  /**
+   * #1009 — this MCP session replaced one the client had already been using
+   * (it presented a session id this server did not know and re-initialized).
+   *
+   * Every piece of per-session state below was reset by that, and the client
+   * does not surface the reconnect to the agent driving it. So a refusal that
+   * follows one is not the same event as a refusal on a genuinely fresh
+   * session, and saying which it is turns "this tool is broken" into "say that
+   * one thing again".
+   */
+  const isReconnect = opts.isReconnect ?? false;
+
+  /**
+   * Appended to per-session-state refusals so the cause is never guessed at.
+   *
+   * Phrased conditionally ("any … you had selected") because the detection
+   * behind it is a deliberate over-approximation — see `isLikelyReconnect`.
+   * Under a false positive this still says nothing untrue to a caller who had
+   * no selection to lose.
+   */
+  const RECONNECT_NOTE =
+    ' Note: this MCP connection was re-established (the previous session ended, ' +
+    'typically because the server restarted). That RESET any active App or active ' +
+    'memory you had selected — selections live only for the current connection, ' +
+    'and clients re-connect without mentioning it. This is not a client ' +
+    'limitation and nothing you did is wrong: re-select and continue.';
   const server = new McpServer(
     { name: 'hadron', version: HADRON_SERVER_VERSION },
     { capabilities: { tools: {} } },
@@ -782,7 +1072,10 @@ export function createMcpServerInstance(
   // consuming it as the default memory scope when a by-name run gives no
   // `memory` hint. Spec-022 URN-input tools still MUST NOT fall back to it —
   // they require a fully-qualified URN.
-  let activeMemoryUrn: string | undefined;
+  // #1012: seeded from this client's durable selection when it sent an
+  // X-Hadron-Client-Id and the memory still passes the read gate. Undefined
+  // otherwise, which is the pre-#1012 behaviour.
+  let activeMemoryUrn: string | undefined = opts.restoredMemoryUrn;
 
   // Spec 026 — has the session called `hadron_list_apps` or `hadron_set_active_app`,
   // or had a regime-(b) `initialize` envelope attempted? Toggles which
@@ -827,8 +1120,21 @@ export function createMcpServerInstance(
       // place to add a per-call re-resolve OR an invalidation hook on
       // AppMember mutations.
       if (engagedWithNewSurface) {
-        const message = `No active Hadron App. Call hadron_list_apps to see options, then hadron_set_active_app with the one you want. If you're calling from a project directory, set 'app' in '.hadron/config.json'.`;
-        mcpLog('warn', 'no_active_app_typed_error', { userId: auth.userId, mcpSessionId: sid });
+        const message =
+          `No active Hadron App. Call hadron_list_apps to see options, then hadron_set_active_app with the one you want. If you're calling from a project directory, set 'app' in '.hadron/config.json'.` +
+          (isReconnect ? RECONNECT_NOTE : '');
+        mcpLog('warn', 'no_active_app_typed_error', {
+          userId: auth.userId,
+          mcpSessionId: sid,
+          // #1009: `engaged` is emitted as a FIELD on both branches so SC-003's
+          // adoption metric can be read off structured logs. Inferring it from
+          // which error TEXT fired is biased: `engagedWithNewSurface` is
+          // per-transport-session and a reconnect resets it, so a migrated
+          // client that reconnects is counted as un-migrated — and the longer a
+          // client runs, the more often it is miscounted.
+          engaged: true,
+          reconnect: isReconnect,
+        });
         return appSelectionError(APP_SELECTION_ERROR_CODES.NO_ACTIVE_APP, message);
       }
       // FR-016 fall-through for un-engaged callers. The MULTIPLE_APPS_RESOLVED
@@ -836,12 +1142,345 @@ export function createMcpServerInstance(
       // envelope's `[<code>]` prefix so SC-003's production-log grep
       // continues to work even when the legacy spec-025 HTTP 409 path is
       // gone.
-      const message = `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance. Or call hadron_list_apps to see your accessible Apps and hadron_set_active_app to pick one.`;
-      mcpLog('warn', 'multiple_apps_resolved_fallthrough', { userId: auth.userId, mcpSessionId: sid });
+      const message =
+        `User has more than one Hadron App; this MCP client does not support App selection. See ${MULTIPLE_APPS_DOCS_URL} for guidance. Or call hadron_list_apps to see your accessible Apps and hadron_set_active_app to pick one.` +
+        (isReconnect ? RECONNECT_NOTE : '');
+      mcpLog('warn', 'multiple_apps_resolved_fallthrough', {
+        userId: auth.userId,
+        mcpSessionId: sid,
+        // See the sibling branch: `engaged` is the metric, not the phrase. On a
+        // RECONNECT this false is untrustworthy as an adoption signal — the
+        // flag was reset with the session, not by an un-migrated client — so
+        // SC-003 should read `engaged` and exclude `reconnect: true` rows.
+        engaged: false,
+        reconnect: isReconnect,
+      });
       return appSelectionError(APP_SELECTION_ERROR_CODES.MULTIPLE_APPS_RESOLVED, message);
     }
 
     return null; // zero-App or other path — fall through
+  }
+
+  /**
+   * #1005 — make an App the session's active one, for both the in-process
+   * selection map and this closure's `auth`.
+   *
+   * Extracted from `hadron_set_active_app` so every pinning path writes the
+   * SAME two places. A path that set only `auth.appId` would work until the
+   * next tool call re-entered `requireAppScope` on a different code path, and
+   * one that set only the map would leave `auth.appId` unset for the delegating
+   * resolvers — both are silent half-fixes.
+   */
+  function pinActiveApp(
+    appId: string,
+    organizationId: string | null,
+    reason: 'selection' | 'worker_bind' | 'session',
+  ): void {
+    const sid = getSessionId();
+    if (sid) activeAppByMcpSession.set(sid, { appId, organizationId });
+    auth.appId = appId;
+    auth.organizationId = organizationId ?? undefined;
+    mcpLog('info', 'active_app_pinned', { userId: auth.userId, mcpSessionId: sid, appId, reason });
+  }
+
+  /**
+   * #1005 — recover App scope from a Hadron session the caller names.
+   *
+   * The active-App selection is per-MCP-TRANSPORT-session in-process state
+   * (`activeAppByMcpSession`, keyed on the transport's session id, cleared on
+   * close). MCP transport sessions are re-created transparently under the
+   * client — a server restart answers a stale id with the recoverable 404 and
+   * the client silently re-initializes (findings:mcp-stale-session-400-vs-404).
+   * The selection does NOT survive that, so a multi-App user's App-scoped calls
+   * succeed for a while and then start failing mid-conversation with
+   * `multiple_apps_resolved`, with nothing in the transcript to explain it.
+   *
+   * A Hadron `Session` row is the durable anchor the agent still holds across
+   * that reconnect: it carries `appId`, and the agent has its id because it
+   * started it. So when a tool is handed one, resolve the App from it rather
+   * than declaring the user's App set ambiguous.
+   *
+   * Gated, not inferred, on three things:
+   *
+   *   1. the session is the CALLER'S OWN (`session.userId === auth.userId` — an
+   *      App-key-created session has a null userId and never matches), so a
+   *      session id is not a capability someone else can quote;
+   *   2. the App is still live (not soft-deleted, not uninstalled — the same
+   *      lifecycle filter `resolveUserApps` applies);
+   *   3. the caller is STILL a participant, re-checked through
+   *      `isAppParticipant` — the SAME predicate `startSession` used to admit
+   *      them (#943). Re-checked rather than trusted from the session row,
+   *      because the row records where the session was attributed and outlives
+   *      the authorization that permitted it (#475 — revoked membership must
+   *      not authorize).
+   *
+   * Gate 3 is the shared predicate rather than a direct `AppMember` lookup on
+   * purpose (PR #1007 review, Codex + Copilot): participation also admits an
+   * org CONTRIBUTOR+ and the owner of a user-owned App, so a bespoke
+   * member-row check would let those callers start a session and pin an App,
+   * then silently refuse to restore it after a reconnect — a gate that drifts
+   * from the one beside it, which is the failure AGENTS.md's first
+   * authorization invariant names.
+   *
+   * So this can only re-establish scope the caller could have set by hand with
+   * `hadron_set_active_app`; it never widens reach. A no-op when there is no
+   * session argument, when the session already names the pinned App, or when
+   * any gate fails — the caller then falls through to `requireAppScope`'s
+   * normal error.
+   *
+   * #1037: it also OVERRIDES an existing pin, which it previously deferred to.
+   * The pin is the user's active-App SELECTION, and any later bind in another
+   * App silently re-points it — so `hadron_record_work` compared a Hadron Dev
+   * Team session against Micromentor Eng Team and refused, blaming the session,
+   * which was the one part that was correct. An explicitly-passed session names
+   * its App unambiguously through its worker; connection state is the fallback
+   * for callers who named nothing, and must never outrank a caller who did.
+   * Every gate below still runs, so adopting the session's App cannot reach an
+   * App the caller could not have selected by hand.
+   *
+   * Deliberately confined to `auth.userId` callers. For a pure App-key
+   * principal `auth.appId` is a CREDENTIAL, not a selection
+   * (findings:auth-appid-credential-vs-selection) — it IS that App, and no
+   * session argument may re-point it.
+   */
+  /**
+   * #1081 — touch a session the caller just drove, so the reaper counts it live.
+   *
+   * ## Why this exists
+   *
+   * The reaper measures last activity as the greatest of `startedAt`,
+   * `updatedAt`, and the newest UsageEvent attributed to the session
+   * (`reapSessions.ts`). On the MCP desktop track a user-credential caller
+   * usually has NO transport binding — the worker session is created by
+   * `hadron_start_session` mid-conversation, long after the HTTP connection was
+   * established, so it can never appear in an `X-Hadron-Session` header. With
+   * `auth.sessionId` null, every usage event is unattributed and nothing bumps
+   * `updatedAt`.
+   *
+   * The result was a heartbeat by ACCIDENT: the only MCP-path write that
+   * touched the Session row was `hadron_record_work(kind:'pr')` denormalizing
+   * `Session.prNumber` — a display-only field update. So a worker who opens PRs
+   * stayed alive and a worker who does not, notably a COORDINATOR who reads
+   * chat and dispatches all day, was reaped ~24h after binding no matter how
+   * hard they worked. That is 7-of-8 coordinator stints ending with no #1029
+   * handoff, and it is why three different reaper ceilings (24h / 27h / 43.6h)
+   * were each reported and each contradicted: one regime, different tool mixes.
+   *
+   * This makes the touch EXPLICIT and puts it on every tool handed a live
+   * session id, which is what the reaper's own docstring already claims happens
+   * ("a session log / chat post touches liveness … for free").
+   *
+   * ## What keeps it from being a hole
+   *
+   * - **Ownership is re-checked, never assumed.** A user principal may only
+   *   touch a session attributed to them; a pure App-key caller only its App's.
+   *   Otherwise any caller could keep an arbitrary session alive by naming it.
+   * - **It cannot revive the dead.** Guarded on `endedAt: null`, so a heartbeat
+   *   racing `endSession` or the reaper updates zero rows rather than
+   *   resurrecting a closed session — and never clears `autoExpiredAt`.
+   * - **It cannot fail a tool call.** A heartbeat is bookkeeping; a caller's
+   *   read must not 500 because liveness bookkeeping had a bad day.
+   */
+  async function heartbeatSession(sessionRef?: string | null): Promise<void> {
+    // Defensive normalization: `createTestableMcpServer` bypasses zod, so a
+    // non-string here would throw out of `.trim()` and fail the whole tool call
+    // — the one thing this function promises never to do (PR #1082 review,
+    // Copilot). Same reason the handlers re-validate contentScope.
+    const id = typeof sessionRef === 'string' ? sessionRef.trim() : '';
+    if (!id) return;
+    // Scope to what the caller demonstrably owns. A pure App-key caller has no
+    // userId by construction; a user principal is judged on the user (the #932
+    // rule), so an impersonated support session cannot heartbeat its target.
+    const owner = auth.userId
+      ? { userId: auth.userId }
+      : auth.appId
+        ? { appId: auth.appId }
+        : null;
+    if (!owner || auth.impersonation) return;
+    // CURRENT eligibility, not historical (PR #1082 review, Codex P1).
+    // Ownership alone is a HISTORICAL fact: `Session.userId` is stamped at bind
+    // and never revoked, so a user removed from the App or the org still
+    // satisfies it with a perfectly valid credential. They could then keep an
+    // old worker session — and the worker it holds — alive indefinitely by
+    // issuing tool calls that are themselves denied, since this touch runs
+    // before any of the handlers' own gates. "Revoked membership must not
+    // authorize" applies to keeping something alive exactly as it applies to
+    // reading it.
+    try {
+      // INSIDE the try (PR #1082 review, Copilot): this is a DB lookup, and it
+      // sat outside while the docstring two paragraphs up promised the
+      // heartbeat "cannot fail a tool call". A transient error here would have
+      // broken that promise — the same claim-wider-than-the-code defect this
+      // PR's own commit messages keep naming. Either step throwing means no
+      // heartbeat, which is the safe direction: the session simply ages.
+      if (auth.userId && !(await callerStillDrives(id))) return;
+      await db.session.updateMany({
+        where: { id, endedAt: null, deletedAt: null, ...owner },
+        data: { updatedAt: new Date() },
+      });
+    } catch (err) {
+      // Deliberately swallowed — see the docstring. Logged, not raised.
+      console.warn('[heartbeatSession] touch failed:', err);
+    }
+  }
+
+  /**
+   * Is this user-principal caller STILL entitled to drive this session?
+   *
+   * Shares its predicate with `adoptAppFromSession` deliberately: that function
+   * already establishes "this session is mine and its App still admits me", and
+   * two copies of that question would drift — which is how a revoked member ends
+   * up refused on one surface and served on another (the `effectiveAccess` tell,
+   * #362). This one answers the question WITHOUT pinning the App, because a
+   * heartbeat must not silently re-scope a caller who passed `app` explicitly.
+   *
+   * A session with `appId: null` is a self-attributed user-credential coding
+   * session (#934) — there is no App to be a member of, so ownership is the
+   * whole gate and there is nothing further to revoke.
+   */
+  async function callerStillDrives(sessionId: string): Promise<boolean> {
+    if (!auth.userId) return false;
+    const session = await db.session.findUnique({
+      where: { id: sessionId },
+      select: { appId: true, userId: true },
+    });
+    if (!session || session.userId !== auth.userId) return false;
+    if (!session.appId) return true;
+    const app = await db.app.findFirst({
+      where: { id: session.appId, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (!app) return false;
+    return isAppParticipant(
+      {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context,
+      app,
+    );
+  }
+
+  async function adoptAppFromSession(sessionRef?: string | null): Promise<boolean> {
+    if (!auth.userId || !sessionRef) return false;
+
+    const session = await db.session.findUnique({
+      where: { id: sessionRef.trim() },
+      select: { appId: true, userId: true },
+    });
+    if (!session?.appId || session.userId !== auth.userId) return false;
+
+    // NO early return for "the pin already matches the session" (PR #1051
+    // review, Codex P2). It was a harmless short-circuit while this function
+    // returned void; the moment it reports whether scope is ESTABLISHED, that
+    // shortcut asserts something it never checked. A long-lived connection
+    // pinned to App A whose caller has since lost membership — or whose App was
+    // uninstalled — would report success on the strength of the stale pin
+    // alone, skipping both checks below, suppressing the worker-derived
+    // fallback, and running the query against an App the caller may no longer
+    // read. "Revoked membership must not authorize" is the invariant, and a
+    // matching pin is not evidence of anything.
+    //
+    // The cost is two queries on the common single-App path. The saving they
+    // replace was a log line.
+    const app = await db.app.findFirst({
+      where: { id: session.appId, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (!app) return false;
+
+    // The participant check runs against the caller as they are NOW, with no
+    // App selection in hand — which is the state this function exists to
+    // repair, and exactly the shape isAppParticipant judges (the USER branch).
+    const participates = await isAppParticipant(
+      {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context,
+      app,
+    );
+    if (!participates) return false;
+
+    // Only pin when it actually changes — no log line implying a switch that
+    // did not happen. Success is reported either way: scope is established and
+    // it is the session's, now VERIFIED rather than assumed.
+    if (app.id !== auth.appId) pinActiveApp(app.id, app.organizationId, 'session');
+    return true;
+  }
+
+  /**
+   * `adoptAppFromSession`'s sibling for a SELF-DESCRIBING worker ref (#1037,
+   * extended by PR #1051 review — Codex P2).
+   *
+   * A worker id or `hrn:worker:…` URN names its own App, exactly as it does at
+   * bind. A tool that takes one and still resolves scope from the ambient pin
+   * therefore answers "No App context" for an unpinned caller, or an empty page
+   * from the WRONG App for a pinned one — while advertising id/URN support.
+   * That is the same defect #1037 fixed for `hadron_start_session` and
+   * `hadron_get_worker`, reappearing in a tool that grew a worker argument
+   * afterwards, which is precisely how a convention decays one tool at a time.
+   *
+   * A bare NAME is deliberately NOT adopted: a name is unique only within an
+   * App, so there is nothing to derive scope FROM — it needs scope to resolve.
+   * The shape test below is a FAST PATH and a statement of intent, not a
+   * load-bearing guard: `resolveWorkerRef` rejects a name anyway, so removing
+   * it changes no outcome (verified by mutation — it stays green). It earns its
+   * place by matching the shape dispatch the resolver itself uses, so the two
+   * cannot disagree about what counts as self-describing.
+   *
+   * Same gates as the session sibling, so this can only re-establish scope the
+   * caller could have set by hand: the App must be live, and the caller must
+   * still be a participant. Confined to `auth.userId` callers — an App key's
+   * `appId` is a CREDENTIAL and is never re-pointed by an argument.
+   */
+  async function adoptAppFromWorker(workerRef?: string | null): Promise<void> {
+    if (!auth.userId || !workerRef) return;
+    const trimmed = workerRef.trim();
+    if (!isId(trimmed) && !hasSchemePrefix(trimmed)) return;
+
+    let workerId: string;
+    try {
+      ({ id: workerId } = await resolveWorkerRef(db, trimmed));
+    } catch (e) {
+      // NARROW (review:narrow-catch-blocks; PR #1051 review, Codex — the THIRD
+      // instance of this class in one PR, and the second one I wrote while
+      // fixing the first). A ref that names nothing leaves scope alone, and the
+      // tool's own not-found path answers. A DATABASE failure must not be
+      // reported as "no active App", which sends the caller to fix their
+      // selection while the server is down.
+      if (!(e instanceof WorkerNotFoundError)) throw e;
+      return;
+    }
+    const worker = await db.worker.findUnique({
+      where: { id: workerId },
+      select: { appId: true },
+    });
+    if (!worker || worker.appId === auth.appId) return;
+
+    const app = await db.app.findFirst({
+      where: { id: worker.appId, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (!app) return;
+
+    const participates = await isAppParticipant(
+      {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context,
+      app,
+    );
+    if (!participates) return;
+
+    pinActiveApp(app.id, app.organizationId, 'session');
   }
 
   // ── hadron_search ─────────────────────────────────────────────────────────────
@@ -1038,7 +1677,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_set_active_memory',
-    'Set the active memory for this session. Subsequent tree tools will use this as the default scope.',
+    'Set the active memory for this session. Subsequent tree tools will use this as the default scope. Scoped to THIS MCP connection and not persisted: if the connection is re-established (which clients do transparently, e.g. after a server restart), the selection is reset and must be set again — tools will behave as though none was ever chosen rather than erroring.',
     {
       memoryUrn: z.string().describe('Memory URN, e.g. hrn:mem:hadronmemory.com:dev (bare hadronmemory.com:dev also accepted). Legacy hrn:memory: and :: forms still resolve.'),
     },
@@ -1076,6 +1715,11 @@ export function createMcpServerInstance(
       // Store the bare URN from the DB row (the canonical form for downstream
       // findFirst({urn:activeMemoryUrn}) lookups).
       activeMemoryUrn = mem.urn;
+      // #1012: persist by PK, not URN — a rename must not strand the selection.
+      // This is the surface with no other remedy: unlike the App selection,
+      // active-memory has no Hadron session to recover from (#1009), so before
+      // this a reconnect meant re-selecting, every restart, forever.
+      await saveActiveMemory(db, auth, clientKey, mem.id);
 
       // #187 / #190 — include the bound deployment URL + server version
       // in the success message so an agent (or a transcript reader) can
@@ -1119,14 +1763,23 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_server_info',
-    'Returns the identity of the hadron-server this MCP session is bound to: the deployment URL and server version. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (see #190 for context). No arguments. Returns plain key:value pairs. Does NOT require an active App or any memory access.',
+    'Returns the identity of the hadron-server this MCP session is bound to: deployment URL, server version, the CAPABILITY tokens this build supports, and whether this connection was re-established. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (#190), and to check a feature is actually present BEFORE relying on it — a deployment behind the docs silently ignores arguments it does not know (#1006). Test for a capability token, not a version number; if the capabilities line is missing entirely the server predates this field and should not be trusted to bind workers. No arguments. Returns plain key:value pairs. Does NOT require an active App or any memory access.',
     {},
     async () => {
       const dep = getDeploymentInfo();
       const lines = [
         `server: ${dep.baseUrl}`,
         `version: ${dep.version}`,
+        `capabilities: ${MCP_SURFACE_CAPABILITIES.join(', ')}`,
       ];
+      // #1009: the one place an agent can ASK whether its bearings were reset,
+      // rather than inferring it from a tool that stopped working.
+      if (isReconnect) {
+        lines.push(
+          'connection: re-established (the previous MCP session ended; any active App ' +
+            'or active memory selection was reset)',
+        );
+      }
       return textResult(lines.join('\n'));
     },
   );
@@ -1219,14 +1872,10 @@ export function createMcpServerInstance(
 
       switch (r.kind) {
         case 'resolved': {
-          if (sid) {
-            activeAppByMcpSession.set(sid, {
-              appId: r.app.id,
-              organizationId: r.app.organizationId,
-            });
-          }
-          auth.appId = r.app.id;
-          auth.organizationId = r.app.organizationId ?? undefined;
+          pinActiveApp(r.app.id, r.app.organizationId, 'selection');
+          // #1012: remember it for this client instance, so the next reconnect
+          // restores it instead of silently dropping it.
+          await saveActiveApp(db, auth, clientKey, r.app.id);
           mcpLog('info', 'regime_c_selection_set', {
             userId: auth.userId,
             mcpSessionId: sid,
@@ -1294,7 +1943,9 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+      const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+      if (fragRefusal) return textResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
@@ -1340,14 +1991,20 @@ export function createMcpServerInstance(
       // exactly the orphan race. Serialize against an ancestor-delete by holding
       // advisory locks on the ancestor path across the upsert, matching the
       // hadron_create_node / createNode paths. Root-level locs skip the tx.
+      let sectionId: string;
       if (ancestorLocs(loc).length === 0) {
-        await db.node.upsert(upsertArgs);
+        ({ id: sectionId } = await db.node.upsert(upsertArgs));
       } else {
-        await db.$transaction(async (tx) => {
+        sectionId = await db.$transaction(async (tx) => {
           await lockAncestorsForCreate(tx, memoryId, loc);
-          await tx.node.upsert(upsertArgs);
+          const row = await tx.node.upsert(upsertArgs);
+          return row.id;
         });
       }
+
+      // #1061 — a section node is a node; creating or re-saving one is a write,
+      // recorded exactly as hadron_create_node's is.
+      recordNodeWrite(db, { id: sectionId, loc, memoryId }, auth);
 
       const urn = await nodeUrn(loc, memoryId);
       return textResult(`Node saved: ${urn}`);
@@ -1429,14 +2086,17 @@ export function createMcpServerInstance(
       // (a session-boundary access oracle). Mirrors the resolver's
       // getAccessibleMemoryIds app+session branch.
       let sessionMemoryIds: Set<string> | null = null;
-      if (auth.appId && auth.sessionId) {
-        const session = await db.session.findUnique({
-          where: { id: auth.sessionId },
-          select: { memoryId: true, agent: { select: { systemMemoryId: true } } },
-        });
-        sessionMemoryIds = new Set<string>();
-        if (session?.memoryId) sessionMemoryIds.add(session.memoryId);
-        if (session?.agent?.systemMemoryId) sessionMemoryIds.add(session.agent.systemMemoryId);
+      // #934: pure App-key shape only (`!auth.userId`) — mirrors the resolver
+      // branch's guard: a user-credential caller's session binding is
+      // heartbeat attribution, never a scope change.
+      if (auth.appId && auth.sessionId && !auth.userId) {
+        // #945: was a hand-copied duplicate of the resolver branch, so the
+        // admissibility fix would have landed on one surface only. Both now
+        // share `sessionScopedMemoryIds` — a foreign PUBLIC agent bound to the
+        // session no longer drags its system memory into scope here either.
+        sessionMemoryIds = new Set<string>(
+          await sessionScopedMemoryIds(db, auth.appId, auth.sessionId),
+        );
       }
 
       // Resolved scope handed to findNodes. When neither memoryUrn nor a
@@ -1710,7 +2370,7 @@ export function createMcpServerInstance(
         score: number | null;
       }): Promise<string> => {
         const n = hit.node;
-        const urn = await nodeUrn(n.loc, n.memoryId);
+        const { urn, fellBack: urnFellBack } = await nodeUrnResult(n.loc, n.memoryId);
         const score = hit.score;
         // #497: show the score relative to the top hit (mode-independent signal).
         const relStr =
@@ -1728,17 +2388,16 @@ export function createMcpServerInstance(
         // expand-neighbours are skipped (they weren't matched via an abstract).
         const isStale =
           score != null &&
-          n.abstract != null && n.abstract.length > 0 &&
-          n.content != null && n.content.length > 0 &&
+          n.content != null &&
           !isCiphertext(n.content) &&
-          n.abstractOriginHash != null &&
-          n.abstractOriginHash !== computeContentHash(n.content);
+          isAbstractUnverified(n);
         if (isStale) parts.push('  Source: abstract-stale');
         // #881 — the hit's portal URL, so an agent citing a search result hands
         // over a working link instead of assembling one from the URN above.
         // Excluded from `brief` mode for the same reason the abstract is: brief
         // stays terse (cor:api:020:03). Omitted when no portal origin is set.
-        if (!brief) {
+        // Omitted for a best-effort fallback URN — see renderNodeReadProjection.
+        if (!brief && !urnFellBack) {
           const hitPortalUrl = portalUrlForUrn(urn);
           if (hitPortalUrl) parts.push(`  URL: ${hitPortalUrl}`);
         }
@@ -1808,7 +2467,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_get_node',
-    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give.",
+    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). It means the content changed after the abstract was written, NOT that the abstract is known to be wrong. To clear it: read both, then either rewrite the abstract, or — if it still describes the node — re-save the identical text via hadron_update_node (or assert `abstractStillAccurate`). Rewriting an abstract you have not first found inaccurate is the wrong move; the marker is a prompt to check, not a verdict. Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give.",
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:architecture" (legacy :: forms still accepted)'),
       contentScope: z
@@ -1825,7 +2484,12 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      // Tolerant of an already-corrupt stored loc containing `#`: reads are
+      // how a bad row is discovered, so the decomposer refusing one would make
+      // exactly the row you need to see the one row you cannot read (urn-lib-js
+      // 0.0.14 → 0.0.15 bump). `#data` still decomposes normally and is
+      // reported below rather than silently serving the parent.
+      const { memoryUrn, loc, fragment, literalLoc } = splitNodeUrnTolerant(rawUrn);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
@@ -1834,53 +2498,53 @@ export function createMcpServerInstance(
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
 
-      // #180 Bug 2: soft-deleted nodes are not addressable via read.
-      // findFirst with explicit deletedAt: null instead of findUnique so
-      // tombstoned rows return "not found" rather than leaking their last
-      // content.
-      const node = await db.node.findFirst({
-        where: { loc, memoryId: memory.id, deletedAt: null },
-        include: {
-          // Filter edges whose other-end node is soft-deleted; dangling
-          // tombstones in the Related / Referenced-by section are no
-          // more useful than the deleted node itself.
-          outgoingEdges: {
-            include: { target: true },
-            where: { target: { deletedAt: null } },
-          },
-          incomingEdges: {
-            include: { source: true },
-            where: { source: { deletedAt: null } },
-          },
-          // Spec 032 — encryption gate for the abstract-stale predicate
-          // (FR-010). Riding the node fetch avoids a second round-trip
-          // (PR-210 review). resolveMemoryByUrn above doesn't carry
-          // `isEncrypted` and changing it has a wider blast radius.
-          memory: { select: { isEncrypted: true } },
+      // The projection's include, named so the two candidate lookups below
+      // cannot drift apart.
+      const nodeReadInclude = {
+        // Filter edges whose other-end node is soft-deleted; dangling
+        // tombstones in the Related / Referenced-by section are no
+        // more useful than the deleted node itself.
+        outgoingEdges: {
+          include: { target: true },
+          where: { target: { deletedAt: null } },
         },
+        incomingEdges: {
+          include: { source: true },
+          where: { source: { deletedAt: null } },
+        },
+        // Spec 032 — encryption gate for the abstract-stale predicate
+        // (FR-010). Riding the node fetch avoids a second round-trip
+        // (PR-210 review). resolveMemoryByUrn above doesn't carry
+        // `isEncrypted` and changing it has a wider blast radius.
+        memory: { select: { isEncrypted: true } },
+      } as const;
+
+      // A LITERAL match wins over the fragment reading. `#data` decomposes to
+      // parent + fragment, but a row's stored loc can BE `foo#data` (it
+      // predates loc validation), and only the database can tell which was
+      // meant — so the exact loc is tried first and the parent is the fallback
+      // (PR #1088 review, Codex P2). Without this the read either misses or
+      // returns a different node that happens to exist under the parent loc.
+      //
+      // #180 Bug 2: soft-deleted nodes are not addressable via read —
+      // findFirst with an explicit `deletedAt: null` rather than findUnique, so
+      // a tombstoned row returns "not found" instead of leaking its last
+      // content.
+      let matchedLiteral = false;
+      let node = await db.node.findFirst({
+        where: { loc: literalLoc ?? loc, memoryId: memory.id, deletedAt: null },
+        include: nodeReadInclude,
       });
+      if (node && literalLoc) matchedLiteral = true;
+      if (!node && literalLoc) {
+        node = await db.node.findFirst({
+          where: { loc, memoryId: memory.id, deletedAt: null },
+          include: nodeReadInclude,
+        });
+      }
       if (!node) {
         return textResult(`Node "${rawUrn}" not found.`);
       }
-
-      // Record usage event (fire-and-forget)
-      db.usageEvent.create({
-        data: {
-          id: generateId(),
-          type: 'read',
-          nodeLoc: loc,
-          nodeId: node.id,
-          // #796: attributed directly so the event stays counted for this
-          // memory after the node is deleted (nodeId is SetNull).
-          memoryId: node.memoryId,
-          appId: auth.appId ?? null,
-          // 046-usage-metering FR-001: user attribution when the
-          // authenticated principal is a user (createdBy unchanged).
-          userId: auth.userId ?? null,
-          createdBy: auth.clientId ?? null,
-          sessionId: null,
-        },
-      }).catch(() => {});
 
       // Spec 031 — contentScope-driven response shape. Default 'content'
       // preserves pre-spec output byte-for-byte. Defensive enum check: zod
@@ -1904,9 +2568,49 @@ export function createMcpServerInstance(
       const lockState = mcpDecryptOrMark(node);
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      return textResult(
-        await renderNodeReadProjection(node, scope, { locked: lockState === 'locked' }),
-      );
+      const projection = await renderNodeReadProjection(node, scope, {
+        locked: lockState === 'locked',
+      });
+
+      // Record usage event (fire-and-forget), AFTER the projection is in hand:
+      // the defensive contentScope check above returns an error for a direct
+      // handler call with a bad scope, and recording first would count a read
+      // for content never returned (PR #1062 review — Copilot).
+      //
+      // #796: `memoryId` is attributed directly so the event stays counted for
+      // this memory after the node is deleted (nodeId is SetNull).
+      //
+      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
+      // bound session. `auth.sessionId` is a validated Session.id — an App-key
+      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
+      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
+      // MCP transport session id. It was hardcoded null in all five MCP usage
+      // writers, which meant MCP work produced no session heartbeat at all: the
+      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
+      // The residual this comment used to describe — "user-credential MCP
+      // callers cannot bind a session today" — was CLOSED by #934 four days
+      // after it was written: `bindSession` takes both principal shapes, and a
+      // user principal binds a session attributed to them. The real gap was
+      // narrower and outlived it: a desktop caller's session is created
+      // mid-conversation by `hadron_start_session`, so it can never reach an
+      // `X-Hadron-Session` header on a connection that already exists, leaving
+      // `auth.sessionId` null and every event here unattributed. #1081 gives
+      // that caller an explicit heartbeat instead (`heartbeatSession`).
+      //
+      // A LOCKED node still records: the projection is what crossed the
+      // boundary, and the caller did read this node's addressable state.
+      recordNodeRead(db, { id: node.id, loc, memoryId: node.memoryId }, auth);
+
+      // #696: `#data` addresses the node's DATA, not the node — and before the
+      // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
+      // read simply missed. Now it decomposes, and returning the parent's
+      // projection with no word said would answer a question the caller did not
+      // ask — the hadron-server#994 harm (resolving to the parent) arriving on
+      // a read surface. This tool has no data view, so it serves the node and
+      // SAYS which resource that is; `resolveUrn` tags its result the same way.
+      // No notice when the LITERAL row matched: nothing was resolved away, the
+      // caller got exactly the loc they named.
+      return textResult(noteFragment(projection, matchedLiteral ? undefined : fragment));
     },
   );
 
@@ -1961,6 +2665,8 @@ export function createMcpServerInstance(
       // couldn't return — denied OR not-found, reported indistinguishably so the
       // result never discloses whether an unreadable node exists (cor:api:040:03).
       const ordered: Array<ReadProjectionNode & { id: string }> = [];
+      /** node id -> the fragment its ref named, for the shared notice below. */
+      const fragmentByNodeId = new Map<string, string>();
       const unavailable: string[] = [];
 
       if (hasPrefix) {
@@ -2013,7 +2719,12 @@ export function createMcpServerInstance(
         // `unavailable` next to genuinely-denied nodes is what let this tool's
         // missing PK capability sit unnoticed: the symptom was indistinguishable
         // from a legitimate access outcome (#822, mirroring #813 on GraphQL).
-        type UrnRef = { raw: string; memoryUrn: string; loc: string };
+        type UrnRef = { raw: string; memoryUrn: string; loc: string; literalLoc?: string };
+        // A `#data` ref reaches its PARENT node, and the projection must say so
+        // exactly as the single read does (cor:api:040:01). Keyed by raw ref,
+        // then re-keyed to node id below, because one node can be named twice
+        // in a batch — once by PK and once by a fragment URN.
+        const fragmentByRef = new Map<string, string>();
         const urnRefs: UrnRef[] = [];
         const pkRefs: string[] = [];
         for (const raw of uniqueRefs) {
@@ -2029,8 +2740,14 @@ export function createMcpServerInstance(
           }
           try {
             assertFullyQualifiedUrn(raw, 'node');
-            const { memoryUrn: mu, loc } = splitNodeUrn(raw);
-            urnRefs.push({ raw, memoryUrn: mu, loc });
+            // Tolerant, exactly as hadron_get_node is: cor:api:040:01 promises
+            // this batch produces the SAME per-node projection as the single
+            // read, and a corrupt stored loc containing `#` readable one way
+            // and a "malformed ref" the other breaks that promise for the rows
+            // most likely to be looked up in bulk (PR #1088 review, Codex P2).
+            const { memoryUrn: mu, loc, fragment, literalLoc } = splitNodeUrnTolerant(raw);
+            if (fragment) fragmentByRef.set(raw, fragment);
+            urnRefs.push({ raw, memoryUrn: mu, loc, literalLoc });
           } catch {
             return textResult(
               `hadron_get_nodes: "${raw}" is neither a node id nor a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). A relative or malformed ref is a caller error, not an access outcome, so it is reported here rather than in the Unavailable list.`,
@@ -2063,15 +2780,31 @@ export function createMcpServerInstance(
             for (const r of group) unavailable.push(r.raw);
             continue;
           }
+          // Both candidates for a fragmented ref, in ONE query: the literal
+          // stored loc (`foo#data`, a row predating loc validation) and the
+          // decomposed parent. The literal wins where it exists — same rule as
+          // the single read, since only the database can tell which was meant
+          // (PR #1088 review, Codex P2).
+          const wanted = new Set<string>();
+          for (const r of group) {
+            wanted.add(r.loc);
+            if (r.literalLoc) wanted.add(r.literalLoc);
+          }
           const rows = await db.node.findMany({
-            where: { memoryId: mem.id, loc: { in: group.map((r) => r.loc) }, deletedAt: null },
+            where: { memoryId: mem.id, loc: { in: [...wanted] }, deletedAt: null },
             include: projectionInclude,
           });
           const rowByLoc = new Map(rows.map((r) => [r.loc, r]));
           for (const r of group) {
-            const row = rowByLoc.get(r.loc);
-            if (row) nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
-            else unavailable.push(r.raw);
+            const literal = r.literalLoc ? rowByLoc.get(r.literalLoc) : undefined;
+            const row = literal ?? rowByLoc.get(r.loc);
+            if (!row) {
+              unavailable.push(r.raw);
+              continue;
+            }
+            // A literal match resolved nothing away, so it carries no notice.
+            if (literal) fragmentByRef.delete(r.raw);
+            nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
           }
         }
 
@@ -2121,7 +2854,15 @@ export function createMcpServerInstance(
         const seenIds = new Set<string>();
         for (const raw of uniqueRefs) {
           const n = nodeByRef.get(raw);
-          if (!n || seenIds.has(n.id)) continue;
+          if (!n) continue;
+          // Recorded BEFORE the seen-check: one node can be named twice in a
+          // batch — once by PK, once by a #data URN — and skipping first drops
+          // the notice whenever the plain ref happens to come earlier. My last
+          // commit claimed to have handled exactly this and did not
+          // (PR #1088 review, Copilot).
+          const frag = fragmentByRef.get(raw);
+          if (frag && !fragmentByNodeId.has(n.id)) fragmentByNodeId.set(n.id, frag);
+          if (seenIds.has(n.id)) continue;
           seenIds.add(n.id);
           ordered.push(n);
         }
@@ -2134,7 +2875,7 @@ export function createMcpServerInstance(
       // per-node parity with hadron_get_node).
       const blocks: string[] = [];
       const omitted: string[] = [];
-      const readEvents: Prisma.UsageEventCreateManyInput[] = [];
+      const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
       for (const n of ordered) {
@@ -2146,35 +2887,28 @@ export function createMcpServerInstance(
         const projection = await renderNodeReadProjection(n, scope, {
           locked: lockState === 'locked',
         });
-        const size = Buffer.byteLength(projection, 'utf8');
+        // Measured on the ANNOTATED block, which is what actually ships: sizing
+        // the bare projection and pushing the annotated one lets a block cross
+        // the advertised hard cap and leaves every later check counting from an
+        // undercounted total (PR #1088 review, Codex P2).
+        const block = noteFragment(projection, fragmentByNodeId.get(n.id));
+        const size = Buffer.byteLength(block, 'utf8');
         if (blocks.length > 0 && bytes + size > BATCH_READ_MAX_BYTES) {
           truncated = true;
           omitted.push(await nodeUrn(n.loc, n.memoryId));
           continue;
         }
-        blocks.push(projection);
+        blocks.push(block);
         bytes += size;
-        readEvents.push({
-          id: generateId(),
-          type: 'read',
-          nodeLoc: n.loc,
-          nodeId: n.id,
-          memoryId: n.memoryId, // #796 (as in hadron_get_node's event)
-          appId: auth.appId ?? null,
-          // 046-usage-metering FR-001 (as in hadron_get_node's event).
-          userId: auth.userId ?? null,
-          createdBy: auth.clientId ?? null,
-          sessionId: null,
-        });
+        readEvents.push({ id: n.id, loc: n.loc, memoryId: n.memoryId });
       }
       // One batched insert for all returned nodes' read events, fire-and-forget
       // (parity with hadron_get_node's non-blocking single create). A per-node
       // create loop would fire up to BATCH_READ_MAX_NODES concurrent unawaited
       // inserts and pressure the connection pool — createMany is one round-trip
-      // (PR #283 review).
-      if (readEvents.length > 0) {
-        db.usageEvent.createMany({ data: readEvents }).catch(() => {});
-      }
+      // (PR #283 review). Only nodes that made it into the response are pushed
+      // above, so a node the byte cap omitted records no read.
+      recordNodeUsage(db, 'read', readEvents, auth);
 
       const headerParts = [`returned ${blocks.length} node(s)`];
       if (unavailable.length) headerParts.push(`${unavailable.length} unavailable`);
@@ -2289,14 +3023,21 @@ export function createMcpServerInstance(
       });
       if (!node) return textResult('Node not found.');
 
-      const urn = await nodeUrn(node.loc, node.memoryId);
+      // #1061 — this tool returns the node's full content, exactly as
+      // hadron_get_node does, so it records the same single read. Its GraphQL
+      // twin (`nextNode`) gets there by delegating to `node(ref:)`; this one has
+      // its own projection, so it records here.
+      recordNodeRead(db, { id: node.id, loc: node.loc, memoryId: node.memoryId }, auth);
+
+      const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
         const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
         // #322: surface the target's stable PK alongside the URN.
         return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
       }));
       // #186: nodeType in the meta block, mirroring hadron_get_node's format.
-      const nextPortalUrl = portalUrlForUrn(urn); // #881 — parity with hadron_get_node
+      // #881 — parity with hadron_get_node, including the fallback-URN omission.
+      const nextPortalUrl = urnFellBack ? null : portalUrlForUrn(urn);
       const meta = [
         `**${node.name}**`,
         urn,
@@ -2589,7 +3330,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_unlock_memory',
-    'Unlock an encrypted PRIVATE memory for THIS MCP session (spec 041). Supply exactly one of passphrase / dataKey; owner-only. While unlocked, reads return plaintext and writes encrypt; other sessions are unaffected. The key lives only in server memory and is dropped when the session closes (or via hadron_lock_memory).',
+    'Unlock an encrypted PRIVATE memory for THIS MCP session (spec 041). Supply exactly one of passphrase / dataKey; owner-only. While unlocked, reads return plaintext and writes encrypt; other sessions are unaffected. The key lives only in server memory — never on disk — and is dropped when the session closes, via hadron_lock_memory, or after the memory goes UNUSED for the key-cache idle window (#1114; 24h by default, and every read or write refreshes it, so an unlock you are actually using does not expire under you). That last case is the one to expect: after a long quiet stretch a read may report the memory locked again with no lock and no disconnect having happened — call this tool again. Key material outliving all use is a worse failure than an extra unlock, which is why the expiry exists rather than the promise being unconditional.',
     {
       memoryUrn: z.string().describe('Memory URN or id'),
       passphrase: z.string().optional().describe('The passphrase the memory was encrypted with'),
@@ -2665,7 +3406,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_node',
-    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory.',
+    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory. Writing to a loc that already holds a node OVERWRITES it: an omitted `description`, `abstract`, `content` or `tags` is CLEARED, not preserved (the other fields — nodeType, objectType, isRunnable, seq, properties, data, llmModel, aiAgent — are kept when omitted). Use hadron_update_node for a partial edit. The overwritten state is snapshotted to revision history first (#976), and encryption is honored.',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports". Both bare and prefixed forms accepted, in either URN grammar. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
@@ -2701,7 +3442,9 @@ export function createMcpServerInstance(
       }
 
       // Split into memory URN + loc and resolve the memory.
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+      const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+      if (fragRefusal) return textResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
@@ -2884,21 +3627,101 @@ export function createMcpServerInstance(
           ...(aiAgent ? { aiAgent } : {}),
           // Resurrect a soft-deleted node on write (#543).
           ...(isResurrect ? { deletedAt: null, deletedBy: null } : {}),
+          updatedBy: auth.clientId ?? null,
         } as any,
       };
+
+      /**
+       * #976 — snapshot the row this "create" is about to OVERWRITE.
+       * hadron_create_node is create-OR-update (#543), and its update branch
+       * used to write no NodeRevision at all, so re-minting an existing loc
+       * destroyed the prior content with no recoverable history — while every
+       * sibling surface snapshots (hadron_update_node, hadron_replace_text and
+       * hadron_update_node_data via the resolver, hadron_move_node, and
+       * writeNodeCore's own `if (existing)` branch).
+       *
+       * The create-vs-overwrite decision is made HERE, under the loc's write
+       * lock — never from the `existing` probe above, which is read before the
+       * transaction and can be stale by the time we write (PR #977 review, both
+       * bots: two concurrent calls both see no row, one creates, and the other
+       * would overwrite it believing it created it). Returns the pre-write row
+       * so the caller can also derive the resurrect decision from it.
+       *
+       * On an encrypted memory this stores the at-rest CIPHERTEXT row,
+       * deliberately — same contract as hadron_update_node. `changes` compares
+       * against the values this upsert will actually write, which for the
+       * clobber-semantics fields (description/abstract/content/tags) is the
+       * resolved `?? null` / `?? []` value, not the raw argument.
+       */
+      const snapshotOverwrittenNode = async (tx: Prisma.TransactionClient) => {
+        const pre = await tx.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
+        if (!pre) return null;
+        await createNodeRevision(tx, {
+          id: generateId(),
+          ...buildNodeRevisionSnapshot(pre, editorFromAuth(auth), {
+            changes: diffNodeChanges(pre, {
+              name,
+              nodeType,
+              objectType: resultObjectType,
+              isRunnable,
+              description: description ?? null,
+              abstract: storedAbstract,
+              content: storedContent,
+              // #1127 review — an overwrite that only re-stamps the
+              // fingerprint is still a change to restorable state, so this
+              // snapshot reports it. NOT every diff caller passes this field
+              // (@copilot, same review): the move paths omit it because a move
+              // cannot change the hash, `restoreNodeRevision` already carries
+              // it via restorableNodeFields, and the GraphQL upsert computes
+              // its hash AFTER its diff — the same ordering this tool had. That
+              // last one is a cosmetic omission rather than the defect fixed
+              // here: with no `abstractStillAccurate` on that surface, a hash
+              // change always rides along with an abstract or content change
+              // the diff already names, so `changes` is never empty there.
+              abstractOriginHash: nextAbstractOriginHash,
+              seq,
+              tags: tags ?? [],
+              properties,
+              data: storedData,
+              llmModel,
+              aiAgent,
+            }),
+          }),
+        });
+        return pre;
+      };
+
       // #664 (Model A — see nodeSubtreeLock.ts): serialize this create against a
       // concurrent ancestor-delete by holding advisory locks on the node's
       // ancestor path across the upsert, matching the GraphQL createNode path.
-      // A root-level loc has no ancestor to coordinate against, so it skips the
-      // transaction. READ COMMITTED (the default) is required so the delete's
-      // descendant count sees this row once our commit releases the lock.
-      const upserted =
-        ancestorLocs(loc).length === 0
-          ? await db.node.upsert(upsertArgs)
-          : await db.$transaction(async (tx) => {
-              await lockAncestorsForCreate(tx, memoryId, loc);
-              return tx.node.upsert(upsertArgs);
-            });
+      // READ COMMITTED (the default) is required so the delete's descendant
+      // count sees this row once our commit releases the lock.
+      //
+      // #976: EVERY write takes the transaction now, root-level locs included.
+      // Two reasons, both about the snapshot: it must commit with the write it
+      // records (else a failed upsert leaves an orphan revision —
+      // hadron_move_node is the precedent), and the create-vs-overwrite
+      // decision must be made under the loc's own write lock. Deciding from the
+      // pre-transaction `existing` probe lost a revision under concurrency: two
+      // calls both saw no row, one created it, the other overwrote it on the
+      // create branch (PR #977 review, both bots). lockLocForWrite takes the
+      // same key as an ancestor-create and as lockNodeForDelete, acquired after
+      // the ancestors so the root→leaf order stays deadlock-free.
+      const upserted = await db.$transaction(async (tx) => {
+        await lockAncestorsForCreate(tx, memoryId, loc); // no-op at a root-level loc
+        await lockLocForWrite(tx, memoryId, loc);
+        const pre = await snapshotOverwrittenNode(tx);
+        return tx.node.upsert({
+          ...upsertArgs,
+          // Resurrect (#543) on the authoritative row, not the stale probe: a
+          // tombstone that appeared after it would otherwise stay flagged
+          // deleted while taking the new content.
+          update: {
+            ...upsertArgs.update,
+            ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
+          } as any,
+        });
+      });
 
       if (resolvedEdges !== null) {
         await replaceOutgoingEdges({
@@ -2939,21 +3762,9 @@ export function createMcpServerInstance(
         await db.pendingEdge.delete({ where: { id: p.id } });
       }
 
-      // Record usage event
-      db.usageEvent.create({
-        data: {
-          id: generateId(),
-          type: 'write',
-          nodeLoc: loc,
-          nodeId: upserted.id,
-          memoryId, // #796 (as in hadron_get_node's event)
-          appId: auth.appId ?? null,
-          // 046-usage-metering FR-001 (as in hadron_get_node's event).
-          userId: auth.userId ?? null,
-          createdBy: auth.clientId ?? null,
-          sessionId: null,
-        },
-      }).catch(() => {});
+      // Record usage event (#796 memoryId + 046 FR-001 attribution, as in
+      // hadron_get_node's event — see the shared recorder).
+      recordNodeWrite(db, { id: upserted.id, loc, memoryId }, auth);
 
       // Announce the write (event pivot): the git mirror subscriber re-reads
       // and mirrors — this replaced the re-fetch + direct writeNodeToGit.
@@ -2995,8 +3806,9 @@ export function createMcpServerInstance(
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by hadron_run_task. Pass true/false; omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
       description: z.string().optional().describe('New short description'),
-      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. Spec 031.'),
-      content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007).'),
+      abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Read the ABSENCE of the marker narrowly: it means "checked against this exact content" ONLY on a read that could have shown it — `contentScope` of `abstract` or `all`, on a memory that is unencrypted or unlocked. Under the default `content` scope, or on a locked memory, no marker is emitted either way and its absence says nothing at all. Spec 031/032.'),
+      content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
+      abstractStillAccurate: z.boolean().optional().describe('ASSERTION, NOT A SETTING — and it SUPPRESSES A CORRECTNESS CHECK. Setting this true tells the server you have RE-READ the existing abstract against the content this call is writing and it still describes it, so the `abstract-stale` marker is cleared instead of armed. It changes no text: it only re-fingerprints the abstract you already have. Do NOT set it to make a marker go away, to save a call, or by default — the marker exists to catch an abstract that quietly stopped matching its node, and this is the one flag that can hide exactly that. If you have not actually compared the two, OMIT IT: a stale marker on an accurate abstract is cheap and self-correcting, a suppressed marker on an inaccurate one is neither, and it misleads every later reader and every RAG hit. Ignored when `abstract` is also supplied (that path already re-fingerprints) or when the node has no abstract. CONCURRENCY — it binds to NEITHER half: it re-fingerprints whatever abstract is STORED when this write lands, against the `content` you pass here — or, if you omit it, the body as this call read it before the write. The two halves fail in OPPOSITE directions: a concurrent ABSTRACT swap is certified unseen and the marker is suppressed on text you never read, whereas a concurrent CONTENT change leaves the stored hash disagreeing with the row, so the marker stays armed: the hash IS written, it just lands on the wrong body, and the one thing you wanted — clearing the marker — does not happen. Neither side is checked against what you read. The fully-bound form needs no flag at all — pass `abstract` AND `content` together and you are writing exactly the two things you compared. Prefer that whenever the node might have another writer; use this flag when re-sending the abstract is not worth it and you accept that trade.'),
       seq: z.number().optional().describe('New sort order among siblings'),
       tags: tagsInputSchema.optional().describe('Replace tags'),
       properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
@@ -3012,7 +3824,7 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -3021,7 +3833,9 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+      const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+      if (fragRefusal) return textResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
@@ -3128,31 +3942,19 @@ export function createMcpServerInstance(
       // Spec 032 — capture existing.abstractOriginHash so the revision
       // history round-trips the staleness signal. On an encrypted memory
       // `existing` still holds CIPHERTEXT here — revisions store the
-      // at-rest form, deliberately (the decrypt happens just below).
-      // #620 — shared builder: editedBy carries the user PK (when the MCP
-      // caller is a user token), `reason` rides in revLabel, and `changes`
-      // records the fields this update supplies with a different value.
-      await createNodeRevision(db, {
-        id: generateId(),
-        ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
-            revLabel: reason,
-            changes: diffNodeChanges(existing, {
-              name,
-              nodeType,
-              objectType,
-              isRunnable,
-              description,
-              abstract: normalizedAbstract,
-              content,
-              seq,
-              tags,
-              properties,
-              data: nodeData,
-              llmModel,
-              aiAgent,
-            }),
-          }),
-      }).catch(() => {});
+      // at-rest form, deliberately (the decrypt happens just below), so the
+      // AT-REST image is captured now and the row is written further down,
+      // once the abstractOriginHash matrix has run.
+      //
+      // #1127 review (@codex P2): the write is DEFERRED rather than done here
+      // because `changes` must be able to report `abstractOriginHash`, and
+      // that value does not exist until after the decrypt. Leaving it out is
+      // what made `abstractStillAccurate` used alone record an EMPTY `changes`
+      // on a revision that really did change restorable state — a suppression
+      // of a correctness check, invisible in history. Diffing still runs
+      // against this at-rest image, so nothing else about the comparison
+      // moves.
+      const preAtRest = { ...existing };
 
       // Spec 041 (PR-517 review, Codex P2): decrypt `existing` in place NOW
       // — everything below (the abstractOriginHash matrix, the embedding
@@ -3163,20 +3965,76 @@ export function createMcpServerInstance(
         decryptNodeFieldsWithKey(existing, updKey);
       }
 
-      // Spec 032 — abstractOriginHash partial-update matrix (9 rows from
-      // the contract). Drives off whether `normalizedAbstract` was
+      // Spec 032 — abstractOriginHash partial-update matrix (10 rows from
+      // the contract; #1126 added the abstractStillAccurate row). Drives off whether `normalizedAbstract` was
       // supplied (undefined = preserve, null = clear, string = set).
       // Hash always computed on plaintext per FR-009 (existing.* is
       // plaintext here — decrypted above for encrypted memories).
       let nextAbstractOriginHash: string | null | undefined;
       if (normalizedAbstract === undefined) {
-        nextAbstractOriginHash = undefined;
+        // #1126 — the caller's assertion that the EXISTING abstract survives
+        // this edit. Row 2 (content updated, abstract absent) arms staleness
+        // on purpose, and that is right by default: the server cannot know
+        // whether an abstract written against the old content still describes
+        // the new one. `abstractStillAccurate` is the caller saying they
+        // checked — so this re-fingerprints the abstract already on the node
+        // against the content this call is writing, exactly as re-saving that
+        // identical text would (row 4). It writes no text of its own.
+        //
+        // Guarded on the node ACTUALLY having an abstract: FR-006/FR-007 hold
+        // that no abstract means no hash, and an unguarded assertion here
+        // would mint a ghost hash on an abstract-less node — a fingerprint
+        // for a thing that does not exist, which later reads would compare
+        // against and quietly trust.
+        const hasStoredAbstract =
+          typeof existing.abstract === 'string' && existing.abstract.trim() !== '';
+        if (abstractStillAccurate === true && hasStoredAbstract) {
+          const nextContent = content !== undefined ? content : existing.content;
+          // computeContentHash(null) is null, so clearing content through this
+          // path lands on FR-007's "abstract but no content ⇒ no hash" rather
+          // than needing its own branch.
+          nextAbstractOriginHash = computeContentHash(nextContent ?? null);
+        } else {
+          nextAbstractOriginHash = undefined;
+        }
       } else if (normalizedAbstract === null) {
         nextAbstractOriginHash = null;
       } else {
+        // `abstract` supplied: this already re-fingerprints against the new
+        // content, so `abstractStillAccurate` is redundant here and ignored
+        // rather than rejected — both spellings mean the same thing and the
+        // outcome is identical either way.
         const nextContent = content !== undefined ? content : existing.content;
         nextAbstractOriginHash = computeContentHash(nextContent ?? null);
       }
+
+      // #620 — shared builder: editedBy carries the user PK (when the MCP
+      // caller is a user token), `reason` rides in revLabel, and `changes`
+      // records the fields this update supplies with a different value.
+      // Written HERE (not before the decrypt) so `abstractOriginHash` can be
+      // part of that delta — see the preAtRest comment above.
+      await createNodeRevision(db, {
+        id: generateId(),
+        ...buildNodeRevisionSnapshot(preAtRest, editorFromAuth(auth), {
+            revLabel: reason,
+            changes: diffNodeChanges(preAtRest, {
+              name,
+              nodeType,
+              objectType,
+              isRunnable,
+              description,
+              abstract: normalizedAbstract,
+              content,
+              abstractOriginHash: nextAbstractOriginHash,
+              seq,
+              tags,
+              properties,
+              data: nodeData,
+              llmModel,
+              aiAgent,
+            }),
+          }),
+      }).catch(() => {});
 
       // Build partial update — only fields that were provided
       const data: Record<string, unknown> = {};
@@ -3226,21 +4084,9 @@ export function createMcpServerInstance(
         });
       }
 
-      // Record usage event
-      db.usageEvent.create({
-        data: {
-          id: generateId(),
-          type: 'write',
-          nodeLoc: loc,
-          nodeId: existing.id,
-          memoryId: existing.memoryId, // #796 (as in hadron_get_node's event)
-          appId: auth.appId ?? null,
-          // 046-usage-metering FR-001 (as in hadron_get_node's event).
-          userId: auth.userId ?? null,
-          createdBy: auth.clientId ?? null,
-          sessionId: null,
-        },
-      }).catch(() => {});
+      // Record usage event (#796 memoryId + 046 FR-001 attribution, as in
+      // hadron_get_node's event — see the shared recorder).
+      recordNodeWrite(db, { id: existing.id, loc, memoryId: existing.memoryId }, auth);
 
       // Announce the write (event pivot): the git mirror subscriber re-reads
       // and mirrors (encrypted memories punt there — see hadron_create_node).
@@ -3667,7 +4513,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         throw e;
       }
 
-      const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+      const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+      const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+      if (fragRefusal) return textResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
         return textResult(`Node "${rawUrn}" not found.`);
@@ -3793,6 +4641,19 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         );
       }
 
+      // #1061 — a delete is a write, on the addressed node only (a recursive
+      // delete's descendants are not counted individually, matching the GraphQL
+      // deleteNode). A HARD delete records nothing: the row is gone, so the
+      // event's `nodeId` FK has nothing to point at — and unlike the soft case
+      // there is no surviving node whose usage series the event belongs to.
+      if (!hard) {
+        recordNodeWrite(
+          db,
+          { id: existing.id, loc: existing.loc, memoryId: existing.memoryId },
+          auth,
+        );
+      }
+
       const totalAffected = (recursive ? result.descendantCount : 0) + 1;
       const mode = hard ? 'Hard-deleted' : 'Soft-deleted';
       const suffix =
@@ -3813,6 +4674,8 @@ Collision policy: if a live node already occupies \`targetUrn\`, the call refuse
 
 Descendants move WITH the node (#768): a node's loc-subtree (every node whose loc is prefixed by \`<loc>:\`) is rebased onto the new loc, so children's URNs follow the parent. This works within one memory OR across memories (#781) — a different memory in \`targetUrn\` relocates the whole subtree there, carrying the moved nodes' embeddings and rewriting the edges whose source moved to the destination memory. A boundary edge to a node left behind becomes a cross-memory edge (its far endpoint is access-gated on read). A same-memory move leaves edge locs untouched (a derived denormalization; keep addressing those edges by their existing URN). A collision at any DESCENDANT slot refuses the whole move (overwrite only evicts the explicitly-named target loc).
 
+The node's \`name\` (its human-authored display title) is PRESERVED — a move changes the address, not the title, exactly as the GraphQL \`moveNode\` mutation does (#1017). Pass \`renameToLeaf: true\` if you want the name re-derived from the new loc's terminal atom instead. Descendants' names are never rewritten either way.
+
 Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move all run inside a single db.$transaction so a partial failure cannot leave the URN slot empty.
 
 On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted).`,
@@ -3820,8 +4683,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       urn: z.string().describe('Current node fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper"'),
       targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
       overwrite: z.boolean().optional().describe('Default false (refuses on collision). Pass true to soft-delete an existing live target node before moving; the move then proceeds into the freed URN slot.'),
+      renameToLeaf: z.boolean().optional().describe("Default false — the node keeps its name. Pass true to also overwrite the moved node's name with the target loc's terminal atom (\"services:db-helper\" → \"db-helper\"). Destroys the existing display title, so only pass it when the name is meant to track the loc."),
     },
-    async ({ urn: rawFrom, targetUrn: rawTo, overwrite }) => {
+    async ({ urn: rawFrom, targetUrn: rawTo, overwrite, renameToLeaf }) => {
       // Spec 022: qualification at the API boundary for both source and target.
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
@@ -3836,8 +4700,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         throw e;
       }
 
-      const { memoryUrn: fromMemoryUrn, loc: fromLoc } = splitNodeUrn(rawFrom);
-      const { memoryUrn: toMemoryUrn, loc: toLoc } = splitNodeUrn(rawTo);
+      const { memoryUrn: fromMemoryUrn, loc: fromLoc, fragment: fromFrag } =
+        splitNodeUrn(rawFrom);
+      const { memoryUrn: toMemoryUrn, loc: toLoc, fragment: toFrag } = splitNodeUrn(rawTo);
+      // BOTH ends: a fragment on the destination would move the node to the
+      // parent's loc and silently drop the "#data" the caller wrote.
+      const moveRefusal =
+        nodeFragmentRefusal(rawFrom, fromFrag) ?? nodeFragmentRefusal(rawTo, toFrag);
+      if (moveRefusal) return textResult(moveRefusal);
 
       const fromMemory = await resolveMemoryByUrn(fromMemoryUrn);
       if (!fromMemory) {
@@ -3889,6 +4759,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           };
 
       let result: MoveResult;
+      // #1095 — the relocated set (each node's id + the loc it LEFT), captured
+      // inside the transaction so the git mirror can run after it commits. Empty
+      // for the same-slot no-op branch, which relocates nothing.
+      let relocated: MoveNodeSubtreeResult['moved'] = [];
       try {
         result = await db.$transaction(async (tx) => {
           // #664/#752: moving a node INTO a subtree is the same orphan vector as
@@ -3901,19 +4775,30 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           await lockAncestorsForCreate(tx, toMemory.id, toLoc);
 
           if (isSameSlot) {
-            // Same-slot "move" — normalize the node's name to the loc leaf, as
-            // before. Nothing to cascade (destLoc === the current loc).
+            // Same-slot "move": source and target address are identical, so the
+            // ONLY thing left to do is the opt-in leaf rename (#1017). Without
+            // it this is a literal no-op — writing a NodeRevision for it would
+            // record a change that did not happen, and on a memory with a
+            // maxRevCount cap it would evict real history to store nothing.
+            //
+            // The rename is itself skipped when the name ALREADY equals the
+            // leaf (PR #1018 review, Copilot): re-stamping an identical value
+            // is the same no-op-history problem one line up, and a same-slot
+            // call is exactly where it is most likely — a caller normalizing a
+            // name that is already normalized.
             const newName = toLoc.split(':').pop()!;
-            await createNodeRevision(tx, {
-              id: generateId(),
-              ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
-                changes: diffNodeChanges(existing, { loc: toLoc, name: newName, memoryId: toMemory.id }),
-              }),
-            });
-            await tx.node.update({
-              where: { id: existing.id },
-              data: { loc: toLoc, name: newName, memoryId: toMemory.id },
-            });
+            if (renameToLeaf === true && existing.name !== newName) {
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
+                  changes: diffNodeChanges(existing, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+                }),
+              });
+              await tx.node.update({
+                where: { id: existing.id },
+                data: { loc: toLoc, name: newName, memoryId: toMemory.id },
+              });
+            }
           } else {
             const crossMemory = toMemory.id !== fromMemory.id;
 
@@ -3947,16 +4832,27 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // #768/#781: rebase the whole loc-subtree via the shared helper (the
             // ONE implementation the GraphQL moveNode resolver also uses) — SAME-
             // memory or CROSS-memory (destMemoryId carries nodes + embeddings +
-            // outgoing edges across). renameSourceLeaf sets the moved node's name
-            // to the loc leaf (this tool's long-standing behavior); it locks +
-            // revalidates the source and writes a NodeRevision per moved node.
-            await moveNodeSubtree(tx, {
+            // outgoing edges across). It locks + revalidates the source and
+            // writes a NodeRevision per moved node.
+            //
+            // #1017: renameSourceLeaf is now the CALLER's choice, defaulting off.
+            // It used to be hardcoded true, which silently overwrote the moved
+            // node's human-authored `name` with the target loc's terminal atom —
+            // unconditional, undocumented, and the opposite of what the GraphQL
+            // `moveNode` resolver does with the same helper. Two surfaces of one
+            // operation disagreeing is bad enough; the tool's own description
+            // enumerated what survives a move (id, edges, descendants) and never
+            // mentioned `name`, so the contract actively taught the wrong thing.
+            // The damage was quiet, too — loc and name are usually similar
+            // enough that a clobbered title still reads plausibly.
+            const subtreeResult = await moveNodeSubtree(tx, {
               source: existing,
               destLoc: toLoc,
               destMemoryId: crossMemory ? toMemory.id : undefined,
               editor: editorFromAuth(auth),
-              renameSourceLeaf: true,
+              renameSourceLeaf: renameToLeaf === true,
             });
+            relocated = subtreeResult.moved;
           }
 
           // Move BY ID — id is stable across moves, so this refetch can't race a
@@ -4030,6 +4926,24 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
       const { moved, childCount } = result;
 
+      // #1061 — a move is a write, recorded at the node's POST-move address
+      // (matching the GraphQL moveNode); rebased descendants are not counted
+      // individually. The PK comes from `existing` rather than `moved` because
+      // the transaction's declared return shape omits it — and a move never
+      // changes the PK, which is the whole point of relocating in place.
+      recordNodeWrite(db, { id: existing.id, loc: toLoc, memoryId: toMemory.id }, auth);
+
+      // #1095 — mirror the move into the affected repos (destination gains the
+      // files, source loses them). Fired after the commit and NOT awaited: a
+      // mirror never fails a write that already landed. Same call the GraphQL
+      // moveNode resolver makes, so the two surfaces mirror identically.
+      void mirrorNodeMoveToGit(db, {
+        srcMemoryId: fromMemory.id,
+        destMemoryId: toMemory.id,
+        moved: relocated,
+        clientId: auth.clientId ?? null,
+      });
+
       // Empty sections omitted, matching hadron_get_node's pattern (PR-189
       // review feedback).
       const lines: string[] = [
@@ -4095,7 +5009,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (e instanceof UrnNotQualifiedError) return { error: e.message };
       throw e;
     }
-    const { memoryUrn, loc } = splitNodeUrn(rawUrn);
+    const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
+    const actionFragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+    if (actionFragRefusal) return { error: actionFragRefusal };
     const memory = await resolveMemoryByUrn(memoryUrn);
     if (!memory || !(await canReadMemory(db, auth, memory.id))) {
       return { error: `Memory not found: "${memoryUrn}".` };
@@ -4121,6 +5037,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     loc: string,
     args?: Record<string, string>,
   ): Promise<string> {
+    // #1061 — collected by the renderer itself (see its `onTargetInlined`
+    // note): it inlines a target only when that target HAS content, so a list
+    // built from `node.outgoingEdges` here would record reads for nodes the
+    // bundle never carried (PR #1062 review — Copilot).
+    const inlined: unknown[] = [];
     const rendered = await renderRunNodeBundle(node, args, async (memoryId) => {
       // Reuse the tool surface's own memoized memory-urn lookup.
       let memUrn = memoryUrnCache.get(memoryId);
@@ -4130,7 +5051,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         memoryUrnCache.set(memoryId, memUrn);
       }
       return memUrn;
-    });
+    }, (target) => inlined.push(target));
     db.usageEvent
       .create({
         data: {
@@ -4143,11 +5064,24 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
-          sessionId: null,
+          sessionId: auth.sessionId ?? null,
           actionArgs: (args ?? undefined) as Record<string, string> | undefined,
         },
       })
       .catch(() => {});
+    // #1061 — the `action-run` event above meters an INVOCATION; it is not a
+    // read, and no read/write chart counts it. But the bundle also hands back
+    // the run node's content AND every dependency node inlined into it, so
+    // those are reads on the same footing as any other. Recorded separately so
+    // the two questions ("how often was this run?" and "how much of the graph
+    // was read?") stay separately answerable.
+    //
+    // NOTE: renderRunNodeBundle inlines edge targets WITHOUT a per-target
+    // memory-read gate, so a cross-memory dependency can be inlined here that
+    // the GraphQL `renderRunNode` preview would have excluded. That asymmetry
+    // predates this change and is tracked separately; the events recorded here
+    // describe what this tool actually returned, which is the honest reading.
+    recordNodeUsage(db, 'read', toUsageNodeRefs([node, ...inlined]), auth);
     return rendered;
   }
 
@@ -4289,12 +5223,57 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     return emitNodeUrnV2(memUrn, loc);
   }
 
-  function runTaskCandidate(mem: RunTaskMem, node: RunTaskNode) {
-    return {
-      urn: nodeUrnFromMem(mem.urn, node.loc),
-      label: node.name,
-      description: node.description,
-    };
+  type RunTaskCandidate = { urn: string; label: string; description: string | null };
+
+  /**
+   * A picker entry, or `null` when the node's loc has no v2 URN.
+   *
+   * Dropping it is deliberate, and is NOT the same call as the read path's
+   * best-effort fallback. Here the URN is an execution identity — it round-trips
+   * through `splitNodeUrn`/`resolveNodeRef` to load the node — so a best-effort
+   * string is worse than nothing: `splitNodeUrn` takes the first two atoms as
+   * the memory, so a malformed URN can silently resolve a DIFFERENT node. A
+   * candidate we cannot address is one we cannot run, so offering it would
+   * present an action that must fail.
+   *
+   * Dropping one candidate also beats the status quo, where a single
+   * un-emittable loc anywhere in the match set throws and takes down the whole
+   * hadron_run_task call.
+   */
+  function runTaskCandidate(mem: RunTaskMem, node: RunTaskNode): RunTaskCandidate | null {
+    try {
+      return { urn: nodeUrnFromMem(mem.urn, node.loc), label: node.name, description: node.description };
+    } catch (err) {
+      console.warn(
+        `[hadron_run_task] skipping candidate ${JSON.stringify(node.loc)} in memory ` +
+          `"${mem.urn}" — its loc has no v2 URN, so it cannot be addressed to run:`,
+        err,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Build the picker list. Returns how many entries were dropped so the caller
+   * can SAY so — a silently shortened list reads as "these are all the tasks".
+   */
+  function buildCandidates(
+    pairs: Array<{ mem: RunTaskMem; node: RunTaskNode }>,
+  ): { usable: RunTaskCandidate[]; skipped: number } {
+    const usable: RunTaskCandidate[] = [];
+    let skipped = 0;
+    for (const { mem, node } of pairs) {
+      const candidate = runTaskCandidate(mem, node);
+      if (candidate) usable.push(candidate);
+      else skipped++;
+    }
+    return { usable, skipped };
+  }
+
+  /** Header suffix disclosing dropped candidates; empty when none were. */
+  function skippedNote(skipped: number): string {
+    if (skipped === 0) return '';
+    return ` (${skipped} unaddressable task${skipped === 1 ? '' : 's'} hidden — see server logs)`;
   }
 
   // Present candidates and run the chosen one: an interactive single-select
@@ -4395,7 +5374,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     const names = mems.slice(0, RUN_TASK_PICK_CAP).map((m) => m.name).join(', ');
     return {
       done: textResult(
-        `Pass a \`memory\` hint (or set an active memory with hadron_set_active_memory). You can reach: ${names}.`,
+        `Pass a \`memory\` hint (or set an active memory with hadron_set_active_memory). You can reach: ${names}.` +
+          // #1009: the active-memory selection is per-connection, so after a
+          // transparent reconnect this refusal appears for a caller who DID set
+          // one. Without this line the only reading available is "the tool
+          // forgot for no reason".
+          (isReconnect
+            ? ' Note: this connection was re-established, which reset any active memory you had selected.'
+            : ''),
       ),
     };
   }
@@ -4528,9 +5514,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return runOrRender(nodeUrnFromMem(memory.urn, matches[0].loc));
         }
         if (matches.length > 1) {
+          const { usable, skipped } = buildCandidates(matches.map((n) => ({ mem: memory, node: n })));
+          if (usable.length === 0) {
+            return textResult(
+              `Tasks matching "${taskHint}" in ${memory.name} exist, but none can be addressed to run ` +
+                '(their locs have no URN). See server logs.',
+            );
+          }
           return presentAndRun(
-            matches.map((n) => runTaskCandidate(memory, n)),
-            `Multiple tasks match "${taskHint}" in ${memory.name} — pick one:`,
+            usable,
+            `Multiple tasks match "${taskHint}" in ${memory.name} — pick one:${skippedNote(skipped)}`,
             runOrRender,
           );
         }
@@ -4539,9 +5532,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (wide.length === 0) {
           return textResult(`No runnable task matching "${taskHint}" in ${memory.name}.`);
         }
+        const wideBuilt = buildCandidates(wide.map((w) => ({ mem: w.mem, node: w.node })));
+        if (wideBuilt.usable.length === 0) {
+          return textResult(
+            `No runnable task matching "${taskHint}" in ${memory.name}. Matches exist in other ` +
+              'memories but none can be addressed to run (their locs have no URN). See server logs.',
+          );
+        }
         return presentAndRun(
-          wide.map((w) => runTaskCandidate(w.mem, w.node)),
-          `No match in ${memory.name}, but "${taskHint}" matches runnable tasks in other memories — pick one:`,
+          wideBuilt.usable,
+          `No match in ${memory.name}, but "${taskHint}" matches runnable tasks in other memories — ` +
+            `pick one:${skippedNote(wideBuilt.skipped)}`,
           runOrRender,
         );
       }
@@ -4551,9 +5552,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (runnable.length === 1) {
         return runOrRender(nodeUrnFromMem(memory.urn, runnable[0].loc));
       }
+      const listed = buildCandidates(runnable.map((n) => ({ mem: memory, node: n })));
+      if (listed.usable.length === 0) {
+        return textResult(
+          `No runnable tasks in ${memory.name} can be addressed to run (their locs have no URN). ` +
+            'See server logs.',
+        );
+      }
       return presentAndRun(
-        runnable.map((n) => runTaskCandidate(memory, n)),
-        `Tasks in ${memory.name} — pick one to run:`,
+        listed.usable,
+        `Tasks in ${memory.name} — pick one to run:${skippedNote(listed.skipped)}`,
         runOrRender,
       );
     },
@@ -4563,7 +5571,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a new work session. All subsequent tool calls can reference this session ID for attribution.',
+    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open and the worker taken, until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment — so nothing but an explicit end closes a DEVELOPER worker session. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so an untouched session reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. All subsequent tool calls can reference this session ID for attribution. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not a live one — an untouched session is not being driven, so it does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
     {
       description: z.string().describe("What this session is about"),
       type: z.string().optional().describe('Session type: DEVELOPER, CHATBOT, AUTOMATION, EDGE'),
@@ -4575,37 +5583,182 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       llmModel: z.string().optional().describe('LLM model being used'),
       parentSessionId: z.string().optional().describe('Parent session ID'),
       prevSessionId: z.string().optional().describe('Previous session ID'),
+      workerRef: z.string().optional().describe('The Worker (named casting) this session works as. Three forms resolve: the worker\'s NAME ("Iris" — unique within the App, case-insensitive, and what a human will say), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its bare id. Prefer the name for a human-driven pickup; the URN when addressing a worker across App context. Must belong to this App; stamps the session\'s agentId from the casting and returns the worker\'s boot briefing.'),
+      force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker — one someone drove RECENTLY (#1114: a merely-open session no longer refuses, so if you are seeing this refusal the session is live rather than just unclosed). That open session may be someone else\'s live work, or your own left behind by a chat session that ended without ending it (ending a chat session never ends a worker session); the server cannot tell which, so neither should you assume. Use only on the user\'s explicit override, after showing who last drove it.'),
     },
-    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId }) => {
+    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId, workerRef, force }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
       // context to attribute the session. Errors with typed [no_active_app]
       // envelope for multi-App OAuth callers without selection.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
+      //
+      // #1005: EXCEPT when the workerRef is self-describing. A worker id or an
+      // `hrn:worker:<root>:<app-slug>:<slug>` URN names exactly one worker, and
+      // a worker belongs to exactly one App — so the App is already known, and
+      // demanding a prior `hadron_set_active_app` asks the caller to state
+      // something the argument settles. `startSession` already derives the App
+      // from the worker when it has no App context, behind the same participant
+      // predicate the appRef path runs, so this widens nothing: it lets the
+      // resolver's existing branch be reached instead of erroring above it.
+      //
+      // A bare NAME still requires App scope — a name is unique only WITHIN an
+      // App (#990), so without one there is nothing to resolve it against, and
+      // guessing across the caller's Apps would resolve one name to several
+      // workers. That caller gets the normal, actionable envelope.
+      const workerRefTrimmed = workerRef?.trim();
+      const workerRefNamesItsApp =
+        !!workerRefTrimmed && (isId(workerRefTrimmed) || hasSchemePrefix(workerRefTrimmed));
+      if (!workerRefNamesItsApp) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+      }
 
-      const sessionId = generateId();
+      // #940: delegate to the GraphQL resolver (findings:node-write-surface-
+      // invariants — MCP tools delegate, never re-implement), so the worker
+      // binding runs the ONE gated path: App-membership checks, WORKER_RETIRED,
+      // SESSION_WORKER_NOT_IN_APP, and the WORKER_TAKEN informed-takeover
+      // refusal (cor:agt:020:03) are all the server's, and this surface can
+      // never drift from the GraphQL one. The direct db.session.create this
+      // replaces predated the worker model; the resolver stamps the same
+      // appId/userId attribution (#931) from the same ctx fields.
+      // Hoisted so the briefing lookup below resolves Worker.prompt under the
+      // SAME principal that started the session — the prompt is gated, and
+      // re-deriving a context risks the two diverging.
+      const mcpCtx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        const session = await resolvers.Mutation.startSession(
+          {},
+          {
+            input: {
+              id: generateId(),
+              type: type ?? undefined,
+              plan: description,
+              repo: repo ?? undefined,
+              branch: branch ?? undefined,
+              prNumber: prNumber ?? undefined,
+              customerId: customerId ?? undefined,
+              language: language ?? undefined,
+              llmModel: llmModel ?? undefined,
+              parentSessionId: parentSessionId ?? undefined,
+              prevSessionId: prevSessionId ?? undefined,
+              workerRef: workerRef ?? undefined,
+              force: force ?? undefined,
+            },
+          },
+          mcpCtx,
+        );
 
-      const session = await db.session.create({
-        data: {
-          id: sessionId,
-          type: (type || 'DEVELOPER') as SessionType,
-          plan: description,
-          appId: auth.appId ?? null,
-          createdBy: auth.clientId ?? null,
-          repo: repo ?? null,
-          branch: branch ?? null,
-          prNumber: prNumber ?? null,
-          customerId: customerId ?? null,
-          language: language ?? null,
-          llmModel: llmModel ?? null,
-          parentSessionId: parentSessionId ?? null,
-          prevSessionId: prevSessionId ?? null,
-        },
-      });
+        // #1005: pin the session's App as this MCP session's active App.
+        //
+        // The App is settled the moment the session exists — `startSession`
+        // stamps `appId` from the worker's casting when it had no App context,
+        // and from the caller's scope otherwise — so every App-scoped tool
+        // afterwards has an unambiguous answer. Before this, a multi-App user
+        // following the documented path (start_session with workerRef → team
+        // chat read/post → record_work) had to have called
+        // `hadron_set_active_app` first, and the failure for not doing so was
+        // DEFERRED: it surfaced on whichever later call happened to need App
+        // scope, reading as a client limitation rather than a missed step.
+        //
+        // Gated on `auth.userId`: an App-key caller's App identity comes from
+        // its credential and must never be re-pointed by a session argument.
+        // A no-op when it already matches, which is the single-App case.
+        //
+        // BEST-EFFORT (PR #1007 review, Codex P1): this read runs AFTER
+        // startSession has committed, so a transient failure here must never be
+        // reported as a failed start. Falling through to the outer catch would
+        // return "Error: …" and withhold the session id — and the client's
+        // retry would then hit WORKER_TAKEN for the very session it was told
+        // had failed, unable to either continue or end it. Same reasoning, and
+        // the same remedy, as the briefing block below (PR #996 review). A
+        // missed pin costs one hadron_set_active_app; a withheld id is
+        // unrecoverable.
+        if (auth.userId && session.appId && session.appId !== auth.appId) {
+          try {
+            const boundApp = await db.app.findUnique({
+              where: { id: session.appId },
+              select: { id: true, organizationId: true },
+            });
+            if (boundApp) pinActiveApp(boundApp.id, boundApp.organizationId, 'worker_bind');
+          } catch {
+            // Swallowed deliberately — the session IS started and bound.
+          }
+        }
 
-      return textResult(
-        `Session started: ${session.id}\n> ${description}`,
-      );
+        // #990: when a worker is bound, ALWAYS return its resolved boot
+        // briefing. Binding IS briefing — an MCP host has no discovery surface
+        // to go looking for the prompt afterwards, and nothing routes it to one
+        // (hadron_server_info returns deployment identity only). Returning it
+        // live also removes the reason to publish briefing NODES into the Team
+        // Agent's memory (hadron-cli#443): those are copies of
+        // Agent.personaPrompt + Worker.promptOverride that nothing recomputes,
+        // so they go stale silently the moment a role agent's prompt changes.
+        //
+        // Resolved through the SAME field resolver GraphQL serves
+        // (Worker.prompt), so the two surfaces cannot drift — and that resolver
+        // self-guards behind the worker read gate, so this cannot widen access.
+        //
+        // SELF-CONTAINED failure handling (PR #996 review, Codex P2): these are
+        // reads that run AFTER startSession has already committed the session,
+        // so a transient failure here must never be reported as a failed start.
+        // It used to fall through to the outer catch, which returned "Error: …"
+        // and withheld the id — and the client's retry would then hit
+        // WORKER_TAKEN for the very session it was told had failed, unable to
+        // either continue or end it. The session id is the thing the caller
+        // cannot recover on its own; the briefing it can ask for again.
+        let workerLine = '';
+        if (session.workerId) {
+          try {
+            const worker = await db.worker.findUnique({ where: { id: session.workerId } });
+            const prompt = worker ? await resolvers.Worker.prompt(worker, {}, mcpCtx) : null;
+            // #1029: the previous stint's handoff, delivered with the briefing
+            // rather than left to be discovered. A fresh session does not know
+            // there is anything to look for, so a design that requires it to go
+            // looking fails — binding is briefing, so binding is handoff. The
+            // session just created is still open and so is never its own
+            // "previous" (Worker.continuity keys on ENDED sessions).
+            const continuity = worker
+              ? await resolvers.Worker.continuity(worker, {}, mcpCtx)
+              : null;
+            // #1026 — the bind is where a worker FIRST needs its own identity,
+            // and it printed neither the URN nor a link. #1008 asks every
+            // worker to sign what it publishes with a hyperlinked URN, so the
+            // briefing had to send it to hadron_get_worker for a string the
+            // bind already had in hand. Emitting both here removes that round
+            // trip at exactly the moment the need arises, and removes the
+            // reason the prompts carve out an exception to "never hand-build a
+            // portal link".
+            const boundUrn = worker
+              ? ((await resolvers.Worker.urn(worker, {}, mcpCtx)) as string | null)
+              : null;
+            const boundUrl = workerPortalUrl(boundUrn);
+            workerLine =
+              `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
+              (boundUrn ? `\n${boundUrn}` : '') +
+              (boundUrl ? `\nURL: ${boundUrl}` : '') +
+              // A worker whose agent carries no template and who has no override
+              // has no briefing — say so, rather than emitting a bare heading.
+              (prompt
+                ? `\n\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
+                : '\n\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)') +
+              renderWorkerContinuity(continuity as RenderableContinuity | null);
+          } catch {
+            workerLine =
+              `\nWorking as worker ${session.workerId}.` +
+              '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
+          }
+        }
+        return textResult(`Session started: ${session.id}\n> ${description}${workerLine}`);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'session start failed'}`);
+      }
     },
   );
 
@@ -4613,36 +5766,1224 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_end_session',
-    'End a session. Records summary and final metrics.',
+    'End a session, and for a worker-bound one write its closing HANDOFF (#1029) — the record the next stint of this worker inherits automatically at bind. This is the CLIENT operation that ends a WORKER SESSION, and the server\'s reaper can end one without you. Ending your CHAT SESSION does not end a worker session (#1034). It ends the SESSION, not any HOLD: if a person bound the worker, the name stays theirs until released (#1050) and only they can bind it again. An App-key BIND takes no hold — a fact about the bind, not a promise about the worker afterwards, since an eligible user may have forced a binding meanwhile and taken the name. Archiving the Desktop window, closing the Claude Code session, or losing the conversation any other way leaves this binding open server-side and the worker taken until you call this tool or the reaper claims it. Call it deliberately when you stop working, not when the window closes — by then it is too late to write a handoff, because the context that would compose one has gone. Pass `handoff` whenever you are stopping deliberately: what landed, what is open, what is blocked, what the next driver should not repeat. Route rather than restate — point at the live artifacts instead of summarizing them, since a restatement drifts while a pointer does not. The server owns where it goes; you supply the prose. A failed handoff write REFUSES the end and leaves the session open, so retrying is safe; ending with no handoff is a deliberate choice, and the next driver is told the stint ended without one.',
     {
-      id: z.string().describe('Session ID to end'),
-      summary: z.string().optional().describe('Summary of what was accomplished'),
+      id: z.string().describe('Id of the session to end — a Hadron session id (the worker session id, when one is bound), never anything about your chat session'),
+      summary: z
+        .string()
+        .optional()
+        .describe(
+          'A label on the session ROW, readable via the `session` / `sessions` GraphQL queries. It is NOT the continuity record: no worker-handoff path reads it, so the next driver of this worker never sees it (#1100). ' +
+            'If you are writing something for whoever comes next, that is `handoff`. ' +
+            'This used to be described as "Summary of what was accomplished", which is exactly what a departing worker thinks it is writing: choosing it succeeds, returns a normal receipt, and delivers nothing to anyone. ' +
+            'The two mistakes are not symmetric. Putting continuity prose here produces NO handoff, and cannot be corrected afterwards — the sequence is append-only and the stint has ended, so the remedy is to bind again and end that session with the prose. Putting a label in `handoff` is merely untidy: the label is missing from the row and the prose reaches the next driver anyway.',
+        ),
+      handoff: z
+        .string()
+        .optional()
+        .describe(
+          'The closing handoff for this worker: prose the NEXT worker session bound to this worker receives at bind. Worker-bound sessions only.',
+        ),
       inputTokens: z.number().optional().describe('Total input tokens used'),
       outputTokens: z.number().optional().describe('Total output tokens used'),
       turnCount: z.number().optional().describe('Number of conversation turns'),
       errorCount: z.number().optional().describe('Number of errors encountered'),
     },
-    async ({ id, summary, inputTokens, outputTokens, turnCount, errorCount }) => {
+    async ({ id, summary, handoff, inputTokens, outputTokens, turnCount, errorCount }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: paired with hadron_start_session.
+      //
+      // #1009: `id` IS the session, so scope is recoverable here with no new
+      // argument at all. This is the tool the gap stranded most sharply — after
+      // a reconnect a multi-App caller could neither continue the session nor
+      // END it, leaving the worker TAKEN until the reaper or a --force takeover.
+      await adoptAppFromSession(id);
       const appScopeError = requireAppScope();
       if (appScopeError) return appScopeError;
 
       const session = await db.session.findUnique({ where: { id } });
       if (!session) return textResult(`Session "${id}" not found.`);
+      // #931: same write gate as the GraphQL endSession — previously this raw
+      // update was ungated, so any App-scoped caller holding a session id
+      // could end another App's (or user's) session. Allowed: a PURE App-key
+      // principal for its own App's sessions, or the authenticated user the
+      // session is attributed to. The App branch requires the ABSENCE of a
+      // userId (#932 Codex P1): for OAuth/user callers requireAppScope()
+      // fills auth.appId from the user's active-App SELECTION, and that must
+      // not let co-members of an App end each other's sessions.
+      const mayEnd =
+        (!auth.userId && auth.appId && session.appId === auth.appId) ||
+        (auth.userId && session.userId === auth.userId);
+      if (!mayEnd) {
+        return textResult(`Forbidden: session "${id}" belongs to a different App or user.`);
+      }
 
-      await db.session.update({
-        where: { id },
-        data: {
-          endedAt: new Date(),
-          summary: summary ?? null,
-          inputTokens: inputTokens ?? null,
-          outputTokens: outputTokens ?? null,
-          turnCount: turnCount ?? null,
-          errorCount: errorCount ?? null,
-        },
+      // #1029: the handoff goes through the SAME writer the GraphQL endSession
+      // uses, so the loc convention, the parent bootstrap and the session
+      // stamping cannot drift between the two surfaces. This tool does its own
+      // raw update rather than delegating to that resolver, which is exactly
+      // how two surfaces come apart — sharing the writer is what stops it here.
+      //
+      // Ordering is the safety property: written BEFORE the end, so a failure
+      // leaves the session open and retryable. Ending first and losing the
+      // prose is unrecoverable — the context that composed it ends with the
+      // stint.
+      const handoffBody = handoff?.trim();
+      if (handoffBody) {
+        if (!session.workerId) {
+          return textResult(
+            `Session "${id}" is not bound to a worker, so there is no continuity sequence to write a handoff to. ` +
+              'End it without one, or bind a worker next time.',
+          );
+        }
+        const mcpCtx: Context = {
+          db,
+          clientId: auth.clientId ?? undefined,
+          userId: auth.userId ?? undefined,
+          appId: auth.appId ?? undefined,
+          sessionId: auth.sessionId ?? undefined,
+          roles: auth.roles as Context['roles'],
+          organizationId: auth.organizationId ?? undefined,
+        };
+        try {
+          await writeSessionHandoff(mcpCtx, session.id, session.workerId, handoffBody);
+        } catch (e) {
+          return textResult(
+            `The handoff could not be written, so the session is STILL OPEN and was not ended — retry, or end without a handoff. ` +
+              `Cause: ${e instanceof Error ? e.message : 'unknown'}`,
+          );
+        }
+      }
+
+      // FIRST END WINS, through the SHARED writer the GraphQL resolver uses
+      // (#1050, hardened by PR #1055 review). Two reasons it is shared rather
+      // than reimplemented here: this tool having its own raw update is exactly
+      // how the guard ended up on one surface last time, and the decision
+      // cannot be made from the row read above — the reaper claims sessions
+      // with its own atomic update, so between that read and this write a
+      // session can go from live to reaped. Deciding from the stale read would
+      // report a clean end for a session the server had already expired AND
+      // overwrite the reaper's endedAt while leaving autoExpiredAt set.
+      const closed = await endSessionFirstWins(db as unknown as Context['db'], id, {
+        summary: summary ?? null,
+        inputTokens: inputTokens ?? null,
+        outputTokens: outputTokens ?? null,
+        turnCount: turnCount ?? null,
+        errorCount: errorCount ?? null,
       });
 
-      return textResult(`Session ended: ${id}`);
+      // #1053: an ALREADY-ended session must not read as a fresh close —
+      // otherwise the receipt is a second false liveness signal, in the tool
+      // the guidance names as the loud one.
+      return textResult(
+        (!closed.endedByThisCall
+          ? `Session ${id} had ALREADY ended${closed.endedAt ? ` at ${closed.endedAt.toISOString()}` : ''}` +
+            (closed.autoExpiredAt
+              ? ' (auto-expired by the server, so nobody closed it deliberately).'
+              : ' (closed deliberately).') +
+            ' Metrics were updated; the original end time stands. You were not bound when you' +
+            ' made this call — hadron_whoami lists what you are actually driving.'
+          : // #1034: name the KIND of session that just ended. This receipt is
+            // the last thing a driver reads before closing the window, and the
+            // failure it is placed against is the reverse order — closing the
+            // window and assuming this happened.
+            `${session.workerId ? 'Worker session' : 'Session'} ended: ${id}`) +
+          (handoffBody
+            ? '\nHandoff written — the next worker session bound to this worker receives it automatically.'
+            : session.workerId && closed.endedByThisCall
+              ? // #1100: a worker-bound end with `summary` set and `handoff`
+                // absent is almost certainly the mistake this receipt exists to
+                // catch — the caller wrote a closing note into a field no
+                // continuity path reads.
+                //
+                // Said HERE because it is the last moment the prose still
+                // EXISTS. This stint can no longer take a handoff (the sequence
+                // is append-only and the session has ended, so re-ending is
+                // refused — pinned by a test), but the caller can still bind
+                // again and end THAT session with it. Once the context goes,
+                // nothing can reconstruct it.
+                //
+                // My first draft of this told the caller to re-end the same
+                // session; the test written to pin that advice is what proved
+                // it refused (PR #1135). A remedy in a message is a promise —
+                // it needs a test like any other.
+                //
+                // Distinguished from an ordinary no-handoff end, which is a
+                // legitimate choice and keeps its quieter wording.
+                summary?.trim()
+                ? '\n⚠ No handoff written, but a `summary` was supplied — and `summary` is display-only.' +
+                  '\n  The next driver of this worker will receive NOTHING.' +
+                  '\n  This stint can no longer take one: the handoff sequence is append-only and this' +
+                  '\n  session has ended, so re-ending it is refused. If that prose was meant for whoever' +
+                  '\n  comes next, bind the worker again and end THAT session with `handoff` — while you' +
+                  '\n  still have the prose. See #1100.'
+                : '\n(No handoff written. The next driver will be told this stint ended without one.)'
+              : ''),
+      );
+    },
+  );
+
+  // ── hadron_whoami ─────────────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_whoami',
+    'Answer "what am I driving right now?" — your own OPEN sessions, each with its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The loss is worst where it is quietest — hadron_team_chat_post takes the session as an OPTIONAL argument, so omitting it posts as the human instead of the worker, silently, with no error and the wrong authorship recorded. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    {
+      limit: z.number().int().optional().describe('Max sessions to return (default 10, cap 50). Newest first.'),
+      includeEnded: z.boolean().optional().describe('Also list recently ENDED sessions — useful to confirm you did end one, or to find the session a work record should have been attributed to.'),
+    },
+    async ({ limit, includeEnded }) => {
+      // Scoped by IDENTITY, deliberately narrower than the GraphQL `sessions`
+      // query's `sessionScopeFilter` — which also admits any org member, and so
+      // answers "sessions I may READ" rather than "sessions I am DRIVING". The
+      // question here is the latter, and the answer must not turn into a roster
+      // of colleagues' activity. Two principal shapes have an honest answer:
+      //
+      //   - a USER caller owns the sessions attributed to them (`userId`), which
+      //     is the same self branch sessionScopeFilter and hadron_end_session's
+      //     write gate use; and
+      //   - a PURE App-key caller (no userId) owns its App's sessions — again
+      //     exactly what hadron_end_session already lets it end.
+      //
+      // A hybrid user+App-selection principal is judged on the USER, never the
+      // selection: an active-App choice must not turn co-members' sessions into
+      // "mine" (the #932 Codex P1 rule that hadron_end_session encodes).
+      //
+      // Impersonation is a read-only support view of someone else's work, so
+      // "what am I driving" has no meaning there — and answering with the
+      // target's sessions would hand a support session the ids needed to post
+      // as their workers. Refused outright. Belt and braces: /mcp already
+      // rejects an impersonation JWT at session init, so this is unreachable
+      // today — it is here so the identity scoping stays self-sufficient rather
+      // than depending on a gate two layers up (the #876 sweep's lesson:
+      // ctx.userId = target fails OPEN against identity-keyed predicates, and
+      // `{ userId: auth.userId }` below is exactly such a predicate).
+      if (auth.impersonation) {
+        return textResult(
+          'Not available in an impersonation session — this answers what YOU are driving, and a support view drives nothing.',
+        );
+      }
+      const scope = auth.userId
+        ? { userId: auth.userId }
+        : auth.appId
+          ? { appId: auth.appId, userId: null }
+          : null;
+      if (!scope) return textResult('Not authenticated — no sessions to report.');
+
+      // createTestableMcpServer bypasses zod — normalize defensively (a NaN
+      // would reach Prisma's `take` as a raw driver error rather than a clamp).
+      const take = Math.max(1, Math.min(typeof limit === 'number' && Number.isFinite(limit) ? limit : 10, 50));
+      const sessions = await db.session.findMany({
+        where: {
+          ...scope,
+          deletedAt: null,
+          // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
+          // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
+          // together precisely so this stays a single test).
+          ...(includeEnded ? {} : { endedAt: null }),
+        },
+        orderBy: { startedAt: 'desc' },
+        take,
+        select: {
+          id: true, startedAt: true, endedAt: true, type: true, plan: true,
+          appId: true, workerId: true,
+        },
+      });
+      if (sessions.length === 0) {
+        return textResult(
+          includeEnded
+            ? 'You have no sessions. Start one with hadron_start_session(workerRef: "<name>") to work as a teammate.'
+            : 'You have no open sessions. Start one with hadron_start_session(workerRef: "<name>"); pass includeEnded to see recent ended ones.',
+        );
+      }
+
+      // Resolve each distinct worker and App ONCE — a caller with several open
+      // sessions on one App would otherwise repeat identical lookups.
+      const workerRows = new Map(
+        (
+          await db.worker.findMany({
+            where: { id: { in: [...new Set(sessions.map((s) => s.workerId).filter((w): w is string => !!w))] } },
+            select: { id: true, name: true, slug: true, role: true, appId: true },
+          })
+        ).map((w) => [w.id, w]),
+      );
+      const appRows = new Map(
+        (
+          await db.app.findMany({
+            where: { id: { in: [...new Set(sessions.map((s) => s.appId).filter((a): a is string => !!a))] } },
+            select: { id: true, name: true, urn: true },
+          })
+        ).map((a) => [a.id, a]),
+      );
+
+      const lines = sessions.map((s) => {
+        const worker = s.workerId ? workerRows.get(s.workerId) : null;
+        const app = s.appId ? appRows.get(s.appId) : null;
+        let urn: string | null = null;
+        if (worker && app) {
+          try {
+            urn = composeWorkerUrn(normalizeUrnForLookup(app.urn), worker.slug);
+          } catch {
+            // An App URN the fixed arity can't take degrades to no URN rather
+            // than failing the whole read (the Worker.urn field resolver's rule).
+            urn = null;
+          }
+        }
+        // #1026 — from the URN just composed, so this row's link and its
+        // identifier cannot disagree.
+        const url = workerPortalUrl(urn);
+        return (
+          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}\n` +
+          // The un-bound case is the one worth calling out: it is the shape in
+          // which a team-chat post silently lands under the human's name.
+          (worker
+            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''}${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
+            : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
+          (app ? `    app: ${app.name}\n` : '') +
+          `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
+          (s.plan ? `\n    plan: ${s.plan}` : '')
+        );
+      });
+
+      return textResult(
+        `${sessions.length} session(s):\n${lines.join('\n')}\n\n` +
+          // #1034: "session id" stays GENERAL here, because this list includes
+          // unbound sessions whose own row says "working as: nobody" — calling
+          // every id a worker session id would contradict the line above it and
+          // invite a reader to infer a binding that does not exist. The
+          // worker-session fact below is scoped to the rows it is true of.
+          // #1034: every clause here is scoped to the rows it is TRUE of. This
+          // list deliberately includes unbound sessions, and team chat REFUSES
+          // one (SESSION_NOT_WORKER_BOUND) — so unconditional "post as the
+          // worker" advice contradicts the "working as: nobody" row directly
+          // above it, and promises a call that cannot succeed.
+          'Pass a row that is BOUND and still OPEN to hadron_team_chat_post to post AS that worker — an ' +
+          'unbound row is refused SESSION_NOT_WORKER_BOUND and an [ENDED] one SESSION_ENDED, neither ' +
+          'silently posted as you. Any session id works for ' +
+          'hadron_record_work and hadron_end_session. Re-fetch a worker\'s boot briefing with hadron_get_worker. ' +
+          'A bound row is a worker session, and it stays open — with its worker taken — until ' +
+          'hadron_end_session or the reaper, no matter what happened to the chat session that started it.',
+      );
+    },
+  );
+
+  // ── hadron_cast_worker ────────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_cast_worker',
+    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the personaPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
+    {
+      role: z.string().optional().describe('The role ("backend-engineer") — picks the installed agent by its personaRole when agent is omitted, and becomes the casting\'s role label. Not validated against defined roles: cast lists are ergonomics, never a gate (cor:agt:020:00).'),
+      name: z.string().optional().describe('The worker\'s name — REQUIRED in effect (#1050): omitting it refuses WORKER_NAME_REQUIRED rather than deriving one, because a name is permanent within the App. Optional in the schema only so that refusal carries its reason instead of arriving as a bare validation error.'),
+      agent: z.string().optional().describe('The agent to cast (Agent URN or ID) — must be installed in the App. Omit to resolve it from role.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+      promptOverride: z.string().optional().describe('Per-worker individuality layered over the agent\'s template prompt — appended to the bound template in the worker\'s resolved prompt.'),
+      session: z.string().optional().describe('Your session id — used to resolve which App to cast in when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
+    },
+    async ({ role, name, agent, app, promptOverride, session }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
+      // Delegate to the GraphQL resolver (findings:node-write-surface-
+      // invariants — MCP tools delegate, never re-implement). Auth semantics
+      // live in the resolver's gate: a hybrid user+selection principal is
+      // judged on the user's own rights, a pure App-key principal is denied.
+      //
+      // App default (Codex review): requireAppScope() must run BEFORE reading
+      // auth.appId — for OAuth callers it is what copies the session's
+      // hadron_set_active_app selection into auth.appId.
+      let appRef = app;
+      if (!appRef) {
+        // #1009: same session-as-App-hint recovery as the team tools.
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      try {
+        const ctx = {
+          db,
+          clientId: auth.clientId ?? undefined,
+          userId: auth.userId ?? undefined,
+          appId: auth.appId ?? undefined,
+          sessionId: auth.sessionId ?? undefined,
+          roles: auth.roles as Context['roles'],
+          organizationId: auth.organizationId ?? undefined,
+        };
+        const worker = await resolvers.Mutation.castWorker(
+          {},
+          { appRef, role: role ?? null, agentRef: agent ?? null, name: name ?? null, promptOverride: promptOverride ?? null },
+          ctx,
+        );
+        const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
+        // #991: emit the URN alongside the id. It is the ref a human can read
+        // back later — the cast is a one-time mint, and before the URN existed
+        // an MCP-only client that did not record the cuid had no way back to
+        // the worker (hadron-cli#443).
+        const workerUrn = (await resolvers.Worker.urn(worker, {}, ctx)) as string | null;
+        // #1026: the cast is a one-time mint whose receipt is the record a
+        // human keeps, so the link ships with the URN it is built from.
+        const workerUrl = workerPortalUrl(workerUrn);
+        return textResult(
+          `Worker cast: **${worker.name}**${worker.role ? ` (${worker.role})` : ''}\n` +
+            `Worker id: ${worker.id}\n` +
+            (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
+            (workerUrl ? `URL: ${workerUrl}\n` : '') +
+            `\nBoot briefing:\n\n${prompt ?? ''}`,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'worker casting failed'}`);
+      }
+    },
+  );
+
+  // ── hadron_team_chat_post / hadron_team_chat_read ─────────────────────────────
+
+  server.tool(
+    'hadron_team_chat_post',
+    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must belong to this App and not be retired); omit it to post as yourself. Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
+    {
+      body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
+      replyToSeq: z.number().int().optional().describe('seq of the message this replies to (a replies-to edge is wired).'),
+      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ body, replyToSeq, session, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
+      // Delegate to the GraphQL resolver (findings:node-write-surface-
+      // invariants — MCP tools delegate, never re-implement). App default
+      // mirrors hadron_cast_worker: requireAppScope() runs BEFORE reading
+      // auth.appId so the omit-app flow honors hadron_set_active_app.
+      let appRef = app;
+      if (!appRef) {
+        // #1005: the session names its App — recover scope from it before
+        // declaring the caller's App set ambiguous.
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      try {
+        const msg = await resolvers.Mutation.createTeamChatMessage(
+          {},
+          { appRef, body, replyToSeq: replyToSeq ?? null, sessionRef: session ?? null },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
+        const extras: string[] = [];
+        if (msg.mentions.length > 0) extras.push(`mentions: ${msg.mentions.map((m: string) => `@${m}`).join(', ')}`);
+        if (msg.replyToSeq != null) extras.push(`in reply to #${msg.replyToSeq}`);
+        // #1037: the receipt NAMES the team it posted into. With a session
+        // passed, the App is unambiguous and a mismatch refuses — but posting
+        // as yourself names no App at all, so the ambient selection decides and
+        // nothing tells you which team heard you. The old receipt printed the
+        // author and the seq, the two things never in doubt, and read as
+        // confirmation whichever team it reached. This is hadron-cli#470's
+        // answer on the surface that has no worktree to warn from: put the
+        // resolved scope in the reader's path rather than add a check.
+        // Resolved through the SHARED ref helper, not a hand-rolled column
+        // match (PR #1049 review, Copilot): `app` accepts every ref form, and
+        // `App.urn` stores the BARE `<root>:<slug>` — so an explicit
+        // `hrn:app:…` matched neither column and the receipt silently dropped
+        // the team name in exactly the case where the caller named an App by
+        // hand. Best-effort: a receipt decorating a post that already succeeded
+        // must never turn it into an error.
+        const postedTo = await resolveAppRef(db, appRef)
+          .then(({ id }: { id: string }) => db.app.findUnique({ where: { id }, select: { urn: true, name: true } }))
+          .catch(() => null);
+        const where = postedTo ? ` in ${postedTo.urn}${postedTo.name ? ` — ${postedTo.name}` : ''}` : '';
+        return textResult(
+          `Posted team-chat message #${msg.seq}${where} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_team_chat_read',
+    'Read the team App\'s chat (#939), oldest first by seq. Pass sinceSeq to fetch only messages AFTER a watermark (strictly greater — pass the last seq you have seen). Pass beforeSeq to page BACKWARD (#1116): only messages with seq strictly LESS are considered and the NEWEST page of those comes back — the messages immediately before the cursor, still oldest-first. That is the stable way to walk back through history; offset is a position in a list other people are appending to, so it skips or repeats under a chat being posted to. offset is IGNORED when beforeSeq is given. Pass mentions (a worker name or id, or a user handle/id) to filter to messages that mention them. Returns seq, author, timestamp, and body per message plus the total count.',
+    {
+      sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
+      beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
+      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+      session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
+      let appRef = app;
+      if (!appRef) {
+        // #1005: this read is the one App-scoped team tool that took NEITHER an
+        // app nor a session, so it had no way to answer "which App?" other than
+        // the in-process selection — which is exactly why it was the call that
+        // failed first when that selection evaporated. `session` is accepted
+        // here purely as an App-resolution hint (the read itself is unchanged
+        // and is gated by team-App participation, not by the session).
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      try {
+        const page = await resolvers.Query.teamChatMessages(
+          {},
+          {
+            appRef,
+            sinceSeq: sinceSeq ?? null,
+            beforeSeq: beforeSeq ?? null,
+            mentionsRef: mentions ?? null,
+            limit: limit ?? null,
+            offset: offset ?? null,
+          },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
+        if (page.total === 0) return textResult('The team chat has no matching messages.');
+        const lines = page.items.map((m) => {
+          const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
+          return `#${m.seq} [${m.authorName ?? 'unknown'}] ${m.at.toISOString()}${reply}:\n${m.body}`;
+        });
+        return textResult(
+          `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`);
+      }
+    },
+  );
+
+  // ── hadron_list_workers ───────────────────────────────────────────────────────
+
+/**
+ * Compact relative age for the roster — "3d ago" (hadron-cli#487).
+ *
+ * Coarse on purpose: a coordinator is asking "has anyone touched this in a
+ * while?", and minute-precision on a two-week-old session invites a reader to
+ * treat it as presence. Rounds DOWN, so it never overstates recency.
+ */
+function ageOf(at: Date, now: Date = new Date()): string {
+  const mins = Math.floor((now.getTime() - at.getTime()) / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+  server.tool(
+    'hadron_list_workers',
+    'List the team App\'s workers — its named staff (#997). THE roster read: use it when you need to work as a teammate but do not know the names, since hadron_start_session\'s workerRef takes a name. Returns each worker\'s name, URN, role, WHO HOLDS IT, whether a session is live, and whether it is retired. #1050: a name is HELD by a person until released — a held name is not yours to take however idle it looks, and the remedy is to cast your own worker, never to end someone\'s session. An UNHELD worker is held by whoever binds it next. "session live" is a separate fact and only ever a question about your own worker. Retired workers are excluded unless includeRetired — their names stay reserved forever, so they explain a WORKER_NAME_TAKEN refusal.',
+    {
+      includeRetired: z.boolean().optional().describe('Include retired castings — historical staff whose names stay reserved.'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+      session: z.string().optional().describe('Your session id — used to resolve which team App to list when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ includeRetired, limit, offset, session, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
+      // App default mirrors hadron_cast_worker / hadron_record_work:
+      // requireAppScope() runs BEFORE reading auth.appId so the omit-app flow
+      // honors hadron_set_active_app.
+      let appRef = app;
+      if (!appRef) {
+        // #1009: the roster read is what an agent reaches for FIRST after
+        // losing its bearings, so it must be recoverable from a session too.
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        // Delegate to the GraphQL resolver (findings:node-write-surface-
+        // invariants — MCP tools delegate, never re-implement), so the staff
+        // read gate is literally the same code path GraphQL runs and cannot
+        // drift. No authorization logic lives here.
+        const page = await resolvers.Query.workers(
+          {},
+          { appRef, includeRetired: includeRetired ?? null, limit: limit ?? null, offset: offset ?? null },
+          ctx,
+        );
+        // An empty PAGE is not an empty ROSTER (PR #1000 review, Codex P2):
+        // `limit: 0` is the resolver's count-only mode, and an offset past the
+        // end also yields no items while `total` stays positive. Telling either
+        // caller to go cast a worker would be plainly wrong.
+        if (page.total === 0) {
+          return textResult(
+            includeRetired
+              ? 'This App has no workers. Cast one with hadron_cast_worker.'
+              : 'This App has no active workers. Cast one with hadron_cast_worker, or pass includeRetired to see retired castings.',
+          );
+        }
+        if (page.items.length === 0) {
+          return textResult(
+            `${page.total} worker(s) in this App, none on this page — offset ${offset ?? 0}` +
+              `${limit === 0 ? ' with limit 0 (count only)' : ''}.`,
+          );
+        }
+        // "Taken right now" + "last driven", in ONE load for the whole page
+        // rather than per worker: cor:agt:020:03 derives liveness from active
+        // sessions, and this is the same signal hadron_start_session refuses
+        // WORKER_TAKEN on. It names only THAT a worker is taken, never who is
+        // driving it — the driver's identity stays behind the takeover refusal,
+        // which is a deliberate act rather than a listing.
+        //
+        // Shared with `Worker.hasLiveSession` / `Worker.lastActiveAt` since
+        // hadron-cli#487 (`loadAppWorkerActivity`), rather than the copy of the
+        // predicate that used to live here. Two roster surfaces reading the
+        // same fact must not be able to disagree about it, and the MCP roster
+        // and the GraphQL one are read by the same coordinator minutes apart.
+        const activity = await loadAppWorkerActivity(ctx, page.items[0].appId);
+        // The App's URN once for the PAGE, not once per worker (PR #1000
+        // review, Copilot): every worker here belongs to the SAME App, so
+        // calling the `Worker.urn` field resolver per item repeated one
+        // identical App lookup up to the 200-item page cap — concurrently,
+        // which is how you saturate a pool. Composed from the shared value with
+        // the same helper the field resolver uses, so the spelling cannot
+        // drift; an App URN the fixed arity can't take degrades to no URN
+        // rather than throwing, exactly as the field resolver does.
+        const rosterApp = await db.app.findUnique({
+          where: { id: page.items[0].appId },
+          select: { urn: true },
+        });
+        const workerUrn = (slug: string): string | null => {
+          if (!rosterApp) return null;
+          try {
+            return composeWorkerUrn(normalizeUrnForLookup(rosterApp.urn), slug);
+          } catch {
+            return null;
+          }
+        };
+
+        // The role AGENT's name, resolved ONCE PER DISTINCT AGENT rather than
+        // per worker (a team commonly casts several workers onto one role
+        // agent). Goes through the `Worker.agent` field resolver, which applies
+        // the Agent's OWN read gate and masks to null on deny — the Worker read
+        // gate is wider than the Agent's, and #552 is precisely about not
+        // letting the wider gate hand out the narrower entity. Only the NAME is
+        // projected; the Agent object never reaches the caller.
+        // Holder display names for the whole PAGE in one query, same reasoning
+        // as the App URN above. Only a NAME is projected — the roster shows
+        // whose a name is, never anything else about them.
+        const holderIds = [
+          ...new Set(
+            page.items
+              .map((w: { heldByUserId: string | null }) => w.heldByUserId)
+              .filter((id: string | null): id is string => !!id),
+          ),
+        ];
+        const holders = new Map<string, string>();
+        if (holderIds.length > 0) {
+          for (const u of await db.user.findMany({
+            where: { id: { in: holderIds } },
+            select: { id: true, handle: true, githubUsername: true },
+          })) {
+            holders.set(u.id, u.handle ?? u.githubUsername ?? u.id);
+          }
+        }
+        const holderName = (id: string): string => holders.get(id) ?? id;
+
+        const agentNames = new Map<string, Promise<string | null>>();
+        const agentNameFor = (agentId: string): Promise<string | null> => {
+          let pending = agentNames.get(agentId);
+          if (!pending) {
+            pending = (async () => {
+              const agent = await resolvers.Worker.agent({ agentId } as never, {}, ctx);
+              return (agent as { name?: string } | null)?.name ?? null;
+            })();
+            agentNames.set(agentId, pending);
+          }
+          return pending;
+        };
+
+        const lines = await Promise.all(
+          page.items.map(async (w: {
+            id: string; name: string; slug: string; role: string | null;
+            agentId: string; retiredAt: Date | null;
+            heldByUserId: string | null;
+          }) => {
+            const urn = workerUrn(w.slug);
+            const agentName = await agentNameFor(w.agentId);
+            // Retirement and liveness are INDEPENDENT (PR #1000 review,
+            // Copilot): `retireWorker` only stamps `retiredAt`, so a retired
+            // worker can still hold an unended session, and collapsing the two
+            // into one ternary dropped the taken/free state that
+            // `includeRetired` promises.
+            // #1050 — HELD and TAKEN are different facts and the roster must
+            // not blur them, which is the whole of hadron-cli#487. HELD says
+            // whose name it is and is what decides whether you may bind;
+            // taken/free says whether a session is live right now, which is
+            // only ever a question about your OWN worker. Held-by-someone-else
+            // reads as unavailable regardless of liveness — that is the point:
+            // an idle held worker is not up for adjudication.
+            const flags: string[] = [];
+            if (w.retiredAt) flags.push('RETIRED');
+            if (w.heldByUserId && w.heldByUserId !== auth.userId) {
+              flags.push(`held by ${holderName(w.heldByUserId)}`);
+            } else if (w.heldByUserId) {
+              flags.push('held by YOU');
+            } else {
+              flags.push('unheld — binding it holds it');
+            }
+            const act = activity.get(w.id);
+            flags.push(act?.hasLiveSession ? 'session live' : 'no live session');
+            // hadron-cli#487: "cast but never driven" is the state a
+            // coordinator most needs and no surface showed — ten issues went to
+            // a worker whose whole history was two sessions under three
+            // minutes, rendered exactly like one worked yesterday.
+            //
+            // The AGE matters as much as the never-case, and omitting it was
+            // the same defect one step in (PR #1086 review, Codex P2): a worker
+            // last driven in March and one driven an hour ago both read "no
+            // live session", while the timestamp sat computed and unrendered.
+            // Rendered only when there is no live session — during one, "live"
+            // is the answer and an age beside it invites reading the age as
+            // presence, which is #1034's confusion in a new place.
+            if (!act?.lastActiveAt) flags.push('never driven');
+            else if (!act.hasLiveSession) flags.push(`last driven ${ageOf(act.lastActiveAt)}`);
+            // #1026 — built from the SAME page-shared URN above, so the roster
+            // costs no extra lookup per worker (the PR #1000 rule that pulled
+            // the App URN out of the per-item path in the first place).
+            const url = workerPortalUrl(urn);
+            return (
+              `- ${w.name}${w.role ? ` (${w.role})` : ''} — ${flags.join(', ')}` +
+              (agentName ? `\n    agent: ${agentName}` : '') +
+              (urn ? `\n    ${urn}` : '') +
+              (url ? `\n    URL: ${url}` : '')
+            );
+          }),
+        );
+        return textResult(
+          `${page.items.length} of ${page.total} worker(s):\n${lines.join('\n')}\n\n` +
+            'Work as one with hadron_start_session(workerRef: "<name>") — it returns that worker\'s boot briefing.',
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'listing workers failed'}`);
+      }
+    },
+  );
+
+  // ── hadron_get_worker ─────────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_get_worker',
+    'Read ONE worker, including its resolved BOOT BRIEFING (#1015). THE recovery read: hadron_start_session returns the briefing once, at bind time, and the briefing must never be cached — so an agent whose context was compacted has no copy and no legitimate way back to it. This is that way. It reserves nothing and mints nothing, so recovering costs neither a second session nor a force-takeover of yourself (both of which corrupt the provenance record the Worker model exists to produce). workerRef takes the same three forms as hadron_start_session — the worker\'s NAME ("Iris"), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id; an id or URN names its own App, a bare NAME needs one selected (or passed as app/session). Re-read this whenever you are unsure you are still working as the worker you bound.',
+    {
+      workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
+    },
+    async ({ workerRef, app, session }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
+      // createTestableMcpServer bypasses zod — normalize defensively so the
+      // test surface and production agree on malformed input.
+      const trimmed = typeof workerRef === 'string' ? workerRef.trim() : '';
+      if (trimmed === '') return textResult('Pass workerRef — a worker name, URN, or id.');
+
+      // The NAME form is the only one that needs App context — a name is unique
+      // only WITHIN an App (#990), while an id or URN names exactly one worker
+      // and therefore exactly one App. Same shape test, and the same reasoning,
+      // as hadron_start_session's #1005 branch: demanding a prior
+      // hadron_set_active_app for a self-describing ref asks the caller to
+      // state what the argument already settles.
+      const refNamesItsApp = isId(trimmed) || hasSchemePrefix(trimmed);
+
+      let appRef = app;
+      if (!refNamesItsApp && !appRef) {
+        // #1016's other half: the session is the durable anchor that survives a
+        // transparent MCP reconnect, so try it before declaring the caller's
+        // App set ambiguous.
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult(
+            `"${trimmed}" is a worker name, which is only unique within an App — pass app, pass your session, or select one with hadron_set_active_app. A worker id or URN needs none of that.`,
+          );
+        }
+      }
+
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        // Delegate to the GraphQL resolver (findings:node-write-surface-
+        // invariants — MCP tools delegate, never re-implement): the staff read
+        // gate, the name-form gate ordering, and the WORKER_NOT_FOUND collapse
+        // are all literally the code GraphQL runs. No authorization here.
+        const worker = await resolvers.Query.worker(
+          {},
+          { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
+          ctx,
+        );
+        if (!worker) return textResult(`Worker not found: ${workerRef}`);
+
+        // Resolved through the SAME field resolvers GraphQL serves, so this
+        // surface and the briefing hadron_start_session prints cannot drift —
+        // and `prompt` self-guards behind the worker read gate, so routing
+        // through it cannot widen access. Rendering live is the whole point:
+        // a copied briefing goes stale silently the moment a role agent's
+        // template changes, which is why the contract forbids caching it.
+        const [prompt, workerUrn, agent, override, continuity] = await Promise.all([
+          resolvers.Worker.prompt(worker, {}, ctx),
+          resolvers.Worker.urn(worker, {}, ctx),
+          resolvers.Worker.agent(worker, {}, ctx),
+          // The RAW override, separate from the composed briefing (PR #1019
+          // review, Codex P2). hadron_update_worker REPLACES the override, so a
+          // caller extending one needs the override alone; handing back only
+          // the composed text would have it paste template+override into the
+          // override field, after which rendering prepends the template again —
+          // and every subsequent edit compounds the duplication. Same gated
+          // field resolver GraphQL serves, so it masks to null on deny.
+          resolvers.Worker.promptOverride(worker, {}, ctx),
+          // #1029: this tool IS the post-compaction recovery read, so it must
+          // carry the handoff for the same reason the bind does — an agent that
+          // lost its context lost the handoff with it, and is the least likely
+          // reader to know one exists.
+          resolvers.Worker.continuity(worker, {}, ctx),
+        ]);
+        const agentName = (agent as { name?: string } | null)?.name ?? null;
+        const readUrl = workerPortalUrl(workerUrn as string | null);
+
+        // Liveness is derived from real rows, never a lease (cor:agt:020:03) —
+        // the same predicate hadron_start_session refuses WORKER_TAKEN on, and
+        // hadron_list_workers reports. It answers "is someone driving this?",
+        // which is what an agent unsure of its own state needs to see.
+        //
+        // #1114/#1120 review (Codex P2): that parity claim was TRUE of the
+        // comment and FALSE of the code the moment liveness stopped being
+        // `endedAt IS NULL`. An open-but-stale session would have read as
+        // "driving" here while the roster said idle and a bind succeeded —
+        // three surfaces, two answers, which is precisely what cor:agt:020:11
+        // exists to forbid. The predicate is the shared one now.
+        const nowHere0 = new Date();
+        const openHere = await db.session.findMany({
+          // The SAME bound as the bind path, filter AND cap (#1120 review,
+          // Codex P2 — second round). The first fix here took the cap without
+          // the filter, which is the mistake the filter exists to prevent:
+          // `startedAt: desc` is not liveness, so past the cap an OLDER
+          // session with a recent heartbeat is dropped before isSessionLive
+          // is asked — and this read then says `free` while the roster and
+          // the binder both say taken. The cap orders a set the filter has
+          // already made small; alone it silently decides the answer.
+          where: {
+            workerId: worker.id, endedAt: null, deletedAt: null,
+            ...recentlyTouchedFilter(nowHere0),
+          },
+          // Heartbeat order, matching the bind path — the cap keeps a prefix,
+          // so what it is ordered by decides what survives it (#1120 review).
+          orderBy: [
+            { updatedAt: { sort: 'desc' as const, nulls: 'last' as const } },
+            { startedAt: 'desc' as const },
+          ],
+          select: {
+            id: true, userId: true, startedAt: true,
+            type: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+          },
+          take: OPEN_SESSION_SCAN_CAP,
+        });
+        const eventsHere = await loadLastEventBySession(db as never, openHere.map((r) => r.id));
+        const nowHere = nowHere0;
+        const liveHere = openHere.filter((r) => isSessionLive(r, eventsHere.get(r.id), nowHere));
+        // TWO QUESTIONS, TWO QUERIES (#1120 review, Codex P2, twice).
+        //
+        // "Is anyone driving this" is about ANY live row and tolerates a cap:
+        // one live session is as good as another for a taken flag. "What is MY
+        // session id" tolerates neither a cap nor an ordering, because there is
+        // exactly one right answer and losing it defeats the whole read — this
+        // is the post-compaction recovery path.
+        //
+        // Selecting `mine` out of the capped set was two fixes deep and still
+        // wrong: first it depended on the first row, then on surviving the
+        // shared cap. Scoping the query to the caller's own sessions is what
+        // actually makes the guarantee independent — and it is naturally
+        // bounded, since it is one person's sessions on one worker.
+        const driving = liveHere[0] ?? null;
+        const myRows = auth.userId
+          ? await db.session.findMany({
+              where: {
+                workerId: worker.id, endedAt: null, deletedAt: null,
+                userId: auth.userId,
+                ...recentlyTouchedFilter(nowHere0),
+              },
+              orderBy: [
+                { updatedAt: { sort: 'desc' as const, nulls: 'last' as const } },
+                { startedAt: 'desc' as const },
+              ],
+              take: OPEN_SESSION_SCAN_CAP,
+              select: {
+                id: true, userId: true, startedAt: true,
+                type: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+              },
+            })
+          : [];
+        const myEvents = await loadLastEventBySession(db as never, myRows.map((r) => r.id));
+        const mine = myRows.find((r) => isSessionLive(r, myEvents.get(r.id), nowHere)) ?? null;
+
+        const flags: string[] = [];
+        if (worker.retiredAt) flags.push('RETIRED');
+        flags.push(driving ? 'taken' : 'free');
+
+        return textResult(
+          `**${worker.name}**${worker.role ? ` (${worker.role})` : ''} — ${flags.join(', ')}\n` +
+            `Worker id: ${worker.id}\n` +
+            (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
+            // #1026: THE recovery read is also the read a worker comes to for
+            // its own identity line, so the link ships beside the URN rather
+            // than being assembled from it.
+            (readUrl ? `URL: ${readUrl}\n` : '') +
+            (agentName ? `Role agent: ${agentName}\n` : '') +
+            // Only the caller's OWN driving session is named. Whose session it
+            // is otherwise stays behind the takeover refusal, which is a
+            // deliberate act rather than a listing (hadron_list_workers' rule).
+            (mine
+              ? `Your active session: ${mine.id} (since ${mine.startedAt.toISOString()})\n`
+              : '') +
+            // Shown separately from the briefing, and labelled as the editable
+            // part, so hadron_update_worker's replace semantics have something
+            // correct to be given back.
+            (override
+              ? `\nPrompt override (the editable part — pass THIS text, amended, to hadron_update_worker; the briefing below is it composed with the shared template):\n\n${override}\n`
+              : '') +
+            (prompt
+              ? `\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
+              : '\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)') +
+            renderWorkerContinuity(continuity as RenderableContinuity | null),
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`);
+      }
+    },
+  );
+
+  // ── hadron_update_worker ──────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_update_worker',
+    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read the worker with hadron_get_worker and amend the text under 'Prompt override', NOT the composed boot briefing below it (pasting the briefing back would fold the shared template into the override, and it would then be prepended again on every render). Omit it to change nothing; pass an empty string to clear it. Everything else about a casting is immutable: the name is permanent, and a different role is a different casting. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
+    {
+      workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN, or its id.'),
+      // Optional, matching the description's "omit it to change nothing" and
+      // the GraphQL mutation's omitted-preserves convention (PR #1019 review,
+      // Copilot). It was REQUIRED while the description promised omission
+      // worked, so a model that read the contract and followed it hit a hard
+      // schema-validation error — the one failure mode worse than the tool not
+      // offering the option at all.
+      promptOverride: z.string().optional().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it; omit it to leave the override untouched."),
+      app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
+      session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
+    },
+    async ({ workerRef, promptOverride, app, session }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
+      // Name-vs-self-describing ref handling, identical to hadron_get_worker.
+      // The MUTATION takes a worker id, so a name is resolved to one FIRST
+      // through the read surface — which applies the staff READ gate; the
+      // staffing gate that authorizes the edit itself then runs in the
+      // resolver, on the resolved row. Neither stands in for the other.
+      const trimmed = typeof workerRef === 'string' ? workerRef.trim() : '';
+      if (trimmed === '') return textResult('Pass workerRef — a worker name, URN, or id.');
+      const refNamesItsApp = isId(trimmed) || hasSchemePrefix(trimmed);
+
+      let appRef = app;
+      if (!refNamesItsApp && !appRef) {
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult(
+            `"${trimmed}" is a worker name, which is only unique within an App — pass app, pass your session, or select one with hadron_set_active_app.`,
+          );
+        }
+      }
+
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        const target = await resolvers.Query.worker(
+          {},
+          { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
+          ctx,
+        );
+        if (!target) return textResult(`Worker not found: ${workerRef}`);
+
+        // Forward the key ONLY when the caller supplied it (PR #1019 review,
+        // Copilot): the resolver distinguishes omitted-preserves from
+        // null-clears by PRESENCE, so passing `promptOverride: undefined`
+        // unconditionally would land in the clear branch and silently wipe the
+        // override of every caller who omitted it. Making the zod arg optional
+        // without this would have converted a loud validation error into a
+        // silent data loss — strictly worse.
+        const mutationArgs: { workerRef: string; promptOverride?: string } = {
+          workerRef: target.id,
+        };
+        const changing = promptOverride !== undefined;
+        if (changing) mutationArgs.promptOverride = promptOverride;
+
+        const worker = await resolvers.Mutation.updateWorker({}, mutationArgs, ctx);
+        // Echo the RESOLVED prompt, not the override alone: what the caller
+        // actually cares about is what the worker will be told at its next
+        // bind, and that is the template plus the override, composed.
+        const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
+        return textResult(
+          (changing ? `Updated **${worker.name}**.\n` : `**${worker.name}** — no change requested (promptOverride omitted).\n`) +
+            (worker.promptOverride
+              ? `\nPrompt override${changing ? ' now' : ''}:\n\n${worker.promptOverride}\n`
+              : changing
+                ? '\nPrompt override cleared.\n'
+                : '\nThis worker has no prompt override.\n') +
+            (prompt
+              ? `\nResolved boot briefing (what ${worker.name} receives at its next bind):\n\n${prompt}`
+              : ''),
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'updating the worker failed'}`);
+      }
+    },
+  );
+
+  // ── hadron_record_work / hadron_team_work_items ───────────────────────────────
+
+  server.tool(
+    'hadron_record_work',
+    'Record an externally visible work milestone (a PR opened, a branch pushed, an issue closed) into the team App\'s worklog (#947) — the append-only, authoritative PR-session join. Pass the session doing the work; ref accepts a github URL or short form (owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) and is stored in ONE canonical spelling. A bare number is refused — include the repo. kind: pr also updates the session\'s displayed PR number. Correct a wrong record by recording a newer one (records are never edited).',
+    {
+      session: z.string().describe('The session id the work is attributed to (must be a session of the team App).'),
+      tool: z.string().describe('The external tool the artifact lives in, e.g. "github".'),
+      kind: z.string().describe('Artifact kind: pr | issue | commit | branch | repo.'),
+      ref: z.string().describe('The artifact ref — a github URL or short form; stored canonically (e.g. owner/repo#371).'),
+      action: z.string().describe('What happened: opened | merged | claimed | reviewed | closed | pushed | ... (free verb).'),
+      detail: z.record(z.string(), z.unknown()).optional().describe('Optional display extras (title, URL) — stored, never filtered on.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ session, tool, kind, ref, action, detail, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
+      // Delegate to the GraphQL resolver (findings:node-write-surface-
+      // invariants — MCP tools delegate, never re-implement). App default
+      // mirrors hadron_cast_worker: requireAppScope() runs BEFORE reading
+      // auth.appId so the omit-app flow honors hadron_set_active_app.
+      let appRef = app;
+      if (!appRef) {
+        // #1005: the session names its App (here it is REQUIRED), so scope is
+        // recoverable without a prior hadron_set_active_app.
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      try {
+        const item = await resolvers.Mutation.recordTeamWork(
+          {},
+          { appRef, sessionRef: session, tool, kind, ref, action, detail: detail ?? null },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
+        // #1053 — SAY when the session has already ended.
+        //
+        // Recording against an ended session is deliberate and durable law
+        // (cor:agt:020:05: "an ended session may be recorded against — late
+        // attribution is the worklog's point: a merge lands after the session
+        // ends"). The chat refuses the same session because speech needs a live
+        // speaker; the worklog is record-keeping. Both are right.
+        //
+        // What was wrong is that this tool said NOTHING. A worker whose binding
+        // had been reaped recorded two milestones, got two clean receipts, and
+        // would have finished the stint believing it was still bound — the only
+        // thing that revealed the loss was a chat post it happened to make
+        // afterwards. Worse, the guidance in every briefing named THIS tool as
+        // one that "at least fails loudly", so a successful receipt read as
+        // positive evidence the binding was alive.
+        //
+        // So the fix is the signal, not a refusal: keep the record, and put the
+        // state in the reader's path at the one moment they would otherwise be
+        // misled. Best-effort — a receipt must never turn a committed record
+        // into an error.
+        let endedNote = '';
+        try {
+          const s = await db.session.findUnique({
+            where: { id: item.sessionId },
+            select: { endedAt: true, autoExpiredAt: true },
+          });
+          if (s?.endedAt) {
+            endedNote =
+              `\n\n⚠ This session ALREADY ENDED at ${s.endedAt.toISOString()}` +
+              (s.autoExpiredAt
+                ? ' — it was auto-expired by the server, so nobody closed it deliberately.'
+                : ' — it was closed deliberately.') +
+              ' The record is kept, and further records against it will be too:' +
+              ' late attribution is what the worklog is for.' +
+              ' What you no longer have is a LIVE binding: the team chat will refuse to author' +
+              ' as this worker through it. Start a new session before doing more work as this' +
+              ' worker.' +
+              ' hadron_whoami lists what you are actually driving.';
+          }
+        } catch {
+          // Swallowed: the record is committed and the receipt is decoration.
+        }
+        return textResult(
+          `Recorded: ${item.kind} ${item.action} ${item.ref} — session ${item.sessionId} (${item.workerName}) at ${item.at.toISOString()}.` +
+            endedNote,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'work record failed'}`);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_team_work_items',
+    'Read the team App\'s worklog (#947) — the provenance query. Two directions: which sessions produced this PR/artifact (pass ref, in ANY accepted spelling — github URL, owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo — normalized before matching), and what has one WORKER done (pass worker, by name, id or URN — #1035; a retired worker still resolves, because retirement ends the casting, not the history). Newest first. Filter further by session, tool, or kind, and combine filters freely. Each item carries the sessionId; read the session for its transcript path.',
+    {
+      ref: z.string().optional().describe('The artifact to look up, in any accepted spelling (e.g. a PR URL or owner/repo#371).'),
+      session: z.string().optional().describe('Filter to records of this session id.'),
+      worker: z.string().optional().describe('Filter to ONE worker\'s records — its name ("Iris"), id, or URN. Everything that worker has done, across all of their sessions. A retired worker still resolves.'),
+      tool: z.string().optional().describe('Filter by tool (e.g. "github").'),
+      kind: z.string().optional().describe('Filter by kind: pr | issue | commit | branch | repo.'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+      app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+    },
+    async ({ ref, session, worker, tool, kind, limit, offset, app }) => {
+      // #1081 — the caller just drove this session, so it is alive. The
+      // touch is explicit here rather than a side effect of whichever tool
+      // happens to write the Session row (see heartbeatSession).
+      await heartbeatSession(session);
+      let appRef = app;
+      if (!appRef) {
+        // #1005: the optional session filter doubles as an App-resolution hint.
+        const scopedBySession = await adoptAppFromSession(session);
+        // #1037/PR #1051 review: a SELF-DESCRIBING worker ref names its own App
+        // too. Gated on whether the session ACTUALLY established scope, not on
+        // whether a session string was supplied (Codex P2): `adoptAppFromSession`
+        // deliberately does nothing for a stale session, or one belonging to a
+        // teammate, and the mere presence of the argument then suppressed the
+        // worker fallback — leaving a caller who may read this worklog with "no
+        // active App" while holding a ref that identifies the App unambiguously.
+        // A session that DID establish scope still wins: it is the caller's own
+        // binding and the more specific statement.
+        if (!scopedBySession) await adoptAppFromWorker(worker);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+        }
+      }
+      try {
+        const page = await resolvers.Query.teamWorkItems(
+          {},
+          {
+            appRef,
+            ref: ref ?? null,
+            sessionRef: session ?? null,
+            workerRef: worker ?? null,
+            tool: tool ?? null,
+            kind: kind ?? null,
+            limit: limit ?? null,
+            offset: offset ?? null,
+          },
+          {
+            db,
+            clientId: auth.clientId ?? undefined,
+            userId: auth.userId ?? undefined,
+            appId: auth.appId ?? undefined,
+            sessionId: auth.sessionId ?? undefined,
+            roles: auth.roles as Context['roles'],
+            organizationId: auth.organizationId ?? undefined,
+          },
+        );
+        if (page.total === 0) return textResult('No matching worklog records.');
+        const lines = page.items.map(
+          (i) =>
+            `${i.at.toISOString()} [${i.workerName}] ${i.kind} ${i.action} ${i.ref} (session ${i.sessionId})`,
+        );
+        return textResult(
+          `${page.total} record(s) total, showing ${page.items.length}:\n\n${lines.join('\n')}`,
+        );
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'worklog read failed'}`);
+      }
     },
   );
 
@@ -4731,6 +7072,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
       if (result.error) return textResult(`Sync failed: ${result.error}`);
+      // #1061 — one write per node the sync actually wrote. This tool is the
+      // ONE entry point to a git sync that has a principal to attribute to; the
+      // webhook and startup batch-loop callers deliberately drop `writtenNodes`
+      // on the floor, because an unattended sync is nobody's usage.
+      recordNodeUsage(db, 'write', result.writtenNodes ?? [], auth);
       return textResult(`Synced ${result.nodeCount ?? 0} nodes.`);
     },
   );
@@ -4754,7 +7100,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_chatbot_start',
-    'Start a new chat session with an agent. Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call hadron_chatbot_process with the result.',
+    'Start a new AGENT CHAT — a saved conversation with an agent (#1034: an agent chat, NOT a "chat session", which is reserved for the human\'s own conversation, and NOT the team chat). Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call hadron_chatbot_process with the result.',
     {
       agentId: z.string().describe('ID of the agent to chat with'),
       userId: z.string().optional().describe('User/persona identifier (e.g. "alex-chen"). Used to scope the per-user memory. If omitted, uses the authenticated user.'),
@@ -5414,6 +7760,47 @@ const transports = new Map<string, StreamableHTTPServerTransport>();
  * §Clarifications Q3; horizontal scale-out requires either sticky
  * sessions or persistent `McpSessionState` first.
  */
+/**
+ * #1009 — when this process last answered a stale `Mcp-Session-Id` with the
+ * recovery 404, or `null` if it never has.
+ *
+ * The reconnect that matters is a two-request exchange with nothing linking its
+ * halves: the stale call carries a session id we reject, and the client's
+ * re-`initialize` deliberately carries NO session header. The 404 is answered
+ * before auth is resolved (by design — learning "session not found" needs no
+ * credential), so there is no principal to correlate on either.
+ *
+ * So the correlation is at PROCESS level: if this server has recently had to
+ * tell someone their session is gone, it is serving clients that had sessions
+ * before — the post-restart state — and a session opened inside that window is
+ * very likely a revival.
+ *
+ * A HEURISTIC, and deliberately biased toward false POSITIVES: the cost of
+ * wrongly mentioning a reconnect is one extra sentence to a caller who had no
+ * selection to lose, while the cost of missing one is the original bug, where
+ * the agent concludes its client is broken. The reconnect note is worded to
+ * stay true under a false positive ("if you had selected…"), which is what
+ * makes that trade safe.
+ */
+let lastStaleSessionAt: number | null = null;
+
+/** How long after a stale-session 404 a new session still reads as a revival. */
+const RECONNECT_CORRELATION_WINDOW_MS = 5 * 60 * 1000;
+
+/** Whether a session opening right now plausibly replaces one this process lost. */
+function isLikelyReconnect(presentedStaleSessionId: string | undefined): boolean {
+  // A client that re-initialized while still sending its old session id is
+  // certain, not heuristic — a known session returned long before this point.
+  if (presentedStaleSessionId) return true;
+  if (lastStaleSessionAt === null) return false;
+  return Date.now() - lastStaleSessionAt <= RECONNECT_CORRELATION_WINDOW_MS;
+}
+
+/** Test seam: forget any observed stale-session 404 (see the heuristic above). */
+export function __resetReconnectCorrelationForTests(): void {
+  lastStaleSessionAt = null;
+}
+
 const activeAppByMcpSession = new Map<
   string,
   { appId: string; organizationId: string | null }
@@ -5454,6 +7841,15 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       ? body.some((m) => isInitializeRequest(m))
       : isInitializeRequest(body);
     if (!hasInitialize) {
+      // #1009 (PR #1011 review, Codex P1 + Copilot): remember that THIS PROCESS
+      // has just told a client its session is gone. A spec-compliant client
+      // reacts to this 404 by re-initializing WITHOUT a session header
+      // (server.session-revival.test.ts), so the next request carries nothing
+      // to correlate on — `Boolean(sessionId)` alone catches only the minority
+      // of clients that re-init while still sending the stale id, which would
+      // have left the primary post-restart path reporting a fresh connection.
+      // This timestamp is the only signal that survives the gap.
+      lastStaleSessionAt = Date.now();
       mcpLog('info', 'stale_mcp_session_404', { mcpSessionId: sessionId, method: req.method });
       res.status(404).json({
         jsonrpc: '2.0',
@@ -5533,11 +7929,17 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // safe — `auth` is local to handleMcpRequest and the closure inside
   // `createMcpServerInstance` reads the post-mutation state.
   let cachedAppResolution: AppResolution | null = null;
+  /** #1012 — did `auth.appId` come from the single-App default rather than a credential? */
+  let appIdFromSingleAppDefault = false;
   if (auth.userId && !auth.appId) {
     cachedAppResolution = await resolveAppForRequest(auth.userId, db);
     if (cachedAppResolution.kind === 'resolved') {
       auth.appId = cachedAppResolution.appId;
       auth.organizationId = cachedAppResolution.organizationId ?? undefined;
+      // #1012 (PR #1013 review, Codex P1): remember that this came from the
+      // regime-a DEFAULT, not from a credential — a stored explicit selection
+      // is allowed to override it below, but must never re-point an App key.
+      appIdFromSingleAppDefault = true;
     }
     if (cachedAppResolution.kind === 'multi-app') {
       mcpLog('warn', 'multi_app_session_opened_without_selection', {
@@ -5557,10 +7959,59 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       : () => randomUUID(),
   });
 
+  // #1009: is this session replacing one the client had already been using?
+  // Two shapes — a re-initialize still carrying the stale id (certain), or a
+  // headerless re-initialize shortly after this process 404'd someone's session
+  // (the spec-compliant path, correlated at process level). See
+  // `isLikelyReconnect`. Everything per-session was just reset underneath a
+  // client that will not mention it, so the tools need to be able to say so.
+  const isReconnect = isLikelyReconnect(sessionId);
+
+  // #1012: the client's stable instance id, if it opted in. Read here — at
+  // session construction — because that is the one moment a restore is useful:
+  // the selections must be in place before the first tool call, not after one
+  // has already been refused.
+  const clientKey = normalizeClientKey(req.headers[CLIENT_KEY_HEADER]);
+
+  // Restore this client's durable selections, re-authorized (see
+  // loadMcpSessionState — a stored selection is a cache of a choice, never a
+  // grant). Applied to `auth` before the server instance closes over it, so
+  // every downstream `if (!auth.appId)` sees the restored value with no
+  // per-tool plumbing — the same shape requireAppScope already relies on.
+  const restored = await loadMcpSessionState(db, auth, clientKey);
+  // Precedence, strongest first (PR #1013 review, Codex P1):
+  //
+  //   1. an App-KEY credential — App identity IS the credential and a stored
+  //      selection must never re-point it (`appIdFromSingleAppDefault` is false
+  //      there, and `loadMcpSessionState` returns nothing for a userId-less
+  //      principal anyway);
+  //   2. this client's EXPLICIT stored selection, re-authorized above;
+  //   3. the regime-a single-App default.
+  //
+  // 2 outranking 3 is the fix: a user who explicitly chose App A can later drop
+  // to exactly one AppMember row (say App B) while remaining a valid
+  // participant in A by org CONTRIBUTOR or ownership. `resolveAppForRequest`
+  // then resolves B as "their only App", and taking that over the choice they
+  // actually made would silently retarget the next App-scoped write. A stated
+  // preference outranks an inferred default whenever it still authorizes.
+  if (restored.appId && (!auth.appId || appIdFromSingleAppDefault)) {
+    const overrodeDefault = auth.appId !== undefined && auth.appId !== restored.appId;
+    auth.appId = restored.appId;
+    auth.organizationId = restored.organizationId ?? undefined;
+    mcpLog('info', 'mcp_session_state_restored', {
+      userId: auth.userId,
+      appId: restored.appId,
+      restoredMemory: Boolean(restored.memoryUrn),
+      overrodeSingleAppDefault: overrodeDefault,
+      reconnect: isReconnect,
+    });
+  }
+
   const mcpServer = createMcpServerInstance(
     auth,
     () => transport.sessionId,
     cachedAppResolution,
+    { isReconnect, clientKey, restoredMemoryUrn: restored.memoryUrn },
   );
 
   transport.onclose = () => {

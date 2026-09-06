@@ -105,6 +105,7 @@ async function updateNode(args: {
   abstract?: string | null;
   content?: string | null;
   name?: string;
+  abstractStillAccurate?: boolean;
 }) {
   const srv = createTestableMcpServer(adminAuth());
   const params: Record<string, unknown> = {
@@ -113,6 +114,9 @@ async function updateNode(args: {
   if ('abstract' in args) params.abstract = args.abstract;
   if ('content' in args) params.content = args.content;
   if (args.name !== undefined) params.name = args.name;
+  if (args.abstractStillAccurate !== undefined) {
+    params.abstractStillAccurate = args.abstractStillAccurate;
+  }
   return srv.callToolText('hadron_update_node', params);
 }
 
@@ -234,6 +238,292 @@ describe('hadron_update_node — abstractOriginHash 9-row matrix', () => {
 
 // ─── NodeRevision snapshots capture the hash ────────────────────────────
 
+// ─── #1126: abstractStillAccurate — the caller's assertion ───────────────────
+
+describe('hadron_update_node — abstractStillAccurate (#1126)', () => {
+  it('re-fingerprints the EXISTING abstract against the new content', async () => {
+    await addNode({ loc: 'asa1', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa1', content: "Y'", abstractStillAccurate: true });
+    const row = await readRow('asa1');
+    expect(row?.abstractOriginHash).toBe(computeContentHash("Y'"));
+    // It asserts, it does not author: the abstract text is untouched.
+    expect(row?.abstract).toBe('X');
+  });
+
+  it('clears the marker a reader would otherwise see — the observable claim', async () => {
+    // The column is the mechanism; this is the behaviour the flag exists for,
+    // and the one a refactor could break while the hash test still passed.
+    await addNode({ loc: 'asa2', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa2', content: "Y'", abstractStillAccurate: true });
+    expect(await readNode('asa2', 'all')).not.toContain('Source: abstract-stale');
+  });
+
+  it('omitted still ARMS staleness — the default is unchanged', async () => {
+    // The paired negative. Without it, a bug that always re-fingerprints
+    // would pass every other test in this block.
+    await addNode({ loc: 'asa3', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa3', content: "Y'" });
+    expect(await readNode('asa3', 'all')).toContain('Source: abstract-stale');
+  });
+
+  it('false behaves exactly like omitted', async () => {
+    await addNode({ loc: 'asa4', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa4', content: "Y'", abstractStillAccurate: false });
+    const row = await readRow('asa4');
+    expect(row?.abstractOriginHash).toBe(computeContentHash('Y'));
+    expect(await readNode('asa4', 'all')).toContain('Source: abstract-stale');
+  });
+
+  it('does NOT mint a ghost hash on a node with no abstract (FR-006)', async () => {
+    // The guard that matters. An unguarded assertion would fingerprint an
+    // abstract that does not exist — a hash later reads compare against and
+    // quietly trust.
+    await addNode({ loc: 'asa5', content: 'Y' });
+    await updateNode({ loc: 'asa5', content: "Y'", abstractStillAccurate: true });
+    expect((await readRow('asa5'))?.abstractOriginHash).toBeNull();
+  });
+
+  it('treats a whitespace-only abstract as no abstract', async () => {
+    await addNode({ loc: 'asa6', abstract: '   ', content: 'Y' });
+    await updateNode({ loc: 'asa6', content: "Y'", abstractStillAccurate: true });
+    expect((await readRow('asa6'))?.abstractOriginHash).toBeNull();
+  });
+
+  it('re-affirms with NO content change — clears an already-armed marker', async () => {
+    // The review case: the abstract was right all along and the marker is
+    // the only thing to fix. Equivalent to re-saving the identical text.
+    await addNode({ loc: 'asa7', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa7', content: "Y'" });
+    expect(await readNode('asa7', 'all')).toContain('Source: abstract-stale');
+    await updateNode({ loc: 'asa7', abstractStillAccurate: true });
+    expect(await readNode('asa7', 'all')).not.toContain('Source: abstract-stale');
+  });
+
+  it('is ignored when `abstract` is also supplied (row 5 already covers it)', async () => {
+    await addNode({ loc: 'asa8', abstract: 'X', content: 'Y' });
+    await updateNode({
+      loc: 'asa8',
+      abstract: 'X2',
+      content: "Y'",
+      abstractStillAccurate: true,
+    });
+    const row = await readRow('asa8');
+    expect(row?.abstract).toBe('X2');
+    expect(row?.abstractOriginHash).toBe(computeContentHash("Y'"));
+  });
+
+  it('clearing content while asserting lands on FR-007 (no content ⇒ no hash)', async () => {
+    await addNode({ loc: 'asa9', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'asa9', content: null, abstractStillAccurate: true });
+    expect((await readRow('asa9'))?.abstractOriginHash).toBeNull();
+  });
+
+  it('#1128 — abstract-first-then-body NOW arms the marker (gap closed)', async () => {
+    // The sequence #1126 was about, and the one that used to raise no signal:
+    // an abstract saved against an empty node gets a null hash (FR-007) and a
+    // later content-only update preserves that null (row 2), so the old
+    // `!= null` read guard treated "never fingerprinted" as "nothing to check".
+    //
+    // I wrote the previous version of this test to DOCUMENT that gap rather
+    // than endorse it, on the assumption that closing it meant false-firing
+    // across a legacy corpus. Measuring killed that assumption: production has
+    // 2 such rows, and both genuinely do have unverified abstracts. The
+    // fingerprint stays null — nothing backfills it — but the READ now says so.
+    await addNode({ loc: 'gap1', abstract: 'X' });
+    expect((await readRow('gap1'))?.abstractOriginHash).toBeNull();
+
+    await updateNode({ loc: 'gap1', content: 'a body the abstract never saw' });
+    expect((await readRow('gap1'))?.abstractOriginHash).toBeNull();
+    expect(await readNode('gap1', 'all')).toContain('Source: abstract-stale');
+  });
+
+  it('#1128 — restoring a revision with a null hash arms the marker', async () => {
+    // PR #1129 review, @codex: restorableNodeFields restores
+    // abstractOriginHash verbatim, so a snapshot taken while the hash was null
+    // brings the null back — and under the new predicate that now shows a
+    // marker where spec 032's legacy-revision edge case promised none.
+    //
+    // Pinned because it is a real consequence, and it is the CORRECT one: the
+    // restored abstract genuinely has never been checked against the restored
+    // content, so saying "verified" would be the lie. The spec text is what
+    // needs to move (@Vera), not this behaviour — and a test makes the change
+    // explicit rather than incidental.
+    await addNode({ loc: 'restore1', abstract: 'X', content: 'Y' });
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'restore1', memoryId: fx.memory.id } },
+      data: { abstractOriginHash: null },
+    });
+    const row = await readRow('restore1');
+
+    // A revision captured while the hash was null.
+    await updateNode({ loc: 'restore1', content: 'Y2', abstractStillAccurate: true });
+    expect((await readRow('restore1'))?.abstractOriginHash).not.toBeNull();
+    expect(await readNode('restore1', 'all')).not.toContain('Source: abstract-stale');
+
+    const rev = await db.nodeRevision.findFirst({
+      where: { nodeId: row!.id, abstractOriginHash: null },
+      orderBy: { createdAt: 'desc' },
+      select: { abstractOriginHash: true },
+    });
+    expect(rev).not.toBeNull(); // the null really was captured
+  });
+
+  it('#1128 — a RESTORE of that revision arms the marker on the live node', async () => {
+    // PR #1139 review, @codex: the test above pins the PRECONDITION — that a
+    // revision captured the null hash — and never restores it, so it could not
+    // fail if restoreNodeRevision started recomputing the hash. Spec 032's
+    // edge case cites this behaviour, so the citation needs a test that
+    // performs the operation it describes.
+    await addNode({ loc: 'restore2', abstract: 'X', content: 'Y' });
+    const live = await readRow('restore2');
+    await db.node.update({
+      where: { id: live!.id },
+      data: { abstractOriginHash: null },
+    });
+
+    // Snapshot the null-hash state, then move the node to a verified one.
+    await updateNode({ loc: 'restore2', content: 'Y2', abstractStillAccurate: true });
+    expect(await readNode('restore2', 'all')).not.toContain('Source: abstract-stale');
+
+    const rev = await db.nodeRevision.findFirst({
+      where: { nodeId: live!.id, abstractOriginHash: null },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    expect(rev).not.toBeNull();
+
+    // The operation the spec's edge case is about.
+    const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: rev!.id }, ctx);
+
+    // Restored verbatim (plan D4) — the null comes back...
+    expect((await readRow('restore2'))?.abstractOriginHash).toBeNull();
+    // ...and under the post-#1128 predicate that is a marker, not silence.
+    // Correct: the restored abstract has never been checked against the
+    // restored body.
+    expect(await readNode('restore2', 'all')).toContain('Source: abstract-stale');
+  });
+
+  it('#1128 — and asserting accuracy clears it, giving the node its first hash', async () => {
+    // The escape hatch has to reach the newly-armed population, or #1128 just
+    // adds a marker nobody can turn off. Asserting fingerprints the abstract
+    // for the first time, which is exactly what was missing.
+    await addNode({ loc: 'gap3', abstract: 'X' });
+    await updateNode({ loc: 'gap3', content: 'B' });
+    expect(await readNode('gap3', 'all')).toContain('Source: abstract-stale');
+
+    await updateNode({ loc: 'gap3', abstractStillAccurate: true });
+    expect((await readRow('gap3'))?.abstractOriginHash).toBe(computeContentHash('B'));
+    expect(await readNode('gap3', 'all')).not.toContain('Source: abstract-stale');
+  });
+
+  it('binds to NEITHER half — an interleaved abstract swap is certified unseen', async () => {
+    // PR #1127 review, @codex, second pass. The flag re-fingerprints whatever
+    // abstract is STORED when the write lands, not the one the caller read.
+    // Here the caller reviewed 'X' against "Y'"; another writer replaced the
+    // abstract with 'Z' in between; the assertion then stamps 'Z' as reviewed
+    // and the marker stays silent on text nobody checked.
+    //
+    // @Holger's call (2026-09-03) is to ship the flag and document both
+    // halves, so this pins the behaviour rather than guarding against it: the
+    // residual hole is a suppressed marker that self-corrects at the next
+    // content edit, and the fully-bound form (pass `abstract` AND `content`)
+    // already exists and needs no flag. The description says so in those
+    // words. This test exists so the trade is visible in the suite and not
+    // only in a parameter string somebody may not read.
+    await addNode({ loc: 'race1', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'race1', abstract: 'Z' }); // the interloper
+    await updateNode({ loc: 'race1', content: "Y'", abstractStillAccurate: true });
+
+    const row = await readRow('race1');
+    expect(row?.abstract).toBe('Z'); // NOT the 'X' the caller reviewed
+    expect(row?.abstractOriginHash).toBe(computeContentHash("Y'"));
+    expect(await readNode('race1', 'all')).not.toContain('Source: abstract-stale');
+  });
+
+  it('the CONTENT half of that race fails SAFE — the marker stays armed', async () => {
+    // PR #1139 review, @codex. The two halves fail in opposite directions and
+    // the contract now says so, so the safe half needs pinning too — a claim
+    // in a contract is a promise.
+    //
+    // A sequential interloper cannot show this: the handler reads `existing`
+    // when it runs, so a content change made BEFORE the call is simply the
+    // content it hashes. The race needs the change to land AFTER that read and
+    // before the write, which is what the one-shot spy below does.
+    await addNode({ loc: 'race3', abstract: 'X', content: 'Y' });
+    const target = await readRow('race3');
+
+    const realFindUnique = db.node.findUnique.bind(db.node);
+    const spy = vi
+      .spyOn(db.node, 'findUnique')
+      .mockImplementationOnce((async (args: never) => {
+        const row = await realFindUnique(args);
+        // The interloper, landing in the window the handler cannot see.
+        await db.node.update({ where: { id: target!.id }, data: { content: 'CONCURRENT' } });
+        return row;
+      }) as unknown as typeof db.node.findUnique);
+    try {
+      await updateNode({ loc: 'race3', abstractStillAccurate: true });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const row = await readRow('race3');
+    // The row keeps the interloper's content; the stamped hash describes the
+    // body this call READ, so the two disagree...
+    expect(row?.content).toBe('CONCURRENT');
+    expect(row?.abstractOriginHash).toBe(computeContentHash('Y'));
+    // ...and the marker therefore stays ARMED. The assertion did not take
+    // effect, which is the failure mode you want: nothing false was certified.
+    expect(await readNode('race3', 'all')).toContain('Source: abstract-stale');
+  });
+
+  it('the fully-bound form writes both things the caller compared', async () => {
+    // The counterpart, and the one the description points at: supplying both
+    // leaves no gap for an interloper to occupy — whatever happened in
+    // between, the row ends up holding exactly the pair that was reviewed.
+    await addNode({ loc: 'race2', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'race2', abstract: 'Z' }); // same interloper
+    await updateNode({ loc: 'race2', abstract: 'X', content: "Y'" });
+
+    const row = await readRow('race2');
+    expect(row?.abstract).toBe('X');
+    expect(row?.abstractOriginHash).toBe(computeContentHash("Y'"));
+    expect(await readNode('race2', 'all')).not.toContain('Source: abstract-stale');
+  });
+
+  it('records the suppression in revision history — `changes` names the hash', async () => {
+    // PR #1127 review, @codex P2. Used alone, the flag changes restorable
+    // state (abstractOriginHash) and nothing else — so before this fix the
+    // revision recorded an EMPTY `changes`, and the one operation in this
+    // tool that suppresses a correctness check was the one operation
+    // invisible in history. Exactly the objectType defect from PR #977,
+    // which is why `abstractOriginHash` now joins TRACKED_NODE_FIELDS.
+    await addNode({ loc: 'rev1', abstract: 'X', content: 'Y' });
+    await updateNode({ loc: 'rev1', content: "Y'" }); // arms the marker
+    const node = await readRow('rev1');
+
+    await updateNode({ loc: 'rev1', abstractStillAccurate: true });
+
+    const revs = await db.nodeRevision.findMany({
+      where: { nodeId: node!.id },
+      orderBy: { createdAt: 'desc' },
+      select: { changes: true },
+    });
+    expect(revs[0]?.changes).toContain('abstractOriginHash');
+  });
+
+  it('#1128 — but asserting on such a node still mints no ghost hash', async () => {
+    // The guard has to hold on this path too: the node HAS an abstract, so
+    // hasStoredAbstract is true, and the hash comes from the new content.
+    // That is correct — the caller is asserting they read both — and it is
+    // also the one way to give such a node a fingerprint at all.
+    await addNode({ loc: 'gap2', abstract: 'X' });
+    await updateNode({ loc: 'gap2', content: 'B', abstractStillAccurate: true });
+    expect((await readRow('gap2'))?.abstractOriginHash).toBe(computeContentHash('B'));
+  });
+});
+
 describe('NodeRevision snapshots capture abstractOriginHash', () => {
   it('hadron_update_node snapshot captures existing.abstractOriginHash', async () => {
     await addNode({ loc: 'v1', abstract: 'X', content: 'Y' });
@@ -345,17 +635,27 @@ describe('hadron_get_node — `Source: abstract-stale` marker (US2)', () => {
     expect(out).not.toContain('Source: abstract-stale');
   });
 
-  it("legacy node (abstractOriginHash IS NULL): no marker, even when abstract + content disagree", async () => {
-    // Simulate a legacy row: abstract + content both populated, hash NULL
-    // (the spec-031 era, before spec 032 shipped). The explicit `!= null`
-    // guard on the staleness predicate must short-circuit.
+  it("unfingerprinted node (abstractOriginHash IS NULL): marker ARMS (#1128)", async () => {
+    // EXPECTATION INVERTED by #1128. This used to assert the opposite, and the
+    // `!= null` guard it pinned was correct when spec 032 shipped: every row
+    // predated the column and would have lit up at once.
+    //
+    // The premise drained. Measured 2026-09-03, production held 1024 live
+    // nodes with both an abstract and content and exactly 2 with no
+    // fingerprint (dev: 786 and 2) — every write since spec 032 re-stamps it.
+    // So the guard had stopped protecting a legacy corpus and was instead
+    // silencing the ONE ordering that most needs the warning: abstract first,
+    // body later, which FR-007 leaves unfingerprinted forever.
+    //
+    // A null hash on a node that HAS both is not "nothing to check" — it is
+    // "never checked", and that is what the marker is for.
     await addNode({ loc: 'r6', abstract: 'X', content: 'Y' });
     await db.node.update({
       where: { loc_memoryId: { loc: 'r6', memoryId: fx.memory.id } },
       data: { abstractOriginHash: null },
     });
     const out = await readNode('r6', 'all');
-    expect(out).not.toContain('Source: abstract-stale');
+    expect(out).toContain('Source: abstract-stale');
   });
 
   it('encrypted memory: marker is SUPPRESSED (v1 gate, deferred to #206 encryption-parity)', async () => {
@@ -439,17 +739,18 @@ describe('hadron_validate — `[stale-abstract]` warning (US3)', () => {
     // between sparse and stale-abstract (the two scopes 031 + 032 own).
   });
 
-  it('legacy node (abstractOriginHash IS NULL): zero `[stale-abstract]` warnings', async () => {
-    // Simulate a pre-spec-032 row: abstract + content both populated,
-    // hash NULL. The explicit `!= null` guard short-circuits the
-    // predicate so legacy data never lights up the validator.
+  it('unfingerprinted node (abstractOriginHash IS NULL): DOES warn (#1128)', async () => {
+    // EXPECTATION INVERTED by #1128, and the validator is the surface where
+    // the old behaviour was hardest to defend: an operator running an audit is
+    // asking "which abstracts should I not trust?", and "we have never checked
+    // this one" is a direct answer to that question, not noise to filter out.
     await addNode({ loc: 'v-legacy', abstract: 'X', content: 'Y' });
     await db.node.update({
       where: { loc_memoryId: { loc: 'v-legacy', memoryId: fx.memory.id } },
       data: { abstractOriginHash: null },
     });
     const out = await validate();
-    expect(out).not.toContain('[stale-abstract]');
+    expect(out).toContain('[stale-abstract]');
   });
 
   it('encrypted memory: zero `[stale-abstract]` warnings (v1 gate, deferred to #206)', async () => {

@@ -44,9 +44,13 @@ const asAdmin = () => ctx({ userId: admin.id, roles: ['OWNER'] });
 
 beforeEach(async () => {
   await cleanDb(db);
+  // The memory slug is deliberately a MINTABLE one (v2 atom charset). The
+  // helper's default carries a `/`, which no create path can produce since
+  // FR-016 — and an un-emittable stored urn would exercise the #966 fallback
+  // on every case in this file instead of the emission it is pinning.
   const a = await createDbOrgAndGraph(db, {
     orgName: 'acme',
-    graphName: 'acme/kb',
+    graphName: 'kb',
     visibility: 'ORGANIZATION',
   });
   org = a.org as any;
@@ -336,7 +340,7 @@ describe('organization', () => {
   it('an org ADMIN administers the org (manage) but cannot delete it', async () => {
     const res = await call(orgAdmin.id, `hrn:org:${org.urn}`, asAdmin());
     expect(res.resourceKind).toBe('organization');
-    expect(res.resourceUrn).toBe(org.urn);
+    expect(res.resourceUrn).toBe(`hrn:org:${org.urn}`);
     expect(res.canManage).toBe(true);
     expect(res.canDelete).toBe(false);
     expect(res.grants.some((g) => g.source === 'ORG_ROLE')).toBe(true);
@@ -430,6 +434,87 @@ describe('user (hrn:user:<handle>)', () => {
     const res = await call(`hrn:user:${h}`, `hrn:memory:${graph.urn}`, asAdmin());
     expect(res.resourceKind).toBe('memory');
     expect((res as { user: { id: string } }).user.id).toBe(member.id);
+  });
+});
+
+describe('resourceUrn is emitted, not echoed (#966 / hadron-cli#423)', () => {
+  // The stored `urn` column is a BARE body by construction (the
+  // chk_*_urn_not_prefixed guardrails), so echoing it handed callers a string
+  // this server's own ref parsers reject — while the same row's `Memory.urn`
+  // field emitted the canonical form. The contract is the SHAPE: resourceUrn is
+  // the only URN the caller gets back, and callers feed it to other commands.
+
+  it('a memory resolves to its canonical hrn:mem: URN, not the stored column', async () => {
+    const res = await call(orgAdmin.id, `hrn:memory:${graph.urn}`, asAdmin());
+    expect(res.resourceUrn).toBe(`hrn:mem:${graph.urn}`);
+    expect(res.resourceUrn).not.toBe(graph.urn);
+  });
+
+  it('an app resolves to its canonical hrn:app: URN', async () => {
+    const { app } = await createDbAppWithKey(db, 'urnapp', org.id);
+    const res = await call(orgAdmin.id, `hrn:app:${app.urn}`, asAdmin());
+    expect(res.resourceUrn).toBe(`hrn:app:${app.urn}`);
+  });
+
+  it('an agent resolves to its canonical hrn:agent: URN', async () => {
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:urnagent`, name: 'ua' },
+    });
+    const res = await call(orgAdmin.id, `hrn:agent:${agent.urn}`, asAdmin());
+    expect(res.resourceUrn).toBe(`hrn:agent:${agent.urn}`);
+  });
+
+  it('a node still resolves to its flat v2 node URN (unchanged)', async () => {
+    await createDbNode(db, { loc: 'urnnode', memoryId: graph.id });
+    const res = await call(orgAdmin.id, `hrn:node:${graph.urn}:urnnode`, asAdmin());
+    expect(res.resourceUrn).toBe(`hrn:node:${graph.urn}:urnnode`);
+  });
+
+  it('every kind round-trips: the returned resourceUrn re-audits to the same resource', async () => {
+    // The property the CLI actually needs — `hadron access check` printed a URN
+    // its own argument parser then refused (hadron-cli#423).
+    const { app } = await createDbAppWithKey(db, 'rtapp', org.id);
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:rtagent`, name: 'rt' },
+    });
+    await createDbNode(db, { loc: 'rtnode', memoryId: graph.id });
+    const refs = [
+      `hrn:memory:${graph.urn}`,
+      `hrn:node:${graph.urn}:rtnode`,
+      `hrn:app:${app.urn}`,
+      `hrn:agent:${agent.urn}`,
+      `hrn:org:${org.urn}`,
+    ];
+    for (const ref of refs) {
+      const first = await call(orgAdmin.id, ref, asAdmin());
+      const again = await call(orgAdmin.id, first.resourceUrn, asAdmin());
+      expect(again.resourceKind).toBe(first.resourceKind);
+      expect(again.resourceUrn).toBe(first.resourceUrn);
+    }
+  });
+
+  it('an un-emittable STORED urn falls back to the raw value instead of failing the audit', async () => {
+    // A legacy row whose slug predates the FR-016 charset. The audit must keep
+    // answering — a corrupt row is exactly when someone runs an access check.
+    const legacy = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:legacy/slug`,
+        name: 'legacy/slug',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await call(orgAdmin.id, `hrn:memory:${legacy.urn}`, asAdmin());
+      expect(res.resourceUrn).toBe(legacy.urn);
+      expect(res.canRead).toBe(true);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

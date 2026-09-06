@@ -1,0 +1,2091 @@
+// Workers — #974 (re-cut): the named casting of an installed Agent into an
+// App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
+// an Agent (`personaRole` + the `personaPrompt` template); the Worker is the
+// local named identity ("Iris") that does attributable work. `castWorker`
+// supersedes `createTeamPersona`'s minting semantics: it no longer mints an
+// Agent at all — it casts an EXISTING installed agent under a name, allocating
+// that name against the `workers_app_name_uniq` constraint (the allocation
+// primitive — no lease, no lock; cor:agt:020:02).
+//
+// Cast lists stay ergonomics, never gates (cor:agt:020:01): role definitions
+// and name registers remain CONTENT in the Team Agent's system memory
+// (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
+// the caller names no explicit worker name. Casting with an explicit name
+// needs no Team Agent at all.
+import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
+import {
+  resolveWorkerRef as resolveWorkerRefId,
+  composeWorkerUrn,
+} from '../../../lib/entityRef/workerRef.js';
+import {
+  getMemoryEncryptionInfo,
+  decryptNodeFields,
+} from '../../../lib/nodeCrypto.js';
+import { applyPersonaTemplate, templateBindsName } from '../../../lib/personaDescription.js';
+import {
+  newestHandoff,
+  handoffSessionId,
+  continuityStatusOf,
+} from '../../../lib/workerHandoff.js';
+import { resolveMemoryRoot } from './chat-scope.js';
+import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
+import { userUrn } from '../../../lib/userHandle.js';
+import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
+import {
+  type Context,
+  requireOrgRole,
+  requireOwnerOrOrgRole,
+  isAppParticipant,
+  isNonReaderAppMember,
+  clampListTake,
+} from './resolvers.helpers.js';
+
+/** Loc prefix of the role-definition branch in a Team Agent's system memory. */
+export const ROLES_BRANCH_PREFIX = 'roles:';
+
+/**
+ * Backstop on slug-race retries in `castWorker` (#991). Not an allocation
+ * budget — see `createWithSlug` for why it must sit far above any plausible
+ * concurrent-cast count rather than at a handful.
+ */
+const SLUG_RACE_RETRY_LIMIT = 50;
+
+type AppRow = {
+  id: string;
+  name: string;
+  urn: string;
+  organizationId: string | null;
+  ownerUserId: string | null;
+  uninstalledAt: Date | null;
+};
+
+const forbidden = (): GraphQLError =>
+  new GraphQLError('You are not authorized to manage workers in this App.', {
+    extensions: { code: 'FORBIDDEN' },
+  });
+
+/**
+ * Staffing gate (inherited from #935's persona-mint lean): casting, retiring,
+ * and hard-deleting a Worker are everyday team acts, so the bar sits below
+ * org ADMIN. May staff:
+ *   - an org member with CONTRIBUTOR+ on the App's org,
+ *   - an AppMember of the App whose role is not (case-insensitively)
+ *     'reader' (#952's shared predicate), or
+ *   - the owner of a user-owned App (strictly owner-only, spec 047).
+ *
+ * Principal shapes (findings:auth-appid-credential-vs-selection): a PURE
+ * App-key principal (appId, no userId) is DENIED — staffing is a human act.
+ * A hybrid user+selection principal is judged solely on the USER's own
+ * rights. Impersonation sessions are read-only support views — never staff.
+ */
+async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void> {
+  if (ctx.impersonation) throw forbidden();
+  if (!ctx.userId) throw forbidden();
+  if (app.ownerUserId !== null) {
+    // spec 047: user-owned entities are strictly owner-only —
+    // findings:org-xor-owner-null-comparison-bypass: branch on the ownership
+    // class BEFORE comparing owner columns.
+    if (ctx.userId === app.ownerUserId) return;
+    throw forbidden();
+  }
+  if (app.organizationId !== null) {
+    try {
+      await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
+      return;
+    } catch (e) {
+      // requireOrgRole signals denial with a plain Error('Forbidden'); anything
+      // else (a DB failure inside the membership lookup) must propagate rather
+      // than read as "not a member" (review:narrow-catch-blocks).
+      if (!(e instanceof Error && e.message === 'Forbidden')) throw e;
+      // fall through to the AppMember path
+    }
+    if (await isNonReaderAppMember(ctx, app)) return;
+  }
+  throw forbidden();
+}
+
+/**
+ * Read gate for the staff list (mirrors requireTeamChatAccess's 'read' mode —
+ * cor:acl:030:01's audience): an AppMember at ANY role, org CONTRIBUTOR+, or
+ * the owner of a user-owned App. A pure App-key principal may read its OWN
+ * App's staff (team automation follows the roster); impersonation reads are
+ * bounded to the support session's single org (#876 class).
+ */
+export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
+  if (ctx.impersonation) {
+    if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
+      throw forbidden();
+    }
+  }
+  if (!ctx.userId) {
+    if (ctx.appId && ctx.appId === app.id) return;
+    throw forbidden();
+  }
+  if (await isAppParticipant(ctx, app)) return;
+  throw forbidden();
+}
+
+type TeamAgentRow = {
+  id: string;
+  name: string;
+  urn: string;
+  systemMemoryId: string | null;
+};
+
+/**
+ * Locate the Team Agent (#935 open question 1 — the marker default): with no
+ * explicit teamAgentRef, the Team Agent is the SINGLE installed Agent whose
+ * system memory carries a roles: branch — the marker makes the App
+ * self-describing. Zero markers or two-plus markers are typed refusals, never
+ * a guess. Also used by the team-chat and worklog bootstraps.
+ */
+export async function locateTeamAgent(
+  ctx: Context,
+  appId: string,
+  teamAgentRef: string | null | undefined,
+): Promise<TeamAgentRow> {
+  if (teamAgentRef) {
+    const { id } = await resolveAgentRef(ctx.db, teamAgentRef);
+    // The explicit ref must name an agent INSTALLED in this App — otherwise
+    // the operation would read cast lists (and allocate against a register)
+    // from an agent the team App never adopted.
+    const row = await ctx.db.appAgent.findUnique({
+      where: { appId_agentId: { appId, agentId: id } },
+      select: { agent: { select: { id: true, name: true, urn: true, systemMemoryId: true } } },
+    });
+    if (!row) {
+      throw new GraphQLError('teamAgentRef must name an Agent installed in this App.', {
+        extensions: { code: 'TEAM_AGENT_NOT_INSTALLED', appId, agentId: id },
+      });
+    }
+    return row.agent;
+  }
+  const installed = await ctx.db.appAgent.findMany({
+    where: { appId },
+    orderBy: { createdAt: 'asc' },
+    select: { agent: { select: { id: true, name: true, urn: true, systemMemoryId: true, deletedAt: true } } },
+  });
+  const candidates: TeamAgentRow[] = [];
+  for (const { agent } of installed) {
+    if (!agent || agent.deletedAt || !agent.systemMemoryId) continue;
+    const marker = await ctx.db.node.findFirst({
+      // Memory-scoped by construction (findings:unscoped-loc-lookup-crosses-
+      // memories): the loc match never leaves this agent's system memory.
+      where: {
+        memoryId: agent.systemMemoryId,
+        deletedAt: null,
+        OR: [{ loc: 'roles' }, { loc: { startsWith: ROLES_BRANCH_PREFIX } }],
+      },
+      select: { id: true },
+    });
+    if (marker) candidates.push(agent);
+  }
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 0) {
+    throw new GraphQLError(
+      'No installed Agent in this App carries a roles: branch in its system memory, so the Team Agent cannot be inferred. Pass teamAgentRef explicitly, or add role definitions (roles:<role> nodes) to the Team Agent\'s system memory.',
+      { extensions: { code: 'TEAM_AGENT_NOT_FOUND', appId } },
+    );
+  }
+  throw new GraphQLError(
+    `More than one installed Agent carries a roles: branch — pass teamAgentRef to pick one. Candidates: ${candidates
+      .map((c) => `${c.name} (${c.urn})`)
+      .join(', ')}.`,
+    {
+      extensions: {
+        code: 'TEAM_AGENT_AMBIGUOUS',
+        appId,
+        candidates: candidates.map((c) => ({ id: c.id, name: c.name, urn: c.urn })),
+      },
+    },
+  );
+}
+
+type WorkerRow = {
+  id: string;
+  appId: string;
+  agentId: string;
+  name: string;
+  slug: string;
+  role: string | null;
+  promptOverride: string | null;
+  memoryId: string | null;
+  retiredAt: Date | null;
+  /** #1050 — the human holding this name, and since when. */
+  heldByUserId: string | null;
+  heldAt: Date | null;
+};
+
+/**
+ * Resolve a workerRef to its row — a Worker id or an
+ * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991), via the shared
+ * `resolve<Entity>Ref` helper (cor:api:140) so the ref grammar has ONE
+ * definition rather than a per-resolver copy that drifts.
+ *
+ * Identity only. The App-membership gate is the caller's job, and every caller
+ * applies it to the RESOLVED row's `appId` — so a URN naming a worker in an App
+ * the caller cannot see still refuses there, not here.
+ */
+async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<WorkerRow> {
+  let id: string;
+  try {
+    ({ id } = await resolveWorkerRefId(ctx.db, workerRef));
+  } catch {
+    // A malformed URN, an unresolvable App, and an absent worker collapse to
+    // one refusal — no existence oracle.
+    throw new GraphQLError('Worker not found.', {
+      extensions: { code: 'WORKER_NOT_FOUND', workerRef },
+    });
+  }
+  const worker = await ctx.db.worker.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      appId: true,
+      agentId: true,
+      name: true,
+      slug: true,
+      role: true,
+      promptOverride: true,
+      memoryId: true,
+      retiredAt: true,
+      heldByUserId: true,
+      heldAt: true,
+    },
+  });
+  if (!worker) {
+    throw new GraphQLError('Worker not found.', {
+      extensions: { code: 'WORKER_NOT_FOUND', workerRef },
+    });
+  }
+  return worker;
+}
+
+/**
+ * Which of `names` are TAKEN in the App — judged by the DATABASE's `lower()`,
+ * the exact expression `workers_app_name_uniq` indexes (`(app_id,
+ * lower(name))`, post-push.sql), never ECMAScript `toLowerCase()` (#985
+ * review, Codex P2: the two diverge under locale-sensitive case folding —
+ * dotted capital I and friends — so a JS-folded set can call a name free
+ * that the very next cast refuses with WORKER_NAME_TAKEN, no race involved).
+ * Returns input spellings → holding worker id; retirement never frees a name,
+ * so retired workers count. ONE definition — the preview and the teamRoles
+ * free/taken column both consult it, so no verdict can disagree with the
+ * constraint.
+ */
+export async function takenWorkersByName(
+  db: Context['db'],
+  appId: string,
+  names: string[],
+): Promise<Map<string, string>> {
+  if (names.length === 0) return new Map();
+  const rows = await db.$queryRaw<{ cname: string; wid: string }[]>`
+    SELECT c.name AS cname, w.id AS wid
+    FROM unnest(${names}::text[]) AS c(name)
+    JOIN workers w ON w.app_id = ${appId} AND lower(w.name) = lower(c.name)`;
+  return new Map(rows.map((r) => [r.cname, r.wid]));
+}
+
+/**
+ * Resolve a worker NAME to its id within one App (#990) — the ergonomic handle
+ * a human already knows ("Iris"), for surfaces that carry App context.
+ *
+ * Judged with the DATABASE's `lower()`, the exact expression
+ * `workers_app_name_uniq` indexes — never ECMAScript `toLowerCase()`, whose
+ * locale-sensitive folding diverges on dotted capital I and friends, so a
+ * JS-folded lookup could miss the very row the constraint says owns the name
+ * (the `takenWorkersByName` rule, #985 review).
+ *
+ * Ambiguity is impossible: the name is unique per App, case-insensitively. A
+ * RETIRED worker resolves here — its name stays reserved (cor:agt:020:02), so
+ * the honest answer for "Iris" is that row; the caller then refuses the
+ * BINDING with the specific `WORKER_RETIRED`, which is far more useful than
+ * "not found" for a name the user can see in the roster.
+ *
+ * Identity only. This function answers "does this App have an Iris?", which is
+ * a fact about the roster — so every caller MUST apply the staff read gate
+ * (`requireWorkerReadAccess`) BEFORE calling it, or it becomes an existence
+ * oracle over another tenant's staff.
+ */
+export async function resolveWorkerIdByName(
+  db: Context['db'],
+  appId: string,
+  name: string,
+): Promise<string | null> {
+  const trimmed = name.trim();
+  if (trimmed === '') return null; // blank is absent (cor:agt:020:02)
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    SELECT id FROM workers
+    WHERE app_id = ${appId} AND lower(name) = lower(${trimmed})
+    LIMIT 1`;
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * Resolve a worker NAME within an App, with the staff read gate applied FIRST
+ * (#990's ordering, extracted in #1015 so it has ONE definition).
+ *
+ * Returns the worker id, or `null` for every failure shape — App absent, App
+ * soft-deleted, caller not admitted, no such name. Collapsing them is the
+ * contract, not laziness: resolving a name answers "does this App have an
+ * Iris?", a fact about the roster that the id/URN forms never have to disclose.
+ * Gating AFTER the lookup, or distinguishing "forbidden" from "no such worker",
+ * would leak roster membership to anyone who can guess a name. Callers map
+ * `null` onto their own refusal, which must be the same one they emit for an
+ * absent worker.
+ *
+ * Extracted because `startSession` and `Query.worker` both need it and a
+ * hand-rolled copy in either would drift — the failure the first authorization
+ * invariant names. What deliberately stays with the CALLER is the App LIFECYCLE
+ * posture: starting a session in an uninstalled App is refused
+ * (`APP_UNINSTALLED`), while READING a worker there is not — Worker rows outlive
+ * their App's uninstall (cor:agt:020:02), so the roster stays legible.
+ */
+export async function resolveWorkerIdByNameGated(
+  ctx: Context,
+  appId: string,
+  name: string,
+): Promise<string | null> {
+  const app = await ctx.db.app.findUnique({
+    where: { id: appId },
+    select: {
+      id: true, name: true, urn: true, organizationId: true,
+      ownerUserId: true, uninstalledAt: true, deletedAt: true,
+    },
+  });
+  if (!app || app.deletedAt) return null;
+  try {
+    await requireWorkerReadAccess(ctx, app);
+  } catch (e) {
+    // NARROW catch (PR #1019 review, Copilot; review:narrow-catch-blocks, the
+    // convention requireWorkerStaffAccess above already follows): collapse ONLY
+    // the expected denial. `requireWorkerReadAccess` reaches the database via
+    // `isAppParticipant`, so a blanket catch turns a connection failure inside
+    // that lookup into "no such worker" — an outage reported as a missing row,
+    // on the exact surface whose whole contract is that absence and denial look
+    // identical. Deliberately opposite reasoning to the collapse this function
+    // exists for: hiding WHY a caller was refused is the point; hiding THAT the
+    // database is down never is.
+    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    return null;
+  }
+  return resolveWorkerIdByName(ctx.db, appId, name);
+}
+
+/** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
+function isNameTaken(e: unknown): boolean {
+  return (
+    e instanceof Prisma.PrismaClientKnownRequestError &&
+    e.code === 'P2002' &&
+    !isSlugTaken(e) &&
+    /workers_app_name_uniq|app_id.*name|name/i.test(String(e.meta?.target ?? e.message))
+  );
+}
+
+/**
+ * True when the refusal is the per-App SLUG unique (`workers_app_slug_uniq`,
+ * #991) — a lost race between two casts that derived the same base slug.
+ *
+ * Checked BEFORE `isNameTaken`, whose pattern is loose enough (`.../name/i`)
+ * to also match a slug target: the slug column is derived from the name, so
+ * Prisma's target string mentions neither reliably. Getting the order wrong
+ * would report a private race as WORKER_NAME_TAKEN and make a caller abandon a
+ * name that is in fact free.
+ */
+function isSlugTaken(e: unknown): boolean {
+  return (
+    e instanceof Prisma.PrismaClientKnownRequestError &&
+    e.code === 'P2002' &&
+    /workers_app_slug_uniq|slug/i.test(String(e.meta?.target ?? e.message))
+  );
+}
+
+/**
+ * The typed `WORKER_HOLD_STALE` refusal (#1073) — the hold is not what the
+ * caller asserted, so the release it described is not the release it would
+ * perform.
+ *
+ * Carries the holder found NOW, because that is the fact a caller needs to
+ * re-prompt with. Naming it discloses nothing new: the caller has already
+ * passed `requireWorkerReadAccess`, through which `Worker.heldByUserId` is
+ * readable anyway — the masking rule for that field applies to callers who fail
+ * that gate, and they never reach here.
+ *
+ * `heldByUserId: null` means the name is unheld now.
+ *
+ * The wording states the FACT and stops there — it does not say the holder is
+ * "someone else", nor that a release would be a force-release (PR #1084 review,
+ * Copilot). Neither is knowable here: this throws before the holder is compared
+ * to the caller, and the account now holding the name may well BE the caller —
+ * a caller asserting `expectUnheld` who turns out to hold it themselves is the
+ * plain case. Releasing then posts nothing and is not a force-release, so a
+ * message claiming otherwise would send them to a confirmation they do not owe.
+ * The client can decide the relationship itself; `heldByUserId` is right there
+ * in the extensions and the caller knows its own id.
+ */
+const holdStale = (workerId: string, heldByUserId: string | null): GraphQLError =>
+  new GraphQLError(
+    heldByUserId
+      ? 'The hold is not what you asserted: this name is currently held. Re-read the worker and decide again — the release you described is not the release this would perform.'
+      : 'The hold is not what you asserted: this name is currently held by nobody, so there is nothing to release.',
+    { extensions: { code: 'WORKER_HOLD_STALE', workerId, heldByUserId } },
+  );
+
+/** The typed WORKER_NAME_TAKEN refusal — the allocation contract's advance
+ *  signal (cor:agt:020:02). */
+function nameTaken(name: string, appId: string): GraphQLError {
+  return new GraphQLError(
+    `Worker name ${JSON.stringify(name)} is already taken in this App — a name binds to one casting forever, so pick another.`,
+    { extensions: { code: 'WORKER_NAME_TAKEN', name, appId } },
+  );
+}
+
+/**
+ * App-scoped critical section for REGISTER semantics (#984 review, Codex P1):
+ * `SELECT … FOR UPDATE` on the Team Agent's system-memory row serializes every
+ * register-consuming operation — role-definition writes (create/updateTeamRole,
+ * whose check-then-write invariant runs would otherwise interleave: two
+ * concurrent creates can each observe a name absent and both persist it) and
+ * register-mode casting (which reads the register and mints against it). The
+ * transaction is a LOCK BRACKET only: the work inside may run its own queries
+ * and transactions on other pool connections (`writeNodeCore` does), which is
+ * safe because the bracket commits — releasing the lock — only after `fn`
+ * resolves. The `ensureWorklogSchema` FOR-UPDATE pattern, held across the
+ * whole read-check-write window.
+ *
+ * #1050 — renamed from `withRegisterLock`. It no longer guards a name
+ * register (there is none); what it still guards is a role DEFINITION write:
+ * two concurrent creates of the same role would otherwise both pass the
+ * TEAM_ROLE_EXISTS check and both write. Casting takes it in no mode at all
+ * now — `workers_app_name_uniq` arbitrates a name atomically on its own.
+ */
+export async function withRoleWriteLock<T>(
+  ctx: Context,
+  systemMemoryId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return ctx.db.$transaction(
+    async (tx) => {
+      // FOR NO KEY UPDATE, deliberately NOT FOR UPDATE: the bracketed work
+      // INSERTS child rows referencing this memory (nodes via writeNodeCore),
+      // and an FK check takes FOR KEY SHARE on the referenced row from a
+      // DIFFERENT connection — which FOR UPDATE blocks, deadlocking the
+      // bracket against its own work until timeout. NO KEY UPDATE conflicts
+      // with other NO KEY UPDATE / UPDATE lockers (the mutual exclusion we
+      // want) while admitting KEY SHARE (the FK checks we cause).
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${systemMemoryId} FOR NO KEY UPDATE`;
+      return fn();
+    },
+    // Generous: the bracket spans a full node write including the git mirror.
+    { timeout: 30_000 },
+  );
+}
+
+
+const MINT_RETRY_LIMIT = 3;
+
+/**
+ * Provision the Worker's casting-scoped working memory in the App's container
+ * (cor:agt:020:01) — best-effort AFTER the casting exists: a failed provision
+ * leaves `Worker.memoryId` null (the spec allows lazy provisioning) rather
+ * than failing or compensating the cast. Identity is the `Worker.memoryId`
+ * COLUMN, never the URN string (#723 / findings:shared-memory-identity-is-a-
+ * column), so the urn is minted FLAT (`<root>:<app-slug>-<worker-slug>`,
+ * aliased on collision) like every other memory — a multi-atom slug would
+ * break node-URN round-tripping and 404 every portal link (the #723 lesson;
+ * the slug convention is tunable per cor:agt:020:01).
+ */
+export async function provisionWorkerMemory(
+  ctx: Context,
+  app: AppRow,
+  worker: { id: string; name: string; slug: string },
+): Promise<string | null> {
+  try {
+    const appSlug = normalizeUrnForLookup(app.urn).split(':').pop() ?? app.urn;
+    // #991: the STORED slug, not a re-derivation. Re-deriving would throw for a
+    // name that slugifies to nothing (losing the working memory for a legally
+    // cast worker), and could drift from the URN atom if the derivation ever
+    // changes.
+    const workerSlug = worker.slug;
+    const root = await resolveMemoryRoot(ctx.db, {
+      organizationId: app.organizationId,
+      ownerUserId: app.ownerUserId,
+      appUrn: app.urn,
+    });
+    for (let attempt = 0; ; attempt++) {
+      const urn = await mintMemoryUrnV2(ctx.db, {
+        root,
+        desiredSlug: `${appSlug}-${workerSlug}`,
+        authorRoot: worker.id.slice(0, 8),
+      });
+      try {
+        // Memory create + Worker.memoryId attach in ONE transaction (PR #978
+        // review — Copilot): a concurrent deleteWorker can observe
+        // `memoryId: null`, hard-delete the never-used casting, and land the
+        // worker.update on a vanished row — the rollback then takes the
+        // just-created memory with it instead of leaving a permanent orphan.
+        return await ctx.db.$transaction(async (tx) => {
+          const created = await tx.memory.create({
+            data: {
+              organizationId: app.organizationId,
+              // Owner XOR (`chk_memory_owner_xor`): follows the App's owner.
+              ownerUserId: app.organizationId === null ? app.ownerUserId : null,
+              urn,
+              name: `${app.name} — ${worker.name} — working memory`,
+              class: 'app',
+              // 035-visibility-enum-cleanup: app-class visibility is NULL.
+              visibility: null,
+              appId: app.id,
+              userId: null,
+              createdBy: ctx.userId ?? null,
+            },
+            select: { id: true },
+          });
+          await tx.worker.update({
+            where: { id: worker.id },
+            data: { memoryId: created.id },
+          });
+          return created.id;
+        });
+      } catch (err) {
+        if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {
+          throw err;
+        }
+        // A urn clash — mint again and alias around the winner. Bounded so a
+        // genuinely unwinnable clash surfaces rather than spinning.
+        if (attempt >= MINT_RETRY_LIMIT) throw err;
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[castWorker] working-memory provisioning failed for worker ${worker.id} — left for lazy provisioning:`,
+      err,
+    );
+    return null;
+  }
+}
+
+/** Argument shape shared by castWorker and its preview (#964). */
+type CastArgs = {
+  appRef: string;
+  agentRef?: string | null;
+  role?: string | null;
+  name?: string | null;
+  promptOverride?: string | null;
+};
+
+type CastTarget = {
+  appId: string;
+  app: AppRow & { deletedAt: Date | null };
+  agent: { id: string; name: string; personaRole: string | null; personaPrompt: string | null };
+  workerRole: string | null;
+  requestedName: string | null;
+  override: string | null;
+};
+
+/**
+ * The shared resolution HALF of casting (#964 — "single implementation" as a
+ * server-code property): normalize the request, resolve + gate the App
+ * (`requireWorkerStaffAccess` — the preview deliberately takes the SAME mint
+ * gate, since a preview reveals a name the caller could mint anyway), and
+ * resolve the agent being cast (explicit agentRef must be installed; else the
+ * role picks the single installed agent whose `personaRole` matches — zero or
+ * two-plus are typed refusals, never a guess). Everything after this —
+ * allocation vs. projection — is the caller's half, so every typed refusal up
+ * to allocation behaves identically under preview and cast.
+ */
+async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarget> {
+  const { appRef, agentRef, role, name, promptOverride } = args;
+  const roleNorm = (role ?? '').trim() || null;
+  if (roleNorm !== null && roleNorm.includes(':')) {
+    throw new GraphQLError('role must be a single loc atom (no ":").', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  // cor:agt:020:02 blank-is-absent: a whitespace-only name is no name.
+  const requestedName = (name ?? '').trim() || null;
+  const override = (promptOverride ?? '').trim() === '' ? null : (promptOverride as string);
+
+  // 1. Resolve the App (cor:api:140 — PK or URN) and gate.
+  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+  if (app.uninstalledAt) {
+    throw new GraphQLError('Cannot cast a worker in an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId },
+    });
+  }
+  await requireWorkerStaffAccess(ctx, app);
+
+  // 2. Resolve the agent being cast — installed in this App at cast time.
+  let agent: CastTarget['agent'];
+  if (agentRef && agentRef.trim() !== '') {
+    // resolveAgentRef throws a plain AgentNotFoundError (which would read
+    // INTERNAL_SERVER_ERROR on the wire) — translate to the typed refusal,
+    // matching startSession's agentRef handling.
+    let id: string;
+    try {
+      ({ id } = await resolveAgentRef(ctx.db, agentRef.trim()));
+    } catch (e) {
+      if (e instanceof AgentNotFoundError) {
+        throw new GraphQLError(`Agent not found: ${agentRef.trim()}`, {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      throw e;
+    }
+    const row = await ctx.db.appAgent.findUnique({
+      where: { appId_agentId: { appId, agentId: id } },
+      select: {
+        agent: {
+          select: { id: true, name: true, personaRole: true, personaPrompt: true, deletedAt: true },
+        },
+      },
+    });
+    if (!row || row.agent.deletedAt) {
+      throw new GraphQLError(
+        'agentRef must name an Agent installed in this App — casting requires the agent on the roster at cast time.',
+        { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId, agentId: id } },
+      );
+    }
+    agent = row.agent;
+  } else {
+    if (!roleNorm) {
+      throw new GraphQLError('Pass agentRef, or a role that identifies the installed agent to cast.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    const installed = await ctx.db.appAgent.findMany({
+      where: { appId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        agent: {
+          select: { id: true, name: true, urn: true, personaRole: true, personaPrompt: true, deletedAt: true },
+        },
+      },
+    });
+    // In-memory case-insensitive equality — never a LIKE-backed filter
+    // (findings:prisma-string-filters-are-unescaped-like).
+    const matches = installed
+      .map((r) => r.agent)
+      .filter(
+        (a) => a && !a.deletedAt && (a.personaRole ?? '').toLowerCase() === roleNorm.toLowerCase(),
+      );
+    if (matches.length === 0) {
+      throw new GraphQLError(
+        `No installed Agent carries personaRole "${roleNorm}" — install the role-agent first, or pass agentRef.`,
+        { extensions: { code: 'WORKER_AGENT_NOT_FOUND', appId, role: roleNorm } },
+      );
+    }
+    if (matches.length > 1) {
+      throw new GraphQLError(
+        `More than one installed Agent carries personaRole "${roleNorm}" — pass agentRef to pick one. Candidates: ${matches
+          .map((a) => `${a.name} (${a.urn})`)
+          .join(', ')}.`,
+        {
+          extensions: {
+            code: 'WORKER_AGENT_AMBIGUOUS',
+            appId,
+            role: roleNorm,
+            candidates: matches.map((a) => ({ id: a.id, name: a.name, urn: a.urn })),
+          },
+        },
+      );
+    }
+    agent = matches[0];
+  }
+  // The casting's role: explicit wins, else the agent's dressing.
+  const workerRole = roleNorm ?? agent.personaRole ?? null;
+  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedName, override };
+}
+
+export const workerMutations = {
+  /**
+   * castWorker — #974 (cor:dmo:050:11): cast an installed agent into the App
+   * under a name. Opt-in, never requires a Team Agent (an explicit name skips
+   * the register entirely); multiple castings of one agent per App are legal
+   * (Iris and Henry, both `backend-engineer`). The agent must be installed in
+   * the App AT CAST TIME; the Worker row survives a later uninstall
+   * (cor:agt:020:02 — the name binds forever).
+   *
+   * Resolution (App gate, agent by ref or personaRole) is shared with
+   * `castWorkerPreview` via `resolveCastTarget` (#964), so preview and cast
+   * cannot drift.
+   *
+   * Name allocation: caller-supplied wins (one attempt — the typed
+   * WORKER_NAME_TAKEN refusal IS the answer); else the Team Agent's cast-list
+   * register for the role is walked first-to-last, relying on the
+   * `workers_app_name_uniq` constraint as the atomic allocation primitive
+   * (advance on WORKER_NAME_TAKEN, exhausted register is typed).
+   */
+  castWorker: async (_: unknown, args: CastArgs, ctx: Context) => {
+    const { appId, app, agent, workerRole, requestedName, override } = await resolveCastTarget(
+      ctx,
+      args,
+    );
+
+    // 3+4. Allocate + create.
+    /** Sentinel: this name is taken, so a register walk should advance. */
+    const NAME_TAKEN = Symbol('name-taken');
+
+    /**
+     * One name's cast attempt. Mints the #991 URN atom from the name being
+     * allocated: `nextFreeWorkerSlug` is advisory — `workers_app_slug_uniq`
+     * arbitrates — so a lost race retries against a freshly-read taken set.
+     *
+     * The retry budget is deliberately generous, because a SMALL cap would make
+     * cor:agt:020:02's "a derived identifier never refuses" observably false
+     * (PR #993 review): with N concurrent casts whose distinct names derive to
+     * one base, each round lets only one winner claim a candidate, so a cap of
+     * k turns the (k+1)-th caller away with a raw constraint error even though
+     * its NAME is free. Every round is guaranteed progress — a loser re-reads a
+     * taken set that has strictly grown — so the loop terminates on its own;
+     * the cap is only a backstop against a pathological storm, set far above
+     * any real concurrency on a single App's staffing.
+     *
+     * Exhausting it is an infrastructure failure, not an allocation refusal:
+     * it surfaces as its own typed code, never as WORKER_NAME_TAKEN, so a
+     * client's register-advance loop cannot mistake it for "pick another name"
+     * and burn through a register that was never the problem.
+     */
+    const createWithSlug = async (
+      candidate: string,
+    ): Promise<{ id: string; name: string; slug: string } | typeof NAME_TAKEN> => {
+      for (let attempt = 0; attempt < SLUG_RACE_RETRY_LIMIT; attempt++) {
+        const slug = await nextFreeWorkerSlug(ctx.db, appId, candidate);
+        try {
+          return await ctx.db.worker.create({
+            data: {
+              appId,
+              agentId: agent.id,
+              name: candidate,
+              slug,
+              role: workerRole,
+              promptOverride: override,
+              createdBy: ctx.userId ?? null,
+              // #1050 — casting does NOT hold. A name is held by the person
+              // who WORKS as it, and the canonical setup flow is a coordinator
+              // casting a roster that other people then bind: making the
+              // caster the holder would block every one of them on a release
+              // they should never have needed. So a cast worker is born UNHELD
+              // and the first bind claims it.
+            },
+            select: { id: true, name: true, slug: true },
+          });
+        } catch (e) {
+          // Order matters: a slug race is private and retried; a name
+          // collision is the caller-visible allocation signal.
+          if (isSlugTaken(e)) continue;
+          if (isNameTaken(e)) return NAME_TAKEN;
+          throw e;
+        }
+      }
+      throw new GraphQLError(
+        `Could not mint a URN slug for worker name ${JSON.stringify(candidate)} after ${SLUG_RACE_RETRY_LIMIT} attempts — too many casts are racing on the same derived slug. The name itself is not taken; retry.`,
+        { extensions: { code: 'WORKER_SLUG_RACE_EXHAUSTED', name: candidate, appId } },
+      );
+    };
+
+    // The uniqueness constraint IS the allocation primitive (cor:agt:020:02) —
+    // a P2002 on workers_app_name_uniq maps to WORKER_NAME_TAKEN; register mode
+    // advances past it.
+    const allocate = async (
+      candidates: string[],
+    ): Promise<{ id: string; name: string; slug: string } | null> => {
+      for (const candidate of candidates) {
+        const row = await createWithSlug(candidate);
+        if (row !== NAME_TAKEN) return row;
+        if (requestedName) throw nameTaken(candidate, appId);
+      }
+      return null;
+    };
+
+    let created: { id: string; name: string; slug: string } | null;
+    if (requestedName) {
+      // Explicit name: one attempt; the DB unique arbitrates atomically, so
+      // no register lock is needed (nothing register-borne is consumed).
+      created = await allocate([requestedName]);
+      if (!created) {
+        // Unreachable in practice (allocate throws WORKER_NAME_TAKEN for an
+        // explicit name) — kept for the type narrowing.
+        throw nameTaken(requestedName, appId);
+      }
+    } else {
+      // #1050: there is no register to allocate from, so a nameless cast has
+      // no name source and refuses rather than inventing one. A worker's name
+      // is its identity and permanent per App (cor:agt:020:02) — a
+      // server-derived name would be a permanent identifier nobody chose.
+      //
+      // This is the path the register used to serve, and dropping it costs
+      // nothing measurable: across both orgs every cast was effectively an
+      // explicit name already (the ordered pool allocated nothing a --name
+      // would not have, #1050 evidence).
+      throw new GraphQLError(
+        'Pass a name for the worker — a name is permanent within the App (cor:agt:020:02), so it is chosen, never derived.',
+        { extensions: { code: 'WORKER_NAME_REQUIRED', ...(workerRole ? { role: workerRole } : {}) } },
+      );
+    }
+
+    // 5. Working memory — best-effort; a failure leaves memoryId null.
+    await provisionWorkerMemory(ctx, app, created);
+
+    return ctx.db.worker.findUniqueOrThrow({ where: { id: created.id } });
+  },
+
+  /**
+   * retireWorker — end the casting while reserving its name FOREVER
+   * (cor:agt:020:02): a retired worker stops authoring (team chat's
+   * worker-App pin checks retirement at post time) and refuses new session
+   * bindings; the row — and its name reservation — survive. Idempotent: the
+   * claim is guarded on `retiredAt: null`, so retiring twice (or racing
+   * another retirer) returns the already-retired row unchanged.
+   */
+  retireWorker: async (
+    _: unknown,
+    { workerRef }: { workerRef: string },
+    ctx: Context,
+  ) => {
+    const worker = await resolveWorkerRefRow(ctx, workerRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    await requireWorkerStaffAccess(ctx, app);
+    await ctx.db.worker.updateMany({
+      where: { id: worker.id, retiredAt: null },
+      data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
+    });
+    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+  },
+
+  /**
+   * releaseWorker — #1050: give up a held name, or take one back.
+   *
+   * Holding is what makes a name a person's rather than a session's, so the
+   * release is the ONLY thing that frees one. Two principals may call it, and
+   * they are different acts:
+   *
+   * - **The holder**, releasing their own name. No notice owed; they are the
+   *   only party losing anything.
+   * - **An App/org admin**, force-releasing somebody else's. This exists for
+   *   the case the holding model otherwise strands — a person leaves and their
+   *   names are held forever — and it is the ONE path by which a name changes
+   *   hands without its holder acting.
+   *
+   * That second path posts to the team chat, naming who released what and from
+   * whom. hadron-cli#492 is precisely the case where notice was owed and there
+   * was no way to give it: the displaced driver learned nothing, and could not
+   * have. A silent admin override would rebuild that. The notification is
+   * best-effort — a chat that cannot be posted to must not prevent an admin
+   * from recovering a departed colleague's names.
+   *
+   * Releasing does NOT retire the worker, free the name for a different
+   * casting, or touch its history: the name stays permanently allocated to
+   * this casting (cor:agt:020:02), and the handoff sequence and worklog travel
+   * with the worker to whoever holds it next (Holger, 2026-08-19). Release is
+   * about WHO holds it, never about what it is.
+   */
+  releaseWorker: async (
+    _: unknown,
+    {
+      workerRef,
+      expectedHolderUserId,
+      expectUnheld,
+    }: { workerRef: string; expectedHolderUserId?: string | null; expectUnheld?: boolean | null },
+    ctx: Context,
+  ) => {
+    // #1073 — the caller may state the hold it believes it is releasing.
+    //
+    // TWO arguments rather than one nullable id, deliberately. Distinguishing
+    // "expect nobody" from "no expectation" through a nullable argument would
+    // rest on KEY PRESENCE, and any layer forwarding the argument
+    // unconditionally sends `undefined` — which is present, and would be read
+    // as an assertion the caller never made
+    // (findings:optional-arg-meets-presence-semantics, a real incident here).
+    // A safety precondition must not depend on every hop between caller and
+    // resolver preserving absence, so both forms are explicit values.
+    const assertsHolder = typeof expectedHolderUserId === 'string' && expectedHolderUserId !== '';
+    const assertsUnheld = expectUnheld === true;
+    if (assertsHolder && assertsUnheld) {
+      throw new GraphQLError(
+        'Pass expectedHolderUserId or expectUnheld, not both — they assert contradictory holds.',
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
+    const worker = await resolveWorkerRefRow(ctx, workerRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+
+    // The READ gate runs FIRST, before the idempotent return below (PR #1052
+    // review, Codex + Copilot P1). Without it this mutation was a read surface:
+    // an unheld worker returned its row before any check, so anyone holding an
+    // id or URN could confirm a foreign worker exists and collect its scalars —
+    // through a mutation, while `Query.worker` would have refused them. A
+    // shortcut placed above an authorization check is an authorization hole
+    // whatever the shortcut is for.
+    await requireWorkerReadAccess(ctx, app);
+
+    if (!worker.heldByUserId) {
+      // An expectation of a SPECIFIC holder is violated by there being none —
+      // the hold the caller meant to release is already gone, and reporting
+      // success would describe an act that did not happen.
+      if (assertsHolder) throw holdStale(worker.id, null);
+      // Idempotent rather than an error: "nobody holds this" is the state the
+      // caller asked for, and a release racing another release is not a fault.
+      //
+      // #1073: nothing was released, so the payload says so rather than
+      // implying an act. `releasedFrom` null is what makes `forced: false`
+      // unambiguous here — it is not claiming the holder was you, it is
+      // reporting that there was no holder.
+      return {
+        worker: await ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } }),
+        releasedFromUserId: null,
+        forced: false,
+        notified: null,
+      };
+    }
+    // Held, but the caller asserted it was not. This is the dangerous case
+    // #1073 names: a client whose pre-read said "unheld" does not prompt, so
+    // without this the hold taken in the interval is force-released SILENTLY
+    // and the team chat records a public act nobody was asked about. Refused
+    // before the authorization branch below, because being told the assertion
+    // is stale discloses nothing the read gate above has not already allowed.
+    if (assertsUnheld) throw holdStale(worker.id, worker.heldByUserId);
+    // An assertion naming a DIFFERENT user than the hold we just read is stale
+    // by definition — and rejecting it here is load-bearing, not tidiness
+    // (PR #1084 review, Codex P1).
+    //
+    // Everything below decides authorization from `worker.heldByUserId`: the
+    // `isHolder` branch, the admin gate it skips, and the team-chat notice that
+    // only a non-holder release posts. If the guarded write could target a
+    // DIFFERENT user than that decision was made against, the two come apart —
+    // holder A asserting B, with the hold moving A→B in between, would release
+    // B under A's holder authorization, skipping both the admin gate and the
+    // notice. That is precisely the silent force-release this feature exists to
+    // prevent, reintroduced by the mechanism meant to prevent it.
+    //
+    // So the invariant is: the authorization decision and the guarded value
+    // name the SAME user, always.
+    if (assertsHolder && expectedHolderUserId !== worker.heldByUserId) {
+      throw holdStale(worker.id, worker.heldByUserId);
+    }
+
+    const isHolder = !!ctx.userId && worker.heldByUserId === ctx.userId;
+    if (!isHolder) {
+      // ADMIN, deliberately narrower than the staff gate that governs casting
+      // and retirement. `requireWorkerStaffAccess` admits any non-reader
+      // AppMember — right for "may staff this App", far too wide for "may take
+      // a name off a colleague", which is the one path by which a name changes
+      // hands without its holder acting. My own test caught this being the
+      // looser gate; the decision was App/org ADMIN.
+      if (ctx.impersonation) throw forbidden();
+      if (!ctx.userId) throw forbidden();
+      if (app.ownerUserId !== null) {
+        // spec 047 strict ownership, branching on the ownership CLASS before
+        // comparing owner columns (findings:org-xor-owner-null-comparison-bypass).
+        if (ctx.userId !== app.ownerUserId) throw forbidden();
+      } else if (app.organizationId !== null) {
+        try {
+          await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+        } catch (e) {
+          // Narrow: requireOrgRole signals denial with Error('Forbidden'); a DB
+          // failure inside the membership lookup must propagate rather than
+          // read as "not an admin" (review:narrow-catch-blocks).
+          if (!(e instanceof Error && e.message === 'Forbidden')) throw e;
+          throw forbidden();
+        }
+      } else {
+        throw forbidden();
+      }
+    }
+
+    // The guard IS the check (#1073). The assertion has already been proven
+    // equal to the hold we read and authorized against, so guarding on that
+    // value is atomic against a change landing between the read and this write
+    // — which is exactly what a client cannot achieve from outside, however
+    // tightly it re-reads. Zero rows under an assertion therefore means the
+    // hold moved in that window.
+    const released = await ctx.db.worker.updateMany({
+      where: { id: worker.id, heldByUserId: worker.heldByUserId },
+      data: { heldByUserId: null, heldAt: null, updatedBy: ctx.userId ?? null },
+    });
+    if (released.count === 0 && assertsHolder) {
+      // Zero rows under an assertion means the hold moved between the read
+      // above and this write. Re-read to name who holds it NOW rather than
+      // echoing the stale value the caller sent (zero-row-guarded-write-has-
+      // two-causes: say which predicate failed).
+      const current = await ctx.db.worker.findUnique({
+        where: { id: worker.id },
+        select: { heldByUserId: true },
+      });
+      throw holdStale(worker.id, current?.heldByUserId ?? null);
+    }
+
+    // Read the worker back HERE, not after the notice (PR #1124 review, Codex
+    // P2). The team-chat post below is a network call, and re-reading after it
+    // widened the window in which another caller could bind to the length of
+    // that call — so the payload could carry a NEW holder while documenting a
+    // null one. The notice does not touch the worker row, so reading before it
+    // changes nothing except how much can happen in between. The window is
+    // narrowed, not closed: `worker` is current state and `releasedFrom` is
+    // what attests the release, and the SDL now says so rather than promising
+    // a null hold it cannot guarantee.
+    const releasedWorker = await ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+
+    // #1073 — THREE states, and the middle one is why it is not a boolean:
+    // null = no notice was owed, false = one was owed and FAILED. A client
+    // cannot honestly render "we may have silently failed to announce this",
+    // so collapsing them would make saying nothing the only truthful UI.
+    let notified: boolean | null = null;
+    if (released.count > 0 && !isHolder) {
+      // Best-effort: an unreachable chat must not block an admin recovering a
+      // departed colleague's names. Narrow enough to be honest — this is the
+      // notification, not the operation.
+      try {
+        const [holder, actor] = await Promise.all([
+          ctx.db.user.findUnique({
+            where: { id: worker.heldByUserId },
+            select: { handle: true, githubUsername: true },
+          }),
+          ctx.userId
+            ? ctx.db.user.findUnique({
+                where: { id: ctx.userId },
+                select: { handle: true, githubUsername: true },
+              })
+            : Promise.resolve(null),
+        ]);
+        const nameOf = (u: { handle: string | null; githubUsername: string | null } | null) =>
+          u?.handle ?? u?.githubUsername ?? 'an administrator';
+        /**
+         * Neutralize a user-supplied name before it goes into the notice
+         * (PR #1052 review, Copilot — suppressed comment, and the best finding
+         * of that round).
+         *
+         * Worker names are only `.trim()`ed at casting, and handles are
+         * user-chosen, so a name carrying `*`, backticks or a NEWLINE can break
+         * the formatting or forge extra sentences into a message whose whole
+         * purpose is to be trustworthy: this is the notice that tells a team
+         * their colleague's name was taken by an admin. A forged one is worse
+         * than none.
+         *
+         * Newlines collapse first — they are what lets a name append a whole
+         * fabricated line — then the emphasis and code characters are escaped.
+         */
+        const plainly = (value: string): string =>
+          value.replace(/\s+/g, ' ').replace(/([\\`*_~[\]()#>|])/g, '\\$1').trim();
+        // LAZY import: resolvers.teamChat already imports locateTeamAgent
+        // from this module, so a static import here would close a cycle. It is
+        // reached only on the admin force-release path, so the cost is nil and
+        // the module graph stays acyclic.
+        const { teamChatMutations } = await import('./resolvers.teamChat.js');
+        await teamChatMutations.createTeamChatMessage(
+          {},
+          {
+            appRef: app.id,
+            body:
+              `The name **${plainly(worker.name)}** was released by ${plainly(nameOf(actor))}, ` +
+              `and was held by ${plainly(nameOf(holder))}. ` +
+              'It is now unheld — the next person to bind it holds it. ' +
+              'Nothing about the worker itself changed: its history, worklog and handoffs stay with the name.',
+            replyToSeq: null,
+            sessionRef: null,
+          },
+          ctx,
+        );
+        notified = true;
+      } catch (e) {
+        // The release STOOD; only the announcement failed. Reporting that is
+        // the whole point of the tri-state — before #1073 this warning was the
+        // only trace, and no caller could see it.
+        notified = false;
+        console.warn(
+          `[releaseWorker] force-release of ${worker.id} succeeded but the team-chat notice failed:`,
+          e,
+        );
+      }
+    }
+
+    return {
+      worker: releasedWorker,
+      // The holder the WRITE ended — `worker.heldByUserId` is the value the
+      // authorization decision was made against AND the value the updateMany
+      // guarded on, which #1084 made the same user by construction. Reporting
+      // a pre-read holder here would reintroduce exactly the gap that closed.
+      releasedFromUserId: released.count > 0 ? worker.heldByUserId : null,
+      // Known, never guessed: reaching here as a non-holder means the admin
+      // gate passed, which requires ctx.userId. So `false` always means the
+      // holder was the caller — or that nothing was released.
+      forced: released.count > 0 ? !isHolder : false,
+      notified,
+    };
+  },
+
+  /**
+   * updateWorker — #1010: amend a casting's individuality after the fact.
+   *
+   * `promptOverride` is the platform's designated per-worker escape hatch
+   * (cor:agt:020:01), but it could only be set at CASTING time and was
+   * immutable thereafter — which inverts the natural order, fixing a casting's
+   * individuality at the one moment nobody yet knows what makes it individual.
+   * Neither escape hatch covered it: the role agent's `personaPrompt` is SHARED
+   * by every casting of that role (cor:agt:020:01 explicitly allows several), so
+   * anything individual written there is claimed by all of them; and
+   * `deleteWorker` + re-cast refuses `WORKER_IN_USE` the moment a session was
+   * bound — so exactly the workers that have accumulated an identity are the
+   * ones that could not be re-cast.
+   *
+   * Scope is deliberately ONE field. `name` is permanent by law
+   * (cor:agt:020:02 — the allocation contract), and `role`/`agent` define the
+   * casting itself: a different role is a different casting, not an edit.
+   *
+   * Argument semantics: OMITTED preserves (the partial-update convention every
+   * other surface follows), explicit `null` or blank CLEARS — matching both the
+   * nullable column and `castWorker`'s own blank-is-absent normalization, so a
+   * value that castWorker would have stored as null cannot be reintroduced here.
+   *
+   * A RETIRED worker refuses. An override is briefing text, delivered at bind
+   * time — and a retired worker takes no new bindings (`startSession` refuses
+   * WORKER_RETIRED), so the edit could never reach anyone. Silently accepting a
+   * write with no possible effect is worse than a typed refusal that says why.
+   *
+   * Authorization is castWorker's gate: this edits the App's staff.
+   */
+  updateWorker: async (
+    _: unknown,
+    args: { workerRef: string; promptOverride?: string | null },
+    ctx: Context,
+  ) => {
+    const worker = await resolveWorkerRefRow(ctx, args.workerRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    await requireWorkerStaffAccess(ctx, app);
+
+    if (worker.retiredAt) {
+      throw new GraphQLError(
+        'This worker is retired — it takes no new session bindings, so a prompt override would never be delivered. Cast a new worker instead.',
+        { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
+      );
+    }
+
+    // Presence, not truthiness: `promptOverride: null` is a request to CLEAR,
+    // while omitting it is a request to leave it alone. A `?? undefined` here
+    // would collapse the two and make clearing impossible.
+    if (!('promptOverride' in args)) {
+      return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    }
+    const next = args.promptOverride;
+    // Guarded on the state the refusal above consumed (PR #1019 review,
+    // Copilot): the check read `retiredAt` from a row resolved earlier, so a
+    // `retireWorker` landing in between would let this write through and amend
+    // a retired casting the contract says it refuses. `updateMany` re-applies
+    // the predicate at write time — the same shape `retireWorker` itself uses
+    // for its idempotent claim, and the lighter sibling of `deleteWorker`'s
+    // SERIALIZABLE count-then-act (this write cannot corrupt anything, it just
+    // must not contradict its own stated refusal).
+    const { count } = await ctx.db.worker.updateMany({
+      where: { id: worker.id, retiredAt: null },
+      // castWorker's normalization, verbatim: blank is absent, and a non-blank
+      // value is stored RAW (not trimmed) — the override is prose whose leading
+      // and trailing whitespace is the author's to choose.
+      data: { promptOverride: (next ?? '').trim() === '' ? null : (next as string) },
+    });
+    if (count === 0) {
+      // Zero rows has TWO causes, and guessing retirement is wrong (PR #1020
+      // review, Codex P2): a concurrent `deleteWorker` can also have removed the
+      // row. It is permitted to — its "never used" test is about bound sessions
+      // and working-memory content, and setting an override makes a worker
+      // neither. Reporting WORKER_RETIRED for a worker that was actually DELETED
+      // would be actively misleading, since deletion frees the name to be cast
+      // again while retirement reserves it forever (cor:agt:020:02) — opposite
+      // advice for the caller. So ask which happened rather than assume.
+      const still = await ctx.db.worker.findUnique({
+        where: { id: worker.id },
+        select: { retiredAt: true },
+      });
+      if (!still) {
+        throw new GraphQLError('Worker not found.', {
+          extensions: { code: 'WORKER_NOT_FOUND', workerRef: args.workerRef },
+        });
+      }
+      throw new GraphQLError(
+        'This worker was retired while the update was in flight — it takes no new session bindings, so a prompt override would never be delivered.',
+        { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
+      );
+    }
+    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+  },
+
+  /**
+   * deleteWorker — the ONLY removal escape (cor:dmo:050:11): the hard delete
+   * of a never-used miscast. "Never did anything" is checked, not asserted:
+   * no session was EVER bound (ended ones included — chat authorship and
+   * worklog records both require a bound session, so zero sessions implies
+   * zero references), and the working memory (if provisioned) holds no nodes
+   * and no assets. Anything else is WORKER_IN_USE — retire instead.
+   */
+  deleteWorker: async (
+    _: unknown,
+    { workerRef }: { workerRef: string },
+    ctx: Context,
+  ) => {
+    const worker = await resolveWorkerRefRow(ctx, workerRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    await requireWorkerStaffAccess(ctx, app);
+
+    const sessions = await ctx.db.session.count({ where: { workerId: worker.id } });
+    if (sessions > 0) {
+      throw new GraphQLError(
+        'This worker has driven sessions — its name is bound to that history forever. Retire it instead.',
+        { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+      );
+    }
+    if (worker.memoryId) {
+      const [nodes, assets] = await Promise.all([
+        ctx.db.node.count({ where: { memoryId: worker.memoryId } }),
+        ctx.db.asset.count({ where: { memoryId: worker.memoryId } }),
+      ]);
+      if (nodes > 0 || assets > 0) {
+        throw new GraphQLError(
+          'This worker\'s working memory holds content — it did something. Retire it instead.',
+          { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+        );
+      }
+    }
+    // Count-then-act: SERIALIZABLE so a session binding (or memory write)
+    // committing between the checks above and the delete cannot slip a
+    // referenced worker through (conventions:count-then-act-serializable-txn;
+    // the counts re-run inside the transaction).
+    await ctx.db.$transaction(
+      async (tx) => {
+        const inTxSessions = await tx.session.count({ where: { workerId: worker.id } });
+        if (inTxSessions > 0) {
+          throw new GraphQLError(
+            'This worker has driven sessions — its name is bound to that history forever. Retire it instead.',
+            { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+          );
+        }
+        await tx.worker.delete({ where: { id: worker.id } });
+        if (worker.memoryId) {
+          const nodes = await tx.node.count({ where: { memoryId: worker.memoryId } });
+          const assets = await tx.asset.count({ where: { memoryId: worker.memoryId } });
+          if (nodes > 0 || assets > 0) {
+            throw new GraphQLError(
+              'This worker\'s working memory holds content — it did something. Retire it instead.',
+              { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+            );
+          }
+          await tx.memory.delete({ where: { id: worker.memoryId } });
+        }
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    return true;
+  },
+};
+
+export const workerQueries = {
+  /**
+   * Read one worker (cor:api:120 find-one). The ref is a Worker id, an
+   * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991), or — with
+   * `appRef` — the worker's NAME ("Iris", #990/#1015).
+   *
+   * The forms are told apart by SHAPE, never by trying each in turn: an id or a
+   * scheme-prefixed URN is self-describing, anything else is a name. Falling
+   * back from a failed URN resolution to a name lookup would make a typo'd URN
+   * silently search the roster (startSession's rule).
+   *
+   * This read is what makes a boot briefing RE-FETCHABLE (#1015): `Worker.prompt`
+   * renders live from the role agent's template, so an agent that lost its
+   * briefing to a compaction can recover it here instead of opening a second
+   * session or forcing a takeover of itself — both of which corrupt the
+   * provenance record the Worker model exists to produce.
+   */
+  worker: async (
+    _: unknown,
+    { ref, appRef }: { ref: string; appRef?: string | null },
+    ctx: Context,
+  ) => {
+    const trimmed = ref?.trim() ?? '';
+    // The NAME form is activated by `appRef`, not by shape alone — it is
+    // strictly ADDITIVE. Without an appRef the resolver behaves exactly as it
+    // did before #1015, including for a name-shaped ref: an unresolvable ref of
+    // any shape refuses WORKER_NOT_FOUND, which is the standing no-oracle
+    // contract. Branching on shape alone would have re-labelled that refusal
+    // and told a caller which of their guesses merely lacked App context.
+    //
+    // A name is unique only WITHIN an App (cor:agt:020:02), so appRef is what
+    // makes the lookup well-defined; guessing across the caller's Apps would
+    // resolve one name to several workers. An id or URN is self-describing and
+    // wins over appRef rather than being checked against it — the same shape
+    // test startSession uses, so a typo'd URN never silently degrades into a
+    // roster search.
+    if (appRef && trimmed !== '' && !isId(trimmed) && !hasSchemePrefix(trimmed)) {
+      // An unresolvable appRef collapses into WORKER_NOT_FOUND too (PR #1019
+      // review, Codex P2). `resolveAppRef` throws AppNotFoundError, which would
+      // escape BEFORE the gated helper's collapse and let a caller tell a
+      // nonexistent App apart from a live one with no such worker — an
+      // existence oracle over other tenants' App refs, reintroduced through the
+      // very argument that was supposed to be gated. The collapse has to cover
+      // every input to the lookup, not just the name.
+      let appId: string;
+      try {
+        ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+      } catch {
+        throw new GraphQLError('Worker not found.', {
+          extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
+        });
+      }
+      // Gate-then-lookup, with denial and absence collapsed — see
+      // resolveWorkerIdByNameGated for why the ordering is the contract.
+      const byName = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
+      if (!byName) {
+        throw new GraphQLError('Worker not found.', {
+          extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
+        });
+      }
+      return ctx.db.worker.findUniqueOrThrow({ where: { id: byName } });
+    }
+    const worker = await resolveWorkerRefRow(ctx, ref);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    await requireWorkerReadAccess(ctx, app);
+    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+  },
+
+  /**
+   * The App's staff list (cor:agt:020:01 — Workers are the staff; AppAgent is
+   * the install roster). Retired castings are hidden by default; pass
+   * includeRetired for the full historical staff.
+   */
+  workers: async (
+    _: unknown,
+    {
+      appRef,
+      includeRetired,
+      limit,
+      offset,
+    }: { appRef: string; includeRetired?: boolean | null; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => {
+    const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+    await requireWorkerReadAccess(ctx, app);
+    const where = {
+      appId,
+      ...(includeRetired ? {} : { retiredAt: null }),
+    };
+    const [items, total] = await Promise.all([
+      ctx.db.worker.findMany({
+        where,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: clampListTake(limit),
+        skip: offset ?? 0,
+      }),
+      ctx.db.worker.count({ where }),
+    ]);
+    return { items, total };
+  },
+
+  /**
+   * castWorkerPreview — #964: the dry-run for the one IRREVERSIBLE act in the
+   * team feature (a cast name is permanent, cor:agt:020:02). A QUERY, not a
+   * dryRun flag: a Boolean argument cannot switch a GraphQL return type, and
+   * "single implementation" is a server-code property — the resolution half
+   * (`resolveCastTarget`: App gate, agent by ref or personaRole, typed
+   * refusals) is the SAME code castWorker runs, and the name projection
+   * consults the same roster the allocation's unique arbitrates. Returns what
+   * the caller needs to decide: the name the cast would allocate, the
+   * composed boot prompt (reviewable BEFORE the name is permanent — where a
+   * template missing {{name}} becomes visible), and which Team Agent
+   * resolved.
+   *
+   * THE PREVIEW RESERVES NOTHING. No lease exists by law (cor:agt:020:03 —
+   * liveness and allocation both derive from real rows, never a hold), so a
+   * previewed name may be gone at cast time, by design. Authorization is the
+   * MINT gate, not a looser read gate: a preview reveals a name the caller
+   * could mint anyway.
+   */
+  castWorkerPreview: async (_: unknown, args: CastArgs, ctx: Context) => {
+    const { appId, agent, workerRole, requestedName, override } = await resolveCastTarget(
+      ctx,
+      args,
+    );
+    let name: string;
+    if (requestedName) {
+      // Taken-ness judged by the DB's lower() — the constraint's own
+      // expression (see takenWorkersByName).
+      const taken = await takenWorkersByName(ctx.db, appId, [requestedName]);
+      if (taken.has(requestedName)) {
+        throw nameTaken(requestedName, appId);
+      }
+      name = requestedName;
+    } else {
+      // #1050: same refusal as castWorker, and deliberately the SAME code —
+      // the preview's whole contract is to answer "what would the cast do",
+      // so a nameless preview must fail exactly where the cast would.
+      throw new GraphQLError(
+        'Pass a name for the worker — a name is permanent within the App (cor:agt:020:02), so it is chosen, never derived.',
+        { extensions: { code: 'WORKER_NAME_REQUIRED', ...(workerRole ? { role: workerRole } : {}) } },
+      );
+    }
+
+    // Prompt composition mirrors Worker.prompt exactly: the agent's template
+    // with {{name}}/{{role}} bound, then the override as its own paragraph.
+    const template = agent.personaPrompt ?? null;
+    const bound = template
+      ? applyPersonaTemplate(template, name, workerRole ?? agent.personaRole ?? '')
+      : null;
+    const prompt = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
+
+    return {
+      name,
+      role: workerRole,
+      agentId: agent.id,
+      agentName: agent.name,
+      prompt,
+      hasNamePlaceholder: template ? templateBindsName(template) : null,
+    };
+  },
+};
+
+/** Per-worker driving state: is a session open, and when was it last driven. */
+export type WorkerActivity = { hasLiveSession: boolean; lastActiveAt: Date | null };
+
+/**
+ * Driving state for EVERY worker of one App, in three queries (hadron-cli#487).
+ *
+ * Ada's finding is that a coordinator cannot tell "dispatched and pending" from
+ * "dispatched into the void": ten issues went to a worker whose entire history
+ * was two sessions of 2m26s and 41s, and `worker list` renders that identically
+ * to a worker driven yesterday. The join already existed — `startSession`
+ * computes it for the takeover prompt — so only the READ surface was missing.
+ *
+ * Loaded per APP rather than per worker on purpose. A roster is the calling
+ * shape, and a field resolver that queried per worker would issue one query per
+ * row, concurrently, up to the 200-item page cap — the N+1 that PR #1000's
+ * review pulled out of the MCP roster twice already.
+ *
+ * Memoized ONLY inside a query, for the reason `loadAppRepoAffinity` states: a
+ * request-scoped memo over data the same request can WRITE is stale by
+ * construction, and `startSession` / `endSession` write exactly this. A mutation
+ * pays the re-read rather than answering from a cache it just invalidated.
+ */
+export async function loadAppWorkerActivity(
+  ctx: Context,
+  appId: string,
+  opts?: { memoize?: boolean; now?: Date },
+): Promise<Map<string, WorkerActivity>> {
+  const now = opts?.now ?? new Date();
+  type Cache = Map<string, Promise<Map<string, WorkerActivity>>>;
+  const holder = ctx as Context & { workerActivityCache?: Cache };
+  const cache = opts?.memoize ? (holder.workerActivityCache ??= new Map()) : null;
+  const cached = cache?.get(appId);
+  if (cached) return cached;
+
+  const pending = (async () => {
+    // AGGREGATED IN THE DATABASE, one row per worker (PR #1086 review, Codex
+    // P2).
+    //
+    // This SQL is a SECOND implementation of `lib/sessionActivity.ts`, and that
+    // is deliberate rather than an oversight: one derivation must aggregate
+    // inside the query (unbounded history), the other works on rows already in
+    // hand (the takeover prompt). Neither can be expressed as the other. What
+    // makes two copies survivable is that they are pinned to agree — see the
+    // differential test in resolvers.worker.test.ts, which runs a matrix of
+    // session shapes through both and requires the same instant. Every rule
+    // below therefore exists twice, and BOTH times in this PR a review finding
+    // had to be applied to both. The first draft fetched every non-deleted session of every worker in
+    // the App and folded them in JavaScript — session history is UNBOUNDED, so
+    // latency, heap and the `IN (…)` parameter count grew with the App's
+    // lifetime on every roster read, and a single-worker read paid the same
+    // price. The output here is O(workers), not O(sessions).
+    //
+    // Three points the SQL encodes, each of which is a rule rather than a
+    // detail:
+    //
+    //  - `deleted_at IS NULL` matches the predicate `startSession` refuses
+    //    WORKER_TAKEN on, exactly (PR #1000 review, Codex P2). Without it a
+    //    roster calls a worker busy whose only live session is soft-deleted,
+    //    while binding it actually succeeds. Liveness a reader SEES and
+    //    liveness the server ENFORCES must be one predicate.
+    //  - `bool_or(ended_at IS NULL)` — ANY open session makes the worker live.
+    //    `force` lets several coexist, and the most recent row is not
+    //    necessarily the open one.
+    //  - `CASE WHEN auto_expired_at IS NULL THEN updated_at END` — see below.
+    //    `GREATEST` ignores NULL arguments in Postgres, so a dropped term is
+    //    simply not considered rather than poisoning the row.
+    // #1114 — per-type cutoffs for the DERIVED liveness below, bound as
+    // naive-UTC literals rather than JS Dates. Prisma binds a Date as
+    // `timestamptz`, and these columns are `timestamp WITHOUT time zone`, so a
+    // bare comparison coerces the COLUMN using the session zone — silently
+    // correct on a UTC server and wrong everywhere else
+    // (findings:prisma-naive-timestamp-raw-sql).
+    const cut = idleCutoffs(now);
+    const rows = await ctx.db.$queryRaw<
+      { workerId: string; live: boolean; lastActiveAt: Date | null }[]
+    >`
+      SELECT s.worker_id AS "workerId",
+             -- #1114: LIVE IS DERIVED, not stored. It was bool_or(ended_at IS
+             -- NULL), which was only ever true because a reaper eventually
+             -- ended abandoned sessions — an inference from silence, written
+             -- into the record. With that rule gone, an open row proves only
+             -- that nobody CLOSED it, so the reader computes "is anyone
+             -- driving this" from the same three heartbeat inputs the takeover
+             -- gate uses (cor:agt:020:11 — one predicate, or the roster and
+             -- the binder disagree about the same worker in the same second).
+             bool_or(
+               s.ended_at IS NULL
+               AND GREATEST(
+                     s.started_at,
+                     CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
+                     ue.max_created
+                   ) >= (CASE s.type::text
+                           WHEN 'DEVELOPER'  THEN ${toNaiveUtc(cut.DEVELOPER)}::timestamp
+                           WHEN 'CHATBOT'    THEN ${toNaiveUtc(cut.CHATBOT)}::timestamp
+                           WHEN 'AUTOMATION' THEN ${toNaiveUtc(cut.AUTOMATION)}::timestamp
+                           WHEN 'EDGE'       THEN ${toNaiveUtc(cut.EDGE)}::timestamp
+                         END)
+             ) AS "live",
+             max(LEAST(GREATEST(
+               s.started_at,
+               -- The REAPER ends an idle session with an updateMany, and
+               -- Prisma's @updatedAt advances updated_at to the reaping
+               -- instant (#930). Folding that in would report the background
+               -- cleanup as the worker's last drive — shifting it forward by
+               -- the whole idle window, and making an ABANDONED worker read as
+               -- recently driven, which is the exact signal this field exists
+               -- to give (PR #1086 review, Codex P2). auto_expired_at is set
+               -- on precisely those rows, so they fall back to started_at and
+               -- their usage events. That UNDER-reports — the last genuine
+               -- heartbeat was overwritten by the reap and is unrecoverable —
+               -- and under-reporting is the safe direction here: it makes an
+               -- abandoned name look more idle, never less.
+               CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
+               ue.max_created
+             -- ACTIVITY CANNOT POSTDATE THE END (PR #1086 review, Codex P2).
+             -- updateSession deliberately permits writes after ended_at, so a
+             -- merge landing days later attributes a PR to a finished stint
+             -- and drags updated_at with it; usage events can be attributed
+             -- late for the same reason. Neither is someone driving the
+             -- worker. LEAST ignores NULL, so an OPEN session is uncapped.
+             ), s.ended_at)) AS "lastActiveAt"
+      FROM sessions s
+      JOIN workers w ON w.id = s.worker_id
+      LEFT JOIN LATERAL (
+        SELECT max(e.created_at) AS max_created
+        FROM usage_events e
+        WHERE e.session_id = s.id
+      ) ue ON true
+      WHERE w.app_id = ${appId} AND s.deleted_at IS NULL
+      GROUP BY s.worker_id
+    `;
+    return new Map<string, WorkerActivity>(
+      rows.map((r) => [r.workerId, { hasLiveSession: r.live, lastActiveAt: r.lastActiveAt }]),
+    );
+  })();
+
+  cache?.set(appId, pending);
+  return pending;
+}
+
+/**
+ * #983 review (Codex + Copilot P1): `Session.worker` made Worker rows
+ * reachable by principals the worker queries never admitted —
+ * `sessionScopeFilter` admits ANY org member (READER included), and a
+ * self-attributed session stays readable by its user after they leave the
+ * App. Attribution needs only the IDENTITY scalars (name, role, appId,
+ * retiredAt); the WORKING-STATE fields — `prompt`, `promptOverride`,
+ * `memoryId` — must stay behind the worker read gate, masked to null on
+ * deny (the #552 posture applied field-level, like Worker.app/agent).
+ * Memoized per request+App: one gate check covers a whole session page.
+ */
+async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
+  type Cache = Map<string, Promise<boolean>>;
+  const holder = ctx as Context & { workerInternalsCache?: Cache };
+  const cache = (holder.workerInternalsCache ??= new Map());
+  let pending = cache.get(appId);
+  if (!pending) {
+    pending = (async () => {
+      const app = await ctx.db.app.findUnique({ where: { id: appId } });
+      if (!app || app.deletedAt) return false;
+      try {
+        await requireWorkerReadAccess(ctx, app);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    cache.set(appId, pending);
+  }
+  return pending;
+}
+
+/**
+ * The App's `urn` COLUMN, read for URN composition. Only the column — never the
+ * App object, which would hand the caller App.keys / App.members
+ * (findings:broadening-read-gate-leaks-nested-objects, #552).
+ *
+ * Memoized per request+App, and ONLY inside a query (#1026). Both halves matter:
+ *
+ *   - memoized, because `Worker.urn` and `Worker.portalUrl` each need it, and a
+ *     roster selecting both would otherwise run TWO identical App lookups per
+ *     worker — concurrently, up to the 200-item page cap. That is the defect PR
+ *     #1000's review already caught once on this exact lookup; adding a second
+ *     URN-shaped field without a memo would reintroduce it at double the width.
+ *   - query-only, because `updateApp` can write a new `urn`, so a request-scoped
+ *     memo over it is stale by construction in a mutation. Same rule, and the
+ *     same reason, as the `repos` affinity memo below: a mutation pays the
+ *     re-read rather than serving its own stale answer.
+ *
+ * `info` is absent when an MCP tool calls the field resolver directly, which
+ * lands on the un-memoized path — the safe direction.
+ */
+async function loadAppUrnForWorker(
+  ctx: Context,
+  appId: string,
+  opts: { memoize: boolean },
+): Promise<string | null> {
+  type Cache = Map<string, Promise<string | null>>;
+  const read = async (): Promise<string | null> => {
+    const app = await ctx.db.app.findUnique({ where: { id: appId }, select: { urn: true } });
+    return app?.urn ?? null;
+  };
+  if (!opts.memoize) return read();
+  const holder = ctx as Context & { workerAppUrnCache?: Cache };
+  const cache = (holder.workerAppUrnCache ??= new Map());
+  let pending = cache.get(appId);
+  if (!pending) {
+    pending = read();
+    cache.set(appId, pending);
+  }
+  return pending;
+}
+
+/**
+ * The worker's URN, `hrn:worker:<root>:<app-slug>:<slug>` (#991) — COMPUTED from
+ * the App's URN plus the stored `slug`, never a column, so a worker is
+ * addressable context-free (`workerRef`, `resolveUrn`, a portal link) without
+ * the caller holding its cuid.
+ *
+ * Shared by `Worker.urn` and `Worker.portalUrl` (#1026) so the identifier a
+ * worker prints and the link that opens it can never disagree about what they
+ * address — the same reason `Node.urn` and `Node.portalUrl` share
+ * `resolveNodeUrnField`.
+ *
+ * Null rather than an error when the App's URN isn't the flat `<root>:<slug>`
+ * pair the fixed arity needs (a legacy row the #697 backfill left behind) — an
+ * unaddressable worker is a gap, not a query failure.
+ */
+async function resolveWorkerUrnField(
+  worker: { appId: string; slug: string },
+  ctx: Context,
+  info?: { operation?: { operation?: string } },
+): Promise<string | null> {
+  const appUrn = await loadAppUrnForWorker(ctx, worker.appId, {
+    memoize: info?.operation?.operation === 'query',
+  });
+  if (appUrn === null) return null;
+  try {
+    return composeWorkerUrn(normalizeUrnForLookup(appUrn), worker.slug);
+  } catch {
+    return null;
+  }
+}
+
+export const workerFieldResolvers = {
+  /**
+   * #1073 — the release receipt's holder, resolved lazily as a SANITIZED
+   * projection (`ReleasedFromUser`), not as a `User`.
+   *
+   * The mutation returns `releasedFromUserId`; this loads the row only when a
+   * client actually selects `releasedFrom`, so a caller that just wants
+   * `forced` / `notified` pays no extra query. Null propagates unchanged,
+   * which is the idempotent "nothing was released" case.
+   *
+   * **Why not `User`** (PR #1124 review, Codex P1 — and it disproved the
+   * justification this resolver originally shipped with). That justification
+   * was: the caller is the holder or an App/org ADMIN, and that audience can
+   * already read the same object through `AppMember.user`. Both halves fail on
+   * the path that matters:
+   *
+   * - `leaveApp` DELETES the `AppMember` row and does not touch the hold, so an
+   *   app-only holder who has left keeps the name with no membership row behind
+   *   it. That is the departed colleague — the exact case force-release exists
+   *   to serve — and for them the `AppMember.user` route does not exist.
+   * - `Worker` only ever exposed `heldByUserId`, a bare id. There was no path
+   *   from this surface to a `User` at all, so returning one would have been a
+   *   NEW disclosure rather than an inherited one.
+   *
+   * And what it discloses is not nothing: `User`'s gated fields are `name`,
+   * `email`, `googleId`, `appleId`; `policy`, `identityProvider`, `externalId`,
+   * `githubId`, `githubUsername`, `roles` and `maxReferrals` default-resolve
+   * with no gate of their own, because they lean on the surface that returned
+   * the object. That is the CLAUDE.md invariant verbatim — relaxing a read gate
+   * re-derives the whole field surface it admits.
+   *
+   * So: id / handle / urn, plus `name` behind the SAME shared `#384` gate it
+   * has on `User` rather than a second copy of the rule (a bespoke per-resolver
+   * gate drifts). An admin releasing someone who has left the org sees a null
+   * name and still learns who they released.
+   */
+  ReleaseWorkerPayload: {
+    releasedFrom: async (
+      parent: { releasedFromUserId?: string | null },
+      _args: unknown,
+      ctx: Context,
+    ) => {
+      if (!parent.releasedFromUserId) return null;
+      return ctx.db.user.findUnique({
+        where: { id: parent.releasedFromUserId },
+        // Selected, not spread: a projection that reads the whole row is one
+        // schema change away from leaking the field it forgot to think about.
+        select: { id: true, handle: true, name: true },
+      });
+    },
+  },
+  ReleasedFromUser: {
+    urn: (u: { handle?: string | null }) => userUrn(u.handle),
+    /** The #384 gate, reused — see `User.name` in resolvers.types.ts. */
+    name: async (u: { id: string; name?: string | null }, _args: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.name ?? null) : null,
+  },
+  Worker: {
+    /**
+     * The worker's URN (#991). See `resolveWorkerUrnField`.
+     *
+     * An identity scalar, ungated like `name`: it discloses the App's slug, and
+     * the Worker read gate already requires participation in that App.
+     */
+    urn: (
+      worker: { appId: string; slug: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ) => resolveWorkerUrnField(worker, ctx, info),
+    /**
+     * #1026 — the portal link that opens this worker, so a worker signing an
+     * artifact under #1008 hands over a URL instead of assembling one.
+     *
+     * Node reads have emitted this since #881, and every role-agent prompt on
+     * this team carries the rule "never hand-build a portal link — copy the URL
+     * line a node read prints". Worker reads printed the URN and no link, so
+     * satisfying #1008 meant constructing `<origin>/app/u/<urn>` by hand: the
+     * one thing the surrounding instruction forbids. The prompts resolved that
+     * with an explicit carve-out ("the ONE portal link you may construct
+     * yourself"), which teaches an exception to a rule that exists for a good
+     * reason and puts the portal origin in the model's hands rather than the
+     * server's. This field is what lets the carve-out come out.
+     *
+     * Built from the SAME URN the `urn` field returns, so the two cannot
+     * diverge. Ungated for the same reason `urn` is — it discloses nothing the
+     * URN beside it does not.
+     *
+     * Nullable on BOTH arms, and neither is an error: no configured portal
+     * origin means no link (see lib/portalUrl.ts — a link to the wrong host is
+     * worse than none), and an App URN the fixed arity cannot take means no URN
+     * to build one from.
+     */
+    portalUrl: async (
+      worker: { appId: string; slug: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => {
+      const urn = await resolveWorkerUrnField(worker, ctx, info);
+      return urn === null ? null : portalUrlForUrn(urn);
+    },
+    /**
+     * #1024 — the repo affinity of this worker's ROLE, resolved so a client
+     * binding a worker needs no second round-trip to `teamRoles`. The CLI's
+     * mismatch warning fires at `session start` (hadron-cli#456), which already
+     * has the worker in hand.
+     *
+     * Behind the worker read gate and masked on deny, like `promptOverride` and
+     * the holder — because `Session.worker` reaches a Worker through a WIDER
+     * gate that admits any org member and survives a user leaving the App, so
+     * an ungated field here would publish a team's repo list through any
+     * historical session.
+     *
+     * Masking to `[]` rather than null is deliberate and costs nothing: empty
+     * already means "no affinity, never warn" (the field's contract), so a
+     * denied caller simply gets no warning — the safe direction for a signal
+     * that must never become a refusal.
+     *
+     * UNPROVEN BY CONSTRUCTION, and kept anyway. `teamRoles` runs
+     * `requireWorkerReadAccess` — the same predicate `maySeeWorkerInternals`
+     * wraps — so today the inner call refuses first and deleting this line
+     * leaves the suite green. That is a green mutation indicting the TEST, not
+     * the guard (review:a-green-mutation-indicts-the-test): no input reaches
+     * it, because the two gates are currently identical.
+     *
+     * It stays because it makes THIS field's audience explicit rather than
+     * inherited. `teamRoles` is a roster read and widening it is plausible; if
+     * it ever admits a broader caller, this field would silently widen with it
+     * — through `Session.worker`, which is the leak path described above. The
+     * day those predicates diverge, this line becomes load-bearing and a test
+     * can reach it.
+     *
+     * Resolved through `loadAppRepoAffinity` — a direct, request-memoized read
+     * of the role nodes, NOT the `teamRoles` query. Routing an internal lookup
+     * through a public paged query cost three defects in one decision (PR
+     * #1071 review, Codex): it truncated at 50 roles, it broke outright for an
+     * App with several `roles:` branches, and it reloaded the roster once per
+     * worker on a listing.
+     *
+     * A role with no definition, a worker with no role, and an unreadable
+     * system memory all answer `[]` rather than erroring. A soft signal must
+     * not be able to fail a read.
+     */
+    repos: async (
+      worker: { appId: string; role: string | null },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string[]> => {
+      if (!worker.role) return [];
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return [];
+      // LAZY import: resolvers.teamRole imports this module (withRoleWriteLock,
+      // locateTeamAgent), so a static import would close the cycle. Same shape
+      // as the teamChat locator below.
+      const { loadAppRepoAffinity } = await import('./resolvers.teamRole.js');
+      // Memoize only inside a QUERY. In a mutation the same request can write
+      // the roles this answer derives from, and a request-scoped memo over
+      // writable data is stale by construction — so a mutation pays the
+      // re-read rather than risking its own stale answer.
+      const affinity = await loadAppRepoAffinity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return affinity.get(worker.role.toLowerCase()) ?? [];
+    },
+    /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
+    promptOverride: async (
+      worker: { appId: string; promptOverride: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.promptOverride : null),
+    /**
+     * #1050 — the holder, behind the worker read gate and masked to null on
+     * deny (PR #1052 review, Codex P2).
+     *
+     * I first shipped these as ungated identity scalars, reasoning that the
+     * Worker read gate already requires App participation. It does not always:
+     * `Session.worker` reaches a Worker row through `sessionScopeFilter`, which
+     * admits any org member AND leaves a self-attributed session readable after
+     * its user has left the App — the #983 finding, which I cited in this same
+     * file while making the same mistake in the opposite direction. A former
+     * member could therefore read current staffing off a historical session.
+     *
+     * Who holds a name is working state, not identity: `name`, `role` and `urn`
+     * describe the casting, while the holder describes who is working as it
+     * right now.
+     */
+    heldByUserId: async (
+      worker: { appId: string; heldByUserId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.heldByUserId : null),
+    /**
+     * Working-state field — worker read gate, masked to null (see heldByUserId).
+     *
+     * Also null whenever there is no holder, which the COLUMN alone does not
+     * guarantee (PR #1052 review, Codex P2): the FK is ON DELETE SET NULL and
+     * Postgres clears only `held_by_user_id`, so a hard-deleted user leaves
+     * `held_at` behind. Both write paths in the platform (`releaseWorker`,
+     * `deleteUserAccount`) clear the pair together, so this covers a raw
+     * database delete rather than any operation — but the API invariant
+     * "`heldAt` is null exactly when `heldByUserId` is" should hold because it
+     * is enforced, not because every path remembered.
+     *
+     * Enforced HERE rather than as a CHECK constraint on purpose: a CHECK would
+     * make the FK's own SET NULL violate it, turning a user deletion into an
+     * error.
+     */
+    heldAt: async (
+      worker: { appId: string; heldAt: Date | null; heldByUserId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) =>
+      worker.heldByUserId && (await maySeeWorkerInternals(ctx, worker.appId))
+        ? worker.heldAt
+        : null,
+    /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
+    memoryId: async (
+      worker: { appId: string; memoryId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.memoryId : null),
+    /**
+     * hadron-cli#487 — is a worker session open on this name RIGHT NOW.
+     *
+     * Nullable, and null means "not permitted to know" rather than "no". A
+     * non-null `Boolean!` would have to answer `false` on deny, which states a
+     * fact the resolver never computed — the #1084 P1 in miniature, where the
+     * gate and the value described different things. Masked like every other
+     * working-state field, because `Session.worker` reaches Worker rows through
+     * a wider gate (#983).
+     *
+     * This is NOT availability. A name's availability is its HOLD
+     * (`cor:agt:020:09`); liveness only says whether a session is open, which
+     * is a question about your own worker. The two were conflated in the CLI
+     * and that conflation IS hadron-cli#487.
+     */
+    hasLiveSession: async (
+      worker: { id: string; appId: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<boolean | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return activity.get(worker.id)?.hasLiveSession ?? false;
+    },
+    /**
+     * hadron-cli#487 — when this worker was last DRIVEN, across every session
+     * it has ever had; null for a worker nobody has ever bound.
+     *
+     * That null is the whole point of the field: a worker cast and never driven
+     * is a meaningfully different thing from one worked yesterday, and every
+     * surface rendered them identically while a coordinator dispatched ten
+     * issues into the second one thinking it was the first.
+     *
+     * Derived by the platform's shared derivation (`sessionActivityAt`), so an
+     * "idle since" a human reads here agrees with the one the takeover prompt
+     * shows and the one the reaper acts on. Masked on deny, as above.
+     */
+    lastActiveAt: async (
+      worker: { id: string; appId: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<Date | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return activity.get(worker.id)?.lastActiveAt ?? null;
+    },
+    /**
+     * The role-agent behind the casting — behind Query.agent's OWN read gate
+     * (PUBLIC, else owner / org READER), masked to null on deny. The Worker
+     * read gate is WIDER than the Agent's (App participants, App keys), and a
+     * nested object hands the caller the Agent's field resolvers — systemPrompt
+     * included — which assume the outer query authorized them
+     * (findings:broadening-read-gate-leaks-nested-objects, #552). The
+     * installed-agent read grant cannot stand in for that gate either: Worker
+     * rows survive uninstall, so "a Worker exists" does not imply the grant
+     * still does (PR #978 review — codex P1 + Copilot).
+     */
+    agent: async (worker: { agentId: string }, _: unknown, ctx: Context) => {
+      const agent = await ctx.db.agent.findUnique({ where: { id: worker.agentId } });
+      if (!agent || agent.deletedAt) return null;
+      if (agent.visibility !== 'PUBLIC') {
+        try {
+          await requireOwnerOrOrgRole(ctx, agent, 'READER');
+        } catch {
+          return null;
+        }
+      }
+      return agent;
+    },
+    /**
+     * The App whose staff this casting fills — behind Query.app's OWN read
+     * gate (owner / org READER), masked to null on deny: an AppMember who is
+     * not an org member can read the Worker but must not reach App.keys /
+     * App.members through it (the same #552 class as `agent` above).
+     */
+    app: async (worker: { appId: string }, _: unknown, ctx: Context) => {
+      const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
+      if (!app || app.deletedAt) return null;
+      try {
+        await requireOwnerOrOrgRole(ctx, app, 'READER');
+      } catch {
+        return null;
+      }
+      return app;
+    },
+    /**
+     * The worker's boot prompt, resolved (cor:agt:020:01 — "how {{name}} and
+     * the override compose is tunable"): the agent's `personaPrompt` template
+     * with `{{name}}`/`{{role}}` bound, then the per-worker `promptOverride`
+     * appended as its own paragraph. Null when the agent carries no template
+     * and the worker no override.
+     */
+    prompt: async (
+      worker: { appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      // Working-state field: the composed boot prompt embeds the agent's
+      // persona template, which this resolver loads WITHOUT the Agent read
+      // gate — so it must sit behind the worker read gate itself (#983
+      // review; see maySeeWorkerInternals).
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      const agent = await ctx.db.agent.findUnique({
+        where: { id: worker.agentId },
+        select: { personaPrompt: true, personaRole: true },
+      });
+      const template = agent?.personaPrompt ?? null;
+      const role = worker.role ?? agent?.personaRole ?? '';
+      const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
+      if (bound && worker.promptOverride) return `${bound}\n\n${worker.promptOverride}`;
+      return worker.promptOverride ?? bound;
+    },
+    /**
+     * #1029 — what a fresh binding inherits from the previous stint.
+     *
+     * Working-state field, so it sits behind the same worker read gate as
+     * `prompt` / `memoryId` and masks to null on deny: it returns a node out of
+     * the worker's working memory and a Session row, and a nested object hands
+     * the caller that entity's field resolvers
+     * (findings:broadening-read-gate-leaks-nested-objects, #552).
+     *
+     * "Previous session" is the most recent ENDED one, deliberately not the
+     * most recent session outright: the session doing the reading is typically
+     * this worker's newest and is still open, and a session that inherits its
+     * own handoff is a loop, not continuity. Ordered by `endedAt` rather than
+     * `startedAt` because with `force` two stints can overlap, and the one that
+     * finished last is the one whose account is current.
+     */
+    continuity: async (
+      worker: { appId: string; id: string; memoryId: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      // SANITIZED projection, never the Session row (PR #1045 review, Codex
+      // P1). The gate above is App PARTICIPATION; the session read gate
+      // (`sessionScopeFilter`) needs ORG membership or self-attribution — so an
+      // AppMember who is not an org member passes this field and would fail a
+      // direct session read. Returning the object would hand them the previous
+      // driver's transcriptPath, host, repo and summary through Session's own
+      // field resolvers, which assume the outer query authorized them. Selected
+      // narrowly so a later field on Session cannot silently join the payload.
+      const previousSession = await ctx.db.session.findFirst({
+        where: { workerId: worker.id, endedAt: { not: null }, deletedAt: null },
+        orderBy: { endedAt: 'desc' as const },
+        select: { id: true, endedAt: true, autoExpiredAt: true },
+      });
+      // No working memory means no sequence to have written to — which is a
+      // real state (provisioning is best-effort at cast), not an error. The
+      // status still reports honestly on the previous stint.
+      const handoffRow = worker.memoryId
+        ? await newestHandoff(ctx.db, worker.memoryId)
+        : null;
+      const status = continuityStatusOf({
+        previousSessionId: previousSession?.id ?? null,
+        handoffSessionId: handoffRow ? handoffSessionId(handoffRow.data) : null,
+      });
+      // Re-read through the node surface so the Node field resolvers see a full
+      // row (and an encrypted memory decrypts through the same path every other
+      // node read uses) rather than the projection newestHandoff selects.
+      const handoff = handoffRow
+        ? await ctx.db.node.findUnique({ where: { id: handoffRow.id } })
+        : null;
+      return { status, handoff, previousSession };
+    },
+  },
+};

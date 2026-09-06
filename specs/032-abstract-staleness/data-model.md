@@ -37,20 +37,21 @@ model Node {
 }
 ```
 
-### `NodeVersion` model
+### `NodeRevision` model
 
-Find via `model NodeVersion {` in `prisma/schema.prisma`. New column positioned adjacent to the existing `abstract` column (from spec 031's PR-201-round-2 follow-up):
+Find via `model NodeRevision {` in `prisma/schema.prisma`. New column positioned adjacent to the existing `abstract` column (from spec 031's PR-201-round-2 follow-up):
 
 ```prisma
-model NodeVersion {
+model NodeRevision {
   // ... existing fields ...
 
   description      String?
   abstract         String?  // spec 031
   /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
-  /// version capture. Restored verbatim by `restoreNodeVersion`; legacy
-  /// versions (pre-spec) have `NULL` here, which short-circuits the
-  /// staleness check on the live row after restore (no false positives).
+  /// version capture. Restored verbatim by `restoreNodeRevision`; legacy
+  /// versions (pre-spec) have `NULL` here, which since #1128 ARMS the
+  /// marker on the live row after restore — correctly, since the restored
+  /// abstract has never been checked against the restored body.
   abstractOriginHash String? @map("abstract_origin_hash")
   content          String?
 
@@ -74,7 +75,7 @@ Hand-authored migration directory (per CLAUDE.md — `prisma migrate dev` is bro
 -- Plan: specs/032-abstract-staleness/plan.md
 --
 -- Adds an optional `abstract_origin_hash` text column to BOTH `nodes` AND
--- `node_versions`. Stores SHA-256(content)[0:8] at the time the abstract
+-- `node_revisions`. Stores SHA-256(content)[0:8] at the time the abstract
 -- was authored, so consumers can detect staleness via `abstract_origin_hash
 -- != content_hash`. Per spec 032 FR-001 + FR-002.
 --
@@ -82,23 +83,26 @@ Hand-authored migration directory (per CLAUDE.md — `prisma migrate dev` is bro
 -- established in spec 031's migrations. Two ALTERs in one transaction so
 -- either both succeed or both abort under lock contention.
 --
--- No backfill: existing rows get NULL in both tables. Pre-spec abstracts
--- naturally won't trigger the staleness signal (check short-circuits when
--- either side is null). See spec 032 Assumptions.
+-- No backfill: existing rows get NULL in both tables. When this shipped that
+-- meant pre-spec abstracts raised no signal; since #1128 a null hash on a row
+-- that HAS both an abstract and a body arms the marker instead (a null hash is
+-- not a free pass). A null on either TEXT column still raises nothing — there
+-- is no abstract to doubt, or no body to doubt it against. See spec 032
+-- Assumptions and FR-010.
 
 BEGIN;
 
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE "nodes" ADD COLUMN "abstract_origin_hash" TEXT;
-ALTER TABLE "node_versions" ADD COLUMN "abstract_origin_hash" TEXT;
+ALTER TABLE "node_revisions" ADD COLUMN "abstract_origin_hash" TEXT;
 
 COMMIT;
 ```
 
 **Online-safe**: both ALTERs are nullable additive columns; metadata-only on Postgres ≥ 11. The `ACCESS EXCLUSIVE` lock on each table is brief; the BEGIN/COMMIT wraps both so the migration aborts as a unit if either lock is contested.
 
-**Reversibility**: `BEGIN; ALTER TABLE "nodes" DROP COLUMN "abstract_origin_hash"; ALTER TABLE "node_versions" DROP COLUMN "abstract_origin_hash"; COMMIT;`. Not included in the migration file (no down-migration convention in this repo).
+**Reversibility**: `BEGIN; ALTER TABLE "nodes" DROP COLUMN "abstract_origin_hash"; ALTER TABLE "node_revisions" DROP COLUMN "abstract_origin_hash"; COMMIT;`. Not included in the migration file (no down-migration convention in this repo).
 
 ## GraphQL schema diff — `src/api/graphql/schema/typeDefs.ts`
 
@@ -111,7 +115,7 @@ type Node {
   content: String
   "SHA-256(content)[0:8] — system-managed change-detection fingerprint."
   contentHash: String
-  "Spec 032 — fingerprint of the `content` value at the time `abstract` was authored. When this differs from `contentHash` and both are non-null, the abstract is stale. Read-only; never settable via NodeInput."
+  "Spec 032 — fingerprint of the `content` value at the time `abstract` was authored. The abstract is UNVERIFIED when this differs from `computeContentHash(content)` recomputed at read time — or when it is absent while both texts exist (#1128). NOT compared against the `contentHash` column, which has its own external-producer domain (PR-207 design pivot). Read-only; never settable via NodeInput."
   abstractOriginHash: String
   # ... rest unchanged ...
 }
@@ -128,18 +132,25 @@ The **staleness check** is read-side computation, not a validation gate, AND it 
 ```typescript
 import { computeContentHash } from '../lib/contentHash.js';
 
-const isStale =
+// Since #1128 this is not inlined anywhere: it is `isAbstractUnverified`
+// in src/lib/contentHash.ts, shared by h-read-node, hadron_find_nodes and
+// h-validate. Reproduced here only to show the shape.
+const isUnverified =
   node.abstract != null &&
   node.abstract.length > 0 &&
   node.content != null &&
   node.content.length > 0 &&
-  node.abstractOriginHash != null &&             // explicit null check (FR-010 condition c)
   node.abstractOriginHash !== computeContentHash(node.content);
 ```
 
-(The `null` check on `abstractOriginHash` is the load-bearing guard against false positives on legacy nodes — pre-spec rows have null `abstractOriginHash` even when abstract + content are both populated; without the explicit guard, `null !== "abc12345"` evaluates `true` and the marker fires falsely. PR-207 review item 5 caught the gap in the original spec.)
+(**The `abstractOriginHash != null` guard is GONE as of #1128** — deliberately, and it reverses PR-207 review item 5, which added it. That review was right that `null !== "abc12345"` evaluates `true`; what changed is that firing there is now the intended behaviour rather than a false positive. An abstract with no fingerprint has never been checked against its body, and the ordering that produces one — abstract written before the body, per FR-007 — is the ordering most likely to be wrong. The guard's original premise was that every row predated the column; that premise drained to 2 rows in 1024. See FR-010 for the measurement and its expiry condition.)
 
-**v1 encryption gate (MCP surface)**: on the MCP read path (`h-read-node`, `h-validate`), the predicate is additionally short-circuited by a `!memory.isEncrypted` clause. The MCP surface does not call `decryptNodesBatch` today (asymmetry tracked by [#206](https://github.com/hadron-memory/hadron-server/issues/206)), so `node.content` is ciphertext on encrypted memories and `computeContentHash(ciphertext)` compares unequal to every plaintext-derived `abstractOriginHash` (false-positive on every node). The GraphQL `nodeById` read path is not affected (it does decrypt). The gate lifts on the MCP surface once the encryption-parity follow-up adds a decrypt step before the predicate. Tracked under [#206](https://github.com/hadron-memory/hadron-server/issues/206).
+**Encryption gate — the two MCP surfaces have DIVERGED.** As drafted, both `h-read-node` and `h-validate` short-circuited on `!memory.isEncrypted`, because neither decrypted and `computeContentHash(ciphertext)` would false-positive on every node.
+
+- **`h-read-node`: gate lifted.** Spec 041 PR-2 (closing [#206](https://github.com/hadron-memory/hadron-server/issues/206)) added the decrypt step — `mcpDecryptOrMark` flips the projection's `isEncrypted` to false when the session holds the key — so the predicate runs on plaintext and the marker fires on an unlocked encrypted memory. A locked one emits nothing, and that silence carries no information.
+- **`h-validate`: gate retained.** It derives `checkStale` from the memory row and never decrypts, so it skips the check on any encrypted memory, key or no key.
+
+The GraphQL `nodeById` read path was never affected (it always decrypted).
 
 ## Hash computation — `src/lib/contentHash.ts` (NEW)
 

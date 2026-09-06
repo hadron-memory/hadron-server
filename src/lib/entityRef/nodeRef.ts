@@ -50,10 +50,11 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
+import { findMemoryByAliasedUrn } from '../urnAlias.js';
 import { NodeNotFoundError } from './errors.js';
 
 export async function resolveNodeRef(
-  db: Pick<PrismaClient, 'node' | 'memory'>,
+  db: Pick<PrismaClient, 'node' | 'memory' | 'urnAlias'>,
   ref: string,
   contextMemoryId?: string,
   options?: { includeDeleted?: boolean },
@@ -145,10 +146,34 @@ export async function resolveNodeRef(
     const memoryUrnCandidates = isCanonical
       ? [parts.slice(0, -1).join('::'), parts.slice(0, -1).join(':')]
       : [`${parts[0]}:${parts[1]}`, `${parts[0]}::${parts[1]}`];
-    const memory = await db.memory.findFirst({
-      where: { urn: { in: memoryUrnCandidates } },
-      select: { id: true, deletedAt: true },
-    });
+    const memory =
+      // Liveness in the QUERY, not after it (PR #1080 review, Copilot P2).
+      // `??` only fires on a null, so an unfiltered primary lookup let a
+      // SOFT-DELETED holder of a re-used URN win the coalesce and suppress the
+      // alias arm entirely — the old URN then 404'd even though a live
+      // historical claimant existed and `resolveMemoryRef` would have found
+      // it. Filtering here makes "not live" mean "not found", which is what
+      // lets the alias arm run and matches the entity resolvers.
+      (await db.memory.findFirst({
+        where: {
+          urn: { in: memoryUrnCandidates },
+          ...(options?.includeDeleted ? {} : { deletedAt: null }),
+        },
+        select: { id: true, deletedAt: true },
+      })) ??
+      // #1079 — the memory may have been RENAMED since this node URN was
+      // published, and a node URN is the most-published identifier there is.
+      // This does NOT come for free from `resolveMemoryRef`'s alias fallback:
+      // this resolver never calls it, splitting the memory prefix out itself.
+      // A LIVE memory still wins, because this arm only runs on a miss above.
+      (await findMemoryByAliasedUrn(
+        db,
+        memoryUrnCandidates,
+        () => {
+          throw new NodeNotFoundError(ref);
+        },
+        { includeDeleted: options?.includeDeleted },
+      ));
     if (memory) {
       // The prefix names a memory row. Treat the body as
       // `<memory-urn>:<loc>` and resolve strictly — soft-deleted

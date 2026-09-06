@@ -1,0 +1,178 @@
+/**
+ * #1103 — the SDL-description enumeration gate.
+ *
+ * Two things are tested here, and the second is the one that decides whether
+ * the gate survives contact with the team:
+ *
+ *   1. It catches a partial enumeration — the defect it was built for.
+ *   2. It does NOT fire on the cases that merely LOOK like one. A gate that
+ *      cries wolf on a documented happy path gets bypassed reflexively, which
+ *      is worse than no gate: it trains people past a real finding later.
+ *
+ * The live SDL is asserted separately by `pnpm check:sdl-enums` in CI. These
+ * run the predicate against synthetic schemas, so a fixture cannot go stale
+ * with the real one and the boundary cases stay legible.
+ */
+import { describe, it, expect } from 'vitest';
+import { findPartialEnumerations } from '../../../../scripts/check-sdl-enumerations.mjs';
+
+const SET = [
+  {
+    name: 'TEST_SCOPES',
+    source: 'test',
+    members: ['mail.read', 'mail.send', 'calendar.read', 'drive.read'] as const,
+  },
+];
+
+const sdl = (description: string) => `
+  type Query {
+    """${description}"""
+    thing: String
+  }
+`;
+
+const violations = (description: string) =>
+  findPartialEnumerations(sdl(description), SET as never);
+
+describe('catches a partial enumeration', () => {
+  it('flags a description listing some members but not all', () => {
+    const v = violations('Scopes: mail.read, mail.send, calendar.read.');
+    expect(v).toHaveLength(1);
+    expect(v[0].missing).toEqual(['drive.read']);
+    expect(v[0].coord).toBe('Query.thing');
+  });
+
+  it('names EVERY missing member, not just the first', () => {
+    // A gate that reports one omission at a time turns a two-line fix into two
+    // review rounds.
+    const v = violations('Scopes: mail.read, mail.send.');
+    expect(v[0].missing).toEqual(['calendar.read', 'drive.read']);
+  });
+
+  it('accepts a complete enumeration in any order or punctuation', () => {
+    expect(violations('One of {drive.read, mail.send, calendar.read, mail.read}.')).toEqual([]);
+  });
+});
+
+describe('sees a description wherever GraphQL allows one (#1123 review)', () => {
+  /**
+   * The collector's first version registered a HAND-LISTED set of node kinds,
+   * and so skipped interfaces, unions, scalars and directives in silence — a
+   * gate reporting success while missing sites, which is worse than no gate
+   * and is the same shape of defect as the hand-maintained scope list it
+   * exists to catch.
+   *
+   * One case per description-bearing kind, because "exhaustive" is a claim and
+   * this is what checking it looks like.
+   */
+  const partial = 'Scopes: mail.read, mail.send, calendar.read.';
+  const cases: Array<[string, string]> = [
+    ['object field', `type Q { """${partial}""" f: String }`],
+    ['object type', `"""${partial}""" type Q { f: String }`],
+    ['interface', `"""${partial}""" interface I { f: String }`],
+    ['interface field', `interface I { """${partial}""" f: String }`],
+    ['union', `type A { x: String }
+type B { x: String }
+"""${partial}""" union U = A | B`],
+    ['scalar', `"""${partial}""" scalar S`],
+    ['enum', `"""${partial}""" enum E { A }`],
+    ['enum value', `enum E { """${partial}""" A }`],
+    ['input object', `"""${partial}""" input In { f: String }`],
+    ['input field', `input In { """${partial}""" f: String }`],
+    ['argument', `type Q { f("""${partial}""" a: String): String }`],
+    ['directive', `"""${partial}""" directive @d on FIELD`],
+  ];
+
+  for (const [label, doc] of cases) {
+    it(`catches a partial enumeration on a ${label}`, () => {
+      const v = findPartialEnumerations(doc, SET as never);
+      expect(v, `${label} was not inspected`).toHaveLength(1);
+      expect(v[0].missing).toEqual(['drive.read']);
+    });
+  }
+
+  it('labels a nameless schema definition rather than inheriting the last type', () => {
+    // Without its own label the coordinate read `SomeType.undefined` — the
+    // violation still found, the author still sent to the wrong place, which
+    // for a diagnostic is most of what it is for.
+    const doc = `type Q { f: String }\n"""${partial}"""\nschema { query: Q }`;
+    const v = findPartialEnumerations(doc, SET as never);
+    expect(v).toHaveLength(1);
+    expect(v[0].coord).toBe('schema');
+  });
+
+  it('names the enclosing FIELD in an argument coordinate', () => {
+    // Two fields with the same argument name both reported `Mutation.scopes`
+    // — one coordinate for two definitions, which an author cannot act on
+    // (#1123 review, Codex P3).
+    const doc = `type Mutation {
+      foo("""${partial}""" scopes: [String!]!): String
+      bar("""${partial}""" scopes: [String!]!): String
+    }`;
+    const v = findPartialEnumerations(doc, SET as never);
+    expect(v).toHaveLength(2);
+    expect(v.map((x) => x.coord).sort()).toEqual([
+      'Mutation.bar(scopes:)',
+      'Mutation.foo(scopes:)',
+    ]);
+  });
+
+  it('an INPUT-OBJECT field is not an argument, and keeps the plain coordinate', () => {
+    // Both are InputValueDefinition; only the one inside a field is an
+    // argument. Treating them alike would put a phantom field name on an
+    // input-object field.
+    //
+    // The input object is placed AFTER a type with a field, deliberately. With
+    // it first, `fieldName` is null anyway and the test passes whether or not
+    // the visitor ever clears it — a spare assertion that cannot tell the two
+    // implementations apart. Ordering it this way is what reaches the leak.
+    const doc = `type Q { earlier(a: String): String }
+    input In { """${partial}""" scopes: [String!]! }`;
+    const v = findPartialEnumerations(doc, SET as never);
+    expect(v).toHaveLength(1);
+    expect(v[0].coord).toBe('In.scopes');
+  });
+
+  it('gives a navigable coordinate rather than a bare name', () => {
+    const v = findPartialEnumerations(
+      `interface I { """${partial}""" f: String }`,
+      SET as never,
+    );
+    expect(v[0].coord).toBe('I.f');
+  });
+});
+
+describe('does NOT fire on the cases that only look like one', () => {
+  it('a single member is documenting a field, not enumerating a set', () => {
+    // The two-member floor. "Grant scope: drive.read." appears on several real
+    // fields and is correct; firing on it would gate the documented happy path.
+    expect(violations('Grant scope: drive.read.')).toEqual([]);
+    expect(violations('Requires mail.send.')).toEqual([]);
+  });
+
+  it('a member ending a SENTENCE still counts as present', () => {
+    // The first draft of the token boundary excluded a following '.' outright,
+    // and so reported drive.read missing from a description that ended with
+    // "…, drive.read." — a member reported absent from the very sentence
+    // listing it. Found by running the gate against correct data.
+    expect(violations('Scopes: mail.read, mail.send, calendar.read, drive.read.')).toEqual([]);
+  });
+
+  it('a LONGER value that merely starts with a member does not count', () => {
+    // calendar.readonly is a real adjacent value. Counting it as calendar.read
+    // would let a genuinely partial list pass — the gate failing OPEN, which is
+    // the direction that matters.
+    const v = violations('Scopes: mail.read, mail.send, calendar.readonly, drive.read.');
+    expect(v).toHaveLength(1);
+    expect(v[0].missing).toEqual(['calendar.read']);
+  });
+
+  it('a member embedded in a longer token does not count', () => {
+    expect(violations('See xmail.read and ymail.send for details.')).toEqual([]);
+  });
+
+  it('descriptions that name the TYPE instead cannot drift', () => {
+    // The remedy the gate recommends, and it must not itself be flagged.
+    expect(violations('scopes must be a subset of ConnectionGrantScope.')).toEqual([]);
+  });
+});

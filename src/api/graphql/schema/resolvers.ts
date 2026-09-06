@@ -49,6 +49,10 @@ import { memoryMutations } from './resolvers.mutation.memory.js';
 import { appMemoryMutations } from './resolvers.mutation.appMemory.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
+import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
+import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
+import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
+import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { appMutations } from './resolvers.mutation.app.js';
 import { chatMutations } from './resolvers.mutation.chat.js';
 import { sessionMutations } from './resolvers.mutation.session.js';
@@ -63,6 +67,7 @@ export const resolvers = {
   DateTime: dateTimeScalar,
   ...typeResolvers,
   ...impersonationTypeResolvers,
+  ...workerFieldResolvers,
   Query: {
     ...nodeQueries,
     ...objectQueries,
@@ -73,6 +78,10 @@ export const resolvers = {
     ...agentQueries,
     ...appQueries,
     ...chatQueries,
+    ...teamChatQueries,
+    ...teamWorkQueries,
+    ...workerQueries,
+    ...teamRoleQueries,
     ...sessionQueries,
     ...slackQueries,
     ...mcpQueries,
@@ -100,6 +109,10 @@ export const resolvers = {
     ...appMemoryMutations,
     ...orgMutations,
     ...agentMutations,
+    ...workerMutations,
+    ...teamRoleMutations,
+    ...teamChatMutations,
+    ...teamWorkMutations,
     ...appMutations,
     ...chatMutations,
     ...sessionMutations,

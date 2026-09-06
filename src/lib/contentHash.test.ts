@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'crypto';
-import { computeContentHash } from './contentHash.js';
+import { computeContentHash, isAbstractUnverified } from './contentHash.js';
 
 describe('computeContentHash (spec 032 — abstractOriginHash helper)', () => {
   it('returns null for null input', () => {
@@ -46,5 +46,43 @@ describe('computeContentHash (spec 032 — abstractOriginHash helper)', () => {
     // helper takes whatever bytes it's given and hashes them. A caller that
     // passes "   " gets the SHA-256 of "   ", not null.
     expect(computeContentHash('   ')).toMatch(/^[0-9a-f]{8}$/);
+  });
+});
+
+describe('isAbstractUnverified (#1128)', () => {
+  const node = (over: Partial<Parameters<typeof isAbstractUnverified>[0]> = {}) => ({
+    abstract: 'a summary',
+    content: 'the body',
+    abstractOriginHash: computeContentHash('the body'),
+    ...over,
+  });
+
+  it('false when the fingerprint matches the current content', () => {
+    expect(isAbstractUnverified(node())).toBe(false);
+  });
+
+  it('true when the fingerprint disagrees — the classic stale case', () => {
+    expect(isAbstractUnverified(node({ content: 'a rewritten body' }))).toBe(true);
+  });
+
+  it('TRUE when there is no fingerprint at all — the #1128 change', () => {
+    // Previously false, via an `abstractOriginHash != null` short-circuit. A
+    // null hash on a node that HAS both an abstract and content does not mean
+    // "nothing to check"; it means "never checked", which is the one thing
+    // this signal exists to say.
+    expect(isAbstractUnverified(node({ abstractOriginHash: null }))).toBe(true);
+  });
+
+  it('false with no abstract — nothing to be unverified about', () => {
+    expect(isAbstractUnverified(node({ abstract: null, abstractOriginHash: null }))).toBe(false);
+    expect(isAbstractUnverified(node({ abstract: '', abstractOriginHash: null }))).toBe(false);
+  });
+
+  it('false with no content — FR-007, an abstract IS the node here', () => {
+    // The abstract-fallback shape. There is no body to disagree with, so a
+    // null hash is correct rather than unverified — and arming here would put
+    // a warning on every content-less node in the graph.
+    expect(isAbstractUnverified(node({ content: null, abstractOriginHash: null }))).toBe(false);
+    expect(isAbstractUnverified(node({ content: '', abstractOriginHash: null }))).toBe(false);
   });
 });

@@ -54,6 +54,30 @@ import {
   installAgentIntoAppCore,
   uninstallAgentFromAppCore,
 } from './resolvers.helpers.js';
+import { findOrCreateAppClassMemory } from './chat-scope.js';
+import { recordUrnRename } from '../../../lib/urnAlias.js';
+
+/**
+ * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
+ * names FOREVER — history (PR trailers, chat archives) references them, and
+ * `Worker.appId` is onDelete: Cascade, so hard-deleting the tombstone would
+ * silently take the castings with it and recycle their names. Every
+ * tombstone-reclaim path must refuse instead when castings exist.
+ */
+async function assertNoWorkers(
+  db: Context['db'],
+  appId: string,
+  appUrn: string,
+  action: 'reclaim',
+): Promise<void> {
+  const workers = await db.worker.count({ where: { appId } });
+  if (workers > 0) {
+    throw new GraphQLError(
+      `Cannot ${action} the URN "${appUrn}": the deleted App holding it still has ${workers} worker casting(s), whose names are permanently reserved (cor:agt:020:02).`,
+      { extensions: { code: 'WORKER_NAMES_RESERVED', appId, workers } },
+    );
+  }
+}
 
 /**
  * Can the caller manage this App's members by ROLE alone — independent of any
@@ -91,6 +115,57 @@ async function callerManagesAppMembers(
       })
     : null;
   return ownerMember?.role === 'owner';
+}
+
+/**
+ * #951 — provision an App's `class='app'` shared memory for its founding
+ * Agent, at App-create time. Idempotent (find-or-create on the derived URN),
+ * and deliberately BEST-EFFORT: the App row is already committed by the time
+ * we get here, the lazy provisioners on the chat paths remain, and an App
+ * without its shared memory is exactly the pre-#951 state — so a failure is
+ * logged, not raised.
+ *
+ * `actingUserId` may be absent for a platform-admin caller (createApp guards
+ * its member grant the same way), in which case provisioning is skipped: the
+ * memory's `createdBy` wants a real user, and the first post will provision it.
+ *
+ * Honors the Agent's own declaration (`memoryProvisioning.appMemory`, spec 008
+ * FR-008 — 'shared' | 'user' | 'none', defaulting to 'shared'): eagerly
+ * creating shared writable storage for an Agent that declares 'user' or 'none'
+ * would contradict the contract it published. (Codex P1 on PR #953. The lazy
+ * chat-time provisioners have never consulted this declaration either — that
+ * pre-dates #951 and is left alone here rather than changed blind; a shared
+ * chat needs its holding memory whatever the declaration says.)
+ */
+async function provisionAppSharedMemory(
+  ctx: Context,
+  app: { id: string; urn: string; name: string; organizationId: string | null; ownerUserId: string | null },
+  agentId: string,
+): Promise<void> {
+  if (!ctx.userId) return;
+  try {
+    const agent = await ctx.db.agent.findUniqueOrThrow({
+      where: { id: agentId },
+      select: { urn: true, name: true, memoryProvisioning: true },
+    });
+    const appMemoryMode =
+      (agent.memoryProvisioning as { appMemory?: unknown } | null)?.appMemory ?? 'shared';
+    if (appMemoryMode !== 'shared') return;
+    await findOrCreateAppClassMemory({
+      appId: app.id,
+      appUrn: app.urn,
+      appName: app.name,
+      agentId,
+      agentUrn: agent.urn,
+      agentName: agent.name,
+      organizationId: app.organizationId,
+      ownerUserId: app.ownerUserId,
+      actingUserId: ctx.userId,
+      db: ctx.db,
+    });
+  } catch (err) {
+    console.warn('[createApp] app-class memory provisioning failed:', err);
+  }
 }
 
 export const appMutations = {
@@ -212,7 +287,9 @@ export const appMutations = {
       // URN format matches memories and agents: "{namespace}:{slug}" — the
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
-      const appUrn = `${namespace}:${deriveSlugFromName(urn ?? name)}`;
+      //
+      const appSlug = deriveSlugFromName(urn ?? name);
+      const appUrn = `${namespace}:${appSlug}`;
 
       // 009-install-agent-flow: agentRef is required (typeDef gate). Resolve the
       // Agent (resolveAgentRef rejects soft-deleted Agents).
@@ -278,6 +355,13 @@ export const appMutations = {
       });
       if (existing) {
         if (existing.deletedAt) {
+          // #974 / cor:agt:020:02: a soft-deleted App keeps reserving all of
+          // its workers' names — history (PR trailers, chat archives)
+          // references them, and `Worker.appId` is onDelete: Cascade, so
+          // hard-deleting the tombstone here would silently take the castings
+          // with it and recycle their permanently-reserved names. Refuse
+          // instead.
+          await assertNoWorkers(ctx.db, existing.id, appUrn, 'reclaim');
           await ctx.db.app.delete({ where: { id: existing.id } });
         } else {
           throw new Error(`An app with URN "${appUrn}" already exists`);
@@ -309,6 +393,22 @@ export const appMutations = {
         },
         include: APP_INCLUDE,
       });
+
+      // #951 — provision the App's own class='app' shared memory NOW, the way
+      // an Agent's system memory is provisioned at Agent-create time. Until
+      // this, the memory was created lazily on the first shared/team chat
+      // post, so a freshly installed App's only memory was the Agent's
+      // system memory — which is READ-ONLY from every App that runs it
+      // (cor:dmo:050:03). That left a correctly-built App badged "read-only"
+      // in the portal with no writable memory at all, and made `hadron team
+      // init -m <memory>` unrunnable: the memory it needs did not exist until
+      // somebody posted to the chat first.
+      //
+      // Best-effort: the App itself is already committed (createApp is not one
+      // transaction), and the lazy provisioners are still in place, so a
+      // failure here must not fail the install — it only defers provisioning
+      // to first post, which is exactly the old behavior.
+      await provisionAppSharedMemory(ctx, createdApp, resolvedAgentId);
 
       // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args
       // become the App's 'default' registry config (deploy-time override
@@ -403,13 +503,17 @@ export const appMutations = {
           });
           if (depCollision) {
             if (depCollision.deletedAt) {
+              // Same reclaim rule as the parent App branch: `Worker.appId`
+              // cascades, so hard-deleting a retired App here would delete its
+              // castings and recycle their permanently-reserved names.
+              await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               await ctx.db.app.delete({ where: { id: depCollision.id } });
             } else {
               depUrn = `${depUrn}:${imp.importedAgentId.slice(-8)}`;
             }
           }
 
-          await ctx.db.app.create({
+          const depApp = await ctx.db.app.create({
             data: {
               organizationId: resolvedOrgId,
               name: `${depAgent.name} (cascaded from ${name})`,
@@ -422,6 +526,9 @@ export const appMutations = {
               },
             },
           });
+          // #951: a cascaded dependency App is an App like any other — it gets
+          // its shared memory at install time too, not on first chat.
+          await provisionAppSharedMemory(ctx, depApp, imp.importedAgentId);
         }
       }
 
@@ -523,7 +630,8 @@ export const appMutations = {
         const org = await ctx.db.organization.findUniqueOrThrow({
           where: { id: app.organizationId }, select: { urn: true },
         });
-        newUrn = `${org.urn}:${deriveSlugFromName(urn)}`; // #574: shared slugify
+        const renamedSlug = deriveSlugFromName(urn); // #574: shared slugify
+        newUrn = `${org.urn}:${renamedSlug}`;
       }
       // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args
       // maintain the App's 'default' registry config. Explicit null
@@ -576,7 +684,40 @@ export const appMutations = {
           }
         }
       }
-      return ctx.db.app.update({
+      // #1079 — a rename and its alias record commit TOGETHER. Separately, the
+      // window between them is exactly the failure the alias map exists to
+      // prevent: the old URN has stopped resolving and nothing remembers it.
+      //
+      // This is the App arm of that fix, and it is the one #1079 was filed for:
+      // a worker URN embeds the App slug, so renaming an App silently 404'd
+      // every worker URN published in a commit trailer or issue signature. The
+      // alias heals them without workerRef changing, because a worker URN is
+      // resolved by resolving its App URN first.
+      return ctx.db.$transaction(async (tx) => {
+        // Lock and RE-READ the urn inside the transaction (PR #1080 review,
+        // Codex + Copilot P2). The row above was read before the transaction
+        // opened, so two concurrent renames could both record the SAME old urn
+        // and the intermediate identity — committed, and returned to whoever
+        // made the first call — would never be aliased at all. Reading under
+        // FOR UPDATE serializes the renames and makes each one record the urn it
+        // actually superseded. `updateOrganization` already did this; the three
+        // single-entity paths did not.
+        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
+          SELECT urn FROM apps WHERE id = ${resolvedId} FOR UPDATE
+        `;
+        if (newUrn !== undefined) {
+          await recordUrnRename(tx, {
+            entityType: 'APP',
+            entityId: resolvedId,
+            // The `urn` column already holds the normalized lookup form the
+            // resolvers query, so it is recorded verbatim — re-normalizing here
+            // would introduce a second normalizer that can disagree with it.
+            oldUrn: lockedRow?.urn ?? app.urn,
+            newUrn,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          });
+        }
+        return tx.app.update({
         where: { id: resolvedId },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -597,6 +738,7 @@ export const appMutations = {
           updatedBy: ctx.userId ?? null,
         },
         include: APP_INCLUDE,
+        });
       });
     },
 

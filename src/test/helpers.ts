@@ -24,11 +24,15 @@ export function buildAppKey(suffix?: string): string {
 export async function cleanDb(db: PrismaClient): Promise<void> {
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
+  // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
+  // describes being hard-deleted, since a published URN keeps being followed
+  // afterwards. That also means nothing below cascades it away, so it has to be
+  // cleared explicitly or aliases leak between tests.
+  await db.urnAlias.deleteMany();
   // 036-ai-service-config: configs FK every owner level (incl.
   // hadron_server, which nothing below deletes) — clear them first.
   await db.aiServiceConfig.deleteMany();
   await db.hadronServer.deleteMany();
-  await db.usageEvent.deleteMany();
   // Spec 046 — usage metering (prices are FK-free; ledger FKs org only).
   await db.aiModelPrice.deleteMany();
   await db.creditLedgerEntry.deleteMany();
@@ -43,6 +47,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.resendSender.deleteMany();
   // General secret store (#677) — polymorphic owner, FK-free.
   await db.secret.deleteMany();
+  // #1012 — durable per-client MCP selections. FKs user/app/memory, all of
+  // which are deleted below, so it has to go first.
+  await db.mcpSessionState.deleteMany();
   // Webfetch polling: receipts + origin bindings both FK AppRun.
   await db.webFetchEventReceipt.deleteMany();
   await db.webFetchPollBinding.deleteMany();
@@ -55,6 +62,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.edge.deleteMany();
   await db.pendingEdge.deleteMany();
   await db.session.deleteMany();
+  // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
+  await db.worker.deleteMany();
   await db.node.deleteMany();
   await db.agentMemoryItem.deleteMany();
   await db.appLogEntry.deleteMany();
@@ -100,6 +109,23 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #692: the principal pool. users/orgs FK it (onDelete SetNull), so it clears
   // last; otherwise reserved/tombstoned rows leak across tests and collide.
   await db.principal.deleteMany();
+  // #1069 — usage events clear LAST, after every row they reference.
+  //
+  // They used to clear near the top, which opened a ~30-statement window in the
+  // middle of this function: usage recording is FIRE-AND-FORGET
+  // (`void db.usageEvent.createMany().catch()`), so a write from the previous
+  // test could land after the usage wipe and before `node.deleteMany()` — too
+  // late to be deleted, in time for the node FK's `SetNull` to blank its
+  // `nodeId`. The next test then opened with stale `[null, null]` read events,
+  // which is exactly what #1069 saw in CI.
+  //
+  // Clearing last closes it structurally rather than narrowing it: a late insert
+  // either lands before the parents go and is deleted here, or lands after and
+  // is REJECTED by its own foreign key (and swallowed by the recorder's
+  // `.catch()`). Safe in this position because every UsageEvent FK is nullable
+  // and `SetNull` — node, session, app, user, organization — and `memoryId` is a
+  // denormalized column with no FK at all (#796).
+  await db.usageEvent.deleteMany();
 }
 
 /**

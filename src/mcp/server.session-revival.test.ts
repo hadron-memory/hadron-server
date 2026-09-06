@@ -23,6 +23,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../server.js';
+import { __resetReconnectCorrelationForTests } from './server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -173,6 +174,49 @@ describe('stale Mcp-Session-Id → 404 Session not found (MCP revival contract)'
     const text = await call.text();
     expect(text).toContain('"result"');
     expect(text).not.toContain('"error"');
+  });
+
+  it('#1009: the revived session KNOWS it is a reconnect, over the real boundary', async () => {
+    // PR #1011 review (Codex P1 + Copilot): the first cut detected a reconnect
+    // as `Boolean(sessionId)`, which misses THIS — the spec-compliant path,
+    // where the client re-initializes with no session header at all, leaving
+    // nothing to correlate on. The unit tests injected the flag directly and so
+    // could not have caught it. This exercises the full 404 → headerless
+    // initialize → tool call exchange and asserts the notice actually appears.
+    __resetReconnectCorrelationForTests();
+    const rawKey = await mintAppKey();
+
+    // A fresh client that never lost a session is NOT told about reconnects.
+    const cleanInit = await mcpFetch({ body: initializeBody, authorization: `Bearer ${rawKey}` });
+    const cleanSession = cleanInit.headers.get('mcp-session-id')!;
+    const cleanInfo = await mcpFetch({
+      sessionId: cleanSession,
+      body: toolCallBody,
+      authorization: `Bearer ${rawKey}`,
+    });
+    expect(await cleanInfo.text()).not.toContain('re-established');
+
+    // 1. Restart state: the client's old session is gone.
+    const stale = await mcpFetch({
+      sessionId: 'pre-restart-session',
+      body: toolCallBody,
+      authorization: `Bearer ${rawKey}`,
+    });
+    expect(stale.status).toBe(404);
+
+    // 2. The client re-initializes WITHOUT a session id — the header the naive
+    //    detection depended on is simply not there.
+    const init = await mcpFetch({ body: initializeBody, authorization: `Bearer ${rawKey}` });
+    const newSessionId = init.headers.get('mcp-session-id');
+    expect(newSessionId).toBeTruthy();
+
+    // 3. hadron_server_info on the revived session reports the reconnect.
+    const info = await mcpFetch({
+      sessionId: newSessionId!,
+      body: toolCallBody,
+      authorization: `Bearer ${rawKey}`,
+    });
+    expect(await info.text()).toContain('re-established');
   });
 
   it('initialize presenting a STALE session ID still opens a session', async () => {

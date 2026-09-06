@@ -320,13 +320,15 @@ describe('updateAgent first-attach of systemMemoryId (legacy agents)', () => {
             class: 'knowledge',
       },
     });
+    // #949: the refusal is now the shared, typed owner assertion (it also
+    // covers the user-owned case the org comparison could not express).
     await expect(
       resolvers.Mutation.updateAgent(
         {},
         { ref: agent.id, systemMemoryId: foreign.id },
         adminCtx(),
       ),
-    ).rejects.toThrow(/same organization/);
+    ).rejects.toThrow(/same owner as its agent/);
   });
 
   it('refuses a memory already attached to another agent', async () => {
@@ -450,6 +452,129 @@ describe('AGENT_SYSTEM memory guards', () => {
         adminCtx(),
       ),
     ).rejects.toThrow(/systemMemoryId/);
+  });
+
+  // -------------------------------------------------------------------------
+  // #1101 — strict-owner classes are not attachable either.
+  //
+  // The gate rejected exactly ONE class (`system`), so `personal` and `private`
+  // passed. That matters because `AgentMemoryItem` is a fold INPUT: an attached
+  // memory lands in `getAppMemoryAccess`, which the MCP access map and (since
+  // #1092) the GraphQL enumeration gate both build on — and that map is
+  // DOCUMENTED personal-free, with `getAccessibleMemoryIds` consumers told to
+  // rely on it. Nothing enforced the claim. Measured before this fix, a pure
+  // App key's accessible set returned another user's personal memory while
+  // MCP's `canReadMemory` refused the same principal the same row.
+  //
+  // #1102 made the read gate filter these rows itself; this is the front door
+  // it was defending against. Both stay — a read gate should not depend on a
+  // write gate having done its job, and pre-existing rows are unaffected by a
+  // refusal added today.
+  // -------------------------------------------------------------------------
+  for (const klass of ['personal', 'private'] as const) {
+    it(`refuses to attach a ${klass}-class memory via addMemoryToAgent (#1101)`, async () => {
+      const agent = await resolvers.Mutation.createAgent(
+        {},
+        { orgId: orgA.id, name: `attach-${klass}` },
+        adminCtx(),
+      );
+      const owner = await db.user.create({
+        data: {
+          id: generateId(),
+          githubId: klass === 'personal' ? 91011 : 91012,
+          githubUsername: `attach-owner-${klass}-${generateId().slice(-8)}`,
+          roles: ['READER'],
+        },
+      });
+      const secret = await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: orgA.id,
+          urn: `${orgA.urn}:secret-${klass}`,
+          name: `secret-${klass}`,
+          class: klass,
+          userId: owner.id,
+        },
+      });
+
+      // An org ADMIN is the principal that could do this — and note they cannot
+      // READ this memory (`cor:acl:010:02`: the ADMIN bypass stops at
+      // personal/private), so the attach was a grant they had no standing to
+      // make.
+      await expect(
+        resolvers.Mutation.addMemoryToAgent(
+          {},
+          { agentRef: agent.id, memoryRef: secret.id, role: 'read' },
+          adminCtx(),
+        ),
+      ).rejects.toThrow(new RegExp(`${klass}-class memory`, 'i'));
+
+      // The remedy must be ACTIONABLE for this class, not merely present
+      // (PR #1106 review, @copilot): a shared message with a conditional tail
+      // told `private` to use a share that class cannot have, and described
+      // `personal` as owner-only when a MemoryShare grantee reads it — the
+      // subject of #1104, merged the day before.
+      const err = await resolvers.Mutation
+        .addMemoryToAgent({}, { agentRef: agent.id, memoryRef: secret.id, role: 'read' }, adminCtx())
+        .catch((e: Error) => e);
+      const message = (err as Error).message;
+      if (klass === 'private') {
+        expect(message).toMatch(/never shareable/i);
+        // Must NOT point at a share: this class has no such path, for anyone.
+        expect(message).not.toMatch(/createMemoryShare/);
+      } else {
+        expect(message).toMatch(/createMemoryShare/);
+        // It must NOT describe the read audience at all. Three review rounds
+        // produced three different wrong descriptions of it — "owner only"
+        // ignores share grantees (#1104), and "owner plus grantees" is false
+        // for an AGENT-SCOPED personal row, where the share is excluded outright
+        // and an active AgentSubscription is additionally required. The refusal
+        // rests on "this class has no audience to grant to", which needs no
+        // claim about who currently reads it. Assert the ABSENCE, so the next
+        // person to helpfully add one reds here.
+        expect(message).not.toMatch(/readable (only )?by/i);
+        expect(message).toMatch(/no audience to grant/i);
+        // The remedy must name the ACTOR who can perform it (#1106 review,
+        // @codex P2). `createMemoryShare` gates on `isMemorySharePrincipal` —
+        // a bare owner check with no admin path — so telling the org ADMIN who
+        // reaches this refusal to "use createMemoryShare" sent them into a
+        // guaranteed FORBIDDEN. Two correct gates composing into a dead end,
+        // catchable only by asking whether the actor the message ADDRESSES can
+        // do the thing it names.
+        expect(message).toMatch(/only the OWNER|ask them/i);
+      }
+
+      // …and nothing was written: a refusal that half-applies is worse than none.
+      const items = await db.agentMemoryItem.findMany({ where: { agentId: agent.id } });
+      expect(items.map((i) => i.memoryId)).not.toContain(secret.id);
+    });
+  }
+
+  it('still attaches an ordinary knowledge memory (#1101 narrowing control)', async () => {
+    // The control: a refusal that denies everything passes any test that only
+    // checks the denial. `knowledge` is the class this mutation exists for.
+    const agent = await resolvers.Mutation.createAgent(
+      {},
+      { orgId: orgA.id, name: 'attach-knowledge' },
+      adminCtx(),
+    );
+    const ok = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgA.id,
+        urn: `${orgA.urn}:attachable`,
+        name: 'attachable',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    await resolvers.Mutation.addMemoryToAgent(
+      {},
+      { agentRef: agent.id, memoryRef: ok.id, role: 'read' },
+      adminCtx(),
+    );
+    const items = await db.agentMemoryItem.findMany({ where: { agentId: agent.id } });
+    expect(items.map((i) => i.memoryId)).toContain(ok.id);
   });
 
   it('refuses to delete an AGENT_SYSTEM memory directly', async () => {

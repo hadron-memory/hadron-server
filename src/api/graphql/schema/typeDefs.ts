@@ -572,7 +572,7 @@ export const typeDefs = `#graphql
     description: String
     "Paragraph-length summary of this node. Opt-in on hadron_get_node via the contentScope parameter. hadron_find_nodes preview surfacing ships in spec 031 US2 — not yet live. Never surfaced in hadron_list_nodes. Cap is 2000 characters; longer values are rejected with NodeAbstractTooLongError. Empty + whitespace-only values normalize to null. Spec 031."
     abstract: String
-    "Spec 032 — fingerprint of the content value at the time abstract was authored. SHA-256 of plaintext content, truncated to 8 hex chars. Compared at read time against computeContentHash(node.content) to detect staleness; when the two values differ AND abstractOriginHash is non-null, the abstract may not reflect current content. System-managed; never settable via NodeInput."
+    "Spec 032 — fingerprint of the content value at the time abstract was authored. SHA-256 of plaintext content, truncated to 8 hex chars. Compared at read time against computeContentHash(node.content) to detect staleness: the abstract may not reflect current content when the two differ, OR when this is NULL on a node that has both an abstract and content (#1128 — an abstract written before the body existed was never fingerprinted, so it has never been checked against it; that reads as unverified, not as verified). NULL is only a clean state when the node has no abstract, or no content for the abstract to describe. Note restoreNodeRevision restores this field verbatim, so restoring a snapshot taken while it was NULL reinstates the unverified state — correctly, since that abstract has never been checked against the restored content. System-managed; never settable via NodeInput."
     abstractOriginHash: String
     """
     Spec 033 FR-006/FR-007 — set when this node needs (re-)embedding;
@@ -671,12 +671,48 @@ export const typeDefs = `#graphql
     data: JSON
   }
 
+  """
+  A unit of work recorded against a user or App: the general row, and what the
+  bare word "session" means throughout this schema (#1034). \`type\` says which
+  kind — DEVELOPER, CHATBOT, AUTOMATION, EDGE — and \`workerId\` is optional.
+
+  A **worker session** is the subtype with \`workerId\` set: a Worker (named
+  casting) bound to a driver, which is what makes work attributable to a
+  teammate and what a merged PR traces back through. Binding is optional, so a
+  list of these is not a staff view and may hold no worker sessions at all —
+  read \`workerId\` per row rather than assuming either way.
+
+  A **chat session** is NOT one of these and has no row here: it is the
+  conversation a human is in — the Claude Desktop window, the Claude Code
+  session, the IDE chat. The two are independent and **ending one does not end
+  the other**: a chat session that closes leaves its worker session open
+  until endSession. Since #1114 nothing ends it for inactivity — silence is not
+  evidence of abandonment — but it stops reading as LIVE once nobody has driven
+  it inside its idle window, so an abandoned name frees itself for binding
+  without the session being ended or its unwritten handoff lost. Do not use "chat
+  session" for a Chat (the agent conversation entity) — that is an **agent
+  chat**, a third concept.
+  """
   type Session {
     id: ID!
+    "Which kind of session this is: DEVELOPER, CHATBOT, AUTOMATION or EDGE."
     type: String!
     appId: String
     userId: String
+    "The role-agent driving the session (with workerId set, the agent behind the casting)."
     agentId: String
+    "#974 / cor:agt:020:03: the Worker (named casting) this session works as."
+    workerId: String
+    """
+    #980 / cor:agt:020:02: the Worker behind workerId, nested — so a session
+    list can render the app-qualified compound ('eng-team/Iris') without a
+    per-row worker(ref:) + app(ref:) round trip (Worker carries name and app).
+    Resolves for RETIRED workers too: retirement ends the casting, not the
+    history, so past sessions stay attributable. Worker.app and Worker.agent
+    run their OWN read gates and mask to null on deny (#552), so this nesting
+    never widens what the session read admits.
+    """
+    worker: Worker
     memoryId: String
     expiresAt: DateTime
     repo: String
@@ -686,6 +722,12 @@ export const typeDefs = `#graphql
     language: String
     plan: String
     llmModel: String
+    "#928: where the driving tool's transcript lives on 'host'."
+    transcriptPath: String
+    "#928: machine identifier the session ran on."
+    host: String
+    "#928: the tool driving the session ('claude-code', 'codex', ...)."
+    tool: String
     inputTokens: Int
     outputTokens: Int
     turnCount: Int
@@ -950,6 +992,21 @@ export const typeDefs = `#graphql
     surfaces: [String!]!
     members: [AppMember!]!
     memberCount: Int!
+    """
+    The App's SHARED app-class memory (#965) — the team space the shared/team
+    chat and the worklog live in, provisioned at install since #951. This is
+    the App → memory hop clients need to default a team-memory argument
+    (hadron-cli#399) instead of scanning every readable memory for
+    Memory.appId. Read-only resolution, never provisions: the memory holding
+    the App's 'worklog' root wins (the ledger home — oldest, mirroring the
+    worklog locator), else the oldest agent-keyed shared row
+    (sharedMemoryOfAgentId set; Worker working memories are also app-class
+    rows under this App and are never this answer). Null when nothing has
+    provisioned a shared memory yet (an App predating #951 with no team
+    activity), or when the caller cannot read the memory record (the ordinary
+    record read gate — denied and missing are indistinguishable).
+    """
+    sharedMemory: Memory
     appType: AppType!
     role: AppMembershipRole!
     description: String
@@ -1163,6 +1220,102 @@ export const typeDefs = `#graphql
 
   # 008-agent-installation: User↔App membership join carrying a per-App role
   # validated against the parent Agent's installation_policy.memberRoles.
+  """
+  #1073 — what a releaseWorker call actually DID, rather than what the caller
+  predicted it would do.
+
+  releaseWorker used to return the post-release Worker, whose
+  heldByUserId is null by construction — so a client could report only who
+  held the name when it last looked. Per cor:agt:020:09 the two release
+  paths are different ACTS: the holder's own release notifies nobody, an admin
+  force-release must announce itself in the team chat. A receipt that cannot
+  tell them apart describes an act that may not have happened.
+  """
+  type ReleaseWorkerPayload {
+    """
+    The worker, re-read immediately after the guarded release and BEFORE the
+    team-chat notice — so the interval in which another caller could bind is as
+    narrow as it can be made. It is NOT zero, and this is a re-read rather than
+    a snapshot of the write.
+
+    So a non-null heldByUserId here is a LATER hold somebody else took, never a
+    failed release. releasedFrom is what says the release happened; this field
+    is current state, and the two answer different questions.
+    """
+    worker: Worker!
+    """
+    The holder the WRITE ended — not the one a pre-read saw. Null when nothing
+    was released, i.e. the name was already unheld (the idempotent path).
+
+    This is the value the authorization decision was made against AND the value
+    the guarded write matched on; #1084 made those the same user by
+    construction, so this cannot name somebody other than whoever actually
+    lost the name.
+    """
+    releasedFrom: ReleasedFromUser
+    """
+    True when the caller released SOMEBODY ELSE'S hold — the admin
+    force-release path, the one act that takes a name without its holder
+    acting, and the one that posts to the team chat.
+
+    Computed server-side, from the authenticated principal and the hold the
+    write ended in the same transaction. A client computing it would have to
+    compare a value it was given against one it had to fetch, and that fetch
+    fails on exactly the path where the answer matters.
+
+    false always means the holder was YOU, or that nothing was released
+    (releasedFrom null) — never "the server could not tell".
+    """
+    forced: Boolean!
+    """
+    Whether the team-chat notice was posted. THREE states, deliberately:
+
+    - null — no notice was owed. A self-release, or nothing released.
+    - true — a notice was owed and posted.
+    - false — a notice was OWED AND FAILED. The release still happened; an
+      unreachable chat must not stop an admin recovering a departed
+      colleague's names.
+
+    A plain boolean would collapse the first and last, and a client cannot
+    render "we may have silently failed to announce this" honestly — so the
+    only truthful UI would be to say nothing, throwing the field away.
+    """
+    notified: Boolean
+  }
+
+  """
+  #1073 — a sanitized identity for the person a release took a name FROM.
+
+  Deliberately a SEPARATE type from User, on the cor:acl:080:02 /
+  PublicOrganization precedent: a field returning another entity's object hands
+  the caller that entity's field resolvers, and User's default-resolved tail
+  (policy, identityProvider, externalId, githubId, roles, maxReferrals) carries
+  no gate of its own — it relies on the surface that returned it.
+
+  releaseWorker cannot lean on that. Its admin path exists for the departed
+  colleague, and leaveApp DELETES the AppMember row while the hold survives —
+  so the very case this path serves is the one where the caller has no other
+  route to that User. Worker itself only ever exposed heldByUserId, a bare id,
+  so a full User here would be a NEW disclosure rather than an inherited one.
+
+  Exposes what answers "who did I release", and nothing that grows back toward
+  User. name keeps the same #384 gate it has on User rather than a second copy
+  of the rule; the rest is public identity a URN already discloses.
+  """
+  type ReleasedFromUser {
+    id: ID!
+    handle: String
+    "Canonical hrn:user:<handle> URN (cor:urn:010:01). Null for a handle-less user."
+    urn: String
+    """
+    Withheld (null) from a viewer who is not the user themselves, a platform
+    admin, or a co-member of one of their orgs — the SAME #384 gate as
+    User.name, reused rather than restated. An admin releasing a colleague who
+    has left the org sees null here, and still gets id/handle/urn.
+    """
+    name: String
+  }
+
   type AppMember {
     appId: ID!
     userId: ID!
@@ -1509,6 +1662,18 @@ export const typeDefs = `#graphql
     id: ID!
     organizationId: String
     organization: Organization
+    """
+    The memory's URN, grammar v2 (cor:urn:010:01): hrn:mem:<root>:<slug...>,
+    emitted by safeCanonicalUrn/emitEntityUrnV2 from the stored urn — so a v1
+    double-colon chain, a legacy single-colon row and an already-v2 row all read
+    back identically here. <slug...> is one atom for a migrated memory but still
+    several for a compound pre-Stage-3 per-user one (<root>:<agent>:app-user:<id>).
+
+    The STORED column is the bare form (<root>:<slug>, no scheme prefix — the
+    chk_memory_urn_not_prefixed guardrail rejects writing a rendered one); this
+    field is the rendered view of it. When emission throws, the stored value is
+    served raw and logged, so a bare, unprefixed value is a possible read.
+    """
     urn: String!
     name: String!
     shortDescription: String
@@ -1648,6 +1813,14 @@ export const typeDefs = `#graphql
     listedOnMarketplace: Boolean!
     type: AgentType!
     surfaces: [String!]!
+    # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
+    # lets any agent present as a colleague. The NAMED identity ('Iris') is
+    # the Worker - the casting of an installed agent into an App - never a
+    # field here. Pure metadata: no server behavior forks on these fields.
+    "Persona role - free string with conventions ('backend-engineer')."
+    personaRole: String
+    "Persona identity TEMPLATE ('You are {{name}}, ...'); {{name}}/{{role}} are bound at casting time (Worker.prompt returns the bound result)."
+    personaPrompt: String
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -1791,6 +1964,401 @@ export const typeDefs = `#graphql
     content: String!
     seq: Int
     createdAt: DateTime!
+  }
+
+  """
+  One message in a team App's chat (#939, Worker envelope since #974). Exactly
+  one of authorUserId / authorWorkerId is set: a human post carries the user, a
+  worker post carries the Worker (the named casting, cor:dmo:050:11) plus the
+  driving sessionId. mentions holds the lowercased tokens extracted
+  server-side at write time (the '@worker-name / @handle' format, stored
+  without the '@').
+  """
+  type TeamChatMessage {
+    "The message node's id."
+    nodeId: ID!
+    "Ordering key, unique per chat, allocated atomically (ascending from 1)."
+    seq: Int!
+    body: String!
+    at: DateTime!
+    authorUserId: ID
+    authorWorkerId: ID
+    "Display convenience: the worker name or the user handle."
+    authorName: String
+    "The session driving the worker author, when posted via sessionRef."
+    sessionId: ID
+    "The seq this message replies to, when it is a reply."
+    replyToSeq: Int
+    mentions: [String!]!
+  }
+
+  type TeamChatMessagesPage {
+    items: [TeamChatMessage!]!
+    total: Int!
+  }
+
+  """
+  One team-worklog record (#947) — an externally visible work milestone (a PR
+  opened, a branch pushed, an issue closed), append-only. The worklog is the
+  AUTHORITATIVE PR-session join (spec cor:agt:020:03); Session.prNumber is a
+  latest-wins display convenience. ref carries the ONE canonical spelling per
+  artifact (github: owner/repo#N, owner/repo@sha, owner/repo:branch,
+  owner/repo; owner/repo lowercased).
+  """
+  type TeamWorkItem {
+    "The record node's id."
+    nodeId: ID!
+    "The session the work is attributed to."
+    sessionId: ID!
+    "Display convenience, denormalized at write: the session's bound worker name, else the attributed user's handle (pre-#974 records surface their stored personaName here)."
+    workerName: String!
+    "The Worker (named casting) behind the record, when the session was worker-bound."
+    workerId: ID
+    "The external tool the artifact lives in ('github', ...). Lowercased."
+    tool: String!
+    "Artifact kind: pr, issue, commit, branch, or repo."
+    kind: String!
+    "The canonical artifact ref — the equality-lookup key."
+    ref: String!
+    "What happened: opened, merged, claimed, reviewed, closed, pushed, ... (free string, lowercased)."
+    action: String!
+    "When the record was made (server-stamped)."
+    at: DateTime!
+    "Optional display extras (title, URL) — never filtered on."
+    detail: JSON
+  }
+
+  type TeamWorkItemsPage {
+    items: [TeamWorkItem!]!
+    total: Int!
+  }
+
+  """
+  A Worker (#974, cor:dmo:050:11) — the named casting of an installed Agent
+  into an App: 'Iris', the backend-engineer agent cast into the eng-team App.
+  The Agent carries the reusable persona dressing; the Worker is the local
+  named identity that does attributable work. Names are unique per App,
+  case-insensitively, forever (retirement and uninstall never free them —
+  cor:agt:020:02); rows survive the agent's uninstall. A Worker is addressable
+  by its id or by the computed \`urn\` below (#991).
+  """
+  type Worker {
+    id: ID!
+    appId: ID!
+    agentId: ID!
+    "The worker's name ('Iris') — the identity every surface renders."
+    name: String!
+    """
+    The URN atom, derived from the name at cast time and permanent thereafter
+    (#991). Lowercased, sanitized to the URN slug charset, and iterated
+    ('iris', 'iris-2', …) until free within the App — so deriving it NEVER
+    refuses a cast, and the name collision stays the only allocation failure a
+    caller sees (cor:agt:020:02).
+    """
+    slug: String!
+    """
+    hrn:worker:<root>:<app-slug>:<slug> (#991) — computed from the App's URN
+    plus \`slug\`, not stored. Accepted anywhere a workerRef is taken, and
+    resolvable via Query.resolveUrn, so a client can address a worker without
+    holding its id. Null only when the App's URN predates the flat grammar-v2
+    shape this arity requires.
+    """
+    urn: String
+    """
+    #1026 — the portal link that opens this worker, mirroring Node.portalUrl
+    (#881), so a worker signing an artifact under #1008 hands over a URL
+    instead of assembling one out of a URN spelling the /app/u route may not
+    resolve.
+
+    Built from the SAME URN the urn field returns, so the two cannot diverge.
+    Null on both arms and neither is an error: no configured portal origin
+    means no link (a link to the wrong host is worse than none), and an App URN
+    the fixed arity cannot take means no URN to build one from.
+    """
+    portalUrl: String
+    "The cast-list role this filling answers ('backend-engineer')."
+    role: String
+    """
+    #1024 — the repo affinity of this worker's ROLE, resolved so a client that
+    already holds the worker needs no second round-trip to teamRoles. The CLI
+    warns on a role/repo mismatch at session start (hadron-cli#456).
+
+    WORKING-STATE field: behind the worker read gate and masked to [] on deny,
+    like promptOverride and the holder — Session.worker reaches a Worker
+    through a wider gate that admits any org member and survives a user leaving
+    the App, so an ungated field would publish a team's repo list through any
+    historical session.
+
+    Masking to [] costs nothing, because empty already means "no affinity,
+    never warn": a denied caller simply gets no warning, which is the safe
+    direction for a signal that must never become a refusal. Same reason a
+    worker with no role, a role with no definition, or an unreadable system
+    memory all answer [] rather than erroring.
+    """
+    repos: [String!]!
+    "Per-worker individuality layered over the agent's template prompt."
+    promptOverride: String
+    "The worker-scoped working memory in the App's container (null until provisioned)."
+    memoryId: ID
+    """
+    #1050 — the human HOLDING this name, or null when nobody does.
+
+    A name is held by a person, not by a live session: expiry, a reap, or a
+    closed chat session never free it, and only an explicit release does. This
+    is what separates the two meanings of \"taken\" — HELD is whose name it is,
+    while a live session is only ever a question about your own worker.
+
+    WORKING-STATE field, behind the worker read gate and masked to null on
+    deny — like promptOverride and memoryId, and NOT like name/role/urn.
+    Session.worker reaches a Worker row through a wider gate that admits any
+    org member and survives a user leaving the App, so an ungated holder would
+    let a former member read current staffing off a historical session.
+    """
+    heldByUserId: ID
+    """
+    When the current hold was taken. Null exactly when heldByUserId is — and
+    likewise masked on deny.
+
+    #1034: "taken" here is the HOLD's timestamp, unrelated to \`WORKER_TAKEN\`
+    (a live worker session) and to \`TeamRoleName.taken\` (a name allocated in
+    the register). Three senses of one word across two types.
+    """
+    heldAt: DateTime
+    """
+    hadron-cli#487 — whether anyone is DRIVING this name right now.
+
+    Not availability: availability is the HOLD above (\`cor:agt:020:09\`), and an
+    ended or idle session never frees a name. This says only whether someone is
+    mid-stint, which is the question a coordinator asks about a name already
+    theirs. Conflating the two is the CLI bug this field exists for.
+
+    #1114 — COMPUTED, never stored. It is "the session has not ended AND it was
+    driven inside its type's idle window", not "a row is open". Nothing ends a
+    session for inactivity any more, because silence is not evidence of
+    abandonment — an agent used once a year is not abandoned in month two — so
+    an open row proves only that nobody closed it. Deriving the answer at read
+    time says exactly what the evidence supports; the previous design expressed
+    the same judgement by ENDING the session, which wrote a guess into the
+    record as a fact and destroyed the handoff that stint had not written yet.
+
+    A worker that reads false is not gone: its session is untouched, and it
+    reads true again the moment it is driven.
+
+    Uses the SAME predicate startSession refuses WORKER_TAKEN on
+    (\`cor:agt:020:11\`) — a reader must not be told a worker is busy that a
+    binder can take, and since #1114 that is load-bearing rather than tidy:
+    with nothing ending abandoned sessions, an \`endedAt IS NULL\` gate would
+    refuse a bind forever and leave force as the only route.
+
+    Nullable BECAUSE of the read gate, not because the answer is unknown: this
+    is a working-state field like heldByUserId, masked to null on deny rather
+    than answering false, which would state a fact the server never computed.
+    """
+    hasLiveSession: Boolean
+    """
+    hadron-cli#487 — when this worker was last DRIVEN, over every session it has
+    ever had. Null for a worker nobody has ever bound, and that null is the
+    point: a casting nobody picked up renders identically to one worked
+    yesterday on every surface today, so a coordinator can dispatch into a
+    channel no one reads and get no signal at all.
+
+    The instant is the platform's one derivation of session activity — the
+    greatest of startedAt, updatedAt, and the newest attributed usage event — so
+    it agrees with the takeover prompt and with the idle window hasLiveSession
+    is derived from (#1114: that window DESCRIBES a session, it no longer ends
+    one). Masked to null on deny, like heldByUserId.
+    """
+    lastActiveAt: DateTime
+    "The role-agent behind the casting."
+    agent: Agent
+    "The App whose staff this casting fills."
+    app: App
+    """
+    The worker's boot prompt, resolved: the agent's personaPrompt template
+    with {{name}}/{{role}} bound, then promptOverride appended as its own
+    paragraph. Null when the agent carries no template and the worker no
+    override.
+    """
+    prompt: String
+    """
+    #1029 — what a fresh binding of this worker inherits from the last one.
+
+    Returned by startSession alongside the boot briefing (binding is briefing,
+    so binding is handoff) and by the worker read, which is the recovery path
+    after a context compaction — the reader who has most lost the handoff and
+    least knows one exists. Working-state field: behind the worker read gate,
+    masked to null on deny, like prompt/promptOverride/memoryId.
+    """
+    continuity: WorkerContinuity
+    createdAt: DateTime!
+    createdBy: String
+    "Retirement instant — a retired worker stops authoring and takes no new sessions; the name stays reserved."
+    retiredAt: DateTime
+    retiredBy: String
+  }
+
+  """
+  #1029 — the continuity a worker carries between stints.
+
+  Handoffs are ordinary nodes in the worker's working memory, so a client walks
+  the whole sequence through the node surface. This type exists for the ONE
+  handoff that cannot be discovered: the newest, which a fresh session does not
+  know to look for.
+  """
+  type WorkerContinuity {
+    status: WorkerContinuityStatus!
+    """
+    The newest handoff node, or null when the worker has none. Present even
+    when status is MISSING — a stale handoff is still the best available
+    account of where this worker got to, and withholding it helps nobody.
+    """
+    handoff: Node
+    """
+    The worker's most recent ENDED session, as a SANITIZED projection — the
+    three facts continuity needs, and deliberately not the Session object.
+
+    The worker read gate that admits this field is WIDER than the session read
+    gate: an AppMember who is not an org member passes the first and fails the
+    second. Returning a Session here would hand them another driver's
+    transcriptPath, host, repo and summary through its field resolvers, which
+    assume the outer query authorized them (#552 / #983).
+    """
+    previousSession: WorkerContinuitySession
+  }
+
+  """
+  #1029 — the previous stint, reduced to what a successor needs to know: which
+  session it was, when it ended, and whether the server reaped it. Not a
+  Session, on purpose (see WorkerContinuity.previousSession).
+  """
+  type WorkerContinuitySession {
+    id: ID!
+    endedAt: DateTime
+    "Set when the #930 reaper ended it — nobody closed this stint deliberately."
+    autoExpiredAt: DateTime
+  }
+
+  """
+  #1029. MISSING is deliberately not "no handoff": it means the PREVIOUS stint
+  did not write one, while \`handoff\` may still carry an older record. Silently
+  presenting a stale handoff as current is the failure this distinction exists
+  to prevent.
+  """
+  enum WorkerContinuityStatus {
+    "No previous ended session — nothing to inherit, and that is not a gap."
+    FIRST_STINT
+    "The previous session wrote the handoff returned here."
+    CURRENT
+    "The previous session ended, or was auto-expired, without writing one."
+    MISSING
+  }
+
+  type WorkersPage {
+    items: [Worker!]!
+    total: Int!
+  }
+
+  """
+  What castWorker WOULD do (#964) — an unsaved projection, deliberately not a
+  Worker (no fake id to mistake for a real row). Scalars only: the ids/names
+  here are attribution-level facts the mint-gate audience already sees, so no
+  nested entity hands out its field resolvers.
+  """
+  type CastWorkerPreview {
+    "The name the cast would take — the caller's, checked free against the App's FULL roster (retired names stay taken). Required since #1050; a nameless preview refuses exactly where the cast would."
+    name: String!
+    "The casting's role: explicit, else the agent's personaRole dressing."
+    role: String
+    "The role-agent the casting would bind."
+    agentId: ID!
+    agentName: String!
+    """
+    The composed boot prompt, post {{name}}/{{role}} substitution with
+    promptOverride appended — the same composition Worker.prompt performs,
+    reviewable BEFORE the name is permanent. Null when the agent carries no
+    template and no override was given.
+    """
+    prompt: String
+    "Whether the agent's personaPrompt binds {{name}} — a nameless template silently produces workers whose prompt never names them. Null when the agent has no template."
+    hasNamePlaceholder: Boolean
+  }
+
+  """
+  A role definition (#960): the roles:<role> node in the Team Agent's system
+  memory. #1050: it carries no name register — a role is a definition, not an
+  allocation pool.
+  The persona prompt template is NOT here — with the Worker model (#974) it
+  lives on the role-agent as dressing (personaRole + personaPrompt); roleAgent
+  points at it.
+  """
+  type TeamRole {
+    "The role slug, e.g. backend-engineer."
+    role: String!
+    "The node loc: roles:<role>."
+    loc: String!
+    nodeId: ID!
+    description: String
+    """
+    #1024 — the repos a worker in this role normally works in, from
+    \`data.repos\`. A SOFT signal for clients to warn on a role/repo mismatch at
+    session start (hadron-cli#456): a worker bound as a server-engineer with
+    \`--repo …/hadron-cli\` is usually a mistake and is sometimes deliberate.
+
+    NEVER a refusal, and never inferred. Cross-repo work is legitimate — a
+    coordinator does it by definition, and sibling repos share code — so a hard
+    gate would be wrong the first time someone makes a genuine cross-cutting
+    change. Affinity is declared, not guessed from the role slug, which happens
+    to work for \`cli-engineer\` → \`hadron-cli\` and breaks for any team whose repo
+    names do not match their role names.
+
+    EMPTY AND UNSET ARE THE SAME: no affinity, never warn. A client cannot
+    usefully act differently on the two, since "spans everything" and "not
+    configured yet" both mean do-not-warn, and distinguishing them would make an
+    unconfigured team look misconfigured.
+    """
+    repos: [String!]!
+    """
+    The single installed agent whose personaRole matches this role — exactly
+    the agent a role-mode castWorker would use (null when zero or ambiguous).
+    Runs Query.agent's own read gate and masks to null on deny (the #552
+    posture), like Worker.agent.
+    """
+    roleAgent: Agent
+    """
+    Whether the role-agent's personaPrompt binds {{name}} — the check that
+    finds templates which silently produce nameless workers (role-agents
+    authored before any guard existed). Null when no single role-agent
+    resolves. Computed even when roleAgent itself is masked: it discloses one
+    boolean about the caller's own App's casting default.
+    """
+    hasNamePlaceholder: Boolean
+  }
+
+  type TeamRolesPage {
+    items: [TeamRole!]!
+    total: Int!
+  }
+
+  "Result of deleteTeamRole (#1002)."
+  type DeleteTeamRolePayload {
+    "The role slug that was retired."
+    role: String!
+    """
+    Nodes tombstoned — the roles:<role> definition plus any sub-nodes under it
+    (a roles:<role>:notes is content OF the role and retires with it). Soft,
+    so the subtree is recoverable.
+    """
+    nodesDeleted: Int!
+  }
+
+  "Result of updateTeamCollections (hadron-cli#401)."
+  type TeamCollectionsPayload {
+    "The team App's shared memory the declaration was written to."
+    memoryId: ID!
+    "The server-owned collections declared on it."
+    collections: [String!]!
+    "False when the declaration already matched the canonical definition (idempotent no-op)."
+    changed: Boolean!
   }
 
   type AgentMemoryItem {
@@ -2684,7 +3252,7 @@ export const typeDefs = `#graphql
     "Canonical URN of the grantee App (hrn:app:<root>:<slug>), or null if unresolvable."
     granteeAppUrn: String
     granteeAppName: String
-    "Covered scopes: mail.read, mail.send, calendar.freebusy, calendar.read."
+    "Covered scopes: mail.read, mail.send, calendar.freebusy, calendar.read, drive.read."
     scopes: [String!]!
     "ISO-8601 expiry, or null for perpetual (until revoked)."
     expiresAt: DateTime
@@ -2995,6 +3563,83 @@ export const typeDefs = `#graphql
     llmModel: String
     parentSessionId: String
     prevSessionId: String
+    # #928 coding-session provenance.
+    transcriptPath: String
+    host: String
+    tool: String
+    """
+    #928 / cor:api:140: the role-Agent driving this session, as a PK or URN.
+    Resolves to Session.agentId. The caller must be able to READ the agent
+    (PUBLIC, or owner / org member) - a session is never attributed to an
+    agent the caller cannot see. Usually omitted with workerRef, which derives
+    it from the casting.
+    """
+    agentRef: String
+    """
+    #974 / cor:agt:020:03: the Worker (named casting) this session works as.
+    Three forms resolve, told apart by SHAPE (never by trying each in turn, so
+    a typo'd URN can't silently fall through to a roster search):
+
+    - the worker's NAME ("Iris") — #990. Unique per App, case-insensitively,
+      matched with the DATABASE's lower(), the expression
+      workers_app_name_uniq indexes. Requires App context (appRef, an App-key
+      credential, or an MCP active-App selection): a name means nothing without
+      one, so a nameless-App call refuses SESSION_WORKER_NAME_NEEDS_APP rather
+      than guessing across the caller's Apps. Gated on the STAFF READ GATE
+      before the lookup runs — resolving a name discloses roster membership,
+      which the id/URN forms never do.
+
+      Which refusal you get depends on WHERE the denial happens, and clients
+      should not assume one code covers both: a caller who supplied appRef has
+      already been checked against the same participant predicate, so an
+      outsider is refused FORBIDDEN there, before any name is read. Only a
+      denial at the in-branch staff gate — reachable when the App came from an
+      App-key credential rather than appRef — is masked as WORKER_NOT_FOUND,
+      indistinguishable from an App with no such worker.
+    - the worker's URN (hrn:worker:<root>:<app-slug>:<slug>, #991); the URN's
+      leaf is the derived slug, never the display name (cor:agt:020:02).
+    - the worker's id.
+
+    Resolves to Session.workerId, and stamps Session.agentId with the worker's
+    role-agent. The worker must belong to the session's App: with appRef (or an
+    App-key credential) it must match the worker's App; without one, the
+    worker's App becomes the session's, behind the same membership gate as
+    appRef. A retired worker refuses (WORKER_RETIRED). #940: a worker with an
+    ACTIVE session refuses WORKER_TAKEN — extensions carry workerId, sessionId,
+    lastDriver, lastSeenAt, everything the takeover prompt needs — unless
+    force is true (informed takeover, cor:agt:020:03: show who last drove it,
+    proceed only on explicit override, never silently).
+    """
+    workerRef: String
+    """
+    #940: take over a worker whose binding would otherwise refuse WORKER_TAKEN.
+    Only meaningful with workerRef. Clients must surface the WORKER_TAKEN
+    payload (who last drove it, when) before retrying with force - that IS the
+    informed-takeover contract; force exists so the override is explicit,
+    never the default.
+    """
+    force: Boolean
+    "The session's stated intent (Session.plan) - what this session is about. MCP's hadron_start_session description lands here."
+    plan: String
+    """
+    #943 / cor:api:140: the App this session is a unit of work for, as a PK or
+    URN. Resolves to Session.appId - the pivot that was previously stamped ONLY
+    from an App-key credential, which made a user-started session structurally
+    unable to satisfy the team-chat authorship gate (cor:agt:020:04 condition b,
+    SESSION_NOT_IN_APP). The caller must be a member of that App: an AppMember
+    at any role, an org member with CONTRIBUTOR+ on its owning org, or the
+    owner of a user-owned App. Unknown or deleted App: BAD_USER_INPUT;
+    non-member: FORBIDDEN. An App-key credential wins - if the caller
+    authenticated as an App and appRef names a DIFFERENT App, the call is
+    refused (SESSION_APP_MISMATCH).
+
+    Uninstalled Apps differ by ref form, because App URNs are only unique
+    among ACTIVE rows (spec 021 FR-027: one live App plus N uninstalled
+    history rows may share a URN). By URN an uninstalled App is simply not
+    found - BAD_USER_INPUT - since there is no single row the URN names; by
+    PK it is found and refused APP_UNINSTALLED.
+    """
+    appRef: String
   }
 
   input UsageEventInput {
@@ -3054,8 +3699,11 @@ export const typeDefs = `#graphql
 
   # ─── Assets ──────────────────────────────────────────────────────
   # Per spec 004-asset-upload. Assets live in a dedicated Asset
-  # entity (NOT a nodeType) FK-related to Memory. URN form:
-  #   <memory.urn>:assets:<asset.id>
+  # entity (NOT a nodeType) FK-related to Memory. URN form (grammar
+  # v2, #697 Stage 2):
+  #   hrn:asset:<root>:<mem...>:assets:<asset.id>
+  # See Asset.urn below for the two degraded shapes a parser must
+  # tolerate, and for why <mem...> is not always a single atom.
 
   enum AssetScanStatus {
     PENDING
@@ -3077,7 +3725,33 @@ export const typeDefs = `#graphql
     """Uploader (User id). Null when the asset was created server-side by an app run (hadron_store_file)."""
     uploadedBy:  ID
     deletedAt:   DateTime
-    """The asset's URN: <memory.urn>:assets:<asset.id>."""
+    """
+    The asset's URN, grammar v2 (cor:urn:010:01): hrn:asset:<root>:<mem...>:assets:<asset.id>,
+    emitted by emitAssetUrnV2 from the holding memory's STORED urn.
+
+    <mem...> is one or more atoms, not always one. A per-user memory urn minted
+    before the #697 Stage-3 flip is still compound (<root>:<agent>:app-user:<id>
+    and friends), and each extra memory atom lengthens the asset URN with it —
+    so the 'assets' marker is not at a fixed offset. A parser recovering the
+    holding memory must take everything between the type word and that marker,
+    never a fixed two-atom prefix. Prefer locating the LAST 'assets' atom and
+    reading the id after it (assetIdFromRef does exactly this).
+
+    Two degraded shapes a parser must tolerate, both of which really occur:
+      * hrn:asset:unknown:assets:<asset.id> — the holding memory row could not
+        be loaded. Carries no memory identity at all.
+      * <memory.urn>:assets:<asset.id> — the pre-#697 shape, with NO hrn:asset:
+        prefix, served when v2 emission throws (empty, over-length or
+        charset-invalid atom in the stored memory urn). It interpolates the
+        stored memory urn verbatim, which is normally bare (<root>:<slug>), so
+        this shape usually looks like acme.com:docs:assets:<id>.
+
+    A third oddity is reachable through the NORMAL branch, not a fallback: a
+    legacy memories.urn row that predates the chk_memory_urn_not_prefixed
+    guardrail can still hold a rendered hrn:mem:-prefixed value, and that
+    composes into hrn:asset:hrn:mem:<root>:<slug>:assets:<id>. A prefix strip
+    that assumes one leading type word will mis-read it.
+    """
     urn:         String!
     """
     Stable, UNAUTHENTICATED hotlink to the bytes (GET /assets/<id>).
@@ -3164,7 +3838,13 @@ export const typeDefs = `#graphql
   same memory.
   """
   input CreateAssetReferenceNodeInput {
-    """Asset id, or its URN (<memory.urn>:assets:<asset.id>)."""
+    """
+    Asset id, or its URN — canonically hrn:asset:<root>:<mem...>:assets:<asset.id>.
+    Parsing is Postel-liberal (assetIdFromRef): the id is whatever follows the
+    LAST 'assets' atom, so every shape Asset.urn can emit is accepted, including
+    the pre-#697 memory-prefixed <memory.urn>:assets:<asset.id> spelling and the
+    other degraded fallback. A ref with no 'assets' atom is taken as a bare id.
+    """
     assetRef:    String!
     """Fully-qualified node URN for the reference node."""
     nodeUrn:     String!
@@ -3229,10 +3909,12 @@ export const typeDefs = `#graphql
   the resource's canonical page. Powers the portal's /app/u/<urn> redirect
   route (hadron-portal#262).
 
-  \`kind\` is the URN's type segment: memory | node | agent | org | app | user.
+  \`kind\` is the URN's type segment: memory | node | agent | org | app | user |
+  apprun | worker | noderev.
   \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
-  nodes (their owning memory), \`organizationId\` only for apps (their owning
-  org) — both are the extra ids those resources' canonical routes require.
+  nodes (their owning memory), \`organizationId\` for apps, app runs, and
+  workers (their owning org) — both are the extra ids those resources'
+  canonical routes require.
   """
   type UrnResolution {
     kind:           String!
@@ -3289,9 +3971,9 @@ export const typeDefs = `#graphql
   """
   type EffectiveAccess {
     user: User!
-    "Canonical URN of the resolved resource (the AiServiceConfig id when the resource is a config, which has no URN)."
+    "Canonical (grammar-v2, hrn:-prefixed) URN of the resolved resource, emitted the same way the entity's own urn field emits it — so it can be fed straight back into another query or command. Two exceptions have no URN by nature: an AiServiceConfig yields its id, and a user yields hrn:user:<handle>."
     resourceUrn: String!
-    "memory | node | app | agent | aiServiceConfig."
+    "memory | node | app | agent | aiServiceConfig | organization | user."
     resourceKind: String!
 
     canRead: Boolean!
@@ -3640,24 +4322,35 @@ export const typeDefs = `#graphql
     nodeBatch(refs: [ID!], memory: ID, locPrefix: String): NodeBatchResult!
 
     """
+    DEPRECATED: use usageEvents(loc: <loc>). Carried for source-compat;
+    there are no known callers (checked across portal / CLI / docs at #802).
+
     Usage events for a node loc, most recent first.
 
-    'loc' names no memory, so this is a cross-memory exact nodeLoc match — the
-    same bare-loc semantics as usageEvents(nodeId:). It is a filter, not a
-    lookup: an unknown loc yields an empty list, not NODE_NOT_FOUND.
+    The migration is a rename, not a rewrite — usageEvents' loc argument is
+    the SAME verbatim exact nodeLoc match under the same gate, so
+    nodeUsage(loc: "x", limit: n) becomes usageEvents(loc: "x", limit: n)
+    with identical results and identical access scoping:
 
-    Access control (#802): results are scoped to the memories the caller may
-    read (org membership / subscriptions / public / owned personal+private per
-    spec 034; ADMIN/OWNER see all EXCEPT another user's personal/private
-    memories and, per spec 047, another user's user-owned memories), so this is
-    never cross-tenant. An unreadable loc and a nonexistent one both return an
-    empty list (no existence disclosure).
+      nodeUsage(loc: 'cor:acl:010:01', limit: 20)
+      usageEvents(loc: 'cor:acl:010:01', limit: 20)
 
-    Equivalent to usageEvents(nodeId: <loc>), which additionally supports a PK
-    or fully-qualified URN, type filtering, and paging — prefer it for new
-    callers.
+    Do NOT migrate to usageEvents(nodeId: <loc>): nodeId is shape-classified,
+    and a hierarchical loc with 3+ colon-separated segments (like the spec
+    citation above) qualifies as node-URN shape and routes to ref resolution
+    instead — NODE_NOT_FOUND, or another node's events (PR-986 review). The
+    loc argument exists precisely so the migration needs no shape caveats.
+
+    usageEvents is a strict superset: nodeId accepts a PK or a fully-qualified
+    node URN (memory-precise — a bare loc cannot disambiguate the same loc in
+    two memories), plus type filtering, memoryId scoping and offset paging. It
+    is also the surface that gets extended; nodeUsage will not grow arguments.
+
+    Access control is identical and unchanged (#802) — see usageEvents below.
+    Deprecated for redundancy, NOT because this field is unsafe.
     """
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
+      @deprecated(reason: "Use usageEvents(loc: <loc>) — identical exact-match loc semantics and access scoping, plus PK/URN refs via nodeId, type filtering, memoryId scoping and paging (#802).")
 
     # Usage events (most recent first), optionally filtered by type, memoryId,
     # or nodeId.
@@ -3677,9 +4370,21 @@ export const typeDefs = `#graphql
     # loc (no memoryId needed):
     #   - PK / URN  → resolved to a single node; scoped via its exact nodeId FK
     #                 (memory-precise).
-    #   - bare loc  → exact nodeLoc match, bounded to readable memories (like
-    #                 nodeUsage but access-scoped); not existence-checked.
-    usageEvents(type: String, memoryId: ID, nodeId: ID, limit: Int, offset: Int): [UsageEvent!]!
+    #   - bare loc  → exact nodeLoc match, bounded to readable memories; not
+    #                 existence-checked. Shape-classified: a loc with 3+
+    #                 colon-separated segments qualifies as node-URN shape and
+    #                 takes the PK/URN branch instead — use loc for those.
+    #                 (This used to read "like nodeUsage but access-scoped" —
+    #                 a comment that named an ungated sibling without anyone
+    #                 following the pointer back. nodeUsage was gated in #802
+    #                 and deprecated as redundant in the same issue.)
+    #
+    # loc — the VERBATIM exact nodeLoc filter (never shape-sniffed, so every
+    # loc works, hierarchical spec citations included), bounded to readable
+    # memories; not existence-checked. The migration target for the deprecated
+    # nodeUsage(loc:) above — same match, same gate (PR-986 review, Codex P2).
+    # Mutually exclusive with nodeId (BAD_USER_INPUT when both are passed).
+    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, limit: Int, offset: Int): [UsageEvent!]!
 
     """
     Revision history for a node, most recent first.
@@ -3745,7 +4450,23 @@ export const typeDefs = `#graphql
     ): [UsageActivityBucket!]!
 
     # Sessions, most recent first
-    sessions(type: String, repo: String, customerId: String, limit: Int, offset: Int): [Session!]!
+    """
+    Sessions VISIBLE to the caller, newest first — not only the caller's own.
+    The scope is authorization-derived (\`sessionScopeFilter\`): a platform
+    ADMIN/OWNER sees every session, an App key sees its own App's, and an
+    ordinary user sees those of Apps in any org they belong to **plus** every
+    session attributed to them (the self branch is identity-scoped, so it does
+    not apply through impersonation). So a client must not present these as "my
+    activity" — many rows may be attributed to other users or Apps.
+
+    Unfiltered, this is also the GENERAL row of every \`type\`, worker-bound or
+    not (#1034), so it is equally not a list of worker sessions.
+
+    workerRef (#974): only sessions bound to that Worker (by id), newest first
+    - the 'taken right now' / 'last driven by' read (cor:agt:020:03). That
+    filter is what narrows this to worker sessions.
+    """
+    sessions(type: String, repo: String, customerId: String, workerRef: String, limit: Int, offset: Int): [Session!]!
     session(id: ID!): Session
 
     """
@@ -4308,7 +5029,168 @@ export const typeDefs = `#graphql
 
     # Message history for a saved chat. Returns plain role/content pairs
     # suitable for feeding back into an LLM.
-    chatHistory(chatId: String!, limit: Int): [ChatMessage!]!
+    #
+    # limit bounds the transcript to its MOST RECENT messages (default 100),
+    # and they are returned oldest-first. Stated because it was not: the window
+    # used to be taken from the other end, so a chat longer than the limit
+    # returned its opening forever (#1111), and a client author had no written
+    # contract to check that against. Contract: cor:cht:050:01.
+    #
+    # beforeSeq (#1116) pages BACKWARD: only messages with seq strictly LESS
+    # than it are considered, and the window then returns the newest "limit"
+    # of those -- the page immediately preceding the cursor, still oldest-first.
+    # It is the mirror of teamChatMessages' sinceSeq: pass the OLDEST seq you
+    # hold, as you would pass the newest to page forward. Omit it for the tail.
+    #
+    # Two boundaries worth knowing before you build on it:
+    #   - A message with NO seq is older than every numbered one
+    #     (cor:cht:050:02), so every cursor includes such messages. They are
+    #     reachable, but they cannot themselves BE a cursor -- a legacy chat
+    #     holding more counterless messages than one page cannot be paged
+    #     through them. Only pre-#919 transcripts are affected.
+    #   - seq is unique going forward but NOT on pre-#919 rows. Where two
+    #     legacy messages share a seq, a cursor at that value excludes both,
+    #     so paging can skip the sibling. See #992 for the underlying gap.
+    chatHistory(chatId: String!, limit: Int, beforeSeq: Int): [ChatMessage!]!
+
+    """
+    Read a team App's chat (#939), seq-ordered ascending, as a uniform
+    { items, total } page. sinceSeq is a watermark cursor: only messages with
+    seq STRICTLY GREATER than it are returned (pass the last seq you have
+    seen). beforeSeq (#1116) is its BACKWARD mirror for scroll-up paging: only
+    messages with seq STRICTLY LESS than it are considered, and the NEWEST
+    limit of those come back -- the page immediately before the cursor, still
+    ascending. The two compose, so passing both reads a bounded slice.
+    offset is IGNORED when beforeSeq is given: a cursor exists precisely
+    because a position is unstable while workers keep posting, and honouring
+    both would put that race back. mentionsRef filters to messages whose stored envelope mentions the
+    referenced worker (a Worker id or name of THIS App, retired included) or
+    user (handle/id) — matching runs against the mention tokens extracted at
+    write time, never by re-parsing bodies. The ref must name this App's own
+    staff or members (a Worker of the App, an AppMember, or the caller); an
+    unresolvable or foreign mentionsRef yields the empty page identically (no
+    existence oracle). limit defaults to 50 (cap 200); limit: 0 returns only
+    total.
+
+    Authorization: an AppMember of the App (any role), an org member with
+    CONTRIBUTOR+ on the App's org, the owner of a user-owned App, or the
+    App's own key (a pure App-key principal may READ its team chat).
+
+    appRef and mentionsRef accept the entity's ID or URN.
+    """
+    teamChatMessages(
+      appRef: ID!
+      sinceSeq: Int
+      beforeSeq: Int
+      mentionsRef: ID
+      limit: Int
+      offset: Int
+    ): TeamChatMessagesPage!
+
+    """
+    Read a team App's worklog (#947) — the provenance query: which sessions
+    (and transcripts) produced this PR? Newest first, as a uniform
+    { items, total } page. ref accepts ANY accepted spelling (URL, short form,
+    canonical) and is matched tool-awarely: with tool 'github' (or none) it is
+    normalized, so 'https://github.com/o/r/pull/371' and 'o/r#371' return the
+    same records; with another tool it matches the stored verbatim ref; with
+    no tool it matches either spelling. sessionRef / tool / kind are equality
+    filters; kind must be one of pr, issue, commit, branch, repo when given.
+    limit defaults to 50 (cap 200); limit: 0 returns only total.
+
+    Authorization: an AppMember of the App (any role), an org member with
+    CONTRIBUTOR+ on the App's org, the owner of a user-owned App, or the
+    App's own key (a pure App-key principal may READ its own App's worklog).
+
+    appRef accepts the entity's ID or URN; sessionRef is the session id.
+    """
+    teamWorkItems(
+      appRef: ID!
+      ref: String
+      sessionRef: ID
+      """
+      #1035 — everything ONE worker has done, filtered server-side so the page
+      envelope stays correct. Without it a client must fan out over
+      sessions(workerRef:) and merge, which cannot reproduce \`total\` or a
+      stable offset on the one surface whose whole point is completeness.
+
+      Accepts a worker id, its URN, or its NAME within this App. A RETIRED
+      worker still resolves — retirement ends the casting, not the history.
+      Records from a session that was never worker-bound carry no worker and
+      do not match. A ref that names nothing readable in this App yields an
+      EMPTY page rather than an error, so this is never an existence oracle
+      for another App's roster.
+      """
+      workerRef: ID
+      tool: String
+      kind: String
+      limit: Int
+      offset: Int
+    ): TeamWorkItemsPage!
+
+    """
+    One Worker by ref (#974) — its id, its URN (#991), or (with appRef) its
+    NAME (#1015), the ergonomic handle a human already knows. The name form is
+    ADDITIVE: it is activated by appRef, since a name is unique only within an
+    App. Without appRef the ref must be an id or URN, and anything else refuses
+    WORKER_NOT_FOUND as before. An id or URN wins over appRef rather than being
+    checked against it, so a typo'd URN never degrades into a roster search.
+
+    Selecting \`prompt\` re-renders the worker's boot briefing live from the
+    role agent's template — the read that lets an agent recover a briefing it
+    lost to a context compaction, instead of opening a second session or
+    forcing a takeover of itself.
+
+    Authorization: an AppMember of the worker's App (any role), an org member
+    with CONTRIBUTOR+ on its org, the owner of a user-owned App, or the App's
+    own key. For the NAME form the gate runs BEFORE the lookup and a denial is
+    reported as WORKER_NOT_FOUND, so the roster is not an existence oracle.
+    """
+    worker(ref: ID!, appRef: ID): Worker
+
+    """
+    A team App's STAFF (#974, cor:agt:020:01 — Workers are the staff; the
+    AppAgent join is the install roster): the App's castings, oldest first,
+    as a uniform { items, total } page. Retired castings are hidden unless
+    includeRetired. Same authorization as worker. appRef accepts the App's
+    ID or URN.
+    """
+    workers(appRef: ID!, includeRetired: Boolean, limit: Int, offset: Int): WorkersPage!
+
+    """
+    An App's role definitions (#960): every roles:<role> node in the Team
+    Agent's system memory. Ordered by role slug. Same read authorization as
+    workers.
+
+    #1050: no register projection. This once existed chiefly to answer "which
+    names are still free", which needed the App's FULL roster and so could not
+    be computed client-side — with names no longer allocated from a pool there
+    is no such question, and the read is a plain list of definitions. teamAgentRef disambiguates when more than one installed agent
+    carries a roles: branch (TEAM_AGENT_AMBIGUOUS otherwise); an encrypted
+    system memory without an active session key refuses SESSION_EXPIRED.
+    """
+    teamRoles(appRef: ID!, teamAgentRef: ID, limit: Int, offset: Int): TeamRolesPage!
+
+    """
+    Dry-run castWorker (#964): run the cast's exact resolution — same
+    arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
+    _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN, APP_UNINSTALLED),
+    same MINT gate — up to but not
+    including the writes, and return what would be created. A Query, not a
+    dryRun flag: casting a name is the one irreversible act in the team
+    feature (cor:agt:020:02 — permanence), and previewing it must not need a
+    mutation permission model or a fake Worker row. THE PREVIEW RESERVES
+    NOTHING: no lease exists by law (cor:agt:020:03), so a previewed name may
+    be gone at cast time — by design; the cast's uniqueness constraint
+    remains the only allocation primitive.
+    """
+    castWorkerPreview(
+      appRef: ID!
+      agentRef: ID
+      role: String
+      name: String
+      promptOverride: String
+    ): CastWorkerPreview!
 
     # ── Assets (spec 004-asset-upload + 006-asset-upload-redesign) ────
     # v1 — agent-addressed listing. Deprecated; use memoryAssets.
@@ -4812,8 +5694,9 @@ export const typeDefs = `#graphql
     # Spec 042 Track B (#593) — user->App connection delegation. Owner-only.
     """
     Grant an App install scoped access to a connection you OWN. scopes must be a
-    subset of {mail.read, mail.send, calendar.freebusy, calendar.read}; expiresAt
-    (ISO-8601) is optional and must be in the future. appRef is a PK or App URN.
+    subset of {mail.read, mail.send, calendar.freebusy, calendar.read, drive.read};
+    expiresAt (ISO-8601) is optional and must be in the future. appRef is a PK or
+    App URN.
     """
     createConnectionGrant(connectionRef: String!, appRef: String!, scopes: [String!]!, expiresAt: String): ConnectionGrant!
     "Revoke a connection grant you created (soft delete). Owner-only."
@@ -4848,8 +5731,81 @@ export const typeDefs = `#graphql
     createAssetReferenceNode(input: CreateAssetReferenceNodeInput!): Node!
 
     # Session lifecycle
+    """
+    Open a session — and, when \`input.workerRef\` is given, a WORKER SESSION:
+    the binding that makes the work attributable to that named teammate.
+
+    The binding is held server-side and is independent of the caller's CHAT
+    SESSION (the human's Desktop window, Claude Code session or IDE chat).
+    **Ending your chat session does not end a worker session** (#1034): a chat
+    session that closes leaves this session open until endSession — #1114
+    removed inactivity as a reason to end one, so nothing else will. The worker
+    stops reading as LIVE once its idle window passes without a drive, which is
+    what lets an abandoned name be bound again; the session itself, and any
+    handoff still unwritten, survive. A client that ties its lifetime to a
+    conversation must call endSession itself; nothing about closing a window
+    reaches this server.
+    """
     startSession(input: SessionInput!): Session!
-    endSession(id: ID!, summary: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
+    """
+    #931: update a live session's mutable provenance fields (a PR is usually
+    opened after startSession already ran). Explicit null clears; omitted
+    preserves; an empty update is a valid liveness touch (bumps updatedAt,
+    which liveness counts — #1114). id-only - sessions have no URN.
+    Gate: platform admin, the session's App, or the attributed user (not via
+    impersonation). Updates on an ended session stay allowed (late PR-merge
+    attribution).
+    """
+    updateSession(id: ID!, prNumber: Int, branch: String): Session!
+
+    """
+    End a session, and — for a worker-bound one — write its closing handoff
+    (#1029). This is the CLIENT operation that ends a worker session. Since
+    #1114 it is very nearly the ONLY one: the reaper ends a session only when a
+    hard expiresAt promised at session start has passed, never for going
+    quiet. A client's chat session ending **does not end a worker session**, and
+    never reaches this server (#1034).
+
+    It ends the SESSION, not any HOLD. Where a person bound the worker the name
+    stays theirs until explicitly released (#1050,
+    [\`cor:agt:020:09\`](hrn:node:hadronmemory.com:specs:cor:agt:020:09)), so
+    only that holder can bind it again. A pure App-key **bind takes no hold** —
+    which is a fact about the bind, not a promise about the worker's state when
+    this returns: an eligible user may have forced a binding meanwhile and taken
+    the name, and ending the App-key session leaves that hold and that session
+    untouched.
+
+    Gate (#931): platform admin, the session's App, or the attributed user
+    (not via impersonation).
+
+    \`handoff\` is agent-composed prose: what landed, what is open, what is
+    blocked, what the next driver should not repeat. The server owns where it
+    goes (the worker's working memory, under the \`handoffs\` parent, at a
+    lexically-ordered loc), so no client re-derives the convention.
+
+    \`summary\` is NOT a smaller \`handoff\` (#1100). It sets \`Session.summary\`,
+    a label on the session row — readable back through \`session\` / \`sessions\`,
+    but read by no worker-continuity path, so the next driver never sees it. The
+    two sit side by side and only one of them reaches that driver, so a caller
+    writing a closing note picks by name: it is \`handoff\`.
+
+    The two mistakes are not symmetric, and that is the whole hazard. Putting
+    continuity prose in \`summary\` succeeds, returns a normal receipt, and
+    produces NO handoff — discovered only once the context that could have
+    written one is gone, and not correctable in place, since the sequence is
+    append-only and the stint has ended (re-ending is refused). The remedy is to
+    bind again and end THAT session with the prose. Putting a label in
+    \`handoff\` is merely untidy: the row lacks its label and the text reaches
+    the next driver anyway.
+
+    Written BEFORE the session ends, and a failed write REFUSES the end
+    (HANDOFF_WRITE_FAILED) rather than ending anyway: a still-bound worker is
+    recoverable — retry, or end without a handoff deliberately — while an ended
+    session whose handoff evaporated is not, because the context that composed
+    it is gone. Passing \`handoff\` on a session with no worker is refused rather
+    than dropped; there is no sequence to write it to.
+    """
+    endSession(id: ID!, summary: String, handoff: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
 
     # Record a usage event
     recordUsage(event: UsageEventInput!): Boolean!
@@ -5198,16 +6154,25 @@ export const typeDefs = `#graphql
     v2 — no @ sigil) and its system memory is user-owned too. Exactly one owner
     (org XOR user).
 
+    personaRole / personaPrompt are the persona dressing (cor:agt:020:01) —
+    the reusable role plus the '{{name}}'-templated identity prompt. The NAMED
+    identity is a Worker, cast with castWorker; names never live on agents.
+
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!]): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String): Agent!
 
     """
     Update an Agent.
 
+    urn renames the slug (org-owned agents only). personaRole / personaPrompt
+    are the persona dressing (cor:agt:020:01); explicit null or blank clears,
+    omitted preserves. Worker castings referencing this agent are unaffected —
+    the named identity lives on the Worker.
+
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String): Agent!
 
     """
     Soft-delete an Agent.
@@ -5215,6 +6180,28 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     deleteAgent(ref: ID!): Boolean!
+
+    """
+    #949 — re-own an Agent's class=system memory to the Agent's own owner
+    (org XOR user) and re-derive its URN as '<agent-urn>-system'.
+
+    The recovery path for a system memory that ended up owned by a different
+    tenant. Access to a memory follows the MEMORY's owner, so such a row puts
+    one tenant's Agent design (for a Team Agent: its 'roles:<role>'
+    definitions and name registers) inside another tenant's audience. System
+    memories are only ever created by Agent provisioning, so before this the
+    only fix was to recreate the Agent.
+
+    Authorization: PLATFORM ADMIN only — the row being moved belongs to a
+    different tenant than the Agent, so neither side's org admin is the right
+    authority. Idempotent: an already-consistent pair is a no-op.
+
+    Error codes (extensions.code): FORBIDDEN, AGENT_HAS_NO_SYSTEM_MEMORY,
+    SYSTEM_MEMORY_NOT_FOUND.
+
+    Accepts the entity's ID or URN.
+    """
+    repairAgentSystemMemory(agentRef: ID!): Agent!
 
     """
     Attach a Memory to an Agent.
@@ -5545,10 +6532,14 @@ export const typeDefs = `#graphql
 
     # ── Chat API ──────────────────────────────────────────────────────
     """
-    Start a chat session (creates chat nodes, loads conversation, returns
-    compiled prompt). When called by a JWT user, the chat is created in
+    Start an AGENT CHAT (creates chat nodes, loads conversation, returns
+    compiled prompt). When called by a JWT user, the agent chat is created in
     that user's personal memory for the agent (provisioned lazily if
     needed).
+
+    #1034: an **agent chat** — deliberately not "chat session", which is
+    reserved for the human's own conversation and names no row in this schema,
+    and not the **team chat**, which is the App's shared channel.
 
     Accepts the entity's ID or URN.
     """
@@ -5573,7 +6564,18 @@ export const typeDefs = `#graphql
     sendChatMessage(chatId: String!, userMessage: String!): ChatPromptResult!
     # Process the LLM's tool response (extract data, transition stage, save assistant message)
     processChatResponse(chatId: String!, toolResponse: JSON!): ChatResponseResult!
-    # Save a chat summary
+    # Persist a caller-produced chat summary.
+    #
+    # #1115 — READ THIS BEFORE CALLING. The summary is STORED and nothing reads
+    # it back as a summary: no query excludes the messages it covers, and the
+    # model-history builder has no summary branch, so the node is replayed as an
+    # ordinary user turn ALONGSIDE the messages it summarises. Calling this
+    # makes the transcript longer, never shorter.
+    #
+    # The compression this was built for does not exist yet, and the trigger
+    # that used to request it (ChatPromptResult.summarizationNeeded) now always
+    # returns null. Kept working so existing callers do not break; re-arming it
+    # needs the design in #1115, not a flag.
     saveChatSummary(chatId: String!, summary: String!): Boolean!
     # Rename a saved chat (user must own it)
     updateChatTitle(chatId: String!, title: String!): Boolean!
@@ -5795,8 +6797,25 @@ export const typeDefs = `#graphql
     row joining the two. An App can have multiple Agents installed; one
     credential addresses all of them.
 
+    This is the ONE operation that attaches an EXISTING Agent to an EXISTING
+    App — distinct from createApp (which makes a NEW App from an Agent). It
+    is therefore also the re-attach that cor:dmo:050:03 promises: detaching an
+    Agent retains the memories accumulated under that App-and-Agent pairing as
+    orphans, and installing the Agent again is what makes them reachable.
+    Under cor:agt:020:01 the AppAgent join is a team's install ROSTER (which
+    agents are available); the App's STAFF are its Workers, cast from
+    installed agents with castWorker. Worker rows survive uninstall
+    (cor:dmo:050:11) — uninstalling severs future casting, not history.
+
     Rejects with code DUPLICATE_APP_AGENT when the Agent is already
     installed in the App.
+
+    Authorization: the owner of a user-owned App, or an org member with
+    CONTRIBUTOR+ on an org-owned App's org (platform admins included). NOT
+    plain AppMembers: installing an existing Agent is itself a read grant on
+    that Agent's design — its system memory becomes readable from every App
+    context, and the returned Agent carries its systemPrompt — so this gate
+    stays at the level that can already read the org's Agents.
 
     Accepts the entity's ID or URN for both appId and agentId. Optional
     trainingMode flag updates the per-App training flag (applies to
@@ -5808,6 +6827,360 @@ export const typeDefs = `#graphql
       agentRef: ID!
       trainingMode: Boolean
     ): InstallAgentIntoAppPayload!
+
+    """
+    #974 — cast a Worker (cor:dmo:050:11, cor:agt:020:01/:02): the named
+    casting of an agent ALREADY INSTALLED in the App, superseding
+    createTeamPersona's minting semantics (nothing is minted — the agent
+    carries the persona dressing; the Worker is the local named identity).
+    Casting is opt-in, never requires a Team Agent (an explicit name skips the
+    register entirely), and multiple castings of one agent per App are legal
+    (Iris and Henry, both backend-engineer).
+
+    Agent resolution: agentRef when given (must be installed here —
+    WORKER_AGENT_NOT_INSTALLED); otherwise role picks the single installed
+    agent whose personaRole matches (zero / several candidates:
+    WORKER_AGENT_NOT_FOUND / WORKER_AGENT_AMBIGUOUS, never a guess). The
+    casting's role defaults to the agent's personaRole when role is omitted.
+
+    The name (cor:agt:020:02) is REQUIRED since #1050 — one attempt, and
+    WORKER_NAME_TAKEN is the answer. There is no register to fall back to: a
+    name is permanent within the App, so it is chosen and never derived, and a
+    nameless cast refuses WORKER_NAME_REQUIRED rather than minting a permanent
+    identifier nobody picked. The workers_app_name_uniq constraint IS the
+    arbiter. Names are unique per App, case-insensitively, FOREVER (two Apps
+    may each have an Iris; retirement and uninstall never free a name).
+
+    A worker-scoped working memory is provisioned in the App's container
+    (Worker.memoryId; best-effort — a failed provision leaves it null for
+    lazy provisioning).
+
+    Authorization: an org member with CONTRIBUTOR+ on the App's org, an
+    AppMember of the App whose role is not 'reader', or the owner of a
+    user-owned App. Pure App-key principals are denied.
+
+    Error codes (extensions.code): WORKER_NAME_TAKEN,
+    WORKER_NAME_REQUIRED, WORKER_AGENT_NOT_INSTALLED,
+    WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS, APP_UNINSTALLED.
+
+    #1050 also removed WORKER_ROLE_NOT_FOUND from this mutation: it fired only
+    because a nameless cast had to find a roles:<role> node to read a register.
+    An unrecognized role now resolves no agent (WORKER_AGENT_NOT_FOUND) or, with
+    an explicit agentRef, is simply the casting's label.
+
+    #1050: the TEAM_AGENT_* and SESSION_EXPIRED refusals are gone from this
+    mutation. They were reachable only because a nameless cast had to locate a
+    Team Agent and read its (possibly encrypted) system memory to find a
+    register. Casting now touches no system memory at all, so teamAgentRef is
+    gone too rather than left accepted-and-ignored.
+
+    Accepts the entity's ID or URN for appRef and agentRef.
+    """
+    castWorker(
+      appRef: ID!
+      agentRef: ID
+      role: String
+      # #1050: a name is now mandatory in EFFECT but stays nullable in the
+      # schema, refused at the resolver with the typed WORKER_NAME_REQUIRED.
+      # A non-null String would report the same mistake as a bare validation error,
+      # losing the reason a name cannot be derived — and it would split this
+      # surface from the MCP tool, which calls the resolver directly and would
+      # keep the typed refusal. One rule, one message, both paths.
+      name: String
+      promptOverride: String
+    ): Worker!
+
+    """
+    #974 — retire a Worker (cor:agt:020:02): end the casting while reserving
+    its name FOREVER. A retired worker stops authoring team chat at once (the
+    worker-App pin checks retirement at post time), takes no new work records,
+    and refuses new session bindings; the row and its name reservation
+    survive. Idempotent — retiring an already-retired worker returns it
+    unchanged. Same authorization as castWorker. workerRef is the worker's id
+    or its URN (#991).
+    """
+    retireWorker(workerRef: ID!): Worker!
+
+    """
+    #1050 — release a HELD name, so somebody else can hold it.
+
+    A name is held by a person until released; nothing else frees one, which
+    is what makes availability a fact rather than a judgement about whether an
+    idle driver is really gone. Two principals may call this, and they are
+    different acts: the HOLDER, releasing their own name and owing nobody
+    notice; or an App/org ADMIN, force-releasing somebody else's — the path
+    that exists so a departed colleague's names are not held forever.
+
+    An admin force-release POSTS TO THE TEAM CHAT, naming who released what
+    and from whom, because the incident this model answers is exactly the one
+    where notice was owed and there was no way to give it. Best-effort: an
+    unreachable chat never blocks the release.
+
+    Releasing does NOT retire the worker, free the name for a different
+    casting, or touch its history — the name stays permanently allocated to
+    this casting, and the handoff sequence and worklog travel with the worker
+    to whoever holds it next. Idempotent: releasing an unheld worker returns
+    it unchanged.
+
+    #1073 — OPTIONAL PRECONDITION. The two release paths are different acts:
+    the holder's own release notifies nobody, an admin force-release announces
+    itself in the team chat. A client that wants to tell its user which one it
+    is about to perform can only classify from a pre-read, and the hold can
+    change in between — so the act performed differs from the act described,
+    and a hold taken in that interval is force-released silently.
+
+    State what you expect and the server refuses instead. Pass
+    expectedHolderUserId to assert a specific holder, or expectUnheld: true to
+    assert there is none; a mismatch refuses WORKER_HOLD_STALE carrying the
+    holder actually found. Passing neither keeps the unconditional behaviour,
+    so this is additive. Passing both is BAD_USER_INPUT.
+
+    Two arguments rather than one nullable id on purpose: distinguishing
+    "expect nobody" from "no expectation" through a nullable argument would
+    rest on KEY PRESENCE, and any layer that forwards the argument
+    unconditionally sends undefined — present, and read as an assertion nobody
+    made. That is a live hazard in this codebase, so a safety precondition does
+    not lean on it.
+    """
+    releaseWorker(
+      workerRef: ID!
+      "Assert the name is held by exactly this user. Mismatch refuses WORKER_HOLD_STALE."
+      expectedHolderUserId: ID
+      "Assert the name is held by nobody. Mismatch refuses WORKER_HOLD_STALE."
+      expectUnheld: Boolean
+    ): ReleaseWorkerPayload!
+
+    """
+    #1010 — amend a casting's individuality after the fact.
+
+    \`promptOverride\` is the per-worker escape hatch (cor:agt:020:01), but it
+    could only be set at CASTING time — fixing a casting's individuality at the
+    one moment nobody yet knows what makes it individual. The role agent's
+    \`personaPrompt\` cannot stand in (it is SHARED by every casting of that
+    role), and re-casting is barred by \`WORKER_IN_USE\` for any worker that has
+    done work — precisely the ones with an identity to record.
+
+    Scope is one field on purpose: \`name\` is permanent by law (cor:agt:020:02)
+    and \`role\`/\`agent\` define the casting itself. OMITTING promptOverride
+    preserves it; explicit \`null\` or a blank string CLEARS it, matching the
+    nullable column and castWorker's blank-is-absent normalization.
+
+    Refuses WORKER_RETIRED for a retired worker: an override is briefing text
+    delivered at bind time, and a retired worker takes no new bindings, so the
+    edit could never reach anyone.
+
+    Same authorization as castWorker. workerRef is the worker's id or URN (#991).
+    """
+    updateWorker(workerRef: ID!, promptOverride: String): Worker!
+
+    """
+    #974 — hard-delete a NEVER-USED miscast (cor:dmo:050:11's only removal
+    escape): refused with WORKER_IN_USE unless no session was ever bound and
+    the worker's working memory holds no content. Anything with history
+    retires instead — its name is bound to that history forever. Also removes
+    the empty working memory. Same authorization as castWorker.
+    """
+    deleteWorker(workerRef: ID!): Boolean!
+
+    """
+    #960 — mint a roles:<role> definition in the Team Agent's system memory.
+    Owns the spec knowledge a hand-authoring caller had to carry: the loc is
+    roles:<role> (single atom). Refuses an existing role (TEAM_ROLE_EXISTS —
+    updateTeamRole is the edit path). Authorization is the Team Agent's
+    definition-edit gate: whoever may write the agent's system memory through
+    the generic node surface may write roles — the write delegates to that same
+    seam (encryption, revision snapshot, git mirror included).
+
+    #1024 deliberately does NOT take \`repos\` here — set it with
+    updateTeamRole. A create that also wrote data could not be made atomic: the
+    write resurrects a tombstone through an unguarded upsert branch, and
+    splitting it into create-then-guarded-update introduced a partial failure
+    between the halves (the role lands, the repo write refuses). Two explicit
+    calls put that seam where the caller can see and retry it, instead of hiding
+    a non-atomic pair inside one mutation.
+
+    #1050: a role definition no longer carries a NAME REGISTER. There is no
+    names / nameRange / nameConvention / allowOutOfRange, and no register
+    invariants to run, because names are not allocated — a cast supplies its
+    own and workers_app_name_uniq is the sole arbiter. Any data.names left on
+    an existing node is historical and is neither read nor rewritten.
+    """
+    createTeamRole(
+      appRef: ID!
+      teamAgentRef: ID
+      role: String!
+      description: String
+    ): TeamRole!
+
+    """
+    #960 — edit a roles:<role> definition. Omitted fields preserve. Unknown
+    role: WORKER_ROLE_NOT_FOUND. Same authorization as createTeamRole.
+
+    #1024: \`repos\` sets the role's repo affinity. Omitted PRESERVES; an empty
+    array CLEARS; explicit \`null\` is treated as OMITTED, not as a clear — worth
+    stating because a client whose variables default to null would otherwise
+    have to guess, and the two readings differ (preserve vs wipe). Pass \`[]\`
+    to clear deliberately. It is merged into the node's \`data\` rather than replacing it,
+    and the write is guarded on the row's revision — a concurrent generic node
+    write (updateNode, hadron_update_node_data) refuses TEAM_ROLE_DATA_CONFLICT
+    rather than silently reverting, since those surfaces do not take this one's
+    lock. Retry after re-reading. A description-only edit carries no data and
+    takes no guard.
+
+    #1050: with the register gone this otherwise edits the description alone,
+    so the #987 expectedNames compare-and-swap is gone too — it existed solely
+    to stop two concurrent wholesale register writes silently dropping each
+    other's newly added FREE names, a hazard that cannot arise when the write
+    owns no list. That closes #1028 (the client-side register CAS arithmetic)
+    outright rather than by implementing it.
+    """
+    updateTeamRole(
+      appRef: ID!
+      teamAgentRef: ID
+      role: String!
+      description: String
+      repos: [String!]
+    ): TeamRole!
+
+    """
+    #1002 — retire a roles:<role> definition. Soft-deletes the role node and
+    any sub-nodes under it (roles:<role>:notes is content OF the role), so the
+    subtree is recoverable. Unknown role: WORKER_ROLE_NOT_FOUND. Same
+    authorization as createTeamRole.
+
+    #1050: unconditional. The minted-name check, TEAM_ROLE_IN_USE, transferTo's
+    one-step supersede, the post-delete recheck and the restore compensation
+    all existed to protect the REGISTER as a ledger of which names had been
+    allocated to this role; with no register there is no ledger to protect and
+    no second write to compensate for.
+
+    What that machinery protected is unchanged, and was never the register's
+    doing: a Worker's name is permanent per App (cor:agt:020:02, enforced by
+    workers_app_name_uniq irrespective of any role), so deleting a role can no
+    more free a taken name than it could before. Superseding a role is now
+    create-the-successor then delete-the-old; the names were never the thing
+    being moved.
+    """
+    deleteTeamRole(
+      appRef: ID!
+      teamAgentRef: ID
+      role: String!
+    ): DeleteTeamRolePayload!
+
+    """
+    Post a message into a team App's chat (#939) as a platform operation.
+    The team chat is ONE well-known chat per team App, at loc chats:team in
+    the Team Agent's shared app-class memory, bootstrapped on first post.
+    The message is written through the atomic chat-message allocator (#919),
+    so racing posts get distinct consecutive seqs.
+
+    Author derivation (#974): with sessionRef, the message is authored by
+    that session's bound Worker (the session must be writable by the caller, a
+    session OF this App, active, and bound to a non-retired Worker OF this
+    App — the worker-App pin, checked at post time so retirement revokes) and
+    the envelope records the driving sessionId; without it, by the calling
+    human. Mentions ('@worker-name' / '@handle'; a multi-word name is
+    mentioned by its slug, e.g. '@mary-jane') are extracted server-side at
+    write time into the envelope. replyToSeq wires a replies-to edge to the
+    cited message. body is capped at 65536 characters.
+
+    Authorization: an AppMember of the App (any role — every member of the
+    host is a participant per cor:acl:030:01), an org member with
+    CONTRIBUTOR+ on the App's org, or the owner of a user-owned App. Pure
+    App-key principals cannot post.
+
+    Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE,
+    TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_NOT_IN_APP (the
+    session belongs to a different App — a worker never authors across
+    Apps), SESSION_ENDED, SESSION_NOT_WORKER_BOUND,
+    SESSION_WORKER_NOT_IN_APP (the worker-App pin), WORKER_RETIRED,
+    SESSION_EXPIRED (encrypted team memory without an active session key),
+    TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could
+    not locate the Team Agent), APP_UNINSTALLED, FORBIDDEN.
+
+    appRef accepts the entity's ID or URN; sessionRef is the session id.
+    """
+    createTeamChatMessage(
+      appRef: ID!
+      body: String!
+      replyToSeq: Int
+      sessionRef: ID
+    ): TeamChatMessage!
+
+    """
+    Record an externally visible work milestone into the team App's worklog
+    (#947) — the append-only, authoritative PR-session join (spec
+    cor:agt:020:03). The session must be writable by the caller and a session
+    OF this App (SessionInput.appRef, #944); an ENDED session is accepted —
+    late attribution (a merge lands after the session ends) is the point.
+    ref accepts URL and short spellings and is stored in ONE canonical form
+    (github: owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo);
+    a bare number is refused — the server never infers a repo. kind must be
+    one of pr, issue, commit, branch, repo; action is a free lowercased verb
+    (opened, merged, claimed, reviewed, closed, pushed, ...). kind: pr also
+    denormalizes the latest-wins Session.prNumber display convenience.
+    detail is an optional JSON bag of display extras (title, URL) — stored,
+    never filtered on. Records are append-only: correct a wrong record by
+    recording a newer one.
+
+    Authorization: an AppMember of the App (any role), an org member with
+    CONTRIBUTOR+ on the App's org, or the owner of a user-owned App. A pure
+    App-key principal may NOT record (read-only on the worklog).
+
+    A worker-bound session records under its Worker's name (#974,
+    cor:agt:020:05) — the worker must belong to THIS App and not be retired
+    (SESSION_WORKER_NOT_IN_APP / WORKER_RETIRED — a retired or foreign
+    worker refuses rather than reshaping the attribution); an unbound
+    session records under the attributed user's handle.
+
+    Typed refusals: WORK_REF_INVALID, SESSION_NOT_FOUND, SESSION_NOT_IN_APP,
+    SESSION_WORKER_NOT_IN_APP, WORKER_RETIRED, TEAM_AGENT_NOT_FOUND /
+    TEAM_AGENT_AMBIGUOUS (first-write bootstrap could not locate the Team
+    Agent), APP_UNINSTALLED, FORBIDDEN, BAD_USER_INPUT.
+
+    appRef accepts the entity's ID or URN; sessionRef is the session id.
+    """
+    recordTeamWork(
+      appRef: ID!
+      sessionRef: ID!
+      tool: String!
+      kind: String!
+      ref: String!
+      action: String!
+      detail: JSON
+    ): TeamWorkItem!
+
+    """
+    (Re)declare the server-owned team collections on the team App's shared
+    memory, converging a drifted declaration to the canonical definition
+    (hadron-cli#401). Idempotent: 'changed' is false when the declaration
+    already matched.
+
+    Why this exists as its own operation. recordTeamWork declares the worklog
+    collection on first write, but deliberately leaves an ALREADY-declared one
+    untouched — a deployment that tightened it governs that surface too, which
+    is the point of schema governance. A declaration is not always a
+    deployment decision though: 'hadron team init' shipped a client-side copy
+    of this schema that has since drifted from the server's (its kind enum
+    predates the 'repo' kind), so on a CLI-bootstrapped memory a
+    recordTeamWork(kind: 'repo') is refused by a rule nobody chose.
+    Overriding silently would break real governance; this operation makes
+    convergence an explicit act instead.
+
+    Only the server-owned collections are rewritten — every other collection
+    on the memory is preserved.
+
+    Authorization: owner or org ADMIN on the memory, the same bar updateMemory
+    applies to a schema edit. Team participation is deliberately NOT enough:
+    it lets you record work, not redefine what a record is.
+
+    Typed refusals: APP_UNINSTALLED, UNAUTHENTICATED, TEAM_AGENT_NOT_FOUND /
+    TEAM_AGENT_AMBIGUOUS (when the App's shared memory must still be
+    bootstrapped).
+
+    Accepts the entity's ID or URN.
+    """
+    updateTeamCollections(appRef: ID!): TeamCollectionsPayload!
 
     """
     Uninstall an Agent from an App. Deletes the AppAgent row. The Agent's
@@ -6235,9 +7608,18 @@ export const typeDefs = `#graphql
     systemMessage: String!
     tools: JSON
     messageHistory: JSON!
+    # #1115 — ALWAYS NULL since 2026-09-04. It used to fire every 20 messages
+    # and ask the caller to produce a summary, but the summary it asked for is
+    # replayed to the model as an ordinary user turn beside the messages it
+    # summarises, so the loop made the transcript longer. Disarmed rather than
+    # removed: the field is nullable, was absent 19 turns in 20, and every
+    # caller already handles that. Re-arming needs the design in #1115.
     summarizationNeeded: SummarizationRequest
   }
 
+  # Retained for ChatPromptResult.summarizationNeeded, which is currently always
+  # null (#1115). Kept so the schema does not break clients that still select
+  # the field.
   type SummarizationRequest {
     messageCount: Int!
     prompt: String!

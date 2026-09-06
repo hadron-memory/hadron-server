@@ -507,3 +507,42 @@ describe('Mutation.mergeUsers — relationships', () => {
     });
   });
 });
+
+describe('Mutation.mergeUsers — worker holds (#1050)', () => {
+  it('moves the source account\'s held names to the survivor', async () => {
+    // The source User is SOFT-deleted, so `held_by_user_id`'s ON DELETE SET
+    // NULL never fires. Without an explicit transfer the surviving account is
+    // refused WORKER_HELD on names held by what is, by construction, the same
+    // person (PR #1052 review, Codex P1).
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'wh-org', urn: `wh-${Date.now()}.com` },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:a`, name: 'A' },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'App', urn: `${org.urn}:app` },
+    });
+    const held = await db.worker.create({
+      data: {
+        appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris',
+        heldByUserId: source.id, heldAt: new Date(),
+      },
+    });
+    // A name held by somebody else must not move.
+    const other = await db.user.create({ data: { handle: `wh-other-${Date.now()}` } });
+    const foreign = await db.worker.create({
+      data: {
+        appId: app.id, agentId: agent.id, name: 'Nadia', slug: 'nadia',
+        heldByUserId: other.id, heldAt: new Date(),
+      },
+    });
+
+    await merge(source.id, target.id);
+
+    expect((await db.worker.findUniqueOrThrow({ where: { id: held.id } })).heldByUserId)
+      .toBe(target.id);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: foreign.id } })).heldByUserId)
+      .toBe(other.id);
+  });
+});

@@ -239,8 +239,19 @@ async function runDeletionTxn(
         where: { importedAgent: { ownerUserId: targetUserId } },
       });
       // User-owned Apps: the App cascade removes app-scoped memories, keys,
-      // members, installs, runs, schedules, webhooks, pending setups.
+      // members, installs, runs, schedules, webhooks, pending setups — and
+      // their Worker castings (Worker.appId cascades).
       await tx.app.deleteMany({ where: { ownerUserId: targetUserId } });
+      // Worker castings of the target's agents: `Worker.agentId` is ON DELETE
+      // RESTRICT (#974), so any surviving casting would fail the agent delete
+      // below with P2003 and roll back the whole erasure. In v1 this set is
+      // empty by construction — a user-owned agent is strictly PERSONAL, so
+      // it can only ever be cast in the owner's OWN Apps, which the App
+      // cascade above just took — but the explicit sweep keeps account
+      // erasure whole if agent sharing is ever relaxed (PR #978 review,
+      // Copilot). Erasure wins over worker-name permanence for the erased
+      // user's own castings, deliberately.
+      await tx.worker.deleteMany({ where: { agent: { ownerUserId: targetUserId } } });
       // User-owned Agents (before memories: their system memories are owned
       // rows swept by the memory pass — Agent.systemMemoryId carries no FK).
       await tx.agent.deleteMany({ where: { ownerUserId: targetUserId } });
@@ -260,6 +271,21 @@ async function runDeletionTxn(
       await tx.userApiKey.updateMany({
         where: { userId: targetUserId, revokedAt: null },
         data: { revokedAt: now },
+      });
+      // #1050 — RELEASE the names this person held. The FK is ON DELETE SET
+      // NULL, but this operation SOFT-deletes the User row, so that action
+      // never fires: an unauthenticatable tombstone would go on holding every
+      // one of its names forever, and each subsequent binder would be refused
+      // WORKER_HELD by an account that cannot release them. Holding is meant to
+      // stop a name being taken from someone who is still there, not to strand
+      // it behind someone who is gone (PR #1052 review, Codex P2).
+      //
+      // The castings themselves are untouched — the name stays permanently
+      // allocated to them, and their worklog and handoff history stay intact
+      // (cor:agt:020:02). Only the hold is cleared.
+      await tx.worker.updateMany({
+        where: { heldByUserId: targetUserId },
+        data: { heldByUserId: null, heldAt: null },
       });
       await tx.session.deleteMany({ where: { userId: targetUserId } });
       await tx.authCode.deleteMany({ where: { userId: targetUserId } });

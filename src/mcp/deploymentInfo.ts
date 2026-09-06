@@ -57,7 +57,84 @@
 // cross-memory asset list (spec cor:api:120), plus the `AssetFilter` input and
 // `AssetsPage` type. A caller-detectable addition: `memoryAssets(memoryId:)`
 // remains, but "every asset I can reach" was previously unanswerable.
-export const HADRON_SERVER_VERSION = '0.13.0';
+// 0.14.0: #1009/#1006 — caller-detectable MCP surface additions. New optional
+// `session` argument on hadron_list_workers / hadron_cast_worker /
+// hadron_team_chat_read (an App-resolution hint, so those tools work after a
+// reconnect without a prior hadron_set_active_app), and hadron_server_info's
+// response gains `capabilities:` plus a `connection:` line. The capabilities
+// line is itself the "how old is this surface?" probe (#1006), so the build
+// that introduces it must not share a version with the builds that lack it.
+// 0.15.0: #1012 — durable per-client MCP selections. A caller sending the new
+// `X-Hadron-Client-Id` header has its active App / active memory restored on the
+// next connection instead of losing them to a reconnect; the `client-session-state`
+// capability token advertises it. Caller-detectable: the header is new input, and
+// the same client now observes different post-reconnect behaviour.
+// 0.16.0: #1116 — a BACKWARD cursor on both transcript readers. New optional
+// `beforeSeq` on the GraphQL `chatHistory` and `teamChatMessages` queries and
+// on the `hadron_team_chat_read` MCP tool, plus the `transcript-backward-cursor`
+// capability token. Caller-detectable, and the reason it must be: MCP DROPS
+// unknown arguments, so a client sending `beforeSeq` to a build without it does
+// not get an error — it gets the OLDEST page instead of the newest, which is a
+// silently wrong answer rather than a missing feature.
+export const HADRON_SERVER_VERSION = '0.16.0';
+
+/**
+ * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
+ * stated rather than inferred.
+ *
+ * The motivating failure was silent. A deployment lagging behind `main` served
+ * a `hadron_start_session` schema with no `workerRef`, and MCP drops unknown
+ * arguments — so a client following current instructions called it, got a
+ * healthy-looking session back, and was never told the worker binding had not
+ * happened. Every such session is unattributable, which quietly breaks the
+ * `cor:agt:020:03` provenance chain (PR → worklog → session → transcript →
+ * human) that the Worker model exists to hold up. A version string alone was
+ * not enough: the reporter had to diff the served tool LIST against `main` to
+ * work out what was wrong.
+ *
+ * So capabilities are named per FEATURE, not per release, and a client is meant
+ * to test for the token rather than compare versions:
+ *
+ *   - absence of the whole `capabilities` line ⇒ a build predating this field,
+ *     which is itself the "too old, don't trust the surface" signal;
+ *   - absence of one token ⇒ that feature is not on this build, so fall back
+ *     (e.g. no `worker-model` ⇒ bind with the CLI instead of opening an
+ *     unattributed session).
+ *
+ * Tokens are ADDITIVE and permanent once shipped. Removing one is a breaking
+ * change to the same clients that learned to depend on it, so a feature that
+ * goes away keeps its token only if the surface still honours it.
+ */
+export const MCP_SURFACE_CAPABILITIES = [
+  /** Spec 026 — hadron_list_apps / hadron_set_active_app selection regimes. */
+  'app-selection',
+  /** #974/#990/#997 — workerRef binding, hadron_cast_worker, hadron_list_workers. */
+  'worker-model',
+  /** #990 — hadron_start_session returns the worker's resolved boot briefing. */
+  'worker-boot-briefing',
+  /** #939 — hadron_team_chat_read / hadron_team_chat_post. */
+  'team-chat',
+  /** #947 — hadron_record_work / hadron_team_work_items. */
+  'team-worklog',
+  /** #1005/#1009 — App scope pinned at bind and recoverable from a session id. */
+  'session-app-recovery',
+  /** #1009 — refusals caused by a reconnect say so instead of reading as a client limit. */
+  'reconnect-notice',
+  /**
+   * #1012 — a client sending `X-Hadron-Client-Id` gets its active App and
+   * active memory restored after a reconnect. Absent ⇒ selections are
+   * per-connection only, and the header is ignored.
+   */
+  'client-session-state',
+  /**
+   * #1116 — `beforeSeq` on the transcript readers: page BACKWARD from a stable
+   * cursor rather than a positional offset. Worth a token rather than a version
+   * comparison alone, because MCP drops unknown arguments: a client that sends
+   * `beforeSeq` to a build lacking it is handed the OLDEST page in silence,
+   * which reads as a working call returning the wrong end of the conversation.
+   */
+  'transcript-backward-cursor',
+] as const;
 
 /**
  * Diagnostics surface — answers "which hadron-server am I talking to?"

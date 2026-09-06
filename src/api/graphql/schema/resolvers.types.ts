@@ -48,10 +48,12 @@ import {
   readAllAgentRecordsFromEager,
   readPrimaryAgentField,
   assetUrn,
+  resolveAppTeamSpaceMemoryIds,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
+import { WORKLOG_LOC } from './resolvers.teamWork.js';
 
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
@@ -929,6 +931,57 @@ export const typeResolvers = {
     memberCount: async (a: { id: string }, _: unknown, ctx: Context) => {
       return ctx.db.appMember.count({ where: { appId: a.id } });
     },
+    /**
+     * #965: the App's SHARED app-class memory — the App → memory hop that lets
+     * clients default a team-memory argument (hadron-cli#399) instead of
+     * scanning every readable memory for `Memory.appId`. Read-only: never
+     * provisions (that stays with createApp/#951 and the chat/worklog
+     * bootstraps).
+     *
+     * Resolution order, both deterministic (oldest wins):
+     *   1. The memory holding the App's `worklog` root — the ledger home,
+     *      located exactly like `locateWorklogRoot` (#947), so the answer
+     *      matches where `recordTeamWork` will actually write. This branch
+     *      also covers pre-#723 legacy shared rows the adoption sweep hasn't
+     *      keyed yet.
+     *   2. Else the oldest agent-keyed shared row (`sharedMemoryOfAgentId`
+     *      set — the #951 install-provisioned pairing). The key filter is
+     *      what excludes Worker working memories, which are ALSO app-class
+     *      rows carrying this App's appId (provisionWorkerMemory) but are
+     *      casting-scoped, never the team space.
+     *
+     * Gated by the RECORD-level memory read gate (`canReadMemoryRecord` — the
+     * same predicate Query.memory runs), so a caller who may see the App but
+     * not its memory gets null; denied and missing are indistinguishable.
+     */
+    sharedMemory: async (a: { id: string }, _: unknown, ctx: Context) => {
+      const teamSpaceIds = await resolveAppTeamSpaceMemoryIds(ctx.db, a.id);
+      if (teamSpaceIds.length === 0) return null;
+      const worklogRoot = await ctx.db.node.findFirst({
+        // loc-scope-ok: deliberately spans the App's OWN app-class memories —
+        // the tenant scope is the resolved team-space id set (mirrors
+        // locateWorklogRoot). #1031: resolved rather than filtered, because
+        // LEGACY pre-#723 spaces have no #723 key and are column-identical to
+        // name-addressable createMemoryInApp memories — telling them apart is
+        // a URN match, not a column one.
+        where: {
+          loc: WORKLOG_LOC,
+          deletedAt: null,
+          memoryId: { in: teamSpaceIds },
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { memoryId: true },
+      });
+      const memory = worklogRoot
+        ? await ctx.db.memory.findUnique({ where: { id: worklogRoot.memoryId } })
+        : // Oldest team space wins when no ledger exists yet. The id set is
+          // already createdAt-ordered by the resolver.
+          (teamSpaceIds[0]
+            ? await ctx.db.memory.findUnique({ where: { id: teamSpaceIds[0] } })
+            : null);
+      if (!memory || memory.deletedAt) return null;
+      return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
+    },
     keys: async (a: { id: string; keys?: unknown[] }, _: unknown, ctx: Context) => {
       if (a.keys) return a.keys;
       return ctx.db.appKey.findMany({
@@ -1157,6 +1210,24 @@ export const typeResolvers = {
   },
   Session: {
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
+    /**
+     * #980: the bound Worker, nested — prefers the eager row SESSION_INCLUDE
+     * loads (the one-query list path; no DataLoader in this repo) and falls
+     * back to a point read for partially-selected parents. Deliberately NO
+     * retirement filter: a session's worker may since have retired, and the
+     * row must still attribute (retirement ends the casting, not the
+     * history). Worker.app / Worker.agent self-guard behind their own read
+     * gates (#552), so nothing nested here outruns the session gate.
+     */
+    worker: async (
+      s: { workerId?: string | null; worker?: unknown },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!s.workerId) return null;
+      if (s.worker !== undefined) return s.worker;
+      return ctx.db.worker.findUnique({ where: { id: s.workerId } });
+    },
   },
   Organization: {
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
@@ -1308,9 +1379,17 @@ export const typeResolvers = {
         class: string;
         visibility: string | null;
         appId: string | null;
-        userId?: string | null;
-        ownerUserId?: string | null;
-        organizationId?: string | null;
+        // #1104 — all of these are `canReadMemoryRecord`'s contract, and it
+        // reads every one of them (see its header for what each `undefined`
+        // does; three of the six change the answer OPEN). Both load paths below
+        // use `include: { memory: true }`, so they are present at runtime and
+        // this is a declaration catching up with reality rather than a fix —
+        // the value is that a future narrowing `select` here now fails to
+        // compile rather than quietly re-answering an authorization question.
+        userId: string | null;
+        ownerUserId: string | null;
+        organizationId: string | null;
+        userMemoryOfAgentId: string | null;
       };
       type Item = { memoryId: string; memory?: Mem | null };
       const eager = a.memoryItems as Item[] | undefined;

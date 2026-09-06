@@ -361,3 +361,40 @@ describe('T065: integration — full Suite/Calendar/Notes scenario (SC-006)', ()
     );
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// #974 — a deleted App's Worker castings keep its URN reserved
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('App-tombstone URN reclaim respects Worker castings (#974, cor:agt:020:02)', () => {
+  it("refuses WORKER_NAMES_RESERVED while the soft-deleted App still has Worker rows", async () => {
+    // `Worker.appId` is onDelete: Cascade, so hard-deleting the tombstone
+    // would silently take the castings with it and recycle their permanently
+    // reserved names (PR trailers and chat archives reference them). The
+    // reclaim path must refuse instead.
+    const retired = await db.app.create({
+      data: {
+        id: generateId(),
+        organizationId: orgX.id,
+        name: 'Suite @ X',
+        urn: `${orgX.urn}:suite-x`, // the slug createApp derives from the name
+        deletedAt: new Date(),
+      },
+    });
+    await db.worker.create({
+      data: { appId: retired.id, agentId: suite.id, name: 'Iris', slug: 'iris' },
+    });
+
+    await expect(
+      resolvers.Mutation.createApp(
+        {},
+        { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X' },
+        adminCtx(bea.id),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'WORKER_NAMES_RESERVED' } });
+
+    // The tombstone and its casting both survive the refused reclaim.
+    expect(await db.app.findUnique({ where: { id: retired.id } })).not.toBeNull();
+    expect(await db.worker.count({ where: { appId: retired.id } })).toBe(1);
+  });
+});

@@ -14,7 +14,7 @@
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { computeContentHash } from './contentHash.js';
+import { isAbstractUnverified } from './contentHash.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import type { MemorySchema } from './memorySchema.js';
@@ -173,15 +173,12 @@ export async function validateMemoryNodes(
         detail: 'No description, content, or abstract',
       });
     }
-    // The explicit `abstractOriginHash != null` guard keeps the validator
-    // quiet on legacy pre-spec-032 rows that never carried the signal.
-    if (
-      checkStale &&
-      node.abstract != null && node.abstract.length > 0 &&
-      node.content != null && node.content.length > 0 &&
-      node.abstractOriginHash != null &&
-      node.abstractOriginHash !== computeContentHash(node.content)
-    ) {
+    // #1128 — shared predicate (isAbstractUnverified). This used to carry its
+    // own copy with an `abstractOriginHash != null` guard, added to keep the
+    // validator quiet on legacy pre-spec-032 rows; that population has since
+    // drained to 2 rows in production, and a missing fingerprint is exactly
+    // what an operator running the validator wants told.
+    if (checkStale && isAbstractUnverified(node)) {
       record({
         kind: 'STALE_ABSTRACT',
         nodeId: node.id,

@@ -3,6 +3,7 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
+import { sharedUrnAgentSlug } from '../../../lib/sharedMemoryLegacyKey.js';
 import { runEmailOperation, type ToolCalendarEvent, type ToolDriveFile } from '../../../lib/emailClient.js';
 import { scopeForOperation } from '../../../lib/emailOperationScopes.js';
 import {
@@ -14,7 +15,7 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
-import { canWriteToMemory } from '../../../mcp/access-control.js';
+import { canWriteToMemory, getPrincipalAppMemoryAccess } from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
@@ -22,12 +23,13 @@ import {
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
   formatCanonicalUrn,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
-import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
+import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
 import {
   validateEdgeCondition,
   validateNodeDataExtractionSpecs,
@@ -77,6 +79,12 @@ export interface Context {
   // response's edges overwhelmingly share a few endpoint memories, so each
   // distinct memory is checked once per request (see canReadMemoryCached).
   memoryReadCache?: Map<string, Promise<boolean>>;
+  // Request-scoped memo for the caller's APP-DERIVED memory ids (#1092). The
+  // fold costs several queries per App and the node gate runs on nearly every
+  // read surface, so it is computed at most once per request. Independent of
+  // any `onlyMemoryId` narrowing — the fold is the same set either way, and the
+  // scoping is applied to the result (see appDerivedMemoryIds).
+  appDerivedMemoryIdCache?: Promise<string[]>;
   // Request-scoped memo for Node.urn / Edge.urn composition (#481) — a list
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
@@ -311,6 +319,49 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
 }
 
 /**
+ * Resolve a memory ref (ID or URN) to its id IFF the caller may read it; returns
+ * null when the ref does not resolve OR the caller lacks read access — so a
+ * ref-scoped surface answers with an empty page and discloses neither the
+ * memory's nor its org's existence (the `conventions:multi-ref-scope-args`
+ * drop-unreadable posture). Uses the SCOPED `getAccessibleMemoryIds` point-read,
+ * so it stays an indexed check and stays in lockstep with the shared predicate
+ * by construction rather than by a hand-rolled copy of it.
+ *
+ * A MALFORMED ref still throws. Silence is for EXISTENCE, not for shape: a bad
+ * URN is caller error and a DB failure is operational, and swallowing either
+ * hands back a partial page that looks complete.
+ *
+ * **When NOT to use this.** It costs a full authorization round PER REF — the
+ * ref resolution is itself a DB round trip (two on a miss, via the legacy-alias
+ * fallback) and the scoped `getAccessibleMemoryIds` issues one or more of its
+ * own depending on the caller's principal shape. That is the right trade only
+ * for a surface that does not already hold the caller's accessible set. A
+ * surface that computes the full set anyway for its default
+ * scope — `listAssets` is the live example — should intersect in memory against
+ * that set instead. `listAssets` additionally narrows by `orgId` before checking
+ * refs, so swapping this helper in there would also drop that narrowing and
+ * WIDEN the result. Unify the two only if you keep both checks.
+ */
+export async function resolveReadableMemoryId(
+  ctx: Context,
+  memoryRef: string,
+): Promise<string | null> {
+  let resolvedId: string;
+  try {
+    ({ id: resolvedId } = await resolveMemoryRef(ctx.db, memoryRef));
+  } catch (e) {
+    // Only a genuine miss collapses to an empty page (no existence disclosure).
+    // A malformed URN or an unexpected DB/runtime error must propagate rather
+    // than masquerade as "empty graph" — mirrors the Query.memory(id:) resolver.
+    if (e instanceof MemoryNotFoundError) return null;
+    throw e;
+  }
+  const accessible = await getAccessibleMemoryIds(ctx, resolvedId);
+  if (accessible !== null && !accessible.includes(resolvedId)) return null;
+  return resolvedId;
+}
+
+/**
  * The RECORD-level memory read gate — "may this caller open this memory's
  * record (its scalars: name, description, data)?", as distinct from
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".
@@ -328,18 +379,54 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
  *   1. personal/private → strict owner, or a MemoryShare grantee (#778).
  *   2. spec 047 user-owned → strict owner, BEFORE the platform-admin path so an
  *      ADMIN never reads another user's user-owned record (#676).
- *   3. otherwise → platform ADMIN/OWNER, a live org membership, or whatever the
- *      shared node gate already admits (PUBLIC, subscription, App session) —
- *      the #362 fallback that keeps record reads in step with node reads.
+ *   3. otherwise → platform ADMIN/OWNER, a live org membership, a live
+ *      AppMember of an App-scoped row (#982 review — the external/B2C member
+ *      shape), or whatever the shared node gate already admits (PUBLIC,
+ *      subscription, App session) — the #362 fallback that keeps record reads
+ *      in step with node reads.
  */
 export async function canReadMemoryRecord(
   ctx: Context,
+  // EVERY field is required, and none of it is style (#1104, PR #1105 review —
+  // @copilot). This gate reads all of them, and an `undefined` from a narrowly
+  // `select`ed row does not fail loudly in any of the six cases — it changes the
+  // ANSWER, and in three of them it changes it OPEN:
+  //
+  //   - `ownerUserId` — `memory.ownerUserId != null` is LOOSE, so `undefined`
+  //     skips the spec-047 strict-owner branch entirely. The next line is the
+  //     platform ADMIN/OWNER short-circuit, so a platform admin reads another
+  //     user's user-owned memory — the exact bypass #676 put that branch ABOVE
+  //     the admin path to prevent. Fails OPEN, for the admin alone: an ordinary
+  //     org member is unaffected, because `chk_memory_owner_xor` makes a
+  //     user-owned row's `organizationId` NULL, so the membership branch below
+  //     is skipped and the `getAccessibleMemoryIds` fallback re-applies
+  //     ownership from the stored row. (Scope corrected by @codex on PR #1105 —
+  //     the first version of this comment named every org member.)
+  //   - `organizationId` — `granteeShareAccess` compares it to `null` (so
+  //     `undefined` misses the free-standing short-circuit) and then hands it to
+  //     Prisma, which **silently drops an `undefined` where-filter**. The
+  //     org-membership check becomes "is this caller a member of ANY org", so a
+  //     grantee who is a member of some OTHER org is admitted to an org-owned
+  //     personal memory. Fails OPEN, and this is the same Prisma behaviour
+  //     `getOrgReadableMemoryIds` carries an explicit guard against. (On a
+  //     free-standing row it fails CLOSED instead — a grantee in no org at all
+  //     is refused a memory the share alone should admit.)
+  //   - `class` — decides which branch runs at all.
+  //   - `userMemoryOfAgentId` — `granteeShareAccess` reads it; `undefined !==
+  //     null` is true, so EVERY share grantee is silently refused. Fails closed.
+  //   - `userId` / `appId` — the owner and AppMember branches; both fail closed.
+  //
+  // Requiring them is what makes a wrong call a COMPILE error instead of a
+  // quiet re-answer, which is why `granteeShareAccess` below is now called
+  // without the `as never` that was hiding exactly this.
   memory: {
     id: string;
     class: string;
-    userId?: string | null;
-    ownerUserId?: string | null;
-    organizationId?: string | null;
+    userId: string | null;
+    ownerUserId: string | null;
+    organizationId: string | null;
+    appId: string | null;
+    userMemoryOfAgentId: string | null;
   },
 ): Promise<boolean> {
   if (memory.class === 'personal' || memory.class === 'private') {
@@ -348,7 +435,8 @@ export async function canReadMemoryRecord(
     // resources (the target-as-owner check below would otherwise admit them).
     if (ctx.impersonation) return false;
     if (ctx.userId && memory.userId === ctx.userId) return true;
-    if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory as never))) return true;
+    // No `as never`: the cast is what let a caller omit the fields this reads.
+    if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
     return false;
   }
   if (memory.ownerUserId != null) {
@@ -371,6 +459,22 @@ export async function canReadMemoryRecord(
         })
       : null;
   if (member) return true;
+  // #982 review (Codex P1): an App-scoped memory's record is readable by the
+  // App's OWN members — the explicitly supported external/B2C shape where an
+  // AppMember is NOT an org member. Such a member participates in the App's
+  // shared memory (the team-chat and worklog gates both admit them, and the
+  // MCP getMemoryAccess unions their App-derived reach), so refusing them the
+  // RECORD here left App.sharedMemory null for exactly the CLI users it
+  // exists for, and Query.memory out of step with effectiveAccess. AppMember
+  // rows hard-delete on removal (no deletedAt column), so existence is
+  // liveness. Identity-scoped — never via impersonation (#876 class).
+  if (ctx.userId && memory.appId && !ctx.impersonation) {
+    const appMember = await ctx.db.appMember.findUnique({
+      where: { appId_userId: { appId: memory.appId, userId: ctx.userId } },
+      select: { userId: true },
+    });
+    if (appMember) return true;
+  }
   // Scope the shared gate to THIS memory so it stays an indexed point-read.
   const accessibleIds = await getAccessibleMemoryIds(ctx, memory.id);
   return accessibleIds === null || accessibleIds.includes(memory.id);
@@ -532,6 +636,196 @@ export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<b
     where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
   });
   return !!member;
+}
+
+/**
+ * App-participation predicate — "may this USER act as a member of this App?"
+ * (#939's team-chat gate, generalized in #943 so `startSession`'s `appRef`
+ * gate is the SAME predicate rather than a second copy of it).
+ *
+ * Admits: an AppMember at ANY role (participation follows the host memory's
+ * audience — `cor:acl:030:01`, so a 'reader' member counts), an org member
+ * with CONTRIBUTOR+ on the App's owning org (parity with the persona-mint
+ * gate's org branch, and platform ADMIN/OWNER via `requireOrgRole`), or the
+ * owner of a user-owned App.
+ *
+ * Under IMPERSONATION this narrows to the session's ONE shared org (#1094):
+ * every arm answers about the TARGET, so an unbounded one would admit an App in
+ * an org the support session was never scoped to. Same bound `requireOrgRole`
+ * and `isOrgMemberOrAdmin` apply; the owner arm's outright denial is that rule's
+ * degenerate case, since a user-owned App has no org to match.
+ *
+ * This is the USER branch only. Callers own their principal-shape policy
+ * around it (findings:auth-appid-credential-vs-selection): a caller with no
+ * `userId` is a pure App-key (or anonymous) principal and is false here —
+ * whether an App KEY may act for its own App is the caller's call, not this
+ * predicate's. A hybrid principal (userId + an active-App SELECTION from
+ * MCP's `requireAppScope`) is judged solely on the user, which is exactly
+ * what this returns.
+ */
+export async function isAppParticipant(
+  ctx: Context,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null },
+): Promise<boolean> {
+  if (!ctx.userId) return false;
+  if (app.ownerUserId !== null) {
+    // spec 047: a user-owned App admits its owner and nobody else
+    // (findings:org-xor-owner-null-comparison-bypass — branch on the
+    // ownership CLASS first; for two different users' entities BOTH
+    // `organizationId`s are NULL, so an org comparison would read
+    // `null !== null` and admit exactly the cross-tenant case).
+    // Identity-scoped, so never via impersonation (isOwnerOrOrgMember's rule;
+    // the team-chat caller already denies org-less Apps under impersonation —
+    // this keeps the predicate safe for any future caller that doesn't).
+    if (ctx.impersonation) return false;
+    return ctx.userId === app.ownerUserId;
+  }
+  // #1094 — impersonation NARROWS this predicate to the session's ONE shared
+  // org, stated once here rather than per arm. `ctx.userId` is the TARGET under
+  // impersonation, so the AppMember lookup below would otherwise answer a
+  // question about the target's memberships ANYWHERE — admitting an App in an
+  // org the support session was never scoped to. Fifth instance of the #876
+  // class (`ctx.userId = target` fails open against identity-keyed predicates),
+  // and the first one inside a shared predicate rather than a resolver, which
+  // is why `impersonationSweep.test.ts` — a case per resolver MODULE — could
+  // not see it.
+  //
+  // Bounded, not denied, and that is the neighbours' rule rather than a choice
+  // made here: `requireOrgRole` and `isOrgMemberOrAdmin` both already read
+  // "under impersonation only the shared org may admit". A blanket
+  // `if (ctx.impersonation) return false` would have made this arm the only one
+  // of the three saying something different, and would have cost an impersonated
+  // admin the in-scope team chat and worklog they can legitimately support.
+  //
+  // The owner arm above denies outright for the SAME rule, not a different one:
+  // a user-owned App has no org, so it can never satisfy this bound.
+  if (ctx.impersonation && app.organizationId !== ctx.impersonation.orgId) return false;
+  const member = await ctx.db.appMember.findUnique({
+    where: { appId_userId: { appId: app.id, userId: ctx.userId } },
+    select: { userId: true },
+  });
+  if (member) return true;
+  if (app.organizationId !== null) {
+    try {
+      await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
+      return true;
+    } catch (e) {
+      // requireOrgRole signals denial with a plain Error('Forbidden'); anything
+      // else (a DB failure inside the membership lookup) must propagate rather
+      // than read as "not a member" (review:narrow-catch-blocks — the
+      // team-chat original swallowed everything here).
+      if (e instanceof Error && e.message === 'Forbidden') return false;
+      throw e;
+    }
+  }
+  return false;
+}
+
+/**
+ * Column narrowing for the App's TEAM SPACE — the app-class memory hosting
+ * `chats:team` and the worklog. NOT sufficient on its own: see
+ * {@link resolveAppTeamSpaceMemoryIds}, which is the surface callers want.
+ *
+ * `class='app'` is a tenancy bucket shared by several row shapes, not one
+ * ([[findings:app-class-is-four-row-shapes]], #1003), so a bare
+ * `appId + class:'app'` predicate is always wrong:
+ *
+ * - `workerOf: { none: {} }` excludes a Worker's casting-scoped working memory
+ *   (#974), whose App-wide readability is an open policy question owned by
+ *   `maySeeWorkerInternals` and must not be settled by accident.
+ * - `userMemoryOfAgentId: null` excludes SESSION memories, reachable only
+ *   through a session binding. Admitting them on a read gate hands every App
+ *   member every anonymous end-user session — the #934/#967 isolation breach.
+ *
+ * What these columns CANNOT do is separate a LEGACY (pre-#723) team space from
+ * a name-addressable `createMemoryInApp` memory: both have every key null. That
+ * is the URN matcher's job, and the reason this is not exported alone.
+ */
+function appTeamSpaceColumnFilter(appId: string) {
+  return {
+    appId,
+    class: 'app' as const,
+    deletedAt: null,
+    workerOf: { none: {} },
+    userMemoryOfAgentId: null,
+  };
+}
+
+/**
+ * The memory ids that ARE this App's team space — the identity question.
+ *
+ * Two kinds qualify, and both must, which is why this is a resolver rather than
+ * a `where` object:
+ *
+ * 1. **Adopted** rows, carrying the #723 key `sharedMemoryOfAgentId`.
+ * 2. **Legacy** (pre-#723) rows, whose key is null because identity then lived
+ *    in the urn string `<app-urn>:<agent-slug>:shared`.
+ *
+ * Legacy rows are column-INDISTINGUISHABLE from name-addressable
+ * `createMemoryInApp(memoryClass: 'app')` memories, which also carry every key
+ * null. Getting this wrong fails in both directions and neither is loud:
+ *
+ * - Requiring the key drops legacy spaces — `App.sharedMemory` reports none and
+ *   the worklog locator finds an empty ledger for an App the adoption sweep has
+ *   not reached (PR #1066 review, Copilot: a regression, since both admitted
+ *   legacy before).
+ * - Dropping the key admits named memories, so an older one wins an
+ *   oldest-first pick and is presented as the team space (same PR, Codex).
+ *
+ * So legacy rows are matched by URN through {@link memoryCarriesLegacyKeyFor} —
+ * by PARSED-ATOM EQUALITY, never a SQL pattern. A slug may legally contain `_`,
+ * a single-character `LIKE` wildcard, and Prisma's `endsWith`/`contains`
+ * compile to `LIKE`, so a pattern would let `sales_bot` adopt `salesXbot`'s
+ * space. That module is the one definition the three adoption paths share; this
+ * is the fourth reader and deliberately not a fifth copy.
+ *
+ * Candidates are narrowed by indexed columns first and compared in memory — an
+ * App holds a handful of app-class rows, so the scan is trivial.
+ *
+ * NOTE this is TENANCY, not authorization: it answers "which memory is the team
+ * space", never "may the caller read it". Pair with {@link isAppParticipant}.
+ * The MCP access map deliberately does NOT use this — see the comment at
+ * `getAppTeamSpaceAccess`, which answers the broader ACCESS question.
+ */
+export async function resolveAppTeamSpaceMemoryIds(
+  db: Context['db'],
+  appId: string,
+): Promise<string[]> {
+  const rows = await db.memory.findMany({
+    where: appTeamSpaceColumnFilter(appId),
+    select: { id: true, urn: true, legacyUrn: true, sharedMemoryOfAgentId: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  if (rows.length === 0) return [];
+
+  const adopted = rows.filter((r) => r.sharedMemoryOfAgentId !== null);
+  const unkeyed = rows.filter((r) => r.sharedMemoryOfAgentId === null);
+  if (unkeyed.length === 0) return adopted.map((r) => r.id);
+
+  // A LEGACY row is recognised from its OWN urn, not from the install roster.
+  //
+  // Deriving the slug set from currently-installed agents looked tighter and
+  // silently lost history (PR #1066 review, Codex): uninstall HARD-DELETES the
+  // AppAgent row while deliberately RETAINING the pairing's memories (FR-005),
+  // so a legacy space whose agent was later uninstalled would stop being
+  // recognised — App.sharedMemory null, teamWorkItems an empty ledger — while
+  // the adopted branch, keyed on a column, kept working. A predicate that
+  // forgets more than its sibling as installs change is the wrong shape.
+  //
+  // The roster cross-check bought nothing here anyway. `chat-scope` matches
+  // slugs because it resolves ONE (app, agent) pairing; this asks the broader
+  // "is this row a team space of THIS App", and `appId` has already answered
+  // the tenancy half. What remains is the urn's own shape, and
+  // `sharedUrnAgentSlug` already rejects the one collision that matters — a
+  // name-addressable `…:<agent>:app-mem:<name>` row, including one literally
+  // named "shared".
+  const legacy = unkeyed.filter(
+    (r) => sharedUrnAgentSlug(r.urn) !== null || sharedUrnAgentSlug(r.legacyUrn) !== null,
+  );
+
+  // Preserve the createdAt ordering the caller's oldest-first picks rely on.
+  const keep = new Set([...adopted, ...legacy].map((r) => r.id));
+  return rows.filter((r) => keep.has(r.id)).map((r) => r.id);
 }
 
 /** Row shape shared by the masked mappers below (no key material leaves). */
@@ -801,6 +1095,63 @@ export async function granteeShareAccess(
 }
 
 /**
+ * The caller's APP-DERIVED memory ids for the node-content gate (#1092), memoized
+ * per request.
+ *
+ * Delegates the reach question to `getPrincipalAppMemoryAccess` — the one
+ * predicate this and the MCP gate share, which enforces App scope and spec-047
+ * strict ownership for both — and adds the one rule that is genuinely local to
+ * THIS consumer: a **`personal`/`private` class filter**.
+ *
+ * That filter is not defensive decoration. The MCP map is documented
+ * personal-free, and when #1092 shipped NOTHING enforced the claim:
+ * `addMemoryToAgent` rejected only class `system`, so an org ADMIN could attach
+ * a `personal` memory as an agent memory item and it folded in. MCP survived
+ * that because `canReadMemory` strict-gates personal/private ABOVE the map;
+ * this gate has no such per-row check — its output becomes `memoryId IN (…)`
+ * directly. Inheriting an invariant that the upstream does not enforce is how a
+ * latent hole reaches a wider audience, and #1092 widened the audience.
+ *
+ * **#1101 has since closed that front door** — the attach gate now refuses
+ * strict-owner classes outright. This filter STAYS anyway, and deliberately:
+ *   - rows attached BEFORE that refusal existed are unaffected by it;
+ *   - a read gate that depends on a write gate having done its job is one
+ *     refactor away from being wrong, and this one guards a cross-tenant leak
+ *     with five instances in three months behind it (#362 class);
+ *   - it is one indexed predicate on a query this function already makes.
+ * So do not delete it as now-redundant: "the writer prevents it" is an argument
+ * about today's writers, and `AgentMemoryItem` gains one every few months.
+ *
+ * The filter is also what keeps this gate's own contract: `getAccessibleMemoryIds`
+ * admits personal/private ONLY through its identity-scoped clauses (owner,
+ * holdings, share grantee). Nothing App-derived may add to that set.
+ *
+ * The **`ownerUserId`** axis deliberately lives upstream instead (PR #1102
+ * review). It is not a quirk of this consumer: `canReadMemory` and
+ * `canWriteToMemory` both enforce it, so a map carrying rows they hard-deny is
+ * wrong for every caller, not just this one. The rule of thumb the two placements
+ * encode — push a filter to the shared predicate when the other consumers also
+ * want it, keep it local only when it compensates for something local (here, the
+ * absence of a per-row check).
+ */
+async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
+  const all = await (ctx.appDerivedMemoryIdCache ??= (async () => {
+    const folded = [...(await getPrincipalAppMemoryAccess(ctx.db, ctx)).keys()];
+    if (folded.length === 0) return [];
+    const rows = await ctx.db.memory.findMany({
+      where: {
+        id: { in: folded },
+        deletedAt: null,
+        class: { notIn: ['personal', 'private'] as never },
+      },
+      select: { id: true },
+    });
+    return rows.map((m: { id: string }) => m.id);
+  })());
+  return onlyMemoryId ? all.filter((id) => id === onlyMemoryId) : all;
+}
+
+/**
  * Returns the memory IDs accessible to the current caller, or null if the
  * caller has unrestricted access (global ADMIN/OWNER).
  *
@@ -823,17 +1174,20 @@ export async function getAccessibleMemoryIds(
   // memory by ID, this filter denies it. This is THE security boundary for
   // multi-user agents — checked FIRST, so it can't be widened by an ADMIN role
   // riding on a session context.
-  if (ctx.appId && ctx.sessionId) {
-    const session = await ctx.db.session.findUnique({
-      where: { id: ctx.sessionId },
-      select: {
-        memoryId: true,
-        agent: { select: { systemMemoryId: true } },
-      },
-    });
-    const ids: string[] = [];
-    if (session?.memoryId) ids.push(session.memoryId);
-    if (session?.agent?.systemMemoryId) ids.push(session.agent.systemMemoryId);
+  //
+  // #945: the admissibility rule (which memory the session may actually reach)
+  // lives in `sessionScopedMemoryIds` — ONE predicate shared with the MCP
+  // node-search scope, which used to carry its own copy of this branch.
+  //
+  // #934: PURE App-key shape only (`!ctx.userId`) — user principals can now
+  // carry a session binding too (the heartbeat attribution), and a hybrid
+  // user+selection principal entering this branch would swap their user reach
+  // for `sessionScopedMemoryIds`, which never consults the USER's rights: a
+  // narrowing at best, a grant (a bound agent's system memory the user cannot
+  // read) at worst. Same shape as `requireSessionWriteAccess`'s App branch
+  // (#932) and the #967 narrow-never-grant rule.
+  if (ctx.appId && ctx.sessionId && !ctx.userId) {
+    const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId);
     return onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
   }
 
@@ -862,10 +1216,45 @@ export async function getAccessibleMemoryIds(
     return all.map((m: { id: string }) => m.id);
   }
 
-  // App Key without an active session — management-only context, no memory
-  // access at all.
-  if (ctx.appId) {
-    return [];
+  // App Key without an active session — the App's installed-agent reach:
+  // its agent's system memory + linked memories, via the SAME predicate the
+  // MCP read gates use (`getAppMemoryAccess`). This branch returned [] from
+  // its pre-App-rename origin ("management-only context, no memory access") —
+  // written when App keys had no GraphQL node reads at all. Once the MCP
+  // search tools started delegating to Query.findNodes (#403), that stance
+  // made this the one gate that disagreed with the MCP layer: the same key
+  // could read every node via hadron_get_node / hadron_list_nodes but every
+  // findNodes-backed search intersected to empty (hadron_find_nodes returned
+  // "No nodes found" for all queries, survey mode included). One predicate,
+  // shared — the sessionScopedMemoryIds lesson (#945) again.
+  // #1092: this is a RETURN only for a principal whose entire reach IS the App
+  // — a pure App key, or an impersonated context (whose identity-scoped reach is
+  // deliberately dropped, #876 class, and whose behaviour this change leaves
+  // exactly as it was). A HYBRID user+selection caller — the shape every MCP
+  // tool builds once its user has an active App — falls THROUGH to the user
+  // branch, which unions this fold with the user's own reach.
+  //
+  // Returning here for a hybrid caller was a silent narrowing: an org member who
+  // selected an App lost their ORG memories from `findNodes`, while
+  // `hadron_get_node` on a node in one still succeeded (MCP's `getMemoryAccess`
+  // unions the App fold with `getOrgReadableMemoryIds`). A selection FOCUSES a
+  // request; it never narrows what its driver may read (`cor:acl:020:01`).
+  if (ctx.appId && (!ctx.userId || ctx.impersonation)) {
+    // #1003: `callerUserId` gates only the App team-space fold — a user-owned
+    // App's team space is owner-only, so a co-member must not receive it. A pure
+    // App key passes null and acts for the App itself.
+    //
+    // Routed through `appDerivedMemoryIds` (#1092) for its STRICT-OWNER filter,
+    // which this branch never had. Measured on the unmodified branch: an org
+    // ADMIN may attach a `personal` memory as an agent memory item
+    // (`addMemoryToAgent` rejects only class `system`), and this gate then
+    // returned it to a pure App key — while MCP's `canReadMemory` refused the
+    // same principal the same row. A pre-existing leak rather than one #1092
+    // introduced, closed here because it is the same fold three lines away and
+    // is now proven constructible. #1101 is the real fix — the ATTACH gate
+    // should refuse a strict-owner class; this is the read gate that must not
+    // depend on it having done so.
+    return appDerivedMemoryIds(ctx, onlyMemoryId);
   }
 
   // JWT user — org/public/subscription memories + owner-only personal/private
@@ -928,6 +1317,32 @@ export async function getAccessibleMemoryIds(
     const accessibleIds = new Set(orgPublicIds);
     for (const g of ownAndHoldings as { id: string }[]) accessibleIds.add(g.id);
     for (const g of sharedWithMe as { id: string }[]) accessibleIds.add(g.id);
+    // #1092 — the APP-derived half, through the SAME predicate the MCP gate
+    // uses, for the same reason getOrgReadableMemoryIds is shared: the two
+    // surfaces answer one question and a second copy is how they drifted. This
+    // branch had no App arm at all, so an external AppMember (an AppMember with
+    // no org role — the supported B2C shape) was admitted to the App's memories
+    // by `Query.memory` (#982), by `appNodes` (#1070) and by MCP's point read,
+    // and got NOTHING from `findNodes` scoped to those same memories. Its
+    // user-visible face was `Edge.source`/`Edge.target` resolving to null for
+    // endpoints the same response had just authorized (PR #1093, Codex P2) —
+    // a rule that quietly nulls authorized data is not a narrower scope, it is
+    // a wrong answer.
+    //
+    // No new AUDIENCE is created here. `cor:acl:010:01` already states the
+    // team space's audience as App PARTICIPATION and names no narrower
+    // enumeration audience, so the absent branch was an incomplete
+    // implementation of a stated rule, not a decision to enumerate less. What
+    // changes is that material already readable BY URN becomes FINDABLE.
+    //
+    // Skipped when a SCOPED check has already admitted the target: the fold
+    // cannot change an answer that is already `true`, and skipping it keeps the
+    // common point-read (an org member reading their own org memory) at exactly
+    // its previous query cost. The fold is several queries per App and this gate
+    // runs on nearly every read surface, so the shortcut is worth stating.
+    if (!(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
+      for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
+    }
     return [...accessibleIds];
   }
 
@@ -945,12 +1360,43 @@ export async function getAccessibleMemoryIds(
   return publicMemories.map((g) => g.id);
 }
 
+/**
+ * #931: write gate for session mutations (`updateSession` / `endSession`).
+ * A session may be written by: a platform ADMIN/OWNER; the App it belongs to
+ * (App-key caller); or the user it is attributed to (identity-scoped — not
+ * via impersonation, #876 class). Deliberately NARROWER than the session read
+ * gates: org membership grants read, never write. Before #931 `endSession`
+ * was ungated — any authenticated principal holding a session id could end
+ * it and overwrite its summary (and, post-#928, free another driver's
+ * persona, since "taken" derives from active sessions).
+ */
+export function requireSessionWriteAccess(
+  ctx: Context,
+  session: { appId: string | null; userId: string | null },
+): void {
+  if (isPlatformAdmin(ctx)) return;
+  // App branch: PURE App-key principals only (#932 Codex P1). A hybrid
+  // principal — a user with an active-App selection, the MCP auth shape —
+  // must NOT inherit App authority, or any co-member of an App could end
+  // another member's session (and free their persona). GraphQL App-key
+  // contexts carry no userId, so this is a no-op for them; it exists so a
+  // Context built from MCP auth (userId + selected appId) can't widen.
+  if (!ctx.userId && ctx.appId && session.appId === ctx.appId) return;
+  if (ctx.userId && session.userId === ctx.userId && !ctx.impersonation) return;
+  throw new Error('Forbidden');
+}
+
 /** Prisma `where` clause that restricts sessions to the caller's scope. */
 export async function sessionScopeFilter(ctx: Context): Promise<Record<string, unknown>> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return {};
   // App Key path — sessions belonging to the authenticated App.
   if (ctx.appId) return { appId: ctx.appId };
-  // JWT user — sessions for Apps in any org the user is a member of.
+  // JWT user — sessions for Apps in any org the user is a member of, PLUS
+  // sessions attributed to the user themself (#929 review P1: a session
+  // started outside any App context — the CLI coding case — has appId null,
+  // so without the userId branch its own creator could not list it).
+  // Identity-scoped, so the self branch does not apply via impersonation
+  // (#876 class: impersonation stays bounded to the shared org's Apps).
   if (ctx.userId) {
     const memberships = await ctx.db.orgMember.findMany({
       where: {
@@ -962,12 +1408,17 @@ export async function sessionScopeFilter(ctx: Context): Promise<Record<string, u
       select: { organizationId: true },
     });
     const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
-    if (orgIds.length === 0) return { id: '__none__' };
-    const apps = await ctx.db.app.findMany({
-      where: { organizationId: { in: orgIds }, deletedAt: null },
-      select: { id: true },
-    });
-    return { appId: { in: apps.map((a) => a.id) } };
+    const clauses: Record<string, unknown>[] = [];
+    if (orgIds.length > 0) {
+      const apps = await ctx.db.app.findMany({
+        where: { organizationId: { in: orgIds }, deletedAt: null },
+        select: { id: true },
+      });
+      if (apps.length > 0) clauses.push({ appId: { in: apps.map((a) => a.id) } });
+    }
+    if (!ctx.impersonation) clauses.push({ userId: ctx.userId });
+    if (clauses.length === 0) return { id: '__none__' };
+    return clauses.length === 1 ? clauses[0] : { OR: clauses };
   }
   return { id: '__none__' }; // unauthenticated — no sessions
 }
@@ -1030,13 +1481,16 @@ export async function resolveReadableNodeByLoc(
 // Fall back to the raw stored value so the row still renders; the corrupted
 // data is repaired separately and can't hold the rest of the response hostage.
 export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
+  // #697 Stage 2: EMIT flat grammar-v2 for the root entity types (`memory`
+  // renames to `mem`; single colon; no `@` sigil). Delegated to the shared
+  // safeEntityUrnV2 so this wrapper and every non-GraphQL emitter (e.g.
+  // effectiveAccess, #966) share ONE strict-then-raw fallback. Any other type
+  // word falls back to the v1 canonical form (unchanged surface until it too
+  // flips).
+  if (type === 'memory' || type === 'org' || type === 'agent' || type === 'app') {
+    return safeEntityUrnV2(type, raw);
+  }
   try {
-    // #697 Stage 2: EMIT flat grammar-v2 for the root entity types (`memory`
-    // renames to `mem`; single colon; no `@` sigil). Any other type word falls
-    // back to the v1 canonical form (unchanged surface until it too flips).
-    if (type === 'memory' || type === 'org' || type === 'agent' || type === 'app') {
-      return emitEntityUrnV2(type, raw);
-    }
     return formatCanonicalUrn(type, raw);
   } catch (err) {
     // Log so operators can locate + repair corrupted rows — the fallback keeps
@@ -1220,7 +1674,16 @@ export const ORG_INCLUDE = {
   exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
 };
 
-export const SESSION_INCLUDE = { events: { orderBy: { createdAt: 'desc' as const }, take: 50 } };
+// #980: `worker: true` eager-loads the bound Worker so `Session.worker`
+// resolves list pages in one query — the repo has no DataLoader and
+// Query.sessions serves 200-row pages, so a per-row field resolver would be a
+// straight N+1. Full row (not a select): the Worker type's scalar fields all
+// come from it, and its OWN field resolvers (app/agent — which self-guard,
+// #552) fetch on demand.
+export const SESSION_INCLUDE = {
+  events: { orderBy: { createdAt: 'desc' as const }, take: 50 },
+  worker: true,
+};
 
 // 023-app-shape Phase 2b: APP_INCLUDE eager-loads the AppAgent rows
 // (with each Agent's memoryItems) so the GraphQL `App.agent` /
@@ -1471,6 +1934,37 @@ export async function requireMemorySharePrincipal(
 // `App`). Keeping the logic in one place prevents drift between the two
 // surfaces.
 
+/**
+ * "Is the caller a non-`reader` member of this App?" — the AppMember half of
+ * the worker-staffing gate (castWorker, formerly createTeamPersona's mint
+ * gate), extracted here (#952) so the one
+ * conventional read-only role spelling lives in a single place rather than
+ * being restated by each surface that admits App members.
+ *
+ * `installAgentIntoAppCore` deliberately does NOT use it — see the note on its
+ * gate: installing an EXISTING Agent is itself a read grant on that Agent's
+ * design, which minting a fresh one is not.
+ *
+ * AppMember roles are free-form strings drawn from the Agent's
+ * `installationPolicy.memberRoles`, so `reader` is the one conventional
+ * read-only spelling this predicate knows (case-insensitive, trimmed).
+ *
+ * Never admits on a USER-owned App: spec 047 keeps those strictly owner-only,
+ * and the owner is already admitted by the org/owner gate this backs up.
+ * Never admits under impersonation — support sessions are read-only (#875).
+ */
+export async function isNonReaderAppMember(
+  ctx: Context,
+  app: { id: string; ownerUserId: string | null },
+): Promise<boolean> {
+  if (ctx.impersonation || !ctx.userId || app.ownerUserId !== null) return false;
+  const member = await ctx.db.appMember.findUnique({
+    where: { appId_userId: { appId: app.id, userId: ctx.userId } },
+    select: { role: true },
+  });
+  return !!member && member.role.trim().toLowerCase() !== 'reader';
+}
+
 export class DuplicateAppAgentError extends GraphQLError {
   constructor(appId: string, agentId: string) {
     super(`Agent ${agentId} is already installed in App ${appId}.`, {
@@ -1514,6 +2008,24 @@ export async function installAgentIntoAppCore(
   // #551: installing is a member-level write on the App's org (CONTRIBUTOR+),
   // not an ADMIN-only action — any org member who can author App config can
   // install an Agent.
+  //
+  //
+  // #952 asked for a non-`reader` AppMember fallback here, "matching
+  // the staffing gate", so a team's own members can compose the roster.
+  // NOT done, deliberately — the two operations are not symmetric:
+  // castWorker only CASTS an agent that is already installed (nothing
+  // pre-existing is revealed), whereas this one installs an EXISTING
+  // Agent, and installing is itself a read grant. An installed Agent's system
+  // memory becomes READ_ONLY in every App-context access map
+  // (`foldAgentIntoAccessMap`), and the mutation payload returns the Agent
+  // object, whose own definition fields (systemPrompt / systemMemoryId /
+  // memoryItems) are NOT field-gated — they rely on this object-level gate
+  // (#551). An AppMember who is not an org member cannot read a non-PUBLIC org
+  // Agent today (`Query.agent` requires org READER), so admitting them here
+  // would hand them exactly that — the
+  // findings:broadening-read-gate-leaks-nested-objects class. Widening this
+  // needs a deliberate call on that exposure, not an inference from the
+  // roster-composition use case.
   await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR');
   const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
   // #756: an org-owned App and a user-owned App have DIFFERENT accessibility
@@ -1812,17 +2324,21 @@ export function mapToolDriveFile(f: ToolDriveFile) {
 export type ExtractionSpecEntry = { field: string; description?: string; shape?: string };
 
 /**
- * Build the respond() tool schema by merging extractionSpec from three
- * levels: agent (config node) → conversation → stage. Stage-level fields
- * win on conflict. Always includes onTrack + offTrackReason fields for
- * continuous routing.
+ * Merge extractionSpec from three levels: agent (config node) →
+ * conversation → stage. Stage-level fields win on conflict.
+ *
+ * Exported (#910) because the WRITE path needs the same list the tool schema
+ * was built from: a spec's `field` carries the destination prefix that says
+ * where each extracted value is filed, and the model answers with the bare
+ * last segment. Deriving the two from one function is what keeps the routing
+ * key and the schema property name in agreement.
  */
-export async function buildRespondToolSchema(
+export async function resolveExtractionSpec(
   db: PrismaClient,
   systemMemoryId: string,
   convName: string | null,
   stageData: Record<string, unknown>,
-): Promise<Array<{ name: string; description: string; parameters: unknown }> | null> {
+): Promise<ExtractionSpecEntry[]> {
   const allSpecs: ExtractionSpecEntry[] = [];
 
   // 1. Agent-level: config node with agentExtractionSpec
@@ -1857,6 +2373,24 @@ export async function buildRespondToolSchema(
       deduped.unshift(allSpecs[i]);
     }
   }
+  return deduped;
+}
+
+/**
+ * Build the respond() tool schema from the merged spec. Always includes
+ * onTrack + offTrackReason fields for continuous routing.
+ *
+ * The property name is the field's LAST dotted segment — the leading
+ * segment is the destination (#910) and is not something the model should
+ * see or answer with.
+ */
+export async function buildRespondToolSchema(
+  db: PrismaClient,
+  systemMemoryId: string,
+  convName: string | null,
+  stageData: Record<string, unknown>,
+): Promise<Array<{ name: string; description: string; parameters: unknown }> | null> {
+  const deduped = await resolveExtractionSpec(db, systemMemoryId, convName, stageData);
 
   const dataProps: Record<string, unknown> = {};
   for (const spec of deduped) {
@@ -2258,6 +2792,33 @@ export interface SessionInput {
   llmModel?: string;
   parentSessionId?: string;
   prevSessionId?: string;
+  // #928 coding-session provenance.
+  transcriptPath?: string;
+  host?: string;
+  tool?: string;
+  // #928 / cor:api:140: the role-Agent driving this session (PK or URN).
+  agentRef?: string;
+  // #943 / cor:api:140: the App this session is a unit of work for (PK or URN),
+  // gated on the caller's membership of that App.
+  appRef?: string;
+  // #974 / cor:agt:020:03: the Worker (named casting) this session works as.
+  // THREE forms, told apart by shape (never a fallback chain): an id, a
+  // `hrn:worker:…` URN (#991), or the worker's NAME (#990).
+  //
+  // The NAME form is App-SCOPED — names are unique only within an App — so it
+  // requires App context (appRef, an App-key credential, or an MCP active-App
+  // selection) and refuses SESSION_WORKER_NAME_NEEDS_APP without one. It is
+  // gated on the staff read gate before the lookup, since resolving a name
+  // discloses roster membership that the id and URN forms never do.
+  //
+  // Gated for all three: the worker must belong to the session's App; a retired
+  // worker refuses; a taken worker refuses WORKER_TAKEN unless force (#940).
+  workerRef?: string;
+  // #940: explicit informed-takeover override for a WORKER_TAKEN refusal.
+  force?: boolean;
+  // The session's stated intent (Session.plan) — MCP's hadron_start_session
+  // description lands here since it delegates to startSession (#940 parity).
+  plan?: string;
 }
 
 export interface UsageEventInput {

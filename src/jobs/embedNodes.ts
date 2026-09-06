@@ -171,14 +171,22 @@ export async function embedNode(
         if (fresh?.embeddingPendingAt?.getTime() !== capturedPendingAt?.getTime()) {
           return 'skipped';
         }
-        await upsertAbstractVector(db, {
-          nodeId,
-          memoryId: memory.id,
-          provider: c.provider,
-          model: c.model,
-          dim: c.dim,
-          embedding: vec,
-        });
+        // The pre-check above is a cheap early-out; THIS is the authoritative
+        // guard — evaluated inside the write, so a newer edit landing between
+        // the two cannot be overwritten (#1025 PR review).
+        const wrote = await upsertAbstractVector(
+          db,
+          {
+            nodeId,
+            memoryId: memory.id,
+            provider: c.provider,
+            model: c.model,
+            dim: c.dim,
+            embedding: vec,
+          },
+          capturedPendingAt,
+        );
+        if (!wrote) return 'skipped';
       }
     }
 
@@ -195,7 +203,7 @@ export async function embedNode(
       }
 
       if (contentText == null || contentText.trim() === '') {
-        await deleteNodeChunkVectors(db, nodeId);
+        if (!(await deleteNodeChunkVectors(db, nodeId, capturedPendingAt))) return 'skipped';
       } else {
         const chunks = chunkNode(contentText, {
           chunkTokens: memory.chunkTokens ?? undefined,
@@ -203,7 +211,7 @@ export async function embedNode(
           forceFixedSize: memory.forceFixedSize,
         });
         if (chunks.length === 0) {
-          await deleteNodeChunkVectors(db, nodeId);
+          if (!(await deleteNodeChunkVectors(db, nodeId, capturedPendingAt))) return 'skipped';
         } else {
           const c = client ?? getEmbeddingClient();
           const vectors = await c.embed(
@@ -225,7 +233,7 @@ export async function embedNode(
           if (fresh?.embeddingPendingAt?.getTime() !== capturedPendingAt?.getTime()) {
             return 'skipped';
           }
-          await upsertChunkVectors(
+          const wroteChunks = await upsertChunkVectors(
             db,
             nodeId,
             chunks.map((ch, i) => ({
@@ -240,7 +248,9 @@ export async function embedNode(
               chunkText: ch.text,
               embedding: vectors[i],
             })),
+            capturedPendingAt,
           );
+          if (!wroteChunks) return 'skipped';
         }
       }
     }

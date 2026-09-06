@@ -5,6 +5,8 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
+import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
+import { excludeTeamChat } from '../../../lib/teamChatLoc.js';
 import {
   type Context,
   deriveChatTitle,
@@ -75,12 +77,21 @@ export const chatQueries = {
 
       if (readableMemoryIds.length === 0) return [];
 
-      // Top-level chat nodes live at loc "chats:<id>" (depth 2). The only
-      // sub-shapes today are `chats:UUID:messages` (container) and
-      // `chats:UUID:messages:NNN-*` (message rows) — both contain
-      // ':messages', and chat-root locs do not, so we can filter them out
-      // at the DB layer instead of pulling every message body just to
-      // discard it.
+      // Top-level chat nodes live at loc "chats:<id>" (depth 2). Message
+      // shapes — `chats:<id>:messages` (container) and
+      // `chats:<id>:messages:NNN-*` (rows) — both contain ':messages', and
+      // chat-root locs do not, so we can filter them out at the DB layer
+      // instead of pulling every message body just to discard it.
+      //
+      // #1030: `chats:` is NOT an agent-chat-only namespace, which the
+      // previous version of this comment asserted. Since #939 the team chat
+      // lives at `chats:team` in a team App's shared app-class memory — one of
+      // the very memories collected above — and it is an agent chat in no
+      // respect except its address. `excludeTeamChat` keeps it out; it is
+      // read through `teamChatMessages`, which renders its authors and
+      // applies the team-membership gate. The exclusion matches the root
+      // exactly and its subtree under ':' only, so a user's own
+      // `chats:team-retro` still lists.
       //
       // Sort by Node.updatedAt (Prisma's @updatedAt) — bumped automatically
       // each time sendChatMessage / processChatResponse writes the new
@@ -94,6 +105,7 @@ export const chatQueries = {
           loc: { startsWith: 'chats:' },
           NOT: { loc: { contains: ':messages' } },
           deletedAt: null,
+          ...excludeTeamChat,
         },
         orderBy: { updatedAt: 'desc' as const },
         take: limit ?? 100,
@@ -153,7 +165,7 @@ export const chatQueries = {
 
     chatHistory: async (
       _: unknown,
-      { chatId, limit }: { chatId: string; limit?: number },
+      { chatId, limit, beforeSeq }: { chatId: string; limit?: number; beforeSeq?: number | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
@@ -218,15 +230,57 @@ export const chatQueries = {
           memoryId: chatNode.memoryId,
           loc: { startsWith: `${chatId}:messages:` },
           deletedAt: null,
+          // #1116: `beforeSeq` is the backward mirror of `teamChatMessages`'
+          // `sinceSeq` — strictly LESS THAN, so a client pages back by passing
+          // the oldest seq it holds. It NARROWS the candidate set; the window
+          // below then returns the newest `limit` of what remains, which is the
+          // page immediately preceding the cursor. The two compose rather than
+          // competing, so paging never changes which END a window comes from.
+          //
+          // A counterless message is included by every cursor, because it is
+          // OLDER than every numbered one (cor:cht:050:02) — excluding it here
+          // would make the oldest part of a legacy transcript the one part
+          // paging could never reach.
+          ...(beforeSeq != null
+            ? { OR: [{ seq: null }, { seq: { lt: beforeSeq } }] }
+            : {}),
         },
-        // #919: transcript order must be the same on every read. `seq` is
+        // #1111: `limit` bounds the transcript to its MOST RECENT slice, so the
+        // sort is inverted and the take reversed below. An ascending sort with
+        // a plain `take` is a HEAD-take — it returned the oldest N, freezing a
+        // long chat at its opening while every later message stayed invisible.
+        //
+        // Inverting all three keys (rather than `seq` alone) is what makes this
+        // exactly the tail rather than an approximation of it: `loc` is unique
+        // per memory, so (seq, createdAt, loc) is a TOTAL order, and the reverse
+        // of a total order taken from the other end is precisely its last N.
+        //
+        // #919: that tiebreak also has to stay, and stay complete. `seq` is
         // allocated atomically now, but chats written before that hold
         // colliding values, and a tie left to the planner can order two
         // members' messages differently from one read to the next.
-        orderBy: [{ seq: 'asc' as const }, { createdAt: 'asc' as const }, { loc: 'asc' as const }],
+        //
+        // `nulls: 'last'` is load-bearing and is NOT the Postgres default:
+        // `Node.seq` is nullable, and PG sorts NULLs FIRST on DESC (it sorts
+        // them last on ASC, which is why the old head-take never met them).
+        // Left at the default, a chat holding enough null-seq rows would fill
+        // the whole window with them and push out the numbered messages —
+        // reproducing this very bug for legacy transcripts. A row with no
+        // counter predates the counter, so it sorts as the OLDEST; within that
+        // group `createdAt` still orders them. (Codex P2 on PR #1112.)
+        orderBy: [
+          { seq: { sort: 'desc' as const, nulls: 'last' as const } },
+          { createdAt: 'desc' as const },
+          { loc: 'desc' as const },
+        ],
         take: limit ?? 100,
-        select: { loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },
+        // `id` rides along for the #1061 usage attribution; the projection
+        // below doesn't use it (a transcript entry is addressed by loc/seq).
+        select: { id: true, loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },
       });
+      // #1111: back to ascending. The window is the newest N; the ORDER a
+      // client renders is still oldest-first, so only the slice moved.
+      rows.reverse();
       // Decrypt before reading `data.role` / returning `content` — for
       // encrypted memories `data` is an opaque wrapper until decrypted, so
       // role detection would otherwise always fall through to the loc
@@ -235,6 +289,13 @@ export const chatQueries = {
       if (memEncInfo.isEncrypted) {
         for (const m of rows) decryptNodeFields(m, memEncInfo);
       }
+      // #1061 — a transcript read returns each message's content, so it is one
+      // read per message returned. Recorded here, AFTER the decrypt above: an
+      // encrypted chat with no live session key throws SESSION_EXPIRED out of
+      // `decryptNodeFields`, and the caller then receives no transcript at all
+      // (PR #1062 review — Codex P2, Copilot). Impersonated callers threw
+      // Forbidden further up, so nothing here can land in a support session.
+      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(rows), ctx);
       return rows.map((m) => {
         // Agent-agnostic role detection (Constitution Invariant #14):
         //   - Primary: data.role on the message node.

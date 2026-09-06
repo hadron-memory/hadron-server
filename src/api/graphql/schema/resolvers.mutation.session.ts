@@ -15,12 +15,25 @@ import {
   parseUrnInput,
   assertFullyQualifiedUrn,
   UrnNotQualifiedError,
+  hasSchemePrefix,
   splitNodeUrn,
   normalizeUrnForLookup,
   legacyMemoryUrnToCanonical,
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
+import { writeNodeCore } from './resolvers.mutation.node.js';
+import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
+import {
+  HANDOFFS_PARENT_LOC,
+  HANDOFF_SESSION_KEY,
+  nextHandoffLoc,
+  newestHandoff,
+  handoffSessionId,
+} from '../../../lib/workerHandoff.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
@@ -28,18 +41,29 @@ import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
-import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
+  loadLastEventBySession,
+  mostRecentlyActive,
+  isSessionLive,
+  recentlyTouchedFilter,
+  OPEN_SESSION_SCAN_CAP,
+} from '../../../lib/sessionActivity.js';
+import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
+import {
   type Context,
+  isAppParticipant,
   requireRole,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  requireSessionWriteAccess,
   resolveReadableNodeByLoc,
   SESSION_INCLUDE,
   mapToolCalendarEvent,
@@ -61,14 +85,918 @@ function dropNulls(t: { dateTime?: string | null; date?: string | null; timeZone
   };
 }
 
+/**
+ * Write a worker session's closing handoff (#1029).
+ *
+ * The agent supplies prose; this owns the ADDRESS — which is the whole reason
+ * it is server-side rather than a `hadron_create_node` call the client
+ * composes. Three things would otherwise be re-derived by every client (MCP,
+ * CLI, portal): which memory, the `handoffs` parent, and the lexically-ordered
+ * loc. That is #1028's finding — domain logic accreting on clients because the
+ * server exposed a primitive instead of the intent.
+ *
+ * Delegates the node writes to `writeNodeCore`, never `db.node` directly, per
+ * `findings:node-write-surface-invariants`: encryption, the revision snapshot,
+ * the abstract-hash recompute and re-embedding all live there, and a bespoke
+ * insert would silently skip every one of them.
+ *
+ * Throws typed `HANDOFF_WRITE_FAILED` on any failure, and the caller has NOT
+ * ended the session at that point — see `endSession`.
+ */
+/**
+ * Close a session, FIRST END WINS, and report what actually happened (#1053).
+ *
+ * Shared by both end paths — the GraphQL resolver and the MCP tool, which does
+ * its own raw update — because a read-then-write here is racy against the
+ * session reaper, and fixing that at one call site is fixing it on one surface
+ * (`review:fix-at-the-call-site-is-a-fix-on-one-surface`).
+ *
+ * The race, which is why the guard is not decoration (PR #1055 review, Codex):
+ * the reaper claims a session with its own atomic update, so between a caller's
+ * `findUnique` and its `update` a session can go from live to reaped. Deciding
+ * from the stale read then does two wrong things at once — it reports a clean
+ * "ended" for a session the server had already expired, and it overwrites the
+ * reaper's `endedAt` while leaving `autoExpiredAt` set, leaving a row that says
+ * it auto-expired at one instant and ended at a later one.
+ *
+ * So the close is a guarded `updateMany` on `endedAt: null` — winning it IS the
+ * proof this call did the ending — and the receipt is decided from the row as
+ * it stands afterwards, never from the row as it was before.
+ */
+export async function endSessionFirstWins(
+  db: Context['db'],
+  id: string,
+  metrics: {
+    summary?: string | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    turnCount?: number | null;
+    errorCount?: number | null;
+  },
+): Promise<{ endedByThisCall: boolean; endedAt: Date | null; autoExpiredAt: Date | null }> {
+  const data = {
+    ...(metrics.summary !== undefined ? { summary: metrics.summary } : {}),
+    ...(metrics.inputTokens !== undefined ? { inputTokens: metrics.inputTokens } : {}),
+    ...(metrics.outputTokens !== undefined ? { outputTokens: metrics.outputTokens } : {}),
+    ...(metrics.turnCount !== undefined ? { turnCount: metrics.turnCount } : {}),
+    ...(metrics.errorCount !== undefined ? { errorCount: metrics.errorCount } : {}),
+  };
+  const claimed = await db.session.updateMany({
+    where: { id, endedAt: null },
+    data: { ...data, endedAt: new Date() },
+  });
+  if (claimed.count === 0) {
+    // Already ended — by an earlier call, or by the reaper a moment ago. The
+    // metrics still land; the original end instant stands.
+    await db.session.updateMany({ where: { id }, data });
+  }
+  const after = await db.session.findUnique({
+    where: { id },
+    select: { endedAt: true, autoExpiredAt: true },
+  });
+  return {
+    endedByThisCall: claimed.count > 0,
+    endedAt: after?.endedAt ?? null,
+    autoExpiredAt: after?.autoExpiredAt ?? null,
+  };
+}
+
+export async function writeSessionHandoff(
+  ctx: Context,
+  sessionId: string,
+  workerId: string,
+  body: string,
+): Promise<void> {
+  // Both guards live HERE, ahead of the try, rather than in either caller (PR
+  // #1045 review, Codex P1 + P2). The GraphQL resolver had them and the MCP
+  // tool — which reimplements the end with its own raw update — did not, so the
+  // bug stayed live on the surface this team actually uses. A guard in the
+  // shared writer is inherited by both, which is the only version of this that
+  // cannot drift. They throw typed and are NOT wrapped in
+  // HANDOFF_WRITE_FAILED: a refusal is an answer, not a failure to write.
+  const session = await ctx.db.session.findUniqueOrThrow({
+    where: { id: sessionId },
+    select: { id: true, endedAt: true, workerId: true },
+  });
+
+  // Ending is retry-tolerant, the sequence is append-only. A retry of a call
+  // that already succeeded would append a SECOND node — newest by loc, stamped
+  // with this older session — and make a stale account read as CURRENT.
+  if (session.endedAt) {
+    throw new GraphQLError(
+      `Session ${sessionId} already ended at ${session.endedAt.toISOString()}, and its handoff is already written. ` +
+        'The sequence is append-only, so a second handoff for the same stint is refused — start a new session to record new state.',
+      {
+        extensions: {
+          code: 'SESSION_ALREADY_ENDED',
+          sessionId,
+          endedAt: session.endedAt.toISOString(),
+        },
+      },
+    );
+  }
+
+  // IDEMPOTENCE by session id, for the window the check above cannot see: the
+  // handoff write and the session close are separate commits, so a crash
+  // between them (or two ends racing past the `endedAt` check) leaves a handoff
+  // written against a session still marked open. A retry would then append a
+  // duplicate for one stint, which contradicts the retry-safety this
+  // operation's whole ordering exists to provide.
+  //
+  // Checking the NEWEST child is sufficient: a retry lands immediately after
+  // its own predecessor, so if this stint already wrote one it is the newest.
+  // (An encrypted working memory would hide the envelope and re-write — worker
+  // memories are provisioned unencrypted, and the same limitation already
+  // applies to the continuity status.)
+  const worker = await ctx.db.worker.findUniqueOrThrow({
+    where: { id: workerId },
+    select: { memoryId: true },
+  });
+  if (worker.memoryId) {
+    const newest = await newestHandoff(ctx.db, worker.memoryId);
+    if (newest && handoffSessionId(newest.data) === sessionId) return;
+  }
+
+  try {
+    const worker = await ctx.db.worker.findUniqueOrThrow({
+      where: { id: workerId },
+      select: { id: true, name: true, slug: true, memoryId: true, appId: true },
+    });
+
+    // AUTHORITY. The caller has already cleared `requireSessionWriteAccess` on
+    // the session being ended, and the target memory is DERIVED from the worker
+    // that session is bound to — the caller names no memory, so this elevation
+    // cannot be steered anywhere. Without it the operation refuses the very
+    // principal it exists for: `requireMemoryWriteAccess` grants an org-owned
+    // app-class memory to org CONTRIBUTORs, and an AppMember who is not an org
+    // member is most of this team. That is the same gap `createTeamChatMessage`
+    // meets and answers the same way (gate on the operation's own predicate,
+    // then write); the difference is that it writes rows by hand, while this
+    // delegates to `writeNodeCore` so encryption, the revision snapshot, the
+    // abstract hash and re-embedding all still happen
+    // (findings:node-write-surface-invariants).
+    //
+    // Deliberately does NOT reach a user-owned App's worker memory: strict
+    // ownership (spec 047) refuses even a platform admin there, and it needs no
+    // help — a user-owned App's workers are driven by its owner.
+    const writerCtx: Context = { ...ctx, roles: ['ADMIN'] as Context['roles'] };
+
+    // Provisioning is best-effort at cast time (the spec allows it lazily), so
+    // a legally cast worker can reach here with no memory. Provision it now
+    // rather than refusing: refusing would mean a worker unlucky at cast can
+    // NEVER write a handoff, which is a permanent gap created by a transient
+    // failure.
+    let memoryId = worker.memoryId;
+    if (!memoryId) {
+      const app = await ctx.db.app.findUniqueOrThrow({
+        where: { id: worker.appId },
+        select: {
+          id: true, name: true, urn: true,
+          organizationId: true, ownerUserId: true, uninstalledAt: true,
+        },
+      });
+      memoryId = await provisionWorkerMemory(ctx, app, worker);
+      if (!memoryId) {
+        throw new Error(`worker ${worker.id} has no working memory and provisioning it failed`);
+      }
+    }
+
+    // The parent carries the convention for a human reading the sequence in the
+    // portal. Created on first handoff, like the team chat's own root — and
+    // `create` mode resurrects a soft-deleted one rather than colliding on
+    // (loc, memoryId).
+    // loc-scope-ok: scoped to one memory by id.
+    const parent = await ctx.db.node.findFirst({
+      where: { memoryId, loc: HANDOFFS_PARENT_LOC, deletedAt: null },
+      select: { id: true },
+    });
+    if (!parent) {
+      await writeNodeCore(
+        {
+          memoryId,
+          loc: HANDOFFS_PARENT_LOC,
+          name: 'handoffs',
+          nodeType: 'record',
+          description: `Handoff records for ${worker.name}, newest last — one per closed worker session.`,
+          content:
+            `# Handoffs — ${worker.name}\n\n` +
+            'One child per closed worker session, newest last, written by ' +
+            '`endSession(handoff:)`.\n\n' +
+            'Starting a session as this worker returns the newest child ' +
+            'automatically — binding is briefing, so binding is handoff. ' +
+            'Reading the sequence by hand is for history, not for resuming.\n\n' +
+            '**Never edit a child.** The sequence is the point, and an amended ' +
+            'handoff destroys the record of what was believed at the time.\n\n' +
+            'Ordering comes from the loc (`handoffs:<yyyy-mm-dd>-<hhmm>`, UTC, ' +
+            'lexically sortable) — never from `seq`, which is a 32-bit Int a ' +
+            'timestamp overflows.\n',
+        },
+        writerCtx,
+        'create',
+      );
+    }
+
+    const at = new Date();
+    const loc = await nextHandoffLoc(ctx.db, memoryId, at);
+    await writeNodeCore(
+      {
+        memoryId,
+        loc,
+        name: loc.slice(HANDOFFS_PARENT_LOC.length + 1),
+        nodeType: 'record',
+        description: `Handoff from ${worker.name}'s session ${sessionId.slice(0, 8)}.`,
+        content: body,
+        // The writing session, which is what lets a later bind tell a CURRENT
+        // handoff from a stale one it never replaced.
+        data: { [HANDOFF_SESSION_KEY]: sessionId },
+      },
+      writerCtx,
+      'create',
+    );
+  } catch (e) {
+    throw new GraphQLError(
+      `The handoff could not be written, so the session was NOT ended — retry, or end without a handoff. Cause: ${
+        e instanceof Error ? e.message : 'unknown'
+      }`,
+      { extensions: { code: 'HANDOFF_WRITE_FAILED', sessionId } },
+    );
+  }
+}
+
 export const sessionMutations = {
     startSession: async (_: unknown, { input }: { input: SessionInput }, ctx: Context) => {
-      return ctx.db.session.create({
+      // #928: optional persona link. `agentRef` (PK or URN, cor:api:140)
+      // resolves to Session.agentId. Gate mirrors Query.agent's read gate —
+      // a PUBLIC agent attaches for any caller, otherwise owner / org member
+      // (READER) — so a session is never attributed to an agent the caller
+      // cannot read. Resolution is not authorization (#554): the
+      // resource-scoped gate runs on the RESOLVED agent.
+      let agentId: string | undefined;
+      // Trimmed: a whitespace-only ref is a trivial client bug and reads as
+      // absent, not as a malformed URN (#929 review).
+      const agentRef = input.agentRef?.trim();
+      if (agentRef) {
+        let resolvedAgentId: string;
+        try {
+          ({ id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef));
+        } catch (e) {
+          // A mutation input error surfaces loudly (contrast Query.agent,
+          // which masks not-found to null); malformed URNs propagate their
+          // own typed error from assertFullyQualifiedUrn.
+          if (e instanceof AgentNotFoundError) {
+            throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          }
+          throw e;
+        }
+        const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+        if (agent.deletedAt) {
+          throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        if (agent.visibility !== 'PUBLIC') {
+          await requireOwnerOrOrgRole(ctx, agent, 'READER');
+        }
+        agentId = resolvedAgentId;
+      }
+
+      // #943: optional App pivot. Before this, `Session.appId` was stamped
+      // ONLY from `ctx.appId` (an App-key credential), so a user-authenticated
+      // session — every CLI session — always had `appId: null` and could never
+      // satisfy the team-chat authorship gate's "a session OF this App"
+      // condition (cor:agt:020:04 (b) / SESSION_NOT_IN_APP). The gate is right;
+      // the write path to satisfy it was missing.
+      //
+      // Same shape as `agentRef` above (cor:api:140, PK or URN): resolution is
+      // NOT authorization (#554) — the gate runs on the RESOLVED App.
+      let appId: string | null = ctx.appId ?? null;
+      // #1037: WHERE the App came from decides what may override it. The same
+      // `ctx.appId` field carries two different trust levels
+      // (findings:auth-appid-credential-vs-selection): for a pure App-key
+      // principal it is a CREDENTIAL — the caller IS that App — while for a
+      // user it is the MCP active-App SELECTION, a convenience that a later
+      // bind in another App silently re-points. An explicitly-qualified ref
+      // must beat a selection; nothing beats a credential.
+      let appSource: 'credential' | 'selection' | 'argument' | 'worker' | null =
+        ctx.appId ? (ctx.userId ? 'selection' : 'credential') : null;
+      const appRef = input.appRef?.trim();
+      if (appRef) {
+        let resolvedAppId: string;
+        try {
+          ({ id: resolvedAppId } = await resolveAppRef(ctx.db, appRef));
+        } catch (e) {
+          if (e instanceof AppNotFoundError) {
+            throw new GraphQLError(`App not found: ${appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          }
+          throw e;
+        }
+        const app = await ctx.db.app.findUniqueOrThrow({
+          where: { id: resolvedAppId },
+          select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+        });
+        // resolveAppRef already excludes soft-deleted rows, and excludes
+        // uninstalled ones on the URN path only — re-check both here so the ID
+        // path can't attach a session to a dead App.
+        //
+        // The URN/PK asymmetry on APP_UNINSTALLED is deliberate, not an
+        // oversight (#944 review): App URNs are unique only among ACTIVE rows
+        // (spec 021 FR-027), so an uninstalled App's URN may name several dead
+        // rows and/or belong to a different live App — "not found" is the only
+        // honest answer there. By PK the row is unambiguous, so it earns the
+        // more specific refusal. Both forms are tested.
+        if (app.deletedAt) {
+          throw new GraphQLError(`App not found: ${appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        if (app.uninstalledAt) {
+          throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+            extensions: { code: 'APP_UNINSTALLED', appId: resolvedAppId },
+          });
+        }
+        // Precedence (documented decision, #943): an App-key CREDENTIAL wins
+        // over a caller-supplied ref. A pure App-key principal IS an App, so a
+        // ref naming a different App is a client bug, not a widening — refuse
+        // it typed rather than silently honouring one or the other.
+        //
+        // #1037: keyed on the ABSENCE of a userId, not on `ctx.appId` alone.
+        // The comment always said "credential"; the check caught the MCP
+        // active-App SELECTION too, so a user whose connection was pinned to B
+        // could not deliberately start a session in A — the exact precedence
+        // this PR promises, contradicted one level above where it is granted.
+        // The distinction is spelled out in the very next comment block, which
+        // is a good measure of how easily this field name misleads
+        // (findings:auth-appid-credential-vs-selection). A user's selection
+        // yields to the argument; the participant gate below still runs on the
+        // resolved App, so yielding never widens reach.
+        if (ctx.appId && !ctx.userId && ctx.appId !== resolvedAppId) {
+          throw new GraphQLError(
+            `appRef "${appRef}" does not name the App this request is authenticated for.`,
+            { extensions: { code: 'SESSION_APP_MISMATCH', appId: ctx.appId } },
+          );
+        }
+        // Authority. A pure App-key principal (no userId) needs no membership:
+        // its credential IS the App. Everyone else — including a HYBRID
+        // principal carrying MCP's active-App SELECTION, which is not a
+        // credential (findings:auth-appid-credential-vs-selection) — must be a
+        // member of the resolved App, the same predicate the team-chat gate
+        // uses. Without this, any caller could stamp any App's id onto a
+        // session and author into that team's chat as its persona.
+        if (ctx.userId || !ctx.appId) {
+          if (!(await isAppParticipant(ctx, app))) {
+            throw new GraphQLError(
+              'You are not a member of this App, so a session cannot be attributed to it.',
+              { extensions: { code: 'FORBIDDEN' } },
+            );
+          }
+        }
+        appId = resolvedAppId;
+        // An explicit argument outranks a selection but not a credential — the
+        // credential branch above already refused a disagreeing ref.
+        if (appSource !== 'credential') appSource = 'argument';
+      }
+
+      // #974: optional Worker binding (cor:agt:020:03) — the named identity
+      // this session works as. An id or a `hrn:worker:…` URN (#991), whose leaf
+      // is the derived slug — cor:agt:020:02 keeps the NAME out of URNs, and
+      // the derived identifier never refuses. Gated: the worker must belong to the
+      // session's App; with no App context yet, the worker's App becomes the
+      // session's — behind the SAME participant predicate the appRef path
+      // runs, so binding a worker never widens who can attribute a session to
+      // an App. A retired worker refuses new bindings; a TAKEN worker (an
+      // active session — honest since the #930 reaper) refuses WORKER_TAKEN
+      // unless force (#940 — informed takeover moved server-side per the
+      // thin-client directive; before this it was the CLI's contract only,
+      // and this mutation was an ungated second surface in waiting).
+      let workerId: string | undefined;
+      // #1029 — the worker's previous stint, derived below when the caller
+      // supplies no explicit chain link.
+      let derivedPrevSessionId: string | undefined;
+      // #1050 — set when this bind should claim an unheld name; executed inside
+      // the session-creating transaction so the two commit together.
+      let claimWorkerId: string | undefined;
+      const workerRef = input.workerRef?.trim();
+      if (workerRef) {
+        // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
+        // URN, via the shared ref helper. #990 adds a third form: a worker
+        // NAME ("Iris"), resolved within this session's App. Identity only —
+        // every gate below (retirement, App match, participation,
+        // WORKER_TAKEN) still runs on the RESOLVED row, so a ref buys
+        // addressability, never access.
+        //
+        // The forms are told apart by SHAPE, not by trying each in turn: an id
+        // or a scheme-prefixed URN is self-describing, and anything else is a
+        // name. Falling back from URN-resolution failure to a name lookup would
+        // make a typo'd URN silently search the roster.
+        let resolvedWorkerId: string;
+        if (isId(workerRef) || hasSchemePrefix(workerRef)) {
+          try {
+            ({ id: resolvedWorkerId } = await resolveWorkerRefId(ctx.db, workerRef));
+          } catch {
+            throw new GraphQLError(`Worker not found: ${workerRef}`, {
+              extensions: { code: 'WORKER_NOT_FOUND' },
+            });
+          }
+        } else {
+          // NAME (#990). A name is unique only WITHIN an App, so this form
+          // needs App context — which a bare-name caller always has, since it
+          // comes from an App key, an explicit appRef, or an MCP active-App
+          // selection. Without one there is nothing to scope the lookup to, and
+          // guessing across the caller's Apps would resolve one name to
+          // several workers.
+          if (appId === null) {
+            throw new GraphQLError(
+              `workerRef "${workerRef}" is a worker name, which is only unique within an App — pass appRef (or select an App), or use the worker's id or URN.`,
+              { extensions: { code: 'SESSION_WORKER_NAME_NEEDS_APP', workerRef } },
+            );
+          }
+          // App lifecycle, checked here and not only at the gate (PR #996
+          // review, Copilot). When `appId` came from `appRef` these were
+          // already enforced above, and the worker-DERIVED path enforces them
+          // below — but when it came from `ctx.appId` (an MCP active-App
+          // SELECTION or an App key) this is the only lifecycle check before
+          // `session.create`. A stale selection pointing at an uninstalled App
+          // must not be able to resolve a name and open a session there.
+          //
+          // This stays HERE rather than inside the shared resolver (#1015):
+          // uninstall bars starting a session, but not READING the roster —
+          // Worker rows outlive their App's uninstall — so the two callers
+          // genuinely differ, and only on this point.
+          const lifecycle = await ctx.db.app.findUnique({
+            where: { id: appId },
+            select: { uninstalledAt: true },
+          });
+          if (lifecycle?.uninstalledAt) {
+            throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+              extensions: { code: 'APP_UNINSTALLED', appId },
+            });
+          }
+          // The staff read gate runs BEFORE the lookup, not after, and a denial
+          // is reported as WORKER_NOT_FOUND — the shared
+          // `resolveWorkerIdByNameGated` owns that ordering (#1015) so this
+          // resolver and `Query.worker` cannot drift on it. A missing App, a
+          // soft-deleted App, a refused caller and an absent name all return
+          // null there and collapse into the one refusal below.
+          //
+          // In practice a caller who reached here via `appRef` has ALREADY
+          // cleared `isAppParticipant` above, the same predicate that gate
+          // uses, so an outsider is refused FORBIDDEN before any name is looked
+          // up. The gate is therefore defense in depth, not the only barrier —
+          // and deliberately so: `appId` can also arrive from an App-key
+          // credential (which skips that membership branch), so the name branch
+          // must be self-sufficient rather than relying on an ordering above it
+          // that a later change could reshuffle.
+          const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
+          if (!byName) {
+            throw new GraphQLError(`Worker not found: ${workerRef}`, {
+              extensions: { code: 'WORKER_NOT_FOUND' },
+            });
+          }
+          resolvedWorkerId = byName;
+        }
+        const worker = await ctx.db.worker.findUnique({
+          where: { id: resolvedWorkerId },
+          select: {
+            id: true, appId: true, agentId: true, retiredAt: true,
+            name: true, heldByUserId: true, heldAt: true,
+          },
+        });
+        if (!worker) {
+          throw new GraphQLError(`Worker not found: ${workerRef}`, {
+            extensions: { code: 'WORKER_NOT_FOUND' },
+          });
+        }
+        if (worker.retiredAt) {
+          throw new GraphQLError(
+            'This worker is retired — its name stays reserved, but it takes no new sessions.',
+            { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
+          );
+        }
+        // #1037: an explicitly-qualified ref beats connection state.
+        //
+        // An id or a `hrn:worker:…` URN NAMES ITS OWN App — that is the whole
+        // reason the URN form exists, and both the tool description and
+        // `tasks:start-worker-session-desktop` promise it needs no
+        // `hadron_set_active_app` first. But `appId` may already hold the MCP
+        // active-App SELECTION, which any earlier bind in another App silently
+        // re-points — so a worker following the documented path, from a
+        // connection that has ever touched a second App, was refused on account
+        // of state it never set and could not see. That also defeats the
+        // premise #1038 was closed on: that a URN is safe BECAUSE its meaning
+        // cannot be changed by someone else's action.
+        //
+        // A selection therefore yields to the ref; a CREDENTIAL never does (a
+        // pure App-key principal IS its App, so a ref naming another is a
+        // client bug), and neither does an explicit `appRef` argument, where
+        // two deliberate statements genuinely disagree.
+        const refNamesItsOwnApp = isId(workerRef) || hasSchemePrefix(workerRef);
+        if (appId !== null && appId !== worker.appId && refNamesItsOwnApp && appSource === 'selection') {
+          // Re-gate on the App we are adopting rather than the one we are
+          // leaving: yielding to the ref must never widen who may attribute a
+          // session to an App. The `appId === null` branch below runs the same
+          // predicate, so clearing this makes the two paths converge.
+          appId = null;
+          appSource = 'worker';
+        }
+        if (appId !== null && appId !== worker.appId) {
+          const held = await ctx.db.app.findUnique({
+            where: { id: appId },
+            select: { urn: true },
+          });
+          const source =
+            appSource === 'credential'
+              ? 'the App key this request is authenticated with'
+              : appSource === 'argument'
+                ? 'the appRef argument'
+                : 'the active-App selection on this connection';
+          throw new GraphQLError(
+            `workerRef "${workerRef}" names a worker of a different App than this session is attributed to. ` +
+              `This session is being attributed to ${held?.urn ?? appId}, from ${source}. ` +
+              (appSource === 'credential'
+                ? 'An App key can only open sessions in its own App.'
+                : 'Pass an appRef naming the worker\'s App, or drop it and let the worker\'s own App decide.'),
+            {
+              extensions: {
+                code: 'SESSION_WORKER_NOT_IN_APP',
+                workerId: worker.id,
+                appId,
+                appSource,
+                workerAppId: worker.appId,
+              },
+            },
+          );
+        }
+        if (appId === null) {
+          const app = await ctx.db.app.findUniqueOrThrow({
+            where: { id: worker.appId },
+            select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+          });
+          if (app.deletedAt) {
+            throw new GraphQLError(`Worker not found: ${workerRef}`, {
+              extensions: { code: 'WORKER_NOT_FOUND' },
+            });
+          }
+          if (app.uninstalledAt) {
+            throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+              extensions: { code: 'APP_UNINSTALLED', appId: worker.appId },
+            });
+          }
+          if (ctx.userId || !ctx.appId) {
+            if (!(await isAppParticipant(ctx, app))) {
+              throw new GraphQLError(
+                'You are not a member of this worker\'s App, so a session cannot be attributed to it.',
+                { extensions: { code: 'FORBIDDEN' } },
+              );
+            }
+          }
+          appId = worker.appId;
+        }
+        // #1050 — a NAME is HELD by a person until released. This gate runs
+        // before the liveness one below and is not forceable, because the two
+        // answer different questions and only one of them is a judgement call:
+        //
+        //   HELD   — "this name is someone's." The remedy is to cast your own
+        //            worker, never to adjudicate whether the holder is really
+        //            gone. There is no correct way to make that call from a
+        //            session row, which is exactly what hadron-cli#492 proved:
+        //            an agent judged a session abandoned, ENDED it, and bound
+        //            as that worker while its driver was mid-PR — every step
+        //            following the documented procedure.
+        //   TAKEN  — "a live session already exists." Only ever a question
+        //            about your OWN worker now, and still forceable, because
+        //            the driver deciding is the driver affected.
+        //
+        // The hold does not depend on session state, so expiry, a reap, or a
+        // closed chat session never free it. That also removes the asymmetry
+        // in #1036/#484 where a timer could silently de-authorise a live
+        // driver.
+        // Note the absence of a `ctx.userId &&` guard (PR #1052 review, Codex +
+        // Copilot P1): with one, a pure App-key principal — whose `ctx.userId`
+        // is undefined — sailed straight past this and could bind a name held
+        // by a human. A hold is the single source of truth for whose name it
+        // is, so it refuses EVERY principal but the holder; an App key is not
+        // a person and can hold nothing, so it is always the wrong one.
+        if (worker.heldByUserId && worker.heldByUserId !== ctx.userId) {
+          const holder = await ctx.db.user.findUnique({
+            where: { id: worker.heldByUserId },
+            select: { handle: true, githubUsername: true },
+          });
+          const who = holder?.handle ?? holder?.githubUsername ?? worker.heldByUserId;
+          throw new GraphQLError(
+            `The name "${worker.name}" is held by ${who}. A held name is not freed by a worker session ending, ` +
+              'and this cannot be forced — cast your own worker instead ' +
+              '(the holder, or an App/org admin, can release it).',
+            {
+              extensions: {
+                code: 'WORKER_HELD',
+                workerId: worker.id,
+                heldBy: worker.heldByUserId,
+                heldByName: who,
+                heldAt: worker.heldAt?.toISOString() ?? null,
+              },
+            },
+          );
+        }
+        // #940 (cor:agt:020:03 — informed takeover, never silent): binding a
+        // worker that already has an ACTIVE session refuses typed, carrying
+        // who last drove it and when — everything the takeover prompt needs
+        // in one round trip — unless the caller explicitly forces. Ordering
+        // is load-bearing: this runs AFTER the App/participant gates above,
+        // because WORKER_TAKEN discloses the driver's identity and an
+        // unauthorized caller must hit FORBIDDEN first. Best-effort by
+        // design: there is no lease (liveness stays derivable from active
+        // sessions), so two concurrent starts can both pass — the contract
+        // is informed consent, not mutual exclusion.
+        if (!input.force) {
+          // ALL active sessions, not the newest-created (PR #983 review,
+          // Copilot): force allows several to coexist, and the most recent
+          // ACTIVITY can be on an older one — the takeover prompt must name
+          // whoever actually drove the worker last.
+          const nowForLiveness = new Date();
+          const openSessions = await ctx.db.session.findMany({
+            // #1120 review (Codex P2): BOUNDED. Nothing closes abandoned
+            // sessions any more, so open rows accumulate per worker and an
+            // unbounded scan — plus every id in an `IN (...)` — grows with the
+            // worker's whole history. The filter drops rows that cannot be
+            // live under ANY type's window; the cap is only a backstop behind
+            // it, because a cap alone could drop the live row itself.
+            where: {
+              workerId: worker.id, endedAt: null, deletedAt: null,
+              ...recentlyTouchedFilter(nowForLiveness),
+            },
+            // ORDERED BY HEARTBEAT, not by bind time (#1120 review, Codex P2).
+            // The cap keeps a prefix, so what the prefix is ordered BY decides
+            // what survives it. `startedAt` is when a stint began, which says
+            // nothing about who drove it last — so an older-started session
+            // with a fresh heartbeat could be cut, and `mostRecentlyActive`
+            // would then name the wrong driver in the refusal. That is the
+            // hadron-cli#492 harm arriving inside the message written to
+            // prevent it.
+            //
+            // RESIDUAL, stated rather than papered over: `updatedAt` is two of
+            // the three heartbeat inputs, and the third (the latest attributed
+            // UsageEvent) cannot be an `orderBy` without a join. So a session
+            // winning purely on a usage event, behind more than
+            // OPEN_SESSION_SCAN_CAP others with newer `updatedAt`, can still be
+            // cut. That needs >200 CONCURRENTLY LIVE sessions on one worker —
+            // reachable only through repeated explicit `force`, each of which
+            // takes a human override — and it costs a misnamed driver in a
+            // refusal, never a wrong allow/deny. The gate itself is unaffected:
+            // ANY live session refuses.
+            orderBy: [
+              { updatedAt: { sort: 'desc' as const, nulls: 'last' as const } },
+              { startedAt: 'desc' as const },
+            ],
+            take: OPEN_SESSION_SCAN_CAP,
+            select: {
+              id: true, userId: true, startedAt: true, updatedAt: true,
+              // #1114: liveness is DERIVED, so the gate needs the inputs.
+              type: true, autoExpiredAt: true, endedAt: true,
+            },
+          });
+          // #1114 — AN OPEN SESSION IS NOT A LIVE ONE. Nothing ends a session
+          // for inactivity any more (silence is not evidence of abandonment),
+          // so `endedAt IS NULL` alone would refuse a bind forever on any
+          // worker whose driver simply walked away — leaving `force: true` as
+          // the only route, which is the reflexive override this refusal exists
+          // to prevent.
+          //
+          // The predicate is the SHARED one (`isSessionLive`), not a second
+          // reading of the same idea: `cor:agt:020:11` requires that what a
+          // roster SHOWS and what a bind ENFORCES be one computation, and the
+          // roster's copy lives in SQL because it must aggregate. Two
+          // derivations that must agree are pinned by a differential test
+          // rather than by hoping.
+          const lastEventForLiveness = await loadLastEventBySession(
+            ctx.db as never,
+            openSessions.map((s) => s.id),
+          );
+          const activeSessions = openSessions.filter((s) =>
+            isSessionLive(s, lastEventForLiveness.get(s.id), nowForLiveness),
+          );
+          if (activeSessions.length > 0) {
+            // lastSeenAt mirrors the #930 reaper's activity derivation:
+            // greatest of startedAt, updatedAt (the explicit heartbeat), and
+            // the latest attributed UsageEvent — computed per session, then
+            // the most recently active session wins.
+            //
+            // Both steps now come from `lib/sessionActivity.ts` (hadron-cli#487):
+            // the same derivation had to answer `Worker.lastActiveAt`, and a
+            // third hand-written copy of "when was this last driven" is how the
+            // takeover prompt and the roster start disagreeing about the same
+            // worker in the same second.
+            const lastEventBySession = await loadLastEventBySession(
+              ctx.db as never,
+              activeSessions.map((s) => s.id),
+            );
+            const best = mostRecentlyActive(activeSessions, lastEventBySession);
+            const active = best?.session ?? activeSessions[0];
+            const lastSeenAt = best?.at ?? active.startedAt;
+            const driver = active.userId
+              ? await ctx.db.user.findUnique({
+                  where: { id: active.userId },
+                  select: { handle: true, githubUsername: true },
+                })
+              : null;
+            const lastDriver = driver?.handle ?? driver?.githubUsername ?? active.userId ?? null;
+            // #1034: this refusal is where the worker-session/chat-session
+            // collision surfaces to a human, and it is the specific failure a
+            // team new to the surface walks into — archive the window, assume
+            // the worker came free, meet a takeover prompt with no way to read
+            // it. Two things the old wording left the reader to infer wrongly:
+            // WHOSE the open session is (it may be the caller's own, which the
+            // old "show the user who is driving it" sent them hunting a
+            // colleague for), and that `last seen` says whether anyone is
+            // actually there (it does not — it is worker-session activity, and
+            // a worker session outlives its chat session).
+            //
+            // What the server must NOT do is guess WHY it is open. It knows the
+            // row exists; it has no signal tying that row to a closed chat
+            // session, so "probably abandoned" would be an unsupported claim
+            // pushing the reader toward force — the hadron-cli#492 harm, in the
+            // message meant to prevent it. Both possibilities, then the
+            // confirmation step (PR #1056 review, Copilot + Codex).
+            const isOwnSession = !!ctx.userId && active.userId === ctx.userId;
+            // Three arms, because "who is driving it" has three different
+            // answers and two of them were previously collapsed into the
+            // wrong one (PR #1056 review, Codex + Copilot). A pure App-key
+            // bind attaches NO person, so `lastDriver` is null and telling the
+            // caller to go ask the driver names somebody who does not exist —
+            // the same defect as the old self-case wording, one arm over.
+            const takenBy = isOwnSession
+              ? 'That worker session is YOUR OWN and is still open — either you are still working in it from another chat session, or it was left behind by one that ended (ending a chat session never ends a worker session). The server cannot tell which. Confirm with the user that nothing is still running in it, then pass force: true.'
+              : lastDriver
+                ? 'Show the user who is driving it, and pass force: true only on their explicit override.'
+                : 'No person is attached to that worker session — it was opened by an App key, so there is nobody to ask. Confirm with the user that the automation holding it is not mid-task, then pass force: true.';
+            throw new GraphQLError(
+              `This worker is taken: worker session ${active.id}${lastDriver ? ` (last driven by ${lastDriver})` : ''}, last seen ${lastSeenAt.toISOString()}. ` +
+                takenBy +
+                (isOwnSession
+                  ? ''
+                  : ' Note "last seen" is worker-session activity, not presence: a worker session outlives the chat session that started it, so an idle-looking one may still have someone behind it.'),
+              {
+                extensions: {
+                  code: 'WORKER_TAKEN',
+                  workerId: worker.id,
+                  sessionId: active.id,
+                  lastDriver,
+                  lastSeenAt: lastSeenAt.toISOString(),
+                },
+              },
+            );
+          }
+        }
+        // Session.agentId keeps recording the ROLE-agent behind the casting
+        // (cor:agt:020:03); an agentRef naming a DIFFERENT agent is a client
+        // bug, refused rather than silently overridden.
+        if (agentId !== undefined && agentId !== worker.agentId) {
+          throw new GraphQLError(
+            'agentRef and workerRef disagree — the worker casts a different agent. Omit agentRef; it is derived from the worker.',
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+        agentId = worker.agentId;
+        workerId = worker.id;
+        // #1050 — an UNHELD name is held by the person who binds it. That is
+        // the claim path: casting holds nothing, so a fresh roster, a released
+        // name, or one cast by an App key all find their holder here.
+        //
+        // DEFERRED into the session-creating transaction below rather than done
+        // here (PR #1052 review, Codex P2): as a separate write it committed
+        // before `session.create` ran, so a create that then failed — a retried
+        // duplicate id, an invalid relation — left the caller holding a name
+        // they never bound. Claim and bind are one act and now commit together.
+        //
+        // Set for an App-KEY binder too, which claims nothing: it marks the
+        // worker as needing a re-check inside the transaction, so a key cannot
+        // bind a name a human claimed in the meantime.
+        if (!worker.heldByUserId) claimWorkerId = worker.id;
+        // #1029: wire the continuity chain. `prevSessionId` and
+        // `parentSessionId` have been in the schema since the beginning and
+        // unused, so the chain primitive existed with nothing writing it. An
+        // explicit input still wins: a caller stitching a sub-agent chain knows
+        // something this default does not.
+        //
+        // Deliberately the most recent ENDED session, matching
+        // Worker.continuity's definition of "previous" — with `force`, two
+        // stints can overlap, and chaining to a still-open one would record
+        // that a session succeeded another that had not finished.
+        if (input.prevSessionId === undefined || input.prevSessionId === null) {
+          const previous = await ctx.db.session.findFirst({
+            where: { workerId: worker.id, endedAt: { not: null }, deletedAt: null },
+            orderBy: { endedAt: 'desc' as const },
+            select: { id: true },
+          });
+          if (previous) derivedPrevSessionId = previous.id;
+        }
+      }
+
+      return ctx.db.$transaction(async (tx) => {
+        // Everything about the hold is settled INSIDE this transaction, so the
+        // decision and the session insert commit together. The row read far
+        // above is a snapshot; by now another bind may have claimed the name.
+        if (claimWorkerId) {
+          const refuseHeld = async (heldByUserId: string, note: string): Promise<never> => {
+            const [worker, holder] = await Promise.all([
+              tx.worker.findUnique({ where: { id: claimWorkerId! }, select: { name: true } }),
+              tx.user.findUnique({
+                where: { id: heldByUserId },
+                select: { handle: true, githubUsername: true },
+              }),
+            ]);
+            throw new GraphQLError(
+              `The name "${worker?.name ?? claimWorkerId}" ${note} ` +
+                `${holder?.handle ?? holder?.githubUsername ?? heldByUserId}. ` +
+                'Cast your own worker instead.',
+              {
+                extensions: {
+                  code: 'WORKER_HELD',
+                  workerId: claimWorkerId,
+                  heldBy: heldByUserId,
+                },
+              },
+            );
+          };
+
+          if (ctx.userId) {
+            // PARTICIPATION is rechecked immediately before the hold is granted
+            // (PR #1052 review, Codex P1). When `appId` came from an MCP
+            // active-App SELECTION and the worker is of that same App, neither
+            // gate above re-runs `isAppParticipant` — so a member whose access
+            // was revoked while their connection stayed open could still take a
+            // name and block the people who do belong. That is #1037's own rule
+            // ("deriving scope re-authorizes, it never assumes") applied to the
+            // write this PR adds, and a hold is standing, not just scope.
+            const app = await tx.app.findUnique({
+              where: { id: appId! },
+              select: { id: true, organizationId: true, ownerUserId: true },
+            });
+            if (!app || !(await isAppParticipant({ ...ctx, db: tx as unknown as Context['db'] }, app))) {
+              throw new GraphQLError(
+                'You are not a member of this worker\'s App, so you cannot take one of its names.',
+                { extensions: { code: 'FORBIDDEN' } },
+              );
+            }
+
+            // A SOFT-DELETED claimant must not take a name (Codex P2): a start
+            // already in flight when `deleteUserAccount` runs could otherwise
+            // land its claim after the deletion released everything, leaving an
+            // unauthenticatable tombstone holding the worker. The User row
+            // survives a soft delete, so the FK cannot catch this.
+            const claimant = await tx.user.findUnique({
+              where: { id: ctx.userId },
+              select: { deletedAt: true },
+            });
+            if (claimant?.deletedAt) {
+              throw new GraphQLError('This account is deleted and cannot take a worker name.', {
+                extensions: { code: 'FORBIDDEN' },
+              });
+            }
+
+            const claimed = await tx.worker.updateMany({
+              where: { id: claimWorkerId, heldByUserId: null },
+              data: { heldByUserId: ctx.userId, heldAt: new Date() },
+            });
+            // LOSING the race must refuse, not proceed. Both callers read
+            // `heldByUserId: null` and cleared the liveness check; the
+            // compare-and-set is what decides which took the name, and ignoring
+            // its result let the loser open a session as a name someone else
+            // now holds.
+            if (claimed.count === 0) {
+              const winner = await tx.worker.findUnique({
+                where: { id: claimWorkerId },
+                select: { heldByUserId: true },
+              });
+              if (winner?.heldByUserId && winner.heldByUserId !== ctx.userId) {
+                await refuseHeld(winner.heldByUserId, 'was claimed a moment before this bind by');
+              }
+            }
+          } else {
+            // An App-KEY binder claims nothing — it is not a person and can
+            // hold no name — but it must still lose the race rather than sit
+            // outside it (Codex P1). Without this re-read, a human claiming
+            // between the snapshot above and this transaction left the App key
+            // free to bind a name that had just become held.
+            const now = await tx.worker.findUnique({
+              where: { id: claimWorkerId },
+              select: { heldByUserId: true },
+            });
+            if (now?.heldByUserId) {
+              await refuseHeld(now.heldByUserId, 'was claimed before this bind by');
+            }
+          }
+        }
+        return tx.session.create({
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
-          appId: ctx.appId,
+          appId,
+          agentId,
+          workerId,
+          // #929 review P1: attribute the session to the calling user (the
+          // schema documents userId as "the developer in a DEVELOPER
+          // session"). Without it a session started outside any App context
+          // (appId null — the CLI coding case) was invisible to its own
+          // creator through both session read gates.
+          userId: ctx.userId ?? null,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
+          plan: input.plan,
           repo: input.repo,
           branch: input.branch,
           prNumber: input.prNumber,
@@ -76,7 +1004,42 @@ export const sessionMutations = {
           language: input.language,
           llmModel: input.llmModel,
           parentSessionId: input.parentSessionId,
-          prevSessionId: input.prevSessionId,
+          prevSessionId: input.prevSessionId ?? derivedPrevSessionId,
+          // #928 coding-session provenance.
+          transcriptPath: input.transcriptPath,
+          host: input.host,
+          tool: input.tool,
+        },
+        include: SESSION_INCLUDE,
+        });
+      });
+    },
+
+    // #931: set a live session's mutable provenance fields mid-session — a PR
+    // usually gets opened AFTER startSession already ran, so prNumber needs a
+    // write path that doesn't wait for endSession. Explicit null clears,
+    // omitted preserves. Deliberately id-only (sessions have no URN, so there
+    // is no ref form to accept — cor:api:140's "genuine PK" case). Any
+    // authorized update also bumps updatedAt, which is the liveness heartbeat
+    // the #930 inactivity reaper counts (an empty update is a valid "touch").
+    // Updates on an ENDED session stay allowed: a PR merge lands after the
+    // session ends, and late attribution is better than none.
+    updateSession: async (
+      _: unknown,
+      { id, prNumber, branch }: { id: string; prNumber?: number | null; branch?: string | null },
+      ctx: Context,
+    ) => {
+      const session = await ctx.db.session.findUnique({ where: { id } });
+      if (!session || session.deletedAt) {
+        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      requireSessionWriteAccess(ctx, session);
+      return ctx.db.session.update({
+        where: { id },
+        data: {
+          ...(prNumber !== undefined ? { prNumber } : {}),
+          ...(branch !== undefined ? { branch } : {}),
+          updatedBy: ctx.userId ?? ctx.clientId ?? null,
         },
         include: SESSION_INCLUDE,
       });
@@ -87,18 +1050,53 @@ export const sessionMutations = {
       {
         id,
         summary,
+        handoff,
         inputTokens,
         outputTokens,
         turnCount,
         errorCount,
-      }: { id: string; summary?: string; inputTokens?: number; outputTokens?: number; turnCount?: number; errorCount?: number },
+      }: { id: string; summary?: string; handoff?: string; inputTokens?: number; outputTokens?: number; turnCount?: number; errorCount?: number },
       ctx: Context,
     ) => {
-      return ctx.db.session.update({
-        where: { id },
-        data: { endedAt: new Date(), summary, inputTokens, outputTokens, turnCount, errorCount },
-        include: SESSION_INCLUDE,
+      // #931: same write gate as updateSession — this was previously ungated,
+      // so any authenticated principal holding a session id could end it and
+      // overwrite its summary (and free another driver's persona, since
+      // "taken" derives from active sessions post-#928).
+      const session = await ctx.db.session.findUnique({ where: { id } });
+      if (!session || session.deletedAt) {
+        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      requireSessionWriteAccess(ctx, session);
+
+      // #1029: the closing handoff, written BEFORE the end and only for a
+      // worker-bound session. Ordering is the whole safety property here — if
+      // this throws, the session is still open and the caller can retry or end
+      // without a handoff deliberately. Ending first and losing the prose is
+      // unrecoverable: the context that composed it is gone with the stint.
+      const handoffBody = handoff?.trim();
+      if (handoffBody) {
+        if (!session.workerId) {
+          throw new GraphQLError(
+            'A handoff belongs to a worker\'s continuity sequence, and this session is not bound to a worker.',
+            { extensions: { code: 'SESSION_NOT_WORKER_BOUND', sessionId: id } },
+          );
+        }
+        // The already-ended refusal and the per-session idempotence both live
+        // in writeSessionHandoff, so the MCP end path inherits them instead of
+        // reimplementing them (PR #1045 review).
+        await writeSessionHandoff(ctx, session.id, session.workerId, handoffBody);
+      }
+
+      // FIRST END WINS, decided by a guarded write rather than by the row read
+      // above: `endedAt` orders the continuity chain (both `Worker.continuity`'s
+      // "previous" and startSession's `prevSessionId` derivation key on it), so
+      // a late retry — or the reaper landing between this handler's read and
+      // its write — must not re-order a worker's history around a stint that
+      // finished long ago.
+      await endSessionFirstWins(ctx.db, id, {
+        summary, inputTokens, outputTokens, turnCount, errorCount,
       });
+      return ctx.db.session.findUniqueOrThrow({ where: { id }, include: SESSION_INCLUDE });
     },
 
     recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
@@ -1058,7 +2056,7 @@ export const sessionMutations = {
           throw e;
         }
 
-        const { memoryUrn: resolvedMemoryUrn, loc } = splitNodeUrn(targetNodeUrn);
+        const { memoryUrn: resolvedMemoryUrn, loc } = splitWholeNodeUrn(targetNodeUrn);
 
         // Find the memory by URN using case-insensitive matching (legacy `:` and canonical `::` forms).
         const parsedMemUrn = parseUrnInput(resolvedMemoryUrn.trim());
@@ -1111,6 +2109,10 @@ export const sessionMutations = {
         // preview so a dry run predicts THIS prompt rather than approximating
         // it. Behavior here is unchanged — the Mustache compile, the
         // routing-edge skip and the dangling-target skip all moved verbatim.
+        // #1061 — the targets the assembler actually INLINED (routing edges and
+        // empty-content targets are skipped), so the read events below describe
+        // what crossed the boundary rather than what the node links to.
+        const inlined: unknown[] = [];
         const assembled = await assembleRunNodePrompt(
           { ...node, loc },
           stringArgs ?? undefined,
@@ -1119,8 +2121,16 @@ export const sessionMutations = {
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
             compileTemplate: (content, data, memoryId) =>
               compileTemplate(content, data, memoryId, ctx.db, {}),
+            onTargetInlined: (target) => inlined.push(target),
           },
         );
+        // #1061 — the render-only branch of runTask (`!appRef`) returns the
+        // assembled bundle to the caller, so it is a read of the run node and
+        // of every dependency inlined into it — the same treatment the
+        // `renderRunNode` preview gets. The `action-run` event below is a
+        // separate question (how often was this run?), not a substitute
+        // (PR #1062 review — Codex).
+        recordNodeUsage(ctx.db, 'read', toUsageNodeRefs([node, ...inlined]), ctx);
 
         // Record usage event (fire-and-forget).
         ctx.db.usageEvent

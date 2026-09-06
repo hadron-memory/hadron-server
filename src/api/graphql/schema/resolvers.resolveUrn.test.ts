@@ -319,3 +319,147 @@ describe('Query.resolveUrn — #696 per-entity v2 shapes', () => {
     expect(composed).toBe(urn);
   });
 });
+
+/**
+ * #1104 — the memory branch's gate is `isOwnerOrOrgMember`, a generic
+ * org/owner predicate, applied to an entity whose access is CLASS-driven.
+ * Diagnosed by @Gil on portal#630 (a share grantee refused), and wrong in BOTH
+ * directions once measured: the same generic gate is too NARROW for a
+ * user-owned memory (it cannot see a share) and too WIDE for an org-owned
+ * personal one (it falls through to org membership, which no personal memory
+ * grants). Fixed by using `canReadMemoryRecord` — the same gate `Query.memory`
+ * uses, which is what makes the two addresses of one memory agree by
+ * construction rather than by a second hand-rolled copy.
+ *
+ * Both directions are asserted against `Query.memory` as well as against an
+ * expectation, because "these two agree" is the actual contract: the URN is the
+ * form we ask people to share, so it must not be the one address that differs.
+ */
+describe('Query.resolveUrn — the memory gate matches Query.memory (#1104)', () => {
+  /** Owner of the personal memories below; never the caller under test. */
+  let secretOwner: { id: string };
+  /** Org member holding a `reader` MemoryShare on the user-owned memory. */
+  let grantee: { id: string };
+  /** Org member with NO share — the too-wide direction. */
+  let bystander: { id: string };
+  let userOwnedPersonal: { id: string; urn: string };
+  let orgOwnedPersonal: { id: string; urn: string };
+
+  const ctxFor = (u: { id: string }): Context => ({ db, userId: u.id, roles: ['READER'] });
+
+  beforeEach(async () => {
+    secretOwner = await db.user.create({
+      data: { id: generateId(), githubId: 7310, githubUsername: `urnres-owner-${generateId().slice(-8)}`, roles: ['READER'] },
+    });
+    grantee = await db.user.create({
+      data: { id: generateId(), githubId: 7311, githubUsername: `urnres-grantee-${generateId().slice(-8)}`, roles: ['READER'] },
+    });
+    bystander = await db.user.create({
+      data: { id: generateId(), githubId: 7312, githubUsername: `urnres-bystander-${generateId().slice(-8)}`, roles: ['READER'] },
+    });
+    for (const u of [secretOwner, grantee, bystander]) {
+      await db.orgMember.create({
+        data: { id: generateId(), organizationId: org.id, userId: u.id, role: 'READER' },
+      });
+    }
+
+    // Free-standing / user-owned (spec 047): org NULL, ownerUserId = owner.
+    // This is the shape portal#630 hit — `hrn:mem:<user>:<slug>`.
+    userOwnedPersonal = await db.memory.create({
+      data: {
+        id: generateId(),
+        urn: `${secretOwner.id}:urnres-user-owned`,
+        name: 'urnres-user-owned',
+        class: 'personal',
+        userId: secretOwner.id,
+        ownerUserId: secretOwner.id,
+      },
+    });
+    await db.memoryShare.create({
+      data: {
+        memoryId: userOwnedPersonal.id,
+        granteeId: grantee.id,
+        grantorId: secretOwner.id,
+        role: 'reader',
+      },
+    });
+
+    // Org-owned personal: org SET, ownerUserId NULL — the shape that makes the
+    // generic gate fall through to org membership.
+    orgOwnedPersonal = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${ORG_URN}:urnres-org-owned-personal`,
+        name: 'urnres-org-owned-personal',
+        class: 'personal',
+        userId: secretOwner.id,
+      },
+    });
+  });
+
+  it('resolves a SHARED memory for its grantee — the URN must not be the one address that fails', async () => {
+    // portal#630. The grantee can already list this memory under "shared with
+    // me", open it at /app/memories/<pk> and read its nodes; only /app/u/<urn>
+    // refused, and the URN is the form we ask people to hand each other.
+    const ctx = ctxFor(grantee);
+    await expect(
+      resolvers.Query.memory({}, { ref: userOwnedPersonal.id }, ctx),
+    ).resolves.toMatchObject({ id: userOwnedPersonal.id });
+    const r = await resolvers.Query.resolveUrn(
+      {},
+      { urn: `urn:memory:${userOwnedPersonal.urn}` },
+      ctx,
+    );
+    expect(r).toEqual({ kind: 'memory', id: userOwnedPersonal.id });
+  });
+
+  it('still refuses a user-owned memory to a non-grantee', async () => {
+    // The narrowing control: the fix must admit the grantee WITHOUT admitting
+    // every org member, or it trades one direction of the bug for the other.
+    const ctx = ctxFor(bystander);
+    // Query.memory THROWS Forbidden on a denied record (resolveUrn collapses
+    // the same refusal to null, deliberately — it must not disclose existence).
+    await expect(
+      resolvers.Query.memory({}, { ref: userOwnedPersonal.id }, ctx),
+    ).rejects.toThrow(/Forbidden/);
+    const r = await resolvers.Query.resolveUrn(
+      {},
+      { urn: `urn:memory:${userOwnedPersonal.urn}` },
+      ctx,
+    );
+    expect(r).toBeNull();
+  });
+
+  it('does NOT resolve another member\'s ORG-OWNED personal memory — an existence oracle', async () => {
+    // The other direction, found by reading the gate rather than the issue.
+    // `isOwnerOrOrgMember` short-circuits to org membership when ownerUserId is
+    // NULL — but NO personal memory is readable by org membership
+    // (`cor:acl:010:01`: personal is owner-only). So resolveUrn handed any org
+    // member the memory's PK for a memory `Query.memory` then refuses to open.
+    // Not a content leak — a confirmation that a named personal memory EXISTS,
+    // plus its id, which is exactly what collapsing not-found and no-access to
+    // null is supposed to prevent.
+    const ctx = ctxFor(bystander);
+    await expect(
+      resolvers.Query.memory({}, { ref: orgOwnedPersonal.id }, ctx),
+    ).rejects.toThrow(/Forbidden/);
+    const r = await resolvers.Query.resolveUrn(
+      {},
+      { urn: `urn:memory:${orgOwnedPersonal.urn}` },
+      ctx,
+    );
+    expect(r).toBeNull();
+  });
+
+  it('still resolves the owner\'s OWN personal memory', async () => {
+    // The second narrowing control — the owner is the one principal a
+    // personal memory admits, so a fix that denies them denies everybody.
+    const ctx = ctxFor(secretOwner);
+    for (const m of [userOwnedPersonal, orgOwnedPersonal]) {
+      expect(
+        await resolvers.Query.resolveUrn({}, { urn: `urn:memory:${m.urn}` }, ctx),
+      ).toEqual({ kind: 'memory', id: m.id });
+    }
+  });
+});

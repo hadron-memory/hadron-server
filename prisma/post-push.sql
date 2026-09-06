@@ -36,6 +36,17 @@ ALTER TABLE memories
     OR (class IN ('knowledge', 'group', 'personal', 'private'))
   );
 
+-- #723: shared_memory_of_agent_id IDENTIFIES an App's runtime `shared`
+-- app-class memory (the find-or-create key that replaced the deterministic
+-- `…:shared` urn), so it is meaningful only on an App-scoped app-class row.
+-- NULL everywhere else — including the name-addressable createMemoryInApp
+-- app-class memories.
+ALTER TABLE memories
+  DROP CONSTRAINT IF EXISTS chk_memory_shared_agent_scope;
+ALTER TABLE memories
+  ADD CONSTRAINT chk_memory_shared_agent_scope
+  CHECK (shared_memory_of_agent_id IS NULL OR (class = 'app' AND app_id IS NOT NULL));
+
 -- 023-app-shape FR-024: bidirectional invariant — class='group' ⇔
 -- visibility='GROUP'.
 ALTER TABLE memories
@@ -215,6 +226,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_app_name_uniq
   ON ai_service_configs (app_id, name) WHERE app_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ai_service_configs_agent_name_uniq
   ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
+
+-- #974 Worker model (cor:dmo:050:11, cor:agt:020:02 v0.0.3): a worker's name
+-- is unique per App, case-insensitively — a functional unique, so it lives
+-- here and in the 20260814130000_worker_model migration (Prisma cannot
+-- express it). Deliberately NOT filtered on retirement: a name binds to one
+-- casting forever (PR trailers and chat archives reference it), so a retired
+-- worker — and an uninstalled agent's surviving casting — keep the name
+-- reserved.
+CREATE UNIQUE INDEX IF NOT EXISTS workers_app_name_uniq
+  ON workers (app_id, lower(name));
+
+-- The mention-token unique that briefly followed here
+-- (workers_app_mention_token_uniq, PR #978 review) was REMOVED by decision
+-- (Holger, 2026-08-14): cor:agt:020:02 keeps ONE uniqueness layer — the name.
+-- Mention-token collisions ("Mary Jane" / "Mary-Jane" → @mary-jane) are
+-- accepted, as they were under the persona model. The DROP keeps a dev DB
+-- that applied it in step; the 20260814150000 migration does the same for
+-- migrated databases.
+DROP INDEX IF EXISTS workers_app_mention_token_uniq;
+
+-- #991 added a SECOND worker unique — `workers_app_slug_uniq` on (app_id, slug),
+-- the URN atom. It is deliberately NOT declared here: it is a plain column pair,
+-- so Prisma CAN model it, and it lives in schema.prisma's `@@unique`. Declaring
+-- it here too would make every `db push` see it as drift and drop it.
+--
+-- It is also not the mention-token unique returning. That one REFUSED a cast;
+-- this one never does — the slug mint iterates (`iris`, `iris-2`, …) until it
+-- finds a free atom, so the name collision above stays the only allocation
+-- primitive a caller can observe. The index is a race guard: two concurrent
+-- casts deriving one base slug must not end up sharing a URN.
+
+-- Cleanup for #975-pushed dev databases (`db push` does not run migrations):
+-- the superseded persona-as-agent name machinery. `persona_name` /
+-- `team_app_id` themselves are gone from schema.prisma, so `db push` drops
+-- the columns (and with them the FK); these guarded DROPs only clear the
+-- functional index and CHECK that Prisma cannot see. No-ops on fresh DBs.
+DROP INDEX IF EXISTS agents_team_persona_name_uniq;
+ALTER TABLE "agents" DROP CONSTRAINT IF EXISTS "chk_agent_persona_team_app";
+DROP INDEX IF EXISTS agents_org_persona_name_uniq;
+DROP INDEX IF EXISTS agents_owner_persona_name_uniq;
 
 -- ─── 325-user-urn: handle is the hrn:user:<handle> slug ──────────────────
 -- Case-insensitive uniqueness on the handle (lowercase-canonical), so a new

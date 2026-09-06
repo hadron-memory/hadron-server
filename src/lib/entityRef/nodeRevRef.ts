@@ -51,7 +51,7 @@ export function composeNodeRevUrn(memUrn: string, loc: string, revNo: number): s
 }
 
 export async function resolveNodeRevRef(
-  db: Pick<PrismaClient, 'nodeRevision' | 'node' | 'memory'>,
+  db: Pick<PrismaClient, 'nodeRevision' | 'node' | 'memory' | 'urnAlias'>,
   ref: string,
 ): Promise<{ id: string }> {
   if (isIdFunc(ref)) {

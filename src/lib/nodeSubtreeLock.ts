@@ -139,6 +139,32 @@ export async function lockPathForCreateUnder(
 }
 
 /**
+ * Acquire the transaction-scoped advisory lock for WRITING the node at `loc`
+ * — the same key `lockNodeForDelete` and an ancestor-create use, so all three
+ * serialize against each other on that loc.
+ *
+ * Take it AFTER `lockAncestorsForCreate` (root→leaf order is what keeps the
+ * whole family deadlock-free), and inside the same READ COMMITTED transaction
+ * as the write itself.
+ *
+ * Why a writer needs it (#976 / PR #977 review, both bots): an upsert that
+ * decides "create or overwrite?" from a read taken BEFORE the transaction can
+ * be wrong by the time it writes — a concurrent create lands in between, and
+ * the upsert then silently overwrites that row believing it created it. Holding
+ * this lock and re-reading under it makes the decision authoritative: whoever
+ * gets the lock second sees the first's committed row (READ COMMITTED takes a
+ * fresh snapshot after the grant) and snapshots it to revision history before
+ * overwriting.
+ */
+export async function lockLocForWrite(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  loc: string,
+): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
+}
+
+/**
  * Acquire the transaction-scoped advisory lock for DELETING the node at `loc`,
  * keyed identically to the lock a descendant-create takes on this loc as one of
  * its ancestors (#664). A delete therefore blocks — and is blocked by — any

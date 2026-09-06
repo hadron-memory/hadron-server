@@ -17,6 +17,46 @@ import { resolvers, type Context } from './resolvers.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { compileTemplate } from '../../../lib/template.js';
 
+/**
+ * Wait for the fire-and-forget usage recorder to write a read event for each of
+ * `ids` (#1069).
+ *
+ * Scoped to THESE node ids on purpose. The previous form polled an unscoped
+ * `count({ type: 'read' }) >= n`, which any read event satisfies — including
+ * stale ones from another test — so the wait could finish before this test's
+ * own writes landed and the assertion would then read somebody else's rows.
+ * That is the #1069 flake: `expected [ null, null ] to include <id>`, where the
+ * nulls are `nodeId` blanked by the node FK's `SetNull`.
+ *
+ * A count is the wrong question. "Have MY events arrived?" is the right one, and
+ * it is the question `mcp/server.batchRead.test.ts` was already asking — which
+ * is why that file never flaked.
+ */
+async function waitForReads(ids: string[]): Promise<void> {
+  let seen: string[] = [];
+  for (let i = 0; i < 50; i++) {
+    seen = (
+      await db.usageEvent.findMany({
+        where: { type: 'read', nodeId: { in: ids } },
+        select: { nodeId: true },
+        distinct: ['nodeId'],
+      })
+    ).map((r) => r.nodeId!);
+    if (seen.length >= ids.length) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  // Throw rather than fall through (@copilot, PR #1138). Falling through hands
+  // the failure to whatever assertion runs next, which reports a missing id and
+  // not the fact that the recorder never wrote — and a future edit that stops
+  // asserting on the ids would turn a broken recorder into a passing test.
+  const missing = ids.filter((id) => !seen.includes(id));
+  throw new Error(
+    `Timed out after 1s waiting for read UsageEvents on ${missing.length} node(s): ` +
+      `${missing.join(', ')}. Recording is fire-and-forget, so either it never ran or it failed ` +
+      `silently in the recorder's .catch().`,
+  );
+}
+
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
@@ -128,11 +168,102 @@ describe('renderRunNode — the render half of the run pipeline (#818)', () => {
 
 describe('renderRunNode — it is a READ (#818)', () => {
   it('records NO action-run UsageEvent, unlike the MCP tool', async () => {
-    const before = await db.usageEvent.count();
     await render(action.id, { subject: 'x' });
     // Metering a preview would inflate the ledger with actions nobody took.
     expect(await db.usageEvent.count({ where: { type: 'action-run' } })).toBe(0);
-    expect(await db.usageEvent.count()).toBe(before);
+  });
+
+  it('records reads ONLY for dependencies actually inlined, not every edge (#1061)', async () => {
+    // The assembler skips a target with no content, so recording from the edge
+    // list would inflate the read series for a node the bundle never carried
+    // (PR #1062 review — Codex P2, Copilot).
+    const empty = await createDbNode(db, {
+      loc: 'reference:empty', memoryId: mem.id, name: 'Empty', content: '',
+    });
+    await db.edge.create({
+      data: {
+        id: generateId(), memoryId: mem.id, sourceId: action.id, targetId: empty.id,
+        name: 'documents', loc: 'actions:review:documents:reference:empty',
+      },
+    });
+
+    const out = await render(action.id, { subject: 'x' });
+    expect(out).toContain('PLAYBOOK BODY');
+    expect(out).not.toContain('Empty');
+
+    await waitForReads([action.id, dep.id]);
+    // Read EVERY event for the negative assertion — the wait above is scoped to
+    // what must appear, this is scoped to nothing so `empty` cannot hide.
+    const reads = await db.usageEvent.findMany({
+      where: { type: 'read' },
+      select: { nodeId: true },
+    });
+    const ids = reads.map((r) => r.nodeId);
+    expect(ids).toContain(action.id); // the run node
+    expect(ids).toContain(dep.id);    // the inlined dependency
+    expect(ids).not.toContain(empty.id); // skipped by the assembler → no read
+  });
+
+  it('is not fooled by stale read events left by another test (#1069)', async () => {
+    // The CI flake this pins, reproduced rather than imagined: two `[null,
+    // null]` read events plus a recorder slower than the poll.
+    //
+    // Where the stale rows come from: usage recording is fire-and-forget, so a
+    // previous test's write could land in the middle of `cleanDb` — after the
+    // usage wipe, in time for `node.deleteMany()` to blank its `nodeId` through
+    // the FK's SetNull. `cleanDb` now clears usage events LAST so that window is
+    // gone, but the wait must not depend on that: an unscoped
+    // `count({type:'read'}) >= 2` is satisfied by ANY two events, so it stops
+    // waiting before this test's own writes land and then asserts on them.
+    await db.usageEvent.createMany({
+      data: [
+        { id: generateId(), type: 'read', nodeId: null, memoryId: mem.id },
+        { id: generateId(), type: 'read', nodeId: null, memoryId: mem.id },
+      ],
+    });
+
+    // Make the real insert lose the race deterministically — 400ms against a
+    // 20ms poll interval — instead of hoping to catch it, which is what made
+    // this a once-in-CI flake rather than a test.
+    const passThrough = db.usageEvent.createMany.bind(db.usageEvent);
+    const slow = vi
+      .spyOn(db.usageEvent, 'createMany')
+      .mockImplementation((async (args: Parameters<typeof passThrough>[0]) => {
+        await new Promise((r) => setTimeout(r, 400));
+        return passThrough(args);
+      }) as typeof db.usageEvent.createMany);
+    try {
+      await render(action.id, { subject: 'x' });
+      await waitForReads([action.id, dep.id]);
+    } finally {
+      slow.mockRestore();
+    }
+
+    const ids = (
+      await db.usageEvent.findMany({ where: { type: 'read' }, select: { nodeId: true } })
+    ).map((r) => r.nodeId);
+    expect(ids).toContain(action.id);
+    expect(ids).toContain(dep.id);
+    // The stale rows are still sitting there: the wait stepped over them rather
+    // than being satisfied by them, which is the whole property.
+    expect(ids.filter((i) => i === null)).toHaveLength(2);
+  });
+
+  it('DOES record read events — a preview still returns node content (#1061)', async () => {
+    // #1061 narrowed the assertion above from "no UsageEvent at all" to "no
+    // action-run". The two are different questions: the #818 contract is that
+    // a preview must not be metered as an EXECUTION, which it still isn't.
+    // But the render hands the caller the run node's content plus every
+    // inlined dependency, and those reads genuinely happened — so leaving them
+    // out would make this the one content-returning surface on the whole
+    // GraphQL API that stays invisible in the usage series.
+    await render(action.id, { subject: 'x' });
+    await waitForReads([action.id]);
+    const reads = await db.usageEvent.findMany({
+      where: { type: 'read' },
+      select: { nodeId: true },
+    });
+    expect(reads.map((r) => r.nodeId)).toContain(action.id);
   });
 
   it('writes nothing to the node', async () => {

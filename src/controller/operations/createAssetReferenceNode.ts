@@ -34,6 +34,7 @@ import { canReadMemory, canWriteToMemory } from '../../mcp/access-control.js';
 import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
 import { writeNodeCore } from '../../api/graphql/schema/resolvers.mutation.node.js';
 import { splitNodeUrn } from '../../lib/urn.js';
+import { splitWholeNodeUrn } from '../../lib/splitNodeUrnTolerant.js';
 import { emitAssetUrnV2 } from '../../lib/urnEmit.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { AssetUploadError } from './beginAssetUpload.js';
@@ -41,7 +42,11 @@ import type { AssetCallerContextV2 } from './beginAssetUpload.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 export interface CreateAssetReferenceNodeInput {
-  /** Asset id, or its URN (`<memory.urn>:assets:<asset.id>`). */
+  /**
+   * Asset id, or its URN (`hrn:asset:<root>:<mem...>:assets:<asset.id>`, plus
+   * the two degraded shapes `Asset.urn` can emit — see its SDL docstring).
+   * Parsed by {@link assetIdFromRef}, which only needs the `assets` marker.
+   */
   assetRef: string;
   /**
    * Fully-qualified node URN (`hrn:node:<root>:<memory>:<loc>`) for the
@@ -110,7 +115,7 @@ export async function createAssetReferenceNode(
   }
 
   // ── 2. Gate on the TARGET memory's WRITE access ──
-  const { memoryUrn, loc } = splitNodeUrn(input.nodeUrn);
+  const { memoryUrn, loc } = splitWholeNodeUrn(input.nodeUrn);
   let targetMemoryId: string;
   try {
     ({ id: targetMemoryId } = await resolveMemoryRef(db, memoryUrn));

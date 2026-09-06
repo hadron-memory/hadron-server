@@ -23,6 +23,7 @@ import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { MemoryNotFoundError } from '../asset/gate.js';
 import { resolveLegacyAlias } from './legacyAlias.js';
+import { findLiveUrnAliasTargets, dedupeById } from '../urnAlias.js';
 
 type WhereClause = {
   id: string;
@@ -35,7 +36,7 @@ type WhereClause = {
 }
 
 export async function resolveMemoryRef(
-  db: Pick<PrismaClient, 'memory'>,
+  db: Pick<PrismaClient, 'memory' | 'urnAlias'>,
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
@@ -69,14 +70,26 @@ export async function resolveMemoryRef(
   // may be a LEGACY reference to a row since migrated to v2 — redirect via
   // `legacyUrn`. Inert until the migration populates it (ID inputs skip this).
   if (lookupUrn !== null) {
-    const aliased = resolveLegacyAlias(
-      ref,
-      await db.memory.findMany({
+    // #1079 rename map read ALONGSIDE the #697 column, deduplicated by id:
+    // the migration backfilled one from the other, so a bare concat would hand
+    // the same row to the ambiguity check twice and refuse a URN that resolves
+    // to exactly one memory.
+    // This is the arm that keeps published NODE urns alive across a memory
+    // rename: a node URN carries its memory's slug and resolves through here.
+    const live = (ids: string[]) =>
+      db.memory.findMany({
+        where: { id: { in: ids }, ...deletedFilter },
+        select: { id: true },
+      });
+    const [legacyRows, aliasRows] = await Promise.all([
+      db.memory.findMany({
         where: { legacyUrn: lookupUrn, ...deletedFilter },
         select: { id: true },
         take: 2,
       }),
-    );
+      findLiveUrnAliasTargets(db, 'MEMORY', lookupUrn, live),
+    ]);
+    const aliased = resolveLegacyAlias(ref, dedupeById(legacyRows, aliasRows));
     if (aliased) return aliased;
   }
   throw new MemoryNotFoundError(ref);

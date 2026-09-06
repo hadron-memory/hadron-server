@@ -24,6 +24,7 @@ import { typeDefs } from './typeDefs.js';
 const EXPECTED_REF_ARGS: Record<string, string[]> = {
   updateAgent: ['ref'],
   deleteAgent: ['ref'],
+  repairAgentSystemMemory: ['agentRef'],
   addMemoryToAgent: ['agentRef', 'memoryRef'],
   updateAgentMemoryRole: ['agentRef', 'memoryRef'],
   removeMemoryFromAgent: ['agentRef', 'memoryRef'],
@@ -33,6 +34,14 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   createAppKey: ['appRef'],
   createApp: ['orgRef', 'agentRef'],
   installAgentIntoApp: ['appRef', 'agentRef'],
+  // #1050: teamAgentRef removed — casting reads no system memory, so the
+  // argument had become accepted-and-ignored.
+  castWorker: ['appRef', 'agentRef'],
+  retireWorker: ['workerRef'],
+  deleteWorker: ['workerRef'],
+  createTeamChatMessage: ['appRef', 'sessionRef'],
+  recordTeamWork: ['appRef', 'sessionRef'],
+  updateTeamCollections: ['appRef'],
   uninstallAgentFromApp: ['appRef', 'agentRef'],
   addAgentToApp: ['appRef', 'agentRef'],
   removeAgentFromApp: ['appRef', 'agentRef'],

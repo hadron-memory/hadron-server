@@ -18,6 +18,7 @@
 
 import { GraphQLError } from 'graphql';
 import { splitNodeUrn } from '../../../lib/urn.js';
+import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -89,7 +90,7 @@ export const importNodeMutations = {
       // splitNodeUrn self-validates qualification (spec 022) and returns the
       // bare memory URN — resolve that to an id here so a bad memory fails
       // before any network fetch.
-      const split = splitNodeUrn(input.nodeUrn as string);
+      const split = splitWholeNodeUrn(input.nodeUrn as string);
       ({ id: memoryId } = await resolveMemoryRef(ctx.db, split.memoryUrn));
       loc = split.loc;
     } else {

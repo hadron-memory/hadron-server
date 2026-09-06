@@ -482,6 +482,38 @@ describe('myChats', () => {
     expect(chats.map((c) => c.loc)).toEqual([c1.chatId]);
   });
 
+  it('#1115: summarizationNeeded is ALWAYS null, including at the old trigger points', async () => {
+    // The trigger fired at every 20th message and asked the caller to produce a
+    // summary — which `saveChatSummary` then stored as a node that the model
+    // reads back as an ordinary USER turn, beside the messages it summarises.
+    // So the loop grew the transcript it was supposed to compress.
+    //
+    // Disarmed rather than removed (@Holger, 2026-09-04): hadron-portal calls
+    // `saveChatSummary` and reads this field, and three hadron-docs pages
+    // document it, so returning null breaks the loop at its first link without
+    // a breaking schema change.
+    //
+    // Driven to 20 and 40 specifically — the exact counts that used to fire.
+    // A test that only sent a couple of messages would pass against the old
+    // code too and prove nothing.
+    const start = await resolvers.Mutation.startChat(
+      {},
+      { agentId: agent.id },
+      userCtx(adminUser.id),
+    );
+    let last: { summarizationNeeded?: unknown } | null = null;
+    for (let i = 1; i <= 40; i += 1) {
+      last = await resolvers.Mutation.sendChatMessage(
+        {},
+        { chatId: start.chatId, userMessage: `turn ${i}` },
+        userCtx(adminUser.id),
+      );
+      expect(last?.summarizationNeeded ?? null).toBeNull();
+    }
+    // Named explicitly so the failure says which boundary broke.
+    expect(last?.summarizationNeeded ?? null).toBeNull();
+  }, 60_000);
+
   it('derives the title from the first user message', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
@@ -898,7 +930,9 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
 
     const sharedMem = await db.memory.findUniqueOrThrow({ where: { id: chat1.memoryId } });
     expect(sharedMem.class).toBe('app');
-    expect(sharedMem.urn).toMatch(/:shared$/);
+    // #723: flat single-atom v2 urn; the (app, agent) pairing lives in columns.
+    expect(sharedMem.urn).toMatch(/^[^:]+:[^:]+-shared$/);
+    expect(sharedMem.sharedMemoryOfAgentId).toBe(agent.id);
 
     // Only one app-class memory provisioned per App (idempotency).
     const all = await db.memory.findMany({

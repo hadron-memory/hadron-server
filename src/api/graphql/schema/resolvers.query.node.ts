@@ -39,6 +39,8 @@ import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
+import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
+import { requireWorkerReadAccess } from './resolvers.worker.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -57,13 +59,24 @@ import {
   requireRole,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  isAppParticipant,
+  resolveAppTeamSpaceMemoryIds,
   isOwnerOrOrgMember,
+  canReadMemoryRecord,
   getAccessibleMemoryIds,
   memoryAccessFilter,
   isMemoryReadableCached,
   loadMemoryUrn,
 } from './resolvers.helpers.js';
+import { getAppMemoryAccess, canReadMemory, getMemoryAccess } from '../../../mcp/access-control.js';
+import { type AuthContext } from '../../../middleware/auth.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import {
+  recordNodeRead,
+  recordNodeUsage,
+  toUsageNodeRef,
+  toUsageNodeRefs,
+} from '../../../lib/usageRecorder.js';
 
 export const nodeQueries = {
     /**
@@ -173,7 +186,9 @@ export const nodeQueries = {
      * A QUERY, not a mutation (the issue left this open): it is
      * side-effect-free. Unlike the MCP tool it records NO `action-run`
      * UsageEvent — metering a preview would inflate the ledger with actions
-     * nobody took.
+     * nobody took. It DOES record `read` events (#1061) for the run node and
+     * every dependency inlined into the bundle: not being an execution says
+     * nothing about whether content was returned, and it was.
      *
      * Assembles with `assembleRunNodePrompt` — the SAME function `runTask`
      * executes (Mustache via compileTemplate; flow-routing edges skipped) —
@@ -241,11 +256,25 @@ export const nodeQueries = {
           )
         : undefined;
 
+      // #1061 — a render returns the node's assembled content, so it counts as
+      // a read of the run node AND of every dependency inlined into the bundle.
+      // Collected from the assembler's own `onTargetInlined` hook rather than
+      // from `visibleEdges`: the assembler ALSO skips routing edges and
+      // empty-content targets (PR #1062 review — Codex P2, Copilot), so
+      // recording the gate's output would count reads for content that never
+      // crossed the boundary. Recorded AFTER assembly, so a compileTemplate
+      // failure records nothing at all.
+      //
+      // This resolver deliberately records no `action-run` event — see the doc
+      // comment — but that is about metering an execution, not about node
+      // reads, which did happen.
+      const inlined: unknown[] = [];
+
       // #858 review (Codex P1): assemble with the SAME function runTask
       // executes — Mustache via compileTemplate, routing edges skipped — not
       // the legacy MCP bundle, which does a literal replaceAll and inlines
       // every edge. A preview that disagrees with the run is worse than none.
-      return assembleRunNodePrompt(
+      const bundle = await assembleRunNodePrompt(
         { ...node, outgoingEdges: visibleEdges } as never,
         stringArgs,
         {
@@ -253,8 +282,11 @@ export const nodeQueries = {
             loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
           compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
             compileTemplate(content, data, memoryId, ctx.db, {}),
+          onTargetInlined: (target) => inlined.push(target),
         },
       );
+      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs([node, ...inlined]), ctx);
+      return bundle;
     },
 
     // Spec: cor:api:180 — cross-entity URN resolution
@@ -307,12 +339,48 @@ export const nodeQueries = {
           } catch {
             return null;
           }
+          // #1104 — the RECORD gate, not the generic org/owner one this branch
+          // used to call, and not the node-content gate either. `resolveUrn`
+          // hands back a memory REFERENCE that the caller then opens as a
+          // record, so `findings:record-vs-node-content-memory-gate` picks the
+          // record gate — and using the same gate `Query.memory` uses is what
+          // makes a memory's two addresses agree by construction rather than by
+          // a second hand-rolled copy.
+          //
+          // `isOwnerOrOrgMember` is a generic org/owner predicate, and a memory
+          // is the one entity here whose access is CLASS-driven. It was wrong in
+          // BOTH directions, which is what a generic gate on a specific model
+          // looks like:
+          //   - too NARROW: it cannot see a MemoryShare, so a grantee who can
+          //     list the memory, open it by PK and read its nodes was refused at
+          //     `/app/u/<urn>` — the one address we ask people to hand around
+          //     (portal#630).
+          //   - too WIDE: with `ownerUserId` NULL it falls through to ORG
+          //     MEMBERSHIP, which no personal memory grants (`cor:acl:010:01`).
+          //     Any org member could resolve a colleague's org-owned personal
+          //     memory to its PK — not content, but a confirmation that it
+          //     exists, which is precisely what collapsing not-found and
+          //     no-access to null exists to prevent.
+          //
+          // `deletedAt` is checked here rather than left to the gate: a
+          // soft-deleted memory must resolve to null like a missing one.
           const memory = await ctx.db.memory.findUnique({
             where: { id },
-            select: { organizationId: true, ownerUserId: true },
+            select: {
+              id: true,
+              class: true,
+              userId: true,
+              ownerUserId: true,
+              organizationId: true,
+              appId: true,
+              // Load-bearing: `canReadMemoryRecord`'s share path reads it, and
+              // omitting it silently refuses every grantee.
+              userMemoryOfAgentId: true,
+              deletedAt: true,
+            },
           });
-          if (!memory) return null;
-          if (!(await isOwnerOrOrgMember(ctx, memory))) return null;
+          if (!memory || memory.deletedAt) return null;
+          if (!(await canReadMemoryRecord(ctx, memory))) return null;
           return { kind: 'memory', id };
         }
         case 'node': {
@@ -442,6 +510,35 @@ export const nodeQueries = {
             ...(fragment ? { fragment } : {}),
           };
         }
+        case 'worker': {
+          // #991: hrn:worker:<root>:<app-slug>:<worker-slug>.
+          let id: string;
+          try {
+            ({ id } = await resolveWorkerRef(ctx.db, baseUrn));
+          } catch {
+            return null;
+          }
+          const worker = await ctx.db.worker.findUnique({
+            where: { id },
+            select: { appId: true },
+          });
+          if (!worker) return null;
+          const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
+          if (!app || app.deletedAt) return null;
+          // The SHARED worker read gate, not a hand-rolled copy — a bespoke
+          // admin-or-member check here would drift from the `workers` query's
+          // (CLAUDE.md authorization invariants). App participants at any role,
+          // the App's own key, or the owner of a user-owned App.
+          try {
+            await requireWorkerReadAccess(ctx, app);
+          } catch {
+            return null;
+          }
+          // A RETIRED worker still resolves: retirement never frees the name or
+          // slug (cor:agt:020:02), and history — PR trailers, chat archives —
+          // must keep resolving.
+          return { kind: 'worker', id, organizationId: app.organizationId };
+        }
         case 'noderev': {
           // #696: hrn:noderev:<root>:<mem>:<loc...>:<rev> (end-anchored).
           let id: string;
@@ -507,13 +604,26 @@ export const nodeQueries = {
       const finish = async <T extends { content: string | null; data: unknown; memoryId: string }>(
         node: T,
       ) => {
+        // #1061 — every dispatch form of this query funnels its ONE successful
+        // return through `finish`, so this is the single place a `read` is
+        // recorded for the canonical node read (and for `nextNode`, which
+        // delegates here). A denied or missing ref returns null earlier and
+        // records nothing — an event must never name a node the caller could
+        // not read (#825).
+        //
+        // Recorded at the END, not the top: `decryptNodesBatch` and
+        // `compileTemplate` can both throw (a missing session key, an
+        // unresolvable template reference), and the caller then gets an error
+        // instead of content (PR #1062 review — Copilot).
         await decryptNodesBatch(ctx.db, [node]);
         if (!raw && node.content?.includes('{{')) {
           const compiled = await compileTemplate(
             node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
           );
+          recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
           return { ...node, content: compiled };
         }
+        recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
         return node;
       };
 
@@ -636,6 +746,11 @@ export const nodeQueries = {
         }
       }
       await decryptNodesBatch(ctx.db, [node]);
+      // #1061 — an export hands the caller the node's full content, so it is a
+      // read like any other. Recorded in each SUCCESSFUL format branch below
+      // rather than here: the PDF path calls the external hadrontool-pdf
+      // service and `renderNodeExport` can throw, and a failed export returned
+      // no content (PR #1062 review — Copilot).
       const memory = await ctx.db.memory.findUnique({
         where: { id: node.memoryId },
         select: { urn: true },
@@ -652,6 +767,7 @@ export const nodeQueries = {
           node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
         const { base64, bytes } = await renderMarkdownToPdf(markdown, { title: node.name });
         const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
+        recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
         return {
           format: 'PDF',
           mimeType: 'application/pdf',
@@ -684,6 +800,7 @@ export const nodeQueries = {
       );
 
       const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
+      recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
       return {
         format: fmt,
         mimeType,
@@ -908,6 +1025,17 @@ export const nodeQueries = {
         where: f.where ?? null,
       };
 
+      // #1061 — one `read` per node this query hands back, across every branch
+      // below (browse, keyword, regex, vector, hybrid, and the neighbours an
+      // `expand` appends). A search that returns 30 hits IS thirty node reads:
+      // the unit of the usage series is node content returned, not calls made,
+      // so a caller that reads 30 nodes through one search and one that reads
+      // them one at a time land in the same place. Every branch has already
+      // scoped its rows to the caller's readable memories before reaching here.
+      const recordSearchHits = (hits: readonly { node: unknown }[]): void => {
+        recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(hits.map((h) => h.node)), ctx);
+      };
+
       // ── No query → filtered list (subsumes `nodes`) ──
       if (!hasQuery) {
         // A `where` predicate (JSONB the Prisma query can't express) OR a
@@ -934,10 +1062,9 @@ export const nodeQueries = {
           await decryptNodesBatch(ctx.db, rows);
           const byId = new Map(rows.map((n) => [n.id, n]));
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
-          return {
-            hits: ordered.map((n) => ({ node: n, score: null, vector: null })),
-            passages: [], total: null, reason: null, degraded: null,
-          };
+          const browseHits = ordered.map((n) => ({ node: n, score: null, vector: null }));
+          recordSearchHits(browseHits);
+          return { hits: browseHits, passages: [], total: null, reason: null, degraded: null };
         }
         const orderBy =
           sort === 'seq' ? { seq: 'asc' as const }
@@ -951,8 +1078,10 @@ export const nodeQueries = {
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
+        const listHits = rows.map((n) => ({ node: n, score: null, vector: null }));
+        recordSearchHits(listHits);
         return {
-          hits: rows.map((n) => ({ node: n, score: null, vector: null })),
+          hits: listHits,
           passages: [],
           total: null,
           reason: null,
@@ -1048,6 +1177,7 @@ export const nodeQueries = {
             }
           }
         }
+        recordSearchHits(hits);
         return { hits, passages: [], total: null, reason, degraded };
       };
 
@@ -1097,6 +1227,7 @@ export const nodeQueries = {
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
           }
         }
+        recordSearchHits(hits);
         return { hits, passages: [], total: null, reason, degraded };
       };
 
@@ -1279,6 +1410,20 @@ export const nodeQueries = {
           include: { memory: { select: { urn: true } } },
         });
         const parentById = new Map(parents.map((p) => [p.id, p]));
+        // #1061 — chunk granularity returns passages rather than whole nodes,
+        // but the passage text IS node content, so each DISTINCT parent counts
+        // once (not once per passage: three chunks of one node is one node's
+        // content read, and per-chunk counting would make a node's read count
+        // depend on how finely it happens to be chunked). Scoped to the parents
+        // that survive `allowedParents`, so a filtered-out node records nothing.
+        recordNodeUsage(
+          ctx.db,
+          'read',
+          toUsageNodeRefs(
+            parents.filter((p) => allowedParents == null || allowedParents.has(p.id)),
+          ),
+          ctx,
+        );
         const passages = chunkHits
           .filter((c) => parentById.has(c.nodeId) && (allowedParents == null || allowedParents.has(c.nodeId)))
           .map((c) => {
@@ -1360,9 +1505,11 @@ export const nodeQueries = {
      * ref strings, so a URN caller gets back something actionable rather than
      * a PK it never sent. Hard caps (cor:api:040:02): over the node-count cap
      * throws; over the response-size cap returns a partial result flagged
-     * `truncated` — never a silent short read. No UsageEvent is recorded,
-     * matching the single-node GraphQL reads (nodeById / node), which don't
-     * either — per-surface parity.
+     * `truncated` — never a silent short read. Records one `read` UsageEvent
+     * per node ACTUALLY RETURNED (#1061 — a node the size cap omitted is not
+     * counted), matching the single-node GraphQL read (`node`), which records
+     * one — per-surface parity. Before #1061 neither recorded anything, which
+     * is what this sentence used to say (PR #1062 review — Copilot).
      */
     nodeBatch: async (
       _: unknown,
@@ -1530,16 +1677,38 @@ export const nodeQueries = {
         bytes += size;
       }
 
+      // #1061 — one read per node actually RETURNED. Deliberately `nodes` and
+      // not `ordered`: a node the byte cap omitted was never handed to the
+      // caller, so counting it would credit a read that didn't happen.
+      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(nodes), ctx);
+
       return { nodes, unavailable, truncated, omitted };
     },
 
     /**
      * Usage events for a node loc, most recent first.
      *
+     * @deprecated Use `usageEvents(loc: <loc>)` — see the `@deprecated`
+     * directive on the schema field. `usageEvents`' `loc` argument is the SAME
+     * verbatim exact `nodeLoc` match under the same gate, so the migration is
+     * a rename; it is additionally a strict superset (PK / fully-qualified URN
+     * refs via `nodeId`, `type`, `memoryId`, `offset`). NOT `nodeId: <loc>`:
+     * that slot is shape-classified, and a hierarchical loc (≥3 colon
+     * segments, e.g. a spec citation) qualifies as node-URN shape and routes
+     * to ref resolution instead (PR-986 review, Codex P2).
+     *
+     * Deprecated for REDUNDANCY, not because it is unsafe — it is gated (below)
+     * and stays supported. Keep it working: the deprecation is a signpost for
+     * clients, and this resolver is the only thing standing behind any caller
+     * that hasn't migrated. Delete only after a deprecation window, and only
+     * once portal / CLI / docs are re-checked for callers.
+     *
      * `loc` names no memory, so this is a CROSS-MEMORY exact `nodeLoc` match —
-     * the same bare-loc semantics as `usageEvents(nodeId: <loc>)`, bounded to
+     * the same verbatim semantics as `usageEvents(loc: <loc>)`, bounded to
      * the memories the caller may read. It is a filter, not a lookup: an
-     * unknown loc yields `[]` rather than NODE_NOT_FOUND.
+     * unknown loc yields `[]` rather than NODE_NOT_FOUND. A bare loc cannot
+     * disambiguate the same loc in two memories; `usageEvents(nodeId: <PK|URN>)`
+     * is the memory-precise form.
      *
      * Access control (#802): this resolver previously had NO gate at all —
      * neither `requireRole` nor memory scoping — so any caller could read any
@@ -1674,10 +1843,71 @@ export const nodeQueries = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      // Org-scoped auth: anyone with org membership at READER+ on the App's
-      // org may read its accessible nodes; platform ADMIN/OWNER bypasses.
+      // Auth: an App PARTICIPANT, or org membership at READER+ on the App's
+      // org; platform ADMIN/OWNER bypasses.
+      //
+      // #1070 — the participant arm closes a drift, and it is worth being
+      // precise that it is a drift rather than a widening. This gate used to be
+      // `requireOwnerOrOrgRole` alone, which admits org members and the App's
+      // owner but NOT an AppMember with no role in the owning org — the
+      // external / B2C participant shape. `isAppParticipant`
+      // (`cor:agt:020:00` §3) does admit them, and so does the MCP access map:
+      // `getMemoryAccess` folds the App's installed-agent memories
+      // (systemMemoryId READ_ONLY + memoryItems) and its team space for exactly
+      // this principal (`mcp/access-control.ts`, #1003).
+      //
+      // So the same person, in the same App, could read this material through
+      // MCP and got FORBIDDEN here — which is the `effectiveAccess` tell for a
+      // hand-rolled gate falling out of sync with the shared predicate (#362).
+      // Admitting them grants nothing the platform does not already grant them;
+      // it stops two surfaces disagreeing about one question.
+      //
+      // Deliberately additive: the org-READER arm is unchanged, so a reader who
+      // is not a participant keeps exactly today's results — including NOT the
+      // team space, which stays behind its own `isAppParticipant` check below.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin) {
+      // Resolved ONCE: the gate here and the team-space scope below ask the
+      // same question, and two calls would be two identical queries per read.
+      //
+      // #1094 REMOVED a `!ctx.impersonation &&` veto that used to sit here. It
+      // was a deliberate stopgap from PR #1093 (Codex P1): `isAppParticipant`
+      // guarded impersonation on its owner branch and not its AppMember branch,
+      // so this caller vetoed the whole arm rather than change a shared
+      // predicate mid-PR — and said so, "filed separately". That filing was
+      // #1094, and the predicate is now bounded to the session's shared org.
+      //
+      // Keeping the veto would not be defence in depth, it would be a WRONG
+      // ANSWER: it denies the arm for in-scope sessions too, so a support
+      // session lost the team chat, worklog and epics of an App inside the very
+      // org it was scoped to — while the dedicated surfaces admitted them. A
+      // second copy of a rule that has since been fixed properly one level down
+      // is exactly the stale-mechanism shape this repo keeps finding.
+      const participant = await isAppParticipant(ctx, app);
+      // ADMISSION only, and the distinction is load-bearing. A soft-uninstalled
+      // App must not be revived by a retained `AppMember` row: `resolveAppRef`
+      // resolves the historical row by id on purpose, membership survives
+      // uninstall, and `resolveUserApps` excludes exactly those memberships
+      // from every active-App access map (PR #1093 review, Codex P1).
+      //
+      // But it must NOT also change what an ORG caller sees on a retired App —
+      // folding the lifecycle into `participant` itself took the team space
+      // away from them, which is existing behaviour and not this PR's to
+      // change. My own test caught that; the comment claiming the scope was
+      // untouched was written before the assertion that checked it.
+      const admitAsParticipant = participant && !app.uninstalledAt;
+      // Org authorization is tracked, not just enforced, because it decides the
+      // SCOPE below as well as admission (PR #1093 review, Codex P1).
+      //
+      // The BOOLEAN form, not try/catch around the throwing one (PR #1093
+      // review, Copilot). A catch wide enough to hold "Forbidden" also holds a
+      // DB error from inside the predicate, and swallowing that would silently
+      // downgrade an org member to the participant scope — a narrower answer
+      // returned as though it were the right one. `isOwnerOrOrgMember` is the
+      // same predicate `requireOwnerOrOrgRole` throws on, and it answers.
+      const orgAuthorized = !!isPlatformAdmin || (await isOwnerOrOrgMember(ctx, app));
+      if (!orgAuthorized && !admitAsParticipant) {
+        // Unchanged refusal, from the original predicate, for anyone who is
+        // neither — so the error a stranger sees is the one they saw before.
         await requireOwnerOrOrgRole(ctx, app, 'READER');
       }
       // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
@@ -1691,7 +1921,7 @@ export const nodeQueries = {
           },
         },
       });
-      const memoryIds = [
+      const agentMemoryIds = [
         ...new Set(
           (appWithAgents?.appAgents ?? []).flatMap((aa) => [
             // #524 — the installed agent's system memory is universally
@@ -1704,6 +1934,152 @@ export const nodeQueries = {
           ]),
         ),
       ];
+
+      // #1031 — the App's own TEAM SPACE, which is structurally unreachable
+      // through the installed-agent walk above: it is an app-class memory keyed
+      // by (appId, sharedMemoryOfAgentId), not an entry in any agent's
+      // memoryItems. Without it the App page can see `roles:*` and not the team
+      // chat, the worklog, or the epics that live beside them.
+      //
+      // ADMITTED ONLY FOR A PARTICIPANT, and that condition is the whole care
+      // in this change. `appNodes` gates on org READER+, while the team space's
+      // audience is the App PARTICIPANT — AppMember at any role, org
+      // CONTRIBUTOR+, or a user-owned App's owner (`cor:agt:020:00` §3). Those
+      // are NOT the same set: an org READER passes this resolver's gate and is
+      // NOT a participant. Adding the team space unconditionally would hand
+      // every org reader the team's chat and worklog, which is precisely the
+      // widening-a-read-gate leak this resolver would otherwise introduce
+      // (`findings:broadening-read-gate-leaks-nested-objects`).
+      //
+      // So the scope is principal-dependent, deliberately: an org reader keeps
+      // exactly the results they get today, and a participant additionally sees
+      // the space they are already entitled to read.
+      const teamSpaceIds = participant
+        ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
+        : [];
+
+      // SCOPE, and this is the half the participant arm turns on (PR #1093
+      // review, Codex P1). My justification for admitting a participant was
+      // that MCP already grants them this material — and the agent walk above
+      // is BROADER than what MCP grants: `getAppMemoryAccess` reads only the
+      // PRIMARY live agent, filters soft-deleted memory items and memories, and
+      // requires an active AgentOrgGrant for a cross-org install. The walk
+      // above does none of those. So admitting a participant to it would hand
+      // them secondary agents, deleted items, and installs whose cross-org
+      // grant has LAPSED — none of which they can reach anywhere else, which
+      // makes it a widening after all, of exactly the kind #1070 warned that
+      // this resolver's scope invites.
+      //
+      // A participant who is not also org-authorized therefore gets the
+      // platform's own answer for their principal — the same fold MCP uses —
+      // rather than this resolver's historically wider walk.
+      //
+      // #1093 added "An org member's scope is untouched" here, which was true
+      // then and is NOT any more (PR #1132 review, @copilot): #1097 applies the
+      // per-App filter below to EVERY principal, so an org member's scope is
+      // narrowed too — deliberately, and that is the whole point of this
+      // change. Left as a correction rather than a deletion so the next reader
+      // can see the org path used to return the unscoped raw walk.
+      const candidateMemoryIds = orgAuthorized
+        ? [...new Set([...agentMemoryIds, ...teamSpaceIds])]
+        : await (async () => {
+            // DELEGATED, after four review rounds of hand-copying this
+            // predicate one clause at a time (PR #1093 — owner, then per-App,
+            // then the subscription gate, then the legacy agent-scoped shape).
+            // Each round I copied what I had read and shipped the rest as an
+            // assertion. That is the repo's FIRST authorization invariant
+            // arriving as a bill:
+            //
+            //   "Reuse the shared access gate; a bespoke per-resolver gate
+            //    drifts."
+            //
+            // — which I quoted at other people twice this week while
+            // reimplementing one. `canReadMemory` is the gate MCP's point read
+            // uses, and the App it is asked about is the App being queried, so
+            // the auth it wants is this caller in THIS App's scope. There is
+            // now no rule here to be a partial copy of.
+            const folded = [
+              ...(
+                await getAppMemoryAccess(ctx.db, resolvedAppId, {
+                  callerUserId: ctx.userId ?? null,
+                })
+              ).keys(),
+            ];
+            const scopedAuth = {
+              userId: ctx.userId,
+              appId: resolvedAppId,
+              roles: ctx.roles,
+            } as AuthContext;
+            // The access map ONCE for the whole page, not once per memory:
+            // `canReadMemory` ends in `getMemoryAccess`, which rebuilds the
+            // App's agent fold on every call (PR #1093 review, Codex P2 — the
+            // same N+1 this resolver's roster sibling was cured of twice).
+            const sharedAccess = await getMemoryAccess(ctx.db as never, scopedAuth);
+            const allowed = await Promise.all(
+              folded.map(async (id) =>
+                (await canReadMemory(ctx.db as never, scopedAuth, id, { access: sharedAccess }))
+                  ? id
+                  : null,
+              ),
+            );
+            const readable = allowed.filter((id): id is string => id !== null);
+
+            return readable;
+          })();
+
+      // THIS App's memories only — for EVERY principal (#1097; the participant
+      // half was #1093 review, Codex P1).
+      //
+      // One Agent installed in two Apps carries BOTH Apps' app-scoped memories
+      // in its global `memoryItems`, so the fold for B contains A's.
+      //
+      // WHICH PATH ACTUALLY LEAKED, corrected (PR #1132 review, @copilot; the
+      // claim below is what #1093 wrote here and I repeated):
+      //
+      // #1093's comment said `canReadMemory` enforces `appId` for
+      // personal/private rows only and so admits an app-class memory of A. That
+      // was true when written and is now FALSE — #1102 moved the rule into
+      // `admissibleFoldRows`, the shared predicate behind `getMemoryAccess`,
+      // whose own docstring calls itself "the enumeration half of #1097". A
+      // participant is therefore already refused A's app-class memory before
+      // this filter is consulted.
+      //
+      // The leak was specific to the ORG branch, which bypasses that predicate
+      // entirely and reads the raw installed-agent walk: nothing enforced
+      // `appId`, and an org READER of B read A's internals. This is the other
+      // half of the same issue.
+      //
+      // Applied ONCE, to both branches, rather than added to the second one.
+      // #1093 shipped this rule inside the participant arm and left the org arm
+      // out, which is how #1092 (the predicates disagreeing about the same
+      // question) and this issue both exist. A second copy would have been the
+      // third answer to one question — and this resolver's own comment, four
+      // lines up, quotes the invariant it would be breaking.
+      //
+      // It is a SCOPE rule about what `appNodes(B)` MEANS, not an access gate:
+      // the resolver's contract is already "the App's installed-agent memories
+      // are the authoritative scope", and the fold does not honour it. Nothing
+      // here decides who may read a memory — that is `canReadMemory`'s job on
+      // the participant path and the org role gate's above.
+      //
+      // `appId IS NULL` keeps what genuinely belongs to the Agent rather than to
+      // a sibling App: its `system` memory (where `app_id` is FORBIDDEN by
+      // `chk_memory_class_app_id`) and any free-standing knowledge it carries.
+      // #1097 weighed dropping those too; this keeps cross-App agent knowledge
+      // working and drops only another App's internals.
+      // Short-circuit before the query, not after it (PR #1132 review,
+      // @copilot): an App with no installed Agents reaches here with an empty
+      // candidate set, and `findMany({ id: { in: [] } })` is a round-trip whose
+      // answer is already known.
+      if (candidateMemoryIds.length === 0) return [];
+      const scoped = await ctx.db.memory.findMany({
+        where: {
+          id: { in: candidateMemoryIds },
+          OR: [{ appId: null }, { appId: resolvedAppId }],
+        },
+        select: { id: true },
+      });
+      const memoryIds = scoped.map((m) => m.id);
       if (memoryIds.length === 0) return [];
 
       // #525 — optional node-level NodeFilter, pushed server-side so callers
@@ -1759,6 +2135,10 @@ export const nodeQueries = {
         },
       });
       await decryptNodesBatch(ctx.db, results);
+      // #1061 — the App-scoped node list returns full node projections, so each
+      // one is a read. Scope is the App's installed-agent memories, established
+      // above.
+      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(results), ctx);
       return results;
     },
 

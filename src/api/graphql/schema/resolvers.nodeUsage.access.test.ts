@@ -178,3 +178,106 @@ describe('nodeUsage scopes on the memoryId COLUMN, not a node relation join', ()
     expect(await resolvers.Query.nodeUsage(null, { loc: 'orphan-loc' }, asAdmin())).toEqual([]);
   });
 });
+
+describe('nodeUsage ≡ usageEvents(loc: <loc>) — the #802 deprecation promise', () => {
+  // nodeUsage is deprecated in favour of usageEvents(loc:). The notice tells
+  // callers the rewrite is a rename, so these must agree ROW FOR ROW — including
+  // on who is denied. If they ever diverge, the deprecation is lying and callers
+  // who follow it silently change behaviour. (The schema-shape half of the
+  // promise is guarded in resolvers.nodeUsageDeprecation.test.ts.)
+  //
+  // The target is the loc ARGUMENT, not nodeId: nodeId shape-classifies its
+  // input, and a hierarchical loc with ≥3 colon segments qualifies as node-URN
+  // shape and routes to resolveNodeRef instead of the loc filter (PR-986
+  // review, Codex P2) — the hierarchical cases below pin both halves of that.
+  const bothFor = async (c: Context, loc: string, limit?: number) => {
+    const viaDeprecated = await resolvers.Query.nodeUsage(null, { loc, limit }, c);
+    const viaTarget = await resolvers.Query.usageEvents(null, { loc, limit }, c);
+    return [viaDeprecated, viaTarget] as const;
+  };
+  const ids = (rows: { id: string }[]) => rows.map((r) => r.id).sort();
+
+  it('agrees for a member on a loc that collides across memories', async () => {
+    const [dep, target] = await bothFor(asMember(), SHARED_LOC);
+    expect(ids(dep)).toEqual(ids(target));
+    expect(dep).not.toHaveLength(0); // the comparison would be vacuous on []
+  });
+
+  it('agrees for ADMIN (the widest principal)', async () => {
+    const [dep, target] = await bothFor(asAdmin(), SHARED_LOC);
+    expect(ids(dep)).toEqual(ids(target));
+    expect(dep).not.toHaveLength(0);
+  });
+
+  it('agrees on DENIAL for an outsider, and on a loc only a foreign tenant has', async () => {
+    const [depOut, targetOut] = await bothFor(asOutsider(), SHARED_LOC);
+    expect(ids(depOut)).toEqual(ids(targetOut));
+    expect(depOut).toEqual([]);
+
+    const nodeBOnly = await db.node.create({
+      data: { id: generateId(), memoryId: memB.id, loc: 'b-only-eq', name: 'b-only-eq' },
+    });
+    await db.usageEvent.create({
+      data: { id: generateId(), type: 'read', nodeLoc: 'b-only-eq', nodeId: nodeBOnly.id, memoryId: memB.id },
+    });
+    const [depDenied, targetDenied] = await bothFor(asMember(), 'b-only-eq');
+    expect(ids(depDenied)).toEqual(ids(targetDenied));
+    expect(depDenied).toEqual([]);
+  });
+
+  it('agrees on a deleted-node event — both read the memoryId column, not the relation', async () => {
+    await db.usageEvent.create({
+      data: { id: generateId(), type: 'read', nodeLoc: 'gone-eq', nodeId: null, memoryId: memA.id },
+    });
+    const [dep, target] = await bothFor(asMember(), 'gone-eq');
+    expect(ids(dep)).toEqual(ids(target));
+    expect(dep).toHaveLength(1);
+  });
+
+  it('agrees under a limit', async () => {
+    const [dep, target] = await bothFor(asMember(), SHARED_LOC, 1);
+    expect(ids(dep)).toEqual(ids(target));
+    expect(dep).toHaveLength(1);
+  });
+
+  it('agrees on a HIERARCHICAL loc that collides across memories (the spec-citation shape)', async () => {
+    // 'cor:acl:010:01' has 4 colon segments — real locs look like this (the
+    // whole specs corpus does). This is the shape Codex flagged on PR-986:
+    // routed through nodeId it would misclassify as a node URN.
+    const specLoc = 'cor:acl:010:01';
+    const nA = await db.node.create({ data: { id: generateId(), memoryId: memA.id, loc: specLoc, name: 'sa' } });
+    const nB = await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: specLoc, name: 'sb' } });
+    await db.usageEvent.createMany({
+      data: [
+        { id: generateId(), type: 'read', nodeLoc: specLoc, nodeId: nA.id, memoryId: memA.id },
+        { id: generateId(), type: 'read', nodeLoc: specLoc, nodeId: nB.id, memoryId: memB.id },
+      ],
+    });
+    const [dep, target] = await bothFor(asMember(), specLoc);
+    expect(ids(dep)).toEqual(ids(target));
+    expect(memoriesOf(dep)).toEqual(new Set([memA.id])); // memB stays out of scope
+    expect(dep).not.toHaveLength(0);
+  });
+
+  it('nodeId: <hierarchical loc> is NOT the migration path — it URN-classifies and throws', async () => {
+    // The other half of the PR-986 finding, pinned so the loc argument can't be
+    // "simplified away": ≥3 colon segments qualify as node-URN shape, so nodeId
+    // routes to resolveNodeRef, which cannot find a memory named 'cor:acl' and
+    // throws — where nodeUsage / usageEvents(loc:) return the events.
+    const specLoc = 'cor:acl:010:01';
+    const nA = await db.node.create({ data: { id: generateId(), memoryId: memA.id, loc: specLoc, name: 'sa' } });
+    await db.usageEvent.create({
+      data: { id: generateId(), type: 'read', nodeLoc: specLoc, nodeId: nA.id, memoryId: memA.id },
+    });
+    await expect(
+      resolvers.Query.usageEvents(null, { nodeId: specLoc }, asMember()),
+    ).rejects.toThrow();
+    expect(await resolvers.Query.usageEvents(null, { loc: specLoc }, asMember())).toHaveLength(1);
+  });
+
+  it('rejects nodeId and loc together (BAD_USER_INPUT, before any lookup)', async () => {
+    await expect(
+      resolvers.Query.usageEvents(null, { nodeId: SHARED_LOC, loc: SHARED_LOC }, asMember()),
+    ).rejects.toThrow('Provide either nodeId or loc, not both');
+  });
+});

@@ -1,0 +1,27 @@
+name: URN renames are aliased
+
+# #1079 / cor:urn:030:01 — a rename that records no alias silently 404s every
+# published reference to the old URN, including every node and edge URN derived
+# from it. Those references live in commit trailers, PR descriptions, issue
+# signatures and chat archives, which the platform cannot reach back and rewrite.
+#
+# This is a gate rather than a review note because diligence demonstrably does
+# not cover it: the issue named one rename path, the fix found five, and three
+# review rounds then found three more. The set of writers is open and invisible
+# from inside any single diff.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  urn-rename-aliased:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Every stored-urn update records an alias
+        run: node scripts/check-urn-rename-aliased.mjs

@@ -1,0 +1,21 @@
+-- #974 follow-up — REMOVE the per-App worker mention-token unique
+-- (workers_app_mention_token_uniq, added by 20260814140000 off a PR #978
+-- review suggestion, reversed by decision the same day — Holger, 2026-08-14).
+--
+-- cor:agt:020:02 keeps exactly ONE uniqueness layer on worker names: the
+-- case-insensitive name itself (`workers_app_name_uniq`). The mention token
+-- is a lossy slug of the name, and making it unique quietly tightened the
+-- casting contract — "Mary-Jane" became uncastable wherever "Mary Jane"
+-- exists. Mention-token collisions (both slugging to `@mary-jane`, so a
+-- mention addresses both) are inherent to the shipped mention contract
+-- (cor:agt:020:04 — one `@` + token format platform-wide) and existed
+-- identically under the persona model; they are accepted, not constrained
+-- away.
+--
+-- The 20260814140000 migration file was deleted rather than kept-and-negated:
+-- it merged and un-merged inside one day, so the only databases that applied
+-- it are dev/CI (its _prisma_migrations row is inert — `migrate deploy`
+-- resolves by name and ignores rows for unknown migrations). This DROP
+-- converges those databases; on any database that never applied it, IF EXISTS
+-- makes it a no-op.
+DROP INDEX IF EXISTS "workers_app_mention_token_uniq";

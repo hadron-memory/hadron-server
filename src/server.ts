@@ -59,6 +59,8 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
+import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
+import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
@@ -1177,6 +1179,12 @@ export async function createServer(): Promise<Express> {
       const ghOrgLogin: string | undefined = installation.account?.login;
       if (ghOrgLogin) {
         if (action === 'created') {
+          // urn-alias-exempt: `urn` here is a WHERE selector, not a write — the
+          // data payload sets only githubInstallationId, so no URN moves and
+          // there is nothing to alias. Flagged because the checker matches
+          // `urn:` anywhere in the call rather than parsing out the data block,
+          // which over-flags on purpose: a stray waiver costs one line, a missed
+          // rename costs a published URN.
           const updated = await db.organization.updateMany({
             where: { urn: ghOrgLogin, githubInstallationId: null },
             data: { githubInstallationId: installation.id },
@@ -1386,6 +1394,22 @@ export async function createServer(): Promise<Express> {
     process.env.DISABLE_ASSET_ORPHAN_SWEEP !== 'true'
   ) {
     startOrphanObjectReaperLoop(db);
+  }
+
+  // Background job (#930, narrowed by #1114): end sessions past `expiresAt`,
+  // stamping `autoExpiredAt`. Inactivity no longer ends anything — liveness is
+  // derived at read time — so this loop honours the hard-expiry promise and
+  // nothing else.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_SESSION_REAPER !== 'true') {
+    startSessionReaperLoop(db);
+  }
+
+  // #1114 — the session-key cache's TTL sweep, on its OWN timer.
+  // Deliberately NOT gated on DISABLE_SESSION_REAPER: an eviction policy for
+  // process-held key material must not be reachable through another
+  // subsystem's off switch (#1120 review, Codex P2).
+  if (process.env.NODE_ENV !== 'test') {
+    startSessionKeySweepLoop();
   }
 
   // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in

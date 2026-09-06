@@ -28,22 +28,50 @@ import {
   mapToolDriveFile,
   runOwnedEmailOperation,
 } from './resolvers.helpers.js';
+import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 
 export const sessionQueries = {
     sessions: async (
       _: unknown,
-      { type, repo, customerId, limit, offset }: { type?: string; repo?: string; customerId?: string; limit?: number; offset?: number },
+      { type, repo, customerId, workerRef, limit, offset }: { type?: string; repo?: string; customerId?: string; workerRef?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       // ADMIN/OWNER see all; App-keyed callers see their own sessions;
       // users see sessions for any App in an org they belong to.
       const scopeFilter = await sessionScopeFilter(ctx);
+      // #974 / cor:agt:020:03: the "taken right now" / "last driven by" reads —
+      // a worker's sessions, newest first, inside the caller's ordinary session
+      // scope. #991 widened the ref to a Worker id OR an
+      // hrn:worker:<root>:<app-slug>:<worker-slug> URN.
+      //
+      // This stays a FILTER, not a lookup: an unresolvable ref narrows to
+      // nothing rather than throwing, so it cannot be used to probe which
+      // workers exist outside the caller's scope. `scopeFilter` — not the ref —
+      // is what authorizes the rows either way.
+      //
+      // An OMITTED filter and a SUPPLIED-BUT-BLANK one are different requests:
+      // omitting it means "don't filter by worker", while `workerRef: "   "` is
+      // a filter that nothing satisfies. Collapsing the two would let a blank
+      // ref silently WIDEN the result to every session in scope — the opposite
+      // of what the caller asked for, and a regression against the pre-#991
+      // behaviour (which filtered on an empty id and matched nothing).
+      let workerId: string | undefined;
+      if (workerRef !== undefined && workerRef !== null) {
+        const trimmedWorkerRef = workerRef.trim();
+        if (trimmedWorkerRef === '') return [];
+        try {
+          ({ id: workerId } = await resolveWorkerRef(ctx.db, trimmedWorkerRef));
+        } catch {
+          return [];
+        }
+      }
       return ctx.db.session.findMany({
         where: {
           ...scopeFilter,
           ...(type ? { type: type as any } : {}),
           ...(repo ? { repo } : {}),
           ...(customerId ? { customerId } : {}),
+          ...(workerId ? { workerId } : {}),
         },
         orderBy: { startedAt: 'desc' },
         take: limit ?? 50,
@@ -59,6 +87,11 @@ export const sessionQueries = {
       if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return session;
       // App-keyed caller can see sessions belonging to their App
       if (ctx.appId && session.appId === ctx.appId) return session;
+      // #929 review P1: a session attributed to the caller themself is
+      // readable by its creator regardless of App association — the CLI
+      // coding case, where appId is null. Identity-scoped, so not via
+      // impersonation (#876 class); mirrors sessionScopeFilter's self branch.
+      if (ctx.userId && session.userId === ctx.userId && !ctx.impersonation) return session;
       // User can see sessions from Apps in any org they belong to
       if (ctx.userId && session.appId) {
         const app = await ctx.db.app.findUnique({
@@ -89,18 +122,29 @@ export const sessionQueries = {
         type,
         memoryId,
         nodeId,
+        loc,
         limit,
         offset,
       }: {
         type?: string;
         memoryId?: string;
         nodeId?: string;
+        loc?: string;
         limit?: number;
         offset?: number;
       },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+
+      // `loc` and `nodeId` are two different addressing modes for the same
+      // filter slot — a verbatim loc filter vs a shape-classified node token.
+      // Passing both is a contradiction we refuse rather than pick a winner.
+      if (loc !== undefined && nodeId !== undefined) {
+        throw new GraphQLError('Provide either nodeId or loc, not both', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
 
       // Per-node scoping (issue #249 follow-up): a single node addressed by a
       // node *token* — PK, URN, or bare loc — no memoryId required. Mirrors the
@@ -122,8 +166,20 @@ export const sessionQueries = {
       //     loc in EVERY readable memory (the memory scoping below still
       //     applies); it does NOT validate node existence (a filter, not a
       //     lookup, so an unknown loc yields [] rather than NODE_NOT_FOUND).
+      //
+      // The shape classification means nodeId CANNOT express a loc filter for
+      // a hierarchical loc: `cor:acl:010:01` has ≥3 segments, so it qualifies
+      // as node-URN shape and routes to resolveNodeRef — which throws
+      // NODE_NOT_FOUND unless an org literally named by its first segment
+      // exists (PR-986 review, Codex P2). The explicit `loc` argument below is
+      // the unambiguous loc-filter path — and the nodeUsage migration target.
       let nodeIdFilter: string | undefined;
       let nodeLocExact: string | undefined;
+      if (loc) {
+        // Verbatim — never shape-sniffed, so every loc works, including ones
+        // that happen to look like a URN. Exactly nodeUsage(loc:)'s semantics.
+        nodeLocExact = loc;
+      }
       if (nodeId) {
         // Scheme-prefixed inputs (`hrn:` / legacy `urn:`) are always node refs
         // (resolveNodeRef validates the type marker and throws on mismatch).
