@@ -8,7 +8,7 @@ Spec source: FR-010, plus US2 acceptance scenarios.
 
 ## Behaviour
 
-The predicate runs on `node.content` as-stored. **The MCP read path does NOT call `decryptNodesBatch` today** (asymmetry tracked by [#206](https://github.com/hadron-memory/hadron-server/issues/206)) — on encrypted memories `node.content` is ciphertext, and `computeContentHash(ciphertext)` would compare unequal to every plaintext-derived `abstractOriginHash` (false-positive on every node). **v1 short-circuits the predicate on encrypted memories** via a `!memory.isEncrypted` gate; the encryption-parity follow-up lifts the gate by adding a decrypt step before the predicate. This contract was originally drafted under the assumption that h-read-node already decrypted — it does not, and the gate is the safe v1 posture. Symmetric with the h-validate gate (US3).
+The predicate runs on **plaintext** `node.content`. As drafted, the MCP read path did not decrypt, so the predicate was short-circuited on encrypted memories by a `!memory.isEncrypted` gate — otherwise `computeContentHash(ciphertext)` false-positives on every node. **That gate has since lifted** (spec 041 PR-2, closing [#206](https://github.com/hadron-memory/hadron-server/issues/206)): `mcpDecryptOrMark` decrypts when the session holds the memory's key and flips the projection's `isEncrypted` to false, so the marker fires on an **unlocked** encrypted memory and a locked one emits nothing. **No longer symmetric with h-validate**, which never gained a decrypt step and keeps its gate — see that contract.
 
 Compute staleness once at the top of the response-shape branch:
 
@@ -20,29 +20,32 @@ const hasAbstract = !!(node.abstract && node.abstract.length > 0);
 const isFallback = scope === 'content' && !hasContent && hasAbstract;
 
 // Scope gate hoisted ABOVE the predicate so the default 'content' scope
-// skips the encryption check, the null-hash guard, AND the SHA-256
-// recomputation entirely — byte-identical-pre-spec read path stays
-// zero-cost (PR-210 review).
+// skips the encryption check AND the SHA-256 recomputation entirely —
+// the default read path stays zero-cost (PR-210 review).
 const shouldCheckStale = scope === 'abstract' || scope === 'all';
 
-// Spec 032 — staleness check. Note the comparison is against a
+// Spec 032 — staleness check, post-#1128. The comparison is against a
 // COMPUTED-AT-READ value, NOT the stored Node.contentHash column (which
 // has its own domain from external producers; see data-model.md "What
-// is NOT in this data model"). The explicit `!= null` on
-// abstractOriginHash is load-bearing: legacy nodes have null hash even
-// when abstract + content are populated, and `null !== "abc12345"`
-// evaluates true — that would fire the marker falsely without the guard.
-let includeStaleMarker = false;
-if (
+// is NOT in this data model").
+//
+// The `abstractOriginHash != null` guard is GONE. It was load-bearing
+// when every row predated the column; since #1128 an absent fingerprint
+// arms the marker exactly as a disagreeing one does, because an abstract
+// that was never fingerprinted has never been checked against its body.
+//
+// The predicate itself now lives in ONE place — isAbstractUnverified in
+// src/lib/contentHash.ts — shared with hadron_find_nodes and h-validate.
+// The scope and encryption gates stay at the call site: they are
+// properties of THIS call, not of the node.
+const includeStaleMarker =
   shouldCheckStale &&
-  !node.memory.isEncrypted &&     // v1 gate; see #206
-  hasAbstract &&
-  hasContent &&
-  node.abstractOriginHash != null
-) {
-  includeStaleMarker =
-    node.abstractOriginHash !== computeContentHash(node.content);
-}
+  // TRUE for an unlocked encrypted memory: since spec 041,
+  // mcpDecryptOrMark sets node.memory.isEncrypted = false on the
+  // PROJECTION once it has decrypted, so the gate ADMITS that case and
+  // the marker is checked. Only a LOCKED memory is skipped here.
+  !node.memory.isEncrypted &&
+  isAbstractUnverified(node);
 
 // Marker emission:
 //   - Source: abstract-fallback fires under default scope + content-less

@@ -24,19 +24,21 @@ for (const node of nodes) {
   }
   // ... broken-edge check ...
 
-  // Spec 032 — stale-abstract warning (FR-011). Compares against a
-  // COMPUTED-AT-READ value, not the stored Node.contentHash column.
-  // The explicit abstractOriginHash != null guard prevents false
-  // positives on legacy nodes (PR-207 review item 5). The `checkStale`
-  // gate suppresses the predicate on encrypted memories until the
-  // encryption-parity follow-up lands (#206).
-  if (
-    checkStale &&
-    node.abstract != null && node.abstract.length > 0 &&
-    node.content != null && node.content.length > 0 &&
-    node.abstractOriginHash != null &&
-    node.abstractOriginHash !== computeContentHash(node.content)
-  ) {
+  // Spec 032 — stale-abstract warning (FR-011), post-#1128. Compares
+  // against a COMPUTED-AT-READ value, not the stored Node.contentHash
+  // column.
+  //
+  // The `abstractOriginHash != null` guard is GONE (it was PR-207 review
+  // item 5). An absent fingerprint now warns exactly as a disagreeing one
+  // does — and a missing fingerprint is precisely what an operator running
+  // the validator wants told.
+  //
+  // The predicate is the SAME function the read path uses,
+  // isAbstractUnverified. The `checkStale` gate is NOT shared: it is
+  // derived from the memory row and h-validate never decrypts, so this
+  // surface still skips encrypted memories whether or not a key is held.
+  // h-read-node's equivalent gate lifted with spec 041; this one did not.
+  if (checkStale && isAbstractUnverified(node)) {
     issues.push(`[stale-abstract] ${nUrn} — abstract may not reflect current content`);
   }
 }

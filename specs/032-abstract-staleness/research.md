@@ -64,10 +64,11 @@ export function computeContentHash(content: string | null | undefined): string |
 
 ## D4 — Restore-version semantics for legacy versions (spec Q1)
 
-**Decision**: `restoreNodeVersion` writes `version.abstractOriginHash` to the live node verbatim. If the version row pre-dates this spec, that value is `null`, and the live row ends up with `abstractOriginHash IS NULL`. **No recomputation.**
+**Decision**: `restoreNodeRevision` writes `version.abstractOriginHash` to the live node verbatim. If the version row pre-dates this spec, that value is `null`, and the live row ends up with `abstractOriginHash IS NULL`. **No recomputation.**
 
 **Rationale**:
 - The staleness check (`abstract != null AND content != null AND abstractOriginHash != contentHash`) naturally short-circuits when `abstractOriginHash IS NULL`. No false-positive stale signal on restored legacy versions.
+  - **Superseded by #1128 (2026-09-03).** The DECISION above stands — restore is still verbatim, still no recomputation — but this rationale no longer holds: the null short-circuit is gone, so restoring a pre-spec snapshot now arms the marker. That is the correct outcome rather than a false positive (the restored abstract has never been checked against the restored body), so the decision needed no revisiting. Recorded here rather than rewritten, because a decision record should show what was believed when the call was made.
 - Restoring is supposed to be "byte-identical to the version" for every other column. Recomputing one column at restore time would be asymmetric and surprising — readers would not expect "I restored an old version, but one column is freshly computed."
 - Operators who want a meaningful staleness signal on restored legacy content can call `h-update-node` with the existing abstract (no-op rewrite); the write-path machinery will populate `abstractOriginHash` correctly. Explicit, controlled, attributable.
 
@@ -80,6 +81,8 @@ export function computeContentHash(content: string | null | undefined): string |
 **Decision**: no flag in v1. The stale-abstract check is always on. It naturally stays quiet on legacy abstracts (where `abstractOriginHash IS NULL`) because the staleness condition short-circuits.
 
 **Rationale**: the question presumes "many legacy abstracts will trigger noisy warnings." They won't — legacy abstracts have null hash by definition. Only POST-spec abstracts (where the hash got populated by a write-path that ran AFTER this spec ships) will produce stale warnings. So on a memory dominated by pre-spec content, the validator stays quiet without any flag.
+
+**Superseded by #1128 (2026-09-03).** The decision (no flag in v1) stands, but this rationale is now inverted: legacy abstracts with a body DO warn. The reason the validator still stays quiet is empirical rather than structural — the unfingerprinted population is a static residue of 2 rows, not the bulk of the corpus the premise assumed. That makes the no-flag decision contingent on a measurement instead of on a definition; FR-010 states what would invalidate it.
 
 If a memory accumulates many post-spec abstracts and most of them go stale (e.g., a high-edit workflow where content updates outpace abstract refreshes), the warnings will be noisy. In that case, add the flag as a follow-up — but solving the noise problem in v1 is premature without evidence the problem exists.
 
@@ -109,25 +112,25 @@ If a memory accumulates many post-spec abstracts and most of them go stale (e.g.
 - Emit a `(stale)` suffix on the abstract preview line: cheap but increases the per-hit visual complexity; the RAG follow-up might encode this differently anyway (vectorizer-side handling).
 - Add a `staleOnly: bool` filter to `h-find-nodes`: filters hits by staleness; potentially useful but out of scope here.
 
-## D8 — NodeVersion is a first-class entity from day one
+## D8 — NodeRevision is a first-class entity from day one
 
-**Decision**: every Phase 2 task involving Node-write paths explicitly includes the matching NodeVersion edit (snapshot capture + `restoreNodeVersion` write payload). Migration adds the column to BOTH `nodes` AND `node_versions` in the same migration file.
+**Decision**: every Phase 2 task involving Node-write paths explicitly includes the matching NodeRevision edit (snapshot capture + `restoreNodeRevision` write payload). Migration adds the column to BOTH `nodes` AND `node_revisions` in the same migration file.
 
-**Rationale**: this is the lesson learned from spec 031 the hard way (caught in PR-201 review as a real bug in `restoreNodeVersion` — abstract was silently dropped on restore). Documented in CLAUDE.md and as a project memory; baked into the spec (FR-002 + Entity Impact + Edge Case 7) and the tasks template (see tasks.md once generated). The implementer cannot accidentally forget the NodeVersion side.
+**Rationale**: this is the lesson learned from spec 031 the hard way (caught in PR-201 review as a real bug in `restoreNodeRevision` — abstract was silently dropped on restore). Documented in CLAUDE.md and as a project memory; baked into the spec (FR-002 + Entity Impact + Edge Case 7) and the tasks template (see tasks.md once generated). The implementer cannot accidentally forget the NodeRevision side.
 
 **Sites that need editing for FR-002 compliance** (will be enumerated in tasks.md):
-1. `prisma/schema.prisma` — NodeVersion model gains `abstractOriginHash String?`
-2. The migration SQL — adds the column to `node_versions` table
-3. `src/api/graphql/schema/resolvers.ts:upsertNode` — `nodeVersion.create` snapshot captures `existing.abstractOriginHash`
-4. `src/api/graphql/schema/resolvers.ts:restoreNodeVersion` — pre-restore snapshot captures live `abstractOriginHash`; restore-write applies `version.abstractOriginHash`
-5. `src/mcp/server.ts:h-update-node` — `nodeVersion.create` snapshot captures `existing.abstractOriginHash`
-6. `src/mcp/server.ts:h-move-node` — `nodeVersion.create` snapshot captures `existing.abstractOriginHash`
+1. `prisma/schema.prisma` — NodeRevision model gains `abstractOriginHash String?`
+2. The migration SQL — adds the column to `node_revisions` table
+3. `src/api/graphql/schema/resolvers.ts:upsertNode` — `nodeRevision.create` snapshot captures `existing.abstractOriginHash`
+4. `src/api/graphql/schema/resolvers.ts:restoreNodeRevision` — pre-restore snapshot captures live `abstractOriginHash`; restore-write applies `version.abstractOriginHash`
+5. `src/mcp/server.ts:h-update-node` — `nodeRevision.create` snapshot captures `existing.abstractOriginHash`
+6. `src/mcp/server.ts:h-move-node` — `nodeRevision.create` snapshot captures `existing.abstractOriginHash`
 
 ## D9 — Test layout
 
 **Decision**:
 - **NEW**: `src/mcp/server.nodeAbstractStaleness.test.ts` — dedicated matrix tests covering the FR-003 through FR-007 hash-write semantics across `h-add-node` and `h-update-node`, plus the `Source: abstract-stale` marker emission on `h-read-node`, plus the `[stale-abstract]` validator warning.
-- **Extend** `src/test/integration/node-abstract.test.ts` — GraphQL `upsertNode` hash semantics (same matrix); `restoreNodeVersion` hash round-trip (verifies FR-002 + D4); GraphQL contract test that `NodeInput.abstractOriginHash` does NOT exist (FR-012 / SC-005).
+- **Extend** `src/test/integration/node-abstract.test.ts` — GraphQL `upsertNode` hash semantics (same matrix); `restoreNodeRevision` hash round-trip (verifies FR-002 + D4); GraphQL contract test that `NodeInput.abstractOriginHash` does NOT exist (FR-012 / SC-005).
 - **Extend** `src/integrations/localFs/loadNodeFromFs.test.ts` — YAML round-trip (importer reads / exporter writes the `abstractOriginHash:` key per FR-013).
 - **Extend** `src/api/graphql/schema/resolvers.encryption.test.ts` — hash is computed on plaintext content on encrypted memories; the column stays plaintext; the staleness signal works end-to-end across an encrypted memory (FR-009).
 

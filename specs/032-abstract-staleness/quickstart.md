@@ -4,9 +4,8 @@ Manual smoke recipe for verifying staleness end-to-end against a local dev serve
 
 ## Prerequisites
 
-- Local Postgres with `hadron_dev` (per CLAUDE.md).
-- `prisma db push` has applied the schema delta (including the new `abstract_origin_hash` columns on both `nodes` and `node_versions`).
-- `prisma/post-push.sql` re-applied.
+- Local Postgres with `hadron` — the canonical dev DB per CLAUDE.md. *(This doc said `hadron_dev`, which CLAUDE.md now documents as deprecated/unused; running these steps there verifies nothing.)*
+- The schema delta is applied (the new `abstract_origin_hash` columns on both `nodes` and `node_revisions`) via **`pnpm db:dev-setup`**. *(This said bare `prisma db push`; CLAUDE.md warns against that on the dev DB — Prisma cannot model the pgvector HNSW index, so a bare push DROPS it and never rebuilds it. @copilot, PR #1139.)*
 - Dev server running locally: `pnpm tsx src/index.ts` (default port 4000).
 - A valid App Key (`hdr_app_…`) — get one from `prisma/seed.ts` output.
 
@@ -27,7 +26,7 @@ h-add-node
 **Expected**: success. Inspect the DB row to confirm the stored hash matches what `computeContentHash` would produce on current content:
 
 ```
-psql -d hadron_dev -c "select n.abstract_origin_hash, encode(digest(n.content::bytea, 'sha256'), 'hex')::text as live_content_hash_full from nodes n join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev';"
+psql -d hadron -c "select n.abstract_origin_hash, encode(digest(n.content::bytea, 'sha256'), 'hex')::text as live_content_hash_full from nodes n join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev';"
 ```
 
 The first 8 chars of `live_content_hash_full` should equal `abstract_origin_hash`. Fresh state.
@@ -59,7 +58,7 @@ h-update-node
 **Expected**: success. Inspect the DB row again:
 
 ```
-psql -d hadron_dev -c "select n.abstract_origin_hash, encode(digest(n.content::bytea, 'sha256'), 'hex')::text as live_content_hash_full from nodes n join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev';"
+psql -d hadron -c "select n.abstract_origin_hash, encode(digest(n.content::bytea, 'sha256'), 'hex')::text as live_content_hash_full from nodes n join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev';"
 ```
 
 The first 8 chars of `live_content_hash_full` should now **differ** from `abstract_origin_hash`. `abstract_origin_hash` is unchanged from Step 1 (the original content's hash); `live_content_hash_full` reflects the new content. The staleness signal is armed.
@@ -90,7 +89,7 @@ h-validate
   memoryUrn: hadronmemory.com::dev
 ```
 
-**Expected**: report includes `[stale-abstract] urn:node:hadronmemory.com::dev::test:staleness — abstract may not reflect current content`. Other nodes in the dev memory should NOT be flagged (they have `abstract_origin_hash IS NULL` from before this spec shipped, and the check short-circuits).
+**Expected**: report includes `[stale-abstract] urn:node:hadronmemory.com::dev::test:staleness — abstract may not reflect current content`. Since #1128, other nodes with `abstract_origin_hash IS NULL` **and** both an abstract and a body ARE flagged too — a missing fingerprint is no longer a free pass. On the live corpus that is a static residue of 2 rows (FR-010), so the report should be this node plus at most those; a longer list means the population measurement FR-010 rests on has expired and needs re-taking.
 
 ### Step 7 — Refresh the abstract: marker clears
 
@@ -104,7 +103,7 @@ h-update-node
 **Expected**: success. Inspect the DB row:
 
 ```
-psql -d hadron_dev -c "select n.abstract_origin_hash, encode(digest(n.content::bytea, 'sha256'), 'hex')::text as live_content_hash_full from nodes n join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev';"
+psql -d hadron -c "select n.abstract_origin_hash, encode(digest(n.content::bytea, 'sha256'), 'hex')::text as live_content_hash_full from nodes n join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev';"
 ```
 
 The first 8 chars of `live_content_hash_full` should equal `abstract_origin_hash` again — the refresh affirms "this abstract matches current content."
@@ -128,15 +127,15 @@ h-validate
 
 **Expected**: no `[stale-abstract]` warnings for this node.
 
-### Step 10 — Legacy node sanity check
+### Step 10 — Unfingerprinted node check *(inverted by #1128)*
 
 Find a node created BEFORE this spec shipped (any node with `abstract IS NOT NULL` from spec 031's era — likely none in dev, but if any exist):
 
 ```
-psql -d hadron_dev -c "select n.loc from nodes n join memories m on m.id = n.memory_id where n.abstract is not null and n.abstract_origin_hash is null and m.urn = 'hadronmemory.com::dev' limit 1;"
+psql -d hadron -c "select n.loc from nodes n join memories m on m.id = n.memory_id where n.abstract is not null and n.content is not null and n.content <> '' and n.abstract_origin_hash is null and m.urn = 'hadronmemory.com::dev' limit 1;"
 ```
 
-If a row exists, read it with `contentScope: 'all'`: NO marker. The legacy null-hash short-circuits the staleness check — no false positive on pre-spec content (FR-007 + SC-004).
+If a row exists, read it with `contentScope: 'all'`: **the marker IS present.** This step asserted the opposite until #1128, and the reversal is the point — a null hash on a row that has both an abstract and a body means the abstract has never been checked against that body, which is what the marker says. A row with a null hash and no body still shows nothing (FR-010 (b)).
 
 ### Step 11 — Restore version round-trip
 
@@ -148,7 +147,7 @@ h-update-node
   reason: snapshot before restore-test
 ```
 
-(Captures a NodeVersion row with current state.)
+(Captures a NodeRevision row with current state.)
 
 Then make a change and restore:
 
@@ -161,12 +160,12 @@ h-update-node
 Find the version ID:
 
 ```
-psql -d hadron_dev -c "select v.id from node_versions v join nodes n on n.id = v.node_id join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev' order by v.created_at desc limit 1 offset 1;"
+psql -d hadron -c "select v.id from node_revisions v join nodes n on n.id = v.node_id join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev' order by v.created_at desc limit 1 offset 1;"
 ```
 
-Then call `restoreNodeVersion` via GraphQL (or whatever the portal surface uses).
+Then call `restoreNodeRevision` via GraphQL (or whatever the portal surface uses).
 
-**Expected**: the restored node has `abstract_origin_hash` equal to the version's snapshot value. If the version was captured pre-spec, the hash is NULL; the staleness check short-circuits; no false signal (FR-002 + research D4).
+**Expected**: the restored node has `abstract_origin_hash` equal to the version's snapshot value — restore stays verbatim (FR-002 + research D4). If the version was captured pre-spec that value is NULL, and since #1128 the restored node therefore **shows the marker**. That is correct rather than a false signal: the restored abstract has never been checked against the restored body.
 
 ### Step 12 — Cleanup
 
@@ -185,10 +184,10 @@ h-delete-node
 | 3 | DB row after content-only update | stored hash no longer matches `sha256(content)`; signal armed |
 | 4 | h-read-node 'all' stale | `Source: abstract-stale` present |
 | 5 | h-read-node default stale | no marker (abstract not in response) |
-| 6 | h-validate stale | `[stale-abstract]` warning for this node only |
+| 6 | h-validate stale | `[stale-abstract]` for this node, plus any other node with an abstract, a body and no fingerprint (#1128) |
 | 7 | DB row after abstract refresh | stored hash matches `sha256(content)` again |
 | 8 | h-read-node 'all' refreshed | no marker |
 | 9 | h-validate refreshed | clean |
-| 10 | Legacy node | no marker (short-circuit) |
-| 11 | restoreNodeVersion | hash restored verbatim; no recomputation |
+| 10 | Unfingerprinted node (abstract + body) | **marker present** (#1128) |
+| 11 | restoreNodeRevision | hash restored verbatim; marker armed if that hash was NULL |
 | 12 | Cleanup | node deleted |
