@@ -7,13 +7,13 @@
 
 ## Summary
 
-Add one nullable text column to `Node` (and matching column to `NodeVersion`), maintain it automatically on every write surface so the value reflects "hash of the content this abstract was derived from," and surface the divergence (`abstractOriginHash != computeContentHash(content)`) as a staleness signal on two read surfaces (`h-read-node` marker, `h-validate` warning). GraphQL exposes the field read-only. No new typed errors — staleness is observable, not throwable.
+Add one nullable text column to `Node` (and matching column to `NodeRevision`), maintain it automatically on every write surface so the value reflects "hash of the content this abstract was derived from," and surface the divergence (`abstractOriginHash != computeContentHash(content)`) as a staleness signal on two read surfaces (`h-read-node` marker, `h-validate` warning). GraphQL exposes the field read-only. No new typed errors — staleness is observable, not throwable.
 
 **Read-time comparison, not stored-vs-stored**: the staleness check computes the current content's hash at read time using the same `computeContentHash` helper that the write paths use. The stored `Node.contentHash` column is **not** consulted (its existing semantic — `SHA256(yaml+md)[0:8]` per the schema doc, set by external YAML / Git-sync producers — stays untouched). This was the spec-revision call from PR-207 review item 1: avoid silently redefining `contentHash` under existing consumers; let the two columns serve different purposes in their own lanes.
 
-**Smaller than spec 031**: one column, no `contentScope`-style matrix. The load-bearing complexity is making sure every Node write surface (MCP × 2, GraphQL × 1, importer × 1, restoreNodeVersion × 1) populates `abstractOriginHash` with the right semantics — that's where the FR-003 / FR-004 / FR-005 / FR-006 / FR-007 matrix lives.
+**Smaller than spec 031**: one column, no `contentScope`-style matrix. The load-bearing complexity is making sure every Node write surface (MCP × 2, GraphQL × 1, importer × 1, restoreNodeRevision × 1) populates `abstractOriginHash` with the right semantics — that's where the FR-003 / FR-004 / FR-005 / FR-006 / FR-007 matrix lives.
 
-**NodeVersion as a first-class entity from day one** — spec 031 learned this lesson the hard way (caught in PR-201 review as a real bug in `restoreNodeVersion`). For 032 it's in the spec (FR-002 + Entity Impact + Edge Case 7), in the data-model from the start, and called out as a Phase 2 task in tasks.md.
+**NodeRevision as a first-class entity from day one** — spec 031 learned this lesson the hard way (caught in PR-201 review as a real bug in `restoreNodeRevision`). For 032 it's in the spec (FR-002 + Entity Impact + Edge Case 7), in the data-model from the start, and called out as a Phase 2 task in tasks.md.
 
 **Encryption scoping**: spec 032's staleness signal works correctly on the existing surface as-is (FR-009). On GraphQL writes, the resolver's decrypt-pre-write pattern surfaces plaintext for `computeContentHash`. On MCP writes, the pre-existing surface asymmetry (handlers don't invoke encryption) means content is stored plaintext on the row anyway, so the hash works. **This spec does NOT add MCP-side encryption** — that's the encryption-parity follow-up tracked in #206. When that follow-up ships, the MCP handlers gain a decrypt-on-update step and `computeContentHash` slots into the same point in the pipeline as GraphQL today. *(**It shipped**: spec 041 PR-2, #206 closed 2026-06-01. `h-read-node` now decrypts when the session holds the key, so FR-010's encryption gate has lifted; `h-validate` got no equivalent and keeps its gate. See spec.md FR-010 / FR-011.)*
 
@@ -21,14 +21,14 @@ Add one nullable text column to `Node` (and matching column to `NodeVersion`), m
 
 - **Language/Version**: TypeScript 5.x on Node.js ≥ 22 (per server constitution S1)
 - **Primary Dependencies**: Prisma 5.x (PostgreSQL), `@modelcontextprotocol/sdk` (MCP server), Apollo Server (GraphQL), `zod` (tool input validation), `js-yaml` / `yaml` (importer/exporter). Hash machinery: **new shared helper** `src/lib/contentHash.ts` introduced by this spec (no existing computeContentHash in the repo today — PR-207 review caught the misleading "existing helper" wording). Crypto: Node.js built-in `createHash('sha256')`; no new dependencies.
-- **Storage**: PostgreSQL. `hadron_dev` for local; `hadron_test` for vitest. Schema delta via `prisma db push` on dev/test, hand-authored migration file under `prisma/migrations/` for production. **Two columns** (`nodes.abstract_origin_hash`, `node_versions.abstract_origin_hash`) added by **one migration** (cheap; both are nullable text, both online-safe with the same `lock_timeout` pattern established in 031).
-- **Testing**: Vitest. **Four** new / extended files: `src/mcp/server.nodeAbstractStaleness.test.ts` (NEW — staleness matrix); `src/test/integration/node-abstract.test.ts` (extend — restoreNodeVersion + GraphQL upsertNode hash semantics + the `NodeInput.abstractOriginHash` absence contract); `src/integrations/localFs/loadNodeFromFs.test.ts` (extend — YAML round-trip of the hash + tampered-hash warning); `src/api/graphql/schema/resolvers.encryption.test.ts` (extend — hash is plaintext metadata on encrypted memories). Also a tiny dedicated unit test for `src/lib/contentHash.ts` with known SHA-256 fixtures.
+- **Storage**: PostgreSQL. `hadron_dev` for local; `hadron_test` for vitest. Schema delta via `prisma db push` on dev/test, hand-authored migration file under `prisma/migrations/` for production. **Two columns** (`nodes.abstract_origin_hash`, `node_revisions.abstract_origin_hash`) added by **one migration** (cheap; both are nullable text, both online-safe with the same `lock_timeout` pattern established in 031).
+- **Testing**: Vitest. **Four** new / extended files: `src/mcp/server.nodeAbstractStaleness.test.ts` (NEW — staleness matrix); `src/test/integration/node-abstract.test.ts` (extend — restoreNodeRevision + GraphQL upsertNode hash semantics + the `NodeInput.abstractOriginHash` absence contract); `src/integrations/localFs/loadNodeFromFs.test.ts` (extend — YAML round-trip of the hash + tampered-hash warning); `src/api/graphql/schema/resolvers.encryption.test.ts` (extend — hash is plaintext metadata on encrypted memories). Also a tiny dedicated unit test for `src/lib/contentHash.ts` with known SHA-256 fixtures.
 - **Target Platform**: Linux server (hadron-server production deployments)
 - **Project Type**: web-service (MCP transport + GraphQL API)
 - **Performance Goals**: hash computation is `O(content length)` and runs once per write — far below the existing write-path budget. No measurable change to read latency (one extra column read; staleness check is a string compare). No new index in v1.
 - **Constraints**: Pre-spec backwards compatibility — every existing node has `abstractOriginHash IS NULL`; staleness check short-circuits when either side is null; no false positives on legacy content. The marker / validator warning MUST NOT fire on legacy nodes.
   - **Superseded by #1128 (2026-09-03).** This constraint was met as written and has since been deliberately dropped. The null short-circuit on `abstractOriginHash` is gone: a legacy node holding both an abstract and a body now DOES fire, because a fingerprint that was never taken is not evidence that the abstract was ever checked. What survives of the constraint is the part about the TEXT columns — a node missing either still fires nothing. See spec.md FR-010 and SC-004.
-- **Scale/Scope**: One column, one migration delta (adds column to both `nodes` and `node_versions`), ~4 MCP/GraphQL write-path edits (each `nodeVersion.create` site + `restoreNodeVersion`'s update payload), one h-read-node marker emission, one h-validate check, one GraphQL type field, one importer key, one exporter key. ~6 new tests, ~3 extended tests.
+- **Scale/Scope**: One column, one migration delta (adds column to both `nodes` and `node_revisions`), ~4 MCP/GraphQL write-path edits (each `nodeRevision.create` site + `restoreNodeRevision`'s update payload), one h-read-node marker emission, one h-validate check, one GraphQL type field, one importer key, one exporter key. ~6 new tests, ~3 extended tests.
 
 ## Constitution Check
 
@@ -41,10 +41,10 @@ Add one nullable text column to `Node` (and matching column to `NodeVersion`), m
 | S1 — Stack pin | yes | ✓ TypeScript / Node ≥ 22 / Prisma / Postgres / Vitest / GraphQL — no changes |
 | S2 — Typed-error boundary | n/a | No new errors. Staleness is observable, not throwable; the existing length-cap / invalid-scope errors from spec 031 still apply unchanged. |
 | S3 — `typeDefs.ts` is one backtick template literal | yes | ✓ New `abstractOriginHash: String` field on `Node` type uses no backticks in its doc-comment |
-| S4 — Composite-PK models | n/a | `Node` and `NodeVersion` both have id columns |
+| S4 — Composite-PK models | n/a | `Node` and `NodeRevision` both have id columns |
 | S5 — CHECK constraints in `prisma/post-push.sql` | n/a | No CHECK constraint added — the column is a fingerprint, not an invariant |
 | S6 — CI grep gates | n/a | No new grep gate |
-| I — Test-first (integration tests for graph-touching MCP tools) | yes | ✓ `h-add-node`, `h-update-node`, `h-read-node`, `h-validate`, GraphQL `upsertNode`, `restoreNodeVersion`, importer — all get integration coverage in the test files named above |
+| I — Test-first (integration tests for graph-touching MCP tools) | yes | ✓ `h-add-node`, `h-update-node`, `h-read-node`, `h-validate`, GraphQL `upsertNode`, `restoreNodeRevision`, importer — all get integration coverage in the test files named above |
 | II — Docs-concurrent (GraphQL doc-comments + migration intent) | yes | ✓ `Node.abstractOriginHash` doc-comment in `typeDefs.ts`; migration file header cites the spec ID; Prisma model doc-comment describes the column |
 | III — Typed errors at the GraphQL boundary | n/a | No new errors at the GraphQL boundary; existing error classes from 031 cover everything callable in this surface |
 | V — Zero-Trust Apps; every MCP tool through access-control | yes | ✓ No new access-control surface — existing `canReadMemory` / `canWriteToMemory` gates on the modified tools unchanged. `abstractOriginHash` is system-managed; callers can't supply it (FR-012), so there's no caller-side authority concern |
@@ -96,7 +96,7 @@ specs/032-abstract-staleness/
 ```text
 hadron-server/
 ├── prisma/
-│   ├── schema.prisma                            # Node + NodeVersion each gain `abstractOriginHash String?`
+│   ├── schema.prisma                            # Node + NodeRevision each gain `abstractOriginHash String?`
 │   └── migrations/
 │       └── YYYYMMDDHHMMSS_abstract_origin_hash/ # NEW migration directory
 │           └── migration.sql                    # BEGIN; SET LOCAL lock_timeout = '5s'; ALTER TABLE … two ADD COLUMNs; COMMIT;
@@ -105,7 +105,7 @@ hadron-server/
 │   │   └── graphql/
 │   │       └── schema/
 │   │           ├── typeDefs.ts                  # Node gains `abstractOriginHash: String` (read-only — NOT on NodeInput)
-│   │           └── resolvers.ts                 # upsertNode + restoreNodeVersion thread hash through
+│   │           └── resolvers.ts                 # upsertNode + restoreNodeRevision thread hash through
 │   ├── integrations/
 │   │   ├── github/
 │   │   │   ├── syncGraphFromGithub.ts           # passes imported abstractOriginHash through to upsert
@@ -128,7 +128,7 @@ No constitutional violations to justify beyond the Spec Workflow tension already
 
 **Two open questions from the spec checklist resolved during plan**:
 
-1. **Q1 — Should `restoreNodeVersion` recompute `abstractOriginHash` from restored content when the version's stored hash is `null` (legacy version restored post-spec)?** → **NO**. Restoring leaves `abstractOriginHash IS NULL` on the live row; the staleness check short-circuits; no false signal. Recomputation would be asymmetric with how other columns are restored (verbatim) and could surprise users who expect "restore = byte-identical to the version." See research D4.
+1. **Q1 — Should `restoreNodeRevision` recompute `abstractOriginHash` from restored content when the version's stored hash is `null` (legacy version restored post-spec)?** → **NO**. Restoring leaves `abstractOriginHash IS NULL` on the live row; the staleness check short-circuits; no false signal. Recomputation would be asymmetric with how other columns are restored (verbatim) and could surprise users who expect "restore = byte-identical to the version." See research D4.
    - **Superseded by #1128 (2026-09-03)**: the ANSWER is unchanged — still no recomputation, still verbatim — but "the staleness check short-circuits; no false signal" no longer describes what happens. The restored row now shows the marker, correctly, because its abstract has never been checked against the restored body. The reason not to recompute was never the silence; it was the byte-identical-restore invariant, and that is untouched.
 
 2. **Q2 — Should `h-validate`'s stale-abstract check be flag-gated so users on memories with many legacy abstracts can opt out?** → **NO** in v1. Legacy abstracts have `abstractOriginHash IS NULL` and naturally don't trigger the warning (FR-007 edge-case behaviour). Memories with mostly legacy content stay quiet by design. If the warning becomes noisy in practice on memories with mixed legacy + post-spec content, add a flag in a follow-up. See research D5.

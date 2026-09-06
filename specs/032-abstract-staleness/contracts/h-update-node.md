@@ -54,21 +54,32 @@ import { computeContentHash } from '../lib/contentHash.js';
 
 // ... existing length-cap + trim-then-check on abstract ...
 
-// On encrypted memories, existing.content arrives ciphertext via
-// db.node.findUnique (no decryptNodeFields call in h-update-node today
-// — pre-existing surface asymmetry per spec 031 round-2 review and
-// gap-tracking issue #206). For non-encrypted memories OR for encrypted
-// memories accessed via MCP today (where content is stored plaintext
-// per the same asymmetry), `existing.content` IS plaintext.
-// When the MCP encryption-parity follow-up ships, this sketch grows
-// a `decryptNodeFields(existing, memEncInfo)` call here.
-const currentContent = existing.content;
+// The encryption-parity follow-up this sketch anticipated HAS shipped
+// (spec 041 PR-2, closing #206): h-update-node decrypts `existing` with
+// the session key before hashing, and encrypts before persisting. So
+// `existing.content` is plaintext by construction rather than by the old
+// surface asymmetry, and the decrypt call the sketch predicted is real.
+const currentContent = existing.content; // plaintext (decrypted above)
 
 // abstractOriginHash semantics:
 let nextAbstractOriginHash: string | null | undefined;
 if (normalizedAbstract === undefined) {
-  // abstract not supplied — preserve
-  nextAbstractOriginHash = undefined; // Prisma: leave column untouched
+  // #1126 — the tenth row. `abstractStillAccurate` is the caller asserting
+  // the STORED abstract survives this edit, so re-fingerprint it against
+  // what this call is writing. Guarded on an abstract actually existing:
+  // without that guard this mints a hash for an abstract that is not
+  // there, contradicting FR-006/FR-007.
+  const hasStoredAbstract =
+    typeof existing.abstract === 'string' && existing.abstract.trim() !== '';
+  if (abstractStillAccurate === true && hasStoredAbstract) {
+    const nextContent = content !== undefined ? content : currentContent;
+    // computeContentHash(null) is null, so clearing content through this
+    // branch lands on FR-007 rather than needing its own row.
+    nextAbstractOriginHash = computeContentHash(nextContent ?? null);
+  } else {
+    // abstract not supplied and no assertion — preserve
+    nextAbstractOriginHash = undefined; // Prisma: leave column untouched
+  }
 } else if (normalizedAbstract === null) {
   // abstract cleared — clear the hash too
   nextAbstractOriginHash = null;
@@ -93,12 +104,12 @@ const data: Prisma.NodeUpdateInput = {
 
 **Key point on "abstract supplied, content absent" (the FR-003 reset case)**: when the caller updates only the abstract, we treat them as affirming "this abstract matches the **current** content right now." The hash is computed against the unchanged `existing.content`. The staleness signal clears.
 
-## NodeVersion snapshot
+## NodeRevision snapshot
 
-Before the `db.node.update` runs, the existing `nodeVersion.create` site MUST capture `existing.abstractOriginHash` in the snapshot (per FR-002). This is the same lesson learned from spec 031.
+Before the `db.node.update` runs, the existing `nodeRevision.create` site MUST capture `existing.abstractOriginHash` in the snapshot (per FR-002). This is the same lesson learned from spec 031.
 
 ```typescript
-await db.nodeVersion.create({
+await db.nodeRevision.create({
   data: {
     // ... existing snapshot fields ...
     abstract: existing.abstract,
@@ -119,6 +130,7 @@ await db.nodeVersion.create({
 
 (in `src/mcp/server.nodeAbstractStaleness.test.ts`)
 
-The 9-row matrix above is each one acceptance scenario. Plus:
-- NodeVersion snapshot captures `existing.abstractOriginHash` on every update path.
-- Encrypted-memory matrix mirror: same 9 rows, but the DB row's `content` column is ciphertext while `abstractOriginHash` is plaintext computed from the plaintext input.
+The **10-row** matrix above is each one acceptance scenario. Plus:
+- NodeRevision snapshot captures `existing.abstractOriginHash` on every update path — including an update that ONLY re-stamps the fingerprint, which is still a change to restorable state (#1127).
+- Encrypted-memory matrix mirror: same rows. Since spec 041 the handler decrypts before hashing and encrypts before persisting, so the DB row's `content` is ciphertext while `abstractOriginHash` is plaintext computed from the plaintext body.
+- **`abstractStillAccurate` (row 10)**: the assertion clears the marker and gives a never-fingerprinted node its first hash; it is IGNORED when `abstract` is also supplied and when the node has no abstract (no ghost fingerprint); and both halves of its race are pinned — an interleaved **abstract** swap is certified unseen (marker suppressed), while an interleaved **content** change leaves the stamped hash disagreeing with the row (marker stays armed, assertion wasted).

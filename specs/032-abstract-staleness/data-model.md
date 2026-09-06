@@ -37,18 +37,18 @@ model Node {
 }
 ```
 
-### `NodeVersion` model
+### `NodeRevision` model
 
-Find via `model NodeVersion {` in `prisma/schema.prisma`. New column positioned adjacent to the existing `abstract` column (from spec 031's PR-201-round-2 follow-up):
+Find via `model NodeRevision {` in `prisma/schema.prisma`. New column positioned adjacent to the existing `abstract` column (from spec 031's PR-201-round-2 follow-up):
 
 ```prisma
-model NodeVersion {
+model NodeRevision {
   // ... existing fields ...
 
   description      String?
   abstract         String?  // spec 031
   /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
-  /// version capture. Restored verbatim by `restoreNodeVersion`; legacy
+  /// version capture. Restored verbatim by `restoreNodeRevision`; legacy
   /// versions (pre-spec) have `NULL` here, which since #1128 ARMS the
   /// marker on the live row after restore — correctly, since the restored
   /// abstract has never been checked against the restored body.
@@ -75,7 +75,7 @@ Hand-authored migration directory (per CLAUDE.md — `prisma migrate dev` is bro
 -- Plan: specs/032-abstract-staleness/plan.md
 --
 -- Adds an optional `abstract_origin_hash` text column to BOTH `nodes` AND
--- `node_versions`. Stores SHA-256(content)[0:8] at the time the abstract
+-- `node_revisions`. Stores SHA-256(content)[0:8] at the time the abstract
 -- was authored, so consumers can detect staleness via `abstract_origin_hash
 -- != content_hash`. Per spec 032 FR-001 + FR-002.
 --
@@ -95,14 +95,14 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE "nodes" ADD COLUMN "abstract_origin_hash" TEXT;
-ALTER TABLE "node_versions" ADD COLUMN "abstract_origin_hash" TEXT;
+ALTER TABLE "node_revisions" ADD COLUMN "abstract_origin_hash" TEXT;
 
 COMMIT;
 ```
 
 **Online-safe**: both ALTERs are nullable additive columns; metadata-only on Postgres ≥ 11. The `ACCESS EXCLUSIVE` lock on each table is brief; the BEGIN/COMMIT wraps both so the migration aborts as a unit if either lock is contested.
 
-**Reversibility**: `BEGIN; ALTER TABLE "nodes" DROP COLUMN "abstract_origin_hash"; ALTER TABLE "node_versions" DROP COLUMN "abstract_origin_hash"; COMMIT;`. Not included in the migration file (no down-migration convention in this repo).
+**Reversibility**: `BEGIN; ALTER TABLE "nodes" DROP COLUMN "abstract_origin_hash"; ALTER TABLE "node_revisions" DROP COLUMN "abstract_origin_hash"; COMMIT;`. Not included in the migration file (no down-migration convention in this repo).
 
 ## GraphQL schema diff — `src/api/graphql/schema/typeDefs.ts`
 

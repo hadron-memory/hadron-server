@@ -10,7 +10,7 @@
 
 - [x] Focused on the implementer-facing contract (audience is the engineer who will build this, not a non-technical stakeholder — same convention established by spec 031)
 - [x] Tool-shape contracts (`Source: abstract-stale` marker shape, `[stale-abstract]` validator message, GraphQL field exposure, importer YAML key) are concrete enough that an implementer can build to them and a reviewer can test against them
-- [x] Concrete schema mechanics (Prisma column type, migration shape, NodeVersion delta) are described at the entity-impact level; implementation specifics deferred to plan.md
+- [x] Concrete schema mechanics (Prisma column type, migration shape, NodeRevision delta) are described at the entity-impact level; implementation specifics deferred to plan.md
 - [x] All mandatory sections completed (Background, User Scenarios, Requirements, Entity Impact, Success Criteria, Assumptions)
 
 ## Requirement Completeness
@@ -33,9 +33,9 @@
 ## Notes
 
 - **Spec sequenced before the RAG follow-up.** Vectorising stale abstracts is a confidently-misleading failure mode that this spec exists to prevent. The RAG spec will consume `abstractOriginHash` directly and encode a "skip / re-queue stale embeddings" policy on top of the signal this spec exposes. Spec ordering: 032 (this) → RAG follow-up.
-- **NodeVersion lesson from spec 031 is applied from day one.** FR-002 + Entity Impact note explicitly call out the curated-subset gotcha. The plan/tasks for this spec MUST treat NodeVersion as a first-class entity from the start (vs. spec 031 where it surfaced during implementation as a planning gap).
+- **NodeRevision lesson from spec 031 is applied from day one.** FR-002 + Entity Impact note explicitly call out the curated-subset gotcha. The plan/tasks for this spec MUST treat NodeRevision as a first-class entity from the start (vs. spec 031 where it surfaced during implementation as a planning gap).
 - **Two open questions deliberately deferred to planning** (not raised as `[NEEDS CLARIFICATION]` because the spec has sensible defaults — but worth surfacing for `/speckit-plan`):
-  1. Should `restoreNodeVersion` recompute `abstractOriginHash` from the restored content when the version's stored hash is null (legacy version restored after this spec ships)? Trade-off documented in the Edge Cases section.
+  1. Should `restoreNodeRevision` recompute `abstractOriginHash` from the restored content when the version's stored hash is null (legacy version restored after this spec ships)? Trade-off documented in the Edge Cases section.
   2. Should the `h-validate` stale-abstract check be gated by a flag (so users can opt out of staleness warnings on memories where many legacy abstracts haven't been refreshed)? Out of scope for v1; tracked here.
 - **Branch/spec-dir number divergence (199 vs 032)** is documented in the Feature Branch header so a confused reviewer reaches the explanation in one click. Future readers should treat the spec-dir number as authoritative.
 - **Three rejected alternatives** worth noting (not included in the spec to keep it tight):

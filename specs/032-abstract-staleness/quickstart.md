@@ -5,7 +5,7 @@ Manual smoke recipe for verifying staleness end-to-end against a local dev serve
 ## Prerequisites
 
 - Local Postgres with `hadron` — the canonical dev DB per CLAUDE.md. *(This doc said `hadron_dev`, which CLAUDE.md now documents as deprecated/unused; running these steps there verifies nothing.)*
-- `prisma db push` has applied the schema delta (including the new `abstract_origin_hash` columns on both `nodes` and `node_versions`).
+- The schema delta is applied (the new `abstract_origin_hash` columns on both `nodes` and `node_revisions`) via **`pnpm db:dev-setup`**. *(This said bare `prisma db push`; CLAUDE.md warns against that on the dev DB — Prisma cannot model the pgvector HNSW index, so a bare push DROPS it and never rebuilds it. @copilot, PR #1139.)*
 - `prisma/post-push.sql` re-applied.
 - Dev server running locally: `pnpm tsx src/index.ts` (default port 4000).
 - A valid App Key (`hdr_app_…`) — get one from `prisma/seed.ts` output.
@@ -148,7 +148,7 @@ h-update-node
   reason: snapshot before restore-test
 ```
 
-(Captures a NodeVersion row with current state.)
+(Captures a NodeRevision row with current state.)
 
 Then make a change and restore:
 
@@ -161,10 +161,10 @@ h-update-node
 Find the version ID:
 
 ```
-psql -d hadron -c "select v.id from node_versions v join nodes n on n.id = v.node_id join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev' order by v.created_at desc limit 1 offset 1;"
+psql -d hadron -c "select v.id from node_revisions v join nodes n on n.id = v.node_id join memories m on m.id = n.memory_id where n.loc = 'test:staleness' and m.urn = 'hadronmemory.com::dev' order by v.created_at desc limit 1 offset 1;"
 ```
 
-Then call `restoreNodeVersion` via GraphQL (or whatever the portal surface uses).
+Then call `restoreNodeRevision` via GraphQL (or whatever the portal surface uses).
 
 **Expected**: the restored node has `abstract_origin_hash` equal to the version's snapshot value — restore stays verbatim (FR-002 + research D4). If the version was captured pre-spec that value is NULL, and since #1128 the restored node therefore **shows the marker**. That is correct rather than a false signal: the restored abstract has never been checked against the restored body.
 
@@ -190,5 +190,5 @@ h-delete-node
 | 8 | h-read-node 'all' refreshed | no marker |
 | 9 | h-validate refreshed | clean |
 | 10 | Unfingerprinted node (abstract + body) | **marker present** (#1128) |
-| 11 | restoreNodeVersion | hash restored verbatim; marker armed if that hash was NULL |
+| 11 | restoreNodeRevision | hash restored verbatim; marker armed if that hash was NULL |
 | 12 | Cleanup | node deleted |
