@@ -100,12 +100,18 @@ import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
 // Timing gotcha: `didEncounterErrors` fires DURING execution, before
 // `formatError` reshapes the response. So the typed client errors that
 // `formatError` maps to stable codes (URN_NOT_QUALIFIED, BAD_USER_INPUT,
-// AmbiguousLegacyUrnError, the asset refusals) do NOT yet carry those codes
-// here — Apollo has them as the default INTERNAL_SERVER_ERROR. We therefore
-// classify the *original* error by TYPE, sharing one list with `formatError`
-// (#918 — see api/graphql/formatError.ts; two hand-kept `instanceof` chains is
-// how "mapped but still reported" happens), then fall back to the error code
-// for Apollo's own client-error classes (validation, parse, …).
+// AmbiguousLegacyUrnError, and the asset refusals) do NOT yet carry those
+// codes here — Apollo has them as the default INTERNAL_SERVER_ERROR. We
+// therefore classify the *original* error by TYPE, then fall back to the error
+// code for Apollo's own client-error classes (validation, parse, …).
+//
+// BEING MAPPED IS NOT BEING SKIPPED (@copilot, PR #924). `isExpectedClientError`
+// consults one shared list with `formatError` — so no second hand-kept
+// `instanceof` chain lives here — but each entry declares `silenceInSentry`
+// separately. The asset refusals are mapped for the wire and deliberately still
+// REPORTED, because ASSET_BYTES_GONE is real server-state inconsistency and
+// this is currently its only alarm (#1140). Do not read the list as "everything
+// formatError touches is silent here"; read the flag.
 const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
   async requestDidStart() {
     return {

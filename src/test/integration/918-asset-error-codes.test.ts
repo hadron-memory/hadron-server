@@ -40,6 +40,10 @@ async function graphqlError(query: string, variables: Record<string, unknown>) {
     headers: { 'content-type': 'application/json', Authorization: `Bearer ${jwt}` },
     body: JSON.stringify({ query, variables }),
   });
+  // Assert the transport before the payload (@copilot, PR #924): a non-GraphQL
+  // failure (500 + a different body shape) would otherwise surface as a
+  // confusing "errors is undefined" rather than as what actually went wrong.
+  expect(res.status, 'GraphQL errors ride a 200').toBe(200);
   const body = (await res.json()) as {
     errors?: Array<{ message: string; extensions?: Record<string, unknown> }>;
   };
@@ -104,9 +108,13 @@ describe('#918 — AssetUploadError codes reach the client', () => {
     const asset = await makeAsset('PENDING');
     const err = await graphqlError(DOWNLOAD, { assetId: asset.id });
     expect(err.extensions?.code).toBe('SCAN_PENDING');
-    // The message still says what happened — the code is additive, so nothing
-    // that reads the prose today breaks.
-    expect(err.message).toContain('not been scanned');
+    // The message is still populated — the code is additive, so a client
+    // reading prose today keeps working. Asserting only that it is NON-EMPTY,
+    // not what it says (@copilot, PR #924): this PR's whole argument is that
+    // the prose is free to change and the code is the contract, so pinning the
+    // wording here would contradict the change and break the suite on a copy
+    // edit that altered nothing a caller depends on.
+    expect(err.message.length).toBeGreaterThan(0);
   });
 
   it('a blocked asset refuses with SCAN_BLOCKED', async () => {
