@@ -33,7 +33,6 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // hadron_server, which nothing below deletes) — clear them first.
   await db.aiServiceConfig.deleteMany();
   await db.hadronServer.deleteMany();
-  await db.usageEvent.deleteMany();
   // Spec 046 — usage metering (prices are FK-free; ledger FKs org only).
   await db.aiModelPrice.deleteMany();
   await db.creditLedgerEntry.deleteMany();
@@ -110,6 +109,23 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #692: the principal pool. users/orgs FK it (onDelete SetNull), so it clears
   // last; otherwise reserved/tombstoned rows leak across tests and collide.
   await db.principal.deleteMany();
+  // #1069 — usage events clear LAST, after every row they reference.
+  //
+  // They used to clear near the top, which opened a ~30-statement window in the
+  // middle of this function: usage recording is FIRE-AND-FORGET
+  // (`void db.usageEvent.createMany().catch()`), so a write from the previous
+  // test could land after the usage wipe and before `node.deleteMany()` — too
+  // late to be deleted, in time for the node FK's `SetNull` to blank its
+  // `nodeId`. The next test then opened with stale `[null, null]` read events,
+  // which is exactly what #1069 saw in CI.
+  //
+  // Clearing last closes it structurally rather than narrowing it: a late insert
+  // either lands before the parents go and is deleted here, or lands after and
+  // is REJECTED by its own foreign key (and swallowed by the recorder's
+  // `.catch()`). Safe in this position because every UsageEvent FK is nullable
+  // and `SetNull` — node, session, app, user, organization — and `memoryId` is a
+  // denormalized column with no FK at all (#796).
+  await db.usageEvent.deleteMany();
 }
 
 /**
