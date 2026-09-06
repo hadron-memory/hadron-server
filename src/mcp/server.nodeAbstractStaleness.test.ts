@@ -368,6 +368,42 @@ describe('hadron_update_node — abstractStillAccurate (#1126)', () => {
     expect(rev).not.toBeNull(); // the null really was captured
   });
 
+  it('#1128 — a RESTORE of that revision arms the marker on the live node', async () => {
+    // PR #1139 review, @codex: the test above pins the PRECONDITION — that a
+    // revision captured the null hash — and never restores it, so it could not
+    // fail if restoreNodeRevision started recomputing the hash. Spec 032's
+    // edge case cites this behaviour, so the citation needs a test that
+    // performs the operation it describes.
+    await addNode({ loc: 'restore2', abstract: 'X', content: 'Y' });
+    const live = await readRow('restore2');
+    await db.node.update({
+      where: { id: live!.id },
+      data: { abstractOriginHash: null },
+    });
+
+    // Snapshot the null-hash state, then move the node to a verified one.
+    await updateNode({ loc: 'restore2', content: 'Y2', abstractStillAccurate: true });
+    expect(await readNode('restore2', 'all')).not.toContain('Source: abstract-stale');
+
+    const rev = await db.nodeRevision.findFirst({
+      where: { nodeId: live!.id, abstractOriginHash: null },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    expect(rev).not.toBeNull();
+
+    // The operation the spec's edge case is about.
+    const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: rev!.id }, ctx);
+
+    // Restored verbatim (plan D4) — the null comes back...
+    expect((await readRow('restore2'))?.abstractOriginHash).toBeNull();
+    // ...and under the post-#1128 predicate that is a marker, not silence.
+    // Correct: the restored abstract has never been checked against the
+    // restored body.
+    expect(await readNode('restore2', 'all')).toContain('Source: abstract-stale');
+  });
+
   it('#1128 — and asserting accuracy clears it, giving the node its first hash', async () => {
     // The escape hatch has to reach the newly-armed population, or #1128 just
     // adds a marker nobody can turn off. Asserting fingerprints the abstract
