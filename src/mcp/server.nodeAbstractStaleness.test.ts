@@ -441,6 +441,43 @@ describe('hadron_update_node — abstractStillAccurate (#1126)', () => {
     expect(await readNode('race1', 'all')).not.toContain('Source: abstract-stale');
   });
 
+  it('the CONTENT half of that race fails SAFE — the marker stays armed', async () => {
+    // PR #1139 review, @codex. The two halves fail in opposite directions and
+    // the contract now says so, so the safe half needs pinning too — a claim
+    // in a contract is a promise.
+    //
+    // A sequential interloper cannot show this: the handler reads `existing`
+    // when it runs, so a content change made BEFORE the call is simply the
+    // content it hashes. The race needs the change to land AFTER that read and
+    // before the write, which is what the one-shot spy below does.
+    await addNode({ loc: 'race3', abstract: 'X', content: 'Y' });
+    const target = await readRow('race3');
+
+    const realFindUnique = db.node.findUnique.bind(db.node);
+    const spy = vi
+      .spyOn(db.node, 'findUnique')
+      .mockImplementationOnce((async (args: never) => {
+        const row = await realFindUnique(args);
+        // The interloper, landing in the window the handler cannot see.
+        await db.node.update({ where: { id: target!.id }, data: { content: 'CONCURRENT' } });
+        return row;
+      }) as unknown as typeof db.node.findUnique);
+    try {
+      await updateNode({ loc: 'race3', abstractStillAccurate: true });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const row = await readRow('race3');
+    // The row keeps the interloper's content; the stamped hash describes the
+    // body this call READ, so the two disagree...
+    expect(row?.content).toBe('CONCURRENT');
+    expect(row?.abstractOriginHash).toBe(computeContentHash('Y'));
+    // ...and the marker therefore stays ARMED. The assertion did not take
+    // effect, which is the failure mode you want: nothing false was certified.
+    expect(await readNode('race3', 'all')).toContain('Source: abstract-stale');
+  });
+
   it('the fully-bound form writes both things the caller compared', async () => {
     // The counterpart, and the one the description points at: supplying both
     // leaves no gap for an interloper to occupy — whatever happened in

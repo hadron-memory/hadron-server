@@ -23,7 +23,7 @@ Spec source: FR-003, FR-004, FR-005, FR-006, FR-007.
 | `null` | absent | **set to `null`** (FR-006 — no abstract = no hash) |
 | `null` | string `Y'` | set to `null` (FR-006) |
 | `null` | `null` | hash set to null |
-| absent + **`abstractStillAccurate: true`** | absent *or* string `Y'` | **set to `computeContentHash(content supplied here, else `existing.content` as read by this call)`** (#1126 — the caller asserts the STORED abstract survives this edit, so it is re-fingerprinted against what this write leaves; identical outcome to re-saving that same abstract text, row 4). **Guarded on the node actually having an abstract** — without the guard this mints a ghost fingerprint on an abstract-less node, contradicting FR-006/FR-007. With `content: null` it lands on FR-007 (`computeContentHash(null)` is null) rather than needing its own row. |
+| absent + **`abstractStillAccurate: true`** | absent *or* string `Y'` | **set to `computeContentHash(...)` over the `content` supplied in this call, or `existing.content` as read by this call when `content` is omitted** (#1126 — the caller asserts the STORED abstract survives this edit, so it is re-fingerprinted against what this write leaves; identical outcome to re-saving that same abstract text, row 4). **Guarded on the node actually having an abstract** — without the guard this mints a ghost fingerprint on an abstract-less node, contradicting FR-006/FR-007. With `content: null` it lands on FR-007 (`computeContentHash(null)` is null) rather than needing its own row. |
 
 *(Row 3, `absent` / `null`, is unaffected by #1128: the read-time check still requires non-null content, so a preserved hash there fires nothing.)*
 
@@ -32,7 +32,12 @@ Spec source: FR-003, FR-004, FR-005, FR-006, FR-007.
 - **It is an assertion, not a setting, and it suppresses a correctness check.** It writes no text; it only re-fingerprints the abstract already stored. The marker exists to catch an abstract that quietly stopped matching its node, and this is the one flag that can hide exactly that.
 - **Ignored, not rejected, when `abstract` is also supplied** — that path already re-fingerprints, so both spellings mean the same thing and the outcome is identical.
 - **Ignored when the node has no abstract** (the guard above).
-- **It binds to NEITHER half.** It re-fingerprints whatever abstract is *stored* when the write lands, against the content **as this call read it** — `existing` is fetched before the write and outside any lock, so when `content` is omitted the hash can certify a body a concurrent writer has since replaced. Neither side is checked against what the caller read. If another writer changed either one in between, the caller certifies text they never saw and the marker is suppressed on it. **The fully-bound form needs no flag at all**: pass `abstract` and `content` together and you are writing exactly the two things you compared.
+- **It binds to NEITHER half — and the two halves fail in OPPOSITE directions**, which is the part worth knowing before relying on it (@codex, PR #1139):
+
+- **Abstract side — unsafe.** It re-fingerprints whatever abstract is *stored* when the write lands. A concurrent writer who swapped the abstract in between gets that new text **certified unseen**, and the marker is suppressed on an abstract the caller never read. Pinned by `binds to NEITHER half — an interleaved abstract swap is certified unseen`.
+- **Content side — fails safe.** The hash is computed from the `content` supplied in *this* call, or, when `content` is omitted, from `existing.content` as read before the write and outside any lock. If a concurrent writer changes content after that read, this call stores a hash of the **old** body while the row keeps the **new** one — they disagree, so **the marker stays armed**. The assertion silently fails to take effect rather than certifying something false.
+
+So a lost race costs you a suppressed marker on the abstract side and a wasted assertion on the content side. Neither side is checked against what the caller read. If another writer changed either one in between, the caller certifies text they never saw and the marker is suppressed on it. **The fully-bound form needs no flag at all**: pass `abstract` and `content` together and you are writing exactly the two things you compared.
 
   This was weighed against making the assertion bind (compare-and-swap on the values the caller read) and **declined** — @Holger's ruling, 2026-09-03. Recorded here because a reader who reaches for the flag needs to know what it does not promise.
 
