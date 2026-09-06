@@ -30,14 +30,28 @@ interface ClientErrorMapping {
   matches: (err: unknown) => boolean;
   /** The extensions to merge onto the formatted error — `code` and any detail. */
   extensionsFor: (err: unknown) => Record<string, unknown>;
+  /**
+   * Whether the Sentry plugin should SKIP this error.
+   *
+   * Deliberately NOT implied by being mapped. Mapping answers *"does the caller
+   * get a typed code?"*; this answers *"do we want to hear about it?"*, and
+   * those are different questions — @Holger's call, 2026-09-06.
+   *
+   * Every entry states it, so adding a mapping forces the second question to be
+   * answered rather than inherited. That is the anti-drift property the shared
+   * list is actually for: one list, two declared columns, no second hand-kept
+   * `instanceof` chain in the plugin.
+   */
+  silenceInSentry: boolean;
 }
 
 /** Type-safe definition site; the cast is contained here. */
 function mapping<E>(
   matches: (err: unknown) => err is E,
   extensionsFor: (err: E) => Record<string, unknown>,
+  { silenceInSentry }: { silenceInSentry: boolean },
 ): ClientErrorMapping {
-  return { matches, extensionsFor: (err) => extensionsFor(err as E) };
+  return { matches, extensionsFor: (err) => extensionsFor(err as E), silenceInSentry };
 }
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
@@ -50,6 +64,7 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
       offendingValue: err.offendingValue,
       expectedType: err.expectedType,
     }),
+    { silenceInSentry: true },
   ),
   // A malformed-grammar / bad-slug URN is caller error, not a server fault.
   // parseUrn / validateUserSlug (create boundaries, e.g. cloneMemory's
@@ -62,21 +77,32 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
       reason: err.reason,
       offendingValue: err.offendingSegment,
     }),
+    { silenceInSentry: true },
   ),
   // #697: a legacy URN matching >1 live row through the stored alias map fails
   // LOUDLY with this typed code (never a silent wrong resolve).
   mapping(
     (err): err is AmbiguousLegacyUrnError => err instanceof AmbiguousLegacyUrnError,
     (err) => ({ code: 'AmbiguousLegacyUrnError', offendingValue: err.ref }),
+    { silenceInSentry: true },
   ),
   // #918: every asset refusal in one branch, taking the code off the instance —
   // MALWARE_BLOCKED, SCAN_PENDING, SCAN_BLOCKED, NOT_FOUND, the MIME/size
   // rejections, and anything the class gains later. Mapping the class rather
   // than enumerating its codes is the point: a new refusal reaches the wire
   // typed without anyone remembering to come back here.
+  //
+  // Sentry: NOT silenced. Mapping these for the wire and silencing them in the
+  // issue stream were proposed together; @Holger split them (2026-09-06) and
+  // took only the wire half. The reason is `ASSET_BYTES_GONE` — a row whose
+  // object is missing is genuine server-state inconsistency, and dropping it
+  // here would remove the only alarm without adding one anywhere else. The
+  // right home for that alarm is the purge/janitor path where the
+  // inconsistency is DISCOVERED, and it does not exist yet (#1140).
   mapping(
     (err): err is AssetUploadError => err instanceof AssetUploadError,
     (err) => ({ code: err.code }),
+    { silenceInSentry: false },
   ),
 ];
 
@@ -90,15 +116,19 @@ function unwrap(error: unknown): unknown {
 }
 
 /**
- * True when the error is one this module maps to a client-facing code — i.e. a
- * refusal the caller asked for, not a fault worth paging anyone about.
+ * True when the Sentry plugin should skip this error.
+ *
+ * NOT simply "is it mapped": a mapped error can still be worth reporting, and
+ * `AssetUploadError` is (see its entry). Being mapped means the caller gets a
+ * typed code; being silenced means we do not want the issue. Each mapping
+ * declares the second independently of the first.
  *
  * Callers must pass the UNWRAPPED original (the Sentry plugin already has it);
  * at `didEncounterErrors` time the wrapper still reads INTERNAL_SERVER_ERROR,
  * which is exactly why the type has to be consulted instead of the code.
  */
 export function isExpectedClientError(original: unknown): boolean {
-  return CLIENT_ERROR_MAPPINGS.some((m) => m.matches(original));
+  return CLIENT_ERROR_MAPPINGS.some((m) => m.matches(original) && m.silenceInSentry);
 }
 
 /** Apollo `formatError`: attach the stable code for every mapped client error. */

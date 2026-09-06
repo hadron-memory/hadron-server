@@ -116,21 +116,35 @@ describe('everything else is left alone', () => {
   });
 });
 
-describe('isExpectedClientError — the anti-drift half', () => {
+describe('isExpectedClientError — mapped and silenced are DIFFERENT questions', () => {
   // Sentry classifies at didEncounterErrors time, BEFORE formatError runs, so
-  // it cannot read the code and must consult the type. Sharing one list is what
-  // stops a newly mapped client error from still being filed as a server fault
-  // — which is what an asset NOT_FOUND was doing.
+  // it cannot read the code and must consult the type. One shared list keeps a
+  // second `instanceof` chain out of the plugin; what each entry does about
+  // Sentry is declared per entry, because "the caller gets a typed code" and
+  // "we do not want to hear about it" are not the same claim.
   it.each([
-    ['AssetUploadError', new AssetUploadError('NOT_FOUND', 'x')],
     ['UrnNotQualifiedError', new UrnNotQualifiedError('bad', undefined, 'node')],
     ['UrnParseError', new UrnParseError('bad', 'reserved-word-slug', 'user')],
     ['AmbiguousLegacyUrnError', new AmbiguousLegacyUrnError('org::mem')],
-  ])('%s is expected, so Sentry skips it', (_name, err) => {
+  ])('%s is silenced — mapped for the wire AND skipped by Sentry', (_name, err) => {
     expect(isExpectedClientError(err)).toBe(true);
-    // …and it is expected precisely BECAUSE it is mapped: the two agree by
-    // construction, which is the property the shared list exists to give.
     expect(format(err as Error).extensions?.code).not.toBe('INTERNAL_SERVER_ERROR');
+  });
+
+  // @Holger's call, 2026-09-06: ship the wire half of #918, keep the Sentry
+  // noise. The load-bearing case is ASSET_BYTES_GONE — a row whose object is
+  // missing is real server-state inconsistency, and silencing it here would
+  // remove the only alarm without adding one where the inconsistency is
+  // actually discovered (#1140). So these are mapped and still REPORTED.
+  it.each([
+    ['NOT_FOUND', new AssetUploadError('NOT_FOUND', 'x')],
+    ['MALWARE_BLOCKED', new AssetUploadError('MALWARE_BLOCKED', 'x')],
+    ['ASSET_BYTES_GONE', new AssetUploadError('ASSET_BYTES_GONE', 'x')],
+  ])('AssetUploadError %s is mapped for the wire but NOT silenced', (code, err) => {
+    // The wire half — this is the #918 fix and it must hold.
+    expect(format(err as Error).extensions?.code).toBe(code);
+    // The Sentry half — deliberately unchanged from before #924.
+    expect(isExpectedClientError(err)).toBe(false);
   });
 
   it('a genuine fault is NOT expected — it still reaches Sentry', () => {
