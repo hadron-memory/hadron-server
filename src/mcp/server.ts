@@ -3965,8 +3965,8 @@ export function createMcpServerInstance(
         decryptNodeFieldsWithKey(existing, updKey);
       }
 
-      // Spec 032 — abstractOriginHash partial-update matrix (9 rows from
-      // the contract). Drives off whether `normalizedAbstract` was
+      // Spec 032 — abstractOriginHash partial-update matrix (10 rows from
+      // the contract; #1126 added the abstractStillAccurate row). Drives off whether `normalizedAbstract` was
       // supplied (undefined = preserve, null = clear, string = set).
       // Hash always computed on plaintext per FR-009 (existing.* is
       // plaintext here — decrypted above for encrypted memories).

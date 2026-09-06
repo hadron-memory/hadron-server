@@ -21,6 +21,18 @@ Spec source: FR-003, FR-004, FR-005, FR-006, FR-007.
 | `null` | absent | **set to `null`** (FR-006 — no abstract = no hash) |
 | `null` | string `Y'` | set to `null` (FR-006) |
 | `null` | `null` | hash set to null |
+| absent + **`abstractStillAccurate: true`** | absent *or* string `Y'` | **set to `computeContentHash(next content)`** (#1126 — the caller asserts the STORED abstract survives this edit, so it is re-fingerprinted against what this write leaves; identical outcome to re-saving that same abstract text, row 4). **Guarded on the node actually having an abstract** — without the guard this mints a ghost fingerprint on an abstract-less node, contradicting FR-006/FR-007. With `content: null` it lands on FR-007 (`computeContentHash(null)` is null) rather than needing its own row. |
+
+*(Row 3, `absent` / `null`, is unaffected by #1128: the read-time check still requires non-null content, so a preserved hash there fires nothing.)*
+
+### `abstractStillAccurate` — properties of the contract, not of the implementation
+
+- **It is an assertion, not a setting, and it suppresses a correctness check.** It writes no text; it only re-fingerprints the abstract already stored. The marker exists to catch an abstract that quietly stopped matching its node, and this is the one flag that can hide exactly that.
+- **Ignored, not rejected, when `abstract` is also supplied** — that path already re-fingerprints, so both spellings mean the same thing and the outcome is identical.
+- **Ignored when the node has no abstract** (the guard above).
+- **It binds to NEITHER half.** It re-fingerprints whatever abstract is *stored* when the write lands, against whatever content that write *leaves* — neither is checked against what the caller read. If another writer changed either one in between, the caller certifies text they never saw and the marker is suppressed on it. **The fully-bound form needs no flag at all**: pass `abstract` and `content` together and you are writing exactly the two things you compared.
+
+  This was weighed against making the assertion bind (compare-and-swap on the values the caller read) and **declined** — @Holger's ruling, 2026-09-03. Recorded here because a reader who reaches for the flag needs to know what it does not promise.
 
 The load-bearing row is the second: **content updated without abstract → abstractOriginHash is left untouched**. The stored hash will compare unequal to `computeContentHash(new content)` at next read; the staleness signal is armed.
 

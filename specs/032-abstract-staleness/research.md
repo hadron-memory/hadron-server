@@ -68,6 +68,7 @@ export function computeContentHash(content: string | null | undefined): string |
 
 **Rationale**:
 - The staleness check (`abstract != null AND content != null AND abstractOriginHash != contentHash`) naturally short-circuits when `abstractOriginHash IS NULL`. No false-positive stale signal on restored legacy versions.
+  - **Superseded by #1128 (2026-09-03).** The DECISION above stands — restore is still verbatim, still no recomputation — but this rationale no longer holds: the null short-circuit is gone, so restoring a pre-spec snapshot now arms the marker. That is the correct outcome rather than a false positive (the restored abstract has never been checked against the restored body), so the decision needed no revisiting. Recorded here rather than rewritten, because a decision record should show what was believed when the call was made.
 - Restoring is supposed to be "byte-identical to the version" for every other column. Recomputing one column at restore time would be asymmetric and surprising — readers would not expect "I restored an old version, but one column is freshly computed."
 - Operators who want a meaningful staleness signal on restored legacy content can call `h-update-node` with the existing abstract (no-op rewrite); the write-path machinery will populate `abstractOriginHash` correctly. Explicit, controlled, attributable.
 
@@ -80,6 +81,8 @@ export function computeContentHash(content: string | null | undefined): string |
 **Decision**: no flag in v1. The stale-abstract check is always on. It naturally stays quiet on legacy abstracts (where `abstractOriginHash IS NULL`) because the staleness condition short-circuits.
 
 **Rationale**: the question presumes "many legacy abstracts will trigger noisy warnings." They won't — legacy abstracts have null hash by definition. Only POST-spec abstracts (where the hash got populated by a write-path that ran AFTER this spec ships) will produce stale warnings. So on a memory dominated by pre-spec content, the validator stays quiet without any flag.
+
+**Superseded by #1128 (2026-09-03).** The decision (no flag in v1) stands, but this rationale is now inverted: legacy abstracts with a body DO warn. The reason the validator still stays quiet is empirical rather than structural — the unfingerprinted population is a static residue of 2 rows, not the bulk of the corpus the premise assumed. That makes the no-flag decision contingent on a measurement instead of on a definition; FR-010 states what would invalidate it.
 
 If a memory accumulates many post-spec abstracts and most of them go stale (e.g., a high-edit workflow where content updates outpace abstract refreshes), the warnings will be noisy. In that case, add the flag as a follow-up — but solving the noise problem in v1 is premature without evidence the problem exists.
 

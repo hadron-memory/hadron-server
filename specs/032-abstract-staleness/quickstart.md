@@ -90,7 +90,7 @@ h-validate
   memoryUrn: hadronmemory.com::dev
 ```
 
-**Expected**: report includes `[stale-abstract] urn:node:hadronmemory.com::dev::test:staleness — abstract may not reflect current content`. Other nodes in the dev memory should NOT be flagged (they have `abstract_origin_hash IS NULL` from before this spec shipped, and the check short-circuits).
+**Expected**: report includes `[stale-abstract] urn:node:hadronmemory.com::dev::test:staleness — abstract may not reflect current content`. Since #1128, other nodes with `abstract_origin_hash IS NULL` **and** both an abstract and a body ARE flagged too — a missing fingerprint is no longer a free pass. On the live corpus that is a static residue of 2 rows (FR-010), so the report should be this node plus at most those; a longer list means the population measurement FR-010 rests on has expired and needs re-taking.
 
 ### Step 7 — Refresh the abstract: marker clears
 
@@ -128,7 +128,7 @@ h-validate
 
 **Expected**: no `[stale-abstract]` warnings for this node.
 
-### Step 10 — Legacy node sanity check
+### Step 10 — Unfingerprinted node check *(inverted by #1128)*
 
 Find a node created BEFORE this spec shipped (any node with `abstract IS NOT NULL` from spec 031's era — likely none in dev, but if any exist):
 
@@ -136,7 +136,7 @@ Find a node created BEFORE this spec shipped (any node with `abstract IS NOT NUL
 psql -d hadron_dev -c "select n.loc from nodes n join memories m on m.id = n.memory_id where n.abstract is not null and n.abstract_origin_hash is null and m.urn = 'hadronmemory.com::dev' limit 1;"
 ```
 
-If a row exists, read it with `contentScope: 'all'`: NO marker. The legacy null-hash short-circuits the staleness check — no false positive on pre-spec content (FR-007 + SC-004).
+If a row exists, read it with `contentScope: 'all'`: **the marker IS present.** This step asserted the opposite until #1128, and the reversal is the point — a null hash on a row that has both an abstract and a body means the abstract has never been checked against that body, which is what the marker says. A row with a null hash and no body still shows nothing (FR-010 (b)).
 
 ### Step 11 — Restore version round-trip
 
@@ -166,7 +166,7 @@ psql -d hadron_dev -c "select v.id from node_versions v join nodes n on n.id = v
 
 Then call `restoreNodeVersion` via GraphQL (or whatever the portal surface uses).
 
-**Expected**: the restored node has `abstract_origin_hash` equal to the version's snapshot value. If the version was captured pre-spec, the hash is NULL; the staleness check short-circuits; no false signal (FR-002 + research D4).
+**Expected**: the restored node has `abstract_origin_hash` equal to the version's snapshot value — restore stays verbatim (FR-002 + research D4). If the version was captured pre-spec that value is NULL, and since #1128 the restored node therefore **shows the marker**. That is correct rather than a false signal: the restored abstract has never been checked against the restored body.
 
 ### Step 12 — Cleanup
 
@@ -189,6 +189,6 @@ h-delete-node
 | 7 | DB row after abstract refresh | stored hash matches `sha256(content)` again |
 | 8 | h-read-node 'all' refreshed | no marker |
 | 9 | h-validate refreshed | clean |
-| 10 | Legacy node | no marker (short-circuit) |
-| 11 | restoreNodeVersion | hash restored verbatim; no recomputation |
+| 10 | Unfingerprinted node (abstract + body) | **marker present** (#1128) |
+| 11 | restoreNodeVersion | hash restored verbatim; marker armed if that hash was NULL |
 | 12 | Cleanup | node deleted |

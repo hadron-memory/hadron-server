@@ -49,8 +49,9 @@ model NodeVersion {
   abstract         String?  // spec 031
   /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
   /// version capture. Restored verbatim by `restoreNodeVersion`; legacy
-  /// versions (pre-spec) have `NULL` here, which short-circuits the
-  /// staleness check on the live row after restore (no false positives).
+  /// versions (pre-spec) have `NULL` here, which since #1128 ARMS the
+  /// marker on the live row after restore — correctly, since the restored
+  /// abstract has never been checked against the restored body.
   abstractOriginHash String? @map("abstract_origin_hash")
   content          String?
 
@@ -82,9 +83,12 @@ Hand-authored migration directory (per CLAUDE.md — `prisma migrate dev` is bro
 -- established in spec 031's migrations. Two ALTERs in one transaction so
 -- either both succeed or both abort under lock contention.
 --
--- No backfill: existing rows get NULL in both tables. Pre-spec abstracts
--- naturally won't trigger the staleness signal (check short-circuits when
--- either side is null). See spec 032 Assumptions.
+-- No backfill: existing rows get NULL in both tables. When this shipped that
+-- meant pre-spec abstracts raised no signal; since #1128 a null hash on a row
+-- that HAS both an abstract and a body arms the marker instead (a null hash is
+-- not a free pass). A null on either TEXT column still raises nothing — there
+-- is no abstract to doubt, or no body to doubt it against. See spec 032
+-- Assumptions and FR-010.
 
 BEGIN;
 
@@ -128,18 +132,25 @@ The **staleness check** is read-side computation, not a validation gate, AND it 
 ```typescript
 import { computeContentHash } from '../lib/contentHash.js';
 
-const isStale =
+// Since #1128 this is not inlined anywhere: it is `isAbstractUnverified`
+// in src/lib/contentHash.ts, shared by h-read-node, hadron_find_nodes and
+// h-validate. Reproduced here only to show the shape.
+const isUnverified =
   node.abstract != null &&
   node.abstract.length > 0 &&
   node.content != null &&
   node.content.length > 0 &&
-  node.abstractOriginHash != null &&             // explicit null check (FR-010 condition c)
   node.abstractOriginHash !== computeContentHash(node.content);
 ```
 
-(The `null` check on `abstractOriginHash` is the load-bearing guard against false positives on legacy nodes — pre-spec rows have null `abstractOriginHash` even when abstract + content are both populated; without the explicit guard, `null !== "abc12345"` evaluates `true` and the marker fires falsely. PR-207 review item 5 caught the gap in the original spec.)
+(**The `abstractOriginHash != null` guard is GONE as of #1128** — deliberately, and it reverses PR-207 review item 5, which added it. That review was right that `null !== "abc12345"` evaluates `true`; what changed is that firing there is now the intended behaviour rather than a false positive. An abstract with no fingerprint has never been checked against its body, and the ordering that produces one — abstract written before the body, per FR-007 — is the ordering most likely to be wrong. The guard's original premise was that every row predated the column; that premise drained to 2 rows in 1024. See FR-010 for the measurement and its expiry condition.)
 
-**v1 encryption gate (MCP surface)**: on the MCP read path (`h-read-node`, `h-validate`), the predicate is additionally short-circuited by a `!memory.isEncrypted` clause. The MCP surface does not call `decryptNodesBatch` today (asymmetry tracked by [#206](https://github.com/hadron-memory/hadron-server/issues/206)), so `node.content` is ciphertext on encrypted memories and `computeContentHash(ciphertext)` compares unequal to every plaintext-derived `abstractOriginHash` (false-positive on every node). The GraphQL `nodeById` read path is not affected (it does decrypt). The gate lifts on the MCP surface once the encryption-parity follow-up adds a decrypt step before the predicate. Tracked under [#206](https://github.com/hadron-memory/hadron-server/issues/206).
+**Encryption gate — the two MCP surfaces have DIVERGED.** As drafted, both `h-read-node` and `h-validate` short-circuited on `!memory.isEncrypted`, because neither decrypted and `computeContentHash(ciphertext)` would false-positive on every node.
+
+- **`h-read-node`: gate lifted.** Spec 041 PR-2 (closing [#206](https://github.com/hadron-memory/hadron-server/issues/206)) added the decrypt step — `mcpDecryptOrMark` flips the projection's `isEncrypted` to false when the session holds the key — so the predicate runs on plaintext and the marker fires on an unlocked encrypted memory. A locked one emits nothing, and that silence carries no information.
+- **`h-validate`: gate retained.** It derives `checkStale` from the memory row and never decrypts, so it skips the check on any encrypted memory, key or no key.
+
+The GraphQL `nodeById` read path was never affected (it always decrypted).
 
 ## Hash computation — `src/lib/contentHash.ts` (NEW)
 

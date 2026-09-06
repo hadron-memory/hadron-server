@@ -4,6 +4,8 @@ description: "Implementation tasks for spec 032 — Node `abstractOriginHash`"
 
 # Tasks: Node `abstractOriginHash` — stale-abstract detection
 
+> **Post-ship note (#1128, 2026-09-03).** Individual task entries below describe the tests and behaviour **as completed at the time**. The staleness rule has since changed: the `abstractOriginHash != null` short-circuit is gone, so an unfingerprinted node holding both an abstract and a body now DOES raise the marker and the validator warning. Task lines saying *"legacy null-hash node (no marker)"* record what was built, not what is true now — the current rule is spec.md **FR-010**, and the tests were updated with the change. Left as written rather than rewritten, because a completed checklist is a record.
+
 **Input**: Design documents from `specs/032-abstract-staleness/`
 **Prerequisites**: [spec.md](./spec.md), [plan.md](./plan.md), [research.md](./research.md), [data-model.md](./data-model.md), [contracts/](./contracts/), [quickstart.md](./quickstart.md)
 
@@ -153,7 +155,7 @@ Single-project layout per [plan.md](./plan.md):
   No `db.node.findMany` select change needed — `include` mode auto-projects the new column. Depends on T004.
 - [x] T025 [US3] Run US3 tests green: `DATABASE_URL='postgresql://holger@localhost:5432/hadron_test' pnpm vitest run src/mcp/server.nodeAbstractStaleness.test.ts`. All assertions pass.
 
-**Checkpoint**: US3 fully functional. Bulk staleness detection available via `h-validate`; no false positives on fresh or legacy nodes; mixed memories report all issue types with their own tags.
+**Checkpoint**: US3 fully functional. Bulk staleness detection available via `h-validate`; no false positives on fresh or legacy nodes; mixed memories report all issue types with their own tags. *(Post-ship: #1128 removed the legacy exemption — an unfingerprinted node with both an abstract and a body is now reported, and that is not a false positive. See spec.md FR-010.)*
 
 ---
 
