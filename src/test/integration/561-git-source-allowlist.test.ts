@@ -20,9 +20,12 @@
  * sees `INTERNAL_SERVER_ERROR`. A refusal a client cannot branch on is a
  * refusal that gets pattern-matched against English prose.
  *
- * The transport guard on the git invocations themselves — the second layer,
- * which holds for a value that reached the column some other way — is asserted
- * where git is actually invoked, in `syncGraphFromGithub.test.ts`.
+ * The transport guard on the git invocations themselves is asserted where git
+ * is actually invoked, in `syncGraphFromGithub.test.ts` — along with the
+ * re-validation of the STORED value, which is what covers a row this file's
+ * mutations never saw. The two are not interchangeable: the guard decides which
+ * TRANSPORT and cannot refuse a non-github https host, because https is the
+ * production transport (@codex, PR #1142).
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';

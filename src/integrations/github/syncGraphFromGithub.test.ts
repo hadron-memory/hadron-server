@@ -145,10 +145,10 @@ describe('syncGraphFromGithub', () => {
   // talks, not just where. Measured (2026-09-08): a bare local path clones by
   // default and ingests that repo's files as nodes; `ext::` is refused by
   // current git's own default but by nothing we control.
-  // `validateMemorySource` refuses such a value at the mutation; this is the
-  // second layer, and it has to be asserted where git is actually invoked,
-  // because an operation test that stops at the thrown error cannot see what
-  // argv reached the process.
+  // `validateMemorySource` refuses such a value at the mutation AND again here
+  // against the stored one; the guard below is the transport half, and it has to
+  // be asserted where git is actually invoked, because an operation test that
+  // stops at the thrown error cannot see what argv reached the process.
 
   it('the clone carries the transport allowlist, ahead of the URL', async () => {
     await syncGraphFromGithub(makeGraph());
