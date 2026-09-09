@@ -81,6 +81,7 @@ import {
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
+import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { recordNodeUsage } from '../../../lib/usageRecorder.js';
 import { createNode } from '../../../controller/operations/createNode.js';
@@ -113,6 +114,30 @@ import {
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
+
+/**
+ * #561 — refuse a `Memory.source` that is not a GitHub repository URL.
+ *
+ * The ONE gate both write paths call, rather than a check per mutation: the
+ * column is a git remote URL, and git reads a remote URL as a transport
+ * selector rather than an address — so it decides how git talks, not just
+ * where. Every caller-reachable write to `source` must pass through here, so a
+ * third write path added later is a missing call rather than a subtly
+ * different regex. What was reachable before it, measured: see lib/gitSource.ts.
+ *
+ * Surfaces the refusal as `INVALID_MEMORY_SOURCE` so a client can branch on it
+ * instead of matching prose.
+ */
+function assertValidMemorySource(source: string | null | undefined): void {
+  try {
+    validateMemorySource(source);
+  } catch (e) {
+    if (e instanceof GitSourceError) {
+      throw new GraphQLError(e.message, { extensions: { code: 'INVALID_MEMORY_SOURCE' } });
+    }
+    throw e;
+  }
+}
 
 /**
  * #769 — resolve the grantee of a memory-share mutation to a definite user id.
@@ -360,6 +385,10 @@ export const memoryMutations = {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
+
+      // #561 — `source` is a git remote URL, so it selects a transport. Refuse
+      // anything that is not a GitHub repository before it is persisted.
+      assertValidMemorySource(source);
 
       // 023-app-shape US4 + 034-memory-class-access: user-creatable classes are
       // `knowledge` (default), `group`, and the owner-owned `personal`/`private`
@@ -637,6 +666,11 @@ export const memoryMutations = {
           }
         }
       }
+      // #561 — same gate as createMemory: a git remote URL selects a transport,
+      // so refuse anything that is not a GitHub repository before it is stored.
+      // An omitted `source` leaves the column untouched and is not re-validated;
+      // an explicit null clears it (DB-only mode).
+      assertValidMemorySource(source);
       // If transferring to a new org, require ADMIN on the target org too
       if (newOrgId && newOrgId !== memory.organizationId) {
         await requireOrgRole(ctx, newOrgId, 'ADMIN');

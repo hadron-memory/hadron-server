@@ -15,17 +15,15 @@
  * be failed retroactively because a repository was unreachable.
  */
 
-import { execFile as execFileCb } from 'child_process';
 import { createDecipheriv } from 'crypto';
-import { promisify } from 'util';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch } from './gitBranch.js';
-
-const execFile = promisify(execFileCb);
+import { execGit } from './execGit.js';
+import { validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 
 /** The prepared checkout handed to a mutate callback. */
 export interface MirrorRepo {
@@ -87,6 +85,20 @@ export async function withMirrorCheckout(
   }
 
   if (!memory.source) return 'skipped'; // DB-only mode
+  // #561 — re-validate the STORED value; see the note in syncGraphFromGithub.
+  // This path never clones, but it does `remote set-url` + `fetch` against the
+  // source, so a legacy non-github https row would still reach the network.
+  // Soft-fails like every other refusal here: the mirror is fire-and-forget and
+  // must never fail a DB write that already committed.
+  try {
+    validateMemorySource(memory.source);
+  } catch (e) {
+    if (e instanceof GitSourceError) {
+      console.warn(`${logPrefix} Refusing to mirror ${memory.urn}: ${e.message}`);
+      return 'skipped';
+    }
+    throw e;
+  }
   // spec 047: git-mirror is org-scoped (needs the org's GitHub App). A
   // user-owned memory has no org → nothing to mirror to.
   if (!memory.organization) return 'skipped';
@@ -124,9 +136,9 @@ export async function withMirrorCheckout(
   try {
     if (token) {
       const tokenUrl = toHttpsUrl(memory.source, token);
-      await execFile('git', ['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
+      await execGit(['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
     }
-    await execFile('git', ['fetch', 'origin'], { cwd: localPath });
+    await execGit(['fetch', 'origin'], { cwd: localPath });
     await prepareWriteBranch(localPath, branch, memory.readBranch ?? undefined);
   } catch (err) {
     console.error(`${logPrefix} Branch setup failed (${branch}) for ${commitSubject}:`, err);
@@ -145,8 +157,8 @@ export async function withMirrorCheckout(
 
   // 6. Commit and push.
   try {
-    await execFile('git', ['add', '-A'], { cwd: localPath });
-    const { stdout } = await execFile('git', ['status', '--porcelain'], { cwd: localPath });
+    await execGit(['add', '-A'], { cwd: localPath });
+    const { stdout } = await execGit(['status', '--porcelain'], { cwd: localPath });
     if (!stdout.trim()) {
       restoreRemote(localPath, memory.source);
       return 'no-changes';
@@ -159,14 +171,14 @@ export async function withMirrorCheckout(
       GIT_COMMITTER_NAME: memory.organization.name,
       GIT_COMMITTER_EMAIL: `hadron@${memory.organization.urn}`,
     };
-    await execFile('git', [
+    await execGit([
       'commit', '-m', `${commitSubject}\n\n[hadron-server]`,
     ], { cwd: localPath, env: gitEnv });
 
     try {
       // `-u` sets upstream tracking so the branch isn't left tracking-less —
       // the original root cause of the "branch already exists" failure.
-      await execFile('git', ['push', '-u', 'origin', branch], { cwd: localPath });
+      await execGit(['push', '-u', 'origin', branch], { cwd: localPath });
       console.log(`${logPrefix} Pushed ${commitSubject} → ${memory.urn}@${branch}`);
     } finally {
       restoreRemote(localPath, memory.source);
@@ -189,7 +201,7 @@ export function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
 }
 
 function restoreRemote(localPath: string, originalUrl: string): void {
-  execFile('git', ['remote', 'set-url', 'origin', originalUrl], { cwd: localPath }).catch(() => {});
+  execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath }).catch(() => {});
 }
 
 function decryptToken(ciphertext: string): string {

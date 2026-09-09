@@ -1,12 +1,9 @@
-import { execFile as execFileCb } from 'child_process';
-import { promisify } from 'util';
-
-const execFile = promisify(execFileCb);
+import { execGit } from './execGit.js';
 
 /** True if `ref` resolves in the repo at `cwd`. */
 async function refExists(cwd: string, ref: string): Promise<boolean> {
   try {
-    await execFile('git', ['rev-parse', '--verify', '--quiet', ref], { cwd });
+    await execGit(['rev-parse', '--verify', '--quiet', ref], { cwd });
     return true;
   } catch {
     return false;
@@ -72,23 +69,23 @@ export async function prepareWriteBranch(
   const originExists = await refExists(localPath, `refs/remotes/origin/${branch}`);
 
   if (localExists) {
-    await execFile('git', ['checkout', branch], { cwd: localPath });
+    await execGit(['checkout', branch], { cwd: localPath });
     if (originExists) {
       // Fast-forward to origin when possible. A non-ff divergence is left for
       // `git push` to surface (rejected push) rather than silently merged or
       // reset — we never want to clobber local node writes here.
-      await execFile('git', ['merge', '--ff-only', `origin/${branch}`], {
+      await execGit(['merge', '--ff-only', `origin/${branch}`], {
         cwd: localPath,
       }).catch(() => {});
     }
   } else if (originExists) {
     // Remote branch exists but we've never checked it out locally — create a
     // local branch tracking it.
-    await execFile('git', ['checkout', '-b', branch, `origin/${branch}`], { cwd: localPath });
+    await execGit(['checkout', '-b', branch, `origin/${branch}`], { cwd: localPath });
   } else {
     // Brand-new branch on both sides: fork it from the read branch (or the
     // remote default). `git push -u` (at the call sites) then publishes it.
     const base = await resolveBaseRef(localPath, baseBranch);
-    await execFile('git', ['checkout', '-b', branch, ...(base ? [base] : [])], { cwd: localPath });
+    await execGit(['checkout', '-b', branch, ...(base ? [base] : [])], { cwd: localPath });
   }
 }
