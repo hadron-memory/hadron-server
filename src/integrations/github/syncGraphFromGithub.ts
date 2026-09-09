@@ -1,7 +1,5 @@
-import { execFile as execFileCb } from 'child_process';
 import { createDecipheriv } from 'crypto';
 import { generateId } from '../../lib/id.js';
-import { promisify } from 'util';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
@@ -10,11 +8,10 @@ import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
+import { execGit } from './execGit.js';
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 import { lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
-
-const execFile = promisify(execFileCb);
 
 function decryptToken(ciphertext: string): string {
   const key = process.env.HADRON_ENCRYPTION_KEY;
@@ -351,17 +348,28 @@ export const syncGraphFromGithub = async (
 async function gitSync(cloneUrl: string, localPath: string, readBranch?: string): Promise<void> {
   if (existsSync(join(localPath, '.git'))) {
     // Update remote URL with fresh token before pulling
-    await execFile('git', ['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
+    await execGit(['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
     if (readBranch) {
-      await execFile('git', ['checkout', readBranch], { cwd: localPath });
+      await execGit(['checkout', readBranch], { cwd: localPath });
     }
-    await execFile('git', ['pull', '--ff-only'], { cwd: localPath });
+    await execGit(['pull', '--ff-only'], { cwd: localPath });
   } else {
     mkdirSync(dirname(localPath), { recursive: true });
     const cloneArgs = ['clone'];
     if (readBranch) cloneArgs.push('--branch', readBranch);
-    cloneArgs.push(cloneUrl, localPath);
-    await execFile('git', cloneArgs);
+    // `--` ends option parsing (#561). Without it a `source` beginning with `-`
+    // is read by git as an OPTION rather than a URL, and `--upload-pack=<cmd>`
+    // runs `<cmd>` — measured executing on git 2.50.1.
+    //
+    // Stated precisely, because it does NOT reproduce through this argv today:
+    // git then treats `localPath` as the repository, and this branch only runs
+    // when `localPath` has no `.git`, so git fails on the missing repository
+    // before invoking upload-pack. That is a property of the surrounding
+    // control flow, not of the command — it holds until someone reorders the
+    // existsSync check or the destination survives a partial clone. `--` makes
+    // the argv safe on its own terms, so it cannot be re-opened from a distance.
+    cloneArgs.push('--', cloneUrl, localPath);
+    await execGit(cloneArgs);
   }
 }
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { splitGitArgv } from '../../test/gitArgv.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile. `git rev-parse --verify --quiet <ref>` resolves
@@ -12,6 +13,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 let existingRefs: Set<string>;
 let failArgv: ((argv: string[]) => boolean) | null;
 const calls: string[][] = [];
+/** Whether each recorded invocation carried the #561 transport guard. */
+const guardFlags: boolean[] = [];
 
 /** Normalize a git ref to a stable key: refs/heads/x → x, refs/remotes/x → x. */
 function refKey(ref: string): string {
@@ -22,9 +25,14 @@ function refKey(ref: string): string {
 
 vi.mock('child_process', () => ({
   execFile: vi.fn((...args: unknown[]) => {
-    const argv = args[1] as string[];
+    const rawArgv = args[1] as string[];
     const cb = args[args.length - 1] as (e: Error | null, o: string, err: string) => void;
+    // #561 — every invocation carries the transport guard; record it separately
+    // so the assertions below still read as the command's own argv, and record
+    // whether it was there so `every call is guarded` is checkable.
+    const { guarded, args: argv } = splitGitArgv(rawArgv);
     calls.push(argv);
+    guardFlags.push(guarded);
 
     if (argv[0] === 'rev-parse') {
       const ref = argv[argv.length - 1];
@@ -50,6 +58,7 @@ function actions(): string[][] {
 
 beforeEach(() => {
   calls.length = 0;
+  guardFlags.length = 0;
   failArgv = null;
 });
 
@@ -118,5 +127,18 @@ describe('prepareWriteBranch', () => {
     await prepareWriteBranch('/repo', 'changes');
 
     expect(actions()).toEqual([['checkout', '-b', 'changes']]);
+  });
+
+  // #561 — the guard is a property of EVERY invocation, not of the clone. These
+  // are local-ref commands that cannot reach a remote, and they are still
+  // asserted: the point of routing all of them through one helper is that no
+  // call site has to be judged individually, and a direct `execFile('git', …)`
+  // added here later would show up as an unguarded call.
+  it('every git invocation carries the transport guard', async () => {
+    existingRefs = new Set(['changes', 'origin/changes']);
+    await prepareWriteBranch('/repo', 'changes');
+
+    expect(guardFlags.length).toBeGreaterThan(0);
+    expect(guardFlags.every(Boolean)).toBe(true);
   });
 });

@@ -1,6 +1,4 @@
-import { execFile as execFileCb } from 'child_process';
 import { createDecipheriv } from 'crypto';
-import { promisify } from 'util';
 import { existsSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { stringify } from 'yaml';
@@ -8,6 +6,7 @@ import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch } from './gitBranch.js';
+import { execGit } from './execGit.js';
 import { deserializeTags } from '../db/provider.js';
 import {
   buildNodeFrontmatter,
@@ -15,8 +14,6 @@ import {
   nodeFilePath,
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
-
-const execFile = promisify(execFileCb);
 
 function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
   const slug = memoryUrn.includes(':') ? memoryUrn.split(':').slice(1).join(':') : memoryUrn;
@@ -70,9 +67,9 @@ export async function pushMemoryToGit(
 
     if (existsSync(join(localPath, '.git'))) {
       if (token) {
-        await execFile('git', ['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
+        await execGit(['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
       }
-      await execFile('git', ['fetch', 'origin'], { cwd: localPath });
+      await execGit(['fetch', 'origin'], { cwd: localPath });
     } else {
       // A previous clone may have been interrupted, leaving a non-empty dir
       // without a `.git` — `git clone` would then fail forever with
@@ -82,8 +79,18 @@ export async function pushMemoryToGit(
       mkdirSync(dirname(localPath), { recursive: true });
       const cloneArgs = ['clone'];
       if (memory.readBranch) cloneArgs.push('--branch', memory.readBranch);
-      cloneArgs.push(cloneUrl, localPath);
-      await execFile('git', cloneArgs);
+      // `--` ends option parsing (#561) — see the note in syncGraphFromGithub's
+      // gitSync, including why the option-injection variant does not reproduce
+      // through this argv today (the `rmSync` above guarantees the destination
+      // is absent, so git fails on the missing repository first).
+      //
+      // This path is still the one to watch: it clones with the RAW
+      // `memory.source` whenever the org has no installation token — never
+      // passing through `toHttpsUrl` — and, unlike syncGraphFromGithub, it does
+      // not require a GitHub App installation at all. Its precondition is
+      // weaker than the one #561 names.
+      cloneArgs.push('--', cloneUrl, localPath);
+      await execGit(cloneArgs);
     }
     await prepareWriteBranch(localPath, branch, memory.readBranch ?? undefined);
   } catch (err) {
@@ -159,8 +166,8 @@ export async function pushMemoryToGit(
 
   // 7. Commit and push
   try {
-    await execFile('git', ['add', '-A'], { cwd: localPath });
-    const { stdout } = await execFile('git', ['status', '--porcelain'], { cwd: localPath });
+    await execGit(['add', '-A'], { cwd: localPath });
+    const { stdout } = await execGit(['status', '--porcelain'], { cwd: localPath });
     if (!stdout.trim()) {
       restoreRemote(localPath, memory.source);
       return { nodeCount: nodes.length, error: undefined };
@@ -174,19 +181,19 @@ export async function pushMemoryToGit(
       GIT_COMMITTER_EMAIL: `hadron@${org.urn}`,
     };
 
-    await execFile('git', [
+    await execGit([
       'commit', '-m', `Push ${nodes.length} nodes from Hadron\n\n[hadron-server pushMemoryToGit]`,
     ], { cwd: localPath, env: gitEnv });
 
     if (token) {
       const tokenUrl = toHttpsUrl(memory.source, token);
-      await execFile('git', ['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
+      await execGit(['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
     }
 
     try {
       // `-u` sets upstream tracking so the branch isn't left tracking-less —
       // the original root cause of the "branch already exists" failure.
-      await execFile('git', ['push', '-u', 'origin', branch], { cwd: localPath });
+      await execGit(['push', '-u', 'origin', branch], { cwd: localPath });
       console.log(`[pushMemoryToGit] Pushed ${nodes.length} nodes → ${memory.urn}@${branch}`);
     } finally {
       restoreRemote(localPath, memory.source);
@@ -201,7 +208,7 @@ export async function pushMemoryToGit(
 
 function restoreRemote(localPath: string, originalUrl: string): void {
   if (existsSync(join(localPath, '.git'))) {
-    execFile('git', ['remote', 'set-url', 'origin', originalUrl], { cwd: localPath }).catch(() => {});
+    execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath }).catch(() => {});
   }
 }
 

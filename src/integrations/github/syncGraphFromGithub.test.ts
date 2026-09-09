@@ -3,6 +3,8 @@ import { join } from 'path';
 import { mkdirSync } from 'fs';
 import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
+import { splitGitArgv } from '../../test/gitArgv.js';
+import { GIT_TRANSPORT_GUARD } from './execGit.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
 
 // ---------------------------------------------------------------------------
@@ -107,34 +109,84 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+/** Every recorded `git` argv, with the #561 transport guard split off. */
+async function gitCalls(): Promise<{ guarded: boolean; args: string[] }[]> {
+  const { execFile } = await import('child_process');
+  const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
+  return execFileMock.mock.calls.map((c: any[]) => splitGitArgv(c[1] as string[]));
+}
+
 describe('syncGraphFromGithub', () => {
   it('calls git clone when .git directory does not exist', async () => {
-    const { execFile } = await import('child_process');
-    const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
-
     const result = await syncGraphFromGithub(makeGraph());
 
-    const calls = execFileMock.mock.calls;
-    const cloneCall = calls.find((c: any[]) => c[1]?.[0] === 'clone');
+    const cloneCall = (await gitCalls()).find((c) => c.args[0] === 'clone');
     expect(cloneCall).toBeDefined();
-    expect(cloneCall![1]).toContain('git@github.com:test/repo.git');
+    expect(cloneCall!.args).toContain('git@github.com:test/repo.git');
     expect(result.error).toBeUndefined();
   });
 
   it('calls git pull when .git directory already exists', async () => {
-    const { execFile } = await import('child_process');
-    const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
-
     // Pre-create .git directory so it looks like an existing clone
     const repoPath = join(mockSources, 'test-org', 'test/repo');
     mkdirSync(join(repoPath, '.git'), { recursive: true });
 
     await syncGraphFromGithub(makeGraph());
 
-    const calls = execFileMock.mock.calls;
-    const pullCall = calls.find((c: any[]) => c[1]?.[0] === 'pull');
+    const pullCall = (await gitCalls()).find((c) => c.args[0] === 'pull');
     expect(pullCall).toBeDefined();
-    expect(pullCall![1]).toContain('--ff-only');
+    expect(pullCall!.args).toContain('--ff-only');
+  });
+
+  // ── #561: the transport guard reaches the clone ───────────────────────────
+  //
+  // The defect these pin is not "the URL is wrong" — it is that git reads a
+  // remote URL as a TRANSPORT SELECTOR, so `Memory.source` chooses how git
+  // talks, not just where. Measured (2026-09-08): a bare local path clones by
+  // default and ingests that repo's files as nodes; `ext::` is refused by
+  // current git's own default but by nothing we control.
+  // `validateMemorySource` refuses such a value at the mutation; this is the
+  // second layer, and it has to be asserted where git is actually invoked,
+  // because an operation test that stops at the thrown error cannot see what
+  // argv reached the process.
+
+  it('the clone carries the transport allowlist, ahead of the URL', async () => {
+    await syncGraphFromGithub(makeGraph());
+
+    const { execFile } = await import('child_process');
+    const raw = (execFile as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: any[]) => c[1] as string[])
+      .find((argv) => argv.includes('clone'));
+    expect(raw, 'expected a clone invocation').toBeDefined();
+    // The guard must LEAD: git honours `-c` only before the subcommand, so a
+    // guard that arrived after `clone` would be passed to clone as arguments
+    // and silently not apply. What the policy SAYS is pinned once, literally,
+    // in execGit.test.ts — asserting it again here would be a second copy to
+    // keep in sync, which is the drift this repo keeps filing.
+    expect(raw!.slice(0, GIT_TRANSPORT_GUARD.length)).toEqual([...GIT_TRANSPORT_GUARD]);
+    expect(raw!.indexOf('clone')).toBe(GIT_TRANSPORT_GUARD.length);
+  });
+
+  it('the clone ends option parsing before the URL, so a `-`-leading source cannot become a flag', async () => {
+    await syncGraphFromGithub(makeGraph());
+
+    const clone = (await gitCalls()).find((c) => c.args[0] === 'clone')!;
+    const sep = clone.args.indexOf('--');
+    expect(sep).toBeGreaterThan(-1);
+    // The URL must come AFTER the separator — before it, `--upload-pack=<cmd>`
+    // would be read as an option and executed.
+    expect(clone.args[sep + 1]).toBe('git@github.com:test/repo.git');
+  });
+
+  it('every git invocation on the pull path is guarded too', async () => {
+    const repoPath = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(join(repoPath, '.git'), { recursive: true });
+
+    await syncGraphFromGithub(makeGraph());
+
+    const calls = await gitCalls();
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((c) => c.guarded)).toBe(true);
   });
 
   it('returns an error when git fails', async () => {
