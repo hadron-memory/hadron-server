@@ -178,6 +178,42 @@ describe('syncGraphFromGithub', () => {
     expect(clone.args[sep + 1]).toBe('git@github.com:test/repo.git');
   });
 
+  // ── #561: a source already IN the column, which never passed a mutation ───
+  //
+  // @codex, PR #1142: `validateMemorySource` at the mutations governs every
+  // future write and no existing row. This function is reached by the startup
+  // batch loop and the webhook, neither of which goes through a mutation — and
+  // the transport guard does not cover the SSRF case, because https is
+  // explicitly allowed there. So the allowlist runs against the STORED value.
+
+  it('refuses a stored non-github https source, and never invokes git', async () => {
+    const result = await syncGraphFromGithub(
+      makeGraph({ source: 'https://github.com.evil.example/o/r' }),
+    );
+
+    expect(result.error).toMatch(/Invalid memory source/);
+    // The refusal has to precede the invocation, not follow it: the SSRF is the
+    // request itself, so a check that ran after the clone would have made it.
+    expect(await gitCalls()).toHaveLength(0);
+  });
+
+  it('refuses a stored local path (the transport guard would too, this fails earlier)', async () => {
+    const result = await syncGraphFromGithub(makeGraph({ source: '/srv/evil-repo' }));
+
+    expect(result.error).toMatch(/Invalid memory source/);
+    expect(await gitCalls()).toHaveLength(0);
+  });
+
+  it('records the refusal as a sync ERROR an operator can see', async () => {
+    // A legacy row cannot be fixed by anyone who cannot find it. The message
+    // lands in `syncError`, which is what the portal and `syncStatus` surface.
+    await syncGraphFromGithub(makeGraph({ source: 'ext::whoami' }));
+
+    const row = await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } });
+    expect(row.syncStatus).toBe('ERROR');
+    expect(row.syncError).toMatch(/Invalid memory source/);
+  });
+
   it('every git invocation on the pull path is guarded too', async () => {
     const repoPath = join(mockSources, 'test-org', 'test/repo');
     mkdirSync(join(repoPath, '.git'), { recursive: true });

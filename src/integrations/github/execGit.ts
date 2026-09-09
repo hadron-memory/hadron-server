@@ -41,12 +41,25 @@
  * silently re-opens it. Denying by default costs nothing and does not depend on
  * a version we do not control.
  *
- * `Memory.source` is validated at the boundary too (`validateMemorySource`) —
- * that is the primary fix, and it also closes the SSRF half by pinning the
- * host. This guard is the second layer, and it is the one that holds for a
- * value that reached the column some other way: a row written before the
- * validator existed, a future write path that forgets it, or a URL this server
- * builds itself from parts.
+ * ## What this guard does NOT cover — and what does
+ *
+ * `Memory.source` is validated by `validateMemorySource`, at the mutations AND
+ * again at each point of use (`syncGraphFromGithub`, `pushMemoryToGit`,
+ * `withMirrorCheckout`). Both are needed, and the reason is a correction to an
+ * earlier draft of this comment, which claimed this guard was "the layer that
+ * holds for a value that reached the column some other way". **It is not, for
+ * the SSRF case.** https is explicitly ALLOWED here — it has to be, it is the
+ * production transport — so a stored non-github https source sails straight
+ * through the guard. Only the allowlist refuses that one, which is why the
+ * allowlist is re-run against the STORED value rather than only the incoming
+ * one (@codex, PR #1142).
+ *
+ * The division of labour, stated so neither is mistaken for the other:
+ *
+ *   - the allowlist decides WHICH HOST, and is the only thing that can;
+ *   - this guard decides WHICH TRANSPORT, and holds even for a value that never
+ *     passed the allowlist at all — a URL this server builds from parts, or an
+ *     argv assembled by a call site added later.
  *
  * ## The policy
  *

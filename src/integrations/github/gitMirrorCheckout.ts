@@ -23,6 +23,7 @@ import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch } from './gitBranch.js';
 import { execGit } from './execGit.js';
+import { validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 
 /** The prepared checkout handed to a mutate callback. */
 export interface MirrorRepo {
@@ -84,6 +85,20 @@ export async function withMirrorCheckout(
   }
 
   if (!memory.source) return 'skipped'; // DB-only mode
+  // #561 — re-validate the STORED value; see the note in syncGraphFromGithub.
+  // This path never clones, but it does `remote set-url` + `fetch` against the
+  // source, so a legacy non-github https row would still reach the network.
+  // Soft-fails like every other refusal here: the mirror is fire-and-forget and
+  // must never fail a DB write that already committed.
+  try {
+    validateMemorySource(memory.source);
+  } catch (e) {
+    if (e instanceof GitSourceError) {
+      console.warn(`${logPrefix} Refusing to mirror ${memory.urn}: ${e.message}`);
+      return 'skipped';
+    }
+    throw e;
+  }
   // spec 047: git-mirror is org-scoped (needs the org's GitHub App). A
   // user-owned memory has no org → nothing to mirror to.
   if (!memory.organization) return 'skipped';

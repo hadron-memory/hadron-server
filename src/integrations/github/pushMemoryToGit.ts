@@ -7,6 +7,7 @@ import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch } from './gitBranch.js';
 import { execGit } from './execGit.js';
+import { validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { deserializeTags } from '../db/provider.js';
 import {
   buildNodeFrontmatter,
@@ -37,6 +38,15 @@ export async function pushMemoryToGit(
 
   if (!memory) return { nodeCount: 0, error: 'Memory not found' };
   if (!memory.source) return { nodeCount: 0, error: 'Memory has no git source configured' };
+  // #561 — re-validate the STORED value; see the note in syncGraphFromGithub.
+  // This path needs it most: it clones with the RAW source when the org has no
+  // installation token, and requires no GitHub App installation at all.
+  try {
+    validateMemorySource(memory.source);
+  } catch (e) {
+    if (e instanceof GitSourceError) return { nodeCount: 0, error: e.message };
+    throw e;
+  }
 
   const org = memory.organization;
   // spec 047: git-mirror is org-scoped (it needs the org's GitHub App). A

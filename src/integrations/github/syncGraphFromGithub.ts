@@ -9,6 +9,7 @@ import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { execGit } from './execGit.js';
+import { validateMemorySource } from '../../lib/gitSource.js';
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 import { lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
@@ -66,6 +67,28 @@ export const syncGraphFromGithub = async (
       console.log(`[syncGraphFromGithub] "${graphName}" is DB-only — skipping git sync`);
       return {};
     }
+
+    // #561 — re-validate the STORED value, not just the incoming one.
+    //
+    // `validateMemorySource` runs on createMemory/updateMemory, so it governs
+    // every future write and no row already in the table. This function is
+    // reached by the startup batch loop, the webhook and `syncMemory` — none of
+    // which went through a mutation — so a row persisted before the allowlist
+    // existed would still reach git. The transport guard does not cover it
+    // either: https is explicitly ALLOWED there, which is exactly what a
+    // legacy non-github source would be using (@codex, PR #1142).
+    //
+    // Checked at the point of USE rather than migrated: a migration fixes the
+    // rows that exist on the day it runs, and this holds for a row restored
+    // from a backup, seeded, or written by any path added later.
+    //
+    // Thrown, NOT returned: the catch below is what stamps `syncStatus: ERROR`
+    // and `syncError`, and a legacy row nobody can see is a legacy row nobody
+    // fixes. An earlier draft returned `{ error }` here — the caller saw the
+    // message, the ROW stayed PENDING with a null syncError, and the portal
+    // showed a memory that simply never synced. Caught by the test below, not
+    // by reading this.
+    validateMemorySource(graph.source);
 
     // Update sync status to SYNCING
     await db.memory.update({
