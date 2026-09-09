@@ -241,17 +241,17 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     expect(d.toLowerCase()).toMatch(/session_ended|\[ended\]/);
   });
 
-  it('the reserved term is NOT applied to the agent chat entity (@Gil seq 73/78)', () => {
-    // The wrong edit this vocabulary invites: `Chat` is a THIRD concept, and
-    // rule 1 ("never shorten chat session to chat") reads as forbidding its own
-    // name until you know there are three things. It is an AGENT CHAT.
-    const d = srv().toolDescription('hadron_chatbot_start').toLowerCase();
-
-    expect(d).toContain('agent chat');
-    // It may MENTION "chat session" — it now does, to say it is not one — but
-    // never as the thing being started.
-    expect(d).not.toMatch(/start (a |an )?(new )?chat session/);
-  });
+  // #1141 removed the assertion that stood here. It read
+  // `hadron_chatbot_start`'s description for the @Gil seq 73/78 property — that
+  // `Chat` is a THIRD concept and an agent chat must not be called a "chat
+  // session" — and that tool no longer exists, so the assertion has no subject
+  // rather than a failing one.
+  //
+  // The RULE is not gone with it: no MCP tool starts an agent chat any more, so
+  // the vocabulary is now carried by the GraphQL schema, which the next
+  // describe block asserts against the same pair of terms. Deleted rather than
+  // repointed at an arbitrary surviving tool, because a vocabulary test needs a
+  // surface that actually talks about the entity.
 });
 
 describe('#1034 — the GraphQL schema carries the distinction for every client', () => {

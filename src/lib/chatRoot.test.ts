@@ -21,6 +21,9 @@ import type { Prisma } from '../generated/prisma/index.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
+import { generateDataKey } from './crypto.js';
+import { decryptNodeFields, encryptNodeFields } from './nodeCrypto.js';
+import { sessionKeyCache } from './sessionKeyCache.js';
 import {
   appendChatMessage,
   updateChatRootData,
@@ -53,6 +56,7 @@ function insertMessage(suffix: string) {
 
 beforeEach(async () => {
   await cleanDb(db);
+  sessionKeyCache.clear();
   const org = await db.organization.create({
     data: { id: generateId(), name: 'cr-org', urn: `cr-org-${generateId()}` },
   });
@@ -183,6 +187,57 @@ describe('updateChatRootData — a late write applies to fresh data', () => {
       ),
     );
     expect((await storedChatData()).edits).toBe(5);
+  });
+});
+
+describe('#1141 — an ENCRYPTED chat root round-trips instead of being written past', () => {
+  // Ported from `mcp/server.goalStack.test.ts`, deleted with the
+  // `hadron_chatbot_*` tools (#1141). The property is NOT theirs: it belongs to
+  // `updateChatRootData`, which stays, and which every kept chat write goes
+  // through. The removed tools were only the surface it happened to be
+  // exercised from — and this file's own fixture is unencrypted throughout, so
+  // deleting that file wholesale would have dropped the only coverage of the
+  // encrypted path on code nobody is removing.
+  //
+  // What it guards: a read-modify-write on an encrypted chat root must land
+  // INSIDE the `__enc` envelope. Writing alongside the ciphertext leaves a
+  // plaintext key next to it that the next decrypt discards, so the edit is
+  // lost silently and the memory leaks the field's shape in the clear.
+
+  it('writes inside the envelope, and the value survives the round trip', async () => {
+    const encInfo = { id: memEnc.id, isEncrypted: true };
+    await db.memory.update({ where: { id: memEnc.id }, data: { isEncrypted: true } });
+    // Seed the key the way an unlocked session does, so the write goes through
+    // the same `sessionKeyCache` lookup production uses.
+    sessionKeyCache.set('test-session', memEnc.id, generateDataKey());
+
+    // Convert the existing plaintext blob through the real encryption path, so
+    // the envelope is the shape production writes rather than one built here.
+    const before = await storedChatData();
+    await db.node.update({
+      where: { id: chat.id },
+      data: {
+        data: encryptNodeFields({ data: before }, encInfo).data as Prisma.InputJsonValue,
+      },
+    });
+    expect(Object.keys(await storedChatData())).toEqual(['__enc']);
+
+    await updateChatRootData(db, chat, encInfo, (d) => ({
+      ...d,
+      goalStack: [{ description: 'encrypted goal' }],
+    }));
+
+    // On disk it is still ONE opaque envelope — no plaintext field beside it.
+    expect(Object.keys(await storedChatData())).toEqual(['__enc']);
+
+    // And the pre-existing fields came back out with the new one, which is the
+    // half a "did it encrypt?" assertion alone would miss.
+    const after = decryptNodeFields(
+      { data: await storedChatData() }, encInfo,
+    ).data as Record<string, unknown>;
+    expect(after.goalStack).toEqual([{ description: 'encrypted goal' }]);
+    expect(after.conversationName).toBe('research');
+    expect(after.messageCount).toBe(0);
   });
 });
 

@@ -114,9 +114,7 @@ import {
 import {
   decryptNodeFieldsWithKey,
   encryptNodeFieldsWithKey,
-  getMemoryEncryptionInfo,
 } from '../lib/nodeCrypto.js';
-import { withChatRootLock } from '../lib/chatRoot.js';
 import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
@@ -128,7 +126,6 @@ import {
 } from '../lib/entityRef/errors.js';
 import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
-import { chatLocFilter, pickChatNode } from '../lib/chatLoc.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
 import { WorkerNotFoundError } from '../lib/entityRef/errors.js';
@@ -173,7 +170,6 @@ import {
   saveActiveMemory,
 } from '../lib/mcpSessionState.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
-import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -214,6 +210,16 @@ export interface TestableMcpServer {
    */
   toolDescription(name: string): string;
   toolParamDescription(name: string, param: string): string;
+  /**
+   * Every registered tool name (#1141).
+   *
+   * Exists so a test can assert an ABSENCE across the whole manifest rather
+   * than name-by-name: `toolDescription` throws on an unregistered name, which
+   * pins the eleven removed chatbot tools but says nothing about a twelfth one
+   * being added later. A removal that can be undone by writing a new tool with
+   * a new name is not a removal.
+   */
+  toolNames(): string[];
 }
 
 export function createTestableMcpServer(
@@ -264,6 +270,9 @@ export function createTestableMcpServer(
       const tool = tools[name];
       if (!tool) throw new Error(`Tool not registered: ${name}`);
       return tool.description ?? '';
+    },
+    toolNames() {
+      return Object.keys(tools);
     },
     /**
      * A single PARAMETER's description (#1100).
@@ -2216,7 +2225,9 @@ export function createMcpServerInstance(
 
       // Build a GraphQL Context from the MCP auth, including appId + sessionId so
       // access scoping resolves the same way it does for the other delegating
-      // tools (the gqlCtx helper omits those — #206 finding).
+      // tools. Both fields are load-bearing and were once omitted — the #206
+      // finding. (The `gqlCtx` helper that omitted them is gone with the
+      // chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
         clientId: auth.clientId ?? undefined,
@@ -4136,7 +4147,9 @@ export function createMcpServerInstance(
     async ({ nodeUrn: rawNodeUrn, data }) => {
       // Build a GraphQL Context from the MCP auth, including appId + sessionId
       // so app-keyed write authorization resolves the same way it does for
-      // hadron_update_node (the gqlCtx helper omits those — #206 finding).
+      // hadron_update_node. Both fields are load-bearing and were once omitted
+      // — the #206 finding. (The `gqlCtx` helper that omitted them is gone with
+      // the chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
         clientId: auth.clientId ?? undefined,
@@ -7078,667 +7091,6 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // on the floor, because an unattended sync is nobody's usage.
       recordNodeUsage(db, 'write', result.writtenNodes ?? [], auth);
       return textResult(`Synced ${result.nodeCount ?? 0} nodes.`);
-    },
-  );
-
-  // ── Chat tools ───────────────────────────────────────────────────────────
-  // These call the GraphQL mutation resolvers directly with a constructed
-  // Context. The MCP App-key auth maps to ctx.appId; the userId param
-  // identifies the persona being tested.
-
-  function gqlCtx(userIdOverride?: string): Context {
-    return {
-      db,
-      clientId: auth.clientId ?? undefined,
-      userId: userIdOverride ?? auth.userId ?? undefined,
-      roles: auth.roles as Context['roles'],
-      organizationId: auth.organizationId ?? undefined,
-    };
-  }
-
-  // ── hadron_chatbot_start ─────────────────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_start',
-    'Start a new AGENT CHAT — a saved conversation with an agent (#1034: an agent chat, NOT a "chat session", which is reserved for the human\'s own conversation, and NOT the team chat). Returns the chat ID, compiled system prompt, tool schema, conversation name, and first stage. The LLM should use the system prompt and tools to generate a welcome message, then call hadron_chatbot_process with the result.',
-    {
-      agentId: z.string().describe('ID of the agent to chat with'),
-      userId: z.string().optional().describe('User/persona identifier (e.g. "alex-chen"). Used to scope the per-user memory. If omitted, uses the authenticated user.'),
-      conversationName: z.string().optional().describe('Specific conversation to start (e.g. "onboarding"). If omitted, picks the first non-setup conversation.'),
-    },
-    async ({ agentId, userId, conversationName }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool: chat tools need
-      // an active App for persona/agent context.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        const ctx = gqlCtx(userId);
-        const result = await resolvers.Mutation.startChat(
-          null,
-          { agentId, userId, conversationName },
-          ctx,
-        );
-        return textResult(JSON.stringify(result, null, 2));
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'startChat failed'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_send ──────────────────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_send',
-    "Send a user message in an existing chat. Returns the recompiled system prompt for the current stage, tool schema, message history, and whether summarization is needed. Use the returned prompt + tools to generate the assistant's response, then call hadron_chatbot_process.",
-    {
-      chatId: z.string().describe('Chat ID returned by hadron_chatbot_start (e.g. "chats:20260417-abc12345-onboarding")'),
-      userMessage: z.string().describe("The user's message text"),
-    },
-    async ({ chatId, userMessage }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        const ctx = gqlCtx();
-        const result = await resolvers.Mutation.sendChatMessage(
-          null,
-          { chatId, userMessage },
-          ctx,
-        );
-        return textResult(JSON.stringify(result, null, 2));
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'sendChatMessage failed'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_process ───────────────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_process',
-    "Process the LLM's structured response for a chat turn. The toolResponse must match the respond() tool schema: { message, data, next_stage }. Hadron saves the assistant message, extracts data into user memory, and handles stage transitions. Returns the display message, whether a stage transition occurred, and the new stage name.",
-    {
-      chatId: z.string().describe('Chat ID'),
-      message: z.string().describe("The assistant's response message to display to the user"),
-      data: z.record(z.string(), z.unknown()).optional().describe('Extracted data fields matching the stage extractionSpec (e.g. { "memory.name": "Alex Chen" })'),
-      next_stage: z.string().nullable().optional().describe('Stage to transition to (null or omitted to stay in current stage)'),
-    },
-    async ({ chatId, message, data, next_stage }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        const ctx = gqlCtx();
-        const toolResponse = {
-          message,
-          ...(data !== undefined ? { data } : {}),
-          ...(next_stage !== undefined ? { next_stage } : {}),
-        };
-        const result = await resolvers.Mutation.processChatResponse(
-          null,
-          { chatId, toolResponse },
-          ctx,
-        );
-        return textResult(JSON.stringify(result, null, 2));
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'processChatResponse failed'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_get_routing_map ───────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_get_routing_map',
-    "Download the full routing map for an agent: topics, conversations (with goals/signals), stages, and edges. Use this to understand the chatbot's conversation structure before routing.",
-    {
-      agentId: z.string().describe('ID of the agent'),
-    },
-    async ({ agentId }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        const agent = await db.agent.findUnique({ where: { id: agentId } });
-        if (!agent) return textResult('Agent not found.');
-        const sysMemId = (agent as any).systemMemoryId as string | null;
-        if (!sysMemId) return textResult('Agent has no system memory.');
-
-        // Load all conversation-related nodes from the system memory
-        const nodes = await db.node.findMany({
-          where: { memoryId: sysMemId, deletedAt: null },
-          select: { id: true, loc: true, name: true, description: true, data: true, nodeType: true },
-          orderBy: { loc: 'asc' },
-        });
-
-        const topics = nodes
-          .filter((n) => n.loc.startsWith('topics:') && n.loc.split(':').length === 2)
-          .map((n) => ({ loc: n.loc, name: n.name, data: n.data }));
-
-        const conversations = nodes
-          .filter((n) => n.loc.startsWith('conversations:') && n.loc.split(':').length === 2)
-          .map((n) => ({ loc: n.loc, name: n.name, description: n.description, data: n.data }));
-
-        const stages = nodes
-          .filter((n) => n.loc.startsWith('conversations:') && n.loc.split(':').length === 3)
-          .map((n) => ({ loc: n.loc, name: n.name, description: n.description, data: n.data }));
-
-        // Load edges between these nodes
-        const nodeIds = nodes.map((n) => n.id);
-        const edges = await db.edge.findMany({
-          where: { sourceId: { in: nodeIds }, deletedAt: null },
-          include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
-        });
-
-        const edgeList = edges.map((e) => ({
-          id: e.id,
-          sourceLoc: e.source.loc,
-          targetLoc: e.target.loc,
-          loc: e.loc,
-          name: e.name,
-          data: e.data,
-        }));
-
-        // Include training entries if they exist
-        const trainingNode = nodes.find((n) => n.loc === 'goals:training');
-        const trainingEntries = trainingNode
-          ? ((trainingNode.data as Record<string, unknown>)?.entries as unknown[]) ?? []
-          : [];
-
-        return textResult(JSON.stringify({ topics, conversations, stages, edges: edgeList, trainingEntries }, null, 2));
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to get routing map'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_get_route_history ──────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_get_route_history',
-    'Get the route history and goal stack for a chat. Shows where the chat has been and what goals are active.',
-    {
-      chatId: z.string().describe('Chat ID'),
-    },
-    async ({ chatId }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        // #829: narrow to chats this caller is entitled to BEFORE picking one.
-        // `loc` is unique per memory, so an attacker who learns a chat id could
-        // plant a node at that loc; filtering by entitlement first means it can
-        // neither be picked nor block the read. The site's own gate still runs.
-        const chatNode = pickChatNode(
-          await db.node.findMany({
-            where: await chatLocFilter(db, chatId, auth),
-            // Oldest wins — a planted duplicate is always newer (#829).
-            orderBy: { createdAt: 'asc' as const },
-            take: 2,
-          }),
-          chatId,
-        );
-        if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
-        const chatData = (chatNode.data as Record<string, unknown>) ?? {};
-        return textResult(JSON.stringify({
-          conversationName: chatData.conversationName,
-          stageName: chatData.stageName,
-          goalStack: chatData.goalStack ?? [],
-          routeHistory: chatData.routeHistory ?? [],
-        }, null, 2));
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to get route history'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_push_goal ──────────────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_push_goal',
-    'Push a new goal onto the goal stack. Use this when the user mentions something they want to do later, or when a detour is needed.',
-    {
-      chatId: z.string().describe('Chat ID'),
-      description: z.string().describe('Description of the goal'),
-      createdBy: z.enum(['ASSISTANT', 'USER']).optional().describe('Who identified this goal (default: ASSISTANT)'),
-    },
-    async ({ chatId, description, createdBy }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        // #829: narrow to chats this caller is entitled to BEFORE picking one.
-        // `loc` is unique per memory, so an attacker who learns a chat id could
-        // plant a node at that loc; filtering by entitlement first means it can
-        // neither be picked nor block the read. The site's own gate still runs.
-        const chatNode = pickChatNode(
-          await db.node.findMany({
-            where: await chatLocFilter(db, chatId, auth),
-            // Oldest wins — a planted duplicate is always newer (#829).
-            orderBy: { createdAt: 'asc' as const },
-            take: 2,
-          }),
-          chatId,
-        );
-        if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
-        // #919: the chat root is stored as one blob, so a read-modify-write
-        // that spans a chat turn silently rolls that turn back — including
-        // `messageCount`, which the turn allocates its `seq` from. Go through
-        // the shared serializer: it re-reads under the chat lock (and handles
-        // the encrypted case, which this path used to write straight past).
-        const memEncInfo = await getMemoryEncryptionInfo(db, chatNode.memoryId);
-        const stack = await withChatRootLock(
-          db,
-          { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc },
-          memEncInfo,
-          async ({ chatData }) => {
-            const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
-            stack.push({
-              description,
-              createdBy: createdBy ?? 'ASSISTANT',
-              createdAt: new Date().toISOString(),
-              conversationUrn: chatData.conversationName ? `conversations:${chatData.conversationName}` : undefined,
-              nodeUrn: chatData.stageName && chatData.conversationName
-                ? `conversations:${chatData.conversationName}:${chatData.stageName}`
-                : undefined,
-              status: 'ACTIVE',
-            });
-            return { chatData: { ...chatData, goalStack: stack }, value: stack };
-          },
-        );
-        return textResult(`Goal pushed: "${description}". Stack depth: ${stack.filter((g: any) => g.status === 'ACTIVE').length}`);
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to push goal'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_pop_goal ───────────────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_pop_goal',
-    'Complete the current goal and return to the previous one. Use this when a detour conversation has finished its purpose.',
-    {
-      chatId: z.string().describe('Chat ID'),
-    },
-    async ({ chatId }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        // #829: narrow to chats this caller is entitled to BEFORE picking one.
-        // `loc` is unique per memory, so an attacker who learns a chat id could
-        // plant a node at that loc; filtering by entitlement first means it can
-        // neither be picked nor block the read. The site's own gate still runs.
-        const chatNode = pickChatNode(
-          await db.node.findMany({
-            where: await chatLocFilter(db, chatId, auth),
-            // Oldest wins — a planted duplicate is always newer (#829).
-            orderBy: { createdAt: 'asc' as const },
-            take: 2,
-          }),
-          chatId,
-        );
-        if (!chatNode) return textResult(`Chat "${chatId}" not found.`);
-        // #919 — same serializer as push_goal above, same two reasons.
-        const memEncInfo = await getMemoryEncryptionInfo(db, chatNode.memoryId);
-        const { stack, completed } = await withChatRootLock(
-          db,
-          { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc },
-          memEncInfo,
-          async ({ chatData }) => {
-            const stack = (chatData.goalStack as Array<Record<string, unknown>>) ?? [];
-
-            // Find and complete the topmost ACTIVE goal
-            let completed: Record<string, unknown> | null = null;
-            for (let i = stack.length - 1; i >= 0; i--) {
-              if (stack[i].status === 'ACTIVE') {
-                stack[i].status = 'COMPLETED';
-                stack[i].completedAt = new Date().toISOString();
-                completed = stack[i];
-                break;
-              }
-            }
-
-            return {
-              chatData: { ...chatData, goalStack: stack },
-              value: { stack, completed },
-            };
-          },
-        );
-
-        if (completed) {
-          const remaining = stack.filter((g: any) => g.status === 'ACTIVE').length;
-          return textResult(`Goal completed: "${completed.description}". ${remaining} active goal(s) remaining.`);
-        }
-        return textResult('No active goals to complete.');
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to pop goal'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_add_training_entry ───────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_add_training_entry',
-    'Add a user statement to the agent-wide routing training set. These entries help the routing engine match future user messages to the right conversation. Stored in the system memory (not encrypted user memory).',
-    {
-      agentId: z.string().describe('ID of the agent'),
-      userStatement: z.string().describe('The user statement that should route here (e.g. "Is Nina back in town?")'),
-      matchedConversation: z.string().describe('The conversation name this statement should route to (e.g. "class-schedule")'),
-      language: z.string().optional().describe('Language code (e.g. "en", "es"). Defaults to "en".'),
-    },
-    async ({ agentId, userStatement, matchedConversation, language }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        const agent = await db.agent.findUnique({ where: { id: agentId } });
-        if (!agent) return textResult('Agent not found.');
-        const sysMemId = (agent as any).systemMemoryId as string | null;
-        if (!sysMemId) return textResult('Agent has no system memory.');
-
-        // Ensure the training node exists
-        const trainingLoc = 'goals:training';
-        let trainingNode = await db.node.findFirst({
-          where: { memoryId: sysMemId, loc: trainingLoc, deletedAt: null },
-        });
-
-        if (!trainingNode) {
-          // Create parent + training node
-          try {
-            await db.node.upsert({
-              where: { loc_memoryId: { loc: 'goals', memoryId: sysMemId } },
-              create: { id: generateId(), memoryId: sysMemId, loc: 'goals', name: 'goals', nodeType: 'system' },
-              update: {},
-            });
-          } catch { /* exists */ }
-          // #664/#752: trainingLoc is `goals:training` — lock the ancestor path
-          // across the insert so a concurrent non-recursive delete of `goals`
-          // can't orphan it (advisory before row; READ COMMITTED).
-          trainingNode = await db.$transaction(async (tx) => {
-            await lockAncestorsForCreate(tx, sysMemId, trainingLoc);
-            return tx.node.create({
-              data: {
-                id: generateId(), memoryId: sysMemId, loc: trainingLoc, name: 'training',
-                nodeType: 'system', data: { entries: [] } as InputJsonValue,
-              },
-            });
-          });
-        }
-
-        const trainingData = (trainingNode.data as Record<string, unknown>) ?? {};
-        const entries = (trainingData.entries as Array<Record<string, unknown>>) ?? [];
-
-        entries.push({
-          userStatement,
-          matchedConversation,
-          language: language ?? 'en',
-          addedAt: new Date().toISOString(),
-          addedBy: auth.userId ?? auth.clientId ?? 'system',
-        });
-
-        await db.node.update({
-          where: { id: trainingNode.id },
-          data: { data: { ...trainingData, entries } as InputJsonValue },
-        });
-
-        return textResult(`Training entry added: "${userStatement}" → ${matchedConversation}. Total entries: ${entries.length}`);
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to add training entry'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_define_persona ───────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_define_persona',
-    'Define a test persona for automated chatbot testing. The persona has a name, description, opening message, and optionally an expected conversation path. Stored in the system memory under test-personas:*.',
-    {
-      agentId: z.string().describe('ID of the agent'),
-      name: z.string().describe('Persona name (e.g. "Maria Santos")'),
-      description: z.string().describe('Brief description: who they are, what they want (e.g. "Freelance designer in Austin, wants to find a mentor")'),
-      openingMessage: z.string().describe('The first message the persona sends to start the chat'),
-      conversationName: z.string().optional().describe('Which conversation to start with (omit to let routing decide)'),
-      followUpMessages: z.array(z.string()).optional().describe('Subsequent messages the persona sends, in order. If omitted, the LLM improvises based on the persona description.'),
-      expectedConversations: z.array(z.string()).optional().describe('Expected conversation path for validation (e.g. ["onboarding", "strategy"])'),
-    },
-    async ({ agentId, name, description, openingMessage, conversationName, followUpMessages, expectedConversations }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        const agent = await db.agent.findUnique({ where: { id: agentId } });
-        if (!agent) return textResult('Agent not found.');
-        const sysMemId = (agent as any).systemMemoryId as string | null;
-        if (!sysMemId) return textResult('Agent has no system memory.');
-
-        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-        const personaLoc = `test-personas:${slug}`;
-
-        // Ensure parent exists
-        try {
-          await db.node.upsert({
-            where: { loc_memoryId: { loc: 'test-personas', memoryId: sysMemId } },
-            create: { id: generateId(), memoryId: sysMemId, loc: 'test-personas', name: 'test-personas', nodeType: 'system', description: 'Test personas for automated chatbot testing' },
-            update: {},
-          });
-        } catch { /* exists */ }
-
-        // #664/#752: personaLoc is `test-personas:<slug>` — lock the ancestor
-        // path across the upsert so a concurrent non-recursive delete of
-        // `test-personas` can't orphan it (advisory before row; READ COMMITTED).
-        const personaUpsertArgs = {
-          where: { loc_memoryId: { loc: personaLoc, memoryId: sysMemId } },
-          create: {
-            id: generateId(), memoryId: sysMemId, loc: personaLoc, name: slug,
-            nodeType: 'system', description: name,
-            data: {
-              personaName: name, description, openingMessage,
-              conversationName: conversationName ?? null,
-              followUpMessages: followUpMessages ?? [],
-              expectedConversations: expectedConversations ?? [],
-              createdAt: new Date().toISOString(),
-            } as InputJsonValue,
-          },
-          update: {
-            description: name,
-            data: {
-              personaName: name, description, openingMessage,
-              conversationName: conversationName ?? null,
-              followUpMessages: followUpMessages ?? [],
-              expectedConversations: expectedConversations ?? [],
-              updatedAt: new Date().toISOString(),
-            } as InputJsonValue,
-            deletedAt: null,
-          },
-        };
-        await db.$transaction(async (tx) => {
-          await lockAncestorsForCreate(tx, sysMemId, personaLoc);
-          await tx.node.upsert(personaUpsertArgs);
-        });
-
-        return textResult(`Persona "${name}" saved at ${personaLoc}.\nOpening: "${openingMessage}"\nFollow-ups: ${(followUpMessages ?? []).length}`);
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to define persona'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_list_personas ──────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_list_personas',
-    'List all test personas defined for an agent.',
-    {
-      agentId: z.string().describe('ID of the agent'),
-    },
-    async ({ agentId }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        const agent = await db.agent.findUnique({ where: { id: agentId } });
-        if (!agent) return textResult('Agent not found.');
-        const sysMemId = (agent as any).systemMemoryId as string | null;
-        if (!sysMemId) return textResult('Agent has no system memory.');
-
-        const personas = await db.node.findMany({
-          where: { memoryId: sysMemId, loc: { startsWith: 'test-personas:' }, deletedAt: null },
-          select: { loc: true, description: true, data: true },
-          orderBy: { loc: 'asc' },
-        });
-
-        if (personas.length === 0) return textResult('No test personas defined. Use hadron_chatbot_define_persona to create one.');
-
-        const lines = personas.map((p) => {
-          const d = (p.data as Record<string, unknown>) ?? {};
-          return `- ${d.personaName ?? p.description ?? p.loc}: "${d.openingMessage ?? ''}"${d.conversationName ? ` (starts: ${d.conversationName})` : ''}`;
-        });
-        return textResult(`${personas.length} persona(s):\n${lines.join('\n')}`);
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to list personas'}`);
-      }
-    },
-  );
-
-  // ── hadron_chatbot_run_persona ────────────────────────────────────────────
-
-  server.tool(
-    'hadron_chatbot_run_persona',
-    'Run a test persona through the chatbot in "dry run" mode. This starts a chat as the persona, sends their opening message, and returns the chatbot\'s compiled prompt + tool schema so the client LLM can generate the response. Call hadron_chatbot_process with the response, then call this tool again with the next follow-up message. Use this iteratively to walk through the full conversation.\n\nWorkflow:\n1. Call hadron_chatbot_run_persona to start (sets up chat, sends opening message)\n2. Read the returned prompt, generate a chatbot response as the client LLM\n3. Call hadron_chatbot_process with the response\n4. Call hadron_chatbot_run_persona again with step=1 (next follow-up)\n5. Repeat until all follow-ups are done or the conversation ends\n\nAt the end, call hadron_chatbot_get_route_history to see the full path taken.',
-    {
-      agentId: z.string().describe('ID of the agent'),
-      personaLoc: z.string().describe('Loc of the persona (e.g. "test-personas:maria-santos")'),
-      step: z.number().optional().describe('Follow-up message index (0 = opening message, 1 = first follow-up, etc.). Defaults to 0.'),
-      chatId: z.string().optional().describe('Chat ID from a previous step. Omit on step 0 to start a new chat.'),
-    },
-    async ({ agentId, personaLoc, step, chatId }) => {
-      // Spec 026 / D-2026-05-21-003 strict tool.
-      const appScopeError = requireAppScope();
-      if (appScopeError) return appScopeError;
-      try {
-        const agent = await db.agent.findUnique({ where: { id: agentId } });
-        if (!agent) return textResult('Agent not found.');
-        const sysMemId = (agent as any).systemMemoryId as string | null;
-        if (!sysMemId) return textResult('Agent has no system memory.');
-
-        const personaNode = await db.node.findFirst({
-          where: { memoryId: sysMemId, loc: personaLoc, deletedAt: null },
-        });
-        if (!personaNode) return textResult(`Persona "${personaLoc}" not found.`);
-        const persona = (personaNode.data as Record<string, unknown>) ?? {};
-        const followUps = (persona.followUpMessages as string[]) ?? [];
-        const currentStep = step ?? 0;
-
-        const ctx = gqlCtx(persona.personaName as string ?? 'test-persona');
-
-        if (currentStep === 0) {
-          // Start a new chat
-          const startResult = await resolvers.Mutation.startChat(
-            null,
-            {
-              agentId,
-              userId: persona.personaName as string,
-              conversationName: (persona.conversationName as string) ?? undefined,
-            },
-            ctx,
-          );
-
-          // Send the opening message
-          const sendResult = await resolvers.Mutation.sendChatMessage(
-            null,
-            { chatId: startResult.chatId, userMessage: persona.openingMessage as string },
-            ctx,
-          );
-
-          return textResult(JSON.stringify({
-            chatId: startResult.chatId,
-            step: 0,
-            personaMessage: persona.openingMessage,
-            totalFollowUps: followUps.length,
-            conversationName: startResult.conversationName,
-            stageName: startResult.stageName,
-            systemMessage: sendResult.systemMessage,
-            tools: sendResult.tools,
-            messageHistory: sendResult.messageHistory,
-            instruction: 'Generate a chatbot response based on the systemMessage and tools above. Then call hadron_chatbot_process with chatId, message, data, and next_stage. After that, call hadron_chatbot_run_persona with step=1 to send the next follow-up.',
-          }, null, 2));
-        }
-
-        // Follow-up steps
-        if (!chatId) return textResult('chatId is required for follow-up steps.');
-        const followUpIdx = currentStep - 1;
-
-        if (followUpIdx >= followUps.length) {
-          // All follow-ups done — generate the test report
-          // #829: narrow to chats this caller is entitled to BEFORE picking one.
-          // `loc` is unique per memory, so an attacker who learns a chat id could
-          // plant a node at that loc; filtering by entitlement first means it can
-          // neither be picked nor block the read. The site's own gate still runs.
-          const chatNode = pickChatNode(
-            await db.node.findMany({
-              where: await chatLocFilter(db, chatId, auth),
-              // Oldest wins — a planted duplicate is always newer (#829).
-              orderBy: { createdAt: 'asc' as const },
-              take: 2,
-            }),
-            chatId,
-          );
-          const chatData = (chatNode?.data as Record<string, unknown>) ?? {};
-          const expected = (persona.expectedConversations as string[]) ?? [];
-          const routeHistory = (chatData.routeHistory as Array<Record<string, unknown>>) ?? [];
-          const visitedConvs = [...new Set(routeHistory.filter((r) => r.conversationUrn).map((r) => (r.conversationUrn as string).replace('conversations:', '')))];
-
-          let pass = true;
-          const issues: string[] = [];
-          if (expected.length > 0) {
-            for (const exp of expected) {
-              if (!visitedConvs.includes(exp)) {
-                pass = false;
-                issues.push(`Expected conversation "${exp}" was not visited.`);
-              }
-            }
-          }
-
-          return textResult(JSON.stringify({
-            chatId,
-            step: currentStep,
-            status: 'COMPLETE',
-            pass,
-            issues,
-            visitedConversations: visitedConvs,
-            totalTurns: (chatData.messageCount as number) ?? 0,
-            routeHistory,
-            goalStack: chatData.goalStack ?? [],
-            instruction: 'Test complete. Review the results above.',
-          }, null, 2));
-        }
-
-        const userMessage = followUps[followUpIdx];
-
-        // Send the follow-up message
-        const sendResult = await resolvers.Mutation.sendChatMessage(
-          null,
-          { chatId, userMessage },
-          ctx,
-        );
-
-        return textResult(JSON.stringify({
-          chatId,
-          step: currentStep,
-          personaMessage: userMessage,
-          remainingFollowUps: followUps.length - followUpIdx - 1,
-          systemMessage: sendResult.systemMessage,
-          tools: sendResult.tools,
-          messageHistory: sendResult.messageHistory,
-          instruction: `Generate a chatbot response for: "${userMessage}". Then call hadron_chatbot_process, then hadron_chatbot_run_persona with step=${currentStep + 1}.`,
-        }, null, 2));
-      } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'Failed to run persona'}`);
-      }
     },
   );
 
