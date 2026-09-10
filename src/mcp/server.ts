@@ -5031,7 +5031,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     }
     const node = await db.node.findUnique({
       where: { loc_memoryId: { loc, memoryId: memory.id } },
-      include: { outgoingEdges: { include: { target: true } } },
+      // #1063 — the same edge filter the GraphQL `renderRunNode` query uses.
+      // Without it a soft-deleted edge kept carrying its target, and a
+      // soft-deleted NODE kept being served through any edge pointing at it —
+      // so deleting a node did not stop it being read. Soft-delete is the
+      // product's delete; a read surface that ignores it has not deleted
+      // anything.
+      include: {
+        outgoingEdges: {
+          where: { deletedAt: null, target: { deletedAt: null } },
+          include: { target: true },
+        },
+      },
     });
     if (!node) return { error: `Node "${rawUrn}" not found.` };
     return { node, loc };
@@ -5055,16 +5066,47 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     // built from `node.outgoingEdges` here would record reads for nodes the
     // bundle never carried (PR #1062 review — Copilot).
     const inlined: unknown[] = [];
-    const rendered = await renderRunNodeBundle(node, args, async (memoryId) => {
-      // Reuse the tool surface's own memoized memory-urn lookup.
-      let memUrn = memoryUrnCache.get(memoryId);
-      if (!memUrn) {
-        const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-        memUrn = mem?.urn ?? memoryId;
-        memoryUrnCache.set(memoryId, memUrn);
+    // #1063 — per-target memory-read gate, memoized for this render on TWO
+    // levels, because a bundle can span many memories and each level costs
+    // something different (PR #1144 review — @codex P2):
+    //
+    //  - the caller's access MAP is built once and threaded through
+    //    `canReadMemory`'s `access` option. Without it, every DISTINCT target
+    //    memory rebuilds the caller's whole App/org access graph, so the cost
+    //    is (distinct memories x access graph) on a surface with no edge cap.
+    //    Built lazily, so a run node with no dependencies pays nothing.
+    //  - the per-memory ANSWER is memoized, since dependencies frequently
+    //    share a memory and each check is still a `Memory` row read.
+    //
+    // The map is only ever `getMemoryAccess(db, auth)`'s own output — the
+    // option's contract is that a hand-built map is not acceptable.
+    let accessMap: Promise<Map<string, string>> | undefined;
+    const readable = new Map<string, Promise<boolean>>();
+    const canRead = (memoryId: string): Promise<boolean> => {
+      let pending = readable.get(memoryId);
+      if (!pending) {
+        accessMap ??= getMemoryAccess(db, auth);
+        pending = accessMap.then((access) => canReadMemory(db, auth, memoryId, { access }));
+        readable.set(memoryId, pending);
       }
-      return memUrn;
-    }, (target) => inlined.push(target));
+      return pending;
+    };
+    const rendered = await renderRunNodeBundle(node, args, {
+      memoryUrnOf: async (memoryId) => {
+        // Reuse the tool surface's own memoized memory-urn lookup.
+        let memUrn = memoryUrnCache.get(memoryId);
+        if (!memUrn) {
+          const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+          memUrn = mem?.urn ?? memoryId;
+          memoryUrnCache.set(memoryId, memUrn);
+        }
+        return memUrn;
+      },
+      // The run node's OWN memory was gated by loadNodeForRun; this gates each
+      // dependency separately, because an edge can cross memories (#781).
+      includeTarget: (target) => canRead(target.memoryId),
+      onTargetInlined: (target) => inlined.push(target),
+    });
     db.usageEvent
       .create({
         data: {
@@ -5089,11 +5131,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     // the two questions ("how often was this run?" and "how much of the graph
     // was read?") stay separately answerable.
     //
-    // NOTE: renderRunNodeBundle inlines edge targets WITHOUT a per-target
-    // memory-read gate, so a cross-memory dependency can be inlined here that
-    // the GraphQL `renderRunNode` preview would have excluded. That asymmetry
-    // predates this change and is tracked separately; the events recorded here
-    // describe what this tool actually returned, which is the honest reading.
+    // Since #1063 the renderer applies the same per-target read gate the
+    // GraphQL preview does, so `inlined` is the readable, non-deleted subset —
+    // which is what makes these events describe exactly what crossed the
+    // boundary. (Before that, this recorded an honest count of a bundle that
+    // should not have contained what it did.)
     recordNodeUsage(db, 'read', toUsageNodeRefs([node, ...inlined]), auth);
     return rendered;
   }

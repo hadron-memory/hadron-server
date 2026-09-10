@@ -41,26 +41,55 @@ export type MemoryUrnLookup = (memoryId: string) => Promise<string>;
 
 /**
  * Substitute `{{arg}}` placeholders, then append the content of every
- * edge-linked node as a "Referenced Nodes" section.
+ * edge-linked node the caller may READ as a "Referenced Nodes" section.
  *
  * Substitution is a literal `replaceAll` per key, NOT a Mustache render — it
  * matches what the runner does, and changing it here would silently change
  * execution.
+ *
+ * ## `includeTarget` is REQUIRED, and that is the fix for #1063
+ *
+ * An edge can point across memories (#781), so inlining a target's content is a
+ * read of ANOTHER memory — and this renderer previously had no way to express
+ * that, let alone enforce it. The MCP run tools handed it `node.outgoingEdges`
+ * whole and returned a foreign memory's content to a caller who could read only
+ * the run node's own memory, while the GraphQL preview of the same node omitted
+ * it. A cross-tenant read, and a preview disagreeing with the run (#818).
+ *
+ * The predicate is a required parameter rather than an optional hook on
+ * purpose. An optional gate is one a new call site can omit and still compile,
+ * which is exactly how this surface came to have none; required, the compiler
+ * asks the question and a caller must answer it. It is deliberately NOT an auth
+ * check performed here — this module stays free of auth context (the two
+ * surfaces have different principal shapes) — it is the caller's own gate,
+ * called at the moment the content would cross the boundary.
  */
 export async function renderRunNodeBundle(
   node: RenderableRunNode,
   args: Record<string, string> | undefined,
-  memoryUrnOf: MemoryUrnLookup,
-  /**
-   * #1061 — called once per target whose content is actually INLINED into the
-   * bundle. Usage recording must count what crossed the response boundary, and
-   * a target with empty content is skipped below; a caller that recorded every
-   * outgoing edge instead would inflate the read series for exactly the nodes
-   * it did not return. Reporting from inside the loop is what keeps the two
-   * from drifting — a second copy of this predicate at the call site is the
-   * bug waiting to happen.
-   */
-  onTargetInlined?: (target: RenderableRunNode['outgoingEdges'][number]['target']) => void,
+  deps: {
+    memoryUrnOf: MemoryUrnLookup;
+    /**
+     * #1063 — may this caller read the target's memory? Returning false drops
+     * the target from the bundle silently, which is the right shape: the run
+     * still succeeds, and the absence discloses nothing about what was omitted.
+     */
+    includeTarget: (
+      target: NonNullable<RenderableRunNode['outgoingEdges'][number]['target']>,
+    ) => Promise<boolean> | boolean;
+    /**
+     * #1061 — called once per target whose content is actually INLINED into the
+     * bundle. Usage recording must count what crossed the response boundary, and
+     * a target with empty content is skipped below; a caller that recorded every
+     * outgoing edge instead would inflate the read series for exactly the nodes
+     * it did not return. Reporting from inside the loop is what keeps the two
+     * from drifting — a second copy of this predicate at the call site is the
+     * bug waiting to happen. Since #1063 that argument is doubly true: the loop
+     * now also drops unreadable targets, so `outgoingEdges` and "what was
+     * returned" differ for a second reason.
+     */
+    onTargetInlined?: (target: RenderableRunNode['outgoingEdges'][number]['target']) => void;
+  },
 ): Promise<string> {
   let actionContent = node.content || '';
   if (args) {
@@ -72,9 +101,10 @@ export async function renderRunNodeBundle(
   for (const edge of node.outgoingEdges) {
     const target = edge.target;
     if (target?.content) {
-      const targetUrn = emitNodeUrnV2(await memoryUrnOf(target.memoryId), target.loc);
+      if (!(await deps.includeTarget(target))) continue;
+      const targetUrn = emitNodeUrnV2(await deps.memoryUrnOf(target.memoryId), target.loc);
       topicSections.push(`## Node: ${target.name} (${targetUrn})\n\n${target.content}`);
-      onTargetInlined?.(target);
+      deps.onTargetInlined?.(target);
     }
   }
   const parts = [`# Node: ${node.name}\n\n${actionContent}`];
