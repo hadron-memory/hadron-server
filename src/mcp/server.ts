@@ -5066,15 +5066,27 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     // built from `node.outgoingEdges` here would record reads for nodes the
     // bundle never carried (PR #1062 review — Copilot).
     const inlined: unknown[] = [];
-    // #1063 — per-target memory-read gate, memoized for this render. A run
-    // node's dependencies often share a memory, and `canReadMemory` is a DB
-    // round trip; without the memo a bundle with N edges into one memory asks
-    // the same question N times.
+    // #1063 — per-target memory-read gate, memoized for this render on TWO
+    // levels, because a bundle can span many memories and each level costs
+    // something different (PR #1144 review — @codex P2):
+    //
+    //  - the caller's access MAP is built once and threaded through
+    //    `canReadMemory`'s `access` option. Without it, every DISTINCT target
+    //    memory rebuilds the caller's whole App/org access graph, so the cost
+    //    is (distinct memories x access graph) on a surface with no edge cap.
+    //    Built lazily, so a run node with no dependencies pays nothing.
+    //  - the per-memory ANSWER is memoized, since dependencies frequently
+    //    share a memory and each check is still a `Memory` row read.
+    //
+    // The map is only ever `getMemoryAccess(db, auth)`'s own output — the
+    // option's contract is that a hand-built map is not acceptable.
+    let accessMap: Promise<Map<string, string>> | undefined;
     const readable = new Map<string, Promise<boolean>>();
     const canRead = (memoryId: string): Promise<boolean> => {
       let pending = readable.get(memoryId);
       if (!pending) {
-        pending = canReadMemory(db, auth, memoryId);
+        accessMap ??= getMemoryAccess(db, auth);
+        pending = accessMap.then((access) => canReadMemory(db, auth, memoryId, { access }));
         readable.set(memoryId, pending);
       }
       return pending;
