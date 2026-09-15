@@ -358,7 +358,10 @@ export const orgMutations = {
         if (
           e instanceof Prisma.PrismaClientKnownRequestError &&
           e.code === 'P2002' &&
-          String((e.meta as { target?: unknown } | null)?.target ?? '').includes('skill_prefix')
+          // Prisma reports the target as field names (`skillPrefix`) for a
+          // mapped column, as the index name for some engines — match either
+          // spelling (Copilot on PR #1164).
+          /skill_?prefix/i.test(String((e.meta as { target?: unknown } | null)?.target ?? ''))
         ) {
           throw new GraphQLError(`skillPrefix "${skillPrefix}" is already used by another organization.`, {
             extensions: { code: 'SKILL_PREFIX_TAKEN' },
