@@ -176,6 +176,32 @@ export async function canReadScope(ctx: Context, scope: ScopeOwnerColumns): Prom
   return agent.visibility === 'PUBLIC' || isOwnerOrOrgMember(ctx, agent);
 }
 
+/**
+ * An App's RESOLUTION CONTEXT — its organization and its LIVE installed Agents
+ * — returned only to a caller who may read the App (a participant, or the
+ * App key of that App); `null` otherwise, indistinguishable from a nonexistent
+ * App. Shared by name resolution and the `scopes(filter.appRef)` list so the
+ * gate cannot be omitted by one of them (plan §8, `a-gate-a-caller-can-omit`).
+ */
+export async function appContextIfReadable(
+  ctx: Context,
+  appId: string,
+): Promise<{ id: string; organizationId: string | null; agentIds: string[] } | null> {
+  const app = await ctx.db.app.findFirst({
+    where: { id: appId, deletedAt: null },
+    select: {
+      id: true,
+      organizationId: true,
+      ownerUserId: true,
+      appAgents: { where: { agent: { deletedAt: null } }, select: { agentId: true } },
+    },
+  });
+  if (!app) return null;
+  const admitted = ctx.userId ? await isAppParticipant(ctx, app) : ctx.appId === app.id;
+  if (!admitted) return null;
+  return { id: app.id, organizationId: app.organizationId, agentIds: app.appAgents.map((a) => a.agentId) };
+}
+
 /** An App key's scope reach: its App, its App's org, its App's installed Agents. */
 async function appKeyScopeReach(
   ctx: Context,
@@ -183,7 +209,10 @@ async function appKeyScopeReach(
 ): Promise<{ appId: string; organizationId: string | null; agentIds: string[] }> {
   const app = await ctx.db.app.findFirst({
     where: { id: appId, deletedAt: null },
-    select: { organizationId: true, appAgents: { select: { agentId: true } } },
+    // Live Agents only: deleteAgent soft-deletes and leaves the AppAgent row,
+    // and a dead Agent's scope must neither be readable nor shadow a live one
+    // (Codex on PR #1160).
+    select: { organizationId: true, appAgents: { where: { agent: { deletedAt: null } }, select: { agentId: true } } },
   });
   return {
     appId,
@@ -312,8 +341,11 @@ export async function resolveScopeMemoryRefs(ctx: Context, memoryRefs: string[])
 
 /** The scope's ordered memory ids, as stored (no access applied — see explainScope). */
 export async function scopeMemoryIds(db: Context['db'], scopeId: string): Promise<string[]> {
+  // Live memories only: deleteMemory soft-deletes, so the FK cascade never
+  // runs and the join row survives its memory (Codex on PR #1160). A tombstone
+  // must not be counted, hidden or "dropped" — for every caller it is gone.
   const rows = await db.scopeMemory.findMany({
-    where: { scopeId },
+    where: { scopeId, memory: { deletedAt: null } },
     orderBy: { position: 'asc' },
     select: { memoryId: true },
   });
@@ -332,12 +364,14 @@ export async function resolveScopeByNameInApp(
   name: string,
   appId: string,
 ): Promise<{ winner: Scope | null; shadowed: Scope[]; ambiguousAmong: Scope[] }> {
-  const app = await ctx.db.app.findFirst({
-    where: { id: appId, deletedAt: null },
-    select: { organizationId: true, appAgents: { select: { agentId: true } } },
-  });
+  // The App is gated BEFORE its context is expanded: an outsider naming a
+  // guessed App must not learn which (public) Agents and scopes it has
+  // installed by comparing results (Codex P1 on PR #1160). A user needs to be
+  // a participant; an App key needs it to be its own App; nobody else gets
+  // even an empty-vs-nonempty tell — the same "nothing found" either way.
+  const app = await appContextIfReadable(ctx, appId);
   if (!app) return { winner: null, shadowed: [], ambiguousAmong: [] };
-  const agentIds = app.appAgents.map((a) => a.agentId);
+  const agentIds = app.agentIds;
   const candidates = await ctx.db.scope.findMany({
     where: {
       name,

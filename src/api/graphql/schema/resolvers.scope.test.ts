@@ -192,6 +192,27 @@ describe('name resolution in an App context — App › Agent › organization, 
     });
   });
 
+  it("an App the caller cannot read is no context — no tell from a PUBLIC Agent's scope (Codex on #1160)", async () => {
+    // A public Agent's scope is readable by anyone; naming a guessed App must
+    // not reveal whether that Agent is installed there.
+    await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
+    await M.createScope({}, { input: { name: 'pub', agentRef: agent.urn, memoryRefs: [memA1.urn] } }, ctx(contributor.id, ['ADMIN']));
+    expect(await Q.scopes({}, { filter: { appRef: app.urn } }, ctx(stranger.id))).toEqual({ items: [], total: 0 });
+    expect(await Q.scopeExplain({}, { name: 'pub', appRef: app.urn }, ctx(stranger.id))).toBeNull();
+    // The scope itself stays readable directly — the gate is on the App context.
+    expect((await Q.scopes({}, { filter: { ownerType: 'AGENT', ownerRef: agent.urn } }, ctx(stranger.id))).total).toBe(1);
+  });
+
+  it('a soft-deleted memory leaves the scope for everyone — not counted, not hidden (Codex on #1160)', async () => {
+    const s = await orgScope('tomb', [memA1.urn, memA2.urn]);
+    await db.memory.update({ where: { id: memA2.id }, data: { deletedAt: new Date() } });
+    expect(await S.memoryCount(s, {}, ctx(contributor.id))).toBe(1);
+    expect(await S.hiddenMemoryCount(s, {}, ctx(contributor.id))).toBe(0);
+    const ex = await Q.scopeExplain({}, { scopeRef: s.id }, ctx(contributor.id));
+    expect(ex.memories.map((m: any) => m.id)).toEqual([memA1.id]);
+    expect(ex.droppedCount).toBe(0);
+  });
+
   it('a name needs an App context on GraphQL', async () => {
     await expect(Q.scopeExplain({}, { name: 'marketing' }, ctx(reader.id))).rejects.toThrow(/needs an App context/);
   });

@@ -30,6 +30,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { narrowToAccessible } from '../../../lib/auth/narrowToAccessible.js';
 import {
+  appContextIfReadable,
   assertScopeName,
   canReadScope,
   explainScope,
@@ -142,15 +143,14 @@ export const scopeQueries = {
       } catch {
         return EMPTY_PAGE;
       }
-      const app = await ctx.db.app.findFirst({
-        where: { id: appId, deletedAt: null },
-        select: { organizationId: true, appAgents: { select: { agentId: true } } },
-      });
+      // Gated before the context is expanded (Codex P1 on PR #1160): a caller who
+      // may not read the App gets the empty page, the same as for no such App.
+      const app = await appContextIfReadable(ctx, appId);
       if (!app) return EMPTY_PAGE;
       where.push({
         OR: [
           { appId },
-          ...(app.appAgents.length ? [{ agentId: { in: app.appAgents.map((a) => a.agentId) } }] : []),
+          ...(app.agentIds.length ? [{ agentId: { in: app.agentIds } }] : []),
           ...(app.organizationId ? [{ organizationId: app.organizationId }] : []),
         ],
       });
@@ -299,7 +299,10 @@ export const scopeFieldResolvers = {
     },
     /** The memories the caller may read, in scope order, with their stored position. */
     memories: async (s: Scope, _: unknown, ctx: Context) => {
-      const rows = await ctx.db.scopeMemory.findMany({ where: { scopeId: s.id }, orderBy: { position: 'asc' } });
+      const rows = await ctx.db.scopeMemory.findMany({
+        where: { scopeId: s.id, memory: { deletedAt: null } }, // tombstones are gone for everyone
+        orderBy: { position: 'asc' },
+      });
       const accessible = await getAccessibleMemoryIds(ctx);
       const { kept } = narrowToAccessible(rows.map((r) => r.memoryId), accessible === null ? 'unrestricted' : new Set(accessible));
       const keptSet = new Set(kept);
