@@ -27,7 +27,7 @@ describe('appSelectionError envelope builder (spec 026 §T008)', () => {
     );
   });
 
-  it('exports each of the 6 spec-026 codes', () => {
+  it('exports each of the 6 spec-026 codes plus the 2 spec-049 org codes', () => {
     const codes = Object.values(APP_SELECTION_ERROR_CODES);
     expect(codes).toEqual([
       'app_identifier_ambiguous',
@@ -36,6 +36,9 @@ describe('appSelectionError envelope builder (spec 026 §T008)', () => {
       'app_member_revoked',
       'no_active_app',
       'multiple_apps_resolved',
+      // Spec 049 Phase 1 — the active organization (D-2026-09-13-003).
+      'org_not_found',
+      'org_required',
     ]);
   });
 

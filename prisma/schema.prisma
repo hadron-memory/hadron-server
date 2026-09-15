@@ -568,6 +568,7 @@ model Organization {
   aiServiceConfigs       AiServiceConfig[]
   // Admin impersonation (read-only support sessions) scoped to this org.
   impersonationSessions  ImpersonationSession[]
+  mcpSessionStates       McpSessionState[]
   // #692 — the org's root principal in the unified pool (urn is the denormalized
   // read source-of-truth, kept in sync at mint).
   principalId            String?                 @unique @map("principal_id")
@@ -3906,18 +3907,27 @@ model McpSessionState {
   /// The active memory selection, stored as the PK rather than the URN so a
   /// rename cannot strand it. The URN is resolved on read.
   memoryId String? @map("memory_id")
+  /// Spec 049 Phase 1 (D-2026-09-13-003) — the EXPLICITLY selected active
+  /// organization (`hadron_set_active_org`), or NULL if none. Distinct from
+  /// the App's organization, which is derived from `appId` at read time and
+  /// outranks this in the resolution ladder (`src/lib/auth/activeOrg.ts`).
+  /// Re-authorized against current org membership on every read — a stored
+  /// selection is a cache of a choice, never a grant.
+  organizationId String? @map("organization_id")
 
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @updatedAt @map("updated_at")
 
-  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  app    App?    @relation(fields: [appId], references: [id], onDelete: SetNull)
-  memory Memory? @relation(fields: [memoryId], references: [id], onDelete: SetNull)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  app          App?          @relation(fields: [appId], references: [id], onDelete: SetNull)
+  memory       Memory?       @relation(fields: [memoryId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
 
   /// One row per (user, client instance) — the upsert target.
   @@unique([userId, clientKey], map: "mcp_session_state_user_client_uniq")
   @@index([appId])
   @@index([memoryId])
+  @@index([organizationId])
   @@map("mcp_session_state")
 }
 

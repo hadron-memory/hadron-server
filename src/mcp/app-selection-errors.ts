@@ -28,6 +28,11 @@ export const APP_SELECTION_ERROR_CODES = {
   NO_ACTIVE_APP: 'no_active_app',
   /** Spec-025 FR-016 fall-through: multi-App user called a strict-list tool from an un-engaged session (never used the new App-selection surface). The literal `multiple_apps_resolved` token is preserved verbatim in the envelope's text prefix so SC-003's production-log grep continues to work. */
   MULTIPLE_APPS_RESOLVED: 'multiple_apps_resolved',
+  // ── Spec 049 Phase 1 — the active ORGANIZATION (D-2026-09-13-003) ────────
+  /** `hadron_set_active_org`'s ref matched no organization the caller is a member of (existence is not disclosed — a foreign org and a nonexistent one read the same). */
+  ORG_NOT_FOUND: 'org_not_found',
+  /** An org-scoped call could not resolve an organization: the caller belongs to several and none was named, selected, or implied by an org-owned active App. The message carries the member list. */
+  ORG_REQUIRED: 'org_required',
 } as const;
 
 export type AppSelectionErrorCode =
