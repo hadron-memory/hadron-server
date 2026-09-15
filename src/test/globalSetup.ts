@@ -222,6 +222,23 @@ async function applyTemplateConstraints(client: Client) {
       ON ai_service_configs (agent_id, name) WHERE agent_id IS NOT NULL;
   `);
 
+  // Spec 049 Phase 2 — Scope: exactly one owner + per-owner name uniqueness
+  // among LIVE rows. Synced with prisma/post-push.sql + the
+  // 20260915170000_scopes migration.
+  await client.query(`
+    ALTER TABLE "scopes" DROP CONSTRAINT IF EXISTS "chk_scope_owner";
+    ALTER TABLE "scopes"
+      ADD CONSTRAINT "chk_scope_owner"
+      CHECK (num_nonnulls(organization_id, agent_id, app_id) = 1);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS scopes_org_name_uniq
+      ON scopes (organization_id, name) WHERE organization_id IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS scopes_agent_name_uniq
+      ON scopes (agent_id, name) WHERE agent_id IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS scopes_app_name_uniq
+      ON scopes (app_id, name) WHERE app_id IS NOT NULL AND deleted_at IS NULL;
+  `);
+
   // #974 Worker model (cor:dmo:050:11, cor:agt:020:02 v0.0.3): a worker's
   // name is unique per App, case-insensitively (functional unique — Prisma
   // can't express it). NOT filtered on retirement: a name binds to one

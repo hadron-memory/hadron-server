@@ -325,6 +325,106 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  # ── Spec 049 Phase 2 — named search scopes ("lenses"), D-2026-09-13-001 ──
+
+  "Which entity owns a Scope. Exactly one per scope (DB-enforced, the AiServiceConfig pattern)."
+  enum ScopeOwnerType {
+    ORGANIZATION
+    AGENT
+    APP
+  }
+
+  """
+  A named search SCOPE: an ORDERED list of memories with exactly one owner
+  (organization | Agent | App). Selects memories only — no saved filter, no
+  retrieval parameters — and NEVER grants: \`memories\` is the stored list ∩
+  what YOU may read (D-2026-09-13-004), and \`hiddenMemoryCount\` says how many
+  you cannot see, as a count only. Names are unique per owner; \`global\` and
+  \`app\` are reserved (the ladder's own views). Collisions across owners in
+  an App's context resolve App › Agent › organization, never unioned.
+  """
+  type Scope {
+    id: ID!
+    name: String!
+    description: String
+    ownerType: ScopeOwnerType!
+    "ID of the owning organization / Agent / App."
+    ownerId: ID!
+    "Bare stored URN of the owner, when it has one."
+    ownerUrn: String
+    "The scope's memories YOU may read, in scope order."
+    memories: [ScopeMemoryEntry!]!
+    "How many memories the scope lists in total."
+    memoryCount: Int!
+    "How many of them you may NOT read (count only — never their names)."
+    hiddenMemoryCount: Int!
+    createdAt: DateTime!
+    updatedAt: DateTime
+  }
+
+  type ScopeMemoryEntry {
+    "0-based order within the scope."
+    position: Int!
+    memory: Memory!
+  }
+
+  type ScopesPage {
+    items: [Scope!]!
+    total: Int!
+  }
+
+  """
+  Filter for the uniform scopes() list. Clauses AND-combine and only narrow the
+  caller's readable set. \`ownerType\` + \`ownerRef\` name one owner; \`appRef\`
+  selects the App's whole CONTEXT (its own scopes, its installed Agents', its
+  organization's) — what a bare name would resolve against there.
+  """
+  input ScopeFilter {
+    ownerType: ScopeOwnerType
+    "ID or URN of the owner (with ownerType)."
+    ownerRef: ID
+    "ID or URN of an App — the resolution context."
+    appRef: ID
+    name: String
+  }
+
+  """
+  Exactly one of organizationRef / agentRef / appRef. \`memoryRefs\` is the
+  ORDERED list (IDs or URNs); each must be readable by you — an unreadable
+  memory reads as "no match", the same as a nonexistent one.
+  """
+  input CreateScopeInput {
+    name: String!
+    description: String
+    organizationRef: ID
+    agentRef: ID
+    appRef: ID
+    memoryRefs: [ID!]!
+  }
+
+  "All optional. \`memoryRefs\`, when passed, REPLACES the list (it is the new order)."
+  input UpdateScopeInput {
+    name: String
+    description: String
+    memoryRefs: [ID!]
+  }
+
+  """
+  What a scope resolves to FOR YOU: which owner tier won when resolved by
+  name, the scopes it shadowed, the readable memories in order, how many were
+  dropped for access, and — when \`loc\` was asked — which memory would win
+  for that address (the input the task-customization operation consumes).
+  """
+  type ScopeExplanation {
+    scope: Scope!
+    resolvedVia: ScopeOwnerType!
+    "Lower-precedence scopes of the same name in that App's context (that you may read)."
+    shadowed: [Scope!]!
+    memories: [Memory!]!
+    droppedCount: Int!
+    winner: Memory
+  }
+
   """
   Filter for the uniform memories() list (#473). All clauses AND-combine and
   only ever narrow the caller's accessible scope — with two documented slice
@@ -4976,6 +5076,34 @@ export const typeDefs = `#graphql
     aiServiceConfigs(filter: AiServiceConfigFilter, limit: Int, offset: Int): AiServiceConfigsPage!
 
     """
+    Spec 049 Phase 2 — the uniform single-scope read (cor:api:120). 'ref' is
+    the scope's ID (a Scope has no URN yet). Null when missing OR when you may
+    not read it — no existence disclosure. Read gate: an org scope to that
+    org's members, an App scope to the App's participants, an Agent scope to
+    whoever may read the Agent.
+    """
+    scope(ref: ID!): Scope
+
+    """
+    Spec 049 Phase 2 — paginated list of the scopes you may read, optionally
+    narrowed by owner, by an App's resolution context, by name, and by the
+    cor:api:100:01 orgId (member-gated, no admin bypass; non-member ⇒ empty
+    page). Name-ascending (id tiebreak); limit default 50 / cap 200; limit: 0
+    ⇒ count only.
+    """
+    scopes(filter: ScopeFilter, orgId: ID, limit: Int, offset: Int): ScopesPage!
+
+    """
+    Spec 049 Phase 2 — explain a scope for YOU. Pass scopeRef, or a bare name
+    plus appRef (a name is unique only per owner, so it resolves in an App's
+    context: App › Agent › organization, never unioned — two installed Agents
+    each owning the name is SCOPE_NAME_AMBIGUOUS and you choose by scopeRef).
+    Returns the readable memories in order, the dropped COUNT, the shadowed
+    scopes, and with \`loc\` which memory would win for that address.
+    """
+    scopeExplain(scopeRef: ID, name: String, appRef: ID, loc: String): ScopeExplanation
+
+    """
     036-ai-service-config: resolve a config name for an execution context
     and return the DECRYPTED credentials (privileged; successor to
     agentAIConfig/appAIConfig).
@@ -6652,6 +6780,20 @@ export const typeDefs = `#graphql
     Auth: admin rights on the owning entity (as aiServiceConfigs).
     """
     deleteAiServiceConfig(id: ID!): Boolean!
+
+    """
+    Spec 049 Phase 2 — create a named scope on exactly one owner. Auth by
+    owner: organization CONTRIBUTOR+; App or Agent ADMIN of the owning org, or
+    the owner of a user-owned one. Name 1–64 [a-z0-9_-], unique per owner
+    among live scopes (SCOPE_NAME_TAKEN), never \`global\` / \`app\`.
+    """
+    createScope(input: CreateScopeInput!): Scope!
+
+    "Spec 049 Phase 2 — update a scope you may write (auth as createScope). memoryRefs replaces the ordered list."
+    updateScope(ref: ID!, input: UpdateScopeInput!): Scope!
+
+    "Spec 049 Phase 2 — soft-delete a scope you may write; its name is free again at once."
+    deleteScope(ref: ID!): Boolean!
 
     # Chatbot revisions (org ADMIN)
     """
