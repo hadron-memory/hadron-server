@@ -1,5 +1,7 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+// Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
+import { assertLocWritable, protectedLocsIn, locsOverlap } from '../../../lib/protectedLoc.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -156,6 +158,8 @@ export async function writeNodeCore(
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, input.memoryId);
       input.memoryId = resolvedMemoryId;
       await requireMemoryWriteAccess(ctx, input.memoryId);
+      // Spec 049 S4: a Channel's address is written by its owning operation only.
+      await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write');
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,
       // MCP, tests, future — gets the same typed InvalidLocError instead
@@ -977,6 +981,13 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, meta.memoryId);
+      // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
+      await assertLocWritable(
+        ctx.db,
+        meta.memoryId,
+        (await ctx.db.node.findUniqueOrThrow({ where: { id: meta.id }, select: { loc: true } })).loc,
+        'update',
+      );
 
       // Encrypted memory: require an active session key up front (mirrors
       // mergeNodes / upsertNode) so a missing key fails with a typed
@@ -1088,6 +1099,13 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, meta.memoryId);
+      // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
+      await assertLocWritable(
+        ctx.db,
+        meta.memoryId,
+        (await ctx.db.node.findUniqueOrThrow({ where: { id: meta.id }, select: { loc: true } })).loc,
+        'update',
+      );
 
       // Encrypted memory: require an active session up front (mirrors
       // updateNodeData / writeNodeCore) so a missing key fails with a typed
@@ -1284,6 +1302,9 @@ export const nodeMutations = {
       const plans: Plan[] = [];
 
       for (const raw of rawNodes) {
+        // Spec 049 S4: a node under a Channel's address is SKIPPED, never
+        // rewritten — the bulk surface reports rather than failing the batch.
+        if ((await protectedLocsIn(ctx.db, raw.memoryId)).some((p) => locsOverlap(p.loc, raw.loc))) continue;
         const memEnc = await getMemEnc(raw.memoryId);
         if (memEnc.isEncrypted && !sessionKeyCache.getByMemoryId(memEnc.id)) {
           throw new GraphQLError(
@@ -1560,6 +1581,8 @@ export const nodeMutations = {
       }
       // One check covers the subtree too: every descendant shares this memory.
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
 
       // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
       // node preserves its original deletedAt/deletedBy (matches the
@@ -1987,6 +2010,9 @@ export const nodeMutations = {
       // The subtree leaves the source memory and lands in the destination — write
       // access to both (a same-memory move checks once).
       await requireMemoryWriteAccess(ctx, source.memoryId);
+      // Spec 049 S4: a move whose SOURCE subtree contains a Channel is refused
+      // here; a destination entering one is refused by the create lock.
+      await assertLocWritable(ctx.db, source.memoryId, source.loc, 'move');
       const crossMemory = destMemoryId !== source.memoryId;
       if (crossMemory) {
         await requireMemoryWriteAccess(ctx, destMemoryId);
@@ -2709,6 +2735,8 @@ export const nodeMutations = {
       const revision = await ctx.db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
 
       // #620 — the restored field set (legacy-sentinel-aware), shared by the
       // pre-restore snapshot's `changes` diff and the write-back.
@@ -2804,6 +2832,8 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
       await ctx.db.nodeRevision.delete({ where: { id: revisionId } });
       return true;
     },

@@ -33,7 +33,10 @@ function makeTxSpy() {
     calls.push({ key1, key2 });
     return Promise.resolve(1);
   });
-  return { tx: { $executeRaw } as unknown as Prisma.TransactionClient, calls };
+  // Spec 049 S4: every helper consults the Channel table before locking; a
+  // memory with no Channels is the pre-Phase-4 world these tests describe.
+  const channel = { findMany: vi.fn(async () => []) };
+  return { tx: { $executeRaw, channel } as unknown as Prisma.TransactionClient, calls };
 }
 
 describe('lockAncestorsForCreate', () => {

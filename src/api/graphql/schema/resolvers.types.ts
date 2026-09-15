@@ -860,6 +860,9 @@ export const typeResolvers = {
     },
   },
   App: {
+    /** Spec 049 Phase 4 — the App's default Channel (readable to whoever reads the App; its host is the App's own memory). */
+    defaultChannel: (a: { defaultChannelId: string | null }, _: unknown, ctx: Context) =>
+      a.defaultChannelId ? ctx.db.channel.findFirst({ where: { id: a.defaultChannelId, deletedAt: null } }) : null,
     // 036-ai-service-config: registry-backed reads of the App's
     // 'default' config (legacy ai_* columns dropped).
     aiProvider: async (a: { id: string }, _: unknown, ctx: Context) =>

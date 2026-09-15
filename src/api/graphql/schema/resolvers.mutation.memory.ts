@@ -971,6 +971,18 @@ export const memoryMutations = {
       if (memory.class === 'system') {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
+      // Spec 049 §8.5: a memory hosting a live Channel is not deleted around
+      // the Channel — delete the Channel through its own operation first.
+      const hosted = await ctx.db.channel.findFirst({
+        where: { memoryId: resolvedId, deletedAt: null },
+        select: { id: true, name: true, loc: true },
+      });
+      if (hosted) {
+        throw new GraphQLError(
+          `This memory hosts Channel "${hosted.name}" (${hosted.loc}); delete the Channel first (deleteChannel).`,
+          { extensions: { code: 'MEMORY_HOSTS_CHANNEL', channelId: hosted.id } },
+        );
+      }
       // Spec 013 FR-014: idempotency. A re-delete on an already-soft-deleted
       // memory returns true without overwriting the original deletedAt. The
       // conditional updateMany closes the read-then-write race so deletedAt is

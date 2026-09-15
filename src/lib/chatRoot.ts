@@ -95,7 +95,9 @@ export async function withChatRootLock<T>(
   }) => Promise<ChatRootOutcome<T>>,
 ): Promise<T> {
   return db.$transaction(async (tx) => {
-    await lockPathForCreateUnder(tx, chat.memoryId, `${chat.loc}:messages`);
+    // The chat surface OWNS this address: it passes the protected-loc gate that
+    // every generic writer is refused by (spec 049 S4).
+    await lockPathForCreateUnder(tx, chat.memoryId, `${chat.loc}:messages`, { ownedByChannel: true });
     // Read AFTER the lock: at READ COMMITTED this statement takes a fresh
     // snapshot, so it sees whatever committed while we waited to be granted it.
     const row = await tx.node.findUnique({
@@ -207,10 +209,19 @@ export async function appendChatMessage<T>(
       msgNum: String(seq).padStart(3, '0'),
       chatData,
     });
+    const now = new Date();
+    // Spec 049 Phase 4 (D-2026-09-13-009): the Channel's watermark is the
+    // allocator's output, written in the SAME transaction as the seq. The
+    // root's `messageCount` below stays the routing operand it always was —
+    // two numbers, two jobs. No-op for a chat that is not a Channel.
+    await tx.channel.updateMany({
+      where: { chatRootNodeId: chat.id },
+      data: { lastSeq: seq, lastMessageAt: now },
+    });
     const next = {
       ...chatData,
       messageCount: seq,
-      lastMessageAt: new Date().toISOString(),
+      lastMessageAt: now.toISOString(),
     };
     return { chatData: next, value: { seq, chatData: next, inserted } };
   });

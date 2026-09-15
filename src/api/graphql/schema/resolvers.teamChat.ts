@@ -55,6 +55,8 @@ import {
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
+// Spec 049 Phase 4 — the Channel row the team chat became.
+import { DEFAULT_CHANNEL_NAME, ensureChannelRow } from '../../../lib/channels.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 
@@ -238,7 +240,7 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
     await ctx.db.$transaction(async (tx) => {
       // #664/#752: create under the ancestor-path lock so a concurrent
       // non-recursive delete of `chats` can't orphan the subtree.
-      await lockAncestorsForCreateMany(tx, memoryId, [TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC]);
+      await lockAncestorsForCreateMany(tx, memoryId, [TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC], { ownedByChannel: true });
       // Each of the three nodes is create-OR-RESTORE: a soft-deleted row
       // still occupies `@@unique([loc, memoryId])`, so a plain create would
       // P2002 forever and the canonical loc would be permanently bricked
@@ -305,6 +307,17 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
   }
   const root = await locateTeamChatRoot(ctx, app.id);
   if (!root) throw new Error(`Team chat bootstrap failed for App ${app.id}`);
+  // Spec 049 Phase 4: the root is a Channel from its first moment — the row is
+  // what reserves and protects the address (D-2026-09-13-006).
+  await ensureChannelRow(ctx.db, {
+    rootId: root.id,
+    memoryId: root.memoryId,
+    loc: root.loc,
+    name: DEFAULT_CHANNEL_NAME,
+    description: `Team chat — ${app.name}`,
+    createdBy: ctx.userId ?? null,
+    asDefaultOfAppId: app.id,
+  });
   return root;
 }
 
@@ -595,8 +608,22 @@ export const teamChatMutations = {
     if (mentions.length > 0) envelope.mentions = mentions;
     if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
-    const root =
-      (await locateTeamChatRoot(ctx, appId)) ?? (await bootstrapTeamChat(ctx, app));
+    const located = await locateTeamChatRoot(ctx, appId);
+    const root = located ?? (await bootstrapTeamChat(ctx, app));
+    // Backfill-on-touch (spec 049 §7.1): a root that predates the Channel table
+    // gets its row on the next post, so the address is protected from then on
+    // even before the one-shot backfill has run.
+    if (located) {
+      await ensureChannelRow(ctx.db, {
+        rootId: root.id,
+        memoryId: root.memoryId,
+        loc: root.loc,
+        name: DEFAULT_CHANNEL_NAME,
+        description: `Team chat — ${app.name}`,
+        createdBy: ctx.userId ?? null,
+        asDefaultOfAppId: app.id,
+      });
+    }
     const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
     const msgFields = translateSessionExpired(memEncInfo, () =>
       encryptNodeFields({ content: body, data: envelope }, memEncInfo),

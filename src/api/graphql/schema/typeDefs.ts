@@ -445,6 +445,71 @@ export const typeDefs = `#graphql
     winner: Memory
   }
 
+  # ── Spec 049 Phase 4 — Channels (D-2026-09-13-006) ──
+
+  "What kind of feed a Channel is. CHAT today; BLOCKERS / TASKS when built."
+  enum ChannelKind {
+    CHAT
+  }
+
+  """
+  A CHANNEL (spec 049, D-2026-09-13-006): a durable, ordered message stream
+  hosted in ONE memory at ONE reserved address, server-ordered and
+  server-attributed — a platform entity, created one-to-one with its chat root.
+  Creating it RESERVES and PROTECTS the address: generic node writes under it
+  are refused (LOC_PROTECTED); its own operations (createTeamChatMessage,
+  hadron_team_chat_post) are the only writers. The audience is the host
+  memory's (cor:acl:030:01) — a Channel has no access layer of its own.
+  \`lastSeq\` / \`lastMessageAt\` are the platform-maintained watermark.
+  """
+  type Channel {
+    id: ID!
+    "Host memory."
+    memoryId: ID!
+    memory: Memory!
+    "The reserved address of the chat root (e.g. chats:team)."
+    loc: String!
+    name: String!
+    kind: ChannelKind!
+    description: String
+    "The chat root node this Channel IS the entity for (one-to-one)."
+    chatRootNodeId: ID!
+    "Highest seq the allocator has issued — a watermark, not a count."
+    lastSeq: Int!
+    lastMessageAt: DateTime
+    createdAt: DateTime!
+    updatedAt: DateTime
+  }
+
+  type ChannelsPage {
+    items: [Channel!]!
+    total: Int!
+  }
+
+  "Filter for channels(): by App (its host memories' Channels) or by one host memory. Refs: ID or URN."
+  input ChannelFilter {
+    appRef: ID
+    memoryRef: ID
+  }
+
+  """
+  Create a named Channel WITH its chat root, in one transaction. The host must
+  be an app-class memory you may write (the chat-host rule). \`loc\` is the
+  reserved address (e.g. chats:release) and must not overlap an existing
+  Channel's; \`chats:team\` is every App's default and is created with the App.
+  """
+  input CreateChannelInput {
+    memoryRef: ID!
+    loc: String!
+    name: String!
+    description: String
+  }
+
+  input UpdateChannelInput {
+    name: String
+    description: String
+  }
+
   """
   Filter for the uniform memories() list (#473). All clauses AND-combine and
   only ever narrow the caller's accessible scope — with two documented slice
@@ -1089,6 +1154,8 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     urn: String!
+    "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
+    defaultChannel: Channel
     "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
     policy: JSON
     organizationId: String
@@ -5160,6 +5227,19 @@ export const typeDefs = `#graphql
     scopeExplain(scopeRef: ID, name: String, appRef: ID, loc: String): ScopeExplanation
 
     """
+    Spec 049 Phase 4 — the uniform single-Channel read. 'ref' is the Channel's
+    id (no URN yet). Null when missing OR when you may not read its host memory.
+    """
+    channel(ref: ID!): Channel
+
+    """
+    Spec 049 Phase 4 — Channels whose host memory you may read, narrowed by an
+    App (its host memories' Channels) or by one memory, and by the cor:api:100:01
+    orgId. Loc-ascending (id tiebreak); limit default 50 / cap 200.
+    """
+    channels(filter: ChannelFilter, orgId: ID, limit: Int, offset: Int): ChannelsPage!
+
+    """
     036-ai-service-config: resolve a config name for an execution context
     and return the DECRYPTED credentials (privileged; successor to
     agentAIConfig/appAIConfig).
@@ -6858,6 +6938,20 @@ export const typeDefs = `#graphql
 
     "Spec 049 Phase 2 — soft-delete a scope you may write; its name is free again at once."
     deleteScope(ref: ID!): Boolean!
+
+    "Spec 049 Phase 4 — create a named Channel with its chat root (host: an app-class memory you may write). LOC_OVERLAPS_CHANNEL when the address overlaps an existing Channel's."
+    createChannel(input: CreateChannelInput!): Channel!
+
+    "Spec 049 Phase 4 — rename / re-describe a Channel whose host memory you may write."
+    updateChannel(ref: ID!, input: UpdateChannelInput!): Channel!
+
+    """
+    Spec 049 Phase 4 — soft-delete a Channel AND its chat root together (the
+    protection holds while either exists, so the address stays reserved and a
+    restore brings both back). Host memory write access required. An App's
+    default Channel is unlinked from the App.
+    """
+    deleteChannel(ref: ID!): Boolean!
 
     # Chatbot revisions (org ADMIN)
     """
