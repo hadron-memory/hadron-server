@@ -50,8 +50,11 @@ import {
   type Context,
   isAppParticipant,
   requireSessionWriteAccess,
+  requireMemoryWriteAccess,
+  getAccessibleMemoryIds,
   clampListTake,
 } from './resolvers.helpers.js';
+import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
@@ -388,6 +391,8 @@ export interface TeamChatMessageOut {
   authorUserId: string | null;
   authorWorkerId: string | null;
   authorName: string | null;
+  /** Item J: the Worker's App when a post crossed Apps; null otherwise. */
+  authorAppId: string | null;
   sessionId: string | null;
   replyToSeq: number | null;
   mentions: string[];
@@ -413,6 +418,7 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo): Team
     authorUserId: typeof env.authorUserId === 'string' ? env.authorUserId : null,
     authorWorkerId: typeof env.authorWorkerId === 'string' ? env.authorWorkerId : null,
     authorName: typeof env.authorName === 'string' ? env.authorName : null,
+    authorAppId: typeof env.authorAppId === 'string' ? env.authorAppId : null,
     sessionId: typeof env.sessionId === 'string' ? env.sessionId : null,
     replyToSeq: typeof env.replyToSeq === 'number' ? env.replyToSeq : null,
     mentions: Array.isArray(env.mentions) ? env.mentions.filter((m): m is string => typeof m === 'string') : [],
@@ -432,12 +438,13 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo): Team
  */
 async function resolveSessionAuthor(
   ctx: Context,
-  appId: string,
+  app: AppRow,
+  hostMemoryId: string,
   sessionRef: string,
-): Promise<{ workerId: string; name: string; sessionId: string }> {
+): Promise<{ workerId: string; name: string; sessionId: string; workerAppId: string; crossApp: boolean }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, endedAt: true },
+    select: { id: true, appId: true, userId: true, workerId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true },
   });
   if (!session) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -451,16 +458,28 @@ async function resolveSessionAuthor(
       extensions: { code: 'FORBIDDEN' },
     });
   }
-  if (session.appId !== appId) {
-    throw new GraphQLError(
-      `Session "${sessionRef}" is not a session of this App — its worker cannot author messages in this team chat.`,
-      { extensions: { code: 'SESSION_NOT_IN_APP', appId } },
-    );
-  }
+  // Spec 049 Phase 8, item J (plan §4.5): the session-App pin
+  // (SESSION_NOT_IN_APP) does not survive as a separate rule — its purpose (a
+  // session of App A must not author in App B) is subsumed by the one check
+  // below: the Worker's App is the Channel's, or the driver may write the
+  // Channel's host memory.
   if (session.endedAt) {
     throw new GraphQLError(
       `Session "${sessionRef}" has ended — its worker can no longer author messages through it.`,
       { extensions: { code: 'SESSION_ENDED' } },
+    );
+  }
+  // cor:agt:020:04's "active session" is the shared liveness predicate
+  // (cor:agt:020:11), not `endedAt` alone: since #1114 an open session
+  // outside its idle window is not ended, but nobody is driving it — and a
+  // GraphQL caller gets no MCP heartbeat (Copilot on PR #1169). The same
+  // predicate the bind refuses WORKER_TAKEN on and the roster reports.
+  const now = new Date();
+  const events = await loadLastEventBySession(ctx.db as never, [session.id]);
+  if (!isSessionLive(session, events.get(session.id), now)) {
+    throw new GraphQLError(
+      `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, so its worker cannot author through it. Drive the session (any team tool heartbeats it) or start a new one.`,
+      { extensions: { code: 'SESSION_NOT_LIVE' } },
     );
   }
   if (!session.workerId) {
@@ -486,19 +505,50 @@ async function resolveSessionAuthor(
       { extensions: { code: 'SESSION_NOT_WORKER_BOUND' } },
     );
   }
-  if (worker.appId !== appId) {
-    throw new GraphQLError(
-      `Session "${sessionRef}" is bound to a worker of a different App — it cannot author in this team chat.`,
-      { extensions: { code: 'SESSION_WORKER_NOT_IN_APP', appId } },
-    );
-  }
   if (worker.retiredAt) {
     throw new GraphQLError(
       `Session "${sessionRef}" is bound to a retired worker — a retired worker stops authoring at once.`,
       { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
     );
   }
-  return { workerId: worker.id, name: worker.name, sessionId: session.id };
+  // Item J — the worker-App pin became the host-memory write check
+  // (D-2026-09-13-008, #1048's rule: the host memory decides). A Worker of
+  // ANOTHER App authors here iff the session's on-behalf-of user may write
+  // the Channel's host memory — evaluated for the USER (no App selection in
+  // the way: `requireMemoryWriteAccess` under an active App delegates to the
+  // App-isolation gate, which is a different question). A pure App-key session
+  // has nothing to derive the right from and is admitted only on the same-App
+  // branch — never widened.
+  const crossApp = worker.appId !== app.id;
+  if (crossApp) {
+    let driverMayWrite = false;
+    // The on-behalf-of user is the SESSION's user, never the caller's:
+    // requireSessionWriteAccess lets a platform admin drive someone else's
+    // session, and the right to author elsewhere is that person's, with
+    // that person's effective rights — no admin bypass rides along (Codex
+    // P2 on PR #1169). A denial is the gate's typed refusal; anything else
+    // (a transient DB failure) is rethrown, never read as "not writable"
+    // (Copilot).
+    if (session.userId) {
+      try {
+        await requireMemoryWriteAccess(
+          { db: ctx.db, userId: session.userId, roles: [] } as unknown as Context,
+          hostMemoryId,
+        );
+        driverMayWrite = true;
+      } catch (e) {
+        if (!(e instanceof Error) || !/^(Forbidden|Unauthenticated)/.test(e.message)) throw e;
+        driverMayWrite = false;
+      }
+    }
+    if (!driverMayWrite) {
+      throw new GraphQLError(
+        `Session "${sessionRef}" is bound to a worker of another App, and its driver may not write this Channel's host memory — it cannot author here.`,
+        { extensions: { code: 'CHANNEL_HOST_NOT_WRITABLE', appId: app.id, workerAppId: worker.appId } },
+      );
+    }
+  }
+  return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp };
 }
 
 /**
@@ -566,15 +616,370 @@ async function resolveMentionTokens(
   return null;
 }
 
+/**
+ * Spec 049 Phase 8 — the Channel-addressed core the team-chat convenience and
+ * `channelMessages` / `createChannelMessage` share: ONE read, ONE post, ONE
+ * gate, two entry points (plan §4.5, §5 Phase 8). `teamChatMessages` /
+ * `createTeamChatMessage` are the `appRef → App.defaultChannel` convenience
+ * over these.
+ */
+type ChannelTarget = { channelId: string; app: AppRow; root: ChatRootRow };
+
+const channelNotFound = (ref: string): GraphQLError =>
+  new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'CHANNEL_NOT_FOUND', channelRef: ref } });
+
+/**
+ * The canonical memory-read boundary for the ONE principal shape it narrows
+ * below the team-chat audience: a pure App-key context carrying an end-user
+ * session, which `getAccessibleMemoryIds` hard-isolates to that session's
+ * memories — the team space is not among them, and the App-participant
+ * check alone would admit it (Codex P1 on PR #1169). Run as a POINT check
+ * (`onlyMemoryId`), never a materialised set (Copilot).
+ *
+ * Every OTHER shape is decided by `requireTeamChatAccess`, on purpose: the
+ * team-chat audience is `cor:acl:030:01`'s — AppMembers at any role, org
+ * CONTRIBUTOR+, the user-owned App's owner, and an impersonation read within
+ * its org — which is deliberately WIDER than the node-content gate for an
+ * App-class memory (an org CONTRIBUTOR who is not an AppMember reads the
+ * team chat and may not read its nodes). Both entry points run this.
+ */
+async function hostMemoryReadable(ctx: Context, memoryId: string): Promise<boolean> {
+  if (ctx.userId || !ctx.sessionId) return true;
+  const accessible = await getAccessibleMemoryIds(ctx, memoryId);
+  return accessible === null || accessible.includes(memoryId);
+}
+
+/**
+ * Resolve a Channel ref to its host App and chat root — or "no match": a
+ * missing Channel, a deleted one, and one whose host memory the caller may
+ * not read all read identically (§8.6, no existence oracle). A Channel in a
+ * host with no App cannot exist today (the chat-host typology, plan §12.1).
+ */
+async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'post' | 'read'): Promise<ChannelTarget> {
+  const ref = (channelRef ?? '').trim();
+  const channel = await ctx.db.channel.findFirst({
+    where: { id: ref, deletedAt: null },
+    select: { id: true, memoryId: true, loc: true, chatRootNodeId: true, memory: { select: { appId: true, deletedAt: true } } },
+  });
+  if (!channel || channel.memory.deletedAt) throw channelNotFound(ref);
+  if (!channel.memory.appId) {
+    throw new GraphQLError('This Channel is hosted outside an App; Channel-addressed chat there is not built yet.', {
+      extensions: { code: 'CHANNEL_HOST_NOT_APP', channelId: channel.id },
+    });
+  }
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: channel.memory.appId } });
+  // The READ gate decides existence; a reader who may not post gets FORBIDDEN
+  // on a post, never "no match" — the Channel is known to them.
+  try {
+    await requireTeamChatAccess(ctx, app, 'read');
+  } catch (e) {
+    // Only the gate's refusal is "no match"; anything else is rethrown.
+    if (e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') throw channelNotFound(ref);
+    throw e;
+  }
+  // AND the canonical memory-read boundary (Codex P1 on PR #1169): a pure
+  // App-key context carrying an end-user session is deliberately narrowed by
+  // getAccessibleMemoryIds to that session's memories — the team space is
+  // not among them — and the App-participant check alone would admit it. A
+  // Channel is addressed by id, so the host memory decides, as for every
+  // other Channel read (§8.6).
+  if (!(await hostMemoryReadable(ctx, channel.memoryId))) throw channelNotFound(ref);
+  if (mode === 'post') await requireTeamChatAccess(ctx, app, 'post');
+  return { channelId: channel.id, app, root: { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc } };
+}
+
+function assertBody(body: unknown): asserts body is string {
+  if (typeof body !== 'string' || body.trim() === '') {
+    throw new GraphQLError('body must be a non-empty string.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  if (body.length > TEAM_CHAT_BODY_MAX_CHARS) {
+    throw new GraphQLError(
+      `body exceeds the team-chat cap of ${TEAM_CHAT_BODY_MAX_CHARS} characters (got ${body.length}). Store large artifacts as their own node and link them.`,
+      { extensions: { code: 'TEAM_CHAT_BODY_TOO_LARGE', maxChars: TEAM_CHAT_BODY_MAX_CHARS } },
+    );
+  }
+}
+
+/**
+ * Post into a Channel's root — the one write path. Author derivation (#939,
+ * re-keyed to the Worker by #974, widened by item J): sessionRef → the
+ * session's bound Worker with the driving session stamped in the envelope;
+ * no sessionRef → the calling human (the gate guarantees ctx.userId).
+ * Mentions are extracted server-side at write time — ONE extractor for every
+ * surface; readers filter on the stored envelope, never re-parse. The message
+ * is written through `chatRoot.appendChatMessage` (atomic seq, #919) as the
+ * Channel's own operation, wiring a `replies-to` edge for replyToSeq.
+ */
+async function postToChannelRoot(
+  ctx: Context,
+  app: AppRow,
+  root: ChatRootRow,
+  args: { body: string; replyToSeq: number | null; sessionRef: string | null },
+): Promise<TeamChatMessageOut> {
+  const { body, replyToSeq, sessionRef } = args;
+  let envelope: Record<string, unknown>;
+  let authorLabel: string;
+  if (sessionRef) {
+    const author = await resolveSessionAuthor(ctx, app, root.memoryId, sessionRef);
+    authorLabel = author.name;
+    envelope = {
+      authorWorkerId: author.workerId,
+      authorName: author.name,
+      sessionId: author.sessionId,
+      // Item J: a cross-App post records the Worker's App beside the Channel's,
+      // so it is visible as one in the transcript.
+      ...(author.crossApp ? { authorAppId: author.workerAppId } : {}),
+    };
+  } else {
+    const user = await ctx.db.user.findUniqueOrThrow({
+      where: { id: ctx.userId! },
+      select: { handle: true },
+    });
+    authorLabel = user.handle;
+    envelope = { authorUserId: ctx.userId, authorName: user.handle };
+  }
+
+  const mentions = extractMentions(body);
+  if (mentions.length > 0) envelope.mentions = mentions;
+  if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
+
+  const messagesLoc = `${root.loc}:messages`;
+  const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
+  const msgFields = translateSessionExpired(memEncInfo, () =>
+    encryptNodeFields({ content: body, data: envelope }, memEncInfo),
+  );
+
+  const messageId = generateId();
+  const createdBy = ctx.userId ?? null;
+  let messageLoc: string | null = null;
+  const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
+    // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
+    // deleteChannel takes this same key, so a delete that committed between
+    // resolving the target and acquiring it is seen here — a message is
+    // never appended under a tombstoned Channel, and its watermark never
+    // advanced.
+    const live = await tx.channel.findFirst({ where: { chatRootNodeId: root.id, deletedAt: null }, select: { id: true } });
+    if (!live) throw channelNotFound(root.loc);
+    // replyToSeq is validated INSIDE the allocating transaction, under the
+    // chat lock, so the target can't be soft-deleted out from under us and
+    // a reply can never cite its own (still-uncommitted) seq.
+    let replyTarget: { id: string; loc: string } | null = null;
+    if (replyToSeq != null) {
+      replyTarget = await tx.node.findFirst({
+        // nodeType-constrained (Copilot on PR #941): the generic write
+        // surface may put off-road nodes under the prefix
+        // (D-2026-08-10-003) — a reply must cite a canonical message.
+        where: {
+          memoryId: root.memoryId,
+          loc: { startsWith: `${messagesLoc}:` },
+          nodeType: 'chat-message',
+          seq: replyToSeq,
+          deletedAt: null,
+        },
+        select: { id: true, loc: true },
+      });
+      if (!replyTarget) {
+        throw new GraphQLError(
+          `replyToSeq ${replyToSeq} does not name a message in this Channel.`,
+          { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } },
+        );
+      }
+    }
+    // The random component is the #916 backstop, not the uniqueness carrier
+    // (#919 makes seq unique); the suffix atom is the author label, a
+    // display convenience in an address that lands in URNs and search.
+    const loc = `${messagesLoc}:${msgNum}-${generateId().slice(-8)}-${sanitizeLocAtom(authorLabel).toLowerCase()}`;
+    // #1061 — the loc is minted inside this transaction closure, but the
+    // usage event is recorded after it COMMITS (a rolled-back append must
+    // record nothing), so it has to escape.
+    messageLoc = loc;
+    const row = await tx.node.create({
+      data: {
+        id: messageId,
+        memoryId: root.memoryId,
+        loc,
+        name: `${msgNum}-${authorLabel}`,
+        nodeType: 'chat-message',
+        content: msgFields.content ?? null,
+        data: (msgFields.data ?? null) as InputJsonValue,
+        seq,
+        // #914: the SENDER's user id — for worker posts, the human driver.
+        createdBy,
+      },
+    });
+    if (replyTarget) {
+      await tx.edge.create({
+        data: {
+          id: generateId(),
+          memoryId: root.memoryId,
+          sourceId: messageId,
+          targetId: replyTarget.id,
+          loc: deriveEdgeLoc(loc, 'replies-to', replyTarget.loc),
+          name: 'replies-to',
+          createdBy,
+        },
+      });
+    }
+    return row.createdAt;
+  }, { asChannel: true });
+
+  // #1061 — a chat message IS a node, so posting one is a write on the team's
+  // shared chat memory. This was one of the largest blind spots in the old
+  // instrumentation: `hadron_team_chat_post` created more nodes on a busy day
+  // than every instrumented write tool combined, and counted for none of it.
+  recordNodeWrite(
+    ctx.db,
+    messageLoc ? { id: messageId, loc: messageLoc, memoryId: root.memoryId } : null,
+    ctx,
+  );
+
+  return {
+    nodeId: messageId,
+    seq,
+    body,
+    at: createdAt,
+    authorUserId: (envelope.authorUserId as string | undefined) ?? null,
+    authorWorkerId: (envelope.authorWorkerId as string | undefined) ?? null,
+    authorName: authorLabel,
+    authorAppId: (envelope.authorAppId as string | undefined) ?? null,
+    sessionId: (envelope.sessionId as string | undefined) ?? null,
+    replyToSeq: replyToSeq ?? null,
+    mentions,
+  };
+}
+
+/**
+ * Read a Channel's root — the one read path (#939, #1116): seq-ordered
+ * ascending as a uniform `{ items, total }` page; `sinceSeq` a watermark
+ * cursor (strictly greater), `beforeSeq` its backward mirror; `mentionsRef`
+ * filters on the STORED envelope mentions, resolved against the host App's
+ * staff and members (an unresolvable or foreign ref collapses to the empty
+ * page — never an existence oracle).
+ */
+async function readChannelRoot(
+  ctx: Context,
+  appId: string,
+  root: ChatRootRow,
+  args: { sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; limit?: number | null; offset?: number | null },
+): Promise<{ items: TeamChatMessageOut[]; total: number }> {
+  const { sinceSeq, beforeSeq, mentionsRef, limit, offset } = args;
+  const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
+  const take = clampListTake(limit);
+  const skip = Math.max(0, offset ?? 0);
+  const where: Prisma.NodeWhereInput = {
+    memoryId: root.memoryId,
+    loc: { startsWith: `${root.loc}:messages:` },
+    // Only canonical messages (Copilot on PR #941): the generic write
+    // surface stays open (D-2026-08-10-003), so off-road nodes under the
+    // prefix must not surface as fabricated transcript entries.
+    nodeType: 'chat-message',
+    deletedAt: null,
+    // #1116: the two cursors are opposite ends of one range and compose —
+    // sinceSeq is exclusive-above, beforeSeq exclusive-below, and passing
+    // both reads a bounded slice. A team message always carries a seq, so
+    // the not-null floor only applies when neither cursor narrows it.
+    seq:
+      sinceSeq != null || beforeSeq != null
+        ? {
+            ...(sinceSeq != null ? { gt: sinceSeq } : {}),
+            ...(beforeSeq != null ? { lt: beforeSeq } : {}),
+          }
+        : { not: null },
+  };
+  // #919 reader order: seq is unique going forward; createdAt + loc break
+  // ties on pre-fix rows so the order is at least stable between reads.
+  const orderBy = [
+    { seq: 'asc' as const },
+    { createdAt: 'asc' as const },
+    { loc: 'asc' as const },
+  ];
+  // #1116: `beforeSeq` pages BACKWARD, so it needs the NEWEST page of what it
+  // narrowed to — the messages immediately before the cursor — where the
+  // forward reader wants the oldest. Selecting that means reading from the
+  // other end and flipping back, exactly as the agent-transcript window does
+  // (cor:cht:050:01), rather than an ascending read at a computed offset.
+  //
+  // `offset` is deliberately IGNORED alongside `beforeSeq`: a cursor exists
+  // because a position is unstable under concurrent posting, so honouring
+  // both would reintroduce the race the cursor was added to remove. Stated
+  // in the SDL rather than silently applied.
+  const backward = beforeSeq != null;
+  const readOrder = backward
+    ? [
+        { seq: 'desc' as const },
+        { createdAt: 'desc' as const },
+        { loc: 'desc' as const },
+      ]
+    : orderBy;
+  // `loc` is selected for the #1061 usage attribution only — the projection
+  // itself doesn't use it, but a UsageEvent without a loc is far less legible
+  // in the raw event feed.
+  const select = {
+    id: true, loc: true, seq: true, content: true, data: true, createdAt: true,
+  };
+
+  // #1061 — reading the transcript returns message CONTENT, so each message
+  // handed back is a read. Recorded on the page actually returned, never on
+  // the wider candidate set a mentions filter scans: `take: 0` (a pure count
+  // probe) and a filtered-out message both correctly record nothing.
+  const recordRead = (rows: readonly { id: string; loc: string }[]): void => {
+    recordNodeUsage(
+      ctx.db,
+      'read',
+      rows.map((r) => ({ id: r.id, loc: r.loc, memoryId: root.memoryId })),
+      ctx,
+    );
+  };
+
+  if (mentionsRef) {
+    const tokens = await resolveMentionTokens(ctx, appId, mentionsRef);
+    if (!tokens) return { items: [], total: 0 };
+    // Always scanned ASCENDING regardless of paging direction: this branch
+    // filters in memory, so the direction is applied to the RESULT below.
+    const rows = await ctx.db.node.findMany({ where, orderBy, select });
+    const matching = rows
+      .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo) }))
+      .filter((m) => m.msg.mentions.some((t) => tokens.includes(t)));
+    const page =
+      take === 0
+        ? []
+        : backward
+          ? matching.slice(Math.max(0, matching.length - take))
+          : matching.slice(skip, skip + take);
+    recordRead(page.map((m) => m.row));
+    return { items: page.map((m) => m.msg), total: matching.length };
+  }
+
+  const total = await ctx.db.node.count({ where });
+  if (take === 0) return { items: [], total };
+  const rows = await ctx.db.node.findMany({
+    where,
+    orderBy: readOrder,
+    select,
+    ...(backward ? {} : { skip }),
+    take,
+  });
+  // Back to ascending: the window moved, the render order never does.
+  if (backward) rows.reverse();
+  // Project BEFORE recording (PR #1062 review — Copilot): `projectMessage`
+  // decrypts, and on an encrypted memory with no live session key it throws
+  // SESSION_EXPIRED — so recording first would count reads for a transcript
+  // the caller never received. The mentions branch above already projects
+  // first; this makes the two branches agree.
+  const items = rows.map((r) => projectMessage(r, memEncInfo));
+  recordRead(rows);
+  return { items, total };
+}
+
 export const teamChatMutations = {
   /**
    * #939 — post a message into the team App's chat as a platform operation:
    * resolve the App (cor:api:140), gate on team membership, locate (or
-   * bootstrap) the team chat, derive the author (sessionRef → the session's
-   * bound Worker; else the calling human), extract mentions server-side, and
-   * write
-   * the message through `chatRoot.appendChatMessage` (atomic seq, #919),
-   * wiring a `replies-to` edge for replyToSeq.
+   * bootstrap) the team chat, and post through the Channel core. Since spec
+   * 049 Phase 8 this is the `appRef → App.defaultChannel` convenience over
+   * `createChannelMessage` — one gate, two entry points.
    */
   createTeamChatMessage: async (
     _: unknown,
@@ -586,18 +991,7 @@ export const teamChatMutations = {
     }: { appRef: string; body: string; replyToSeq?: number | null; sessionRef?: string | null },
     ctx: Context,
   ): Promise<TeamChatMessageOut> => {
-    if (typeof body !== 'string' || body.trim() === '') {
-      throw new GraphQLError('body must be a non-empty string.', {
-        extensions: { code: 'BAD_USER_INPUT' },
-      });
-    }
-    if (body.length > TEAM_CHAT_BODY_MAX_CHARS) {
-      throw new GraphQLError(
-        `body exceeds the team-chat cap of ${TEAM_CHAT_BODY_MAX_CHARS} characters (got ${body.length}). Store large artifacts as their own node and link them.`,
-        { extensions: { code: 'TEAM_CHAT_BODY_TOO_LARGE', maxChars: TEAM_CHAT_BODY_MAX_CHARS } },
-      );
-    }
-
+    assertBody(body);
     const { id: appId } = await resolveAppRef(ctx.db, appRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     if (app.uninstalledAt) {
@@ -606,35 +1000,6 @@ export const teamChatMutations = {
       });
     }
     await requireTeamChatAccess(ctx, app, 'post');
-
-    // Author derivation (#939, re-keyed to the Worker by #974): sessionRef →
-    // the session's bound Worker, with the driving session stamped in the
-    // envelope; no sessionRef → the calling human. The membership gate above
-    // guarantees ctx.userId is set here.
-    let envelope: Record<string, unknown>;
-    let authorLabel: string;
-    if (sessionRef) {
-      const author = await resolveSessionAuthor(ctx, appId, sessionRef);
-      authorLabel = author.name;
-      envelope = {
-        authorWorkerId: author.workerId,
-        authorName: author.name,
-        sessionId: author.sessionId,
-      };
-    } else {
-      const user = await ctx.db.user.findUniqueOrThrow({
-        where: { id: ctx.userId! },
-        select: { handle: true },
-      });
-      authorLabel = user.handle;
-      envelope = { authorUserId: ctx.userId, authorName: user.handle };
-    }
-
-    // Mentions are extracted server-side at write time (#939) — ONE extractor
-    // for every surface; readers filter on the stored envelope, never re-parse.
-    const mentions = extractMentions(body);
-    if (mentions.length > 0) envelope.mentions = mentions;
-    if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
     const located = await locateTeamChatRoot(ctx, appId);
     const root = located ?? (await bootstrapTeamChat(ctx, app));
@@ -652,124 +1017,46 @@ export const teamChatMutations = {
         asDefaultOfAppId: app.id,
       });
     }
-    const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
-    const msgFields = translateSessionExpired(memEncInfo, () =>
-      encryptNodeFields({ content: body, data: envelope }, memEncInfo),
-    );
+    return postToChannelRoot(ctx, app, root, { body, replyToSeq: replyToSeq ?? null, sessionRef: sessionRef ?? null });
+  },
 
-    const messageId = generateId();
-    const createdBy = ctx.userId ?? null;
-    let messageLoc: string | null = null;
-    const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
-      // replyToSeq is validated INSIDE the allocating transaction, under the
-      // chat lock, so the target can't be soft-deleted out from under us and
-      // a reply can never cite its own (still-uncommitted) seq.
-      let replyTarget: { id: string; loc: string } | null = null;
-      if (replyToSeq != null) {
-        replyTarget = await tx.node.findFirst({
-          // nodeType-constrained (Copilot on PR #941): the generic write
-          // surface may put off-road nodes under the prefix
-          // (D-2026-08-10-003) — a reply must cite a canonical message.
-          where: {
-            memoryId: root.memoryId,
-            loc: { startsWith: `${TEAM_CHAT_MESSAGES_LOC}:` },
-            nodeType: 'chat-message',
-            seq: replyToSeq,
-            deletedAt: null,
-          },
-          select: { id: true, loc: true },
-        });
-        if (!replyTarget) {
-          throw new GraphQLError(
-            `replyToSeq ${replyToSeq} does not name a message in this team chat.`,
-            { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } },
-          );
-        }
-      }
-      // The random component is the #916 backstop, not the uniqueness carrier
-      // (#919 makes seq unique); the suffix atom is the author label, a
-      // display convenience in an address that lands in URNs and search.
-      const loc = `${TEAM_CHAT_MESSAGES_LOC}:${msgNum}-${generateId().slice(-8)}-${sanitizeLocAtom(authorLabel).toLowerCase()}`;
-      // #1061 — the loc is minted inside this transaction closure, but the
-      // usage event is recorded after it COMMITS (a rolled-back append must
-      // record nothing), so it has to escape.
-      messageLoc = loc;
-      const row = await tx.node.create({
-        data: {
-          id: messageId,
-          memoryId: root.memoryId,
-          loc,
-          name: `${msgNum}-${authorLabel}`,
-          nodeType: 'chat-message',
-          content: msgFields.content ?? null,
-          data: (msgFields.data ?? null) as InputJsonValue,
-          seq,
-          // #914: the SENDER's user id — for worker posts, the human driver.
-          createdBy,
-        },
-      });
-      if (replyTarget) {
-        await tx.edge.create({
-          data: {
-            id: generateId(),
-            memoryId: root.memoryId,
-            sourceId: messageId,
-            targetId: replyTarget.id,
-            loc: deriveEdgeLoc(loc, 'replies-to', replyTarget.loc),
-            name: 'replies-to',
-            createdBy,
-          },
-        });
-      }
-      return row.createdAt;
-    }, { asChannel: true });
-
-    // #1061 — a chat message IS a node, so posting one is a write on the team's
-    // shared chat memory. This was one of the largest blind spots in the old
-    // instrumentation: `hadron_team_chat_post` created more nodes on a busy day
-    // than every instrumented write tool combined, and counted for none of it.
-    recordNodeWrite(
-      ctx.db,
-      messageLoc ? { id: messageId, loc: messageLoc, memoryId: root.memoryId } : null,
-      ctx,
-    );
-
-    return {
-      nodeId: messageId,
-      seq,
+  /**
+   * Spec 049 Phase 8 — post into ANY Channel by ref. The host App's team-chat
+   * gate decides who may post; the author derivation is item J's: a session's
+   * Worker authors here when its App is the Channel's, OR when its driver may
+   * write the Channel's host memory (`CHANNEL_HOST_NOT_WRITABLE` otherwise).
+   */
+  createChannelMessage: async (
+    _: unknown,
+    {
+      channelRef,
       body,
-      at: createdAt,
-      authorUserId: (envelope.authorUserId as string | undefined) ?? null,
-      authorWorkerId: (envelope.authorWorkerId as string | undefined) ?? null,
-      authorName: authorLabel,
-      sessionId: (envelope.sessionId as string | undefined) ?? null,
-      replyToSeq: replyToSeq ?? null,
-      mentions,
-    };
+      replyToSeq,
+      sessionRef,
+    }: { channelRef: string; body: string; replyToSeq?: number | null; sessionRef?: string | null },
+    ctx: Context,
+  ): Promise<TeamChatMessageOut> => {
+    assertBody(body);
+    const target = await resolveChannelTarget(ctx, channelRef, 'post');
+    if (target.app.uninstalledAt) {
+      throw new GraphQLError('Cannot post into a Channel of an uninstalled App.', {
+        extensions: { code: 'APP_UNINSTALLED', appId: target.app.id },
+      });
+    }
+    return postToChannelRoot(ctx, target.app, target.root, { body, replyToSeq: replyToSeq ?? null, sessionRef: sessionRef ?? null });
   },
 };
 
 export const teamChatQueries = {
   /**
-   * #939 — read the team chat, seq-ordered ascending, as a uniform
-   * `{ items, total }` page (conventions:uniform-read-surface). `sinceSeq` is
-   * a watermark cursor: only messages with seq STRICTLY GREATER are returned
-   * (so a client passes the last seq it has seen). `mentionsRef` filters on
-   * the STORED envelope mentions (resolved to a worker name or user handle —
-   * the one mention format); because the envelope lives in `data`, which is
-   * ciphertext in an encrypted memory, the mentions filter decrypts and
-   * filters in memory over the seq window rather than in SQL. An unresolvable
-   * mentionsRef collapses to the empty page (never an existence oracle).
+   * #939 — read the team chat: the `appRef → App.defaultChannel` convenience
+   * over `channelMessages` (spec 049 Phase 8). See `readChannelRoot`.
    */
   teamChatMessages: async (
     _: unknown,
     {
       appRef,
-      sinceSeq,
-      beforeSeq,
-      mentionsRef,
-      limit,
-      offset,
+      ...args
     }: {
       appRef: string;
       sinceSeq?: number | null;
@@ -786,112 +1073,29 @@ export const teamChatQueries = {
 
     const root = await locateTeamChatRoot(ctx, appId);
     if (!root) return { items: [], total: 0 };
+    // One gate, two entry points: the convenience runs the same host-memory
+    // point check the Channel-addressed read runs (Copilot on PR #1169).
+    if (!(await hostMemoryReadable(ctx, root.memoryId))) return { items: [], total: 0 };
+    return readChannelRoot(ctx, appId, root, args);
+  },
 
-    const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
-    const take = clampListTake(limit);
-    const skip = Math.max(0, offset ?? 0);
-    const where: Prisma.NodeWhereInput = {
-      memoryId: root.memoryId,
-      loc: { startsWith: `${TEAM_CHAT_MESSAGES_LOC}:` },
-      // Only canonical messages (Copilot on PR #941): the generic write
-      // surface stays open (D-2026-08-10-003), so off-road nodes under the
-      // prefix must not surface as fabricated transcript entries.
-      nodeType: 'chat-message',
-      deletedAt: null,
-      // #1116: the two cursors are opposite ends of one range and compose —
-      // sinceSeq is exclusive-above, beforeSeq exclusive-below, and passing
-      // both reads a bounded slice. A team message always carries a seq, so
-      // the not-null floor only applies when neither cursor narrows it.
-      seq:
-        sinceSeq != null || beforeSeq != null
-          ? {
-              ...(sinceSeq != null ? { gt: sinceSeq } : {}),
-              ...(beforeSeq != null ? { lt: beforeSeq } : {}),
-            }
-          : { not: null },
-    };
-    // #919 reader order: seq is unique going forward; createdAt + loc break
-    // ties on pre-fix rows so the order is at least stable between reads.
-    const orderBy = [
-      { seq: 'asc' as const },
-      { createdAt: 'asc' as const },
-      { loc: 'asc' as const },
-    ];
-    // #1116: `beforeSeq` pages BACKWARD, so it needs the NEWEST page of what it
-    // narrowed to — the messages immediately before the cursor — where the
-    // forward reader wants the oldest. Selecting that means reading from the
-    // other end and flipping back, exactly as the agent-transcript window does
-    // (cor:cht:050:01), rather than an ascending read at a computed offset.
-    //
-    // `offset` is deliberately IGNORED alongside `beforeSeq`: a cursor exists
-    // because a position is unstable under concurrent posting, so honouring
-    // both would reintroduce the race the cursor was added to remove. Stated
-    // in the SDL rather than silently applied.
-    const backward = beforeSeq != null;
-    const readOrder = backward
-      ? [
-          { seq: 'desc' as const },
-          { createdAt: 'desc' as const },
-          { loc: 'desc' as const },
-        ]
-      : orderBy;
-    // `loc` is selected for the #1061 usage attribution only — the projection
-    // itself doesn't use it, but a UsageEvent without a loc is far less legible
-    // in the raw event feed.
-    const select = {
-      id: true, loc: true, seq: true, content: true, data: true, createdAt: true,
-    };
-
-    // #1061 — reading the transcript returns message CONTENT, so each message
-    // handed back is a read. Recorded on the page actually returned, never on
-    // the wider candidate set a mentions filter scans: `take: 0` (a pure count
-    // probe) and a filtered-out message both correctly record nothing.
-    const recordRead = (rows: readonly { id: string; loc: string }[]): void => {
-      recordNodeUsage(
-        ctx.db,
-        'read',
-        rows.map((r) => ({ id: r.id, loc: r.loc, memoryId: root.memoryId })),
-        ctx,
-      );
-    };
-
-    if (mentionsRef) {
-      const tokens = await resolveMentionTokens(ctx, appId, mentionsRef);
-      if (!tokens) return { items: [], total: 0 };
-      // Always scanned ASCENDING regardless of paging direction: this branch
-      // filters in memory, so the direction is applied to the RESULT below.
-      const rows = await ctx.db.node.findMany({ where, orderBy, select });
-      const matching = rows
-        .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo) }))
-        .filter((m) => m.msg.mentions.some((t) => tokens.includes(t)));
-      const page =
-        take === 0
-          ? []
-          : backward
-            ? matching.slice(Math.max(0, matching.length - take))
-            : matching.slice(skip, skip + take);
-      recordRead(page.map((m) => m.row));
-      return { items: page.map((m) => m.msg), total: matching.length };
-    }
-
-    const total = await ctx.db.node.count({ where });
-    if (take === 0) return { items: [], total };
-    const rows = await ctx.db.node.findMany({
-      where,
-      orderBy: readOrder,
-      select,
-      ...(backward ? {} : { skip }),
-      take,
-    });
-    // Back to ascending: the window moved, the render order never does.
-    if (backward) rows.reverse();
-    // Project BEFORE recording (PR #1062 review — Copilot): `projectMessage`
-    // decrypts, and on an encrypted memory with no live session key it throws
-    // SESSION_EXPIRED — so recording first would count reads for a transcript
-    // the caller never received. The mentions branch above already projects
-    // first; this makes the two branches agree.
-    const items = rows.map((r) => projectMessage(r, memEncInfo));
-    recordRead(rows);
-    return { items, total };
+  /** Spec 049 Phase 8 — read ANY Channel by ref; a Channel the caller may not read is "no match". */
+  channelMessages: async (
+    _: unknown,
+    {
+      channelRef,
+      ...args
+    }: {
+      channelRef: string;
+      sinceSeq?: number | null;
+      beforeSeq?: number | null;
+      mentionsRef?: string | null;
+      limit?: number | null;
+      offset?: number | null;
+    },
+    ctx: Context,
+  ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
+    const target = await resolveChannelTarget(ctx, channelRef, 'read');
+    return readChannelRoot(ctx, target.app.id, target.root, args);
   },
 };

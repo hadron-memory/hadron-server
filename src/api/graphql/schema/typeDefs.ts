@@ -2340,6 +2340,8 @@ export const typeDefs = `#graphql
     authorWorkerId: ID
     "Display convenience: the worker name or the user handle."
     authorName: String
+    "Spec 049 Phase 8 (item J): the Worker's App when the post crossed Apps — visible as one in the transcript."
+    authorAppId: ID
     "The session driving the worker author, when posted via sessionRef."
     sessionId: ID
     "The seq this message replies to, when it is a reply."
@@ -5547,6 +5549,22 @@ export const typeDefs = `#graphql
     ): TeamChatMessagesPage!
 
     """
+    Spec 049 Phase 8 — read ANY Channel by ref (its id), with teamChatMessages'
+    cursors, mentions filter and paging; teamChatMessages is the
+    appRef → App.defaultChannel convenience over this. Authorization is the
+    host App's team-chat read gate; a Channel you may not read — or one that
+    does not exist — is CHANNEL_NOT_FOUND, identically.
+    """
+    channelMessages(
+      channelRef: ID!
+      sinceSeq: Int
+      beforeSeq: Int
+      mentionsRef: ID
+      limit: Int
+      offset: Int
+    ): TeamChatMessagesPage!
+
+    """
     Read a team App's worklog (#947) — the provenance query: which sessions
     (and transcripts) produced this PR? Newest first, as a uniform
     { items, total } page. ref accepts ANY accepted spelling (URL, short form,
@@ -7607,11 +7625,17 @@ export const typeDefs = `#graphql
     CONTRIBUTOR+ on the App's org, or the owner of a user-owned App. Pure
     App-key principals cannot post.
 
+    Spec 049 Phase 8 (item J): the worker-App pin became the host-memory
+    write check. A session's Worker authors here when its App is this one,
+    OR when the session's on-behalf-of user may write the Channel's host
+    memory — a cross-App post records authorAppId. A pure App-key session is
+    admitted only on the same-App branch. SESSION_NOT_IN_APP and
+    SESSION_WORKER_NOT_IN_APP are retired; CHANNEL_HOST_NOT_WRITABLE is the
+    successor code.
+
     Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE,
-    TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_NOT_IN_APP (the
-    session belongs to a different App — a worker never authors across
-    Apps), SESSION_ENDED, SESSION_NOT_WORKER_BOUND,
-    SESSION_WORKER_NOT_IN_APP (the worker-App pin), WORKER_RETIRED,
+    TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_ENDED,
+    SESSION_NOT_WORKER_BOUND, CHANNEL_HOST_NOT_WRITABLE, WORKER_RETIRED,
     SESSION_EXPIRED (encrypted team memory without an active session key),
     TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could
     not locate the Team Agent), APP_UNINSTALLED, FORBIDDEN.
@@ -7620,6 +7644,21 @@ export const typeDefs = `#graphql
     """
     createTeamChatMessage(
       appRef: ID!
+      body: String!
+      replyToSeq: Int
+      sessionRef: ID
+    ): TeamChatMessage!
+
+    """
+    Spec 049 Phase 8 — post into ANY Channel by ref (its id): the
+    createTeamChatMessage contract (author derivation, mentions, replyToSeq,
+    the body cap, item J) addressed by Channel. createTeamChatMessage is the
+    appRef → App.defaultChannel convenience over this — one gate, two entry
+    points. A Channel you may not read is CHANNEL_NOT_FOUND; one you may read
+    but not post into is FORBIDDEN.
+    """
+    createChannelMessage(
+      channelRef: ID!
       body: String!
       replyToSeq: Int
       sessionRef: ID

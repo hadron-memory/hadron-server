@@ -6957,18 +6957,116 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
+  // ── Channel-addressed chat (spec 049 Phase 8) ─────────────────────────────────
+
+  const chatCtx = (): Context => ({
+    db,
+    clientId: auth.clientId ?? undefined,
+    userId: auth.userId ?? undefined,
+    appId: auth.appId ?? undefined,
+    sessionId: auth.sessionId ?? undefined,
+    roles: auth.roles as Context['roles'],
+    organizationId: auth.organizationId ?? undefined,
+  });
+
+  /** Post into a Channel by id — the team-chat post's Channel-addressed twin. */
+  const postToChannel = async (channelRef: string, body: string, replyToSeq: number | null, session: string | null) => {
+    try {
+      const msg = await resolvers.Mutation.createChannelMessage({}, { channelRef, body, replyToSeq, sessionRef: session }, chatCtx());
+      const extras: string[] = [];
+      if (msg.mentions.length > 0) extras.push(`mentions: ${msg.mentions.map((m: string) => `@${m}`).join(', ')}`);
+      if (msg.replyToSeq != null) extras.push(`in reply to #${msg.replyToSeq}`);
+      if (msg.authorAppId) extras.push('cross-App post');
+      // Display-only, best-effort: the message is already appended, so a
+      // failed lookup must not turn a successful post into an error the
+      // caller retries (Copilot on PR #1169).
+      const ch = await db.channel.findUnique({ where: { id: channelRef.trim() }, select: { name: true, loc: true } }).catch(() => null);
+      return textResult(
+        `Posted message #${msg.seq} in Channel ${ch ? `${ch.name} (${ch.loc})` : channelRef} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
+      );
+    } catch (e) {
+      if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+      return textResult(`Error: ${e instanceof Error ? e.message : 'channel post failed'}`);
+    }
+  };
+
+  /** Read a Channel by id — the team-chat read's Channel-addressed twin. */
+  const readChannel = async (
+    channelRef: string,
+    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number },
+  ) => {
+    try {
+      const page = await resolvers.Query.channelMessages(
+        {},
+        { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null },
+        chatCtx(),
+      );
+      if (page.total === 0) return textResult('The Channel has no matching messages.');
+      const lines = page.items.map((m) => {
+        const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
+        const cross = m.authorAppId ? ' [cross-App]' : '';
+        return `#${m.seq} [${m.authorName ?? 'unknown'}]${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
+      });
+      return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`);
+    } catch (e) {
+      if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+      return textResult(`Error: ${e instanceof Error ? e.message : 'channel read failed'}`);
+    }
+  };
+
+  server.tool(
+    'hadron_channel_post',
+    'Post a message into a Channel by id (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
+    {
+      channel: z.string().describe('The Channel id (from hadron_list_channels).'),
+      body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
+      replyToSeq: z.number().int().optional().describe('seq of the message this replies to.'),
+      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself.'),
+    },
+    async ({ channel, body, replyToSeq, session }) => {
+      await heartbeatSession(session);
+      return postToChannel(channel, body, replyToSeq ?? null, session ?? null);
+    },
+  );
+
+  server.tool(
+    'hadron_channel_read',
+    'Read a Channel by id (spec 049), oldest first by seq — hadron_team_chat_read\'s contract (sinceSeq watermark, beforeSeq backward paging, mentions filter) addressed by Channel. A Channel you may not read is [channel_not_found].',
+    {
+      channel: z.string().describe('The Channel id (from hadron_list_channels).'),
+      sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
+      beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
+      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App.'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+      session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
+    },
+    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session }) => {
+      await heartbeatSession(session);
+      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset });
+    },
+  );
+
   // ── hadron_team_chat_post / hadron_team_chat_read ─────────────────────────────
 
   server.tool(
     'hadron_team_chat_post',
-    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must belong to this App and not be retired); omit it to post as yourself. Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
+    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must not be retired, and it authors here when its App is this one — or, on the `channel` path, when you may write the Channel\'s host memory (spec 049 item J; a cross-App post is marked); omit it to post as yourself. Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
     {
       body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
       replyToSeq: z.number().int().optional().describe('seq of the message this replies to (a replies-to edge is wired).'),
       session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+      channel: z.string().optional().describe('Spec 049: post into THIS Channel (id, from hadron_list_channels) instead of the App\'s default team chat. Item J: your worker authors there when its App is the Channel\'s, or when you may write the Channel\'s host memory.'),
     },
-    async ({ body, replyToSeq, session, app }) => {
+    async ({ body, replyToSeq, session, app, channel }) => {
+      // Presence, not truthiness (Copilot on PR #1169): a supplied '' is a
+      // malformed Channel selector and resolves as CHANNEL_NOT_FOUND, never
+      // a silent fall-through to the default team chat.
+      if (channel !== undefined) {
+        await heartbeatSession(session);
+        return postToChannel(channel, body, replyToSeq ?? null, session ?? null);
+      }
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -7006,6 +7104,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const extras: string[] = [];
         if (msg.mentions.length > 0) extras.push(`mentions: ${msg.mentions.map((m: string) => `@${m}`).join(', ')}`);
         if (msg.replyToSeq != null) extras.push(`in reply to #${msg.replyToSeq}`);
+        // Item J: a cross-App post is visible as one.
+        if (msg.authorAppId) extras.push('cross-App post');
         // #1037: the receipt NAMES the team it posted into. With a session
         // passed, the App is unambiguous and a mismatch refuses — but posting
         // as yourself names no App at all, so the ambient selection decides and
@@ -7045,8 +7145,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       offset: z.number().int().optional().describe('Page offset.'),
       session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
+      channel: z.string().optional().describe('Spec 049: read THIS Channel (id, from hadron_list_channels) instead of the App\'s default team chat.'),
     },
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app }) => {
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel }) => {
+      // Presence, not truthiness (Copilot on PR #1169): a supplied '' is a
+      // malformed Channel selector and resolves as CHANNEL_NOT_FOUND, never
+      // a silent fall-through to the default team chat.
+      if (channel !== undefined) {
+        await heartbeatSession(session);
+        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset });
+      }
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
