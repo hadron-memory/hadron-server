@@ -1691,6 +1691,7 @@ model Agent {
   aiServiceConfigs  AiServiceConfig[]
   scopes               Scope[]
   registerAttendeeOf   RegisterEntry[] @relation("RegisterAttendeeAgent")
+  readStates           ChannelReadState[] @relation("ReadStateAgent")
   /// #974 — the named castings of this agent into Apps (cor:dmo:050:11).
   workers           Worker[]
 
@@ -2784,6 +2785,7 @@ model App {
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
   registerEntries  RegisterEntry[] @relation("RegisterOwnerApp")
+  readStates       ChannelReadState[] @relation("ReadStateApp")
   /// Spec 049 Phase 4 (D-2026-09-13-007 D2): the App's DEFAULT Channel — the row the
   /// team chat became, what `teamChatMessages(appRef)` addresses and what an
   /// installed Agent's default register row points at. Set at App creation
@@ -3238,6 +3240,7 @@ model Worker {
   sessions Session[] @relation("SessionWorker")
   /// Spec 049 Phase 5 — register rows naming this Worker as the attendee.
   registerAttendeeOf RegisterEntry[] @relation("RegisterAttendeeWorker")
+  readStates         ChannelReadState[] @relation("ReadStateWorker")
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
@@ -4190,6 +4193,7 @@ model Channel {
   chatRoot      Node   @relation("ChannelRoot", fields: [chatRootNodeId], references: [id], onDelete: Cascade)
   defaultOfApps App[]  @relation("AppDefaultChannel")
   registerEntries RegisterEntry[]
+  readStates      ChannelReadState[]
 
   /// One Channel per address.
   @@unique([memoryId, loc])
@@ -4252,4 +4256,37 @@ model RegisterEntry {
   @@index([attendeeWorkerId])
   @@index([attendeeAgentId])
   @@map("register_entries")
+}
+
+/// Spec 049 Phase 7 — per ATTENDEE per Channel: where this attendee is up to
+/// (D-2026-09-13-009, §14 correction 1). OUTSIDE the register: a cursor on the
+/// register row "mixes what-I-attend with where-I-am and the relay would keep
+/// a second copy". Keyed on the attendee, not the bare Agent — two Workers
+/// cast from one Agent in one App must not share a cursor. Advances are
+/// MONOTONIC (`GREATEST`, `lib/channelReadState.ts`): an older transaction
+/// never overwrites a newer cursor; concurrent runs may both see a window as
+/// new — duplicate attention, never skipped attention. Mute is session state,
+/// never a column here (D16 local).
+///
+/// CHECKs `chk_read_state_attendee` (exactly one of worker / agent) and
+/// `chk_read_state_agent_app` (an Agent attendee carries its App); partial
+/// uniques on (worker, channel) and (agent, app, channel) — post-push.sql.
+model ChannelReadState {
+  id          String   @id @default(cuid())
+  workerId    String?  @map("worker_id")
+  agentId     String?  @map("agent_id")
+  appId       String?  @map("app_id")
+  channelId   String   @map("channel_id")
+  lastSeenSeq Int      @default(0) @map("last_seen_seq")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  worker  Worker?  @relation("ReadStateWorker", fields: [workerId], references: [id], onDelete: Cascade)
+  agent   Agent?   @relation("ReadStateAgent", fields: [agentId], references: [id], onDelete: Cascade)
+  app     App?     @relation("ReadStateApp", fields: [appId], references: [id], onDelete: Cascade)
+  channel Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([channelId])
+  @@index([workerId])
+  @@index([agentId, appId])
+  @@map("channel_read_states")
 }

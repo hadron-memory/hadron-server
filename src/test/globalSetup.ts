@@ -273,6 +273,24 @@ async function applyTemplateConstraints(client: Client) {
       WHERE organization_id IS NOT NULL AND attendee_worker_id IS NULL AND attendee_agent_id IS NULL AND deleted_at IS NULL;
   `);
 
+  // Spec 049 Phase 7 — read-state: exactly one attendee, an Agent attendee
+  // carries its App, the (attendee, channel) natural keys. Synced with
+  // prisma/post-push.sql + the 20260915240000_channel_read_state migration.
+  await client.query(`
+    ALTER TABLE "channel_read_states" DROP CONSTRAINT IF EXISTS "chk_read_state_attendee";
+    ALTER TABLE "channel_read_states"
+      ADD CONSTRAINT "chk_read_state_attendee"
+      CHECK (num_nonnulls(worker_id, agent_id) = 1);
+    ALTER TABLE "channel_read_states" DROP CONSTRAINT IF EXISTS "chk_read_state_agent_app";
+    ALTER TABLE "channel_read_states"
+      ADD CONSTRAINT "chk_read_state_agent_app"
+      CHECK (agent_id IS NULL OR app_id IS NOT NULL);
+    CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_worker_channel_uniq
+      ON channel_read_states (worker_id, channel_id) WHERE worker_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_agent_app_channel_uniq
+      ON channel_read_states (agent_id, app_id, channel_id) WHERE agent_id IS NOT NULL;
+  `);
+
   // #974 Worker model (cor:dmo:050:11, cor:agt:020:02 v0.0.3): a worker's
   // name is unique per App, case-insensitively (functional unique — Prisma
   // can't express it). NOT filtered on retirement: a name binds to one
