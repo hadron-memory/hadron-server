@@ -80,6 +80,16 @@ describe('rung 2 — the active App', () => {
     expect(r).toEqual({ kind: 'org', organizationId: orgB.id, source: 'single-membership' });
   });
 
+  it('an UNINSTALLED App no longer wins — the pin can outlive the install (Codex/Copilot on #1158)', async () => {
+    await join(orgA, user);
+    await join(orgB, user);
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: orgA.id, name: 'A', urn: `ao-a-${generateId()}:app`, uninstalledAt: new Date() },
+    });
+    const r = await resolveActiveOrg(db, { userId: user.id, activeAppId: app.id, selectedOrgId: orgB.id });
+    expect(r).toEqual({ kind: 'org', organizationId: orgB.id, source: 'selection' });
+  });
+
   it('a PERSONAL (user-owned) App has no organization and is skipped', async () => {
     await join(orgA, user);
     await join(orgB, user);
@@ -132,6 +142,21 @@ describe('rungs 4 and 5 — the membership count', () => {
       expect(r.reason).toBe('ambiguous');
       expect(new Set(r.memberOrgIds)).toEqual(new Set([orgA.id, orgB.id]));
     }
+  });
+
+  it('a soft-deleted organization is not a membership: not selectable, not the single one, not counted', async () => {
+    // An org's soft-delete leaves OrgMember rows in place (Codex/Copilot on #1158).
+    await join(orgA, user);
+    await join(orgB, user);
+    await db.organization.update({ where: { id: orgB.id }, data: { deletedAt: new Date() } });
+    expect(await resolveActiveOrg(db, { userId: user.id, selectedOrgId: orgB.id })).toEqual({
+      kind: 'org', organizationId: orgA.id, source: 'single-membership',
+    });
+    expect(await resolveActiveOrg(db, { userId: user.id, namedOrgId: orgB.id })).toEqual({
+      kind: 'required', reason: 'named_not_member', memberOrgIds: [orgA.id],
+    });
+    await db.organization.update({ where: { id: orgA.id }, data: { deletedAt: new Date() } });
+    expect(await resolveActiveOrg(db, { userId: user.id })).toEqual({ kind: 'user-owned' });
   });
 
   it('impersonation collapses the memberships to the one shared org', async () => {

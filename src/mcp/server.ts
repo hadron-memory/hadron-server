@@ -128,7 +128,7 @@ import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
-import { WorkerNotFoundError } from '../lib/entityRef/errors.js';
+import { OrganizationNotFoundError, WorkerNotFoundError } from '../lib/entityRef/errors.js';
 import {
   renderWorkerContinuity,
   type RenderableContinuity,
@@ -1824,20 +1824,34 @@ export function createMcpServerInstance(
         `capabilities: ${MCP_SURFACE_CAPABILITIES.join(', ')}`,
       ];
       // Spec 049 Phase 1: the resolved active organization and which rung of
-      // the ladder chose it — the one place a caller can ASK which tenancy an
-      // org-scoped read will run against, rather than inferring it from results.
+      // the ladder chose it — the one place a caller can ASK which tenancy the
+      // scope ladder (Phase 3) will run an org-scoped read against, rather than
+      // inferring it from results. Phase 1 reports; nothing narrows on it yet.
       if (auth.userId && !auth.impersonation) {
         const r = await currentActiveOrg();
         if (r.kind === 'org') {
           const o = await db.organization.findUnique({ where: { id: r.organizationId }, select: { urn: true } });
           lines.push(`active organization: ${o ? safeEmitEntityUrnV2('org', o.urn) : r.organizationId} (via ${r.source})`);
         } else if (r.kind === 'user-owned') {
-          lines.push('active organization: none — no memberships; org-scoped reads use your user-owned memories');
+          lines.push('active organization: none — no memberships; the org view is your user-owned memories');
         } else {
           lines.push(
-            `active organization: unresolved — ${r.memberOrgIds.length} memberships and none selected; org-scoped reads refuse with org_required until hadron_set_active_org or the call names one`,
+            `active organization: unresolved — ${r.memberOrgIds.length} memberships and none selected; the scope ladder will refuse org-scoped reads with org_required until hadron_set_active_org or the call names one`,
           );
         }
+      } else if (auth.appId && !auth.userId) {
+        // A pure App key cannot call hadron_set_active_org — its organization
+        // IS the credential (cor:api:100) — so it must be able to read it here
+        // (Codex on PR #1158). A user-owned App has none.
+        const app = await db.app.findUnique({
+          where: { id: auth.appId },
+          select: { organization: { select: { urn: true } } },
+        });
+        lines.push(
+          app?.organization
+            ? `active organization: ${safeEmitEntityUrnV2('org', app.organization.urn)} (via credential — the App key's own organization)`
+            : 'active organization: none — this App key belongs to a user-owned App, which has no organization',
+        );
       }
       // #1009: the one place an agent can ASK whether its bearings were reset,
       // rather than inferring it from a tool that stopped working.
@@ -2032,7 +2046,7 @@ export function createMcpServerInstance(
                 ? `The ladder now resolves to ${await renderOrgLine(now.organizationId)} (via ${now.source}).`
                 : now.kind === 'user-owned'
                   ? 'You belong to no organization, so org-scoped reads use your own user-owned memories.'
-                  : `You belong to ${now.memberOrgIds.length} organizations and none is selected, so org-scoped reads will refuse with org_required until one is named or selected:\n${await renderMemberOrgs(now.memberOrgIds)}`),
+                  : `You belong to ${now.memberOrgIds.length} organizations and none is selected, so the scope ladder will refuse org-scoped reads with org_required until one is named or selected:\n${await renderMemberOrgs(now.memberOrgIds)}`),
           );
         }
         return appSelectionError(
@@ -2048,7 +2062,11 @@ export function createMcpServerInstance(
       let namedOrgId: string | null = null;
       try {
         ({ id: namedOrgId } = await resolveOrgRef(db, org));
-      } catch {
+      } catch (e) {
+        // Only "no such org" and "not a well-formed ref" are the caller's
+        // input; anything else (a DB failure, an ambiguous legacy alias) must
+        // surface rather than read as org_not_found (Copilot on PR #1158).
+        if (!(e instanceof OrganizationNotFoundError) && !(e instanceof UrnNotQualifiedError)) throw e;
         namedOrgId = null;
       }
       const r = namedOrgId
@@ -2073,10 +2091,10 @@ export function createMcpServerInstance(
       const effective = await currentActiveOrg();
       const outranked =
         effective.kind === 'org' && effective.organizationId !== r.organizationId
-          ? ` Note: your active App is owned by ${await renderOrgLine(effective.organizationId)}, which outranks this selection while it is active — org-scoped reads run against that organization until you switch or clear the App.`
+          ? ` Note: your active App is owned by ${await renderOrgLine(effective.organizationId)}, which outranks this selection while it is active — the ladder resolves to that organization until you switch or clear the App.`
           : '';
       return textResult(
-        `Active organization set to ${await renderOrgLine(r.organizationId)}. Org-scoped reads now run against it unless the call names another organization or an org-owned active App applies.${outranked}`,
+        `Active organization set to ${await renderOrgLine(r.organizationId)} and stored for this client. It is the ladder's third rung: a call that names an organization, or an org-owned active App, outranks it. hadron_server_info reports what currently resolves; the scope ladder (spec 049 Phase 3) is the read surface that consumes it.${outranked}`,
       );
     },
   );

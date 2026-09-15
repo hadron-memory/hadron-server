@@ -77,7 +77,13 @@ export async function resolveActiveOrg(
   db: PrismaClient,
   args: ResolveActiveOrgArgs,
 ): Promise<ActiveOrgResolution> {
-  const memberOrgIds = await getMemberOrgIds(db, args.userId, args.restrictToOrgId);
+  // `getMemberOrgIds` filters the MEMBERSHIP's deletedAt only; an organization's
+  // soft-delete leaves its OrgMember rows in place. Without this second filter
+  // the ladder could resolve a tombstoned org as the single membership, honour
+  // a stale selection of one, or count it in the refusal's member list — while
+  // the setter refuses it and the restore path drops it (Codex + Copilot on
+  // PR #1158). Live organizations only, everywhere below.
+  const memberOrgIds = await liveOrgIds(db, await getMemberOrgIds(db, args.userId, args.restrictToOrgId));
   const isMember = (orgId: string): boolean => memberOrgIds.includes(orgId);
 
   // 1. Named in the call — a refusal here is final: the caller asked for an org
@@ -89,10 +95,13 @@ export async function resolveActiveOrg(
       : { kind: 'required', reason: 'named_not_member', memberOrgIds };
   }
 
-  // 2. The active App's organization — org-owned Apps only, members only.
+  // 2. The active App's organization — org-owned Apps only, members only, and
+  //    only while the App is LIVE: a pinned `auth.appId` can outlive an
+  //    uninstall on a long-lived connection, and the restore path already
+  //    rejects uninstalled Apps — this rung must not keep winning on one.
   if (args.activeAppId) {
     const app = await db.app.findFirst({
-      where: { id: args.activeAppId, deletedAt: null },
+      where: { id: args.activeAppId, deletedAt: null, uninstalledAt: null },
       select: { organizationId: true },
     });
     if (app?.organizationId && isMember(app.organizationId)) {
@@ -113,4 +122,13 @@ export async function resolveActiveOrg(
     return { kind: 'user-owned' };
   }
   return { kind: 'required', reason: 'ambiguous', memberOrgIds };
+}
+
+/** Keep only ids of organizations that are not soft-deleted, preserving order. */
+async function liveOrgIds(db: PrismaClient, orgIds: string[]): Promise<string[]> {
+  if (orgIds.length === 0) return [];
+  const live = new Set(
+    (await db.organization.findMany({ where: { id: { in: orgIds }, deletedAt: null }, select: { id: true } })).map((o) => o.id),
+  );
+  return orgIds.filter((id) => live.has(id));
 }
