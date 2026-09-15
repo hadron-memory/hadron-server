@@ -44,6 +44,7 @@ import type { AuthContext } from '../middleware/auth.js';
 import type { Context } from '../api/graphql/schema/resolvers.js';
 import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
 import { canReadMemory } from '../mcp/access-control.js';
+import { getMemberOrgIds } from './auth/memberOrgIds.js';
 
 /** Header carrying the caller's stable client-instance id. */
 export const CLIENT_KEY_HEADER = 'x-hadron-client-id';
@@ -71,8 +72,16 @@ export function normalizeClientKey(raw: unknown): string | null {
 /** A re-authorized selection. Absent fields mean "nothing usable stored". */
 export interface RestoredMcpSelection {
   appId?: string;
+  /** The restored App's OWN organization (null for a user-owned App) — not a selection. */
   organizationId?: string | null;
   memoryUrn?: string;
+  /**
+   * Spec 049 Phase 1 — the EXPLICIT `hadron_set_active_org` selection, present
+   * only while the caller is still a member of it. Distinct from
+   * `organizationId` above, which is derived from the App and outranks this in
+   * the ladder (`lib/auth/activeOrg.ts`).
+   */
+  activeOrgId?: string;
 }
 
 /**
@@ -103,11 +112,21 @@ export async function loadMcpSessionState(
           },
         },
         memory: { select: { id: true, urn: true, deletedAt: true } },
+        organization: { select: { id: true, deletedAt: true } },
       },
     });
     if (!row) return {};
 
     const restored: RestoredMcpSelection = {};
+
+    // ── The explicit organization: lifecycle, then CURRENT membership ───────
+    // The same shared helper the org-scoped queries gate on (`getMemberOrgIds`),
+    // so a stored selection can never outlive the membership that justified it.
+    const org = row.organization;
+    if (org && !org.deletedAt) {
+      const memberOrgIds = await getMemberOrgIds(db, auth.userId, auth.impersonation?.orgId);
+      if (memberOrgIds.includes(org.id)) restored.activeOrgId = org.id;
+    }
 
     // ── The App: lifecycle, then the SHARED participation gate ──────────────
     const app = row.app;
@@ -175,12 +194,25 @@ export async function saveActiveMemory(
   await upsertSelection(db, auth, clientKey, { memoryId });
 }
 
-/** Shared upsert for the two selections — one row per (user, client instance). */
+/**
+ * Persist — or with `null`, CLEAR — this client's explicit active-organization
+ * selection (spec 049 Phase 1). Same contract as {@link saveActiveApp}.
+ */
+export async function saveActiveOrg(
+  db: PrismaClient,
+  auth: AuthContext,
+  clientKey: string | null,
+  organizationId: string | null,
+): Promise<void> {
+  await upsertSelection(db, auth, clientKey, { organizationId });
+}
+
+/** Shared upsert for the selections — one row per (user, client instance). */
 async function upsertSelection(
   db: PrismaClient,
   auth: AuthContext,
   clientKey: string | null,
-  patch: { appId?: string; memoryId?: string },
+  patch: { appId?: string; memoryId?: string; organizationId?: string | null },
 ): Promise<void> {
   if (!clientKey || !auth.userId) return;
   try {

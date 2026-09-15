@@ -76,7 +76,14 @@
 // unknown arguments, so a client sending `beforeSeq` to a build without it does
 // not get an error — it gets the OLDEST page instead of the newest, which is a
 // silently wrong answer rather than a missing feature.
-export const HADRON_SERVER_VERSION = '0.16.0';
+// 0.17.0: spec 049 Phase 1 (D-2026-09-13-003) — the active ORGANIZATION on
+// MCP. New `hadron_set_active_org` tool (persisted per client instance like the
+// App and memory selections, re-authorized on restore), an `active organization:`
+// line on hadron_server_info showing which rung of the ladder chose it, and the
+// `active-org` capability token. Caller-detectable: a client that needs the org
+// view on a build without it has no tool to call, and must fall back to naming
+// the org per call.
+export const HADRON_SERVER_VERSION = '0.17.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
@@ -134,6 +141,12 @@ export const MCP_SURFACE_CAPABILITIES = [
    * which reads as a working call returning the wrong end of the conversation.
    */
   'transcript-backward-cursor',
+  /**
+   * Spec 049 Phase 1 — `hadron_set_active_org` and the active-organization
+   * ladder (D-2026-09-13-003). Absent ⇒ the org view is portal-only on this
+   * build; name the org per call instead.
+   */
+  'active-org',
 ] as const;
 
 /**
