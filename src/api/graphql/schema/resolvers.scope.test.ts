@@ -103,10 +103,11 @@ describe('write gates and names', () => {
   });
 
   it('a memory the author cannot read reads as "no match", like a nonexistent one', async () => {
-    const unreadable = orgScope('x', [memB.urn]);
-    const missing = orgScope('y', [`${orgA.urn}:does-not-exist`]);
-    await expect(unreadable).rejects.toThrow(/No match for memoryRef/);
-    await expect(missing).rejects.toThrow(/No match for memoryRef/);
+    // One at a time: a second promise created before the first is awaited
+    // rejects unhandled while the first assertion runs, which CI reports as
+    // a failure even though both assertions hold.
+    await expect(orgScope('x', [memB.urn])).rejects.toThrow(/No match for memoryRef/);
+    await expect(orgScope('y', [`${orgA.urn}:does-not-exist`])).rejects.toThrow(/No match for memoryRef/);
   });
 });
 
