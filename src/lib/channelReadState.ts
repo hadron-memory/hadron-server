@@ -21,6 +21,8 @@
  */
 
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
+import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { generateId } from './id.js';
 import { mentionTokenOf } from './mentionToken.js';
 import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegister.js';
@@ -90,7 +92,7 @@ export interface AttentionSection {
  */
 export async function renderAttentionSection(
   db: Db,
-  run: { agentId: string | null; appId: string; registerSnapshot: unknown },
+  run: { id: string; agentId: string | null; appId: string; userId: string | null; organizationId: string; registerSnapshot: unknown },
 ): Promise<AttentionSection> {
   const none: AttentionSection = { text: '', captured: new Map() };
   if (!run.agentId) return none;
@@ -98,9 +100,27 @@ export async function renderAttentionSection(
   if (!snap || snap.rows.length === 0) return none;
   const attendee: RegisterAttendee = { agentId: run.agentId, appId: run.appId };
   const channelIds = [...new Set(snap.rows.map((r) => r.channelId))];
+  // The snapshot is data, never a grant (plan §8.1): an owner-side register
+  // row may name a Channel whose host memory this run's principal cannot
+  // read, and a prompt line naming it would be the disclosure resolveRegister
+  // refuses (Codex P1 on PR #1168). Intersect with the run principal's
+  // canonical accessible set — the same Context{appId, userId?} the kernel's
+  // tools run under (cor:agt:010:01) — before rendering or advancing.
+  const principal = {
+    db: db as PrismaClient,
+    appId: run.appId,
+    userId: run.userId ?? undefined,
+    organizationId: run.organizationId,
+    clientId: `run:${run.id}`,
+  } as unknown as Context;
+  const accessible = await getAccessibleMemoryIds(principal);
   const [channels, cursors] = await Promise.all([
     db.channel.findMany({
-      where: { id: { in: channelIds }, deletedAt: null },
+      where: {
+        id: { in: channelIds },
+        deletedAt: null,
+        ...(accessible === null ? {} : { memoryId: { in: accessible } }),
+      },
       select: { id: true, name: true, loc: true, lastSeq: true, memoryId: true, memory: { select: { urn: true } } },
       orderBy: [{ loc: 'asc' }, { id: 'asc' }],
     }),

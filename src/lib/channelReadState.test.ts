@@ -168,3 +168,32 @@ describe('read-state', () => {
     await expect(M.advanceChannelReadState({}, { attendeeRef: agent.urn, appRef: app.urn, channelRef: channel.id, seq: 2 }, ctx(admin.id))).rejects.toThrow(/Forbidden/);
   });
 });
+
+describe('PR #1168 review — the oracles and the watermark', () => {
+  it('an uninstalled Agent is no attendee; an unregistered Channel is "no match"; a seq past the watermark is refused; an unreadable host never reaches the prompt', async () => {
+    const loose = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'loose', urn: `${org.urn}:loose`, visibility: 'ORGANIZATION' } });
+    expect(await Q.channelReadState({}, { attendeeRef: loose.urn, appRef: app.urn, channelRef: channel.id }, ctx(admin.id))).toBeNull();
+    // A live Channel the attendee does not attend (no register row names it) reads as no match — and cannot be written.
+    const side = (await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:side', name: 'side', createdBy: admin.id })).channel;
+    await db.registerEntry.deleteMany({ where: { channelId: side.id } });
+    expect(await Q.channelReadState({}, { attendeeRef: worker.id, channelRef: side.id }, ctx(admin.id))).toBeNull();
+    await expect(M.advanceChannelReadState({}, { attendeeRef: agent.urn, appRef: app.urn, channelRef: side.id, seq: 0 }, appKeyCtx())).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+    // The watermark bounds the cursor.
+    await post('one');
+    await expect(M.advanceChannelReadState({}, { attendeeRef: agent.urn, appRef: app.urn, channelRef: channel.id, seq: 5 }, appKeyCtx())).rejects.toMatchObject({ extensions: { code: 'SEQ_BEYOND_WATERMARK', lastSeq: 1 } });
+    expect(await M.advanceChannelReadState({}, { attendeeRef: agent.urn, appRef: app.urn, channelRef: channel.id, seq: 1 }, appKeyCtx())).toMatchObject({ lastSeenSeq: 1 });
+    // An org-owned row naming ANOTHER App's Channel: the run's principal (App-key of this App) cannot read that host,
+    // so the attention section neither names it nor advances a cursor for it.
+    const appB = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'B', urn: `${org.urn}:b` } });
+    await db.appAgent.create({ data: { appId: appB.id, agentId: agent.id } });
+    const memB = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:b-shared`, name: 'b', class: 'app', appId: appB.id, sharedMemoryOfAgentId: agent.id } });
+    const foreign = (await ensureChannelWithRoot(db, { memoryId: memB.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: appB.id })).channel;
+    await db.registerEntry.create({ data: { id: generateId(), organizationId: org.id, channelId: foreign.id, role: 'BOTH' } });
+    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    const section = await renderAttentionSection(db, run);
+    expect(section.text).toContain('- team (');
+    expect(section.text).not.toContain(memB.urn);
+    expect(section.captured.has(foreign.id)).toBe(false);
+    expect(section.captured.has(channel.id)).toBe(true);
+  });
+});

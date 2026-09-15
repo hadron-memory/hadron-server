@@ -42,7 +42,7 @@ import { agentRegisterDefaults } from '../../../lib/registerInstall.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { isAppParticipant } from './resolvers.helpers.js';
-import { resolveRegister, toGqlRegisterRows, type RegisterAttendee } from '../../../lib/resolveRegister.js';
+import { collectRegisterRows, resolveRegister, toGqlRegisterRows, type RegisterAttendee } from '../../../lib/resolveRegister.js';
 import { advanceReadState } from '../../../lib/channelReadState.js';
 import { OPEN_SESSION_SCAN_CAP, isSessionLive, loadLastEventBySession, recentlyTouchedFilter } from '../../../lib/sessionActivity.js';
 
@@ -201,6 +201,10 @@ async function readableAttendee(
     if (!appRef?.trim()) return null;
     try {
       const [{ id: agentId }, { id: resolvedAppId }] = await Promise.all([resolveAgentRef(ctx.db, attendeeRef), resolveAppRef(ctx.db, appRef)]);
+      // An Agent-in-App attendee EXISTS only as a live install — the same
+      // rule resolveRegister's attendeeColumns applies (Codex P1 on PR #1168).
+      const install = await ctx.db.appAgent.findUnique({ where: { appId_agentId: { appId: resolvedAppId, agentId } }, select: { agentId: true } });
+      if (!install) return null;
       attendee = { agentId, appId: resolvedAppId };
       appId = resolvedAppId;
     } catch {
@@ -241,6 +245,23 @@ async function requireReadStateDriver(ctx: Context, attendee: RegisterAttendee, 
   if (!open.some((s) => isSessionLive(s, events.get(s.id), now))) throw new Error('Forbidden');
 }
 
+/**
+ * The Channel a read-state read/write names, admitted only when it is IN THE
+ * ATTENDEE'S REGISTER (Codex P1 on PR #1168): a cursor exists per registered
+ * Channel, and a foreign or unregistered Channel reads as "no match" — never
+ * the way to learn it exists, never a row for a Channel nobody attends.
+ */
+async function registeredChannel(
+  ctx: Context,
+  attendee: RegisterAttendee,
+  channelRef: string,
+): Promise<{ id: string; lastSeq: number } | null> {
+  const id = (channelRef ?? '').trim();
+  const collected = await collectRegisterRows(ctx.db, attendee);
+  if (!collected || !collected.rows.some((r) => r.channelId === id)) return null;
+  return ctx.db.channel.findFirst({ where: { id, deletedAt: null }, select: { id: true, lastSeq: true } });
+}
+
 async function readStateRow(ctx: Context, attendee: RegisterAttendee, channelId: string) {
   const row = await ctx.db.channelReadState.findFirst({
     where: { channelId, ...('workerId' in attendee ? { workerId: attendee.workerId } : { agentId: attendee.agentId, appId: attendee.appId }) },
@@ -257,7 +278,7 @@ export const readStateQueries = {
   ) => {
     const resolved = await readableAttendee(ctx, attendeeRef, appRef);
     if (!resolved) return null;
-    const channel = await ctx.db.channel.findFirst({ where: { id: channelRef.trim(), deletedAt: null }, select: { id: true } });
+    const channel = await registeredChannel(ctx, resolved.attendee, channelRef);
     if (!channel) return null;
     return readStateRow(ctx, resolved.attendee, channel.id);
   },
@@ -272,9 +293,18 @@ export const readStateMutations = {
     const resolved = await readableAttendee(ctx, attendeeRef, appRef);
     if (!resolved) throw new GraphQLError(`No match for attendeeRef "${attendeeRef}".`, { extensions: { code: 'NOT_FOUND' } });
     await requireReadStateDriver(ctx, resolved.attendee, resolved.appId);
-    const channel = await ctx.db.channel.findFirst({ where: { id: channelRef.trim(), deletedAt: null }, select: { id: true } });
+    const channel = await registeredChannel(ctx, resolved.attendee, channelRef);
     if (!channel) throw new GraphQLError(`No match for channelRef "${channelRef}".`, { extensions: { code: 'NOT_FOUND' } });
     if (!Number.isInteger(seq) || seq < 0) throw new GraphQLError('seq must be a non-negative integer.', { extensions: { code: 'BAD_USER_INPUT' } });
+    // A cursor past the watermark could never be corrected downward (every
+    // later write is GREATEST) and would suppress attention until the Channel
+    // caught up — stale relay state after a restore is the realistic source
+    // (Codex P2 on PR #1168). Refused, with the watermark named.
+    if (seq > channel.lastSeq) {
+      throw new GraphQLError(`seq ${seq} is beyond the Channel's watermark (${channel.lastSeq}).`, {
+        extensions: { code: 'SEQ_BEYOND_WATERMARK', lastSeq: channel.lastSeq },
+      });
+    }
     await advanceReadState(ctx.db, resolved.attendee, channel.id, seq);
     return readStateRow(ctx, resolved.attendee, channel.id);
   },
