@@ -375,8 +375,13 @@ describe('#1037 — the team tools', () => {
     const out = await createTestableMcpServer(unpinned()).callToolText('hadron_team_chat_post', {
       session: sid, app: appB.id, body: 'deliberately elsewhere',
     });
-    // Refused, because the session is not of App B — the authorship gate, which
-    // is what stops a cross-team post rather than this precedence rule.
-    expect(out).toMatch(/not a session of this App/i);
+    // The post lands in App B — the explicit argument won. Before spec 049
+    // Phase 8 the authorship gate then refused it as "not a session of this
+    // App"; item J replaced that pin with the host-memory write check, and
+    // this driver may write B's team memory, so the post is ADMITTED and
+    // marked as a cross-App post. The precedence rule is what this pins.
+    expect(out).toMatch(/^Posted team-chat message #1 in /);
+    expect(out).toContain(appB.urn);
+    expect(out).toContain('cross-App post');
   });
 });

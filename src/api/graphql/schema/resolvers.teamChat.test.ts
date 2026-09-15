@@ -384,21 +384,26 @@ describe('createTeamChatMessage — sessionRef author derivation', () => {
     await expectCode(post(ctx(appMember.id), { sessionRef: 'nope' }), 'SESSION_NOT_FOUND');
   });
 
-  it("refuses another App's session with SESSION_NOT_IN_APP (Codex P1 — no cross-App worker authoring)", async () => {
-    // The caller's OWN writable session, but bound to a different App: the
-    // write gate passes and the App binding must still refuse it.
+  it("a session of another App bound to THIS App's worker authors — the session-App pin is subsumed by item J (spec 049 Phase 8)", async () => {
+    // Before Phase 8 this refused SESSION_NOT_IN_APP. Item J replaced both
+    // pins with one check on the WORKER: its App is the Channel's (true here),
+    // or its driver may write the host memory. The session's own App is not
+    // a rule any more — the Worker is what authors, and this one is ours.
     const s = await workerSession(appMember.id);
     const otherApp = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Other App', urn: `${org.urn}:other-s` },
     });
     await db.session.update({ where: { id: s.sessionId }, data: { appId: otherApp.id } });
-    await expectCode(post(ctx(appMember.id), { sessionRef: s.sessionId }), 'SESSION_NOT_IN_APP');
+    const msg = await post(ctx(appMember.id), { sessionRef: s.sessionId });
+    expect(msg.authorWorkerId).toBe(s.workerId);
+    expect(msg.authorAppId).toBeNull();
   });
 
-  it("refuses a worker of a DIFFERENT App with SESSION_WORKER_NOT_IN_APP (#974 — the worker-App pin)", async () => {
-    // A session OF this App, hand-bound to another App's worker: the
-    // session-App check passes, so the worker-App pin must refuse it —
-    // this is what the old SESSION_AGENT_NOT_IN_APP roster check became.
+  it("refuses a worker of a DIFFERENT App whose driver may not write this host memory — CHANNEL_HOST_NOT_WRITABLE (item J, the successor of the worker-App pin)", async () => {
+    // A session OF this App, hand-bound to another App's worker. Before spec
+    // 049 Phase 8 the worker-App pin refused this outright; item J refuses it
+    // only because the driver (an App member with no org role) may not write
+    // the Channel's host memory — the host memory decides, not the pin.
     const otherApp = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Other App W', urn: `${org.urn}:other-w` },
     });
@@ -410,7 +415,7 @@ describe('createTeamChatMessage — sessionRef author derivation', () => {
     await db.session.create({
       data: { id: sessionId, appId: app.id, userId: appMember.id, agentId: teamAgent.id, workerId: foreignWorker.id },
     });
-    await expectCode(post(ctx(appMember.id), { sessionRef: sessionId }), 'SESSION_WORKER_NOT_IN_APP');
+    await expectCode(post(ctx(appMember.id), { sessionRef: sessionId }), 'CHANNEL_HOST_NOT_WRITABLE');
   });
 
   it('a retired worker stops authoring at once — WORKER_RETIRED at post time (#974)', async () => {

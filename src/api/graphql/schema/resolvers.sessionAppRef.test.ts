@@ -387,8 +387,16 @@ describe('#944/#974 review — agent binding alone cannot author; the worker-App
   });
 });
 
-describe('#943 — the gate the fix makes reachable stays closed elsewhere', () => {
-  it('a session of App A still cannot author into App B\'s chat', async () => {
+describe('#943 — the gate the fix makes reachable, after spec 049 Phase 8 (item J)', () => {
+  it('a session of App A authors into App B\'s chat iff its driver may write B\'s host memory — and the post says so', async () => {
+    // Before Phase 8 this was refused SESSION_NOT_IN_APP: a session of App A
+    // never authored in App B. Item J (plan §4.5) replaced the session-App
+    // pin and the worker-App pin with ONE check — the Worker's App is the
+    // Channel's, or the driver may write the Channel's host memory. contrib
+    // is an org CONTRIBUTOR, who may write B's app-class memory, so Ada is
+    // ADMITTED and the message records her App beside the Channel's. The
+    // refusal direction (a driver who may not write B's host memory:
+    // CHANNEL_HOST_NOT_WRITABLE) is pinned in resolvers.channelChat.test.ts.
     const ada = await M.castWorker(
       {},
       { appRef: app.id, agentRef: teamAgent.id, name: 'Ada' },
@@ -399,14 +407,13 @@ describe('#943 — the gate the fix makes reachable stays closed elsewhere', () 
       workerRef: ada.id,
     });
     await db.appAgent.create({ data: { appId: otherApp.id, agentId: teamAgent.id } });
-    await expectCode(
-      M.createTeamChatMessage(
-        {},
-        { appRef: otherApp.id, body: 'wrong room', sessionRef: session.id },
-        ctx(contrib.id),
-      ),
-      'SESSION_NOT_IN_APP',
+    const posted = await M.createTeamChatMessage(
+      {},
+      { appRef: otherApp.id, body: 'cross-team note', sessionRef: session.id },
+      ctx(contrib.id),
     );
+    expect(posted.authorWorkerId).toBe(ada.id);
+    expect(posted.authorAppId).toBe(app.id);
   });
 });
 
