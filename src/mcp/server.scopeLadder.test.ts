@@ -106,6 +106,19 @@ describe('hadron_set_active_scope — rung 2, persisted, re-authorized', () => {
     expect(cleared).toContain('(via active-app)');
   });
 
+  it('the disclosure is on EVERY scoped return — a vector diagnostic included (Codex/Copilot on #1161)', async () => {
+    const out = await server().callToolText('hadron_find_nodes', { query: 'alpha', mode: 'vector' });
+    expect(out).toContain(`scope: app hrn:app:${app.urn}`);
+    expect(out).toMatch(/\[(no_vector_index|embedding_unavailable)\]/);
+  });
+
+  it("a pure App key's `global` is its credential's organization (Codex/Copilot on #1161)", async () => {
+    const srv = createTestableMcpServer({ appId: app.id, roles: [] } as AuthContext, { sessionId: `sl-${generateId()}` });
+    const out = await srv.callToolText('hadron_find_nodes', { query: '*', scope: 'global' });
+    expect(out).toContain(`scope: global — organization hrn:org:${org.urn}`);
+    expect(out).toContain(`hrn:node:${attached.urn}:alpha`);
+  });
+
   it('hadron_search carries the same scope line', async () => {
     const out = await server().callToolText('hadron_search', { query: 'alpha', entityTypes: ['node'] });
     expect(out).toContain(`scope: app hrn:app:${app.urn}`);

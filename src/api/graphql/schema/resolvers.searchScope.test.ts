@@ -116,13 +116,39 @@ describe('a scope named in the call', () => {
     await expect(Q.findNodes({}, { scope: 'app' }, ctx(reader.id))).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
+  it("`app` applies the install-admissibility rule: a cross-org Agent without a live AgentOrgGrant contributes nothing (Copilot on #1161)", async () => {
+    const agentB = await db.agent.create({ data: { id: generateId(), organizationId: orgB.id, name: 'agB', urn: `${orgB.urn}:agB`, visibility: 'PUBLIC' } });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agentB.id, memoryId: memB.id, role: 'read' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agentB.id } });
+    await db.appMember.create({ data: { appId: app.id, userId: twoOrgs.id, role: 'member' } });
+    // twoOrgs can READ memB (member of orgB) — so only the lens, not the access
+    // intersection, keeps it out of this App's scope.
+    const r = await Q.findNodes({}, { scope: 'app', appRef: app.urn }, ctx(twoOrgs.id));
+    expect(r.scope.memoryUrns).toEqual([memA1.urn]);
+    expect(locsOf(r)).toEqual([`${memA1.id}:alpha`]);
+  });
+
   it('`global` is the organization view: orgId, else the single membership, else ORG_REQUIRED', async () => {
     const named = await Q.findNodes({}, { scope: 'global', orgId: orgA.urn }, ctx(twoOrgs.id));
     expect(named.scope).toMatchObject({ kind: 'global', label: orgA.urn });
     expect(locsOf(named)).toEqual([`${memA1.id}:alpha`, `${memA2.id}:alpha`]);
     const single = await Q.findNodes({}, { scope: 'global' }, ctx(reader.id));
     expect(single.scope.label).toBe(orgA.urn);
+    // The envelope says what was searched — the org's readable memories, materialised.
+    expect(new Set(single.scope.memoryUrns)).toEqual(new Set([memA1.urn, memA2.urn]));
     await expect(Q.findNodes({}, { scope: 'global' }, ctx(twoOrgs.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
+    // An orgId that names nothing is a FINAL refusal — never the single membership instead (Codex on #1161).
+    await expect(Q.findNodes({}, { scope: 'global', orgId: `no-such-${generateId()}` }, ctx(reader.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
+  });
+
+  it("an App key's `global` is its own App's organization, on both surfaces (Codex on #1161)", async () => {
+    const appKey = { db, appId: app.id, roles: [] } as unknown as Context;
+    const nodes = await Q.findNodes({}, { scope: 'global' }, appKey);
+    expect(nodes.scope).toMatchObject({ kind: 'global', label: orgA.urn });
+    expect(nodes.hits.length).toBeGreaterThan(0);
+    const gs = await Q.globalSearch({}, { query: 'alpha', entityTypes: ['node'], scope: 'global' }, appKey);
+    expect(gs.scope).toMatchObject({ kind: 'global', label: orgA.urn });
+    expect(gs.hits.length).toBeGreaterThan(0);
   });
 
   it("globalSearch's memory + node slices run under the same scope and disclose it", async () => {

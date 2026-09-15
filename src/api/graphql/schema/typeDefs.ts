@@ -4403,6 +4403,10 @@ export const typeDefs = `#graphql
       orgId: ID
       limit: Int
       offset: Int
+      "Spec 049 (D-2026-09-13-002): run the memory + node slices under a named scope — a scope id, a bare name (needs appRef), 'app' (needs appRef), or 'global' (orgId, or your single membership). See findNodes.scope; the result's scope field discloses what applied."
+      scope: String
+      "Spec 049: the App context for a bare scope name or scope: 'app' (ID or URN)."
+      appRef: ID
     ): GlobalSearchResult!
 
     """

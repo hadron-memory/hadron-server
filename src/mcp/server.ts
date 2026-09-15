@@ -178,7 +178,7 @@ import {
   saveActiveScope,
 } from '../lib/mcpSessionState.js';
 // Spec 049 Phase 1 — the active-organization ladder (D-2026-09-13-003).
-import { resolveActiveOrg } from '../lib/auth/activeOrg.js';
+import { resolveActiveOrg, type ActiveOrgResolution } from '../lib/auth/activeOrg.js';
 // Spec 049 Phase 2 — the scope tools translate resolver refusals by their code.
 import { GraphQLError as ScopeGraphQLError } from 'graphql';
 // Spec 049 Phase 3 — the search ladder on MCP.
@@ -1140,7 +1140,16 @@ export function createMcpServerInstance(
     hasExplicitSelector: boolean,
   ): Promise<SearchScopeResolution | null> => {
     if (!scopeArg && hasExplicitSelector) return null;
-    const activeOrg = auth.userId && !auth.impersonation ? await currentActiveOrg() : null;
+    // A pure App key's organization is its credential (cor:api:100) — the same
+    // answer hadron_server_info gives it — so `global` resolves to it rather
+    // than to the user-owned view (Codex + Copilot on PR #1161).
+    let activeOrg: ActiveOrgResolution | null = null;
+    if (auth.userId && !auth.impersonation) {
+      activeOrg = await currentActiveOrg();
+    } else if (auth.appId && !auth.userId) {
+      const app = await db.app.findUnique({ where: { id: auth.appId }, select: { organizationId: true } });
+      activeOrg = app?.organizationId ? { kind: 'org', organizationId: app.organizationId, source: 'app' } : { kind: 'user-owned' };
+    }
     return resolveSearchScope(scopeCtx(), {
       scopeArg,
       appId: auth.appId ?? null,
@@ -2757,6 +2766,9 @@ export function createMcpServerInstance(
       } else if (scopeRes?.kind === 'global') {
         scopeOrgId = scopeRes.orgScopeId ?? undefined;
       }
+      // Every scoped return below — passages, the vector diagnostics, the node
+      // list — starts with the disclosure (Codex + Copilot on PR #1161).
+      const scopePrefix = scopeRes ? `${scopeNoteLine(scopeRes)}\n\n` : '';
 
       let result: Awaited<ReturnType<typeof resolvers.Query.findNodes>>;
       try {
@@ -2801,7 +2813,7 @@ export function createMcpServerInstance(
       // name is shown, matching the pre-delegation output.
       if (granularity === 'chunk') {
         const passages = result.passages ?? [];
-        if (passages.length === 0) return textResult('Found 0 passage(s).');
+        if (passages.length === 0) return textResult(`${scopePrefix}Found 0 passage(s).`);
         const parentIds = [...new Set(passages.map((p) => p.parentNodeId))];
         const parentNodes = await db.node.findMany({
           where: { id: { in: parentIds } },
@@ -2820,7 +2832,7 @@ export function createMcpServerInstance(
           const bodyLines = p.text.split(/\r?\n/).map((l) => `  ${l}`);
           lines.push([header, ...bodyLines].join('\n'));
         }
-        return textResult(`Found ${lines.length} passage(s):\n\n${lines.join('\n')}`);
+        return textResult(`${scopePrefix}Found ${lines.length} passage(s):\n\n${lines.join('\n')}`);
       }
 
       // ── Diagnostic states → text notes (FR-021) ────────────────────────────
@@ -2829,7 +2841,7 @@ export function createMcpServerInstance(
       // note is prepended to the keyword-only results.
       if (result.reason === 'no_vector_index') {
         return textResult(
-          'Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).',
+          `${scopePrefix}Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).`,
         );
       }
       if (result.reason === 'embedding_unavailable') {
@@ -2837,7 +2849,7 @@ export function createMcpServerInstance(
         // one code, so the note names both causes (the pre-delegation surface
         // had separate messages).
         return textResult(
-          'Note: vector search is unavailable — no embedding endpoint is configured or embed() failed. [embedding_unavailable]\n\nFound 0 node(s).',
+          `${scopePrefix}Note: vector search is unavailable — no embedding endpoint is configured or embed() failed. [embedding_unavailable]\n\nFound 0 node(s).`,
         );
       }
       // `degraded` may carry MULTIPLE comma-separated flags (PR-482 — e.g.

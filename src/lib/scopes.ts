@@ -40,6 +40,7 @@ import { resolveMemoryRef } from './entityRef/memoryRef.js';
 import { resolveOrgRef } from './entityRef/orgRef.js';
 import { narrowToAccessible } from './auth/narrowToAccessible.js';
 import { resolveActiveOrg, type ActiveOrgResolution } from './auth/activeOrg.js';
+import { isLifecycleActive } from '@hadron-memory/access-control';
 
 /** The ladder's built-in tokens (D-2026-09-13-002); a scope may not take either name. */
 export const RESERVED_SCOPE_NAMES: ReadonlySet<string> = new Set(['global', 'app']);
@@ -480,16 +481,20 @@ export async function appScopeMemoryIds(db: Context['db'], appId: string): Promi
   const app = await db.app.findFirst({
     where: { id: appId, deletedAt: null, uninstalledAt: null },
     select: {
+      organizationId: true,
+      ownerUserId: true,
       appAgents: {
         orderBy: { createdAt: 'asc' },
         select: {
           agent: {
             select: {
+              id: true,
+              organizationId: true,
               deletedAt: true,
               memoryItems: {
                 where: { deletedAt: null, memory: { deletedAt: null, class: { not: 'system' } } },
                 orderBy: { createdAt: 'asc' },
-                select: { memoryId: true },
+                select: { memoryId: true, memory: { select: { appId: true, ownerUserId: true } } },
               },
             },
           },
@@ -501,7 +506,24 @@ export async function appScopeMemoryIds(db: Context['db'], appId: string): Promi
   const ids: string[] = [];
   for (const row of app.appAgents) {
     if (!row.agent || row.agent.deletedAt) continue;
-    for (const item of row.agent.memoryItems) if (!ids.includes(item.memoryId)) ids.push(item.memoryId);
+    // The same three admissibility rules the gate applies to an install
+    // (`getPrimaryAgentAccess` / `admissibleFoldRows`, Copilot on PR #1161):
+    // a cross-org install needs a live AgentOrgGrant (same-org auto-passes;
+    // a user-owned App has no org and rides its owner's subscription);
+    if (app.organizationId !== null && app.organizationId !== row.agent.organizationId) {
+      const grant = await db.agentOrgGrant.findUnique({
+        where: { orgId_agentId: { orgId: app.organizationId, agentId: row.agent.id } },
+      });
+      if (!grant || !isLifecycleActive(grant)) continue;
+    }
+    for (const item of row.agent.memoryItems) {
+      // an app-scoped memory row is THIS App's only (an Agent's items are
+      // global to the Agent, so another App's rows ride along otherwise);
+      if (item.memory.appId != null && item.memory.appId !== appId) continue;
+      // a user-owned memory folds in only when the App shares its owner.
+      if (item.memory.ownerUserId != null && item.memory.ownerUserId !== app.ownerUserId) continue;
+      if (!ids.includes(item.memoryId)) ids.push(item.memoryId);
+    }
   }
   const own = await db.memory.findMany({
     where: { appId, class: 'app', deletedAt: null },
@@ -637,8 +659,28 @@ async function globalView(
   activeOrg: ActiveOrgResolution | null,
   source: SearchScopeResolution['source'],
 ): Promise<SearchScopeResolution> {
+  // Both views MATERIALISE their list (Copilot on PR #1161): the envelope's
+  // `memoryUrns` must say what was searched, and a null "no narrowing" would
+  // have labelled the caller's ENTIRE accessible set (public memories included)
+  // as "user-owned". cor:api:100 — the user-owned view is the caller's own
+  // memories; the org view is the org's readable memories.
   if (!activeOrg || activeOrg.kind === 'user-owned') {
-    return { kind: 'user-owned', source, label: 'user-owned memories', ownerUrn: null, memoryIds: null, orgScopeId: null, droppedCount: 0 };
+    const accessible = await getAccessibleMemoryIds(ctx);
+    const own = ctx.userId
+      ? (
+          await ctx.db.memory.findMany({
+            where: {
+              deletedAt: null,
+              class: { not: 'system' }, // the broad-search default, kept on the materialised path
+              ...(accessible === null ? {} : { id: { in: accessible } }),
+              OR: [{ ownerUserId: ctx.userId }, { class: { in: ['personal', 'private'] }, userId: ctx.userId }],
+            },
+            orderBy: { createdAt: 'asc' },
+            select: { id: true },
+          })
+        ).map((m) => m.id)
+      : [];
+    return { kind: 'user-owned', source, label: 'user-owned memories', ownerUrn: null, memoryIds: own, orgScopeId: null, droppedCount: 0 };
   }
   if (activeOrg.kind === 'required') {
     throw new GraphQLError(
@@ -649,12 +691,27 @@ async function globalView(
     );
   }
   const org = await ctx.db.organization.findUnique({ where: { id: activeOrg.organizationId }, select: { urn: true } });
+  // The org view as findNodes' orgId narrowing computes it: the accessible set
+  // ∩ the organization's memories — materialised for the envelope.
+  const accessible = await getAccessibleMemoryIds(ctx);
+  const orgMemoryIds = (
+    await ctx.db.memory.findMany({
+      where: {
+        deletedAt: null,
+        class: { not: 'system' }, // the broad-search default, kept on the materialised path
+        organizationId: activeOrg.organizationId,
+        ...(accessible === null ? {} : { id: { in: accessible } }),
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    })
+  ).map((m) => m.id);
   return {
     kind: 'global',
     source,
     label: org?.urn ?? activeOrg.organizationId,
     ownerUrn: org?.urn ?? null,
-    memoryIds: null,
+    memoryIds: orgMemoryIds,
     orgScopeId: activeOrg.organizationId,
     droppedCount: 0,
   };
@@ -692,15 +749,21 @@ export async function resolveNamedScopeForQuery(
       try {
         ({ id: namedOrgId } = await resolveOrgRef(ctx.db, orgId));
       } catch {
-        namedOrgId = null;
+        // An explicit org that names nothing is a FINAL refusal, not a fall
+        // through to the single membership — that would answer a different
+        // organization's question with plausible rows (Codex on PR #1161). A
+        // nonexistent org reads exactly like a foreign one.
+        activeOrg = { kind: 'required', reason: 'named_not_member', memberOrgIds: [] };
       }
     }
-    activeOrg = await resolveActiveOrg(ctx.db, {
-      userId: ctx.userId,
-      namedOrgId,
-      activeAppId: appId,
-      restrictToOrgId: ctx.impersonation?.orgId,
-    });
+    if (!activeOrg) {
+      activeOrg = await resolveActiveOrg(ctx.db, {
+        userId: ctx.userId,
+        namedOrgId,
+        activeAppId: appId,
+        restrictToOrgId: ctx.impersonation?.orgId,
+      });
+    }
   } else if (ctx.appId) {
     const app = await ctx.db.app.findUnique({ where: { id: ctx.appId }, select: { organizationId: true } });
     activeOrg = app?.organizationId ? { kind: 'org', organizationId: app.organizationId, source: 'app' } : { kind: 'user-owned' };

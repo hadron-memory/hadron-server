@@ -301,7 +301,14 @@ export const orgQueries = {
         } catch {
           return { hits: [], total: 0, degraded: [] };
         }
-        if (!callerOrgIds.includes(resolvedOrgId)) {
+        // An App key's organization is its credential (cor:api:100): it may
+        // narrow to its OWN App's org, as findNodes already allows — the two
+        // scoped surfaces must agree (Codex on PR #1161).
+        let appKeyOrgId: string | null = null;
+        if (!ctx.userId && ctx.appId) {
+          appKeyOrgId = (await ctx.db.app.findUnique({ where: { id: ctx.appId }, select: { organizationId: true } }))?.organizationId ?? null;
+        }
+        if (!callerOrgIds.includes(resolvedOrgId) && appKeyOrgId !== resolvedOrgId) {
           return { hits: [], total: 0, degraded: [] };
         }
         orgIds = [resolvedOrgId];
