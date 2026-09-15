@@ -21,6 +21,7 @@ import {
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
+import { lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { validateLoc } from '../../../lib/validateLoc.js';
 
 /** The caller's readable-memory clause, or null for the unrestricted principal. */
@@ -135,6 +136,11 @@ export const channelMutations = {
     const row = await writableChannel(ctx, ref);
     const now = new Date();
     await ctx.db.$transaction(async (tx) => {
+      // The same key a post takes (`appendChatMessage` locks `<loc>:messages`'
+      // path): a post in flight finishes before the tombstone lands and none
+      // starts after it, so a deleted Channel never gains messages (Copilot
+      // on PR #1165, round 2).
+      await lockPathForCreateUnder(tx, row.memoryId, `${row.loc}:messages`, { ownedByChannel: true });
       // Row and root together; the address stays protected while either
       // exists (a tombstoned Channel still guards — protectedLoc.ts).
       await tx.channel.update({ where: { id: row.id }, data: { deletedAt: now, deletedBy: ctx.userId ?? null } });

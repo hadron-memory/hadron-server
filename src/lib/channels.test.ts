@@ -51,7 +51,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: admin.id, role: 'admin' } });
   appMem = await db.memory.create({
-    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id },
+    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id },
   });
   knowledge = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:kb`, name: 'kb', class: 'knowledge', visibility: 'ORGANIZATION' },
@@ -258,5 +258,30 @@ describe('PR #1165 review — the decisions only the lock can make', () => {
     const again = await backfillChannels(db, { apply: true });
     expect(again.rowsRaised).toBe(0);
     expect((await db.channel.findUniqueOrThrow({ where: { id: row.id } })).lastSeq).toBe(9);
+  });
+});
+
+describe('PR #1165 review round 2 — the remaining unlocked writers', () => {
+  it('a live non-chat squatter at chats:team is refused by the team-chat locator/bootstrap (LOC_OCCUPIED), and mergeNodes onto a Channel root is refused', async () => {
+    await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'chats:team', name: 'squatter', nodeType: 'record' } });
+    await expect(
+      M.createTeamChatMessage({}, { appRef: app.urn, body: 'hello' }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_OCCUPIED' } });
+    expect(await db.channel.count({ where: { memoryId: appMem.id } })).toBe(0);
+    // A Channel elsewhere; merging a record INTO its root is refused, and so is deleting a merged source under it.
+    const { rootId } = await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:release', name: 'release', createdBy: admin.id });
+    const note = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'notes:n', name: 'n', nodeType: 'record', content: 'x' } });
+    await expect(
+      M.mergeNodes({}, { input: { source: note.id, target: rootId } }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+    const msg = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'chats:release:messages:0001', name: '1', nodeType: 'chat-message', seq: 1 } });
+    await expect(
+      M.mergeNodes({}, { input: { source: msg.id, target: note.id, deleteSource: true } }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+    // A root-level generic create at a root-level Channel address is refused too.
+    await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'announce', name: 'announce', createdBy: admin.id });
+    await expect(
+      M.createNode({}, { input: { memoryId: appMem.urn, loc: 'announce', name: 'a' } }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
   });
 });

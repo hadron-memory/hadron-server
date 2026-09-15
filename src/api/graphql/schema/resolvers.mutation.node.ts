@@ -681,13 +681,14 @@ export async function writeNodeCore(
             update: updatePayload,
             include,
           } satisfies Prisma.NodeUpsertArgs;
-          node =
-            ancestorLocs(input.loc).length === 0
-              ? await ctx.db.node.upsert(upsertArgs)
-              : await ctx.db.$transaction(async (tx) => {
-                  await lockAncestorsForCreate(tx, input.memoryId, input.loc);
-                  return tx.node.upsert(upsertArgs);
-                });
+          // A root-level loc takes no ancestor lock, but still goes through
+          // the helper: it is also the spec 049 S4 protected-loc gate, run
+          // under the transaction — a root-level Channel address was
+          // otherwise overwritable here (Copilot on PR #1165, round 2).
+          node = await ctx.db.$transaction(async (tx) => {
+            await lockAncestorsForCreate(tx, input.memoryId, input.loc);
+            return tx.node.upsert(upsertArgs);
+          });
         }
       } catch (e) {
         if (
@@ -2288,6 +2289,14 @@ export const nodeMutations = {
         }
       }
       authedMemories.add(source.memoryId);
+      // Spec 049 S4: neither endpoint may be a Channel's address — the target
+      // is written, the source is deleted or re-pointed (Copilot on PR #1165,
+      // round 2). Fast typed refusal here; the authoritative check runs under
+      // the locks inside the transaction below.
+      await assertLocWritable(ctx.db, target.memoryId, target.loc, 'merge');
+      if (deleteSource || fields.has('EDGES')) {
+        await assertLocWritable(ctx.db, source.memoryId, source.loc, 'merge');
+      }
 
       // Edge transfer can mutate edges whose denormalized memory is NEITHER
       // the source's nor the target's: an INCOMING edge from a third memory
@@ -2416,6 +2425,11 @@ export const nodeMutations = {
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       await ctx.db.$transaction(async (tx) => {
+        // Lock-then-gate on both endpoints (spec 049 S4).
+        await lockLocForWrite(tx, target.memoryId, target.loc);
+        if (deleteSource || fields.has('EDGES')) {
+          await lockNodeForDelete(tx, source.memoryId, source.loc);
+        }
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -2779,6 +2793,8 @@ export const nodeMutations = {
       // Restore (+ optional truncate) in one transaction (#617) so the portal
       // never sequences restore + N deletes and can't half-apply on a crash.
       const restored = await ctx.db.$transaction(async (tx) => {
+        // Spec 049 S4: lock-then-gate — the check above is the fast refusal.
+        await lockLocForWrite(tx, node.memoryId, node.loc);
         if (truncate) {
           // #617 truncate: collapse the history so the selected revision becomes
           // the new baseline. Delete every snapshot NEWER than the selected one

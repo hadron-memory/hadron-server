@@ -46,6 +46,17 @@ export interface ChannelRow {
 }
 
 /**
+ * The memory-level advisory lock Channel creation and `deleteMemory` share,
+ * so "is this memory live?" / "does this memory host a Channel?" cannot be
+ * answered on both sides at once (Copilot on PR #1165, round 2). The
+ * one-argument form keys a different space from the (memory, loc) pairs the
+ * subtree locks use, so it never contends with them.
+ */
+export async function lockMemoryForChannelChange(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'channel-host:' + memoryId}))`;
+}
+
+/**
  * Refuse an address that overlaps another Channel's in this memory (live or
  * tombstoned — the reservation is what protection means). The SAME address is
  * not a clash: that is the idempotent create-or-restore case. Run it under the
@@ -179,6 +190,10 @@ export async function ensureChannelWithRoot(
     // `:messages` child's parent), so a concurrent generic write of the root
     // and a concurrent Channel create on an overlapping address both queue
     // here and re-check after the grant.
+    await lockMemoryForChannelChange(tx, args.memoryId);
+    // Re-checked under that lock: the preflight above ran outside it.
+    const live = await tx.memory.findFirst({ where: { id: args.memoryId, deletedAt: null }, select: { id: true } });
+    if (!live) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
     await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { ownedByChannel: true });
     await assertNoChannelOverlap(tx, args.memoryId, args.loc);
     const restoreOrCreate = async (

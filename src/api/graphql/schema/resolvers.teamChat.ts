@@ -174,6 +174,10 @@ async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRoot
     // per installed agent) — the relation filter is the tenant scope (#939).
     where: {
       loc: TEAM_CHAT_LOC,
+      // Spec 049: only a chat root is the team chat. A live non-chat node
+      // squatting the address is not adopted — the bootstrap refuses it
+      // (LOC_OCCUPIED) rather than posting into an arbitrary record.
+      nodeType: 'chat',
       deletedAt: null,
       memory: { appId, class: 'app', deletedAt: null },
     },
@@ -250,12 +254,19 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
       const restoreOrCreate = async (
         loc: string,
         create: () => Promise<{ id: string }>,
+        accept: (row: { nodeType: string }) => boolean = () => true,
       ): Promise<string> => {
         const existing = await tx.node.findUnique({
           where: { loc_memoryId: { loc, memoryId } },
-          select: { id: true, deletedAt: true },
+          select: { id: true, deletedAt: true, nodeType: true },
         });
         if (existing) {
+          if (!accept(existing)) {
+            throw new GraphQLError(
+              `"${loc}" is occupied by a ${existing.nodeType} node; the team chat adopts only a chat root. Move or delete it first.`,
+              { extensions: { code: 'LOC_OCCUPIED', loc, nodeType: existing.nodeType } },
+            );
+          }
           if (existing.deletedAt) {
             await tx.node.update({
               where: { id: existing.id },
@@ -285,6 +296,8 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
             createdBy: ctx.userId ?? null,
           },
         }),
+        // A chat root (live or tombstoned) is adopted; anything else live is a squatter (LOC_OCCUPIED).
+        (row) => row.nodeType === 'chat',
       );
       await restoreOrCreate(TEAM_CHAT_MESSAGES_LOC, () =>
         tx.node.create({
