@@ -579,6 +579,7 @@ model Organization {
   impersonationSessions  ImpersonationSession[]
   mcpSessionStates       McpSessionState[]
   scopes                 Scope[]
+  registerEntries        RegisterEntry[]
   // #692 — the org's root principal in the unified pool (urn is the denormalized
   // read source-of-truth, kept in sync at mint).
   principalId            String?                 @unique @map("principal_id")
@@ -1624,6 +1625,10 @@ model Agent {
   /// `personalMemory` provisioning is implicit (lazy-create on first
   /// user-attributed write). 008-agent-installation FR-008.
   memoryProvisioning   Json            @default("{\"appMemory\": \"shared\"}") @map("memory_provisioning")
+  /// Spec 049 Phase 5 (plan §3.5 recommendation): the defaults this Agent's
+  /// install-created register row is made with — `{ mentionOnly?: boolean }`.
+  /// A scalar default, not a reference that can rot; null = platform defaults.
+  registerDefaults     Json?           @map("register_defaults")
   // 008-agent-installation (2026-05-02): Agent declares membership constraints.
   // Schema: { maxMembers: number | 'unlimited', memberRoles: string[] }.
   // Enforced at AppMember invite-acceptance time.
@@ -1685,6 +1690,7 @@ model Agent {
   orgGrants         AgentOrgGrant[]
   aiServiceConfigs  AiServiceConfig[]
   scopes               Scope[]
+  registerAttendeeOf   RegisterEntry[] @relation("RegisterAttendeeAgent")
   /// #974 — the named castings of this agent into Apps (cor:dmo:050:11).
   workers           Worker[]
 
@@ -2777,6 +2783,7 @@ model App {
   workers          Worker[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
+  registerEntries  RegisterEntry[] @relation("RegisterOwnerApp")
   /// Spec 049 Phase 4 (D-2026-09-13-007 D2): the App's DEFAULT Channel — the row the
   /// team chat became, what `teamChatMessages(appRef)` addresses and what an
   /// installed Agent's default register row points at. Set at App creation
@@ -3229,6 +3236,8 @@ model Worker {
   /// take the castings (and their worklog and handoff history) with them.
   heldBy   User?     @relation("WorkerHolder", fields: [heldByUserId], references: [id], onDelete: SetNull)
   sessions Session[] @relation("SessionWorker")
+  /// Spec 049 Phase 5 — register rows naming this Worker as the attendee.
+  registerAttendeeOf RegisterEntry[] @relation("RegisterAttendeeWorker")
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
@@ -4175,9 +4184,67 @@ model Channel {
   memory        Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   chatRoot      Node   @relation("ChannelRoot", fields: [chatRootNodeId], references: [id], onDelete: Cascade)
   defaultOfApps App[]  @relation("AppDefaultChannel")
+  registerEntries RegisterEntry[]
 
   /// One Channel per address.
   @@unique([memoryId, loc])
   @@index([memoryId])
   @@map("channels")
+}
+
+/// Spec 049 Phase 5 — what a register row declares about an attendee's
+/// relationship to a Channel: INTENT, never permission (D-2026-09-13-008).
+enum RegisterRole {
+  WATCH
+  POST
+  BOTH
+}
+
+/// Spec 049 Phase 5 — a REGISTER ENTRY (D-2026-09-13-007, §14 corrections 1
+/// and 2): "this attendee takes part in this Channel". Owned by exactly ONE of
+/// an organization or an App (S1: `chk_register_owner`). The attendee is a
+/// Worker when cast, otherwise an Agent in an App; BOTH NULL means every
+/// attendee in the owner's context (org-wide for an org row, App-wide for an
+/// App row) — one row for "every Agent attends the announcements channel".
+///
+/// Not a trigger list: a row here never starts a run. Not exportable
+/// (D-2026-08-25-006): platform instrumentation, excluded from memory export
+/// and the git mirror. The register never grants — `canRead` / `canPost` are
+/// the host memory's gates, evaluated at read time (Phase 6).
+///
+/// Partial uniques per (owner, channel, attendee) WHERE deleted_at IS NULL —
+/// the install default's natural key (`post-push.sql`, the migration).
+model RegisterEntry {
+  id               String       @id @default(cuid())
+  organizationId   String?      @map("organization_id")
+  appId            String?      @map("app_id")
+  channelId        String       @map("channel_id")
+  attendeeWorkerId String?      @map("attendee_worker_id")
+  attendeeAgentId  String?      @map("attendee_agent_id")
+  role             RegisterRole @default(BOTH)
+  mentionOnly      Boolean      @default(false) @map("mention_only")
+  /// The human's intent, free text (D1).
+  description      String?
+  /// D2 — the row install materialised for the App's default Channel; an App
+  /// may remove it (D4), uninstall removes it.
+  installDefault   Boolean      @default(false) @map("install_default")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  createdBy        String?      @map("created_by")
+  updatedAt        DateTime?    @updatedAt @map("updated_at")
+  updatedBy        String?      @map("updated_by")
+  deletedAt        DateTime?    @map("deleted_at")
+  deletedBy        String?      @map("deleted_by")
+
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  app            App?          @relation("RegisterOwnerApp", fields: [appId], references: [id], onDelete: Cascade)
+  channel        Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  attendeeWorker Worker?       @relation("RegisterAttendeeWorker", fields: [attendeeWorkerId], references: [id], onDelete: Cascade)
+  attendeeAgent  Agent?        @relation("RegisterAttendeeAgent", fields: [attendeeAgentId], references: [id], onDelete: Cascade)
+
+  @@index([channelId])
+  @@index([organizationId])
+  @@index([appId])
+  @@index([attendeeWorkerId])
+  @@index([attendeeAgentId])
+  @@map("register_entries")
 }

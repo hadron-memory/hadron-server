@@ -510,6 +510,95 @@ export const typeDefs = `#graphql
     description: String
   }
 
+  # ── Spec 049 Phase 5 — the chat register (D-2026-09-13-007) ──
+
+  "What a register row declares: INTENT, never permission (D-2026-09-13-008)."
+  enum RegisterRole {
+    WATCH
+    POST
+    BOTH
+  }
+
+  "A register row is owned by exactly one of the two; Agent-owned rows do not exist (plan §14)."
+  enum RegisterOwnerType {
+    ORGANIZATION
+    APP
+  }
+
+  """
+  A REGISTER ENTRY (spec 049, D-2026-09-13-007): "this attendee takes part in
+  this Channel". The attendee is a Worker when cast, otherwise an Agent in an
+  App; both null = every attendee in the owner's context (org-wide for an
+  organization row, App-wide for an App row). Not a trigger list — a row never
+  starts a run. The register never grants: what the attendee may read or post
+  is the Channel's host memory's decision. Not exportable.
+  """
+  type RegisterEntry {
+    id: ID!
+    ownerType: RegisterOwnerType!
+    "ID of the owning organization / App."
+    ownerId: ID!
+    organizationId: ID
+    appId: ID
+    channelId: ID!
+    "The Channel — null when you may not read its host memory (you stand on the owner side only)."
+    channel: Channel
+    attendeeWorkerId: ID
+    attendeeAgentId: ID
+    "The attendee's URN (hrn:worker:… or the Agent's); null for 'every attendee'."
+    attendeeUrn: String
+    role: RegisterRole!
+    "Only messages mentioning the attendee count as new for it."
+    mentionOnly: Boolean!
+    "The row install materialised for the App's default Channel (D2)."
+    installDefault: Boolean!
+    "The human's intent, free text."
+    description: String
+    createdAt: DateTime!
+    updatedAt: DateTime
+  }
+
+  type RegisterEntriesPage {
+    items: [RegisterEntry!]!
+    total: Int!
+  }
+
+  "Filter for registerEntries(). Refs: ID or URN."
+  input RegisterEntryFilter {
+    "An App or an organization."
+    ownerRef: ID
+    channelRef: ID
+    "A Worker or an Agent."
+    attendeeRef: ID
+  }
+
+  input CreateRegisterEntryInput {
+    "An App or an organization (URN or id)."
+    ownerRef: ID!
+    channelRef: ID!
+    "A Worker or an Agent in the owner's context; omitted = every attendee there."
+    attendeeRef: ID
+    "Default BOTH."
+    role: RegisterRole
+    mentionOnly: Boolean
+    description: String
+  }
+
+  input UpdateRegisterEntryInput {
+    role: RegisterRole
+    mentionOnly: Boolean
+    description: String
+  }
+
+  "Spec 049 Phase 5 — what an Agent's install-created register row is made with (plan §3.5)."
+  type RegisterDefaults {
+    mentionOnly: Boolean!
+  }
+
+  input RegisterDefaultsInput {
+    mentionOnly: Boolean
+  }
+
   """
   Filter for the uniform memories() list (#473). All clauses AND-combine and
   only ever narrow the caller's accessible scope — with two documented slice
@@ -2029,6 +2118,8 @@ export const typeDefs = `#graphql
     # 008-agent-installation: declarative knobs.
     memoryProvisioning: MemoryProvisioning!
     installationPolicy: InstallationPolicy!
+    "Spec 049 Phase 5 — the defaults this Agent's install-created register row is made with."
+    registerDefaults: RegisterDefaults!
     # 008-agent-installation: dependency edges and installations.
     imports: [AgentImport!]!
     importedBy: [AgentImport!]!
@@ -5240,6 +5331,20 @@ export const typeDefs = `#graphql
     channels(filter: ChannelFilter, orgId: ID, limit: Int, offset: Int): ChannelsPage!
 
     """
+    Spec 049 Phase 5 — one register entry. Null when missing OR when you may
+    neither read its Channel's host memory nor stand on the row's owner side.
+    """
+    registerEntry(ref: ID!): RegisterEntry
+
+    """
+    Spec 049 Phase 5 — register entries you may read (§8.6), narrowed by owner
+    (an App or an organization), Channel, or attendee (a Worker or an Agent),
+    and by the cor:api:100:01 orgId. A filter naming something foreign returns
+    the same empty page as one naming nothing. Oldest first; limit default 50 / cap 200.
+    """
+    registerEntries(filter: RegisterEntryFilter, orgId: ID, limit: Int, offset: Int): RegisterEntriesPage!
+
+    """
     036-ai-service-config: resolve a config name for an execution context
     and return the DECRYPTED credentials (privileged; successor to
     agentAIConfig/appAIConfig).
@@ -6444,7 +6549,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String, registerDefaults: RegisterDefaultsInput): Agent!
 
     """
     Soft-delete an Agent.
@@ -6952,6 +7057,21 @@ export const typeDefs = `#graphql
     default Channel is unlinked from the App.
     """
     deleteChannel(ref: ID!): Boolean!
+
+    """
+    Spec 049 Phase 5 — declare that an attendee takes part in a Channel. Owner:
+    an App (org ADMIN / owner of a user-owned App) or an organization
+    (CONTRIBUTOR+). attendeeRef: a Worker or an Agent in the owner's context;
+    omitted = every attendee there. REGISTER_ENTRY_EXISTS when a live row
+    already holds that (owner, Channel, attendee). Intent, never permission.
+    """
+    createRegisterEntry(input: CreateRegisterEntryInput!): RegisterEntry!
+
+    "Spec 049 Phase 5 — change a row's role / mentionOnly / description (the owner's gate)."
+    updateRegisterEntry(ref: ID!, input: UpdateRegisterEntryInput!): RegisterEntry!
+
+    "Spec 049 Phase 5 — soft-delete a row. Each owner removes its own rows; an App may remove its install-created default."
+    deleteRegisterEntry(ref: ID!): Boolean!
 
     # Chatbot revisions (org ADMIN)
     """

@@ -30,6 +30,7 @@ import { generateId } from './id.js';
 import { ancestorLocs, lockAncestorsForCreateMany } from './nodeSubtreeLock.js';
 import { getMemoryEncryptionInfo, encryptNodeFields } from './nodeCrypto.js';
 import { locsOverlap } from './protectedLoc.js';
+import { ensureInstallRegisterRows } from './registerInstall.js';
 import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 
 /** The name of every App's default Channel — the row `chats:team` became. */
@@ -128,10 +129,13 @@ export async function ensureChannelRow(
     row = await db.channel.update({ where: { id: row.id }, data: { deletedAt: null, deletedBy: null } });
   }
   if (args.asDefaultOfAppId) {
-    await db.app.updateMany({
+    const set = await db.app.updateMany({
       where: { id: args.asDefaultOfAppId, defaultChannelId: null },
       data: { defaultChannelId: row.id },
     });
+    // Spec 049 Phase 5 (D2): the moment an App gets its default Channel,
+    // every live install gets its materialised register row.
+    if (set.count > 0) await ensureInstallRegisterRows(db, args.asDefaultOfAppId, { createdBy: args.createdBy });
   }
   return row;
 }

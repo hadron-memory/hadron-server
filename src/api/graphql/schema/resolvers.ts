@@ -55,6 +55,7 @@ import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { scopeMutations, scopeQueries, scopeFieldResolvers } from './resolvers.scope.js';
 import { channelMutations, channelQueries, channelFieldResolvers } from './resolvers.channel.js';
+import { registerMutations, registerQueries, registerFieldResolvers } from './resolvers.register.js';
 import { appMutations } from './resolvers.mutation.app.js';
 import { chatMutations } from './resolvers.mutation.chat.js';
 import { sessionMutations } from './resolvers.mutation.session.js';
@@ -72,6 +73,11 @@ export const resolvers = {
   ...workerFieldResolvers,
   ...scopeFieldResolvers,
   ...channelFieldResolvers,
+  ...registerFieldResolvers,
+  // `Agent` already has a block in typeResolvers; the register's field joins
+  // it rather than replacing it (a bare spread would clobber the AI-config
+  // and relation fields).
+  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent },
   Query: {
     ...nodeQueries,
     ...objectQueries,
@@ -86,6 +92,7 @@ export const resolvers = {
     ...teamWorkQueries,
     ...scopeQueries,
     ...channelQueries,
+    ...registerQueries,
     ...workerQueries,
     ...teamRoleQueries,
     ...sessionQueries,
@@ -121,6 +128,7 @@ export const resolvers = {
     ...teamWorkMutations,
     ...scopeMutations,
     ...channelMutations,
+    ...registerMutations,
     ...appMutations,
     ...chatMutations,
     ...sessionMutations,
