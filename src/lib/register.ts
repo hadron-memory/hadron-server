@@ -141,7 +141,7 @@ export async function resolveChannelForOwner(
   owner: RegisterOwnerColumns,
 ): Promise<{ id: string; memoryId: string }> {
   const ref = channelRef.trim();
-  const refuse = () => badInput(`No match for channelRef "".`);
+  const refuse = () => badInput(`No match for channelRef "${ref}".`);
   const row = await ctx.db.channel.findFirst({
     where: { id: ref, deletedAt: null },
     select: { id: true, memoryId: true, memory: { select: { appId: true, organizationId: true } } },
@@ -250,13 +250,19 @@ export async function readableRegisterWhere(ctx: Context): Promise<Prisma.Regist
   const contributorOrgIds = memberships.filter((m) => m.role !== 'READER').map((m) => m.organizationId);
   if (memberOrgIds.length) arms.push({ organizationId: { in: memberOrgIds } });
   // App participation as `isAppParticipant` defines it: AppMember at any
-  // role, org CONTRIBUTOR+, or the owner of a user-owned App.
+  // role, org CONTRIBUTOR+, or the owner of a user-owned App. Under
+  // impersonation the whole arm is bounded to the support session's single
+  // org and the user-owned arm is dropped — exactly what `isAppParticipant`
+  // does for the single-row path (Codex/Copilot on PR #1166): a list must
+  // never enumerate what the single read denies.
+  const impersonatedOrg = ctx.impersonation?.orgId ?? null;
   arms.push({
     app: {
       deletedAt: null,
+      ...(impersonatedOrg ? { organizationId: impersonatedOrg } : {}),
       OR: [
         { members: { some: { userId: ctx.userId } } },
-        { ownerUserId: ctx.userId },
+        ...(impersonatedOrg ? [] : [{ ownerUserId: ctx.userId }]),
         ...(contributorOrgIds.length ? [{ organizationId: { in: contributorOrgIds } }] : []),
       ],
     },

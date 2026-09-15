@@ -2471,24 +2471,50 @@ export function createMcpServerInstance(
 
   // ── The chat register (spec 049 Phase 5, D-2026-09-13-007) ──────────────────
 
-  /** Register rows as lines: owner · channel · attendee · role. */
+  /**
+   * Register rows as lines: owner · channel · attendee · role. The Channel's
+   * name and address are shown only when the caller may read its host memory
+   * — the same gate `RegisterEntry.channel` applies (Codex P1 on PR #1166: an
+   * owner-side reader gets the row, never a foreign Channel's details).
+   * Attendees are batch-loaded, one query per kind (Copilot).
+   */
   const renderRegisterRows = async (
     ctx: Context,
     rows: Array<{ id: string; organizationId: string | null; appId: string | null; channelId: string; attendeeWorkerId: string | null; attendeeAgentId: string | null; role: string; mentionOnly: boolean; installDefault: boolean; description: string | null }>,
   ) => {
-    const R = (resolvers as { RegisterEntry: { attendeeUrn: (r: unknown, a: unknown, c: Context) => Promise<string | null> } }).RegisterEntry;
+    const accessible = await gqlAccessibleMemoryIds(ctx);
     const channels = new Map(
-      (await ctx.db.channel.findMany({ where: { id: { in: [...new Set(rows.map((r) => r.channelId))] } }, select: { id: true, name: true, loc: true } })).map((c) => [c.id, c]),
+      (await ctx.db.channel.findMany({ where: { id: { in: [...new Set(rows.map((r) => r.channelId))] } }, select: { id: true, name: true, loc: true, memoryId: true } })).map((c) => [c.id, c]),
     );
-    const out: string[] = [];
-    for (const r of rows) {
+    const workerIds = [...new Set(rows.map((r) => r.attendeeWorkerId).filter((x): x is string => !!x))];
+    const agentIds = [...new Set(rows.map((r) => r.attendeeAgentId).filter((x): x is string => !!x))];
+    const workers = new Map(
+      (workerIds.length
+        ? await ctx.db.worker.findMany({ where: { id: { in: workerIds } }, select: { id: true, slug: true, app: { select: { urn: true } } } })
+        : []
+      ).map((w) => [w.id, w]),
+    );
+    const agents = new Map(
+      (agentIds.length ? await ctx.db.agent.findMany({ where: { id: { in: agentIds } }, select: { id: true, urn: true } }) : []).map((a) => [a.id, a]),
+    );
+    const attendeeOf = (r: { attendeeWorkerId: string | null; attendeeAgentId: string | null }) => {
+      if (r.attendeeWorkerId) {
+        const w = workers.get(r.attendeeWorkerId);
+        try {
+          return w ? composeWorkerUrn(normalizeUrnForLookup(w.app.urn), w.slug) : r.attendeeWorkerId;
+        } catch {
+          return r.attendeeWorkerId;
+        }
+      }
+      if (r.attendeeAgentId) return agents.get(r.attendeeAgentId)?.urn ?? r.attendeeAgentId;
+      return 'every attendee';
+    };
+    return rows.map((r) => {
       const ch = channels.get(r.channelId);
-      const attendee = (await R.attendeeUrn(r, {}, ctx)) ?? 'every attendee';
-      out.push(
-        `- ${ch ? `${ch.name} (${ch.loc})` : r.channelId} ← ${attendee} — ${r.role}${r.mentionOnly ? ', mention-only' : ''}${r.installDefault ? ', install default' : ''}\n  owner: ${r.appId ? `App ${r.appId}` : `organization ${r.organizationId}`} · id ${r.id}${r.description ? `\n  ${r.description}` : ''}`,
-      );
-    }
-    return out;
+      const readable = !!ch && (accessible === null || accessible.includes(ch.memoryId));
+      const channel = readable ? `${ch!.name} (${ch!.loc})` : `channel ${r.channelId} (host memory not readable to you)`;
+      return `- ${channel} ← ${attendeeOf(r)} — ${r.role}${r.mentionOnly ? ', mention-only' : ''}${r.installDefault ? ', install default' : ''}\n  owner: ${r.appId ? `App ${r.appId}` : `organization ${r.organizationId}`} · id ${r.id}${r.description ? `\n  ${r.description}` : ''}`;
+    });
   };
 
   server.tool(
