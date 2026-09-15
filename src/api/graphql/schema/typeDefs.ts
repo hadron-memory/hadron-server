@@ -240,9 +240,29 @@ export const typeDefs = `#graphql
     parse the set, never compare the whole string. Codes: no_vector_index,
     embedding_unavailable, literal_fallback, and_relaxed_to_or (a bare
     multi-term keyword query matched nothing under AND, so it was retried as
-    OR and these hits match ANY term).
+    OR and these hits match ANY term), scope_narrowed (spec 049: the scope
+    this search ran under lists memories you cannot read; they were dropped
+    and \`scope.droppedCount\` says how many).
     """
     degraded: String
+    "Spec 049 (D-2026-09-13-002): what this search was produced under. Null when no scope applied (the pre-049 accessible set, optionally org-narrowed)."
+    scope: SearchScopeInfo
+  }
+
+  """
+  Spec 049 — the scope a search ran under (every result discloses it,
+  D-2026-09-13-002). \`kind\`: scope | app | global | user-owned. \`source\`:
+  call | session | active-app | active-org. \`memoryUrns\` lists only the
+  memories YOU may read; \`droppedCount\` is how many the scope lists that you
+  may not — a count, never their names.
+  """
+  type SearchScopeInfo {
+    kind: String!
+    source: String!
+    label: String!
+    ownerUrn: String
+    memoryUrns: [String!]!
+    droppedCount: Int!
   }
 
   "Slim node projection for the graph view (issue #466) — only what a node-link graph draws."
@@ -595,6 +615,8 @@ export const typeDefs = `#graphql
   }
 
   type GlobalSearchResult {
+    "Spec 049: the scope the Memory + Node slices ran under (see FindNodesResult.scope). Null when no scope applied."
+    scope: SearchScopeInfo
     hits: [GlobalSearchHit!]!
     """
     Total ranked matches for building a pager. BOUNDED CONTRACT: this is the
@@ -4313,6 +4335,10 @@ export const typeDefs = `#graphql
       offset: Int
       "Optional absolute relevance floor (cor:api:090 / #497): drop ranked hits whose score is below this value. Scores are NOT comparable across modes, so the meaningful scale differs per mode (keyword ts_rank is roughly 0..a-few; vector cosine similarity is 0..1; hybrid is a small RRF fraction) — pick a floor for the mode in use. Ignored on the no-query browse list (unscored) and never trims expand-neighbours. A floor returns fewer hits, never weaker ones."
       minScore: Float
+      "Spec 049 (D-2026-09-13-002): search under a named scope — a scope id, a bare scope name (needs appRef), 'app' (the App's attached memories; needs appRef), or 'global' (the active organization's view — orgId, or your single membership). The scope's memories are intersected with your access (a lens never grants; the rest is disclosed as scope.droppedCount) and filter.memoryIds narrows WITHIN it. Omitted: the pre-049 behaviour — your accessible set, optionally narrowed by orgId."
+      scope: String
+      "Spec 049: the App context for a bare scope name or for scope: 'app' (ID or URN)."
+      appRef: ID
     ): FindNodesResult!
 
     """

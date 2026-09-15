@@ -45,6 +45,7 @@ import type { Context } from '../api/graphql/schema/resolvers.js';
 import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
 import { canReadMemory } from '../mcp/access-control.js';
 import { getMemberOrgIds } from './auth/memberOrgIds.js';
+import { canReadScope } from './scopes.js';
 
 /** Header carrying the caller's stable client-instance id. */
 export const CLIENT_KEY_HEADER = 'x-hadron-client-id';
@@ -82,6 +83,8 @@ export interface RestoredMcpSelection {
    * the ladder (`lib/auth/activeOrg.ts`).
    */
   activeOrgId?: string;
+  /** Spec 049 Phase 3 — the `hadron_set_active_scope` selection, present only while the caller may still read it. */
+  activeScopeId?: string;
 }
 
 /**
@@ -113,11 +116,24 @@ export async function loadMcpSessionState(
         },
         memory: { select: { id: true, urn: true, deletedAt: true } },
         organization: { select: { id: true, deletedAt: true } },
+        scope: true,
       },
     });
     if (!row) return {};
 
     const restored: RestoredMcpSelection = {};
+
+    // ── The active scope: lifecycle, then the scope READ gate ───────────────
+    if (row.scope && !row.scope.deletedAt) {
+      const ctx = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      } as Context;
+      if (await canReadScope(ctx, row.scope)) restored.activeScopeId = row.scope.id;
+    }
 
     // ── The explicit organization: lifecycle, then CURRENT membership ───────
     // The same shared helper the org-scoped queries gate on (`getMemberOrgIds`),
@@ -207,12 +223,22 @@ export async function saveActiveOrg(
   await upsertSelection(db, auth, clientKey, { organizationId });
 }
 
+/** Persist — or with `null`, CLEAR — this client's active-scope selection (spec 049 Phase 3). */
+export async function saveActiveScope(
+  db: PrismaClient,
+  auth: AuthContext,
+  clientKey: string | null,
+  scopeId: string | null,
+): Promise<void> {
+  await upsertSelection(db, auth, clientKey, { scopeId });
+}
+
 /** Shared upsert for the selections — one row per (user, client instance). */
 async function upsertSelection(
   db: PrismaClient,
   auth: AuthContext,
   clientKey: string | null,
-  patch: { appId?: string; memoryId?: string; organizationId?: string | null },
+  patch: { appId?: string; memoryId?: string; organizationId?: string | null; scopeId?: string | null },
 ): Promise<void> {
   if (!clientKey || !auth.userId) return;
   try {

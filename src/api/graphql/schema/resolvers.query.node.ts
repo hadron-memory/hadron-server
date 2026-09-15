@@ -38,6 +38,8 @@ import { compileTemplate } from '../../../lib/template.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+// Spec 049 Phase 3 — the search ladder's GraphQL entry + disclosure envelope.
+import { resolveNamedScopeForQuery, scopeInfoOf, mergeDegraded as mergeDegradedCodes, SCOPE_NARROWED } from '../../../lib/scopes.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { requireWorkerReadAccess } from './resolvers.worker.js';
@@ -77,6 +79,35 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
+
+/** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
+export interface FindNodesArgs {
+  query?: string | null;
+  mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
+  minScore?: number | null;
+  filter?: {
+    memoryIds?: string[] | null;
+    memoryClasses?: string[] | null;
+    nodeType?: string | null;
+    objectType?: string | null;
+    tags?: string[] | null;
+    isRunnable?: boolean | null;
+    locPrefix?: string | null;
+    createdBy?: string | null;
+    updatedAfter?: string | null;
+    updatedBefore?: string | null;
+    includeDeleted?: boolean | null;
+    where?: NodeWhere | null;
+  } | null;
+  fields?: string[] | null;
+  sort?: 'relevance' | 'loc' | 'seq' | 'updatedAt' | null;
+  sortProperty?: NodePropertySort | null;
+  expand?: number | null;
+  granularity?: 'node' | 'chunk' | null;
+  orgId?: string | null;
+  limit?: number | null;
+  offset?: number | null;
+}
 
 export const nodeQueries = {
     /**
@@ -818,38 +849,25 @@ export const nodeQueries = {
     // boolean operators). Access-scoped exactly like the per-kind node queries.
     findNodes: async (
       _: unknown,
-      {
-        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore,
-      }: {
-        query?: string | null;
-        mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
-        minScore?: number | null;
-        filter?: {
-          memoryIds?: string[] | null;
-          memoryClasses?: string[] | null;
-          nodeType?: string | null;
-          objectType?: string | null;
-          tags?: string[] | null;
-          isRunnable?: boolean | null;
-          locPrefix?: string | null;
-          createdBy?: string | null;
-          updatedAfter?: string | null;
-          updatedBefore?: string | null;
-          includeDeleted?: boolean | null;
-          where?: NodeWhere | null;
-        } | null;
-        fields?: string[] | null;
-        sort?: 'relevance' | 'loc' | 'seq' | 'updatedAt' | null;
-        sortProperty?: NodePropertySort | null;
-        expand?: number | null;
-        granularity?: 'node' | 'chunk' | null;
-        orgId?: string | null;
-        limit?: number | null;
-        offset?: number | null;
+      args: FindNodesArgs & {
+        /** Spec 049 Phase 3 — a scope named in the call; see the SDL. */
+        scope?: string | null;
+        /** Spec 049 Phase 3 — the App context for a bare scope name / `app`. */
+        appRef?: string | null;
       },
       ctx: Context,
     ) => {
+      const { scope, appRef, ...coreArgs } = args;
+
+      // The pre-spec-049 resolver, unchanged, as a local so the scope wrapper
+      // at the bottom can re-enter it without a self-reference (which would
+      // leave TypeScript unable to infer the return type).
+      const core = async ({
+        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore,
+      }: FindNodesArgs) => {
       const f = filter ?? {};
+
+      // ── (spec 049 scope handling lives in the wrapper at the end of core) ──
       const finalLimit = limit ?? 50;
       const off = offset ?? 0;
       // #497 — optional absolute relevance floor. Applied to the ranked scores
@@ -1476,6 +1494,46 @@ export const nodeQueries = {
         null,
         mergeDegraded(null),
       );
+      };
+
+      // ── Spec 049 Phase 3 — a scope named in the call (D-2026-09-13-002) ──
+      // Resolve it, then run the core with the scope's memories as the explicit
+      // memory set (S2: already ∩ the caller's access — a lens never grants,
+      // D-004) and, for `global`, the organization narrowing; add the
+      // disclosure envelope on the way out. `filter.memoryIds` narrows WITHIN
+      // the scope. Omitted ⇒ the pre-049 semantics are untouched: the portal
+      // and the CLI pass orgId and filters explicitly and never this argument,
+      // so their results do not change under them from a flag they never passed
+      // (`cor:acl:020:03` rule 5's surprise). The ambient rungs (session,
+      // active App, active org) live on the MCP surface, which has session state.
+      if (scope == null || scope.trim() === '') return core(coreArgs);
+
+      const f = coreArgs.filter ?? {};
+      const scopeRes = await resolveNamedScopeForQuery(ctx, scope, appRef ?? null, coreArgs.orgId ?? null);
+      const info = await scopeInfoOf(ctx, scopeRes);
+      const narrowed = scopeRes.droppedCount > 0 ? SCOPE_NARROWED : null;
+      let innerFilter = f;
+      let innerOrgId = coreArgs.orgId;
+      if (scopeRes.memoryIds !== null) {
+        let requested = scopeRes.memoryIds;
+        if (f.memoryIds && f.memoryIds.length > 0) {
+          const explicit = (
+            await Promise.all(
+              f.memoryIds.map((ref) =>
+                isId(ref) ? Promise.resolve(ref) : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
+            )
+          ).filter((id): id is string => id !== null);
+          requested = scopeRes.memoryIds.filter((id) => explicit.includes(id));
+        }
+        if (requested.length === 0) {
+          return { hits: [], passages: [], total: 0, reason: null, degraded: narrowed, scope: info };
+        }
+        innerFilter = { ...f, memoryIds: requested };
+      } else if (scopeRes.kind === 'global') {
+        innerOrgId = scopeRes.orgScopeId;
+      }
+      const inner = await core({ ...coreArgs, filter: innerFilter, orgId: innerOrgId });
+      return { ...inner, scope: info, degraded: mergeDegradedCodes(inner.degraded, narrowed) };
     },
 
     /**
