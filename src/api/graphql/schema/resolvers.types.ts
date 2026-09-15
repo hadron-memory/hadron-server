@@ -501,7 +501,19 @@ export const typeResolvers = {
      */
     scope: async (r: { appId: string; scopeSnapshot: unknown }, _: unknown, ctx: Context) => {
       if (parseRunScopeSnapshot(r.scopeSnapshot) === null) return null;
-      return scopeInfoOf(ctx, await resolveRunScope(ctx, r));
+      // Request-memoized on the snapshot itself: a run page repeats one
+      // trigger's snapshot across its rows, and the projection is the caller's
+      // access ∩ that snapshot — the same answer for every row that carries it
+      // (Copilot on PR #1163). Keyed on the serialized snapshot, not the scope
+      // id, because two snapshots of one scope can differ.
+      const cache = (ctx.runScopeInfoCache ??= new Map());
+      const key = `${r.appId} ${JSON.stringify(r.scopeSnapshot)}`;
+      let pending = cache.get(key);
+      if (!pending) {
+        pending = resolveRunScope(ctx, r).then((res) => scopeInfoOf(ctx, res));
+        cache.set(key, pending);
+      }
+      return pending;
     },
     // #696 — the computed hrn:apprun:<root>:<app>:<run-id> URN. Null for the
     // rare multi-segment App URN the flat shape can't express (compose throws →

@@ -824,14 +824,21 @@ export async function resolveScopeForTrigger(ctx: Context, appId: string, scopeR
 
 /** Snapshot a trigger's scope for a run at mint; null when the scope is gone (⇒ `app`). */
 export async function snapshotScopeForTrigger(db: Context['db'], scopeId: string): Promise<RunScopeSnapshot | null> {
-  const scope = await db.scope.findFirst({ where: { id: scopeId, deletedAt: null } });
+  // ONE statement for the row and its ordered list, so a concurrent
+  // updateScope cannot land between them and leave a snapshot that pairs old
+  // metadata with a new list (Copilot on PR #1163). Live memories only, as
+  // scopeMemoryIds reads them.
+  const scope = await db.scope.findFirst({
+    where: { id: scopeId, deletedAt: null },
+    include: { memories: { where: { memory: { deletedAt: null } }, orderBy: { position: 'asc' }, select: { memoryId: true } } },
+  });
   if (!scope) return null;
   return {
     scopeId: scope.id,
     name: scope.name,
     ownerType: ownerTypeOf(scope),
     ownerId: ownerIdOf(scope),
-    memoryIds: await scopeMemoryIds(db, scope.id),
+    memoryIds: scope.memories.map((m) => m.memoryId),
   };
 }
 

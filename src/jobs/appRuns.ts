@@ -995,6 +995,9 @@ export interface SpawnConfig {
   callback?: string | null;
   itemCallback?: string | null;
   total: number;
+  /** Spec 049: the lens every run this fan-out mints carries — an explicit
+   *  `scope_ref` override, else the parent's own snapshot (set by the tool). */
+  scopeSnapshot?: unknown;
   dispatching?: boolean;
   callbackFiredAt?: string;
 }
@@ -1059,6 +1062,9 @@ async function tryFireSpawnCallback(db: PrismaClient, parentId: string): Promise
       parentRunId: parentId, // points at the ORIGINAL parent (D19 / example-3 A′)
       entryNodeUrn: cfg.callback!,
       eventData: { parentRunId: parentId, ...tally, __spawnCallback: true },
+      // Spec 049: a coordination run sees what its siblings saw — never the
+      // broad `app` view by omission (Codex/Copilot on PR #1163).
+      scopeSnapshot: cfg.scopeSnapshot ?? parent.scopeSnapshot,
       createdBy: `run:${parentId}`,
     });
   } catch (err) {
@@ -1127,6 +1133,7 @@ export async function handleSpawnCompletion(db: PrismaClient, runId: string): Pr
           ...(ev && ev[cfg.itemKey] !== undefined ? { [cfg.itemKey]: ev[cfg.itemKey] } : {}),
           __spawnCallback: true,
         },
+        scopeSnapshot: cfg.scopeSnapshot ?? parent.scopeSnapshot,
         createdBy: `run:${parent.id}`,
       });
     } catch (err) {

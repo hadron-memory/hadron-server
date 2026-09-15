@@ -15,7 +15,9 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { mintAppRun } from '../jobs/appRuns.js';
+import { mintAppRun, handleSpawnCompletion } from '../jobs/appRuns.js';
+import { runContext } from '../jobs/appRunDeps.js';
+import { hadronSpawn } from './runner/tools/index.js';
 import { resolveRunScope, resolveScopeForTrigger } from './scopes.js';
 
 const M = resolvers.Mutation as any;
@@ -122,5 +124,51 @@ describe('the snapshot on the run', () => {
     const r = await resolveRunScope(ctx(admin.id), run);
     expect(r).toMatchObject({ kind: 'app', source: 'trigger', memoryIds: [memA1.id] });
     expect(await AppRunType.scope(run, {}, ctx(admin.id))).toBeNull();
+  });
+});
+
+describe('hadron_spawn is scope-bearing (plan §3.3)', () => {
+  it('an explicit scope_ref overrides the parent lens for every child AND every callback run; absent, the parent snapshot flows to all', async () => {
+    const lens = await M.createScope({}, { input: { name: 'lens', organizationRef: orgA.urn, memoryRefs: [memA1.urn] } }, ctx(admin.id));
+    const other = await M.createScope({}, { input: { name: 'other', organizationRef: orgA.urn, memoryRefs: [memA2.urn] } }, ctx(admin.id));
+    const parent = await mintAppRun(db, {
+      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
+      triggerKind: 'SCHEDULE', entryNodeUrn: entry, scopeId: lens.id, publish: false,
+    });
+    const toolCtx = (run: typeof parent) => ({ log: () => {}, db, run, principal: runContext(db, run) });
+    await hadronSpawn.execute(toolCtx(parent), {
+      items: ['x', 'y'], process_item: entry, callback: entry, item_callback: entry, scope_ref: 'other',
+    });
+    const kids = (await db.appRun.findMany({ where: { parentRunId: parent.id } })).filter((r) => !(r.eventData as any)?.__spawnCallback);
+    expect(kids).toHaveLength(2);
+    for (const k of kids) expect((k.scopeSnapshot as any).scopeId).toBe(other.id);
+    // Children terminate → item callbacks and the final callback mint under the SAME lens.
+    for (const k of kids) {
+      await db.appRun.update({ where: { id: k.id }, data: { status: 'COMPLETED' } });
+      await handleSpawnCompletion(db, k.id);
+    }
+    const coordination = (await db.appRun.findMany({ where: { parentRunId: parent.id } })).filter((r) => (r.eventData as any)?.__spawnCallback);
+    expect(coordination).toHaveLength(3);
+    for (const c of coordination) expect((c.scopeSnapshot as any).scopeId).toBe(other.id);
+
+    // No override: the parent's own snapshot, on children and callbacks alike.
+    const parent2 = await mintAppRun(db, {
+      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
+      triggerKind: 'SCHEDULE', entryNodeUrn: entry, scopeId: lens.id, publish: false,
+    });
+    await hadronSpawn.execute(toolCtx(parent2), { items: ['x'], process_item: entry, callback: entry });
+    const [kid] = (await db.appRun.findMany({ where: { parentRunId: parent2.id } })).filter((r) => !(r.eventData as any)?.__spawnCallback);
+    expect((kid.scopeSnapshot as any).scopeId).toBe(lens.id);
+    await db.appRun.update({ where: { id: kid.id }, data: { status: 'COMPLETED' } });
+    await handleSpawnCompletion(db, kid.id);
+    const [cb] = (await db.appRun.findMany({ where: { parentRunId: parent2.id } })).filter((r) => (r.eventData as any)?.__spawnCallback);
+    expect((cb.scopeSnapshot as any).scopeId).toBe(lens.id);
+
+    // A scope_ref outside the App's context is refused, minting nothing.
+    const parent3 = await mintAppRun(db, {
+      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
+    });
+    await expect(hadronSpawn.execute(toolCtx(parent3), { items: ['x'], process_item: entry, scope_ref: 'nope' })).rejects.toThrow(/No readable scope/);
+    expect(await db.appRun.count({ where: { parentRunId: parent3.id } })).toBe(0);
   });
 });
