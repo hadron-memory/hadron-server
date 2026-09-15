@@ -134,9 +134,13 @@ describe('resolveRegister', () => {
     expect(snap).toMatchObject({ attendee: { agentId: agent.id, appId: app.id } });
     expect(snap!.rows).toHaveLength(1);
     expect(snap!.rows[0]).toMatchObject({ channelId: channel.id, attendeeAgentId: agent.id, installDefault: true });
+    // The audit columns travel with the snapshot: entry.createdAt is the row's, never an epoch.
+    const installRow = await db.registerEntry.findFirstOrThrow({ where: { appId: app.id } });
+    expect(snap!.rows[0].createdAt).toBe(installRow.createdAt.toISOString());
     const rows = await R.register(run, {}, ctx(admin.id));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ namedBy: 'AGENT', canRead: true, canPost: true, channel: { id: channel.id } });
+    expect((rows[0].entry as { createdAt: Date }).createdAt.getTime()).toBeGreaterThan(0);
     expect(await R.register(run, {}, ctx(reader.id))).toEqual([expect.objectContaining({ canRead: false, disclosure: 'HOST_MEMORY_NOT_READABLE' })]);
     const bare = await mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     expect(bare.registerSnapshot).toBeNull();
@@ -151,5 +155,23 @@ describe('resolveRegister', () => {
     expect(await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(stranger.id))).toEqual([]);
     expect(await Q.attendeeRegister({}, { workerRef: 'nope' }, ctx(admin.id))).toEqual([]);
     await expect(Q.attendeeRegister({}, {}, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+});
+
+describe('PR #1167 review — the oracles', () => {
+  it('an unreadable host memory discloses neither URN nor id; an uninstalled Agent is not an attendee', async () => {
+    const asReader = await resolveRegister(db, { attendee: { workerId: worker.id }, actor: ctx(reader.id) });
+    expect(asReader?.rows[0].channel).toMatchObject({ hostMemoryUrn: null, hostMemoryId: null });
+    const rows = await R.register(
+      await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }),
+      {},
+      ctx(reader.id),
+    );
+    expect(rows[0].channel.hostMemoryId).toBeNull();
+    // A live Agent that is NOT installed in the App — even one of another
+    // tenant — never resolves as an Agent-in-App attendee.
+    const foreign = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'loose', urn: `${org.urn}:loose`, visibility: 'ORGANIZATION' } });
+    expect(await resolveRegister(db, { attendee: { agentId: foreign.id, appId: app.id }, actor: ctx(admin.id) })).toBeNull();
+    expect(await Q.attendeeRegister({}, { agentRef: foreign.urn, appRef: app.urn }, ctx(admin.id))).toEqual([]);
   });
 });

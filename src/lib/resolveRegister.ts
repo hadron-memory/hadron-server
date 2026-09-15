@@ -76,7 +76,7 @@ export interface RegisterViewRow {
     loc: string;
     /** The host memory's URN — only when the actor may read it (§8.2); else null. */
     hostMemoryUrn: string | null;
-    hostMemoryId: string;
+    hostMemoryId: string | null;
     lastSeq: number;
     lastMessageAt: Date | null;
     deleted: boolean;
@@ -120,11 +120,17 @@ async function attendeeColumns(
     }
     return { workerId: w.id, agentId: w.agentId, appId: w.appId, organizationId: w.app.organizationId, attendeeUrn: urn };
   }
-  const [agent, app] = await Promise.all([
+  // An Agent-in-App attendee EXISTS only as a live install: without the
+  // AppAgent row the pair is fabricated, and resolving it would hand the
+  // caller the App's EVERYONE rows plus a foreign Agent's URN (Codex P1 on
+  // PR #1167) — the same relationship the register-write and run-mint gates
+  // require.
+  const [agent, app, install] = await Promise.all([
     db.agent.findFirst({ where: { id: attendee.agentId, deletedAt: null }, select: { urn: true } }),
     db.app.findFirst({ where: { id: attendee.appId, deletedAt: null }, select: { organizationId: true } }),
+    db.appAgent.findUnique({ where: { appId_agentId: { appId: attendee.appId, agentId: attendee.agentId } }, select: { agentId: true } }),
   ]);
-  if (!agent || !app) return null;
+  if (!agent || !app || !install) return null;
   return {
     workerId: null,
     agentId: attendee.agentId,
@@ -208,6 +214,27 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
     ).map((c) => [c.id, c]),
   );
   const accessible = actor ? await getAccessibleMemoryIds(actor) : null;
+  // The two post-side gates, decided ONCE per host App and per host memory:
+  // a register is unbounded and this runs on every briefing render, so the
+  // N rows of one App must not cost N gate round trips (Copilot on PR #1167).
+  const participantByApp = new Map<string, Promise<boolean>>();
+  const participantOf = (app: { id: string; organizationId: string | null; ownerUserId: string | null }) => {
+    let p = participantByApp.get(app.id);
+    if (!p) {
+      p = isAppParticipant(actor!, app);
+      participantByApp.set(app.id, p);
+    }
+    return p;
+  };
+  const writableByMemory = new Map<string, Promise<boolean>>();
+  const writableMemory = (memoryId: string) => {
+    let p = writableByMemory.get(memoryId);
+    if (!p) {
+      p = requireMemoryWriteAccess(actor!, memoryId).then(() => true, () => false);
+      writableByMemory.set(memoryId, p);
+    }
+    return p;
+  };
   const view: RegisterViewRow[] = [];
   for (const e of rows) {
     const c = channels.get(e.channelId);
@@ -231,18 +258,15 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
       // hosted in an App, the driver must be that App's participant
       // (`cor:acl:030:01`: participation follows the host memory's audience).
       const hostApp = c.memory.app && !c.memory.app.deletedAt ? c.memory.app : null;
-      const participant = hostApp ? await isAppParticipant(actor, hostApp) : true;
+      const participant = hostApp ? await participantOf(hostApp) : true;
       if (!participant && actor.userId) {
         canPost = false;
         disclosure = 'DRIVER_NOT_PARTICIPANT';
+      } else if (await writableMemory(c.memoryId)) {
+        canPost = true;
       } else {
-        try {
-          await requireMemoryWriteAccess(actor, c.memoryId);
-          canPost = true;
-        } catch {
-          canPost = false;
-          disclosure = 'HOST_MEMORY_NOT_WRITABLE';
-        }
+        canPost = false;
+        disclosure = 'HOST_MEMORY_NOT_WRITABLE';
       }
     }
     view.push({
@@ -261,8 +285,11 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
         name: c.name,
         kind: c.kind,
         loc: c.loc,
+        // Both the URN and the id are disclosed under the canonical read gate
+        // (§8.2): an unreadable host memory's primary key is as much an
+        // existence oracle as its URN (Codex P1 on PR #1167).
         hostMemoryUrn: canRead ? safeEmitEntityUrnV2('memory', c.memory.urn) : null,
-        hostMemoryId: c.memoryId,
+        hostMemoryId: canRead ? c.memoryId : null,
         lastSeq: c.lastSeq,
         lastMessageAt: c.lastMessageAt,
         deleted: !!c.deletedAt,
@@ -286,6 +313,8 @@ export interface RunRegisterSnapshot {
     id: string; channelId: string; organizationId: string | null; appId: string | null;
     attendeeWorkerId: string | null; attendeeAgentId: string | null;
     role: 'WATCH' | 'POST' | 'BOTH'; mentionOnly: boolean; installDefault: boolean; description: string | null;
+    /** The row's audit columns as ISO strings — a snapshot row serves the public `RegisterEntry` type and must not fabricate them. */
+    createdAt: string; createdBy: string | null; updatedAt: string | null; updatedBy: string | null;
   }>;
 }
 
@@ -299,6 +328,7 @@ export async function snapshotRegisterForRun(db: Context['db'], agentId: string,
       id: r.id, channelId: r.channelId, organizationId: r.organizationId, appId: r.appId,
       attendeeWorkerId: r.attendeeWorkerId, attendeeAgentId: r.attendeeAgentId,
       role: r.role, mentionOnly: r.mentionOnly, installDefault: r.installDefault, description: r.description,
+      createdAt: r.createdAt.toISOString(), createdBy: r.createdBy, updatedAt: r.updatedAt?.toISOString() ?? null, updatedBy: r.updatedBy,
     })),
   };
 }
@@ -312,13 +342,23 @@ export function parseRunRegisterSnapshot(raw: unknown): RunRegisterSnapshot | nu
   return o as unknown as RunRegisterSnapshot;
 }
 
-/** A snapshot's rows as the entry rows `resolveRegister` consumes (audit columns stubbed). */
+/**
+ * A snapshot's rows as the entry rows `resolveRegister` consumes. The audit
+ * columns are the snapshotted ones (Copilot on PR #1167: a fabricated epoch
+ * would surface as `entry.createdAt` through the public type); a row from a
+ * pre-audit snapshot falls back to the epoch rather than failing the read.
+ */
 export function snapshotRowsAsEntries(snap: RunRegisterSnapshot): EntryRow[] {
   return snap.rows.map(
     (r) =>
       ({
         ...r,
-        createdAt: new Date(0), createdBy: null, updatedAt: null, updatedBy: null, deletedAt: null, deletedBy: null,
+        createdAt: r.createdAt ? new Date(r.createdAt) : new Date(0),
+        createdBy: r.createdBy ?? null,
+        updatedAt: r.updatedAt ? new Date(r.updatedAt) : null,
+        updatedBy: r.updatedBy ?? null,
+        deletedAt: null,
+        deletedBy: null,
       }) as EntryRow,
   );
 }

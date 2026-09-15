@@ -616,7 +616,8 @@ export const typeDefs = `#graphql
     kind: ChannelKind!
     loc: String!
     hostMemoryUrn: String
-    hostMemoryId: ID!
+    "The host memory's id — like the URN, only when YOU may read it."
+    hostMemoryId: ID
     "The Channel's watermark — the highest seq issued, not a count."
     lastSeq: Int!
     lastMessageAt: DateTime
