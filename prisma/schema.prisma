@@ -3918,6 +3918,10 @@ model McpSessionState {
   /// Re-authorized against current org membership on every read — a stored
   /// selection is a cache of a choice, never a grant.
   organizationId String? @map("organization_id")
+  /// Spec 049 Phase 3 (D-2026-09-13-002) — the session's ACTIVE SCOPE
+  /// (`hadron_set_active_scope`): rung 2 of the search ladder, outranked only
+  /// by a scope named in the call. Re-authorized (readable) on every read.
+  scopeId        String? @map("scope_id")
 
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @updatedAt @map("updated_at")
@@ -3926,12 +3930,14 @@ model McpSessionState {
   app          App?          @relation(fields: [appId], references: [id], onDelete: SetNull)
   memory       Memory?       @relation(fields: [memoryId], references: [id], onDelete: SetNull)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  scope        Scope?        @relation(fields: [scopeId], references: [id], onDelete: SetNull)
 
   /// One row per (user, client instance) — the upsert target.
   @@unique([userId, clientKey], map: "mcp_session_state_user_client_uniq")
   @@index([appId])
   @@index([memoryId])
   @@index([organizationId])
+  @@index([scopeId])
   @@map("mcp_session_state")
 }
 
@@ -4047,6 +4053,7 @@ model Scope {
   agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
   app          App?          @relation(fields: [appId], references: [id], onDelete: Cascade)
   memories     ScopeMemory[]
+  mcpSessionStates McpSessionState[]
 
   @@index([organizationId])
   @@index([agentId])

@@ -39,6 +39,8 @@ import { resolveAppRef } from './entityRef/appRef.js';
 import { resolveMemoryRef } from './entityRef/memoryRef.js';
 import { resolveOrgRef } from './entityRef/orgRef.js';
 import { narrowToAccessible } from './auth/narrowToAccessible.js';
+import { resolveActiveOrg, type ActiveOrgResolution } from './auth/activeOrg.js';
+import { isLifecycleActive } from '@hadron-memory/access-control';
 
 /** The ladder's built-in tokens (D-2026-09-13-002); a scope may not take either name. */
 export const RESERVED_SCOPE_NAMES: ReadonlySet<string> = new Set(['global', 'app']);
@@ -436,4 +438,356 @@ export async function explainScope(ctx: Context, scopeId: string, loc?: string |
     winnerMemoryId = kept.find((id) => holding.has(id)) ?? null;
   }
   return { memoryIds: kept, droppedCount: droppedIds.length, winnerMemoryId };
+}
+
+// ── Spec 049 Phase 3 — the search ladder (D-2026-09-13-002 / -004) ────────────
+
+/** The ladder's two built-in views (reserved names — see RESERVED_SCOPE_NAMES). */
+export const BUILTIN_SCOPE_APP = 'app';
+export const BUILTIN_SCOPE_GLOBAL = 'global';
+
+/** What a search was produced under — the disclosure envelope's input (plan §2 S3). */
+export interface SearchScopeResolution {
+  /** A named scope, the `app` view, the `global` (organization) view, or the user-owned view. */
+  kind: 'scope' | 'app' | 'global' | 'user-owned';
+  /** Which rung chose it. */
+  source: 'call' | 'session' | 'active-app' | 'active-org';
+  /** Human-readable label for the envelope: the scope name, the App URN, the org URN. */
+  label: string;
+  /** For `kind: 'scope'`: the scope's owner URN, when it has one. */
+  ownerUrn: string | null;
+  /**
+   * The memory ids to search — ALREADY intersected with the caller's access
+   * (S2). `null` means "the caller's accessible set as the engine computes it"
+   * (the `global` and user-owned views, which narrow by organization rather
+   * than by list).
+   */
+  memoryIds: string[] | null;
+  /** For `kind: 'global'`: the organization the engine narrows to. */
+  orgScopeId: string | null;
+  /** Memories the scope lists that the caller may NOT read — count only (§8.2). */
+  droppedCount: number;
+}
+
+/**
+ * The `app` view: the App's attached memories — the `AgentMemoryItem` rows of
+ * EVERY installed Agent plus the App's own app-class memories. A new
+ * computation on purpose: `getAppMemoryAccess` is a GATE and is
+ * primary-Agent-only (`take: 1`) by design; this is a LENS, and the lens is
+ * still intersected with the gate's output by the caller (plan §4.2 step 3).
+ * System-class memories are left out, as the broad search leaves them out.
+ */
+export async function appScopeMemoryIds(db: Context['db'], appId: string): Promise<string[]> {
+  const app = await db.app.findFirst({
+    where: { id: appId, deletedAt: null, uninstalledAt: null },
+    select: {
+      organizationId: true,
+      ownerUserId: true,
+      appAgents: {
+        orderBy: { createdAt: 'asc' },
+        select: {
+          agent: {
+            select: {
+              id: true,
+              organizationId: true,
+              deletedAt: true,
+              memoryItems: {
+                where: { deletedAt: null, memory: { deletedAt: null, class: { not: 'system' } } },
+                orderBy: { createdAt: 'asc' },
+                select: { memoryId: true, memory: { select: { appId: true, ownerUserId: true } } },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  if (!app) return [];
+  const ids: string[] = [];
+  for (const row of app.appAgents) {
+    if (!row.agent || row.agent.deletedAt) continue;
+    // The same three admissibility rules the gate applies to an install
+    // (`getPrimaryAgentAccess` / `admissibleFoldRows`, Copilot on PR #1161):
+    // a cross-org install needs a live AgentOrgGrant (same-org auto-passes;
+    // a user-owned App has no org and rides its owner's subscription);
+    if (app.organizationId !== null && app.organizationId !== row.agent.organizationId) {
+      const grant = await db.agentOrgGrant.findUnique({
+        where: { orgId_agentId: { orgId: app.organizationId, agentId: row.agent.id } },
+      });
+      if (!grant || !isLifecycleActive(grant)) continue;
+    }
+    for (const item of row.agent.memoryItems) {
+      // an app-scoped memory row is THIS App's only (an Agent's items are
+      // global to the Agent, so another App's rows ride along otherwise);
+      if (item.memory.appId != null && item.memory.appId !== appId) continue;
+      // a user-owned memory folds in only when the App shares its owner.
+      if (item.memory.ownerUserId != null && item.memory.ownerUserId !== app.ownerUserId) continue;
+      if (!ids.includes(item.memoryId)) ids.push(item.memoryId);
+    }
+  }
+  const own = await db.memory.findMany({
+    where: { appId, class: 'app', deletedAt: null },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true },
+  });
+  for (const m of own) if (!ids.includes(m.id)) ids.push(m.id);
+  return ids;
+}
+
+export interface ResolveSearchScopeArgs {
+  /** A scope named in the call: a scope id, a bare name, `app`, or `global`. */
+  scopeArg?: string | null;
+  /** The App context for a bare name or for `app` — explicit on GraphQL, the active App on MCP. */
+  appId?: string | null;
+  /** The session's active scope (MCP), consulted only when nothing is named. */
+  storedScopeId?: string | null;
+  /** Whether the ambient rungs (session, active App, active org) apply at all — MCP yes, GraphQL no. */
+  ambient: boolean;
+  /** The active organization, already resolved by the Phase 1 ladder (for `global`). */
+  activeOrg?: ActiveOrgResolution | null;
+}
+
+/**
+ * The search ladder (D-2026-09-13-002): a scope named in the call › the
+ * session's active scope › the active App (`app`) › the active organization
+ * (`global`) › the user-owned view. Returns `null` when nothing applies (a
+ * GraphQL call that named nothing keeps its pre-spec-049 semantics — the
+ * caller's accessible set, optionally org-narrowed — so the portal's and the
+ * CLI's existing results do not change under them from a flag they never
+ * passed, which is the surprise `cor:acl:020:03` rule 5 names).
+ *
+ * Every named scope is intersected with the caller's access (S2) — a lens
+ * never grants (D-004) — and the dropped count travels in the result for the
+ * envelope. Refuses with `ORG_REQUIRED` (member list attached) when `global`
+ * is asked for and the organization is ambiguous, and with
+ * `SCOPE_NAME_AMBIGUOUS` / `NOT_FOUND` for a name that resolves to several or
+ * to nothing the caller may read.
+ */
+export async function resolveSearchScope(
+  ctx: Context,
+  args: ResolveSearchScopeArgs,
+): Promise<SearchScopeResolution | null> {
+  const named = args.scopeArg?.trim() || null;
+
+  // ── Rung 1: named in the call ──
+  if (named) {
+    if (named === BUILTIN_SCOPE_GLOBAL) return globalView(ctx, args.activeOrg ?? null, 'call');
+    if (named === BUILTIN_SCOPE_APP) {
+      if (!args.appId) {
+        throw new GraphQLError('scope "app" needs an App context: pass appRef (GraphQL) or select an App (MCP).', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      return appView(ctx, args.appId, 'call');
+    }
+    let scope: Scope | null = null;
+    if (SCOPE_NAME_RE.test(named) && !(await ctx.db.scope.findFirst({ where: { id: named }, select: { id: true } }))) {
+      // A bare NAME, unique only per owner — resolved in the App's context.
+      if (!args.appId) {
+        throw new GraphQLError(`Resolving scope "${named}" by name needs an App context: pass appRef (GraphQL) or select an App (MCP), or pass the scope id.`, {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      const r = await resolveScopeByNameInApp(ctx, named, args.appId);
+      if (r.ambiguousAmong.length) {
+        throw new GraphQLError(
+          `"${named}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass the scope id to choose one: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
+          { extensions: { code: 'SCOPE_NAME_AMBIGUOUS', candidates: r.ambiguousAmong.map((s) => s.id) } },
+        );
+      }
+      scope = r.winner;
+    } else {
+      const row = await ctx.db.scope.findFirst({ where: { id: named, deletedAt: null } });
+      scope = row && (await canReadScope(ctx, row)) ? row : null;
+    }
+    if (!scope) {
+      throw new GraphQLError(`No readable scope matches "${named}".`, { extensions: { code: 'NOT_FOUND' } });
+    }
+    return scopeView(ctx, scope, 'call');
+  }
+
+  if (!args.ambient) return null;
+
+  // ── Rung 2: the session's active scope, re-authorized ──
+  if (args.storedScopeId) {
+    const row = await ctx.db.scope.findFirst({ where: { id: args.storedScopeId, deletedAt: null } });
+    if (row && (await canReadScope(ctx, row))) return scopeView(ctx, row, 'session');
+  }
+
+  // ── Rung 3: the active App ⇒ `app` ──
+  if (args.appId) return appView(ctx, args.appId, 'active-app');
+
+  // ── Rungs 4/5: the active organization ⇒ `global`, or the user-owned view ──
+  return globalView(ctx, args.activeOrg ?? null, 'active-org');
+}
+
+async function scopeView(ctx: Context, scope: Scope, source: SearchScopeResolution['source']): Promise<SearchScopeResolution> {
+  const ex = await explainScope(ctx, scope.id);
+  let ownerUrn: string | null = null;
+  if (scope.appId) ownerUrn = (await ctx.db.app.findUnique({ where: { id: scope.appId }, select: { urn: true } }))?.urn ?? null;
+  else if (scope.agentId) ownerUrn = (await ctx.db.agent.findUnique({ where: { id: scope.agentId }, select: { urn: true } }))?.urn ?? null;
+  else if (scope.organizationId) ownerUrn = (await ctx.db.organization.findUnique({ where: { id: scope.organizationId }, select: { urn: true } }))?.urn ?? null;
+  return {
+    kind: 'scope',
+    source,
+    label: scope.name,
+    ownerUrn,
+    memoryIds: ex.memoryIds,
+    orgScopeId: null,
+    droppedCount: ex.droppedCount,
+  };
+}
+
+async function appView(ctx: Context, appId: string, source: SearchScopeResolution['source']): Promise<SearchScopeResolution> {
+  const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { urn: true } });
+  const listed = await appScopeMemoryIds(ctx.db, appId);
+  const accessible = await getAccessibleMemoryIds(ctx);
+  const { kept, droppedIds } = narrowToAccessible(listed, accessible === null ? 'unrestricted' : new Set(accessible));
+  return {
+    kind: 'app',
+    source,
+    label: app?.urn ?? appId,
+    ownerUrn: app?.urn ?? null,
+    memoryIds: kept,
+    orgScopeId: null,
+    droppedCount: droppedIds.length,
+  };
+}
+
+async function globalView(
+  ctx: Context,
+  activeOrg: ActiveOrgResolution | null,
+  source: SearchScopeResolution['source'],
+): Promise<SearchScopeResolution> {
+  // Both views MATERIALISE their list (Copilot on PR #1161): the envelope's
+  // `memoryUrns` must say what was searched, and a null "no narrowing" would
+  // have labelled the caller's ENTIRE accessible set (public memories included)
+  // as "user-owned". cor:api:100 — the user-owned view is the caller's own
+  // memories; the org view is the org's readable memories.
+  if (!activeOrg || activeOrg.kind === 'user-owned') {
+    const accessible = await getAccessibleMemoryIds(ctx);
+    const own = ctx.userId
+      ? (
+          await ctx.db.memory.findMany({
+            where: {
+              deletedAt: null,
+              class: { not: 'system' }, // the broad-search default, kept on the materialised path
+              ...(accessible === null ? {} : { id: { in: accessible } }),
+              OR: [{ ownerUserId: ctx.userId }, { class: { in: ['personal', 'private'] }, userId: ctx.userId }],
+            },
+            orderBy: { createdAt: 'asc' },
+            select: { id: true },
+          })
+        ).map((m) => m.id)
+      : [];
+    return { kind: 'user-owned', source, label: 'user-owned memories', ownerUrn: null, memoryIds: own, orgScopeId: null, droppedCount: 0 };
+  }
+  if (activeOrg.kind === 'required') {
+    throw new GraphQLError(
+      activeOrg.reason === 'named_not_member'
+        ? 'The named organization is not one you are a member of.'
+        : `You belong to ${activeOrg.memberOrgIds.length} organizations and none is active: name one (orgId), select one (hadron_set_active_org), or select an App.`,
+      { extensions: { code: 'ORG_REQUIRED', memberOrgIds: activeOrg.memberOrgIds } },
+    );
+  }
+  const org = await ctx.db.organization.findUnique({ where: { id: activeOrg.organizationId }, select: { urn: true } });
+  // The org view as findNodes' orgId narrowing computes it: the accessible set
+  // ∩ the organization's memories — materialised for the envelope.
+  const accessible = await getAccessibleMemoryIds(ctx);
+  const orgMemoryIds = (
+    await ctx.db.memory.findMany({
+      where: {
+        deletedAt: null,
+        class: { not: 'system' }, // the broad-search default, kept on the materialised path
+        organizationId: activeOrg.organizationId,
+        ...(accessible === null ? {} : { id: { in: accessible } }),
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    })
+  ).map((m) => m.id);
+  return {
+    kind: 'global',
+    source,
+    label: org?.urn ?? activeOrg.organizationId,
+    ownerUrn: org?.urn ?? null,
+    memoryIds: orgMemoryIds,
+    orgScopeId: activeOrg.organizationId,
+    droppedCount: 0,
+  };
+}
+
+/**
+ * The GraphQL entry to the ladder: a scope NAMED in the call, with the App
+ * context from `appRef` (participant-gated — a foreign App reads the same as
+ * no App) and the organization from `orgId` for `global`. No ambient rungs:
+ * GraphQL has no session state for a user principal; an App-key credential IS
+ * its App. Shared by `findNodes` and `globalSearch` so the two cannot drift.
+ */
+export async function resolveNamedScopeForQuery(
+  ctx: Context,
+  scopeArg: string,
+  appRef: string | null,
+  orgId: string | null,
+): Promise<SearchScopeResolution> {
+  let appId: string | null = ctx.appId ?? null;
+  if (appRef) {
+    // The same gate name resolution and the list use: a foreign or unknown App
+    // is no context, with no tell between the two.
+    let candidate: string | null = null;
+    try {
+      ({ id: candidate } = await resolveAppRef(ctx.db, appRef.trim()));
+    } catch {
+      candidate = null;
+    }
+    appId = candidate ? ((await appContextIfReadable(ctx, candidate))?.id ?? null) : null;
+  }
+  let activeOrg: ActiveOrgResolution | null = null;
+  if (ctx.userId) {
+    let namedOrgId: string | null = null;
+    if (orgId) {
+      try {
+        ({ id: namedOrgId } = await resolveOrgRef(ctx.db, orgId));
+      } catch {
+        // An explicit org that names nothing is a FINAL refusal, not a fall
+        // through to the single membership — that would answer a different
+        // organization's question with plausible rows (Codex on PR #1161). A
+        // nonexistent org reads exactly like a foreign one.
+        activeOrg = { kind: 'required', reason: 'named_not_member', memberOrgIds: [] };
+      }
+    }
+    if (!activeOrg) {
+      activeOrg = await resolveActiveOrg(ctx.db, {
+        userId: ctx.userId,
+        namedOrgId,
+        activeAppId: appId,
+        restrictToOrgId: ctx.impersonation?.orgId,
+      });
+    }
+  } else if (ctx.appId) {
+    const app = await ctx.db.app.findUnique({ where: { id: ctx.appId }, select: { organizationId: true } });
+    activeOrg = app?.organizationId ? { kind: 'org', organizationId: app.organizationId, source: 'app' } : { kind: 'user-owned' };
+  }
+  const r = await resolveSearchScope(ctx, { scopeArg, appId, ambient: false, activeOrg });
+  // Unreachable: a named scope always resolves or throws.
+  if (!r) throw new GraphQLError(`No readable scope matches "${scopeArg}".`, { extensions: { code: 'NOT_FOUND' } });
+  return r;
+}
+
+/** The `scope_narrowed` degrade code, appended to an envelope's comma-separated set. */
+export const SCOPE_NARROWED = 'scope_narrowed';
+
+export function mergeDegraded(existing: string | null | undefined, extra: string | null): string | null {
+  const set = [existing, extra].filter((s): s is string => !!s).flatMap((s) => s.split(','));
+  return set.length ? [...new Set(set)].join(',') : null;
+}
+
+/** The GraphQL / MCP projection of a resolution: URNs only for readable memories. */
+export async function scopeInfoOf(ctx: Context, r: SearchScopeResolution) {
+  const memoryUrns = r.memoryIds
+    ? (await ctx.db.memory.findMany({ where: { id: { in: r.memoryIds } }, select: { id: true, urn: true } }))
+        .sort((a, b) => r.memoryIds!.indexOf(a.id) - r.memoryIds!.indexOf(b.id))
+        .map((m) => m.urn)
+    : [];
+  return { kind: r.kind, source: r.source, label: r.label, ownerUrn: r.ownerUrn, memoryUrns, droppedCount: r.droppedCount };
 }

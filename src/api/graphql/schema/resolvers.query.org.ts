@@ -2,6 +2,8 @@
 import { parseUrnInput } from '../../../lib/urn.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+// Spec 049 Phase 3 — the search ladder's GraphQL entry + disclosure envelope.
+import { resolveNamedScopeForQuery, scopeInfoOf, SCOPE_NARROWED, type SearchScopeResolution } from '../../../lib/scopes.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -244,9 +246,11 @@ export const orgQueries = {
         query,
         entityTypes,
         fields,
-        orgId,
+        orgId: orgIdArg,
         limit,
         offset,
+        scope,
+        appRef,
       }: {
         query: string;
         entityTypes?: SearchEntityType[] | null;
@@ -254,9 +258,21 @@ export const orgQueries = {
         orgId?: string | null;
         limit?: number | null;
         offset?: number | null;
+        /** Spec 049 Phase 3 — a scope named in the call (see findNodes). */
+        scope?: string | null;
+        appRef?: string | null;
       },
       ctx: Context,
     ) => {
+      // Spec 049 Phase 3 — a named scope narrows the Memory + Node slices to
+      // the scope's memories (already ∩ access, S2); `global` becomes the
+      // organization narrowing below. Nothing else changes; omitted ⇒ pre-049.
+      let orgId = orgIdArg;
+      let scopeRes: SearchScopeResolution | null = null;
+      if (scope != null && scope.trim() !== '') {
+        scopeRes = await resolveNamedScopeForQuery(ctx, scope, appRef ?? null, orgId ?? null);
+        if (scopeRes.kind === 'global') orgId = scopeRes.orgScopeId;
+      }
       // Build the access principal from ctx using the SAME gates as the
       // per-kind queries, so a global hit can never reach something the caller
       // couldn't open directly. getAccessibleMemoryIds already carves out other
@@ -285,7 +301,14 @@ export const orgQueries = {
         } catch {
           return { hits: [], total: 0, degraded: [] };
         }
-        if (!callerOrgIds.includes(resolvedOrgId)) {
+        // An App key's organization is its credential (cor:api:100): it may
+        // narrow to its OWN App's org, as findNodes already allows — the two
+        // scoped surfaces must agree (Codex on PR #1161).
+        let appKeyOrgId: string | null = null;
+        if (!ctx.userId && ctx.appId) {
+          appKeyOrgId = (await ctx.db.app.findUnique({ where: { id: ctx.appId }, select: { organizationId: true } }))?.organizationId ?? null;
+        }
+        if (!callerOrgIds.includes(resolvedOrgId) && appKeyOrgId !== resolvedOrgId) {
           return { hits: [], total: 0, degraded: [] };
         }
         orgIds = [resolvedOrgId];
@@ -295,7 +318,9 @@ export const orgQueries = {
       const principal: SearchPrincipal = {
         viewerUserId: ctx.userId ?? null,
         isPlatformAdmin,
-        accessibleMemoryIds,
+        // A scope's list is already the caller's readable subset of it (S2), so
+        // handing it over as the accessible set narrows and never widens.
+        accessibleMemoryIds: scopeRes?.memoryIds ?? accessibleMemoryIds,
         orgIds,
         // #609: the caller's OWN member orgs — the Organization slice uses this
         // so an admin still finds a hidden org they belong to.
@@ -303,7 +328,13 @@ export const orgQueries = {
         orgScopeId,
         impersonationOrgId: ctx.impersonation?.orgId ?? null,
       };
-      return runGlobalSearch(ctx.db, { query, entityTypes, fields, limit, offset }, principal);
+      const res = await runGlobalSearch(ctx.db, { query, entityTypes, fields, limit, offset }, principal);
+      if (!scopeRes) return res;
+      return {
+        ...res,
+        scope: await scopeInfoOf(ctx, scopeRes),
+        degraded: scopeRes.droppedCount > 0 ? [...res.degraded, SCOPE_NARROWED] : res.degraded,
+      };
     },
 
     me: async (_: unknown, __: unknown, ctx: Context) => {

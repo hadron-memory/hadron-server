@@ -175,11 +175,14 @@ import {
   saveActiveApp,
   saveActiveMemory,
   saveActiveOrg,
+  saveActiveScope,
 } from '../lib/mcpSessionState.js';
 // Spec 049 Phase 1 — the active-organization ladder (D-2026-09-13-003).
-import { resolveActiveOrg } from '../lib/auth/activeOrg.js';
+import { resolveActiveOrg, type ActiveOrgResolution } from '../lib/auth/activeOrg.js';
 // Spec 049 Phase 2 — the scope tools translate resolver refusals by their code.
 import { GraphQLError as ScopeGraphQLError } from 'graphql';
+// Spec 049 Phase 3 — the search ladder on MCP.
+import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchScopeResolution } from '../lib/scopes.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 
@@ -247,6 +250,8 @@ export function createTestableMcpServer(
     restoredMemoryUrn?: string;
     /** Spec 049 Phase 1 — a re-authorized explicit active-org selection, as the boundary restores it. */
     restoredOrgId?: string;
+    /** Spec 049 Phase 3 — a re-authorized active-scope selection, as the boundary restores it. */
+    restoredScopeId?: string;
   },
 ): TestableMcpServer {
   const server = createMcpServerInstance(
@@ -258,6 +263,7 @@ export function createTestableMcpServer(
       clientKey: opts?.clientKey,
       restoredMemoryUrn: opts?.restoredMemoryUrn,
       restoredOrgId: opts?.restoredOrgId,
+      restoredScopeId: opts?.restoredScopeId,
     },
   );
   const tools = (server as unknown as {
@@ -1052,6 +1058,8 @@ export function createMcpServerInstance(
     restoredMemoryUrn?: string;
     /** Spec 049 Phase 1 — an already-re-authorized explicit active-org selection to start from. */
     restoredOrgId?: string;
+    /** Spec 049 Phase 3 — an already-re-authorized active-scope selection to start from. */
+    restoredScopeId?: string;
   } = {},
 ): McpServer {
   /**
@@ -1109,6 +1117,64 @@ export function createMcpServerInstance(
   // consulted when neither applies. Seeded from the client's durable selection
   // (re-authorized at the boundary) like the memory above; undefined otherwise.
   let activeOrgId: string | undefined = opts.restoredOrgId;
+
+  // Spec 049 Phase 3 — the session's ACTIVE SCOPE (`hadron_set_active_scope`):
+  // rung 2 of the search ladder, outranked only by a scope named in the call.
+  // Seeded from the client's durable selection (re-authorized at the boundary).
+  let activeScopeId: string | undefined = opts.restoredScopeId;
+
+  /**
+   * The MCP search ladder (D-2026-09-13-002): a scope named in the call › the
+   * session's active scope › the active App (`app`) › the active organization
+   * (`global`) › the user-owned view.
+   *
+   * An EXPLICIT memory selector in the call (memoryUrn / memoryUrns /
+   * allMemories / parentRel) is a per-call choice and outranks the AMBIENT
+   * rungs — a caller who named a memory must not have an ambient default
+   * silently shrink it to nothing (`cor:acl:020:03` rule 5's surprise, and the
+   * `hadron_find_nodes(memoryUrn: …)` call every project's CLAUDE.md makes) —
+   * but a scope NAMED in the same call still applies and intersects.
+   */
+  const mcpSearchScope = async (
+    scopeArg: string | undefined,
+    hasExplicitSelector: boolean,
+  ): Promise<SearchScopeResolution | null> => {
+    if (!scopeArg && hasExplicitSelector) return null;
+    // A pure App key's organization is its credential (cor:api:100) — the same
+    // answer hadron_server_info gives it — so `global` resolves to it rather
+    // than to the user-owned view (Codex + Copilot on PR #1161).
+    let activeOrg: ActiveOrgResolution | null = null;
+    if (auth.userId && !auth.impersonation) {
+      activeOrg = await currentActiveOrg();
+    } else if (auth.appId && !auth.userId) {
+      const app = await db.app.findUnique({ where: { id: auth.appId }, select: { organizationId: true } });
+      activeOrg = app?.organizationId ? { kind: 'org', organizationId: app.organizationId, source: 'app' } : { kind: 'user-owned' };
+    }
+    return resolveSearchScope(scopeCtx(), {
+      scopeArg,
+      appId: auth.appId ?? null,
+      storedScopeId: activeScopeId ?? null,
+      ambient: true,
+      activeOrg,
+    });
+  };
+
+  /** The `scope:` line every scoped search result starts with (plan §2 S3). */
+  const scopeNoteLine = (r: SearchScopeResolution): string => {
+    const what =
+      r.kind === 'scope'
+        ? `scope "${r.label}"${r.ownerUrn ? ` (owned by ${r.ownerUrn})` : ''}`
+        : r.kind === 'app'
+          ? `app ${safeEmitEntityUrnV2('app', r.label)} — its attached memories`
+          : r.kind === 'global'
+            ? `global — organization ${safeEmitEntityUrnV2('org', r.label)}`
+            : 'your user-owned memories (no organization)';
+    const dropped =
+      r.droppedCount > 0
+        ? ` — ${r.droppedCount} ${r.droppedCount === 1 ? 'memory' : 'memories'} in this scope are not readable by you and were dropped. [degraded:scope_narrowed]`
+        : '';
+    return `scope: ${what} (via ${r.source}). Pass scope: "global" for your whole organization, or a scope id / name.${dropped}`;
+  };
 
   /**
    * Resolve the caller's active organization by the shared ladder, with this
@@ -1562,8 +1628,9 @@ export function createMcpServerInstance(
         .optional()
         .describe('Force these fields (overrides the smart-sniff). Omit to auto-detect.'),
       limit: z.number().optional().describe('Max results (default 50, max 200).'),
+      scope: z.string().optional().describe('Spec 049: run the memory + node slices under a named scope (a scope id / name, "app", or "global"). Omitted: the ladder applies (active scope › active App › active organization) and the result says which.'),
     },
-    async ({ query, entityTypes, fields, limit }) => {
+    async ({ query, entityTypes, fields, limit, scope }) => {
       if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
 
       // createTestableMcpServer bypasses zod — normalize args defensively.
@@ -1580,12 +1647,22 @@ export function createMcpServerInstance(
       // non-admins, and the #609 hidden-org carve-out for admins.
       const memberOrgIds = auth.userId ? await getMemberOrgIds(db, auth.userId) : [];
       const orgIds = isPlatformAdmin ? null : memberOrgIds;
+      // Spec 049 Phase 3 — the ladder narrows the memory + node slices; a
+      // scope's list is already ∩ access (S2), so handing it over narrows only.
+      let scopeRes: SearchScopeResolution | null = null;
+      try {
+        scopeRes = await mcpSearchScope(scope, false);
+      } catch (e) {
+        if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
+        throw e;
+      }
       const principal: SearchPrincipal = {
         viewerUserId: auth.userId ?? null,
         isPlatformAdmin,
-        accessibleMemoryIds,
-        orgIds,
+        accessibleMemoryIds: scopeRes?.memoryIds ?? accessibleMemoryIds,
+        orgIds: scopeRes?.kind === 'global' && scopeRes.orgScopeId ? [scopeRes.orgScopeId] : orgIds,
         viewerOrgIds: memberOrgIds,
+        orgScopeId: scopeRes?.kind === 'global' ? scopeRes.orgScopeId : null,
       };
 
       const { hits, degraded } = await globalSearch(
@@ -1594,11 +1671,12 @@ export function createMcpServerInstance(
         principal,
       );
 
+      const scopeNote = scopeRes ? `${scopeNoteLine(scopeRes)}\n\n` : '';
       const note = degraded.length
         ? `\n\n${degraded.map((d) => `[degraded] ${d}`).join('\n')}`
         : '';
       if (hits.length === 0) {
-        return textResult(`No results for "${q}".${note}`);
+        return textResult(`${scopeNote}No results for "${q}".${note}`);
       }
       const lines = hits.map((h) => {
         const label = h.urn ?? h.id;
@@ -1606,7 +1684,7 @@ export function createMcpServerInstance(
         return `- [${h.entityType}] **${label}**${name} (matched ${h.matchedField}, score ${h.score.toFixed(2)})`;
       });
       return textResult(
-        `${hits.length} result${hits.length === 1 ? '' : 's'} for "${q}":\n\n${lines.join('\n')}${note}`,
+        `${scopeNote}${hits.length} result${hits.length === 1 ? '' : 's'} for "${q}":\n\n${lines.join('\n')}${note}`,
       );
     },
   );
@@ -2323,6 +2401,45 @@ export function createMcpServerInstance(
     },
   );
 
+  // ── hadron_set_active_scope (spec 049 Phase 3, D-2026-09-13-002) ────────────
+
+  server.tool(
+    'hadron_set_active_scope',
+    'Set — or with clear:true, drop — the ACTIVE SCOPE for this client (spec 049): the named search scope hadron_find_nodes / hadron_search run under when the call names no scope and no memory. Rung 2 of the ladder: a scope named in the call › this › the active App (`app`, its attached memories) › the active organization (`global`) › your user-owned memories. Persisted per client instance like hadron_set_active_app and re-authorized on restore. A scope never grants: results are its memories ∩ what you may read, and every result says which scope it ran under.',
+    {
+      scope: z.string().optional().describe('A scope id, or a scope NAME resolved in the active App\'s context (App › Agent › organization). See hadron_list_scopes.'),
+      clear: z.boolean().optional().describe('true = drop the selection; the ladder falls through to the active App / organization.'),
+    },
+    async ({ scope, clear }) => {
+      if (!auth.userId) return textResult('Not authenticated — an App key\'s scope is its App.');
+      if (auth.impersonation) return textResult('Not available in an impersonation session.');
+      const ctx = scopeCtx();
+      if (!scope) {
+        if (!clear) return textResult('[bad_user_input] Pass scope (an id or a name), or clear: true.');
+        activeScopeId = undefined;
+        await saveActiveScope(db, auth, clientKey, null);
+        const now = await mcpSearchScope(undefined, false).catch(() => null);
+        return textResult(`Active scope cleared.${now ? ` Searches now run under: ${scopeNoteLine(now)}` : ''}`);
+      }
+      let row = await db.scope.findFirst({ where: { id: scope.trim(), deletedAt: null } });
+      if (!row && auth.appId) {
+        const r = await resolveScopeByNameInApp(ctx, scope.trim(), auth.appId);
+        if (r.ambiguousAmong.length) {
+          return textResult(`[scope_name_ambiguous] "${scope}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass an id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`);
+        }
+        row = r.winner;
+      }
+      if (!row || !(await canReadScope(ctx, row))) {
+        return textResult(`[not_found] No readable scope matches "${scope}"${auth.appId ? '' : ' — a bare name needs an active App; pass the scope id or select an App first'}. See hadron_list_scopes.`);
+      }
+      activeScopeId = row.id;
+      await saveActiveScope(db, auth, clientKey, row.id);
+      mcpLog('info', 'active_scope_set', { userId: auth.userId, mcpSessionId: getSessionId(), scopeId: row.id });
+      const now = await mcpSearchScope(undefined, false);
+      return textResult(`Active scope set to "${row.name}" (id ${row.id}) and stored for this client.${now ? `\n${scopeNoteLine(now)}` : ''}`);
+    },
+  );
+
   // ── hadron_create_parent_node ───────────────────────────────────────────────────
 
   server.tool(
@@ -2425,6 +2542,7 @@ export function createMcpServerInstance(
       allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
       isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
       objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
+      scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
       limit: z.number().optional().describe('Max results (default 10 for a query; 50 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
       minScore: z.number().optional().describe('Absolute relevance floor: drop hits scoring below this. Scores are NOT comparable across modes — keyword ranks run roughly 0..a-few, vector cosine similarity is 0..1, hybrid is a small RRF fraction — so read the (score …) values in a first unfiltered call, then set a floor for the mode in use. Prefer this (or a narrower query) over reading a long tail of weak hits. Returns fewer hits, never weaker ones; does not apply to survey mode.'),
@@ -2432,7 +2550,7 @@ export function createMcpServerInstance(
       granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
       where: z.record(z.string(), z.unknown()).optional().describe('Structured predicate over a node\'s `properties`/`data` JSONB (#719) — filters, then the chosen mode ranks the survivors (composes with keyword/vector/hybrid/regex and survey/browse). A node is EITHER a branch (exactly one of `and`/`or`/`not`) OR a leaf: a `path` (array of JSON keys, e.g. ["sourceKind"]) plus exactly ONE operator — eq | ne | in | lt | lte | gt | gte | between | exists | contains. `field`: "properties" (default) | "data". `as`: "text" (default) | "number" | "datetime" | "boolean" — number/datetime route through DB guards so unparseable values drop the row (never an error); `contains` is jsonb @> containment. Bounded: depth ≤ 4, ≤ 32 leaves, path ≤ 8. Example: {"and":[{"path":["sourceKind"],"eq":"substack"},{"path":["extractedAt"],"as":"datetime","gte":"2026-07-04T00:00:00Z"}]}'),
     },
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, objectType, brief, limit, minScore, expand, granularity, where }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, objectType, brief, limit, minScore, expand, granularity, where, scope }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -2629,6 +2747,29 @@ export function createMcpServerInstance(
         organizationId: auth.organizationId ?? undefined,
       };
 
+      // Spec 049 Phase 3 — the ladder. An explicit selector above outranks the
+      // ambient rungs; a scope named in the call intersects with it.
+      let scopeRes: SearchScopeResolution | null = null;
+      let scopeOrgId: string | undefined;
+      try {
+        scopeRes = await mcpSearchScope(scope, memSelectors.length > 0 || !!trimmedParentRel);
+      } catch (e) {
+        if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
+        throw e;
+      }
+      if (scopeRes?.memoryIds) {
+        const inScope = new Set(scopeRes.memoryIds);
+        filterMemoryIds = filterMemoryIds ? filterMemoryIds.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
+        if (filterMemoryIds.length === 0) {
+          return textResult(`${scopeNoteLine(scopeRes)}\n\nFound 0 node(s) — ${memSelectors.length ? 'the memories you named are outside this scope' : 'this scope lists no memory you can read'}.`);
+        }
+      } else if (scopeRes?.kind === 'global') {
+        scopeOrgId = scopeRes.orgScopeId ?? undefined;
+      }
+      // Every scoped return below — passages, the vector diagnostics, the node
+      // list — starts with the disclosure (Codex + Copilot on PR #1161).
+      const scopePrefix = scopeRes ? `${scopeNoteLine(scopeRes)}\n\n` : '';
+
       let result: Awaited<ReturnType<typeof resolvers.Query.findNodes>>;
       try {
         result = await resolvers.Query.findNodes(
@@ -2638,6 +2779,7 @@ export function createMcpServerInstance(
             // (subsumes the old matchesQuery "*" / "" path).
             query: isSurvey ? undefined : safeQuery,
             mode: effectiveMode,
+            orgId: scopeOrgId,
             filter: {
               memoryIds: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,
@@ -2671,7 +2813,7 @@ export function createMcpServerInstance(
       // name is shown, matching the pre-delegation output.
       if (granularity === 'chunk') {
         const passages = result.passages ?? [];
-        if (passages.length === 0) return textResult('Found 0 passage(s).');
+        if (passages.length === 0) return textResult(`${scopePrefix}Found 0 passage(s).`);
         const parentIds = [...new Set(passages.map((p) => p.parentNodeId))];
         const parentNodes = await db.node.findMany({
           where: { id: { in: parentIds } },
@@ -2690,7 +2832,7 @@ export function createMcpServerInstance(
           const bodyLines = p.text.split(/\r?\n/).map((l) => `  ${l}`);
           lines.push([header, ...bodyLines].join('\n'));
         }
-        return textResult(`Found ${lines.length} passage(s):\n\n${lines.join('\n')}`);
+        return textResult(`${scopePrefix}Found ${lines.length} passage(s):\n\n${lines.join('\n')}`);
       }
 
       // ── Diagnostic states → text notes (FR-021) ────────────────────────────
@@ -2699,7 +2841,7 @@ export function createMcpServerInstance(
       // note is prepended to the keyword-only results.
       if (result.reason === 'no_vector_index') {
         return textResult(
-          'Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).',
+          `${scopePrefix}Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).`,
         );
       }
       if (result.reason === 'embedding_unavailable') {
@@ -2707,7 +2849,7 @@ export function createMcpServerInstance(
         // one code, so the note names both causes (the pre-delegation surface
         // had separate messages).
         return textResult(
-          'Note: vector search is unavailable — no embedding endpoint is configured or embed() failed. [embedding_unavailable]\n\nFound 0 node(s).',
+          `${scopePrefix}Note: vector search is unavailable — no embedding endpoint is configured or embed() failed. [embedding_unavailable]\n\nFound 0 node(s).`,
         );
       }
       // `degraded` may carry MULTIPLE comma-separated flags (PR-482 — e.g.
@@ -2737,6 +2879,8 @@ export function createMcpServerInstance(
           'Note: no node matched ALL of your terms (keyword search ANDs them), so the search was relaxed to ANY term (OR). These hits each match at least one term — a single missing word likely zeroed the strict search; drop or change it to narrow back down. [degraded:and_relaxed_to_or]',
         );
       }
+      // Spec 049: every scoped result says which scope it ran under, first.
+      if (scopeRes) noteLines.unshift(scopeNoteLine(scopeRes));
       const note: string | null = noteLines.length ? noteLines.join('\n') : null;
 
       // ── Node rendering ─────────────────────────────────────────────────────
@@ -7796,7 +7940,13 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     auth,
     () => transport.sessionId,
     cachedAppResolution,
-    { isReconnect, clientKey, restoredMemoryUrn: restored.memoryUrn, restoredOrgId: restored.activeOrgId },
+    {
+      isReconnect,
+      clientKey,
+      restoredMemoryUrn: restored.memoryUrn,
+      restoredOrgId: restored.activeOrgId,
+      restoredScopeId: restored.activeScopeId,
+    },
   );
 
   transport.onclose = () => {
