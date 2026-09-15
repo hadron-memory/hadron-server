@@ -144,6 +144,7 @@ async function handleWebhook(db: PrismaClient, req: Request, res: Response): Pro
         ...(callbackUrl ? { __callbackUrl: callbackUrl } : {}),
       },
       policy: webhook.policy,
+      scopeId: webhook.scopeId,
       createdBy: webhook.createdBy,
     });
     await db.agentWebhook.updateMany({ where: { id: webhook.id }, data: { lastCalledAt: new Date() } });

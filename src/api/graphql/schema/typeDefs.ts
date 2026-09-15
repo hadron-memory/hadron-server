@@ -3161,6 +3161,14 @@ export const typeDefs = `#graphql
     """
     actionsSpent: Int
     """
+    Spec 049 (D-2026-09-13-004): the scope this run carries, as YOU may read it —
+    the snapshot taken at mint (the trigger's scope, or a spawned parent's)
+    re-intersected with your access; memoryUrns lists what you may read of it
+    and droppedCount the rest. Null ⇒ the run carries no named scope and its
+    view is the App's attached memories ('app').
+    """
+    scope: SearchScopeInfo
+    """
     The token budget this run was MINTED with — budgetTokens is what REMAINS.
     NULL for runs minted before this was recorded, which is deliberate: 0 would
     render as 'no budget' rather than 'unknown'.
@@ -3287,6 +3295,8 @@ export const typeDefs = `#graphql
     agentId: ID
     "On-behalf-of user captured at creation; v1 only the creator themself."
     userId: ID
+    "Spec 049: the scope this trigger's runs carry (null ⇒ 'app')."
+    scopeId: ID
     name: String!
     "5-field cron for recurring schedules; null for one-shots (#510)."
     cron: String
@@ -3331,6 +3341,8 @@ export const typeDefs = `#graphql
     "Named AI config for this trigger (spec-036 walk override)."
     aiConfigName: String
     enabled: Boolean
+    "Spec 049 (D-2026-09-13-004): the scope this trigger's runs carry — a scope id, or a name resolved in the App's context (App › Agent › organization). Must be readable by you and resolvable in that App. Snapshotted onto each run at mint; omitted ⇒ the App's attached memories ('app')."
+    scopeRef: ID
   }
 
   input UpdateAgentScheduleInput {
@@ -3348,6 +3360,8 @@ export const typeDefs = `#graphql
     policy: JSON
     aiConfigName: String
     enabled: Boolean
+    "Spec 049: set the trigger's scope (id or name in the App's context); an empty string clears it back to 'app'."
+    scopeRef: ID
   }
 
   input TriggerAppRunInput {
@@ -3414,6 +3428,8 @@ export const typeDefs = `#graphql
     appId: ID!
     agentId: ID
     userId: ID
+    "Spec 049: the scope this trigger's runs carry (null ⇒ 'app')."
+    scopeId: ID
     name: String!
     argsSchema: JSON
     entryNodeUrn: String!
@@ -3455,6 +3471,8 @@ export const typeDefs = `#graphql
     policy: JSON
     aiConfigName: String
     enabled: Boolean
+    "Spec 049 (D-2026-09-13-004): the scope this webhook's runs carry — a scope id, or a name resolved in the App's context. Snapshotted onto each run at mint; omitted ⇒ 'app'."
+    scopeRef: ID
   }
 
   "One consumable ticket in the org ledger (cor:acl:050:04 tier 2)."

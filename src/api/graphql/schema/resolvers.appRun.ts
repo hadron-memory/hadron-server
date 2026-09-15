@@ -2,6 +2,8 @@
 // read surface (cor:api:120-shaped), manual trigger, and the kill switch.
 
 import { GraphQLError } from 'graphql';
+// Spec 049 Phase 3b — a trigger's scopeRef, gated and resolved in the App's context.
+import { resolveScopeForTrigger } from '../../../lib/scopes.js';
 import { generateId } from '../../../lib/id.js';
 import {
   mintAppRun,
@@ -112,6 +114,8 @@ export interface CreateAgentScheduleInput {
   eventData?: Record<string, unknown> | null;
   policy?: unknown;
   aiConfigName?: string | null;
+  /** Spec 049 Phase 3b — the trigger's scope (id, or a name in the App's context); update: '' clears. */
+  scopeRef?: string | null;
   enabled?: boolean | null;
 }
 
@@ -407,12 +411,16 @@ export const appRunMutations = {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
+    // Spec 049 Phase 3b: the trigger's scope — readable by the caller and owned
+    // by this App's context; snapshotted onto each run at mint.
+    const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
     return ctx.db.agentSchedule.create({
       data: {
         id: generateId(),
         organizationId: app.organizationId,
         appId: app.id,
         agentId,
+        scopeId,
         // v1: a schedule runs on behalf of its CREATOR or nobody — never a
         // third party (delegating another user's authority needs the rule
         // language; cor:agt:010:01 tunable).
@@ -474,6 +482,14 @@ export const appRunMutations = {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
+    // Spec 049: a ref sets the scope, an empty string clears it (⇒ `app`),
+    // omitted leaves it — the agentRef convention above.
+    const scopeId =
+      input.scopeRef === undefined || input.scopeRef === null
+        ? undefined
+        : input.scopeRef.trim() === ''
+          ? null
+          : await resolveScopeForTrigger(ctx, existing.appId, input.scopeRef);
     return ctx.db.agentSchedule.update({
       where: { id },
       data: {
@@ -487,6 +503,7 @@ export const appRunMutations = {
         ...(input.enabled != null ? { enabled: input.enabled } : {}),
         ...(input.runAsSelf != null ? { userId: resolveRunAsSelf(ctx, input.runAsSelf) } : {}),
         ...(agentId !== undefined ? { agentId } : {}),
+        ...(scopeId !== undefined ? { scopeId } : {}),
         updatedBy: ctx.userId ?? ctx.clientId ?? null,
       },
     });
@@ -560,6 +577,7 @@ export const appRunMutations = {
         policy?: unknown;
         aiConfigName?: string | null;
         enabled?: boolean | null;
+        scopeRef?: string | null;
       };
     },
     ctx: Context,
@@ -567,6 +585,7 @@ export const appRunMutations = {
     const app = await requireScheduleAdmin(ctx, input.appRef);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(input.name)) {
       throw new GraphQLError('Webhook name must be lowercase alphanumeric/dash, 1-64 chars.', {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -584,6 +603,7 @@ export const appRunMutations = {
         appId: app.id,
         agentId,
         userId: resolveRunAsSelf(ctx, input.runAsSelf),
+        scopeId,
         name: input.name,
         secret: generateWebhookSecret(),
         argsSchema: (input.argsSchema ?? undefined) as never,

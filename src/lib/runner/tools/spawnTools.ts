@@ -135,6 +135,8 @@ export const hadronSpawn: RunToolDef = {
             parentRunId: ctx.run.id,
             entryNodeUrn: processItem,
             eventData: { ...parentView, [itemKey]: item },
+            // Spec 049: a child inherits its parent's scope snapshot verbatim.
+            scopeSnapshot: ctx.run.scopeSnapshot,
             createdBy: `run:${ctx.run.id}`,
           });
           spawned++;

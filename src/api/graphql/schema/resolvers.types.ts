@@ -13,6 +13,8 @@ import {
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+// Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
+import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../lib/scopes.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
@@ -492,6 +494,15 @@ export const typeResolvers = {
       resolveRevisionEditor(ctx, [nv.approvedBy]),
   },
   AppRun: {
+    /**
+     * Spec 049 Phase 3b — the run's scope as the CALLER may read it: the mint
+     * snapshot ∩ the caller's current access (a lens never grants), or null
+     * when the run carries no named scope (its view is then `app`).
+     */
+    scope: async (r: { appId: string; scopeSnapshot: unknown }, _: unknown, ctx: Context) => {
+      if (parseRunScopeSnapshot(r.scopeSnapshot) === null) return null;
+      return scopeInfoOf(ctx, await resolveRunScope(ctx, r));
+    },
     // #696 — the computed hrn:apprun:<root>:<app>:<run-id> URN. Null for the
     // rare multi-segment App URN the flat shape can't express (compose throws →
     // served as null, never crashes the run audit surface).
