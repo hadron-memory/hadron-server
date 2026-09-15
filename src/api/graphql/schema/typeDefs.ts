@@ -1715,6 +1715,14 @@ export const typeDefs = `#graphql
     policy: JSON
     "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
     listedOnMarketplace: Boolean!
+    """
+    The literal prefix a task node in this org's memories is exported to disk
+    with as a Claude skill (e.g. 'hadron-', 'mm-'): stored per org, never
+    derived. Lowercase, trailing hyphen included, unique across orgs. Null =
+    not chosen; a client refuses to export from the org rather than guess. A
+    task in a user-owned memory has no org and takes the platform's 'hadron-'.
+    """
+    skillPrefix: String
     githubInstallationId: Int
     githubAppId: String
     hasGithubAppPrivateKey: Boolean!
@@ -6022,7 +6030,15 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateOrganization(id: ID!, name: String, urn: String, listedOnMarketplace: Boolean, policy: JSON): Organization!
+    updateOrganization(
+      id: ID!
+      name: String
+      urn: String
+      listedOnMarketplace: Boolean
+      policy: JSON
+      "The skill-export prefix: lowercase [a-z][a-z0-9]* plus a trailing hyphen (e.g. 'mm-'); unique across orgs (SKILL_PREFIX_TAKEN). Explicit null clears it; omitted preserves."
+      skillPrefix: String
+    ): Organization!
 
     """
     Soft-delete an Organization.
