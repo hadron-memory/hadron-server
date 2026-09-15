@@ -54,6 +54,7 @@ import {
   getAccessibleMemoryIds,
   clampListTake,
 } from './resolvers.helpers.js';
+import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
@@ -443,7 +444,7 @@ async function resolveSessionAuthor(
 ): Promise<{ workerId: string; name: string; sessionId: string; workerAppId: string; crossApp: boolean }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, endedAt: true },
+    select: { id: true, appId: true, userId: true, workerId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true },
   });
   if (!session) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -466,6 +467,19 @@ async function resolveSessionAuthor(
     throw new GraphQLError(
       `Session "${sessionRef}" has ended — its worker can no longer author messages through it.`,
       { extensions: { code: 'SESSION_ENDED' } },
+    );
+  }
+  // cor:agt:020:04's "active session" is the shared liveness predicate
+  // (cor:agt:020:11), not `endedAt` alone: since #1114 an open session
+  // outside its idle window is not ended, but nobody is driving it — and a
+  // GraphQL caller gets no MCP heartbeat (Copilot on PR #1169). The same
+  // predicate the bind refuses WORKER_TAKEN on and the roster reports.
+  const now = new Date();
+  const events = await loadLastEventBySession(ctx.db as never, [session.id]);
+  if (!isSessionLive(session, events.get(session.id), now)) {
+    throw new GraphQLError(
+      `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, so its worker cannot author through it. Drive the session (any team tool heartbeats it) or start a new one.`,
+      { extensions: { code: 'SESSION_NOT_LIVE' } },
     );
   }
   if (!session.workerId) {
@@ -615,6 +629,27 @@ const channelNotFound = (ref: string): GraphQLError =>
   new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'CHANNEL_NOT_FOUND', channelRef: ref } });
 
 /**
+ * The canonical memory-read boundary for the ONE principal shape it narrows
+ * below the team-chat audience: a pure App-key context carrying an end-user
+ * session, which `getAccessibleMemoryIds` hard-isolates to that session's
+ * memories — the team space is not among them, and the App-participant
+ * check alone would admit it (Codex P1 on PR #1169). Run as a POINT check
+ * (`onlyMemoryId`), never a materialised set (Copilot).
+ *
+ * Every OTHER shape is decided by `requireTeamChatAccess`, on purpose: the
+ * team-chat audience is `cor:acl:030:01`'s — AppMembers at any role, org
+ * CONTRIBUTOR+, the user-owned App's owner, and an impersonation read within
+ * its org — which is deliberately WIDER than the node-content gate for an
+ * App-class memory (an org CONTRIBUTOR who is not an AppMember reads the
+ * team chat and may not read its nodes). Both entry points run this.
+ */
+async function hostMemoryReadable(ctx: Context, memoryId: string): Promise<boolean> {
+  if (ctx.userId || !ctx.sessionId) return true;
+  const accessible = await getAccessibleMemoryIds(ctx, memoryId);
+  return accessible === null || accessible.includes(memoryId);
+}
+
+/**
  * Resolve a Channel ref to its host App and chat root — or "no match": a
  * missing Channel, a deleted one, and one whose host memory the caller may
  * not read all read identically (§8.6, no existence oracle). A Channel in a
@@ -648,8 +683,7 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   // not among them — and the App-participant check alone would admit it. A
   // Channel is addressed by id, so the host memory decides, as for every
   // other Channel read (§8.6).
-  const accessible = await getAccessibleMemoryIds(ctx);
-  if (accessible !== null && !accessible.includes(channel.memoryId)) throw channelNotFound(ref);
+  if (!(await hostMemoryReadable(ctx, channel.memoryId))) throw channelNotFound(ref);
   if (mode === 'post') await requireTeamChatAccess(ctx, app, 'post');
   return { channelId: channel.id, app, root: { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc } };
 }
@@ -1039,6 +1073,9 @@ export const teamChatQueries = {
 
     const root = await locateTeamChatRoot(ctx, appId);
     if (!root) return { items: [], total: 0 };
+    // One gate, two entry points: the convenience runs the same host-memory
+    // point check the Channel-addressed read runs (Copilot on PR #1169).
+    if (!(await hostMemoryReadable(ctx, root.memoryId))) return { items: [], total: 0 };
     return readChannelRoot(ctx, appId, root, args);
   },
 

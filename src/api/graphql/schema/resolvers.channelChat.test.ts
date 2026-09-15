@@ -159,3 +159,20 @@ describe('PR #1169 review — the memory boundary and the on-behalf-of user', ()
     expect(await db.node.count({ where: { memoryId: memA.id, loc: { startsWith: 'chats:release:messages:' } } })).toBe(0);
   });
 });
+
+describe('PR #1169 review, round 2 — liveness and the convenience read', () => {
+  it('an idle session cannot author (SESSION_NOT_LIVE); the team-chat convenience read is gated on the host memory too', async () => {
+    // A session untouched for longer than its idle window is open but nobody is driving it.
+    const stale = await db.session.create({
+      data: { id: generateId(), appId: appA.id, userId: admin.id, workerId: workerA.id, type: 'DEVELOPER', startedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) } as never,
+    });
+    await db.session.update({ where: { id: stale.id }, data: { updatedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) } });
+    await expect(M.createChannelMessage({}, { channelRef: release.id, body: 'x', sessionRef: stale.id }, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+    // The convenience read under an App-key context narrowed to an end-user session: empty, not the team space.
+    const session = await db.session.create({ data: { id: generateId(), appId: appA.id, type: 'CHATBOT', startedAt: new Date() } as never });
+    const endUser = { db, appId: appA.id, sessionId: session.id, roles: [] } as unknown as Context;
+    await M.createTeamChatMessage({}, { appRef: appA.urn, body: 'team hello' }, ctx(admin.id));
+    expect(await Q.teamChatMessages({}, { appRef: appA.urn }, endUser)).toEqual({ items: [], total: 0 });
+    expect((await Q.teamChatMessages({}, { appRef: appA.urn }, ctx(admin.id))).total).toBe(1);
+  });
+});
