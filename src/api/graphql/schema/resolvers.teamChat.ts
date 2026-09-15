@@ -51,6 +51,7 @@ import {
   isAppParticipant,
   requireSessionWriteAccess,
   requireMemoryWriteAccess,
+  getAccessibleMemoryIds,
   clampListTake,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
@@ -507,11 +508,22 @@ async function resolveSessionAuthor(
   const crossApp = worker.appId !== app.id;
   if (crossApp) {
     let driverMayWrite = false;
-    if (ctx.userId) {
+    // The on-behalf-of user is the SESSION's user, never the caller's:
+    // requireSessionWriteAccess lets a platform admin drive someone else's
+    // session, and the right to author elsewhere is that person's, with
+    // that person's effective rights — no admin bypass rides along (Codex
+    // P2 on PR #1169). A denial is the gate's typed refusal; anything else
+    // (a transient DB failure) is rethrown, never read as "not writable"
+    // (Copilot).
+    if (session.userId) {
       try {
-        await requireMemoryWriteAccess({ ...ctx, appId: undefined, sessionId: undefined }, hostMemoryId);
+        await requireMemoryWriteAccess(
+          { db: ctx.db, userId: session.userId, roles: [] } as unknown as Context,
+          hostMemoryId,
+        );
         driverMayWrite = true;
-      } catch {
+      } catch (e) {
+        if (!(e instanceof Error) || !/^(Forbidden|Unauthenticated)/.test(e.message)) throw e;
         driverMayWrite = false;
       }
     }
@@ -625,9 +637,19 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   // on a post, never "no match" — the Channel is known to them.
   try {
     await requireTeamChatAccess(ctx, app, 'read');
-  } catch {
-    throw channelNotFound(ref);
+  } catch (e) {
+    // Only the gate's refusal is "no match"; anything else is rethrown.
+    if (e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') throw channelNotFound(ref);
+    throw e;
   }
+  // AND the canonical memory-read boundary (Codex P1 on PR #1169): a pure
+  // App-key context carrying an end-user session is deliberately narrowed by
+  // getAccessibleMemoryIds to that session's memories — the team space is
+  // not among them — and the App-participant check alone would admit it. A
+  // Channel is addressed by id, so the host memory decides, as for every
+  // other Channel read (§8.6).
+  const accessible = await getAccessibleMemoryIds(ctx);
+  if (accessible !== null && !accessible.includes(channel.memoryId)) throw channelNotFound(ref);
   if (mode === 'post') await requireTeamChatAccess(ctx, app, 'post');
   return { channelId: channel.id, app, root: { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc } };
 }
@@ -699,6 +721,13 @@ async function postToChannelRoot(
   const createdBy = ctx.userId ?? null;
   let messageLoc: string | null = null;
   const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
+    // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
+    // deleteChannel takes this same key, so a delete that committed between
+    // resolving the target and acquiring it is seen here — a message is
+    // never appended under a tombstoned Channel, and its watermark never
+    // advanced.
+    const live = await tx.channel.findFirst({ where: { chatRootNodeId: root.id, deletedAt: null }, select: { id: true } });
+    if (!live) throw channelNotFound(root.loc);
     // replyToSeq is validated INSIDE the allocating transaction, under the
     // chat lock, so the target can't be soft-deleted out from under us and
     // a reply can never cite its own (still-uncommitted) seq.

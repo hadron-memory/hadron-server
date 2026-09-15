@@ -126,3 +126,36 @@ describe('Channel-addressed chat', () => {
     expect(home.authorAppId).toBeNull();
   });
 });
+
+describe('PR #1169 review — the memory boundary and the on-behalf-of user', () => {
+  it('an App-key context narrowed to an end-user session cannot read a Channel through the App-participant gate', async () => {
+    const memRelease = await db.memory.findUniqueOrThrow({ where: { id: memA.id } });
+    void memRelease;
+    // A pure App-key principal with an end-user session: getAccessibleMemoryIds
+    // narrows it to that session's memories; the team space is not among them.
+    const session = await db.session.create({ data: { id: generateId(), appId: appA.id, type: 'CHATBOT', startedAt: new Date() } as never });
+    const endUser = { db, appId: appA.id, sessionId: session.id, roles: [] } as unknown as Context;
+    await expect(Q.channelMessages({}, { channelRef: release.id }, endUser)).rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
+  });
+
+  it('cross-App rights are the SESSION user\'s, not the caller\'s: a platform admin driving a reader\'s session is refused', async () => {
+    // member (org READER, participant of A and B) drives Iris; a platform
+    // ADMIN posts through that session into B. The admin could write B's host
+    // memory; member may not — and it is member's authorship, so it refuses.
+    await db.appMember.create({ data: { appId: appB.id, userId: member.id, role: 'member' } });
+    const memberSession = await boundSession(member.id, appA.id, workerA.id);
+    const platformAdmin = { db, userId: admin.id, roles: ['ADMIN'] } as unknown as Context;
+    await expect(
+      M.createChannelMessage({}, { channelRef: teamB.id, body: 'as Iris', sessionRef: memberSession.id }, platformAdmin),
+    ).rejects.toMatchObject({ extensions: { code: 'CHANNEL_HOST_NOT_WRITABLE' } });
+  });
+
+  it('a Channel deleted between resolving the target and the append is never written', async () => {
+    // Simulated at the seam the race lands on: the append helper re-checks
+    // the Channel row LIVE under the lock, so a stale target cannot append.
+    const target = await db.channel.findUniqueOrThrow({ where: { id: release.id } });
+    await M.deleteChannel({}, { ref: release.id }, ctx(admin.id));
+    await expect(M.createChannelMessage({}, { channelRef: target.id, body: 'late' }, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
+    expect(await db.node.count({ where: { memoryId: memA.id, loc: { startsWith: 'chats:release:messages:' } } })).toBe(0);
+  });
+});

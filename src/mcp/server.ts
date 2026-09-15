@@ -6977,7 +6977,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (msg.mentions.length > 0) extras.push(`mentions: ${msg.mentions.map((m: string) => `@${m}`).join(', ')}`);
       if (msg.replyToSeq != null) extras.push(`in reply to #${msg.replyToSeq}`);
       if (msg.authorAppId) extras.push('cross-App post');
-      const ch = await db.channel.findUnique({ where: { id: channelRef.trim() }, select: { name: true, loc: true } });
+      // Display-only, best-effort: the message is already appended, so a
+      // failed lookup must not turn a successful post into an error the
+      // caller retries (Copilot on PR #1169).
+      const ch = await db.channel.findUnique({ where: { id: channelRef.trim() }, select: { name: true, loc: true } }).catch(() => null);
       return textResult(
         `Posted message #${msg.seq} in Channel ${ch ? `${ch.name} (${ch.loc})` : channelRef} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
       );
@@ -7048,7 +7051,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_post',
-    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must belong to this App and not be retired); omit it to post as yourself. Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
+    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must not be retired, and it authors here when its App is this one — or, on the `channel` path, when you may write the Channel\'s host memory (spec 049 item J; a cross-App post is marked); omit it to post as yourself. Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
     {
       body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
       replyToSeq: z.number().int().optional().describe('seq of the message this replies to (a replies-to edge is wired).'),
@@ -7057,7 +7060,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       channel: z.string().optional().describe('Spec 049: post into THIS Channel (id, from hadron_list_channels) instead of the App\'s default team chat. Item J: your worker authors there when its App is the Channel\'s, or when you may write the Channel\'s host memory.'),
     },
     async ({ body, replyToSeq, session, app, channel }) => {
-      if (channel) {
+      // Presence, not truthiness (Copilot on PR #1169): a supplied '' is a
+      // malformed Channel selector and resolves as CHANNEL_NOT_FOUND, never
+      // a silent fall-through to the default team chat.
+      if (channel !== undefined) {
         await heartbeatSession(session);
         return postToChannel(channel, body, replyToSeq ?? null, session ?? null);
       }
@@ -7142,7 +7148,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       channel: z.string().optional().describe('Spec 049: read THIS Channel (id, from hadron_list_channels) instead of the App\'s default team chat.'),
     },
     async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel }) => {
-      if (channel) {
+      // Presence, not truthiness (Copilot on PR #1169): a supplied '' is a
+      // malformed Channel selector and resolves as CHANNEL_NOT_FOUND, never
+      // a silent fall-through to the default team chat.
+      if (channel !== undefined) {
         await heartbeatSession(session);
         return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset });
       }
