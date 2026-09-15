@@ -34,6 +34,14 @@ export class OrganizationNotFoundError extends Error {
   }
 }
 
+/** Spec 049 Phase 2 — a scope ref (id) that resolves to no live Scope. */
+export class ScopeNotFoundError extends Error {
+  constructor(public ref: string) {
+    super(`SCOPE_NOT_FOUND: ${ref}`);
+    this.name = 'ScopeNotFoundError';
+  }
+}
+
 export class UserNotFoundError extends Error {
   constructor(public ref: string) {
     super(`USER_NOT_FOUND: ${ref}`);

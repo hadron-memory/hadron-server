@@ -128,7 +128,13 @@ import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
-import { OrganizationNotFoundError, WorkerNotFoundError } from '../lib/entityRef/errors.js';
+import {
+  AgentNotFoundError,
+  AppNotFoundError,
+  MemoryNotFoundError,
+  OrganizationNotFoundError,
+  WorkerNotFoundError,
+} from '../lib/entityRef/errors.js';
 import {
   renderWorkerContinuity,
   type RenderableContinuity,
@@ -142,7 +148,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
-import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
+import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 
@@ -172,6 +178,8 @@ import {
 } from '../lib/mcpSessionState.js';
 // Spec 049 Phase 1 — the active-organization ladder (D-2026-09-13-003).
 import { resolveActiveOrg } from '../lib/auth/activeOrg.js';
+// Spec 049 Phase 2 — the scope tools translate resolver refusals by their code.
+import { GraphQLError as ScopeGraphQLError } from 'graphql';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 
@@ -2104,6 +2112,216 @@ export function createMcpServerInstance(
     const o = await db.organization.findUnique({ where: { id: orgId }, select: { urn: true, name: true } });
     return o ? `**${safeEmitEntityUrnV2('org', o.urn)}** (${o.name})` : orgId;
   }
+
+  // ── Spec 049 Phase 2 — scopes: list / create / update / delete / explain ──────
+  //
+  // Thin over the SAME resolvers GraphQL serves (`resolvers.scope.ts` →
+  // `lib/scopes.ts`): the desktop track needs CRUD on MCP (#1150), and two
+  // entry points over one computation is how the two surfaces stay in parity.
+
+  /** GraphQL Context for the scope tools — appId + sessionId are load-bearing (#206). */
+  const scopeCtx = (): Context => ({
+    db,
+    clientId: auth.clientId ?? undefined,
+    userId: auth.userId ?? undefined,
+    appId: auth.appId ?? undefined,
+    sessionId: auth.sessionId ?? undefined,
+    roles: auth.roles as Context['roles'],
+    organizationId: auth.organizationId ?? undefined,
+  });
+
+  /** A resolver refusal as `[<code>] <message>` text, the app-selection envelope convention. */
+  const scopeErrorText = (e: unknown) => {
+    if (e instanceof ScopeGraphQLError) {
+      return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+    }
+    if (e instanceof Error && (e.message === 'Forbidden' || e.message === 'Unauthenticated')) {
+      return textResult(`[${e.message.toLowerCase()}] ${e.message}.`);
+    }
+    // A ref that names nothing is the caller's input, not a server fault
+    // (Copilot on PR #1160): keep it inside the `[code]` envelope.
+    if (
+      e instanceof AppNotFoundError ||
+      e instanceof AgentNotFoundError ||
+      e instanceof OrganizationNotFoundError ||
+      e instanceof MemoryNotFoundError
+    ) {
+      return textResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
+    }
+    if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`);
+    throw e;
+  };
+
+  type ScopeRow = { id: string; name: string; description: string | null; organizationId: string | null; agentId: string | null; appId: string | null };
+
+  /**
+   * A PAGE of scopes rendered for the caller — owner, id, readable memories in
+   * order, hidden count — in a fixed number of queries whatever the page size:
+   * one for the join rows (live memories only), one for their memories, one per
+   * owner kind, and the accessible set computed ONCE (Copilot on PR #1160: the
+   * per-scope field resolvers recomputed it twice per row, ~5 queries × 200).
+   */
+  async function renderScopes(ctx: Context, scopes: ScopeRow[]): Promise<string[]> {
+    if (scopes.length === 0) return [];
+    const ids = scopes.map((s) => s.id);
+    const [joins, accessible, orgs, agents, apps] = await Promise.all([
+      db.scopeMemory.findMany({
+        where: { scopeId: { in: ids }, memory: { deletedAt: null } },
+        orderBy: { position: 'asc' },
+        select: { scopeId: true, memoryId: true, position: true, memory: { select: { urn: true } } },
+      }),
+      // The GraphQL gate, not the MCP one: the Scope field resolvers project
+      // through it, and the two surfaces must render one list (the MCP gate
+      // still denies an owner's app-scoped personal memory — the known parity
+      // gap, `feedback:memory-access-gate-parity`).
+      gqlAccessibleMemoryIds(ctx),
+      db.organization.findMany({ where: { id: { in: scopes.map((s) => s.organizationId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
+      db.agent.findMany({ where: { id: { in: scopes.map((s) => s.agentId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
+      db.app.findMany({ where: { id: { in: scopes.map((s) => s.appId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
+    ]);
+    const readable = accessible === null ? null : new Set(accessible);
+    const urnOf = { org: new Map(orgs.map((o) => [o.id, o.urn])), agent: new Map(agents.map((a) => [a.id, a.urn])), app: new Map(apps.map((a) => [a.id, a.urn])) };
+    return scopes.map((s) => {
+      const kind = s.appId ? 'app' : s.agentId ? 'agent' : 'org';
+      const ownerId = (s.appId ?? s.agentId ?? s.organizationId) as string;
+      const ownerUrn = urnOf[kind].get(ownerId);
+      const ownerLabel = ownerUrn ? safeEmitEntityUrnV2(kind, ownerUrn) : ownerId;
+      const mine = joins.filter((j) => j.scopeId === s.id);
+      const shown = mine.filter((j) => readable === null || readable.has(j.memoryId));
+      const hidden = mine.length - shown.length;
+      const lines = [
+        `**${s.name}** — ${kind === 'org' ? 'organization' : kind}-owned by ${ownerLabel} · id ${s.id}` + (s.description ? ` — ${s.description}` : ''),
+        ...shown.map((j) => `  ${j.position + 1}. ${safeEmitEntityUrnV2('memory', j.memory.urn)}`),
+      ];
+      if (hidden > 0) lines.push(`  (+${hidden} ${hidden === 1 ? 'memory' : 'memories'} you cannot read)`);
+      return lines.join('\n');
+    });
+  }
+  const renderScope = async (ctx: Context, s: ScopeRow): Promise<string> => (await renderScopes(ctx, [s]))[0];
+
+  server.tool(
+    'hadron_list_scopes',
+    'List the named search scopes ("lenses", spec 049) you may read — an ORDERED memory list with exactly one owner (organization | Agent | App). With no filter, lists the active App\'s resolution CONTEXT: the App\'s own scopes, its installed Agents\', and its organization\'s — what a bare scope name resolves against there (App › Agent › organization, never unioned). A scope never grants: each shows only the memories YOU may read, plus a count of the rest. Names `global` and `app` are the ladder\'s built-in views, not scopes.',
+    {
+      app: z.string().optional().describe('App URN or id whose context to list. Defaults to the active App.'),
+      ownerType: z.enum(['ORGANIZATION', 'AGENT', 'APP']).optional().describe('With ownerRef: list one owner\'s scopes instead of an App context.'),
+      ownerRef: z.string().optional().describe('URN or id of the owner (with ownerType).'),
+      name: z.string().optional().describe('Only scopes with exactly this name.'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+    },
+    async ({ app, ownerType, ownerRef, name, limit, offset }) => {
+      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      const ctx = scopeCtx();
+      const appRef = app ?? (ownerRef ? undefined : auth.appId);
+      try {
+        const page = await resolvers.Query.scopes({}, { filter: { appRef, ownerType, ownerRef, name }, limit, offset }, ctx);
+        if (page.items.length === 0) {
+          return textResult(
+            page.total === 0
+              ? `No scopes${appRef ? ' in this App\'s context' : ''}. Create one with hadron_create_scope; \`app\` and \`global\` are always available as the ladder\'s built-in views.`
+              : `${page.total} scope(s), none on this page.`,
+          );
+        }
+        const rendered = await renderScopes(ctx, page.items);
+        return textResult(`${page.total} scope(s)${appRef ? ' in this App\'s context' : ''}:\n\n${rendered.join('\n\n')}`);
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_create_scope',
+    'Create a named search scope (spec 049): an ORDERED list of memories owned by exactly one of an organization, an Agent, or an App. Pass one owner ref, or none to own it by the active App. Every memory must be one you can read (an unreadable one reads as "no match"). Names: 1–64 of [a-z0-9_-], unique per owner; `global` and `app` are reserved. Auth: organization CONTRIBUTOR+; App / Agent ADMIN of the owning org or the owner of a user-owned one.',
+    {
+      name: z.string().describe('The scope name.'),
+      memoryUrns: z.array(z.string()).min(1).describe('The ORDERED memory list — fully-qualified memory URNs (hrn:mem:<root>:<slug>) or ids.'),
+      description: z.string().optional().describe('What this lens is for — shown wherever the scope is shown.'),
+      organizationRef: z.string().optional().describe('Own it by this organization (URN or id).'),
+      agentRef: z.string().optional().describe('Own it by this Agent (URN or id) — travels with the Agent\'s installs.'),
+      appRef: z.string().optional().describe('Own it by this App (URN or id). Default when no owner is passed: the active App.'),
+    },
+    async ({ name, memoryUrns, description, organizationRef, agentRef, appRef }) => {
+      if (!auth.userId) return textResult('Not authenticated — scopes are created by a user, not an App key.');
+      const ctx = scopeCtx();
+      const owner = { organizationRef, agentRef, appRef: appRef ?? (organizationRef || agentRef ? undefined : auth.appId) };
+      if (!owner.organizationRef && !owner.agentRef && !owner.appRef) {
+        return textResult('[bad_user_input] No owner: pass organizationRef, agentRef or appRef, or select an App with hadron_set_active_app first.');
+      }
+      try {
+        const scope = await resolvers.Mutation.createScope({}, { input: { name, description, ...owner, memoryRefs: memoryUrns } }, ctx);
+        return textResult(`Created.\n\n${await renderScope(ctx, scope)}\n\nSelect it for searches with hadron_set_active_scope (spec 049 Phase 3) or name it per call once that lands.`);
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_update_scope',
+    'Update a scope you may write (auth as hadron_create_scope): rename, re-describe, or REPLACE its ordered memory list.',
+    {
+      scope: z.string().describe('The scope id (from hadron_list_scopes).'),
+      name: z.string().optional(),
+      description: z.string().optional(),
+      memoryUrns: z.array(z.string()).min(1).optional().describe('The NEW ordered list — replaces, never merges.'),
+    },
+    async ({ scope, name, description, memoryUrns }) => {
+      if (!auth.userId) return textResult('Not authenticated.');
+      const ctx = scopeCtx();
+      try {
+        const updated = await resolvers.Mutation.updateScope({}, { ref: scope, input: { name, description, memoryRefs: memoryUrns } }, ctx);
+        return textResult(`Updated.\n\n${await renderScope(ctx, updated)}`);
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_delete_scope',
+    'Soft-delete a scope you may write; its name is free again at once. Deleting a scope attaches or detaches nothing — it was only ever a lens.',
+    { scope: z.string().describe('The scope id.') },
+    async ({ scope }) => {
+      if (!auth.userId) return textResult('Not authenticated.');
+      try {
+        await resolvers.Mutation.deleteScope({}, { ref: scope }, scopeCtx());
+        return textResult(`Scope ${scope} deleted.`);
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_scope_explain',
+    'Explain what a scope resolves to FOR YOU (spec 049): the readable memories in scope order, how many were dropped for access (a count — a lens never grants and never names what you cannot read), which owner tier won when resolved by NAME in an App\'s context (App › Agent › organization, never unioned; two installed Agents each owning the name is ambiguous and you choose by id), the scopes it shadowed, and — with `loc` — which memory would win for that address.',
+    {
+      scope: z.string().optional().describe('The scope id. Or pass name.'),
+      name: z.string().optional().describe('A scope NAME, resolved in the App\'s context.'),
+      app: z.string().optional().describe('The App context for a name (URN or id). Defaults to the active App.'),
+      loc: z.string().optional().describe('An address: report which memory in the scope would win for it.'),
+    },
+    async ({ scope, name, app, loc }) => {
+      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      const ctx = scopeCtx();
+      try {
+        const ex = await resolvers.Query.scopeExplain({}, { scopeRef: scope, name, appRef: app ?? auth.appId, loc }, ctx);
+        if (!ex) return textResult(`No readable scope matches${name ? ` "${name}" in this App's context` : ''}.`);
+        const lines = [
+          `**${ex.scope.name}** resolved via ${ex.resolvedVia.toLowerCase()} owner · id ${ex.scope.id}`,
+          ...ex.memories.map((m, i) => `  ${i + 1}. ${safeEmitEntityUrnV2('memory', m.urn)}`),
+        ];
+        if (ex.droppedCount > 0) lines.push(`  (${ex.droppedCount} ${ex.droppedCount === 1 ? 'memory' : 'memories'} dropped — not readable by you)`);
+        if (ex.shadowed.length) lines.push(`shadowed: ${ex.shadowed.map((s) => `${s.id} (${resolvers.Scope.ownerType(s).toLowerCase()})`).join(', ')}`);
+        if (loc) lines.push(ex.winner ? `winner for "${loc}": ${safeEmitEntityUrnV2('memory', ex.winner.urn)}` : `winner for "${loc}": none — no readable memory in this scope holds that address`);
+        return textResult(lines.join('\n'));
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
 
   // ── hadron_create_parent_node ───────────────────────────────────────────────────
 

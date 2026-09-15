@@ -569,6 +569,7 @@ model Organization {
   // Admin impersonation (read-only support sessions) scoped to this org.
   impersonationSessions  ImpersonationSession[]
   mcpSessionStates       McpSessionState[]
+  scopes                 Scope[]
   // #692 — the org's root principal in the unified pool (urn is the denormalized
   // read source-of-truth, kept in sync at mint).
   principalId            String?                 @unique @map("principal_id")
@@ -896,6 +897,7 @@ model Memory {
   app                 App?              @relation("AppMemories", fields: [appId], references: [id], onDelete: Cascade)
   sessions            Session[]         @relation("SessionMemory")
   mcpSessionStates    McpSessionState[]
+  scopeMemberships ScopeMemory[]
   /// #974 — the Workers whose casting-scoped working memory this is (at most
   /// one in practice; identity lives on `Worker.memoryId`, cor:dmo:050:11).
   workerOf            Worker[]          @relation("WorkerMemory")
@@ -1670,6 +1672,7 @@ model Agent {
   importedBy        AgentImport[]       @relation("ImportedAgent")
   orgGrants         AgentOrgGrant[]
   aiServiceConfigs  AiServiceConfig[]
+  scopes               Scope[]
   /// #974 — the named castings of this agent into Apps (cor:dmo:050:11).
   workers           Worker[]
 
@@ -2761,6 +2764,7 @@ model App {
   /// work.
   workers          Worker[]
   mcpSessionStates McpSessionState[]
+  scopes           Scope[]
   keys             AppKey[]
   members          AppMember[]
   memories         Memory[]          @relation("AppMemories")
@@ -4008,4 +4012,65 @@ model UrnAlias {
   /// Reverse lookup — "what did this entity used to be called".
   @@index([entityType, entityId])
   @@map("urn_aliases")
+}
+
+/// Spec 049 Phase 2 (D-2026-09-13-001) — a named search SCOPE ("lens"): an
+/// ORDERED list of memories with exactly one owner — organization, Agent, or
+/// App — as three nullable FKs with a CHECK (`chk_scope_owner`,
+/// `num_nonnulls(...) = 1`), never an `ownerKind` string. The Scope pattern
+/// the register table copies (plan §2 S1). A scope selects memories only
+/// (filters stay per call; no saved filter, no retrieval parameters) and
+/// NEVER grants: every consumer intersects it with the caller's accessible
+/// set (D-2026-09-13-004, `lib/auth/narrowToAccessible.ts`).
+///
+/// `name` is unique PER OWNER among live rows — partial unique indexes in
+/// post-push.sql / the migration, since Prisma cannot express them and a plain
+/// @@unique would let a soft-deleted row block the name forever. Collisions
+/// across owners in an App's context resolve App › Agent › organization,
+/// namespaced, never unioned (`lib/scopes.ts`). `global` and `app` are
+/// reserved ladder tokens and refused at create.
+model Scope {
+  id             String    @id @default(cuid())
+  name           String
+  description    String?
+  organizationId String?   @map("organization_id")
+  agentId        String?   @map("agent_id")
+  appId          String?   @map("app_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  app          App?          @relation(fields: [appId], references: [id], onDelete: Cascade)
+  memories     ScopeMemory[]
+
+  @@index([organizationId])
+  @@index([agentId])
+  @@index([appId])
+  @@map("scopes")
+}
+
+/// The ordered memory list of a Scope. A join row rather than an id array so
+/// that "which scopes include this memory" is a query (D-2026-09-13-001
+/// rejected ids-in-JSON for exactly that — `scope explain` and memory deletion
+/// need the reverse lookup) and so a deleted memory cascades out of every
+/// scope. Composite PK: listed in `MODELS_WITHOUT_ID` (db/client.ts).
+model ScopeMemory {
+  scopeId  String @map("scope_id")
+  memoryId String @map("memory_id")
+  /// 0-based order within the scope — the only thing the task-customization
+  /// operation will consume; search ignores it (D-2026-09-13-005).
+  position Int
+
+  scope  Scope  @relation(fields: [scopeId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@id([scopeId, memoryId])
+  @@unique([scopeId, position])
+  @@index([memoryId])
+  @@map("scope_memories")
 }
