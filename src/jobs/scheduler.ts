@@ -91,6 +91,7 @@ export async function schedulerTick(db: PrismaClient, now = new Date()): Promise
           ...(s.aiConfigName ? { __aiConfigName: s.aiConfigName } : {}),
         },
         policy: s.policy,
+        scopeId: s.scopeId,
         createdBy: s.createdBy,
       });
       minted += 1;

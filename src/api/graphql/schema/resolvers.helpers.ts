@@ -96,6 +96,10 @@ export interface Context {
   // Request-scoped memo for AppRun.app (#831) — same rationale as appUrnCache,
   // for the full row rather than just the urn (lazily created; see loadApp).
   appRowCache?: Map<string, Promise<AppRow | null>>;
+  // Spec 049 Phase 3b — AppRun.scope memo, keyed on the serialized snapshot
+  // (lazily created in the field resolver): a run page repeats one trigger's
+  // snapshot across its rows.
+  runScopeInfoCache?: Map<string, Promise<unknown>>;
   // #853 — AppRun.agent / AppRun.entryNode memos. A run page repeats the same
   // agent and entry node across rows; without these the two relations cost a
   // membership query + a row lookup EACH (see loadReadableAgent/loadEntryNode).

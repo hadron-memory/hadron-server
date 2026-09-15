@@ -25,6 +25,8 @@ import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
+// Spec 049 Phase 3b — the trigger's scope snapshot on the run.
+import { parseRunScopeSnapshot, snapshotScopeForTrigger } from '../lib/scopes.js';
 import {
   generateText,
   LlmInvocationError,
@@ -312,6 +314,14 @@ export interface MintAppRunArgs {
   /** Internal outbox control for callers that must commit related durable
    *  state atomically before this run becomes publishable. Defaults true. */
   publish?: boolean;
+  /**
+   * Spec 049 Phase 3b (D-2026-09-13-004): the trigger's scope, snapshotted
+   * onto the run at mint (schedules, webhooks). Ignored when `scopeSnapshot`
+   * is passed. A scope that no longer exists snapshots nothing (⇒ `app`).
+   */
+  scopeId?: string | null;
+  /** A parent run's snapshot, inherited verbatim by a spawned child. */
+  scopeSnapshot?: unknown;
 }
 
 export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promise<AppRun> {
@@ -447,6 +457,15 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   }
 
   // 2. MINT the activation (AppRun row) + publish the wake-up.
+  // Spec 049 Phase 3b: the scope travels as a SNAPSHOT (like `policy`), so an
+  // edit to the scope mid-flight cannot change what a running run means.
+  const scopeSnapshot =
+    args.scopeSnapshot !== undefined
+      ? parseRunScopeSnapshot(args.scopeSnapshot)
+      : args.scopeId
+        ? await snapshotScopeForTrigger(db, args.scopeId)
+        : null;
+
   const run = await db.appRun.create({
     data: {
       id: generateId(),
@@ -463,6 +482,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       // accepts the pre-#510 single-link shape for runs minted before the
       // deploy (PENDING rows survive a restart).
       policy: (presentLinks.length > 0 ? { chain: presentLinks } : undefined) as never,
+      scopeSnapshot: (scopeSnapshot ?? undefined) as never,
       budgetTokens: DEFAULT_RUN_TOKEN_BUDGET,
       budgetActions: DEFAULT_RUN_ACTION_BUDGET,
       // #832: snapshot the MINTED budget so a client can render "spent vs
@@ -975,6 +995,9 @@ export interface SpawnConfig {
   callback?: string | null;
   itemCallback?: string | null;
   total: number;
+  /** Spec 049: the lens every run this fan-out mints carries — an explicit
+   *  `scope_ref` override, else the parent's own snapshot (set by the tool). */
+  scopeSnapshot?: unknown;
   dispatching?: boolean;
   callbackFiredAt?: string;
 }
@@ -1039,6 +1062,9 @@ async function tryFireSpawnCallback(db: PrismaClient, parentId: string): Promise
       parentRunId: parentId, // points at the ORIGINAL parent (D19 / example-3 A′)
       entryNodeUrn: cfg.callback!,
       eventData: { parentRunId: parentId, ...tally, __spawnCallback: true },
+      // Spec 049: a coordination run sees what its siblings saw — never the
+      // broad `app` view by omission (Codex/Copilot on PR #1163).
+      scopeSnapshot: cfg.scopeSnapshot ?? parent.scopeSnapshot,
       createdBy: `run:${parentId}`,
     });
   } catch (err) {
@@ -1107,6 +1133,7 @@ export async function handleSpawnCompletion(db: PrismaClient, runId: string): Pr
           ...(ev && ev[cfg.itemKey] !== undefined ? { [cfg.itemKey]: ev[cfg.itemKey] } : {}),
           __spawnCallback: true,
         },
+        scopeSnapshot: cfg.scopeSnapshot ?? parent.scopeSnapshot,
         createdBy: `run:${parent.id}`,
       });
     } catch (err) {

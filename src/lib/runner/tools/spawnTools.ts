@@ -14,6 +14,7 @@
  */
 
 import { mintAppRun, mergedView, RunLaunchDeniedError } from '../../../jobs/appRuns.js';
+import { resolveScopeForTrigger, snapshotScopeForTrigger } from '../../scopes.js';
 import type { RunToolDef } from './types.js';
 
 const MAX_SPAWN_ITEMS = (() => {
@@ -55,6 +56,12 @@ export const hadronSpawn: RunToolDef = {
         type: 'string',
         description: 'Optional node URN to run as EACH child finishes.',
       },
+      scope_ref: {
+        type: 'string',
+        description:
+          'Optional named search scope (id or name, resolved in this App\'s context) every child ' +
+          'and callback run searches under. Default: the scope this run itself carries.',
+      },
     },
     required: ['items', 'process_item'],
   },
@@ -77,6 +84,16 @@ export const hadronSpawn: RunToolDef = {
     const callback = typeof args.callback === 'string' && args.callback.length > 0 ? args.callback : null;
     const itemCallback =
       typeof args.item_callback === 'string' && args.item_callback.length > 0 ? args.item_callback : null;
+    // Spec 049 §3.3: the fan-out is scope-bearing like a schedule or webhook —
+    // an explicit scope_ref is resolved in the App's context under the run
+    // principal and snapshotted once, else every child inherits the parent's
+    // snapshot verbatim. Persisted in the spawn config so the callbacks mint
+    // under the same lens.
+    let scopeSnapshot: unknown = ctx.run.scopeSnapshot;
+    if (typeof args.scope_ref === 'string' && args.scope_ref.trim().length > 0) {
+      const scopeId = await resolveScopeForTrigger(ctx.principal, ctx.run.appId, args.scope_ref);
+      scopeSnapshot = await snapshotScopeForTrigger(ctx.db, scopeId);
+    }
 
     // Depth guard (D-SP-7): walk the lineage — trees are legal, bombs are not.
     let depth = 0;
@@ -107,6 +124,7 @@ export const hadronSpawn: RunToolDef = {
         spawn: {
           processItem, itemKey, callback, itemCallback,
           total: items.length, dispatching: true,
+          ...(scopeSnapshot != null ? { scopeSnapshot } : {}),
         } as never,
       },
     });
@@ -135,6 +153,8 @@ export const hadronSpawn: RunToolDef = {
             parentRunId: ctx.run.id,
             entryNodeUrn: processItem,
             eventData: { ...parentView, [itemKey]: item },
+            // Spec 049: the fan-out's lens — the override or the parent's own.
+            scopeSnapshot,
             createdBy: `run:${ctx.run.id}`,
           });
           spawned++;

@@ -450,8 +450,8 @@ export const BUILTIN_SCOPE_GLOBAL = 'global';
 export interface SearchScopeResolution {
   /** A named scope, the `app` view, the `global` (organization) view, or the user-owned view. */
   kind: 'scope' | 'app' | 'global' | 'user-owned';
-  /** Which rung chose it. */
-  source: 'call' | 'session' | 'active-app' | 'active-org';
+  /** Which rung chose it — `trigger` for a headless run's snapshot (Phase 3b). */
+  source: 'call' | 'session' | 'active-app' | 'active-org' | 'trigger';
   /** Human-readable label for the envelope: the scope name, the App URN, the org URN. */
   label: string;
   /** For `kind: 'scope'`: the scope's owner URN, when it has one. */
@@ -772,6 +772,122 @@ export async function resolveNamedScopeForQuery(
   // Unreachable: a named scope always resolves or throws.
   if (!r) throw new GraphQLError(`No readable scope matches "${scopeArg}".`, { extensions: { code: 'NOT_FOUND' } });
   return r;
+}
+
+// ── Spec 049 Phase 3b — a headless run's scope (D-2026-09-13-004) ─────────────
+
+/**
+ * What a run carries: the trigger's scope as it stood at mint. Its memory ids
+ * are the scope's STORED order — not intersected with anyone's access, because
+ * the run's principal is judged at USE, hop by hop (`resolveRunScope`). The
+ * name / owner are display data for the disclosure; `scopeId` is provenance.
+ */
+export interface RunScopeSnapshot {
+  scopeId: string;
+  name: string;
+  ownerType: ScopeOwnerType;
+  ownerId: string;
+  memoryIds: string[];
+}
+
+/**
+ * Resolve a trigger's `scopeRef` for CREATE / UPDATE (plan §3.3): an id or a
+ * bare name in the App's context, readable by the caller, and OWNED BY that
+ * context — the App itself, an Agent installed in it, or the App's
+ * organization. A scope from elsewhere would let a trigger author smuggle a
+ * lens the App never had; refused as input, with no existence tell.
+ */
+export async function resolveScopeForTrigger(ctx: Context, appId: string, scopeRef: string): Promise<string> {
+  const ref = scopeRef.trim();
+  const refuse = () => badInput(`No readable scope matches "${ref}" in this App's context.`);
+  const context = await appContextIfReadable(ctx, appId);
+  if (!context) throw refuse();
+  let scope: Scope | null = await ctx.db.scope.findFirst({ where: { id: ref, deletedAt: null } });
+  if (!scope) {
+    const r = await resolveScopeByNameInApp(ctx, ref, appId);
+    if (r.ambiguousAmong.length) {
+      throw new GraphQLError(
+        `"${ref}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass the scope id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
+        { extensions: { code: 'SCOPE_NAME_AMBIGUOUS', candidates: r.ambiguousAmong.map((s) => s.id) } },
+      );
+    }
+    scope = r.winner;
+  }
+  if (!scope || !(await canReadScope(ctx, scope))) throw refuse();
+  const inContext =
+    scope.appId === appId ||
+    (scope.agentId !== null && context.agentIds.includes(scope.agentId)) ||
+    (scope.organizationId !== null && scope.organizationId === context.organizationId);
+  if (!inContext) throw refuse();
+  return scope.id;
+}
+
+/** Snapshot a trigger's scope for a run at mint; null when the scope is gone (⇒ `app`). */
+export async function snapshotScopeForTrigger(db: Context['db'], scopeId: string): Promise<RunScopeSnapshot | null> {
+  // ONE statement for the row and its ordered list, so a concurrent
+  // updateScope cannot land between them and leave a snapshot that pairs old
+  // metadata with a new list (Copilot on PR #1163). Live memories only, as
+  // scopeMemoryIds reads them.
+  const scope = await db.scope.findFirst({
+    where: { id: scopeId, deletedAt: null },
+    include: { memories: { where: { memory: { deletedAt: null } }, orderBy: { position: 'asc' }, select: { memoryId: true } } },
+  });
+  if (!scope) return null;
+  return {
+    scopeId: scope.id,
+    name: scope.name,
+    ownerType: ownerTypeOf(scope),
+    ownerId: ownerIdOf(scope),
+    memoryIds: scope.memories.map((m) => m.memoryId),
+  };
+}
+
+/** Read a stored snapshot back, tolerating anything that is not one (⇒ null). */
+export function parseRunScopeSnapshot(raw: unknown): RunScopeSnapshot | null {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const s = raw as Partial<RunScopeSnapshot>;
+  if (typeof s.scopeId !== 'string' || typeof s.name !== 'string' || !Array.isArray(s.memoryIds)) return null;
+  return {
+    scopeId: s.scopeId,
+    name: s.name,
+    ownerType: (s.ownerType ?? 'APP') as ScopeOwnerType,
+    ownerId: typeof s.ownerId === 'string' ? s.ownerId : '',
+    memoryIds: s.memoryIds.filter((id): id is string => typeof id === 'string'),
+  };
+}
+
+/**
+ * The scope a run searches under, FOR THE GIVEN PRINCIPAL, judged now: the
+ * snapshot ∩ the principal's CURRENT access (S2) — never the snapshot alone,
+ * which would make a mint-time list an access grant that outlives a revoked
+ * membership. No snapshot ⇒ the App's attached memories (`app`), D-004's
+ * default. The one function every run-side consumer calls, per hop; today's
+ * consumers are the `AppRun.scope` disclosure and the kernel-side seam a
+ * run search tool will plug into.
+ */
+export async function resolveRunScope(
+  ctx: Context,
+  run: { appId: string; scopeSnapshot: unknown },
+): Promise<SearchScopeResolution> {
+  const snap = parseRunScopeSnapshot(run.scopeSnapshot);
+  if (!snap) return appView(ctx, run.appId, 'trigger');
+  const accessible = await getAccessibleMemoryIds(ctx);
+  const { kept, droppedIds } = narrowToAccessible(snap.memoryIds, accessible === null ? 'unrestricted' : new Set(accessible));
+  const ownerUrn =
+    snap.ownerType === 'APP'
+      ? ((await ctx.db.app.findUnique({ where: { id: snap.ownerId }, select: { urn: true } }))?.urn ?? null)
+      : snap.ownerType === 'AGENT'
+        ? ((await ctx.db.agent.findUnique({ where: { id: snap.ownerId }, select: { urn: true } }))?.urn ?? null)
+        : ((await ctx.db.organization.findUnique({ where: { id: snap.ownerId }, select: { urn: true } }))?.urn ?? null);
+  return {
+    kind: 'scope',
+    source: 'trigger',
+    label: snap.name,
+    ownerUrn,
+    memoryIds: kept,
+    orgScopeId: null,
+    droppedCount: droppedIds.length,
+  };
 }
 
 /** The `scope_narrowed` degrade code, appended to an envelope's comma-separated set. */

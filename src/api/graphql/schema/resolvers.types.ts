@@ -13,6 +13,8 @@ import {
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+// Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
+import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../lib/scopes.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
@@ -492,6 +494,27 @@ export const typeResolvers = {
       resolveRevisionEditor(ctx, [nv.approvedBy]),
   },
   AppRun: {
+    /**
+     * Spec 049 Phase 3b — the run's scope as the CALLER may read it: the mint
+     * snapshot ∩ the caller's current access (a lens never grants), or null
+     * when the run carries no named scope (its view is then `app`).
+     */
+    scope: async (r: { appId: string; scopeSnapshot: unknown }, _: unknown, ctx: Context) => {
+      if (parseRunScopeSnapshot(r.scopeSnapshot) === null) return null;
+      // Request-memoized on the snapshot itself: a run page repeats one
+      // trigger's snapshot across its rows, and the projection is the caller's
+      // access ∩ that snapshot — the same answer for every row that carries it
+      // (Copilot on PR #1163). Keyed on the serialized snapshot, not the scope
+      // id, because two snapshots of one scope can differ.
+      const cache = (ctx.runScopeInfoCache ??= new Map());
+      const key = `${r.appId} ${JSON.stringify(r.scopeSnapshot)}`;
+      let pending = cache.get(key);
+      if (!pending) {
+        pending = resolveRunScope(ctx, r).then((res) => scopeInfoOf(ctx, res));
+        cache.set(key, pending);
+      }
+      return pending;
+    },
     // #696 — the computed hrn:apprun:<root>:<app>:<run-id> URN. Null for the
     // rare multi-segment App URN the flat shape can't express (compose throws →
     // served as null, never crashes the run audit surface).
