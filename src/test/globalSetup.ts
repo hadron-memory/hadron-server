@@ -239,6 +239,40 @@ async function applyTemplateConstraints(client: Client) {
       ON scopes (app_id, name) WHERE app_id IS NOT NULL AND deleted_at IS NULL;
   `);
 
+  // Spec 049 Phase 5 — the register: exactly one owner, at most one
+  // attendee, and the (owner, channel, attendee) natural keys among LIVE rows
+  // (the install insert's ON CONFLICT target). Synced with
+  // prisma/post-push.sql + the 20260915220000_register_entries migration.
+  await client.query(`
+    ALTER TABLE "register_entries" DROP CONSTRAINT IF EXISTS "chk_register_owner";
+    ALTER TABLE "register_entries"
+      ADD CONSTRAINT "chk_register_owner"
+      CHECK (num_nonnulls(organization_id, app_id) = 1);
+    ALTER TABLE "register_entries" DROP CONSTRAINT IF EXISTS "chk_register_attendee";
+    ALTER TABLE "register_entries"
+      ADD CONSTRAINT "chk_register_attendee"
+      CHECK (num_nonnulls(attendee_worker_id, attendee_agent_id) <= 1);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS register_entries_app_channel_worker_uniq
+      ON register_entries (app_id, channel_id, attendee_worker_id)
+      WHERE app_id IS NOT NULL AND attendee_worker_id IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS register_entries_app_channel_agent_uniq
+      ON register_entries (app_id, channel_id, attendee_agent_id)
+      WHERE app_id IS NOT NULL AND attendee_agent_id IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS register_entries_app_channel_all_uniq
+      ON register_entries (app_id, channel_id)
+      WHERE app_id IS NOT NULL AND attendee_worker_id IS NULL AND attendee_agent_id IS NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS register_entries_org_channel_worker_uniq
+      ON register_entries (organization_id, channel_id, attendee_worker_id)
+      WHERE organization_id IS NOT NULL AND attendee_worker_id IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS register_entries_org_channel_agent_uniq
+      ON register_entries (organization_id, channel_id, attendee_agent_id)
+      WHERE organization_id IS NOT NULL AND attendee_agent_id IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS register_entries_org_channel_all_uniq
+      ON register_entries (organization_id, channel_id)
+      WHERE organization_id IS NOT NULL AND attendee_worker_id IS NULL AND attendee_agent_id IS NULL AND deleted_at IS NULL;
+  `);
+
   // #974 Worker model (cor:dmo:050:11, cor:agt:020:02 v0.0.3): a worker's
   // name is unique per App, case-insensitively (functional unique — Prisma
   // can't express it). NOT filtered on retirement: a name binds to one

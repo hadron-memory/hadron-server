@@ -4,6 +4,8 @@
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
 import { sharedUrnAgentSlug } from '../../../lib/sharedMemoryLegacyKey.js';
+// Spec 049 Phase 5 — the install-created register row (D2) and its removal on uninstall.
+import { ensureInstallRegisterRows, removeRegisterRowsForUninstall } from '../../../lib/registerInstall.js';
 import { runEmailOperation, type ToolCalendarEvent, type ToolDriveFile } from '../../../lib/emailClient.js';
 import { scopeForOperation } from '../../../lib/emailOperationScopes.js';
 import {
@@ -2117,6 +2119,13 @@ export async function installAgentIntoAppCore(
       throw e;
     }
   });
+  // Spec 049 Phase 5 (D2): the install's materialised register row for the
+  // App's default Channel — a no-op until the App has one (then written by
+  // `ensureChannelRow`). Race-safe insert; idempotent.
+  await ensureInstallRegisterRows(ctx.db, resolvedAppId, {
+    agentId: resolvedAgentId,
+    createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+  });
   return {
     appId: resolvedAppId,
     agentId: resolvedAgentId,
@@ -2141,6 +2150,9 @@ export async function uninstallAgentFromAppCore(
   await ctx.db.appAgent.deleteMany({
     where: { appId: resolvedAppId, agentId: resolvedAgentId },
   });
+  // Spec 049 Phase 5 (D4): the attendee has left the App — its App-owned
+  // register rows go with it (soft-deleted; an org's rows are the org's).
+  await removeRegisterRowsForUninstall(ctx.db, resolvedAppId, resolvedAgentId, ctx.userId ?? null);
   return { appId: resolvedAppId, agentId: resolvedAgentId };
 }
 

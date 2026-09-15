@@ -2469,6 +2469,125 @@ export function createMcpServerInstance(
     },
   );
 
+  // ── The chat register (spec 049 Phase 5, D-2026-09-13-007) ──────────────────
+
+  /**
+   * Register rows as lines: owner · channel · attendee · role. The Channel's
+   * name and address are shown only when the caller may read its host memory
+   * — the same gate `RegisterEntry.channel` applies (Codex P1 on PR #1166: an
+   * owner-side reader gets the row, never a foreign Channel's details).
+   * Attendees are batch-loaded, one query per kind (Copilot).
+   */
+  const renderRegisterRows = async (
+    ctx: Context,
+    rows: Array<{ id: string; organizationId: string | null; appId: string | null; channelId: string; attendeeWorkerId: string | null; attendeeAgentId: string | null; role: string; mentionOnly: boolean; installDefault: boolean; description: string | null }>,
+  ) => {
+    const accessible = await gqlAccessibleMemoryIds(ctx);
+    const channels = new Map(
+      (await ctx.db.channel.findMany({ where: { id: { in: [...new Set(rows.map((r) => r.channelId))] } }, select: { id: true, name: true, loc: true, memoryId: true } })).map((c) => [c.id, c]),
+    );
+    const workerIds = [...new Set(rows.map((r) => r.attendeeWorkerId).filter((x): x is string => !!x))];
+    const agentIds = [...new Set(rows.map((r) => r.attendeeAgentId).filter((x): x is string => !!x))];
+    const workers = new Map(
+      (workerIds.length
+        ? await ctx.db.worker.findMany({ where: { id: { in: workerIds } }, select: { id: true, slug: true, app: { select: { urn: true } } } })
+        : []
+      ).map((w) => [w.id, w]),
+    );
+    const agents = new Map(
+      (agentIds.length ? await ctx.db.agent.findMany({ where: { id: { in: agentIds } }, select: { id: true, urn: true } }) : []).map((a) => [a.id, a]),
+    );
+    const attendeeOf = (r: { attendeeWorkerId: string | null; attendeeAgentId: string | null }) => {
+      if (r.attendeeWorkerId) {
+        const w = workers.get(r.attendeeWorkerId);
+        try {
+          return w ? composeWorkerUrn(normalizeUrnForLookup(w.app.urn), w.slug) : r.attendeeWorkerId;
+        } catch {
+          return r.attendeeWorkerId;
+        }
+      }
+      if (r.attendeeAgentId) return agents.get(r.attendeeAgentId)?.urn ?? r.attendeeAgentId;
+      return 'every attendee';
+    };
+    return rows.map((r) => {
+      const ch = channels.get(r.channelId);
+      const readable = !!ch && (accessible === null || accessible.includes(ch.memoryId));
+      const channel = readable ? `${ch!.name} (${ch!.loc})` : `channel ${r.channelId} (host memory not readable to you)`;
+      return `- ${channel} ← ${attendeeOf(r)} — ${r.role}${r.mentionOnly ? ', mention-only' : ''}${r.installDefault ? ', install default' : ''}\n  owner: ${r.appId ? `App ${r.appId}` : `organization ${r.organizationId}`} · id ${r.id}${r.description ? `\n  ${r.description}` : ''}`;
+    });
+  };
+
+  server.tool(
+    'hadron_register_list',
+    'List the chat REGISTER (spec 049): which attendee (a Worker, or an Agent in an App — or everyone in the owner\'s context) takes part in which Channel, as declared by the App or its organization. Intent, never permission: what an attendee may actually read or post is the Channel\'s host memory\'s decision. Default: the active App\'s rows. Every install carries a materialised default row for the App\'s `team` Channel.',
+    {
+      owner: z.string().optional().describe('An App or organization (URN or id). Defaults to the active App.'),
+      channel: z.string().optional().describe('Only rows for this Channel (id).'),
+      attendee: z.string().optional().describe('Only rows naming this Worker or Agent (URN or id).'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+    },
+    async ({ owner, channel, attendee, limit, offset }) => {
+      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      const ctx = scopeCtx();
+      const ownerRef = owner ?? (channel || attendee ? undefined : (auth.appId ?? undefined));
+      if (!ownerRef && !channel && !attendee) return textResult('[bad_user_input] Pass owner, channel or attendee, or select an App with hadron_set_active_app first.');
+      try {
+        const page = await resolvers.Query.registerEntries({}, { filter: { ownerRef, channelRef: channel, attendeeRef: attendee }, limit, offset }, ctx);
+        if (page.total === 0) return textResult('No register entries you may read there.');
+        const lines = await renderRegisterRows(ctx, page.items);
+        return textResult(`${page.total} register entr${page.total === 1 ? 'y' : 'ies'}:\n\n${lines.join('\n')}`);
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_register_add',
+    'Declare that an attendee takes part in a Channel (spec 049 register). Owner: an App (org ADMIN, or the owner of a user-owned App) or an organization (CONTRIBUTOR+); defaults to the active App. attendee: a Worker or an Agent in the owner\'s context; omit it for every attendee there. Intent, never permission — the row grants nothing.',
+    {
+      channel: z.string().describe('The Channel id (from hadron_list_channels).'),
+      attendee: z.string().optional().describe('A Worker or Agent (URN or id). Omit = every attendee in the owner\'s context.'),
+      owner: z.string().optional().describe('An App or organization (URN or id). Defaults to the active App.'),
+      role: z.enum(['WATCH', 'POST', 'BOTH']).optional().describe('Default BOTH.'),
+      mentionOnly: z.boolean().optional().describe('Only messages mentioning the attendee count as new for it.'),
+      description: z.string().optional().describe('Why — the human\'s intent.'),
+    },
+    async ({ channel, attendee, owner, role, mentionOnly, description }) => {
+      if (!auth.userId) return textResult('Not authenticated — register rows are written by a user, not an App key.');
+      const ctx = scopeCtx();
+      const ownerRef = owner ?? auth.appId;
+      if (!ownerRef) return textResult('[bad_user_input] No owner: pass owner, or select an App with hadron_set_active_app first.');
+      try {
+        const row = await resolvers.Mutation.createRegisterEntry(
+          {},
+          { input: { ownerRef, channelRef: channel, attendeeRef: attendee, role, mentionOnly, description } },
+          ctx,
+        );
+        const lines = await renderRegisterRows(ctx, [row]);
+        return textResult(`Added.\n\n${lines.join('\n')}`);
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_register_remove',
+    'Remove a register entry you own (spec 049): each owner removes its own rows — an App may remove its install-created default, never an organization\'s row.',
+    { entry: z.string().describe('The register entry id (from hadron_register_list).') },
+    async ({ entry }) => {
+      if (!auth.userId) return textResult('Not authenticated — register rows are written by a user, not an App key.');
+      try {
+        await resolvers.Mutation.deleteRegisterEntry({}, { ref: entry }, scopeCtx());
+        return textResult('Removed.');
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
+
   // ── hadron_set_active_scope (spec 049 Phase 3, D-2026-09-13-002) ────────────
 
   server.tool(

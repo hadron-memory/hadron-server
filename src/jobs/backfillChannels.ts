@@ -37,6 +37,7 @@ import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { locateTeamAgent } from '../api/graphql/schema/resolvers.worker.js';
 import { DEFAULT_CHANNEL_NAME, ensureChannelRow, ensureChannelWithRoot } from '../lib/channels.js';
+import { ensureInstallRegisterRows } from '../lib/registerInstall.js';
 import { TEAM_CHAT_LOC } from '../lib/teamChatLoc.js';
 
 /** The message nodeTypes the allocator counts — mirrors chatRoot.ts. */
@@ -56,6 +57,8 @@ export interface BackfillReport {
   ambiguousApps: Array<{ appId: string; appName: string; memoryIds: string[] }>;
   /** Apps with no root and no team-space memory at all. */
   noMemoryApps: number;
+  /** Spec 049 Phase 5 — install-created register rows written (or, dry, missing). */
+  registerRowsCreated: number;
 }
 
 /** The allocator's high-water mark for one root, computed the way it computes it. */
@@ -121,6 +124,7 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
     defaultsProvisioned: 0,
     ambiguousApps: [],
     noMemoryApps: 0,
+    registerRowsCreated: 0,
   };
 
   // 1. Every team-chat root in an app-class memory — tombstoned roots AND
@@ -209,6 +213,24 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
         asDefaultOfAppId: app.id,
         hostLabel: app.name,
       });
+    }
+  }
+
+  // 3. Spec 049 Phase 5 (§7.3): every live install of an App with a default
+  //    Channel has its materialised register row. Idempotent on the partial
+  //    unique; the migration wrote these for Apps that already had a default,
+  //    this covers the ones step 2 just gave one.
+  const withDefault = await db.app.findMany({
+    where: { deletedAt: null, defaultChannelId: { not: null } },
+    select: { id: true, createdBy: true },
+  });
+  for (const app of withDefault) {
+    if (opts.apply) {
+      report.registerRowsCreated += await ensureInstallRegisterRows(db, app.id, { createdBy: app.createdBy ?? null });
+    } else {
+      const installs = await db.appAgent.count({ where: { appId: app.id, agent: { deletedAt: null } } });
+      const rows = await db.registerEntry.count({ where: { appId: app.id, installDefault: true, deletedAt: null } });
+      report.registerRowsCreated += Math.max(0, installs - rows);
     }
   }
   return report;

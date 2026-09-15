@@ -392,3 +392,35 @@ CREATE INDEX IF NOT EXISTS nodes_data_gin ON nodes USING gin (data jsonb_path_op
 -- update lives here (Codex on PR #1164).
 UPDATE organizations SET skill_prefix = 'hadron-'
   WHERE urn = 'hadronmemory.com' AND skill_prefix IS NULL;
+
+-- Spec 049 Phase 5 — the register's S1 CHECKs and partial uniques (Prisma
+-- cannot express either). Synced with the 20260915220000_register_entries
+-- migration.
+ALTER TABLE register_entries
+  DROP CONSTRAINT IF EXISTS chk_register_owner;
+ALTER TABLE register_entries
+  ADD CONSTRAINT chk_register_owner
+  CHECK (num_nonnulls(organization_id, app_id) = 1);
+ALTER TABLE register_entries
+  DROP CONSTRAINT IF EXISTS chk_register_attendee;
+ALTER TABLE register_entries
+  ADD CONSTRAINT chk_register_attendee
+  CHECK (num_nonnulls(attendee_worker_id, attendee_agent_id) <= 1);
+CREATE UNIQUE INDEX IF NOT EXISTS register_entries_app_channel_worker_uniq
+  ON register_entries (app_id, channel_id, attendee_worker_id)
+  WHERE app_id IS NOT NULL AND attendee_worker_id IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS register_entries_app_channel_agent_uniq
+  ON register_entries (app_id, channel_id, attendee_agent_id)
+  WHERE app_id IS NOT NULL AND attendee_agent_id IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS register_entries_app_channel_all_uniq
+  ON register_entries (app_id, channel_id)
+  WHERE app_id IS NOT NULL AND attendee_worker_id IS NULL AND attendee_agent_id IS NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS register_entries_org_channel_worker_uniq
+  ON register_entries (organization_id, channel_id, attendee_worker_id)
+  WHERE organization_id IS NOT NULL AND attendee_worker_id IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS register_entries_org_channel_agent_uniq
+  ON register_entries (organization_id, channel_id, attendee_agent_id)
+  WHERE organization_id IS NOT NULL AND attendee_agent_id IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS register_entries_org_channel_all_uniq
+  ON register_entries (organization_id, channel_id)
+  WHERE organization_id IS NOT NULL AND attendee_worker_id IS NULL AND attendee_agent_id IS NULL AND deleted_at IS NULL;
