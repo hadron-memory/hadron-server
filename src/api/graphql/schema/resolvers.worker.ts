@@ -31,6 +31,8 @@ import {
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
 import { applyPersonaTemplate, templateBindsName } from '../../../lib/personaDescription.js';
+// Spec 049 Phase 6 — the register block, derived data through one composition point.
+import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
   newestHandoff,
   handoffSessionId,
@@ -2015,7 +2017,7 @@ export const workerFieldResolvers = {
      * and the worker no override.
      */
     prompt: async (
-      worker: { appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
+      worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
       _: unknown,
       ctx: Context,
     ) => {
@@ -2031,8 +2033,14 @@ export const workerFieldResolvers = {
       const template = agent?.personaPrompt ?? null;
       const role = worker.role ?? agent?.personaRole ?? '';
       const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
-      if (bound && worker.promptOverride) return `${bound}\n\n${worker.promptOverride}`;
-      return worker.promptOverride ?? bound;
+      const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
+      // Spec 049 Phase 6: the register block is DERIVED data appended through
+      // the one composition point (`renderDerivedBlocks`), never authored
+      // prompt text — evaluated for the reader, so a briefing says what THIS
+      // driver may read and post, and re-renders live like the rest.
+      const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx }));
+      if (!derived) return authored;
+      return authored ? `${authored}\n\n${derived}` : derived;
     },
     /**
      * #1029 — what a fresh binding inherits from the previous stint.

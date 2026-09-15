@@ -103,3 +103,16 @@ describe('register tools', () => {
     expect(await server(admin.id, app2.id).callToolText('hadron_register_list', { owner: org.urn })).toContain('team (chats:team) ← every attendee');
   });
 });
+
+describe('the register on the identity surfaces (Phase 6)', () => {
+  it('hadron_start_session, hadron_get_worker and hadron_whoami all carry the bound worker\'s register block', async () => {
+    const asAdmin = server(admin.id);
+    const started = await asAdmin.callToolText('hadron_start_session', { description: 'stint', workerRef: 'Iris' });
+    expect(started).toContain('## Channels (register)');
+    expect(started).toContain('- team — hrn:mem:');
+    expect(await asAdmin.callToolText('hadron_get_worker', { workerRef: 'Iris' })).toContain('## Channels (register)');
+    const who = await asAdmin.callToolText('hadron_whoami', {});
+    expect(who).toContain('working as: Iris');
+    expect(who).toContain('    ## Channels (register)');
+  });
+});

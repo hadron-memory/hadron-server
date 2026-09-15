@@ -39,6 +39,10 @@ import {
 } from '../../../lib/register.js';
 import { generateId } from '../../../lib/id.js';
 import { agentRegisterDefaults } from '../../../lib/registerInstall.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
+import { isAppParticipant } from './resolvers.helpers.js';
+import { resolveRegister, toGqlRegisterRows, type RegisterAttendee } from '../../../lib/resolveRegister.js';
 
 type RegisterRoleInput = 'WATCH' | 'POST' | 'BOTH';
 
@@ -61,6 +65,50 @@ async function writableEntry(ctx: Context, ref: string): Promise<RegisterEntry> 
 
 export const registerQueries = {
   registerEntry: async (_: unknown, { ref }: { ref: string }, ctx: Context) => readableEntry(ctx, ref),
+
+  /**
+   * Spec 049 Phase 6 — an attendee's resolved register. Gated on App
+   * participation (the Worker's App, or the given App) — the same gate the
+   * Worker's briefing sits behind; anything foreign or nonexistent is an
+   * empty list, never an oracle.
+   */
+  attendeeRegister: async (
+    _: unknown,
+    { workerRef, agentRef, appRef }: { workerRef?: string | null; agentRef?: string | null; appRef?: string | null },
+    ctx: Context,
+  ) => {
+    let attendee: RegisterAttendee | null = null;
+    let appId: string | null = null;
+    if (workerRef?.trim()) {
+      try {
+        const { id } = await resolveWorkerRef(ctx.db, workerRef);
+        const w = await ctx.db.worker.findUnique({ where: { id }, select: { appId: true } });
+        if (w) {
+          attendee = { workerId: id };
+          appId = w.appId;
+        }
+      } catch {
+        return [];
+      }
+    } else if (agentRef?.trim() && appRef?.trim()) {
+      try {
+        const [{ id: agentId }, { id: resolvedAppId }] = await Promise.all([resolveAgentRef(ctx.db, agentRef), resolveAppRef(ctx.db, appRef)]);
+        attendee = { agentId, appId: resolvedAppId };
+        appId = resolvedAppId;
+      } catch {
+        return [];
+      }
+    } else {
+      throw new GraphQLError('Pass workerRef, or agentRef with appRef.', { extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    if (!attendee || !appId) return [];
+    const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });
+    if (!app) return [];
+    const admitted = ctx.userId ? await isAppParticipant(ctx, app) : ctx.appId === app.id;
+    if (!admitted) return [];
+    const view = await resolveRegister(ctx.db, { attendee, actor: ctx });
+    return view ? toGqlRegisterRows(view) : [];
+  },
 
   registerEntries: async (
     _: unknown,

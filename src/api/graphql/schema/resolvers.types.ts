@@ -15,6 +15,7 @@ import {
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 // Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
 import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../lib/scopes.js';
+import { parseRunRegisterSnapshot, resolveRegister, snapshotRowsAsEntries, toGqlRegisterRows } from '../../../lib/resolveRegister.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
@@ -500,6 +501,17 @@ export const typeResolvers = {
      * snapshot ∩ the caller's current access (a lens never grants), or null
      * when the run carries no named scope (its view is then `app`).
      */
+    /**
+     * Spec 049 Phase 6 — the run's register snapshot as the CALLER may act on
+     * it: rows from the snapshot, watermarks live, gates evaluated now (a
+     * snapshot is data, never a grant that outlives a revoked membership).
+     */
+    register: async (r: { registerSnapshot: unknown }, _: unknown, ctx: Context) => {
+      const snap = parseRunRegisterSnapshot(r.registerSnapshot);
+      if (!snap) return [];
+      const view = await resolveRegister(ctx.db, { attendee: snap.attendee, actor: ctx, rows: snapshotRowsAsEntries(snap) });
+      return view ? toGqlRegisterRows(view) : [];
+    },
     scope: async (r: { appId: string; scopeSnapshot: unknown }, _: unknown, ctx: Context) => {
       if (parseRunScopeSnapshot(r.scopeSnapshot) === null) return null;
       // Request-memoized on the snapshot itself: a run page repeats one

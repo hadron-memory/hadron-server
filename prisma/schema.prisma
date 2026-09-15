@@ -3689,6 +3689,11 @@ model AppRun {
   /// consumer re-intersects it with the principal's CURRENT access (`resolveRunScope`);
   /// never an access grant that outlives a revoked membership. NULL ⇒ `app`.
   scopeSnapshot        Json?             @map("scope_snapshot")
+  /// Spec 049 Phase 6 (D-2026-09-13-007): the attendee's resolved REGISTER at mint
+  /// (Agent-in-App = agentId + appId), rows only — for the attention section (Phase 7).
+  /// Same re-intersection rule as scopeSnapshot: the Channel watermarks are read
+  /// live and the gates are evaluated on every use; never a grant. NULL ⇒ no attendee.
+  registerSnapshot     Json?             @map("register_snapshot")
   parentRunId          String?           @map("parent_run_id")
   failure              Json?
   timeoutMs            Int?              @map("timeout_ms")

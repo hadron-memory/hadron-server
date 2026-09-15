@@ -185,6 +185,8 @@ import { resolveActiveOrg, type ActiveOrgResolution } from '../lib/auth/activeOr
 import { GraphQLError as ScopeGraphQLError } from 'graphql';
 // Spec 049 Phase 3 — the search ladder on MCP.
 import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchScopeResolution } from '../lib/scopes.js';
+// Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
+import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 
@@ -6814,6 +6816,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         ).map((a) => [a.id, a]),
       );
 
+      // Spec 049 Phase 6: the register per BOUND row, rendered through the one
+      // composition point and evaluated for this caller — what each worker
+      // session may read and post, and where the Channels stand.
+      const registerBlocks = new Map<string, string>();
+      for (const workerId of new Set(sessions.map((s) => s.workerId).filter((w): w is string => !!w))) {
+        try {
+          const block = renderDerivedBlocks(await resolveRegister(db, { attendee: { workerId }, actor: scopeCtx() }));
+          if (block) registerBlocks.set(workerId, block);
+        } catch {
+          // A register that cannot be rendered never fails the identity read.
+        }
+      }
+
       const lines = sessions.map((s) => {
         const worker = s.workerId ? workerRows.get(s.workerId) : null;
         const app = s.appId ? appRows.get(s.appId) : null;
@@ -6839,7 +6854,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
           (app ? `    app: ${app.name}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
-          (s.plan ? `\n    plan: ${s.plan}` : '')
+          (s.plan ? `\n    plan: ${s.plan}` : '') +
+          (s.workerId && registerBlocks.has(s.workerId)
+            ? `\n${registerBlocks.get(s.workerId)!.split('\n').map((l) => `    ${l}`).join('\n')}`
+            : '')
         );
       });
 

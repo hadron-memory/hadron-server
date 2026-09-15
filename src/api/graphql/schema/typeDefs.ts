@@ -590,6 +590,61 @@ export const typeDefs = `#graphql
     description: String
   }
 
+  # ── Spec 049 Phase 6 — resolveRegister (plan §4.3) ──
+
+  "S5 — why an attendee cannot act on a register row. Rendered identically by every consumer."
+  enum RegisterDisclosure {
+    HOST_MEMORY_NOT_READABLE
+    HOST_MEMORY_NOT_WRITABLE
+    CHANNEL_DELETED
+    DRIVER_NOT_PARTICIPANT
+    UNKNOWN_ACTOR
+    IMPERSONATION
+  }
+
+  "Which attendee column the winning register row named."
+  enum RegisterNamedBy {
+    WORKER
+    AGENT
+    EVERYONE
+  }
+
+  "The Channel half of a register view row; the host memory's URN only when YOU may read it."
+  type RegisterViewChannel {
+    id: ID!
+    name: String!
+    kind: ChannelKind!
+    loc: String!
+    hostMemoryUrn: String
+    "The host memory's id — like the URN, only when YOU may read it."
+    hostMemoryId: ID
+    "The Channel's watermark — the highest seq issued, not a count."
+    lastSeq: Int!
+    lastMessageAt: DateTime
+    deleted: Boolean!
+  }
+
+  """
+  One row of an attendee's RESOLVED register (spec 049 §4.3): the winning
+  register entry for a Channel (App › organization, Worker › Agent › everyone,
+  never unioned), the Channel's watermark, and the CALLER's real standing on
+  the host memory — canRead / canPost are the existing gates, the register
+  grants nothing. A row the caller cannot act on is returned with its reason,
+  never dropped.
+  """
+  type RegisterViewRow {
+    entry: RegisterEntry!
+    namedBy: RegisterNamedBy!
+    channel: RegisterViewChannel!
+    "Phase 7 — the attendee's cursor; null until read-state lands."
+    lastSeenSeq: Int
+    canRead: Boolean!
+    "Null when no actor could be evaluated (UNKNOWN_ACTOR in disclosure)."
+    canPost: Boolean
+    disclosure: RegisterDisclosure
+    attendeeUrn: String
+  }
+
   "Spec 049 Phase 5 — what an Agent's install-created register row is made with (plan §3.5)."
   type RegisterDefaults {
     mentionOnly: Boolean!
@@ -3335,6 +3390,13 @@ export const typeDefs = `#graphql
     """
     scope: SearchScopeInfo
     """
+    Spec 049 Phase 6 (D-2026-09-13-007): the register this run's attendee
+    (its Agent in its App) carried at mint, as YOU may act on it — rows from
+    the snapshot, watermarks live, gates evaluated now. Empty when the run has
+    no Agent (no attendee) or no rows.
+    """
+    register: [RegisterViewRow!]!
+    """
     The token budget this run was MINTED with — budgetTokens is what REMAINS.
     NULL for runs minted before this was recorded, which is deliberate: 0 would
     render as 'no budget' rather than 'unknown'.
@@ -5343,6 +5405,15 @@ export const typeDefs = `#graphql
     the same empty page as one naming nothing. Oldest first; limit default 50 / cap 200.
     """
     registerEntries(filter: RegisterEntryFilter, orgId: ID, limit: Int, offset: Int): RegisterEntriesPage!
+
+    """
+    Spec 049 Phase 6 — an attendee's RESOLVED register: the rows that apply to
+    a Worker (workerRef) or to an Agent in an App (agentRef + appRef), one per
+    Channel, with YOUR standing on each host memory. The relay reads this
+    instead of a configured appRef. Gated on App participation (the same gate
+    as the Worker's briefing); a foreign or nonexistent attendee is an empty list.
+    """
+    attendeeRegister(workerRef: ID, agentRef: ID, appRef: ID): [RegisterViewRow!]!
 
     """
     036-ai-service-config: resolve a config name for an execution context
