@@ -113,8 +113,10 @@ export async function resolveScopeOwnerForWrite(
     return { organizationId: null, agentId: id, appId: null };
   }
   const { id } = await resolveAppRef(ctx.db, input.appRef!.trim());
+  // Live AND installed: an uninstalled App must not keep supplying its owner
+  // to the write gate (Copilot on PR #1160) — same rule as the read side.
   const app = await ctx.db.app.findFirst({
-    where: { id, deletedAt: null },
+    where: { id, deletedAt: null, uninstalledAt: null },
     select: { organizationId: true, ownerUserId: true },
   });
   if (!app) throw new Error('Forbidden');
@@ -134,7 +136,7 @@ export async function requireScopeWrite(ctx: Context, scope: ScopeOwnerColumns):
     return requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
   }
   const app = await ctx.db.app.findFirst({
-    where: { id: scope.appId!, deletedAt: null },
+    where: { id: scope.appId!, deletedAt: null, uninstalledAt: null },
     select: { organizationId: true, ownerUserId: true },
   });
   if (!app) throw new Error('Forbidden');
@@ -163,7 +165,7 @@ export async function canReadScope(ctx: Context, scope: ScopeOwnerColumns): Prom
   if (scope.organizationId) return isOrgMemberOrAdmin(ctx, scope.organizationId);
   if (scope.appId) {
     const app = await ctx.db.app.findFirst({
-      where: { id: scope.appId, deletedAt: null },
+      where: { id: scope.appId, deletedAt: null, uninstalledAt: null },
       select: { id: true, organizationId: true, ownerUserId: true },
     });
     return !!app && (await isAppParticipant(ctx, app));
@@ -173,6 +175,10 @@ export async function canReadScope(ctx: Context, scope: ScopeOwnerColumns): Prom
     select: { organizationId: true, ownerUserId: true, visibility: true },
   });
   if (!agent) return false;
+  // Impersonation is bounded to the ONE shared org (#876 / #1094): a PUBLIC
+  // Agent elsewhere is outside the support view, whatever its visibility
+  // (Copilot on PR #1160).
+  if (ctx.impersonation && agent.organizationId !== ctx.impersonation.orgId) return false;
   return agent.visibility === 'PUBLIC' || isOwnerOrOrgMember(ctx, agent);
 }
 
@@ -188,7 +194,7 @@ export async function appContextIfReadable(
   appId: string,
 ): Promise<{ id: string; organizationId: string | null; agentIds: string[] } | null> {
   const app = await ctx.db.app.findFirst({
-    where: { id: appId, deletedAt: null },
+    where: { id: appId, deletedAt: null, uninstalledAt: null },
     select: {
       id: true,
       organizationId: true,
@@ -208,7 +214,7 @@ async function appKeyScopeReach(
   appId: string,
 ): Promise<{ appId: string; organizationId: string | null; agentIds: string[] }> {
   const app = await ctx.db.app.findFirst({
-    where: { id: appId, deletedAt: null },
+    where: { id: appId, deletedAt: null, uninstalledAt: null },
     // Live Agents only: deleteAgent soft-deletes and leaves the AppAgent row,
     // and a dead Agent's scope must neither be readable nor shadow a live one
     // (Codex on PR #1160).
@@ -302,7 +308,8 @@ export async function readableScopesWhere(
         agent: {
           deletedAt: null,
           OR: [
-            { visibility: 'PUBLIC' },
+            // PUBLIC admits anyone — except a support view, bounded to its org.
+            ...(ctx.impersonation ? [] : [{ visibility: 'PUBLIC' as const }]),
             ...identityArms,
             { organizationId: { in: memberOrgIds } },
           ],

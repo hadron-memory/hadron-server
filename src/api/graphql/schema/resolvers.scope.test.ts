@@ -213,6 +213,15 @@ describe('name resolution in an App context — App › Agent › organization, 
     expect(ex.droppedCount).toBe(0);
   });
 
+  it('a blank rename is refused, and an UNINSTALLED App no longer reads or writes its scopes (Copilot on #1160)', async () => {
+    const admin = ctx(contributor.id, ['ADMIN']);
+    const s = await M.createScope({}, { input: { name: 'app-owned', appRef: app.urn, memoryRefs: [memA1.urn] } }, admin);
+    await expect(M.updateScope({}, { ref: s.id, input: { name: '   ' } }, admin)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    expect(await Q.scope({}, { ref: s.id }, admin)).toBeNull();
+    await expect(M.updateScope({}, { ref: s.id, input: { description: 'x' } }, admin)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+  });
+
   it('a name needs an App context on GraphQL', async () => {
     await expect(Q.scopeExplain({}, { name: 'marketing' }, ctx(reader.id))).rejects.toThrow(/needs an App context/);
   });

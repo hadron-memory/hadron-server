@@ -128,7 +128,13 @@ import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
-import { OrganizationNotFoundError, WorkerNotFoundError } from '../lib/entityRef/errors.js';
+import {
+  AgentNotFoundError,
+  AppNotFoundError,
+  MemoryNotFoundError,
+  OrganizationNotFoundError,
+  WorkerNotFoundError,
+} from '../lib/entityRef/errors.js';
 import {
   renderWorkerContinuity,
   type RenderableContinuity,
@@ -142,7 +148,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
-import { isAppParticipant } from '../api/graphql/schema/resolvers.helpers.js';
+import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 
@@ -2132,27 +2138,66 @@ export function createMcpServerInstance(
     if (e instanceof Error && (e.message === 'Forbidden' || e.message === 'Unauthenticated')) {
       return textResult(`[${e.message.toLowerCase()}] ${e.message}.`);
     }
+    // A ref that names nothing is the caller's input, not a server fault
+    // (Copilot on PR #1160): keep it inside the `[code]` envelope.
+    if (
+      e instanceof AppNotFoundError ||
+      e instanceof AgentNotFoundError ||
+      e instanceof OrganizationNotFoundError ||
+      e instanceof MemoryNotFoundError
+    ) {
+      return textResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
+    }
+    if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`);
     throw e;
   };
 
-  /** One scope, rendered for the caller: owner, ids, readable memories, hidden count. */
-  async function renderScope(ctx: Context, s: { id: string; name: string; description: string | null; organizationId: string | null; agentId: string | null; appId: string | null; createdAt: Date; updatedAt: Date | null; createdBy: string | null; updatedBy: string | null; deletedAt: Date | null; deletedBy: string | null }): Promise<string> {
-    const S = resolvers.Scope;
-    const ownerType = S.ownerType(s);
-    const ownerUrn = await S.ownerUrn(s, {}, ctx);
-    const entries = await S.memories(s, {}, ctx);
-    const hidden = await S.hiddenMemoryCount(s, {}, ctx);
-    const ownerLabel = ownerUrn
-      ? safeEmitEntityUrnV2(ownerType === 'ORGANIZATION' ? 'org' : ownerType === 'AGENT' ? 'agent' : 'app', ownerUrn)
-      : S.ownerId(s);
-    const lines = [
-      `**${s.name}** — ${ownerType.toLowerCase()}-owned by ${ownerLabel} · id ${s.id}` +
-        (s.description ? ` — ${s.description}` : ''),
-      ...entries.map((e) => `  ${e.position + 1}. ${safeEmitEntityUrnV2('memory', e.memory!.urn)}`),
-    ];
-    if (hidden > 0) lines.push(`  (+${hidden} ${hidden === 1 ? 'memory' : 'memories'} you cannot read)`);
-    return lines.join('\n');
+  type ScopeRow = { id: string; name: string; description: string | null; organizationId: string | null; agentId: string | null; appId: string | null };
+
+  /**
+   * A PAGE of scopes rendered for the caller — owner, id, readable memories in
+   * order, hidden count — in a fixed number of queries whatever the page size:
+   * one for the join rows (live memories only), one for their memories, one per
+   * owner kind, and the accessible set computed ONCE (Copilot on PR #1160: the
+   * per-scope field resolvers recomputed it twice per row, ~5 queries × 200).
+   */
+  async function renderScopes(ctx: Context, scopes: ScopeRow[]): Promise<string[]> {
+    if (scopes.length === 0) return [];
+    const ids = scopes.map((s) => s.id);
+    const [joins, accessible, orgs, agents, apps] = await Promise.all([
+      db.scopeMemory.findMany({
+        where: { scopeId: { in: ids }, memory: { deletedAt: null } },
+        orderBy: { position: 'asc' },
+        select: { scopeId: true, memoryId: true, position: true, memory: { select: { urn: true } } },
+      }),
+      // The GraphQL gate, not the MCP one: the Scope field resolvers project
+      // through it, and the two surfaces must render one list (the MCP gate
+      // still denies an owner's app-scoped personal memory — the known parity
+      // gap, `feedback:memory-access-gate-parity`).
+      gqlAccessibleMemoryIds(ctx),
+      db.organization.findMany({ where: { id: { in: scopes.map((s) => s.organizationId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
+      db.agent.findMany({ where: { id: { in: scopes.map((s) => s.agentId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
+      db.app.findMany({ where: { id: { in: scopes.map((s) => s.appId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
+    ]);
+    const readable = accessible === null ? null : new Set(accessible);
+    const urnOf = { org: new Map(orgs.map((o) => [o.id, o.urn])), agent: new Map(agents.map((a) => [a.id, a.urn])), app: new Map(apps.map((a) => [a.id, a.urn])) };
+    return scopes.map((s) => {
+      const kind = s.appId ? 'app' : s.agentId ? 'agent' : 'org';
+      const ownerId = (s.appId ?? s.agentId ?? s.organizationId) as string;
+      const ownerUrn = urnOf[kind].get(ownerId);
+      const ownerLabel = ownerUrn ? safeEmitEntityUrnV2(kind, ownerUrn) : ownerId;
+      const mine = joins.filter((j) => j.scopeId === s.id);
+      const shown = mine.filter((j) => readable === null || readable.has(j.memoryId));
+      const hidden = mine.length - shown.length;
+      const lines = [
+        `**${s.name}** — ${kind === 'org' ? 'organization' : kind}-owned by ${ownerLabel} · id ${s.id}` + (s.description ? ` — ${s.description}` : ''),
+        ...shown.map((j) => `  ${j.position + 1}. ${safeEmitEntityUrnV2('memory', j.memory.urn)}`),
+      ];
+      if (hidden > 0) lines.push(`  (+${hidden} ${hidden === 1 ? 'memory' : 'memories'} you cannot read)`);
+      return lines.join('\n');
+    });
   }
+  const renderScope = async (ctx: Context, s: ScopeRow): Promise<string> => (await renderScopes(ctx, [s]))[0];
 
   server.tool(
     'hadron_list_scopes',
@@ -2178,7 +2223,7 @@ export function createMcpServerInstance(
               : `${page.total} scope(s), none on this page.`,
           );
         }
-        const rendered = await Promise.all(page.items.map((s) => renderScope(ctx, s)));
+        const rendered = await renderScopes(ctx, page.items);
         return textResult(`${page.total} scope(s)${appRef ? ' in this App\'s context' : ''}:\n\n${rendered.join('\n\n')}`);
       } catch (e) {
         return scopeErrorText(e);

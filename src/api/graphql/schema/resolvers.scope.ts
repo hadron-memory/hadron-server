@@ -250,15 +250,17 @@ export const scopeMutations = {
   ): Promise<Scope> => {
     const writer = requireWriter(ctx);
     const scope = await writableScope(ctx, ref);
-    const name = input.name?.trim();
-    if (name !== undefined && name !== '') assertScopeName(name);
+    // A name that was PASSED is validated, blank included — a blank rename must
+    // be refused, not silently ignored (Copilot on PR #1160).
+    const name = input.name != null ? input.name.trim() : undefined;
+    if (name !== undefined) assertScopeName(name);
     const memoryIds = input.memoryRefs ? await resolveScopeMemoryRefs(ctx, input.memoryRefs) : null;
     try {
       return await ctx.db.$transaction(async (tx) => {
         const updated = await tx.scope.update({
           where: { id: scope.id },
           data: {
-            ...(name ? { name } : {}),
+            ...(name !== undefined ? { name } : {}),
             ...(input.description !== undefined ? { description: input.description?.trim() || null } : {}),
             updatedBy: writer,
           },
