@@ -83,7 +83,16 @@
 // `active-org` capability token. Caller-detectable: a client that needs the org
 // view on a build without it has no tool to call, and must fall back to naming
 // the org per call.
-export const HADRON_SERVER_VERSION = '0.17.0';
+// 0.18.0: spec 049 Phases 2–8 — named search scopes (`hadron_*_scope`,
+// `hadron_set_active_scope`), Channels (`hadron_list_channels`,
+// `hadron_create_channel`), the chat register (`hadron_register_*`), the
+// register block on the briefing / hadron_whoami, and CHANNEL-ADDRESSED chat:
+// `hadron_channel_post` / `hadron_channel_read` plus the `channel` selector on
+// hadron_team_chat_post / hadron_team_chat_read. The selector is the reason this
+// is a capability: MCP drops unknown arguments, so a client sending `channel` to
+// an older build silently posts into — or reads — the DEFAULT team chat instead
+// (Copilot on PR #1169). Token: `channels`.
+export const HADRON_SERVER_VERSION = '0.18.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
@@ -147,6 +156,14 @@ export const MCP_SURFACE_CAPABILITIES = [
    * build; name the org per call instead.
    */
   'active-org',
+  /**
+   * Spec 049 Phases 4–8 — Channels, the chat register, and Channel-addressed
+   * chat (`hadron_channel_post` / `hadron_channel_read`, the `channel` selector
+   * on the team-chat tools). Absent ⇒ a `channel` argument is DROPPED by the
+   * older build and the call lands in the default team chat; address only the
+   * default team chat on such a build.
+   */
+  'channels',
 ] as const;
 
 /**
