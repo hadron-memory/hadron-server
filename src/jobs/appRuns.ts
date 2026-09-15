@@ -27,6 +27,7 @@ import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/ai
 import { recordLlmUsage } from '../lib/metering/index.js';
 // Spec 049 Phase 3b — the trigger's scope snapshot on the run.
 import { parseRunScopeSnapshot, snapshotScopeForTrigger } from '../lib/scopes.js';
+import { snapshotRegisterForRun } from '../lib/resolveRegister.js';
 import {
   generateText,
   LlmInvocationError,
@@ -466,6 +467,11 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
         ? await snapshotScopeForTrigger(db, args.scopeId)
         : null;
 
+  // Spec 049 Phase 6: the attendee of a headless run is Agent-in-App; a run
+  // with no agentId has no attendee and gets no register (plan §4.4). Rows
+  // only — the watermarks are read live by the attention section (Phase 7).
+  const registerSnapshot = args.agentId ? await snapshotRegisterForRun(db, args.agentId, args.appId) : null;
+
   const run = await db.appRun.create({
     data: {
       id: generateId(),
@@ -483,6 +489,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       // deploy (PENDING rows survive a restart).
       policy: (presentLinks.length > 0 ? { chain: presentLinks } : undefined) as never,
       scopeSnapshot: (scopeSnapshot ?? undefined) as never,
+      registerSnapshot: (registerSnapshot ?? undefined) as never,
       budgetTokens: DEFAULT_RUN_TOKEN_BUDGET,
       budgetActions: DEFAULT_RUN_ACTION_BUDGET,
       // #832: snapshot the MINTED budget so a client can render "spent vs
