@@ -1,5 +1,7 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+// Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
+import { assertLocWritable, protectedLocsIn, locsOverlap } from '../../../lib/protectedLoc.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -74,6 +76,7 @@ import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import {
   ancestorLocs,
   lockAncestorsForCreate,
+  lockLocForWrite,
   lockAncestorsForCreateMany,
   lockNodeForDelete,
 } from '../../../lib/nodeSubtreeLock.js';
@@ -156,6 +159,8 @@ export async function writeNodeCore(
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, input.memoryId);
       input.memoryId = resolvedMemoryId;
       await requireMemoryWriteAccess(ctx, input.memoryId);
+      // Spec 049 S4: a Channel's address is written by its owning operation only.
+      await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write');
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,
       // MCP, tests, future — gets the same typed InvalidLocError instead
@@ -608,9 +613,17 @@ export async function writeNodeCore(
           const guardWhere: Prisma.NodeWhereInput = opts?.targetNodeId
             ? { id: opts.targetNodeId, revSeq: claimedRevNo }
             : { loc: input.loc, memoryId: input.memoryId, revSeq: claimedRevNo };
-          const guarded = await ctx.db.node.updateMany({
-            where: guardWhere,
-            data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
+          // Spec 049 S4: the write holds the address lock, and the
+          // protected-loc gate runs under it — the early check above is the
+          // fast typed refusal, this is the authoritative one (a Channel can
+          // be created, or the node moved under one, in between; Copilot on
+          // PR #1165).
+          const guarded = await ctx.db.$transaction(async (tx) => {
+            await lockLocForWrite(tx, input.memoryId, input.loc);
+            return tx.node.updateMany({
+              where: guardWhere,
+              data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
+            });
           });
           if (guarded.count === 0) {
             throw new GraphQLError(
@@ -631,12 +644,16 @@ export async function writeNodeCore(
             include,
           });
         } else if (mode === 'update') {
-          node = await ctx.db.node.update({
-            where: opts?.targetNodeId
-              ? { id: opts.targetNodeId }
-              : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-            data: updatePayload,
-            include,
+          // Same lock-then-gate discipline as the guarded branch above.
+          node = await ctx.db.$transaction(async (tx) => {
+            await lockLocForWrite(tx, input.memoryId, input.loc);
+            return tx.node.update({
+              where: opts?.targetNodeId
+                ? { id: opts.targetNodeId }
+                : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+              data: updatePayload,
+              include,
+            });
           });
         } else {
           // Create/upsert. A new node placed into a subtree must be serialized
@@ -664,13 +681,14 @@ export async function writeNodeCore(
             update: updatePayload,
             include,
           } satisfies Prisma.NodeUpsertArgs;
-          node =
-            ancestorLocs(input.loc).length === 0
-              ? await ctx.db.node.upsert(upsertArgs)
-              : await ctx.db.$transaction(async (tx) => {
-                  await lockAncestorsForCreate(tx, input.memoryId, input.loc);
-                  return tx.node.upsert(upsertArgs);
-                });
+          // A root-level loc takes no ancestor lock, but still goes through
+          // the helper: it is also the spec 049 S4 protected-loc gate, run
+          // under the transaction — a root-level Channel address was
+          // otherwise overwritable here (Copilot on PR #1165, round 2).
+          node = await ctx.db.$transaction(async (tx) => {
+            await lockAncestorsForCreate(tx, input.memoryId, input.loc);
+            return tx.node.upsert(upsertArgs);
+          });
         }
       } catch (e) {
         if (
@@ -977,6 +995,13 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, meta.memoryId);
+      // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
+      await assertLocWritable(
+        ctx.db,
+        meta.memoryId,
+        (await ctx.db.node.findUniqueOrThrow({ where: { id: meta.id }, select: { loc: true } })).loc,
+        'update',
+      );
 
       // Encrypted memory: require an active session key up front (mirrors
       // mergeNodes / upsertNode) so a missing key fails with a typed
@@ -1088,6 +1113,13 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, meta.memoryId);
+      // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
+      await assertLocWritable(
+        ctx.db,
+        meta.memoryId,
+        (await ctx.db.node.findUniqueOrThrow({ where: { id: meta.id }, select: { loc: true } })).loc,
+        'update',
+      );
 
       // Encrypted memory: require an active session up front (mirrors
       // updateNodeData / writeNodeCore) so a missing key fails with a typed
@@ -1283,7 +1315,21 @@ export const nodeMutations = {
       }
       const plans: Plan[] = [];
 
+      // Spec 049 S4: a node under a Channel's address is SKIPPED, never
+      // rewritten — the bulk surface reports rather than failing the batch.
+      // One Channel-table read per memory, not per node (Copilot on PR #1165).
+      const protectedByMemory = new Map<string, Array<{ loc: string }>>();
+      const isProtectedLoc = async (memoryId: string, loc: string) => {
+        let locs = protectedByMemory.get(memoryId);
+        if (!locs) {
+          locs = await protectedLocsIn(ctx.db, memoryId);
+          protectedByMemory.set(memoryId, locs);
+        }
+        return locs.some((p) => locsOverlap(p.loc, loc));
+      };
+
       for (const raw of rawNodes) {
+        if (await isProtectedLoc(raw.memoryId, raw.loc)) continue;
         const memEnc = await getMemEnc(raw.memoryId);
         if (memEnc.isEncrypted && !sessionKeyCache.getByMemoryId(memEnc.id)) {
           throw new GraphQLError(
@@ -1560,6 +1606,8 @@ export const nodeMutations = {
       }
       // One check covers the subtree too: every descendant shares this memory.
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
 
       // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
       // node preserves its original deletedAt/deletedBy (matches the
@@ -1987,6 +2035,9 @@ export const nodeMutations = {
       // The subtree leaves the source memory and lands in the destination — write
       // access to both (a same-memory move checks once).
       await requireMemoryWriteAccess(ctx, source.memoryId);
+      // Spec 049 S4: a move whose SOURCE subtree contains a Channel is refused
+      // here; a destination entering one is refused by the create lock.
+      await assertLocWritable(ctx.db, source.memoryId, source.loc, 'move');
       const crossMemory = destMemoryId !== source.memoryId;
       if (crossMemory) {
         await requireMemoryWriteAccess(ctx, destMemoryId);
@@ -2238,6 +2289,14 @@ export const nodeMutations = {
         }
       }
       authedMemories.add(source.memoryId);
+      // Spec 049 S4: neither endpoint may be a Channel's address — the target
+      // is written, the source is deleted or re-pointed (Copilot on PR #1165,
+      // round 2). Fast typed refusal here; the authoritative check runs under
+      // the locks inside the transaction below.
+      await assertLocWritable(ctx.db, target.memoryId, target.loc, 'merge');
+      if (deleteSource || fields.has('EDGES')) {
+        await assertLocWritable(ctx.db, source.memoryId, source.loc, 'merge');
+      }
 
       // Edge transfer can mutate edges whose denormalized memory is NEITHER
       // the source's nor the target's: an INCOMING edge from a third memory
@@ -2366,6 +2425,11 @@ export const nodeMutations = {
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       await ctx.db.$transaction(async (tx) => {
+        // Lock-then-gate on both endpoints (spec 049 S4).
+        await lockLocForWrite(tx, target.memoryId, target.loc);
+        if (deleteSource || fields.has('EDGES')) {
+          await lockNodeForDelete(tx, source.memoryId, source.loc);
+        }
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -2709,6 +2773,8 @@ export const nodeMutations = {
       const revision = await ctx.db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
 
       // #620 — the restored field set (legacy-sentinel-aware), shared by the
       // pre-restore snapshot's `changes` diff and the write-back.
@@ -2727,6 +2793,8 @@ export const nodeMutations = {
       // Restore (+ optional truncate) in one transaction (#617) so the portal
       // never sequences restore + N deletes and can't half-apply on a crash.
       const restored = await ctx.db.$transaction(async (tx) => {
+        // Spec 049 S4: lock-then-gate — the check above is the fast refusal.
+        await lockLocForWrite(tx, node.memoryId, node.loc);
         if (truncate) {
           // #617 truncate: collapse the history so the selected revision becomes
           // the new baseline. Delete every snapshot NEWER than the selected one
@@ -2804,6 +2872,7 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // No protected-loc gate: a revision row is history, not the address.
       await ctx.db.nodeRevision.delete({ where: { id: revisionId } });
       return true;
     },

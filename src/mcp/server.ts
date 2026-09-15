@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+// Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
+import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
@@ -2401,6 +2403,72 @@ export function createMcpServerInstance(
     },
   );
 
+  // ── Channels (spec 049 Phase 4, D-2026-09-13-006) ───────────────────────────
+
+  /** One Channel as a line: id · name · loc · host memory · watermark. */
+  const renderChannels = async (ctx: Context, rows: Array<{ id: string; name: string; loc: string; memoryId: string; lastSeq: number; lastMessageAt: Date | null; description: string | null }>) => {
+    const memories = await ctx.db.memory.findMany({
+      where: { id: { in: [...new Set(rows.map((r) => r.memoryId))] } },
+      select: { id: true, urn: true },
+    });
+    const urnOf = new Map(memories.map((m) => [m.id, safeEmitEntityUrnV2('memory', m.urn)]));
+    return rows.map((r) =>
+      [
+        `- ${r.name} (${r.loc}) — id ${r.id}`,
+        `  memory: ${urnOf.get(r.memoryId) ?? r.memoryId}`,
+        `  messages: seq ≤ ${r.lastSeq}${r.lastMessageAt ? `, last ${r.lastMessageAt.toISOString()}` : ''}`,
+        ...(r.description ? [`  ${r.description}`] : []),
+      ].join('\n'),
+    );
+  };
+
+  server.tool(
+    'hadron_list_channels',
+    'List the Channels (spec 049 — durable, server-ordered message streams; each hosted at ONE reserved address in ONE memory) whose host memory you may read. Default: the active App\'s. Every App has a default Channel `team` at chats:team — what hadron_team_chat_post writes to. A Channel\'s address is PROTECTED: generic node writes under it are refused ([loc_protected]).',
+    {
+      app: z.string().optional().describe('App URN or id. Defaults to the active App.'),
+      memory: z.string().optional().describe('Or: one host memory (URN or id).'),
+      limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+      offset: z.number().int().optional().describe('Page offset.'),
+    },
+    async ({ app, memory, limit, offset }) => {
+      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      const ctx = scopeCtx();
+      const appRef = memory ? undefined : (app ?? auth.appId ?? undefined);
+      if (!appRef && !memory) return textResult('[bad_user_input] Pass app or memory, or select an App with hadron_set_active_app first.');
+      try {
+        const page = await resolvers.Query.channels({}, { filter: { appRef, memoryRef: memory }, limit, offset }, ctx);
+        if (page.total === 0) return textResult('No channels you may read there.');
+        const lines = await renderChannels(ctx, page.items);
+        return textResult(`${page.total} channel${page.total === 1 ? '' : 's'}:\n\n${lines.join('\n')}`);
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_create_channel',
+    'Create a named Channel WITH its chat root (spec 049), in an app-class memory you may write. `loc` is the reserved address (e.g. chats:release) — it must not overlap an existing Channel\'s. Every App already has `team` at chats:team.',
+    {
+      memory: z.string().describe('Host memory (URN or id) — app-class.'),
+      loc: z.string().describe('The reserved address, e.g. chats:release.'),
+      name: z.string().describe('The Channel name.'),
+      description: z.string().optional().describe('What the Channel is for.'),
+    },
+    async ({ memory, loc, name, description }) => {
+      if (!auth.userId) return textResult('Not authenticated — Channels are created by a user, not an App key.');
+      const ctx = scopeCtx();
+      try {
+        const row = await resolvers.Mutation.createChannel({}, { input: { memoryRef: memory, loc, name, description } }, ctx);
+        const lines = await renderChannels(ctx, [row]);
+        return textResult(`Created.\n\n${lines.join('\n')}\n\nThe address ${row.loc} is now protected: only the Channel's own operations write there.`);
+      } catch (e) {
+        return scopeErrorText(e);
+      }
+    },
+  );
+
   // ── hadron_set_active_scope (spec 049 Phase 3, D-2026-09-13-002) ────────────
 
   server.tool(
@@ -2507,16 +2575,20 @@ export function createMcpServerInstance(
       // parent, so creating it under a concurrently-deleted grandparent is
       // exactly the orphan race. Serialize against an ancestor-delete by holding
       // advisory locks on the ancestor path across the upsert, matching the
-      // hadron_create_node / createNode paths. Root-level locs skip the tx.
+      // hadron_create_node / createNode paths. A root-level loc takes no
+      // ancestor lock, but still goes through the helper: it is also the
+      // spec 049 S4 protected-loc gate, and a root-level Channel address
+      // was otherwise overwritable here (Codex P1 on PR #1165).
       let sectionId: string;
-      if (ancestorLocs(loc).length === 0) {
-        ({ id: sectionId } = await db.node.upsert(upsertArgs));
-      } else {
+      try {
         sectionId = await db.$transaction(async (tx) => {
           await lockAncestorsForCreate(tx, memoryId, loc);
           const row = await tx.node.upsert(upsertArgs);
           return row.id;
         });
+      } catch (e) {
+        if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+        throw e;
       }
 
       // #1061 — a section node is a node; creating or re-saving one is a write,
@@ -4394,6 +4466,13 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memory.id))) {
         return textResult('Write access denied for this memory.');
       }
+      // Spec 049 S4: an in-place update takes no lock, so the gate is explicit.
+      try {
+        await assertLocWritable(db, memory.id, loc, 'update');
+      } catch (e) {
+        if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+        throw e;
+      }
 
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
@@ -4617,7 +4696,18 @@ export function createMcpServerInstance(
       }
 
       if (Object.keys(data).length > 0) {
-        await db.node.update({ where: { id: existing.id }, data });
+        // Spec 049 S4: the write holds the address lock and the gate runs
+        // under it — the check above is the fast refusal, this the
+        // authoritative one (Copilot on PR #1165).
+        try {
+          await db.$transaction(async (tx) => {
+            await lockLocForWrite(tx, memory.id, loc);
+            await tx.node.update({ where: { id: existing.id }, data });
+          });
+        } catch (e) {
+          if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+          throw e;
+        }
       }
 
       if (resolvedEdges !== null) {

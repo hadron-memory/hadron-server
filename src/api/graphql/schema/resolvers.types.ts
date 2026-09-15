@@ -51,6 +51,7 @@ import {
   readPrimaryAgentField,
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
+  getAccessibleMemoryIds,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
@@ -860,6 +861,20 @@ export const typeResolvers = {
     },
   },
   App: {
+    /**
+     * Spec 049 Phase 4 — the App's default Channel, gated on its HOST MEMORY
+     * like `App.sharedMemory`: `Query.app` admits an org member who is not an
+     * App participant, and a nested object hands them that type's whole field
+     * surface (`Channel.memory`) — findings:broadening-read-gate-leaks-nested-
+     * objects (Copilot on PR #1165). Null when unreadable, silently.
+     */
+    defaultChannel: async (a: { defaultChannelId: string | null }, _: unknown, ctx: Context) => {
+      if (!a.defaultChannelId) return null;
+      const row = await ctx.db.channel.findFirst({ where: { id: a.defaultChannelId, deletedAt: null } });
+      if (!row) return null;
+      const accessible = await getAccessibleMemoryIds(ctx);
+      return accessible === null || accessible.includes(row.memoryId) ? row : null;
+    },
     // 036-ai-service-config: registry-backed reads of the App's
     // 'default' config (legacy ai_* columns dropped).
     aiProvider: async (a: { id: string }, _: unknown, ctx: Context) =>

@@ -55,6 +55,8 @@ import {
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
+// Spec 049 Phase 4 — the Channel row the team chat became.
+import { DEFAULT_CHANNEL_NAME, ensureChannelRow } from '../../../lib/channels.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 
@@ -172,6 +174,10 @@ async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRoot
     // per installed agent) — the relation filter is the tenant scope (#939).
     where: {
       loc: TEAM_CHAT_LOC,
+      // Spec 049: only a chat root is the team chat. A live non-chat node
+      // squatting the address is not adopted — the bootstrap refuses it
+      // (LOC_OCCUPIED) rather than posting into an arbitrary record.
+      nodeType: 'chat',
       deletedAt: null,
       memory: { appId, class: 'app', deletedAt: null },
     },
@@ -238,7 +244,7 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
     await ctx.db.$transaction(async (tx) => {
       // #664/#752: create under the ancestor-path lock so a concurrent
       // non-recursive delete of `chats` can't orphan the subtree.
-      await lockAncestorsForCreateMany(tx, memoryId, [TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC]);
+      await lockAncestorsForCreateMany(tx, memoryId, [TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC], { ownedByChannel: true });
       // Each of the three nodes is create-OR-RESTORE: a soft-deleted row
       // still occupies `@@unique([loc, memoryId])`, so a plain create would
       // P2002 forever and the canonical loc would be permanently bricked
@@ -247,29 +253,36 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
       // delete/restore cycle (old messages stay deleted).
       const restoreOrCreate = async (
         loc: string,
-        create: () => Promise<unknown>,
-      ) => {
+        create: () => Promise<{ id: string }>,
+        accept: (row: { nodeType: string }) => boolean = () => true,
+      ): Promise<string> => {
         const existing = await tx.node.findUnique({
           where: { loc_memoryId: { loc, memoryId } },
-          select: { id: true, deletedAt: true },
+          select: { id: true, deletedAt: true, nodeType: true },
         });
         if (existing) {
+          if (!accept(existing)) {
+            throw new GraphQLError(
+              `"${loc}" is occupied by a ${existing.nodeType} node; the team chat adopts only a chat root. Move or delete it first.`,
+              { extensions: { code: 'LOC_OCCUPIED', loc, nodeType: existing.nodeType } },
+            );
+          }
           if (existing.deletedAt) {
             await tx.node.update({
               where: { id: existing.id },
               data: { deletedAt: null, deletedBy: null },
             });
           }
-          return;
+          return existing.id;
         }
-        await create();
+        return (await create()).id;
       };
       await restoreOrCreate('chats', () =>
         tx.node.create({
           data: { id: generateId(), memoryId, loc: 'chats', name: 'chats', nodeType: 'record' },
         }),
       );
-      await restoreOrCreate(TEAM_CHAT_LOC, () =>
+      const rootId = await restoreOrCreate(TEAM_CHAT_LOC, () =>
         tx.node.create({
           data: {
             id: generateId(),
@@ -283,6 +296,8 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
             createdBy: ctx.userId ?? null,
           },
         }),
+        // A chat root (live or tombstoned) is adopted; anything else live is a squatter (LOC_OCCUPIED).
+        (row) => row.nodeType === 'chat',
       );
       await restoreOrCreate(TEAM_CHAT_MESSAGES_LOC, () =>
         tx.node.create({
@@ -296,6 +311,19 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
           },
         }),
       );
+      // Spec 049 Phase 4: the row is minted in the SAME transaction as the
+      // root, under the lock — the root is never live without its protection
+      // (Copilot on PR #1165). The lock serializes the first-post race, so
+      // ensureChannelRow's P2002 branch cannot fire inside this transaction.
+      await ensureChannelRow(tx, {
+        rootId,
+        memoryId,
+        loc: TEAM_CHAT_LOC,
+        name: DEFAULT_CHANNEL_NAME,
+        description: `Team chat — ${app.name}`,
+        createdBy: ctx.userId ?? null,
+        asDefaultOfAppId: app.id,
+      });
     });
   } catch (e) {
     // Concurrent first post won the bootstrap race — use its rows.
@@ -305,6 +333,19 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
   }
   const root = await locateTeamChatRoot(ctx, app.id);
   if (!root) throw new Error(`Team chat bootstrap failed for App ${app.id}`);
+  // Spec 049 Phase 4: the root is a Channel from its first moment — the row is
+  // what reserves and protects the address (D-2026-09-13-006). Idempotent for
+  // the transaction above; load-bearing for the concurrent-winner path, whose
+  // root may predate Channels.
+  await ensureChannelRow(ctx.db, {
+    rootId: root.id,
+    memoryId: root.memoryId,
+    loc: root.loc,
+    name: DEFAULT_CHANNEL_NAME,
+    description: `Team chat — ${app.name}`,
+    createdBy: ctx.userId ?? null,
+    asDefaultOfAppId: app.id,
+  });
   return root;
 }
 
@@ -595,8 +636,22 @@ export const teamChatMutations = {
     if (mentions.length > 0) envelope.mentions = mentions;
     if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
-    const root =
-      (await locateTeamChatRoot(ctx, appId)) ?? (await bootstrapTeamChat(ctx, app));
+    const located = await locateTeamChatRoot(ctx, appId);
+    const root = located ?? (await bootstrapTeamChat(ctx, app));
+    // Backfill-on-touch (spec 049 §7.1): a root that predates the Channel table
+    // gets its row on the next post, so the address is protected from then on
+    // even before the one-shot backfill has run.
+    if (located) {
+      await ensureChannelRow(ctx.db, {
+        rootId: root.id,
+        memoryId: root.memoryId,
+        loc: root.loc,
+        name: DEFAULT_CHANNEL_NAME,
+        description: `Team chat — ${app.name}`,
+        createdBy: ctx.userId ?? null,
+        asDefaultOfAppId: app.id,
+      });
+    }
     const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
     const msgFields = translateSessionExpired(memEncInfo, () =>
       encryptNodeFields({ content: body, data: envelope }, memEncInfo),
@@ -667,7 +722,7 @@ export const teamChatMutations = {
         });
       }
       return row.createdAt;
-    });
+    }, { asChannel: true });
 
     // #1061 — a chat message IS a node, so posting one is a write on the team's
     // shared chat memory. This was one of the largest blind spots in the old

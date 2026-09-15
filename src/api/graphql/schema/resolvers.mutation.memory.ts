@@ -79,6 +79,8 @@ import {
   hasSchemePrefix,
 } from '../../../lib/urn.js';
 import { GraphQLError } from 'graphql';
+// Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
+import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
 import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js';
@@ -971,14 +973,32 @@ export const memoryMutations = {
       if (memory.class === 'system') {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
-      // Spec 013 FR-014: idempotency. A re-delete on an already-soft-deleted
-      // memory returns true without overwriting the original deletedAt. The
-      // conditional updateMany closes the read-then-write race so deletedAt is
-      // set once. Secrets are org/user-owned only (#696), so there are no
-      // memory-scoped secrets to sweep here anymore.
-      await ctx.db.memory.updateMany({
-        where: { id: resolvedId, deletedAt: null },
-        data: { deletedAt: new Date() },
+      await ctx.db.$transaction(async (tx) => {
+        // Spec 049 §8.5: a memory hosting a live Channel is not deleted around
+        // the Channel — delete the Channel through its own operation first.
+        // Checked and tombstoned under the memory-level lock Channel creation
+        // also takes (`lockMemoryForChannelChange`), so a Channel cannot land
+        // between the check and the tombstone (Copilot on PR #1165, round 2).
+        await lockMemoryForChannelChange(tx, resolvedId);
+        const hosted = await tx.channel.findFirst({
+          where: { memoryId: resolvedId, deletedAt: null },
+          select: { id: true, name: true, loc: true },
+        });
+        if (hosted) {
+          throw new GraphQLError(
+            `This memory hosts Channel "${hosted.name}" (${hosted.loc}); delete the Channel first (deleteChannel).`,
+            { extensions: { code: 'MEMORY_HOSTS_CHANNEL', channelId: hosted.id } },
+          );
+        }
+        // Spec 013 FR-014: idempotency. A re-delete on an already-soft-deleted
+        // memory returns true without overwriting the original deletedAt. The
+        // conditional updateMany closes the read-then-write race so deletedAt is
+        // set once. Secrets are org/user-owned only (#696), so there are no
+        // memory-scoped secrets to sweep here anymore.
+        await tx.memory.updateMany({
+          where: { id: resolvedId, deletedAt: null },
+          data: { deletedAt: new Date() },
+        });
       });
       return true;
     },

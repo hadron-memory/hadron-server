@@ -1,4 +1,6 @@
 import { createDecipheriv } from 'crypto';
+// Spec 049 S4 — a Channel's address is skipped and reported, never overwritten from git.
+import { protectedLocsIn, locsOverlap } from '../../lib/protectedLoc.js';
 import { generateId } from '../../lib/id.js';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -11,7 +13,8 @@ import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { execGit } from './execGit.js';
 import { validateMemorySource } from '../../lib/gitSource.js';
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
-import { lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
+import { ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
+import type { Prisma } from '../../generated/prisma/index.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
 
 function decryptToken(ciphertext: string): string {
@@ -49,6 +52,8 @@ export const syncGraphFromGithub = async (
    * sync is not somebody's activity.
    */
   writtenNodes?: { id: string; loc: string; memoryId: string }[];
+  /** Spec 049 S4 — file locs that overlap a Channel's address; skipped, never written. */
+  skippedProtected?: string[];
 }> => {
   try {
     const graphName = graph.urn;
@@ -139,6 +144,7 @@ export const syncGraphFromGithub = async (
     // row ids are known) but declared outside it so the refs survive the commit
     // and can be returned to the caller.
     const writtenNodes: { id: string; loc: string; memoryId: string }[] = [];
+    const skippedProtected: string[] = [];
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
@@ -146,12 +152,23 @@ export const syncGraphFromGithub = async (
       // delete of an ancestor in this memory can't count zero descendants and
       // then miss the rows this sync commits. READ COMMITTED (the tx default) is
       // required so that delete's count sees these rows once the sync commits.
+      // Spec 049 S4: a Channel's address is never written from git — a mirror
+      // could otherwise overwrite the one record whose authorship is derived
+      // (#1047). Skipped and reported, never a failed sync.
+      const protectedLocs = await protectedLocsIn(tx, graph.id);
+      const isProtected = (loc: string) => protectedLocs.some((p) => locsOverlap(p.loc, loc));
       await lockAncestorsForCreateMany(
         tx,
         graph.id,
-        fsGraph.nodes.map((n) => n.loc).filter((l): l is string => typeof l === 'string' && l !== ''),
+        fsGraph.nodes
+          .map((n) => n.loc)
+          .filter((l): l is string => typeof l === 'string' && l !== '' && !isProtected(l)),
       );
       const upsertedIds: string[] = [];
+      // Rows the cleanup pass below must leave alone: a protected file's row
+      // is not upserted, and `notIn: upsertedIds` would otherwise hard-delete
+      // it — a root deletion cascading its Channel row (Copilot on PR #1165).
+      const protectedRowIds: string[] = [];
       // File frontmatter ids already claimed in THIS run — a second file
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
@@ -167,6 +184,10 @@ export const syncGraphFromGithub = async (
 
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
+        if (isProtected(loc)) {
+          skippedProtected.push(loc);
+          continue;
+        }
         const name = node.name!;
         const update = {
           loc,
@@ -206,6 +227,14 @@ export const syncGraphFromGithub = async (
 
         let rowId: string;
         if (byId && byId.memoryId === graph.id) {
+          // The SOURCE loc of an id-first move is checked too: a file whose
+          // new path is free must not drag a node out from under a Channel
+          // (Copilot on PR #1165).
+          if (byId.loc !== loc && isProtected(byId.loc)) {
+            skippedProtected.push(`${byId.loc} → ${loc}`);
+            protectedRowIds.push(byId.id);
+            continue;
+          }
           if (byId.loc !== loc) {
             // Moving into a loc another row currently holds: repo-wins — the
             // occupant is stale at that loc (it either moves later this run
@@ -288,8 +317,21 @@ export const syncGraphFromGithub = async (
         }
       }
 
+      // Spec 049 S4: never delete a row under (or above) a Channel's address,
+      // whether it was skipped this run or was git-owned before the Channel
+      // existed — the reservation outlives the mirror.
+      const protectedLocClauses: Prisma.NodeWhereInput[] = protectedLocs.flatMap((p) => [
+        { loc: p.loc },
+        { loc: { startsWith: `${p.loc}:` } },
+        ...(ancestorLocs(p.loc).length ? [{ loc: { in: ancestorLocs(p.loc) } }] : []),
+      ]);
       await tx.node.deleteMany({
-        where: { ownerRepo, memoryId: graph.id, id: { notIn: upsertedIds } },
+        where: {
+          ownerRepo,
+          memoryId: graph.id,
+          id: { notIn: [...upsertedIds, ...protectedRowIds] },
+          ...(protectedLocClauses.length ? { NOT: { OR: protectedLocClauses } } : {}),
+        },
       });
 
       for (const edge of edges) {
@@ -355,8 +397,11 @@ export const syncGraphFromGithub = async (
       });
     }
 
+    if (skippedProtected.length > 0) {
+      console.warn(`Sync of "${graphName}": skipped ${skippedProtected.length} file(s) under a Channel's address: ${skippedProtected.join(', ')}`);
+    }
     console.log(`Synced memory "${graphName}": ${fsGraph.nodes.length} nodes, ${edges.length} edges`);
-    return { nodeCount: fsGraph.nodes.length, writtenNodes };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({

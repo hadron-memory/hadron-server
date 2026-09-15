@@ -54,6 +54,7 @@ import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { scopeMutations, scopeQueries, scopeFieldResolvers } from './resolvers.scope.js';
+import { channelMutations, channelQueries, channelFieldResolvers } from './resolvers.channel.js';
 import { appMutations } from './resolvers.mutation.app.js';
 import { chatMutations } from './resolvers.mutation.chat.js';
 import { sessionMutations } from './resolvers.mutation.session.js';
@@ -70,6 +71,7 @@ export const resolvers = {
   ...impersonationTypeResolvers,
   ...workerFieldResolvers,
   ...scopeFieldResolvers,
+  ...channelFieldResolvers,
   Query: {
     ...nodeQueries,
     ...objectQueries,
@@ -83,6 +85,7 @@ export const resolvers = {
     ...teamChatQueries,
     ...teamWorkQueries,
     ...scopeQueries,
+    ...channelQueries,
     ...workerQueries,
     ...teamRoleQueries,
     ...sessionQueries,
@@ -117,6 +120,7 @@ export const resolvers = {
     ...teamChatMutations,
     ...teamWorkMutations,
     ...scopeMutations,
+    ...channelMutations,
     ...appMutations,
     ...chatMutations,
     ...sessionMutations,

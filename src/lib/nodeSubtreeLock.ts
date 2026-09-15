@@ -45,6 +45,8 @@
 // being deleted without passing through these create paths. Coordinating move
 // is a tracked follow-up.
 import type { Prisma } from '../generated/prisma/index.js';
+// Spec 049 §2 S4 — the protected-loc gate every lock helper enforces.
+import { assertLocWritable } from './protectedLoc.js';
 
 /**
  * The strict ancestor locs of `loc`, shortest first (root → parent). A loc is a
@@ -74,14 +76,38 @@ export function ancestorLocs(loc: string): string[] {
  * MUST run inside a READ COMMITTED interactive transaction that also performs
  * the create; the lock is held only for that transaction's lifetime.
  */
+/**
+ * Spec 049 §2 S4 — every lock helper below is ALSO the protected-loc gate.
+ * A generic writer that omits `ownedByChannel` is REFUSED on a Channel's
+ * address (the safe default); only the operations that own a Channel pass
+ * `{ ownedByChannel: true }` (`chatRoot.ts`, the team-chat bootstrap). See
+ * `protectedLoc.ts` for the rule and why the overlap runs both ways.
+ *
+ * The gate runs AFTER the locks are granted, never before: Channel creation
+ * takes the same ancestor keys and commits its row inside that transaction,
+ * so a writer that queued behind it re-reads the Channel table on a fresh
+ * READ COMMITTED snapshot and sees the row (Codex/Copilot on PR #1165 — a
+ * check before the lock was a TOCTOU window the size of the wait).
+ */
+export interface LockOpts {
+  ownedByChannel?: boolean;
+}
+
+async function guard(tx: Prisma.TransactionClient, memoryId: string, locs: string[], op: string, opts?: LockOpts) {
+  if (opts?.ownedByChannel) return;
+  await assertLocWritable(tx, memoryId, locs, op);
+}
+
 export async function lockAncestorsForCreate(
   tx: Prisma.TransactionClient,
   memoryId: string,
   loc: string,
+  opts?: LockOpts,
 ): Promise<void> {
   for (const ancestor of ancestorLocs(loc)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
   }
+  await guard(tx, memoryId, [loc], 'create under', opts);
 }
 
 /**
@@ -98,6 +124,7 @@ export async function lockAncestorsForCreateMany(
   tx: Prisma.TransactionClient,
   memoryId: string,
   locs: string[],
+  opts?: LockOpts,
 ): Promise<void> {
   const ancestors = new Set<string>();
   for (const loc of locs) {
@@ -114,6 +141,7 @@ export async function lockAncestorsForCreateMany(
   for (const ancestor of ordered) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
   }
+  await guard(tx, memoryId, locs, 'create under', opts);
 }
 
 /**
@@ -132,10 +160,12 @@ export async function lockPathForCreateUnder(
   tx: Prisma.TransactionClient,
   memoryId: string,
   parentLoc: string,
+  opts?: LockOpts,
 ): Promise<void> {
   for (const loc of [...ancestorLocs(parentLoc), parentLoc]) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
   }
+  await guard(tx, memoryId, [parentLoc], 'create under', opts);
 }
 
 /**
@@ -160,8 +190,10 @@ export async function lockLocForWrite(
   tx: Prisma.TransactionClient,
   memoryId: string,
   loc: string,
+  opts?: LockOpts,
 ): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
+  await guard(tx, memoryId, [loc], 'write', opts);
 }
 
 /**
@@ -178,6 +210,8 @@ export async function lockNodeForDelete(
   tx: Prisma.TransactionClient,
   memoryId: string,
   loc: string,
+  opts?: LockOpts,
 ): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
+  await guard(tx, memoryId, [loc], 'delete', opts);
 }

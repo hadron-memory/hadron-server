@@ -55,6 +55,8 @@ import {
   uninstallAgentFromAppCore,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
+// Spec 049 Phase 4 — the App's default Channel, created with the App.
+import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 
 /**
@@ -409,6 +411,17 @@ export const appMutations = {
       // failure here must not fail the install — it only defers provisioning
       // to first post, which is exactly the old behavior.
       await provisionAppSharedMemory(ctx, createdApp, resolvedAgentId);
+      // Spec 049 Phase 4 (D-2026-09-13-006): the default Channel is created WITH
+      // the App — nothing is unprotected before the first post. The core makes
+      // root, row and default link in ONE transaction, so a failure here leaves
+      // NO root behind (never a live `chats:team` without its Channel — Copilot
+      // on PR #1165); the App row is committed, and the first post's bootstrap
+      // provisions both. Logged at error level so the gap is visible.
+      try {
+        await ensureDefaultChannelForApp(ctx.db, createdApp, ctx.userId ?? null);
+      } catch (err) {
+        console.error(`[createApp] default Channel provisioning failed for App ${createdApp.id} — deferred to first post:`, err);
+      }
 
       // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args
       // become the App's 'default' registry config (deploy-time override

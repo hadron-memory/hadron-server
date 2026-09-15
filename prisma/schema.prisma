@@ -907,6 +907,7 @@ model Memory {
   sessions            Session[]         @relation("SessionMemory")
   mcpSessionStates    McpSessionState[]
   scopeMemberships ScopeMemory[]
+  channels         Channel[]
   /// #974 — the Workers whose casting-scoped working memory this is (at most
   /// one in practice; identity lives on `Worker.memoryId`, cor:dmo:050:11).
   workerOf            Worker[]          @relation("WorkerMemory")
@@ -1163,6 +1164,8 @@ model Node {
   pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
   revisions     NodeRevision[]
+  /// Spec 049 Phase 4: the Channel whose chat root this node is, if any.
+  channel       Channel?        @relation("ChannelRoot")
   embeddings    NodeEmbedding[] // 033: 1 abstract row + N chunk rows; Cascade delete
 
   @@unique([loc, memoryId])
@@ -2774,6 +2777,14 @@ model App {
   workers          Worker[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
+  /// Spec 049 Phase 4 (D-2026-09-13-007 D2): the App's DEFAULT Channel — the row the
+  /// team chat became, what `teamChatMessages(appRef)` addresses and what an
+  /// installed Agent's default register row points at. Set at App creation
+  /// (`ensureDefaultChannel`) and by the Phase 4 backfill (the OLDEST live
+  /// `chats:team` root, the resolver's own ordering). A nullable FK rather than a
+  /// flag on the Channel: two defaults per App would be a state no CHECK refuses.
+  defaultChannelId String? @unique @map("default_channel_id")
+  defaultChannel   Channel? @relation("AppDefaultChannel", fields: [defaultChannelId], references: [id], onDelete: SetNull)
   keys             AppKey[]
   members          AppMember[]
   memories         Memory[]          @relation("AppMemories")
@@ -4105,4 +4116,68 @@ model ScopeMemory {
   @@unique([scopeId, position])
   @@index([memoryId])
   @@map("scope_memories")
+}
+
+/// Spec 049 Phase 4 (D-2026-09-13-006) — what kind of feed a Channel is. `CHAT`
+/// today; `BLOCKERS` / `TASKS` when built (D7 local, register session). Adding
+/// a value that a CHECK references is TWO migration files (the Postgres
+/// transaction rule).
+enum ChannelKind {
+  CHAT
+}
+
+/// Spec 049 Phase 4 (D-2026-09-13-006) — a CHANNEL: a durable, ordered message
+/// stream hosted in ONE memory at ONE reserved address, server-ordered and
+/// server-attributed, that people and Agents post to and an Agent can be told
+/// about. NOT a chatbot conversation (`cor:cht`). A PLATFORM ENTITY, not the
+/// chat-root node: the row is created EAGERLY, one-to-one with its chat root
+/// (`chatRootNodeId`, unique), in the same transaction — that is what makes
+/// "the canonical reference is the PK of the chat node" and the table one
+/// thing, and what leaves nothing unprotected before the first post.
+///
+/// Creating a row RESERVES and PROTECTS its address: every generic node write
+/// under `loc` (and any subtree operation overlapping it) is refused
+/// (`src/lib/protectedLoc.ts`, spec 049 §2 S4 shape B — the Channel table is
+/// the protection's only source until D-2026-08-25-004 adds
+/// `Memory.protectedLocs` as a second one). The owning operations write
+/// through their own gate. This is hadron-server#1047's closure: the loc is
+/// operation-exclusive because it is protected, and protected because this
+/// row declared it.
+///
+/// `lastSeq` / `lastMessageAt` are the platform-maintained WATERMARK
+/// (D-2026-09-13-009) — the allocator's output, written inside
+/// `appendChatMessage`'s lock in the same transaction as the seq. The chat
+/// root's `data.messageCount` stays what it is, a routing operand; two numbers,
+/// two jobs. `lastSeq − lastSeenSeq` is a watermark delta, never a message
+/// count (gaps and the known prod duplicate are preserved).
+///
+/// The audience is the HOST MEMORY's (`cor:acl:030:01`): a Channel has no
+/// access layer of its own. Participation, reads and posts follow the memory.
+/// Soft-deleted in step with its root; the protection holds while either exists.
+model Channel {
+  id             String      @id @default(cuid())
+  memoryId       String      @map("memory_id")
+  /// The reserved address of the chat root (e.g. `chats:team`).
+  loc            String
+  name           String
+  kind           ChannelKind @default(CHAT)
+  description    String?
+  chatRootNodeId String      @unique @map("chat_root_node_id")
+  lastSeq        Int         @default(0) @map("last_seq")
+  lastMessageAt  DateTime?   @map("last_message_at")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  createdBy      String?     @map("created_by")
+  updatedAt      DateTime?   @updatedAt @map("updated_at")
+  updatedBy      String?     @map("updated_by")
+  deletedAt      DateTime?   @map("deleted_at")
+  deletedBy      String?     @map("deleted_by")
+
+  memory        Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  chatRoot      Node   @relation("ChannelRoot", fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  defaultOfApps App[]  @relation("AppDefaultChannel")
+
+  /// One Channel per address.
+  @@unique([memoryId, loc])
+  @@index([memoryId])
+  @@map("channels")
 }
