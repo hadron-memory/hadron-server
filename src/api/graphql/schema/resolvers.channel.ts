@@ -21,7 +21,6 @@ import {
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
-import { locsOverlap } from '../../../lib/protectedLoc.js';
 import { validateLoc } from '../../../lib/validateLoc.js';
 
 /** The caller's readable-memory clause, or null for the unrestricted principal. */
@@ -99,15 +98,9 @@ export const channelMutations = {
     validateLoc(loc);
     const name = input.name.trim();
     if (!name) throw new GraphQLError('name is required.', { extensions: { code: 'BAD_USER_INPUT' } });
-    // No overlap with an existing Channel's address (live or tombstoned):
-    // the reservation is what protection means.
-    const existing = await ctx.db.channel.findMany({ where: { memoryId }, select: { loc: true, name: true } });
-    const clash = existing.find((c) => locsOverlap(c.loc, loc));
-    if (clash) {
-      throw new GraphQLError(`"${loc}" overlaps Channel "${clash.name}" (${clash.loc}).`, {
-        extensions: { code: 'LOC_OVERLAPS_CHANNEL', channelLoc: clash.loc },
-      });
-    }
+    // The overlap check (LOC_OVERLAPS_CHANNEL) and the live-occupant check
+    // (LOC_OCCUPIED) live in the core, under the ancestor lock — a preflight
+    // here is a decision two concurrent creates can both get wrong.
     const { channel } = await ensureChannelWithRoot(ctx.db, {
       memoryId,
       loc,

@@ -13,7 +13,8 @@ import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { execGit } from './execGit.js';
 import { validateMemorySource } from '../../lib/gitSource.js';
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
-import { lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
+import { ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
+import type { Prisma } from '../../generated/prisma/index.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
 
 function decryptToken(ciphertext: string): string {
@@ -164,6 +165,10 @@ export const syncGraphFromGithub = async (
           .filter((l): l is string => typeof l === 'string' && l !== '' && !isProtected(l)),
       );
       const upsertedIds: string[] = [];
+      // Rows the cleanup pass below must leave alone: a protected file's row
+      // is not upserted, and `notIn: upsertedIds` would otherwise hard-delete
+      // it — a root deletion cascading its Channel row (Copilot on PR #1165).
+      const protectedRowIds: string[] = [];
       // File frontmatter ids already claimed in THIS run — a second file
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
@@ -222,6 +227,14 @@ export const syncGraphFromGithub = async (
 
         let rowId: string;
         if (byId && byId.memoryId === graph.id) {
+          // The SOURCE loc of an id-first move is checked too: a file whose
+          // new path is free must not drag a node out from under a Channel
+          // (Copilot on PR #1165).
+          if (byId.loc !== loc && isProtected(byId.loc)) {
+            skippedProtected.push(`${byId.loc} → ${loc}`);
+            protectedRowIds.push(byId.id);
+            continue;
+          }
           if (byId.loc !== loc) {
             // Moving into a loc another row currently holds: repo-wins — the
             // occupant is stale at that loc (it either moves later this run
@@ -304,8 +317,21 @@ export const syncGraphFromGithub = async (
         }
       }
 
+      // Spec 049 S4: never delete a row under (or above) a Channel's address,
+      // whether it was skipped this run or was git-owned before the Channel
+      // existed — the reservation outlives the mirror.
+      const protectedLocClauses: Prisma.NodeWhereInput[] = protectedLocs.flatMap((p) => [
+        { loc: p.loc },
+        { loc: { startsWith: `${p.loc}:` } },
+        ...(ancestorLocs(p.loc).length ? [{ loc: { in: ancestorLocs(p.loc) } }] : []),
+      ]);
       await tx.node.deleteMany({
-        where: { ownerRepo, memoryId: graph.id, id: { notIn: upsertedIds } },
+        where: {
+          ownerRepo,
+          memoryId: graph.id,
+          id: { notIn: [...upsertedIds, ...protectedRowIds] },
+          ...(protectedLocClauses.length ? { NOT: { OR: protectedLocClauses } } : {}),
+        },
       });
 
       for (const edge of edges) {

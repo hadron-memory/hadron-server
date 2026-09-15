@@ -2575,16 +2575,20 @@ export function createMcpServerInstance(
       // parent, so creating it under a concurrently-deleted grandparent is
       // exactly the orphan race. Serialize against an ancestor-delete by holding
       // advisory locks on the ancestor path across the upsert, matching the
-      // hadron_create_node / createNode paths. Root-level locs skip the tx.
+      // hadron_create_node / createNode paths. A root-level loc takes no
+      // ancestor lock, but still goes through the helper: it is also the
+      // spec 049 S4 protected-loc gate, and a root-level Channel address
+      // was otherwise overwritable here (Codex P1 on PR #1165).
       let sectionId: string;
-      if (ancestorLocs(loc).length === 0) {
-        ({ id: sectionId } = await db.node.upsert(upsertArgs));
-      } else {
+      try {
         sectionId = await db.$transaction(async (tx) => {
           await lockAncestorsForCreate(tx, memoryId, loc);
           const row = await tx.node.upsert(upsertArgs);
           return row.id;
         });
+      } catch (e) {
+        if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+        throw e;
       }
 
       // #1061 — a section node is a node; creating or re-saving one is a write,
@@ -4692,7 +4696,18 @@ export function createMcpServerInstance(
       }
 
       if (Object.keys(data).length > 0) {
-        await db.node.update({ where: { id: existing.id }, data });
+        // Spec 049 S4: the write holds the address lock and the gate runs
+        // under it — the check above is the fast refusal, this the
+        // authoritative one (Copilot on PR #1165).
+        try {
+          await db.$transaction(async (tx) => {
+            await lockLocForWrite(tx, memory.id, loc);
+            await tx.node.update({ where: { id: existing.id }, data });
+          });
+        } catch (e) {
+          if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+          throw e;
+        }
       }
 
       if (resolvedEdges !== null) {

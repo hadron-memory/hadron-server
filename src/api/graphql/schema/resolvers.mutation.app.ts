@@ -412,13 +412,15 @@ export const appMutations = {
       // to first post, which is exactly the old behavior.
       await provisionAppSharedMemory(ctx, createdApp, resolvedAgentId);
       // Spec 049 Phase 4 (D-2026-09-13-006): the default Channel is created WITH
-      // the App — nothing is unprotected before the first post. Best-effort for
-      // the same reason as the provisioning above: the App row is committed, and
-      // the first post's bootstrap makes both if this did not.
+      // the App — nothing is unprotected before the first post. The core makes
+      // root, row and default link in ONE transaction, so a failure here leaves
+      // NO root behind (never a live `chats:team` without its Channel — Copilot
+      // on PR #1165); the App row is committed, and the first post's bootstrap
+      // provisions both. Logged at error level so the gap is visible.
       try {
         await ensureDefaultChannelForApp(ctx.db, createdApp, ctx.userId ?? null);
       } catch (err) {
-        console.warn('[createApp] default Channel provisioning failed:', err);
+        console.error(`[createApp] default Channel provisioning failed for App ${createdApp.id} — deferred to first post:`, err);
       }
 
       // 036-ai-service-config: the legacy aiProvider/aiModel/aiApiKey args

@@ -11,19 +11,31 @@
  * choice (the oldest live root among the App's app-class memories, exactly
  * as `locateTeamChatRoot` chooses), not a column.
  *
- * Tombstoned roots get TOMBSTONED rows: the address stays protected (a
- * deleted chat still occupies it) and a restore brings the row back with it.
- * Apps that never posted get their default Channel created (eager D-006) —
- * when the shared app-class memory is unambiguous; an App with several and
- * no root is reported, not guessed.
+ * Roots in SOFT-DELETED memories are swept too (a restored memory must come
+ * back protected), and tombstoned roots get TOMBSTONED rows: the address
+ * stays reserved and a restore brings the row back with it. Apps that never
+ * posted get their default Channel created (eager D-006) in their team-space
+ * memory — resolved by the canonical team-space resolver, then the Team
+ * Agent locator when several qualify; an App that stays ambiguous is
+ * reported, not guessed.
+ *
+ * Encrypted roots: `messageCount` sits inside the encrypted `data` blob and
+ * no session key is available to a job, so the watermark is MAX(seq) alone
+ * (seq is a plaintext column). That equals the allocator's answer unless
+ * messages were HARD-deleted or imported without seq; such roots are counted
+ * in `encryptedRoots` so the operator knows which watermarks to eyeball.
  *
  * Idempotent: a row that exists is only ever RAISED to the computed
- * watermark, never lowered. Dry run by default; `--apply` writes.
+ * watermark, never lowered — atomically (`lastSeq < computed`), so a post
+ * landing mid-run cannot be regressed. Dry run by default; `--apply` writes.
  *
  *   pnpm tsx src/jobs/backfillChannels.ts [--apply]
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
+import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
+import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
+import { locateTeamAgent } from '../api/graphql/schema/resolvers.worker.js';
 import { DEFAULT_CHANNEL_NAME, ensureChannelRow, ensureChannelWithRoot } from '../lib/channels.js';
 import { TEAM_CHAT_LOC } from '../lib/teamChatLoc.js';
 
@@ -36,18 +48,24 @@ export interface BackfillReport {
   rowsCreated: number;
   rowsRaised: number;
   rowsTombstoned: number;
+  /** Roots whose `messageCount` is encrypted — watermark from MAX(seq) alone. */
+  encryptedRoots: number;
   defaultsSet: number;
   defaultsProvisioned: number;
-  /** Apps with no root and several shared app-class memories — not guessed. */
+  /** Apps with no root and several team-space memories the locator could not separate. */
   ambiguousApps: Array<{ appId: string; appName: string; memoryIds: string[] }>;
-  /** Apps with no root and no shared app-class memory at all. */
+  /** Apps with no root and no team-space memory at all. */
   noMemoryApps: number;
 }
 
 /** The allocator's high-water mark for one root, computed the way it computes it. */
-async function highWater(db: PrismaClient, root: { memoryId: string; loc: string; data: unknown }): Promise<number> {
-  const data = root.data && typeof root.data === 'object' ? (root.data as Record<string, unknown>) : {};
-  const counter = typeof data.messageCount === 'number' ? data.messageCount : 0;
+async function highWater(
+  db: PrismaClient,
+  root: { memoryId: string; loc: string; data: unknown },
+): Promise<{ lastSeq: number; encrypted: boolean }> {
+  const data = root.data && typeof root.data === 'object' && !Array.isArray(root.data) ? (root.data as Record<string, unknown>) : {};
+  const encrypted = '__enc' in data;
+  const counter = !encrypted && typeof data.messageCount === 'number' ? data.messageCount : 0;
   const top = await db.node.aggregate({
     where: {
       memoryId: root.memoryId,
@@ -57,7 +75,38 @@ async function highWater(db: PrismaClient, root: { memoryId: string; loc: string
     },
     _max: { seq: true },
   });
-  return Math.max(counter, top._max?.seq ?? 0);
+  return { lastSeq: Math.max(counter, top._max?.seq ?? 0), encrypted };
+}
+
+/**
+ * The team-space memory a never-posted App's default Channel goes in. One
+ * candidate: it. Several: the Team Agent's (the marker default, or the single
+ * live installed Agent — the same fallback the bootstrap uses). Else null.
+ */
+async function pickTeamSpace(
+  db: PrismaClient,
+  appId: string,
+  candidates: string[],
+): Promise<string | null> {
+  if (candidates.length === 1) return candidates[0];
+  const ctx = { db } as Context;
+  let agentId: string | null = null;
+  try {
+    agentId = (await locateTeamAgent(ctx, appId, null)).id;
+  } catch {
+    const installed = await db.appAgent.findMany({
+      where: { appId },
+      select: { agent: { select: { id: true, deletedAt: true } } },
+    });
+    const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
+    if (live.length === 1) agentId = live[0].id;
+  }
+  if (!agentId) return null;
+  const owned = await db.memory.findFirst({
+    where: { id: { in: candidates }, sharedMemoryOfAgentId: agentId },
+    select: { id: true },
+  });
+  return owned?.id ?? null;
 }
 
 export async function backfillChannels(db: PrismaClient, opts: { apply: boolean }): Promise<BackfillReport> {
@@ -67,22 +116,25 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
     rowsCreated: 0,
     rowsRaised: 0,
     rowsTombstoned: 0,
+    encryptedRoots: 0,
     defaultsSet: 0,
     defaultsProvisioned: 0,
     ambiguousApps: [],
     noMemoryApps: 0,
   };
 
-  // 1. Every team-chat root in an app-class memory, tombstones included.
+  // 1. Every team-chat root in an app-class memory — tombstoned roots AND
+  //    soft-deleted memories included (Codex on PR #1165).
   const roots = await db.node.findMany({
     // loc-scope-ok: a platform sweep over every app-class memory.
-    where: { loc: TEAM_CHAT_LOC, memory: { class: 'app', deletedAt: null } },
+    where: { loc: TEAM_CHAT_LOC, memory: { class: 'app' } },
     select: { id: true, memoryId: true, loc: true, data: true, deletedAt: true, createdBy: true, memory: { select: { appId: true, app: { select: { name: true } } } } },
     orderBy: { createdAt: 'asc' },
   });
   report.rootsSeen = roots.length;
   for (const root of roots) {
-    const lastSeq = await highWater(db, root);
+    const { lastSeq, encrypted } = await highWater(db, root);
+    if (encrypted) report.encryptedRoots += 1;
     const lastMessage = await db.node.findFirst({
       where: { memoryId: root.memoryId, loc: { startsWith: `${root.loc}:messages:` }, nodeType: { in: MESSAGE_NODE_TYPES }, deletedAt: null },
       orderBy: { createdAt: 'desc' },
@@ -109,13 +161,14 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
       }
     } else if (existing.lastSeq < lastSeq) {
       report.rowsRaised += 1;
-      if (opts.apply) await db.channel.update({ where: { id: existing.id }, data: { lastSeq } });
+      // Conditional so a post that landed since the read is never regressed
+      // (Copilot on PR #1165).
+      if (opts.apply) await db.channel.updateMany({ where: { id: existing.id, lastSeq: { lt: lastSeq } }, data: { lastSeq } });
     }
   }
 
   // 2. Every App's default: the oldest LIVE root among its app-class memories;
-  //    an App that never posted gets one provisioned when its shared memory is
-  //    unambiguous.
+  //    an App that never posted gets one provisioned in its team space.
   const apps = await db.app.findMany({
     where: { deletedAt: null, defaultChannelId: null },
     select: { id: true, name: true, createdBy: true },
@@ -135,23 +188,20 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
       }
       continue;
     }
-    const shared = await db.memory.findMany({
-      where: { appId: app.id, class: 'app', deletedAt: null, userMemoryOfAgentId: null },
-      orderBy: { createdAt: 'asc' },
-      select: { id: true },
-    });
-    if (shared.length === 0) {
+    const candidates = await resolveAppTeamSpaceMemoryIds(db, app.id);
+    if (candidates.length === 0) {
       report.noMemoryApps += 1;
       continue;
     }
-    if (shared.length > 1) {
-      report.ambiguousApps.push({ appId: app.id, appName: app.name, memoryIds: shared.map((m) => m.id) });
+    const memoryId = await pickTeamSpace(db, app.id, candidates);
+    if (!memoryId) {
+      report.ambiguousApps.push({ appId: app.id, appName: app.name, memoryIds: candidates });
       continue;
     }
     report.defaultsProvisioned += 1;
     if (opts.apply) {
       await ensureChannelWithRoot(db, {
-        memoryId: shared[0].id,
+        memoryId,
         loc: TEAM_CHAT_LOC,
         name: DEFAULT_CHANNEL_NAME,
         description: `Team chat — ${app.name}`,

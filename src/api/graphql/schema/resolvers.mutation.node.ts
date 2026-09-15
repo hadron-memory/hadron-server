@@ -76,6 +76,7 @@ import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import {
   ancestorLocs,
   lockAncestorsForCreate,
+  lockLocForWrite,
   lockAncestorsForCreateMany,
   lockNodeForDelete,
 } from '../../../lib/nodeSubtreeLock.js';
@@ -612,9 +613,17 @@ export async function writeNodeCore(
           const guardWhere: Prisma.NodeWhereInput = opts?.targetNodeId
             ? { id: opts.targetNodeId, revSeq: claimedRevNo }
             : { loc: input.loc, memoryId: input.memoryId, revSeq: claimedRevNo };
-          const guarded = await ctx.db.node.updateMany({
-            where: guardWhere,
-            data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
+          // Spec 049 S4: the write holds the address lock, and the
+          // protected-loc gate runs under it — the early check above is the
+          // fast typed refusal, this is the authoritative one (a Channel can
+          // be created, or the node moved under one, in between; Copilot on
+          // PR #1165).
+          const guarded = await ctx.db.$transaction(async (tx) => {
+            await lockLocForWrite(tx, input.memoryId, input.loc);
+            return tx.node.updateMany({
+              where: guardWhere,
+              data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
+            });
           });
           if (guarded.count === 0) {
             throw new GraphQLError(
@@ -635,12 +644,16 @@ export async function writeNodeCore(
             include,
           });
         } else if (mode === 'update') {
-          node = await ctx.db.node.update({
-            where: opts?.targetNodeId
-              ? { id: opts.targetNodeId }
-              : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-            data: updatePayload,
-            include,
+          // Same lock-then-gate discipline as the guarded branch above.
+          node = await ctx.db.$transaction(async (tx) => {
+            await lockLocForWrite(tx, input.memoryId, input.loc);
+            return tx.node.update({
+              where: opts?.targetNodeId
+                ? { id: opts.targetNodeId }
+                : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+              data: updatePayload,
+              include,
+            });
           });
         } else {
           // Create/upsert. A new node placed into a subtree must be serialized
@@ -1301,10 +1314,21 @@ export const nodeMutations = {
       }
       const plans: Plan[] = [];
 
+      // Spec 049 S4: a node under a Channel's address is SKIPPED, never
+      // rewritten — the bulk surface reports rather than failing the batch.
+      // One Channel-table read per memory, not per node (Copilot on PR #1165).
+      const protectedByMemory = new Map<string, Array<{ loc: string }>>();
+      const isProtectedLoc = async (memoryId: string, loc: string) => {
+        let locs = protectedByMemory.get(memoryId);
+        if (!locs) {
+          locs = await protectedLocsIn(ctx.db, memoryId);
+          protectedByMemory.set(memoryId, locs);
+        }
+        return locs.some((p) => locsOverlap(p.loc, loc));
+      };
+
       for (const raw of rawNodes) {
-        // Spec 049 S4: a node under a Channel's address is SKIPPED, never
-        // rewritten — the bulk surface reports rather than failing the batch.
-        if ((await protectedLocsIn(ctx.db, raw.memoryId)).some((p) => locsOverlap(p.loc, raw.loc))) continue;
+        if (await isProtectedLoc(raw.memoryId, raw.loc)) continue;
         const memEnc = await getMemEnc(raw.memoryId);
         if (memEnc.isEncrypted && !sessionKeyCache.getByMemoryId(memEnc.id)) {
           throw new GraphQLError(
@@ -2832,8 +2856,7 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
-      // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
-      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
+      // No protected-loc gate: a revision row is history, not the address.
       await ctx.db.nodeRevision.delete({ where: { id: revisionId } });
       return true;
     },

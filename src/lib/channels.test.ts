@@ -24,6 +24,8 @@ import { ensureChannelWithRoot } from './channels.js';
 import { assertLocWritable, LocProtectedError, partitionProtected } from './protectedLoc.js';
 import { lockAncestorsForCreate, lockLocForWrite } from './nodeSubtreeLock.js';
 import { backfillChannels } from '../jobs/backfillChannels.js';
+import { appendChatMessage } from './chatRoot.js';
+import { getMemoryEncryptionInfo } from './nodeCrypto.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -171,8 +173,12 @@ describe('backfill', () => {
     // A summary under the same prefix does NOT count (chatRoot.ts allowlist).
     await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'chats:team:messages:0009', name: 's', nodeType: 'abstract', seq: 9 } });
     // A second App that never posted, with one shared app-class memory.
+    // A second App that never posted, with one team-space memory (the #723 key
+    // is what the canonical resolver recognises — a bare app-class row is not a team space).
     const app2 = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Quiet', urn: `${org.urn}:quiet` } });
-    await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:quiet-shared`, name: 'qs', class: 'app', appId: app2.id } });
+    const agent2 = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'agent2', urn: `${org.urn}:agent2`, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId: app2.id, agentId: agent2.id } });
+    await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:quiet-shared`, name: 'qs', class: 'app', appId: app2.id, sharedMemoryOfAgentId: agent2.id } });
 
     const dry = await backfillChannels(db, { apply: false });
     expect(dry).toMatchObject({ rootsSeen: 1, rowsCreated: 1, defaultsSet: 1, defaultsProvisioned: 1 });
@@ -191,5 +197,66 @@ describe('backfill', () => {
 
     const again = await backfillChannels(db, { apply: true });
     expect(again).toMatchObject({ rootsSeen: 2, rowsCreated: 0, rowsRaised: 0, defaultsSet: 0, defaultsProvisioned: 0 });
+  });
+});
+
+describe('PR #1165 review — the decisions only the lock can make', () => {
+  it('the core refuses an overlapping address and a live non-chat occupant (LOC_OCCUPIED); a tombstoned chat root is adopted', async () => {
+    await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id });
+    await expect(
+      ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team:sub', name: 'sub', createdBy: admin.id }),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_OVERLAPS_CHANNEL' } });
+    await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'notes:x', name: 'x', nodeType: 'record' } });
+    await expect(
+      ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'notes:x', name: 'x', createdBy: admin.id }),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_OCCUPIED' } });
+    expect(await db.channel.count({ where: { memoryId: appMem.id } })).toBe(1);
+    // A tombstoned chat root at the address is revived as the Channel's root.
+    const old = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'chats:old', name: 'old', nodeType: 'chat', deletedAt: new Date() } });
+    const { rootId } = await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:old', name: 'old', createdBy: admin.id });
+    expect(rootId).toBe(old.id);
+    expect((await db.node.findUniqueOrThrow({ where: { id: old.id } })).deletedAt).toBeNull();
+  });
+
+  it('the chatbot surface is a generic writer: appendChatMessage on a Channel is refused unless the caller is the Channel operation', async () => {
+    const { rootId } = await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id });
+    const chat = { id: rootId, memoryId: appMem.id, loc: 'chats:team' };
+    const enc = await getMemoryEncryptionInfo(db, appMem.id);
+    const insert = async ({ tx, seq, msgNum }: { tx: any; seq: number; msgNum: string }) =>
+      tx.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: `chats:team:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq } });
+    await expect(appendChatMessage(db, chat, enc, insert)).rejects.toBeInstanceOf(LocProtectedError);
+    const { seq } = await appendChatMessage(db, chat, enc, insert, { asChannel: true });
+    expect(seq).toBe(1);
+    expect((await db.channel.findUniqueOrThrow({ where: { chatRootNodeId: rootId } })).lastSeq).toBe(1);
+    // A chat that is NOT a Channel is unaffected either way.
+    const plain = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'chats:plain', name: 'plain', nodeType: 'chat', data: { messageCount: 0 } } });
+    const r = await appendChatMessage(db, { id: plain.id, memoryId: appMem.id, loc: 'chats:plain' }, enc, async ({ tx, seq, msgNum }) =>
+      tx.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: `chats:plain:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq } }),
+    );
+    expect(r.seq).toBe(1);
+  });
+
+  it('App.defaultChannel follows the host memory: an org member who is not an App participant sees null', async () => {
+    await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id });
+    const member = await db.user.create({ data: { id: generateId(), githubId: 49103, githubUsername: `ch-member-${Date.now()}` } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: member.id, role: 'READER' } });
+    const a = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    const AppType = (resolvers as any).App;
+    expect((await AppType.defaultChannel(a, {}, ctx(admin.id)))?.id).toBe(a.defaultChannelId);
+    expect(await AppType.defaultChannel(a, {}, ctx(member.id))).toBeNull();
+  });
+
+  it('the backfill sweeps a root in a soft-deleted memory and never lowers a watermark', async () => {
+    const gone = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:gone`, name: 'gone', class: 'app', appId: app.id, deletedAt: new Date() } });
+    const root = await db.node.create({ data: { id: generateId(), memoryId: gone.id, loc: 'chats:team', name: 'Team chat', nodeType: 'chat', data: { messageCount: 4 } } });
+    const run = await backfillChannels(db, { apply: true });
+    expect(run.rowsCreated).toBe(1);
+    const row = await db.channel.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
+    expect(row.lastSeq).toBe(4);
+    // A watermark the allocator moved past is left alone.
+    await db.channel.update({ where: { id: row.id }, data: { lastSeq: 9 } });
+    const again = await backfillChannels(db, { apply: true });
+    expect(again.rowsRaised).toBe(0);
+    expect((await db.channel.findUniqueOrThrow({ where: { id: row.id } })).lastSeq).toBe(9);
   });
 });

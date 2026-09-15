@@ -249,8 +249,8 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
       // delete/restore cycle (old messages stay deleted).
       const restoreOrCreate = async (
         loc: string,
-        create: () => Promise<unknown>,
-      ) => {
+        create: () => Promise<{ id: string }>,
+      ): Promise<string> => {
         const existing = await tx.node.findUnique({
           where: { loc_memoryId: { loc, memoryId } },
           select: { id: true, deletedAt: true },
@@ -262,16 +262,16 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
               data: { deletedAt: null, deletedBy: null },
             });
           }
-          return;
+          return existing.id;
         }
-        await create();
+        return (await create()).id;
       };
       await restoreOrCreate('chats', () =>
         tx.node.create({
           data: { id: generateId(), memoryId, loc: 'chats', name: 'chats', nodeType: 'record' },
         }),
       );
-      await restoreOrCreate(TEAM_CHAT_LOC, () =>
+      const rootId = await restoreOrCreate(TEAM_CHAT_LOC, () =>
         tx.node.create({
           data: {
             id: generateId(),
@@ -298,6 +298,19 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
           },
         }),
       );
+      // Spec 049 Phase 4: the row is minted in the SAME transaction as the
+      // root, under the lock — the root is never live without its protection
+      // (Copilot on PR #1165). The lock serializes the first-post race, so
+      // ensureChannelRow's P2002 branch cannot fire inside this transaction.
+      await ensureChannelRow(tx, {
+        rootId,
+        memoryId,
+        loc: TEAM_CHAT_LOC,
+        name: DEFAULT_CHANNEL_NAME,
+        description: `Team chat — ${app.name}`,
+        createdBy: ctx.userId ?? null,
+        asDefaultOfAppId: app.id,
+      });
     });
   } catch (e) {
     // Concurrent first post won the bootstrap race — use its rows.
@@ -308,7 +321,9 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
   const root = await locateTeamChatRoot(ctx, app.id);
   if (!root) throw new Error(`Team chat bootstrap failed for App ${app.id}`);
   // Spec 049 Phase 4: the root is a Channel from its first moment — the row is
-  // what reserves and protects the address (D-2026-09-13-006).
+  // what reserves and protects the address (D-2026-09-13-006). Idempotent for
+  // the transaction above; load-bearing for the concurrent-winner path, whose
+  // root may predate Channels.
   await ensureChannelRow(ctx.db, {
     rootId: root.id,
     memoryId: root.memoryId,
@@ -694,7 +709,7 @@ export const teamChatMutations = {
         });
       }
       return row.createdAt;
-    });
+    }, { asChannel: true });
 
     // #1061 — a chat message IS a node, so posting one is a write on the team's
     // shared chat memory. This was one of the largest blind spots in the old

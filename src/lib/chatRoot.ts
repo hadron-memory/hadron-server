@@ -85,6 +85,17 @@ export interface ChatRootOutcome<T> {
  * this contends with every chat-message insert — and with every other holder of
  * this lock — exactly as intended.
  */
+/**
+ * Spec 049 S4: which chat-root callers OWN a Channel's address. Only the
+ * Channel's own operation (the team-chat post) passes `asChannel`; the chatbot
+ * surface, which also allocates through this helper, is a generic writer to
+ * the protected-loc gate and is refused on a Channel (Copilot on PR #1165 —
+ * `chatLocFilter` excludes only `chats:team`, not a custom Channel).
+ */
+export interface ChatRootOpts {
+  asChannel?: boolean;
+}
+
 export async function withChatRootLock<T>(
   db: PrismaClient,
   chat: ChatRootRef,
@@ -93,11 +104,13 @@ export async function withChatRootLock<T>(
     tx: Prisma.TransactionClient;
     chatData: Record<string, unknown>;
   }) => Promise<ChatRootOutcome<T>>,
+  opts?: ChatRootOpts,
 ): Promise<T> {
   return db.$transaction(async (tx) => {
-    // The chat surface OWNS this address: it passes the protected-loc gate that
-    // every generic writer is refused by (spec 049 S4).
-    await lockPathForCreateUnder(tx, chat.memoryId, `${chat.loc}:messages`, { ownedByChannel: true });
+    // The Channel's own operation passes the protected-loc gate that every
+    // generic writer is refused by (spec 049 S4); a chat that is not a Channel
+    // passes either way.
+    await lockPathForCreateUnder(tx, chat.memoryId, `${chat.loc}:messages`, { ownedByChannel: opts?.asChannel === true });
     // Read AFTER the lock: at READ COMMITTED this statement takes a fresh
     // snapshot, so it sees whatever committed while we waited to be granted it.
     const row = await tx.node.findUnique({
@@ -200,6 +213,7 @@ export async function appendChatMessage<T>(
     msgNum: string;
     chatData: Record<string, unknown>;
   }) => Promise<T>,
+  opts?: ChatRootOpts,
 ): Promise<{ seq: number; chatData: Record<string, unknown>; inserted: T }> {
   return withChatRootLock(db, chat, memEncInfo, async ({ tx, chatData }) => {
     const seq = (await highWaterSeq(tx, chat, chatData)) + 1;
@@ -224,7 +238,7 @@ export async function appendChatMessage<T>(
       lastMessageAt: now.toISOString(),
     };
     return { chatData: next, value: { seq, chatData: next, inserted } };
-  });
+  }, opts);
 }
 
 /**
@@ -240,9 +254,10 @@ export async function updateChatRootData(
   chat: ChatRootRef,
   memEncInfo: MemoryEncryptionInfo,
   apply: (chatData: Record<string, unknown>) => Record<string, unknown>,
+  opts?: ChatRootOpts,
 ): Promise<Record<string, unknown>> {
   return withChatRootLock(db, chat, memEncInfo, async ({ chatData }) => {
     const next = apply(chatData);
     return { chatData: next, value: next };
-  });
+  }, opts);
 }

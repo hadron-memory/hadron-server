@@ -82,6 +82,12 @@ export function ancestorLocs(loc: string): string[] {
  * address (the safe default); only the operations that own a Channel pass
  * `{ ownedByChannel: true }` (`chatRoot.ts`, the team-chat bootstrap). See
  * `protectedLoc.ts` for the rule and why the overlap runs both ways.
+ *
+ * The gate runs AFTER the locks are granted, never before: Channel creation
+ * takes the same ancestor keys and commits its row inside that transaction,
+ * so a writer that queued behind it re-reads the Channel table on a fresh
+ * READ COMMITTED snapshot and sees the row (Codex/Copilot on PR #1165 — a
+ * check before the lock was a TOCTOU window the size of the wait).
  */
 export interface LockOpts {
   ownedByChannel?: boolean;
@@ -98,10 +104,10 @@ export async function lockAncestorsForCreate(
   loc: string,
   opts?: LockOpts,
 ): Promise<void> {
-  await guard(tx, memoryId, [loc], 'create under', opts);
   for (const ancestor of ancestorLocs(loc)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
   }
+  await guard(tx, memoryId, [loc], 'create under', opts);
 }
 
 /**
@@ -120,7 +126,6 @@ export async function lockAncestorsForCreateMany(
   locs: string[],
   opts?: LockOpts,
 ): Promise<void> {
-  await guard(tx, memoryId, locs, 'create under', opts);
   const ancestors = new Set<string>();
   for (const loc of locs) {
     for (const ancestor of ancestorLocs(loc)) ancestors.add(ancestor);
@@ -136,6 +141,7 @@ export async function lockAncestorsForCreateMany(
   for (const ancestor of ordered) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
   }
+  await guard(tx, memoryId, locs, 'create under', opts);
 }
 
 /**
@@ -156,10 +162,10 @@ export async function lockPathForCreateUnder(
   parentLoc: string,
   opts?: LockOpts,
 ): Promise<void> {
-  await guard(tx, memoryId, [parentLoc], 'create under', opts);
   for (const loc of [...ancestorLocs(parentLoc), parentLoc]) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
   }
+  await guard(tx, memoryId, [parentLoc], 'create under', opts);
 }
 
 /**
@@ -186,8 +192,8 @@ export async function lockLocForWrite(
   loc: string,
   opts?: LockOpts,
 ): Promise<void> {
-  await guard(tx, memoryId, [loc], 'write', opts);
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
+  await guard(tx, memoryId, [loc], 'write', opts);
 }
 
 /**
@@ -206,6 +212,6 @@ export async function lockNodeForDelete(
   loc: string,
   opts?: LockOpts,
 ): Promise<void> {
-  await guard(tx, memoryId, [loc], 'delete', opts);
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
+  await guard(tx, memoryId, [loc], 'delete', opts);
 }
