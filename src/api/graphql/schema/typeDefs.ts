@@ -645,6 +645,18 @@ export const typeDefs = `#graphql
     attendeeUrn: String
   }
 
+  """
+  Spec 049 Phase 7 — where an attendee is up to on a Channel (D-2026-09-13-009).
+  Outside the register; keyed on the ATTENDEE (a Worker, or an Agent in an
+  App); advances are monotonic. Mute is session state, never here.
+  """
+  type ChannelReadState {
+    attendeeUrn: String
+    channelId: ID!
+    lastSeenSeq: Int!
+    updatedAt: DateTime!
+  }
+
   "Spec 049 Phase 5 — what an Agent's install-created register row is made with (plan §3.5)."
   type RegisterDefaults {
     mentionOnly: Boolean!
@@ -5416,6 +5428,13 @@ export const typeDefs = `#graphql
     attendeeRegister(workerRef: ID, agentRef: ID, appRef: ID): [RegisterViewRow!]!
 
     """
+    Spec 049 Phase 7 — an attendee's cursor on a Channel (attendeeRef: a Worker,
+    or an Agent with appRef). Same gate as attendeeRegister; lastSeenSeq 0 when
+    the attendee has never checkpointed there; null when unreadable or unknown.
+    """
+    channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
+
+    """
     036-ai-service-config: resolve a config name for an execution context
     and return the DECRYPTED credentials (privileged; successor to
     agentAIConfig/appAIConfig).
@@ -7143,6 +7162,14 @@ export const typeDefs = `#graphql
 
     "Spec 049 Phase 5 — soft-delete a row. Each owner removes its own rows; an App may remove its install-created default."
     deleteRegisterEntry(ref: ID!): Boolean!
+
+    """
+    Spec 049 Phase 7 — advance an attendee's cursor on a Channel (the relay's
+    write; §8.7 gate: the caller must be the attendee's DRIVER — a user whose
+    live session is bound to that Worker, or the App-key principal of the
+    attendee's App). Monotonic: a lower seq is a no-op that returns the cursor.
+    """
+    advanceChannelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!, seq: Int!): ChannelReadState!
 
     # Chatbot revisions (org ADMIN)
     """

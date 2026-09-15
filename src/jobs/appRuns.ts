@@ -28,6 +28,7 @@ import { recordLlmUsage } from '../lib/metering/index.js';
 // Spec 049 Phase 3b — the trigger's scope snapshot on the run.
 import { parseRunScopeSnapshot, snapshotScopeForTrigger } from '../lib/scopes.js';
 import { snapshotRegisterForRun } from '../lib/resolveRegister.js';
+import { advanceCapturedReadStates, renderAttentionSection } from '../lib/channelReadState.js';
 import {
   generateText,
   LlmInvocationError,
@@ -722,6 +723,13 @@ async function executeAppRunInner(
         // Entry lookup/assembly failures are OBSERVABLE failed runs (D20/D15).
         return fail('ASSEMBLY_FAILED', String((err as Error)?.message ?? err));
       }
+      // Spec 049 Phase 7 (D-2026-09-13-009, plan §4.4): the attention section —
+      // the run's register snapshot ∩ live Channel watermarks ∩ the attendee's
+      // read-state, CPU-computed, no message content. Empty for a run with no
+      // Agent (no attendee). The watermarks captured HERE are what this hop's
+      // checkpoint advances, so a message landing in between is never skipped.
+      const attention = await renderAttentionSection(db, run);
+      if (attention.text) instructions = `${instructions}\n\n${attention.text}`;
 
       const budget = (await db.appRun.findUniqueOrThrow({ where: { id: runId }, select: { budgetTokens: true } }))
         .budgetTokens;
@@ -915,15 +923,23 @@ async function executeAppRunInner(
 
       if (next === null) {
         // 5. FINISH — guarded for the same concurrent-cancel reason as fail().
-        const finished = await db.appRun.updateMany({
-          where: { id: runId, status: 'RUNNING' },
-          data: {
-            status: 'COMPLETED',
-            finishedAt: new Date(),
-            curNodeUrn: writtenRef ?? cur,
-            data: envelope as never,
-            hops: hops as never,
-          },
+        // Spec 049 Phase 7: the cursor advances in the SAME transaction as the
+        // hop (D-009 rejected catch-up-at-start: "a long run goes deaf after
+        // its first hop"), still guarded — a cancelled run advances nothing,
+        // and the final hop's window is not left unread.
+        const finished = await db.$transaction(async (tx) => {
+          const r = await tx.appRun.updateMany({
+            where: { id: runId, status: 'RUNNING' },
+            data: {
+              status: 'COMPLETED',
+              finishedAt: new Date(),
+              curNodeUrn: writtenRef ?? cur,
+              data: envelope as never,
+              hops: hops as never,
+            },
+          });
+          if (r.count === 1) await advanceCapturedReadStates(tx, run, attention.captured);
+          return r;
         });
         if (finished.count === 0) return 'skipped'; // cancelled at the wire
         return 'completed';
@@ -934,9 +950,14 @@ async function executeAppRunInner(
       // overwritten; zero rows matched means the run is no longer RUNNING —
       // halt here instead of paying for the next hop's checks (PR-532
       // review, Gemini).
-      const checkpointed = await db.appRun.updateMany({
-        where: { id: runId, status: 'RUNNING' },
-        data: { curNodeUrn: next.targetUrn, data: envelope as never, hops: hops as never },
+      const checkpointed = await db.$transaction(async (tx) => {
+        const r = await tx.appRun.updateMany({
+          where: { id: runId, status: 'RUNNING' },
+          data: { curNodeUrn: next.targetUrn, data: envelope as never, hops: hops as never },
+        });
+        // Spec 049 Phase 7: the read-state advances with the checkpoint.
+        if (r.count === 1) await advanceCapturedReadStates(tx, run, attention.captured);
+        return r;
       });
       if (checkpointed.count === 0) return 'skipped';
       cur = next.targetUrn;

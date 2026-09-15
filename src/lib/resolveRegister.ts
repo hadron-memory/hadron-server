@@ -36,6 +36,7 @@ import {
 import { composeWorkerUrn } from './entityRef/workerRef.js';
 import { normalizeUrnForLookup } from './urn.js';
 import { emitEntityUrnV2 } from './urnEmit.js';
+import { readStatesFor } from './channelReadState.js';
 
 /** v2 entity URN for display; falls back to the bare urn (display strings never throw). */
 function safeEmitEntityUrnV2(type: 'memory' | 'agent', bareUrn: string): string {
@@ -235,6 +236,8 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
     }
     return p;
   };
+  // Phase 7 — the attendee's cursors, joined per Channel (0 when none).
+  const cursors = await readStatesFor(db, args.attendee, channelIds);
   const view: RegisterViewRow[] = [];
   for (const e of rows) {
     const c = channels.get(e.channelId);
@@ -294,7 +297,7 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
         lastMessageAt: c.lastMessageAt,
         deleted: !!c.deletedAt,
       },
-      readState: null,
+      readState: cursors.has(c.id) ? { lastSeenSeq: cursors.get(c.id)! } : null,
       canRead,
       canPost,
       disclosure,
@@ -403,7 +406,13 @@ export function renderDerivedBlocks(view: RegisterView | null): string {
     const standing =
       r.disclosure ? describeDisclosure(r.disclosure) : r.canPost === true ? 'read + post' : r.canPost === false ? 'read only' : 'read';
     const flags = [r.entry.role.toLowerCase(), ...(r.entry.mentionOnly ? ['mention-only'] : []), ...(r.entry.installDefault ? ['install default'] : [])].join(', ');
-    const water = r.channel.lastSeq > 0 ? `at seq ${r.channel.lastSeq}` : 'no messages yet';
+    const seen = r.readState?.lastSeenSeq ?? 0;
+    const water =
+      r.channel.lastSeq > 0
+        ? r.channel.lastSeq > seen
+          ? `new since seq ${seen} (channel is at ${r.channel.lastSeq})`
+          : `nothing new (at seq ${r.channel.lastSeq})`
+        : 'no messages yet';
     return `- ${r.channel.name} — ${where}: ${flags}; ${standing}; ${water}${r.entry.description ? `\n  ${r.entry.description}` : ''}`;
   });
   return `## Channels (register)\n${lines.join('\n')}`;

@@ -42,7 +42,9 @@ import { agentRegisterDefaults } from '../../../lib/registerInstall.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { isAppParticipant } from './resolvers.helpers.js';
-import { resolveRegister, toGqlRegisterRows, type RegisterAttendee } from '../../../lib/resolveRegister.js';
+import { collectRegisterRows, resolveRegister, toGqlRegisterRows, type RegisterAttendee } from '../../../lib/resolveRegister.js';
+import { advanceReadState } from '../../../lib/channelReadState.js';
+import { OPEN_SESSION_SCAN_CAP, isSessionLive, loadLastEventBySession, recentlyTouchedFilter } from '../../../lib/sessionActivity.js';
 
 type RegisterRoleInput = 'WATCH' | 'POST' | 'BOTH';
 
@@ -168,6 +170,143 @@ export const registerQueries = {
         : ctx.db.registerEntry.findMany({ where, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take, skip }),
     ]);
     return { items, total };
+  },
+};
+
+/**
+ * Phase 7 — resolve an attendee ref for the read-state surface and check the
+ * caller may READ it (App participation, the briefing's gate). Null ⇒ "no
+ * match" to this caller.
+ */
+async function readableAttendee(
+  ctx: Context,
+  attendeeRef: string,
+  appRef: string | null | undefined,
+): Promise<{ attendee: RegisterAttendee; appId: string; workerAppId: string | null } | null> {
+  let attendee: RegisterAttendee | null = null;
+  let appId: string | null = null;
+  let workerAppId: string | null = null;
+  try {
+    const { id } = await resolveWorkerRef(ctx.db, attendeeRef);
+    const w = await ctx.db.worker.findUnique({ where: { id }, select: { appId: true } });
+    if (w) {
+      attendee = { workerId: id };
+      appId = w.appId;
+      workerAppId = w.appId;
+    }
+  } catch {
+    // not a Worker
+  }
+  if (!attendee) {
+    if (!appRef?.trim()) return null;
+    try {
+      const [{ id: agentId }, { id: resolvedAppId }] = await Promise.all([resolveAgentRef(ctx.db, attendeeRef), resolveAppRef(ctx.db, appRef)]);
+      // An Agent-in-App attendee EXISTS only as a live install — the same
+      // rule resolveRegister's attendeeColumns applies (Codex P1 on PR #1168).
+      const install = await ctx.db.appAgent.findUnique({ where: { appId_agentId: { appId: resolvedAppId, agentId } }, select: { agentId: true } });
+      if (!install) return null;
+      attendee = { agentId, appId: resolvedAppId };
+      appId = resolvedAppId;
+    } catch {
+      return null;
+    }
+  }
+  if (!attendee || !appId) return null;
+  const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });
+  if (!app) return null;
+  const admitted = ctx.userId ? await isAppParticipant(ctx, app) : ctx.appId === app.id;
+  return admitted ? { attendee, appId, workerAppId } : null;
+}
+
+/**
+ * §8.7 — the read-state WRITER gate: the caller must be the attendee's
+ * driver. A Worker attendee: a user with a LIVE session bound to that Worker
+ * (the shared liveness predicate, cor:agt:020:11), or the App-key principal
+ * of the Worker's App (the relay's shape). An Agent-in-App attendee has no
+ * human driver: only its App's key principal. Anyone else is refused —
+ * otherwise one caller could advance another attendee's cursor and silence
+ * its attention.
+ */
+async function requireReadStateDriver(ctx: Context, attendee: RegisterAttendee, appId: string): Promise<void> {
+  if (ctx.impersonation) throw new Error('Forbidden');
+  if (!ctx.userId) {
+    if (ctx.appId && ctx.appId === appId) return;
+    throw new Error('Forbidden');
+  }
+  if (!('workerId' in attendee)) throw new Error('Forbidden');
+  const now = new Date();
+  const open = await ctx.db.session.findMany({
+    where: { workerId: attendee.workerId, userId: ctx.userId, endedAt: null, deletedAt: null, ...recentlyTouchedFilter(now) },
+    orderBy: [{ updatedAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
+    select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+    take: OPEN_SESSION_SCAN_CAP,
+  });
+  const events = await loadLastEventBySession(ctx.db as never, open.map((s) => s.id));
+  if (!open.some((s) => isSessionLive(s, events.get(s.id), now))) throw new Error('Forbidden');
+}
+
+/**
+ * The Channel a read-state read/write names, admitted only when it is IN THE
+ * ATTENDEE'S REGISTER (Codex P1 on PR #1168): a cursor exists per registered
+ * Channel, and a foreign or unregistered Channel reads as "no match" — never
+ * the way to learn it exists, never a row for a Channel nobody attends.
+ */
+async function registeredChannel(
+  ctx: Context,
+  attendee: RegisterAttendee,
+  channelRef: string,
+): Promise<{ id: string; lastSeq: number } | null> {
+  const id = (channelRef ?? '').trim();
+  const collected = await collectRegisterRows(ctx.db, attendee);
+  if (!collected || !collected.rows.some((r) => r.channelId === id)) return null;
+  return ctx.db.channel.findFirst({ where: { id, deletedAt: null }, select: { id: true, lastSeq: true } });
+}
+
+async function readStateRow(ctx: Context, attendee: RegisterAttendee, channelId: string) {
+  const row = await ctx.db.channelReadState.findFirst({
+    where: { channelId, ...('workerId' in attendee ? { workerId: attendee.workerId } : { agentId: attendee.agentId, appId: attendee.appId }) },
+  });
+  const view = await resolveRegister(ctx.db, { attendee, actor: ctx, rows: [] });
+  return { attendeeUrn: view?.attendeeUrn ?? null, channelId, lastSeenSeq: row?.lastSeenSeq ?? 0, updatedAt: row?.updatedAt ?? new Date(0) };
+}
+
+export const readStateQueries = {
+  channelReadState: async (
+    _: unknown,
+    { attendeeRef, appRef, channelRef }: { attendeeRef: string; appRef?: string | null; channelRef: string },
+    ctx: Context,
+  ) => {
+    const resolved = await readableAttendee(ctx, attendeeRef, appRef);
+    if (!resolved) return null;
+    const channel = await registeredChannel(ctx, resolved.attendee, channelRef);
+    if (!channel) return null;
+    return readStateRow(ctx, resolved.attendee, channel.id);
+  },
+};
+
+export const readStateMutations = {
+  advanceChannelReadState: async (
+    _: unknown,
+    { attendeeRef, appRef, channelRef, seq }: { attendeeRef: string; appRef?: string | null; channelRef: string; seq: number },
+    ctx: Context,
+  ) => {
+    const resolved = await readableAttendee(ctx, attendeeRef, appRef);
+    if (!resolved) throw new GraphQLError(`No match for attendeeRef "${attendeeRef}".`, { extensions: { code: 'NOT_FOUND' } });
+    await requireReadStateDriver(ctx, resolved.attendee, resolved.appId);
+    const channel = await registeredChannel(ctx, resolved.attendee, channelRef);
+    if (!channel) throw new GraphQLError(`No match for channelRef "${channelRef}".`, { extensions: { code: 'NOT_FOUND' } });
+    if (!Number.isInteger(seq) || seq < 0) throw new GraphQLError('seq must be a non-negative integer.', { extensions: { code: 'BAD_USER_INPUT' } });
+    // A cursor past the watermark could never be corrected downward (every
+    // later write is GREATEST) and would suppress attention until the Channel
+    // caught up — stale relay state after a restore is the realistic source
+    // (Codex P2 on PR #1168). Refused, with the watermark named.
+    if (seq > channel.lastSeq) {
+      throw new GraphQLError(`seq ${seq} is beyond the Channel's watermark (${channel.lastSeq}).`, {
+        extensions: { code: 'SEQ_BEYOND_WATERMARK', lastSeq: channel.lastSeq },
+      });
+    }
+    await advanceReadState(ctx.db, resolved.attendee, channel.id, seq);
+    return readStateRow(ctx, resolved.attendee, channel.id);
   },
 };
 
