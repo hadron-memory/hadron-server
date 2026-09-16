@@ -480,8 +480,13 @@ export const typeDefs = `#graphql
     never compose one — the id and this are the only two spellings that
     resolve, and a Channel that does not resolve is indistinguishable from one
     you may not read.
+
+    NULL when this Channel has no address that round-trips: a host memory whose
+    stored URN is still pre-v2 compound flattens into a node URN that cannot be
+    split back, so the server emits nothing rather than an address it would
+    itself reject. Use \`id\` for those.
     """
-    chatRootUrn: String!
+    chatRootUrn: String
     "Highest seq the allocator has issued — a watermark, not a count."
     lastSeq: Int!
     lastMessageAt: DateTime

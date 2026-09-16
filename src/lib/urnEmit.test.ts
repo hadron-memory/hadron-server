@@ -12,6 +12,7 @@ import {
   safeNodeUrnV2,
   safeNodeUrnV2Result,
   safeEdgeUrnV2,
+  nodeUrnRoundTrips,
 } from './urnEmit.js';
 
 describe('urnEmit (v2 emission)', () => {
@@ -167,5 +168,29 @@ describe('urnEmit (v2 emission)', () => {
       // ...and that it does not read as a caller-side problem.
       expect(logged).toContain('STORED');
     });
+  });
+});
+
+describe('nodeUrnRoundTrips (#1172)', () => {
+  it('is true only for a memory urn of exactly one slug under its root', () => {
+    expect(nodeUrnRoundTrips('acme.com:mmdata')).toBe(true);
+    // A stored CANONICAL form is the same memory, so it round-trips too.
+    expect(nodeUrnRoundTrips('acme.com::mmdata')).toBe(true);
+    // The pre-v2 compound shapes: emission flattens them, and nothing can
+    // split the result back — `hrn:node:acme.com:app:ag:shared:chats:team`
+    // reads as memory `acme.com:app` + loc `ag:shared:chats:team`.
+    expect(nodeUrnRoundTrips('acme.com:dev-app:coder:shared')).toBe(false);
+    expect(nodeUrnRoundTrips('acme.com:coder:app-user:019f00')).toBe(false);
+    // An org-only urn names no memory, and a corrupt one never throws here.
+    expect(nodeUrnRoundTrips('acme.com')).toBe(false);
+    expect(nodeUrnRoundTrips('')).toBe(false);
+    expect(nodeUrnRoundTrips(':')).toBe(false);
+  });
+
+  it('answers about the MEMORY only — a bad loc is safeEmit\'s business', () => {
+    expect(nodeUrnRoundTrips('acme.com:mmdata')).toBe(true);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(safeNodeUrnV2Result('acme.com:mmdata', 'review:').fellBack).toBe(true);
+    warn.mockRestore();
   });
 });

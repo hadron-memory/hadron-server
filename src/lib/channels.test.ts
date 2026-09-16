@@ -306,6 +306,30 @@ describe('addressing (#1171) — a Channel can be named after it is created', ()
     expect(await Q.channel({}, { ref: channel.id }, ctx(admin.id))).toBeNull();
   });
 
+  it('emits NO address for a host memory whose stored urn predates v2, because that one would not round-trip', async () => {
+    // Copilot on PR #1172, measured: a LEGACY team space is stored as
+    // `<app-urn>:<agent-slug>:shared` (still supported —
+    // resolveAppTeamSpaceMemoryIds), so the flat v2 join emits
+    // `hrn:node:<org>:<app>:<agent>:shared:chats:team`, which the resolver
+    // splits as memory `<org>:<app>` + loc `<agent>:shared:chats:team` and
+    // therefore REJECTS. Emitting it would hand a client an address this very
+    // server refuses — the defect `findings:graphql-urn-canonical-on-read`
+    // exists about, and the reason the round-trip test above needs a fixture
+    // of each shape rather than the two-atom one only.
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const legacyMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${app.urn}:${agent.name}:shared`, name: 'legacy', class: 'app', appId: app.id },
+    });
+    const { channel } = await ensureChannelWithRoot(db, { memoryId: legacyMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id });
+    const ChannelType = (resolvers as any).Channel;
+    expect(await ChannelType.chatRootUrn(channel, {}, ctx(admin.id))).toBeNull();
+    // The flat form it WOULD have emitted is exactly the one that resolves to
+    // nothing — asserted, so the null above is a measurement and not a guess.
+    expect(await Q.channel({}, { ref: `hrn:node:${legacyMem.urn}:chats:team` }, ctx(admin.id))).toBeNull();
+    // The Channel itself is perfectly addressable by id.
+    expect((await Q.channel({}, { ref: channel.id }, ctx(admin.id)))?.id).toBe(channel.id);
+  });
+
   it('the address discloses no more than the id: a stranger reads null and cannot write', async () => {
     const { channel } = await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id });
     const address = `hrn:node:${appMem.urn}:chats:team`;

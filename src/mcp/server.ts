@@ -29,6 +29,7 @@ import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
+  nodeUrnRoundTrips,
   safeNodeUrnV2,
   safeNodeUrnV2Result,
   safeEdgeUrnV2,
@@ -2417,12 +2418,21 @@ export function createMcpServerInstance(
     const urnOf = new Map(memories.map((m) => [m.id, safeEmitEntityUrnV2('memory', m.urn)]));
     // #1171: the chat root's node URN is the Channel's ADDRESS — every
     // channelRef accepts it, so print it rather than leaving the id as the
-    // only thing a caller can pass back.
-    const addressOf = new Map(memories.map((m) => [m.id, m.urn]));
+    // only thing a caller can pass back. A host memory whose stored urn
+    // predates v2 has no address that round-trips, and says so rather than
+    // printing one the server would reject (Copilot on PR #1172).
+    const bareUrnOf = new Map(memories.map((m) => [m.id, m.urn]));
+    const addressLine = (memoryId: string, loc: string) => {
+      const bare = bareUrnOf.get(memoryId);
+      if (bare === undefined) return [];
+      return nodeUrnRoundTrips(bare)
+        ? [`  address: ${safeNodeUrnV2(bare, loc)}`]
+        : ['  address: none — this host memory predates URN v2; address it by id'];
+    };
     return rows.map((r) =>
       [
         `- ${r.name} (${r.loc}) — id ${r.id}`,
-        ...(addressOf.has(r.memoryId) ? [`  address: ${safeNodeUrnV2(addressOf.get(r.memoryId)!, r.loc)}`] : []),
+        ...addressLine(r.memoryId, r.loc),
         `  memory: ${urnOf.get(r.memoryId) ?? r.memoryId}`,
         `  messages: seq ≤ ${r.lastSeq}${r.lastMessageAt ? `, last ${r.lastMessageAt.toISOString()}` : ''}`,
         ...(r.description ? [`  ${r.description}`] : []),
@@ -6975,7 +6985,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     organizationId: auth.organizationId ?? undefined,
   });
 
-  /** Post into a Channel by id — the team-chat post's Channel-addressed twin. */
+  /** Post into a Channel by id or address — the team-chat post's Channel-addressed twin. */
   const postToChannel = async (channelRef: string, body: string, replyToSeq: number | null, session: string | null) => {
     try {
       const msg = await resolvers.Mutation.createChannelMessage({}, { channelRef, body, replyToSeq, sessionRef: session }, chatCtx());
@@ -7000,7 +7010,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     }
   };
 
-  /** Read a Channel by id — the team-chat read's Channel-addressed twin. */
+  /** Read a Channel by id or address — the team-chat read's Channel-addressed twin. */
   const readChannel = async (
     channelRef: string,
     args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number },
@@ -7026,7 +7036,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_channel_post',
-    'Post a message into a Channel by id (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
+    'Post a message into a Channel by id or ADDRESS — the chat-root URN hadron_list_channels prints (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
     {
       channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
@@ -7041,7 +7051,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_channel_read',
-    'Read a Channel by id (spec 049), oldest first by seq — hadron_team_chat_read\'s contract (sinceSeq watermark, beforeSeq backward paging, mentions filter) addressed by Channel. A Channel you may not read is [channel_not_found].',
+    'Read a Channel by id or ADDRESS (the chat-root URN hadron_list_channels prints; spec 049), oldest first by seq — hadron_team_chat_read\'s contract (sinceSeq watermark, beforeSeq backward paging, mentions filter) addressed by Channel. A Channel you may not read is [channel_not_found].',
     {
       channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),

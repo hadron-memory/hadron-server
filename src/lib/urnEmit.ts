@@ -249,3 +249,35 @@ export function safeNodeUrnV2(memBareUrn: string, loc: string): string {
 export function safeEdgeUrnV2(memBareUrn: string, loc: string): string {
   return safeEmit('edge', memBareUrn, loc).urn;
 }
+
+/**
+ * Whether a node/edge URN emitted from this memory can be SPLIT BACK into
+ * (memory, loc) — i.e. whether the flat v2 join round-trips through
+ * `resolveNodeRef`.
+ *
+ * True iff the stored memory urn is `<root>:<slug>` (a stored canonical `::`
+ * counts — `bareAtoms` normalizes it). The v2 grammar gives a memory exactly
+ * ONE atom under its root and the resolver's single-colon path splits on the
+ * same assumption, so a PRE-v2 COMPOUND stored urn — the legacy team space
+ * `<org>:<app>:<agent>:shared` (`resolveAppTeamSpaceMemoryIds`), a per-user
+ * `<org>:<agent>:app-user:<id>` — flattens into a URN nothing can take apart
+ * again: `hrn:node:org:app:agent:shared:chats:team` reads as memory `org:app`
+ * plus loc `agent:shared:chats:team`, which names nothing.
+ *
+ * Emission is NOT wrong to flatten: that is the v2 shape, and #697 exists to
+ * flatten those stored urns. This predicate is for the narrower question a
+ * caller must ask before PROMISING a URN back — an address a client is told to
+ * pass in, a link it is told to follow. Answer it before emitting, and emit
+ * nothing rather than something the server will reject (Copilot on PR #1172;
+ * `findings:graphql-urn-canonical-on-read`).
+ *
+ * Note this is about the stored MEMORY form only. A corrupt `loc` is the
+ * `safeEmit` fallback's business and reports itself there.
+ */
+export function nodeUrnRoundTrips(memBareUrn: string): boolean {
+  try {
+    return bareAtoms(memBareUrn).length === 2;
+  } catch {
+    return false;
+  }
+}
