@@ -474,6 +474,14 @@ export const typeDefs = `#graphql
     description: String
     "The chat root node this Channel IS the entity for (one-to-one)."
     chatRootNodeId: ID!
+    """
+    #1171 — the Channel's ADDRESS: its chat root's node URN
+    (hrn:node:<org>:<memory>:<loc>), which every channelRef accepts. COPY it;
+    never compose one — the id and this are the only two spellings that
+    resolve, and a Channel that does not resolve is indistinguishable from one
+    you may not read.
+    """
+    chatRootUrn: String!
     "Highest seq the allocator has issued — a watermark, not a count."
     lastSeq: Int!
     lastMessageAt: DateTime
@@ -567,6 +575,7 @@ export const typeDefs = `#graphql
   input RegisterEntryFilter {
     "An App or an organization."
     ownerRef: ID
+    "A Channel: its id or its address (Channel.chatRootUrn). A ref naming nothing matches nothing."
     channelRef: ID
     "A Worker or an Agent."
     attendeeRef: ID
@@ -575,6 +584,7 @@ export const typeDefs = `#graphql
   input CreateRegisterEntryInput {
     "An App or an organization (URN or id)."
     ownerRef: ID!
+    "A Channel: its id or its address (Channel.chatRootUrn, #1171)."
     channelRef: ID!
     "A Worker or an Agent in the owner's context; omitted = every attendee there."
     attendeeRef: ID
@@ -5395,7 +5405,10 @@ export const typeDefs = `#graphql
 
     """
     Spec 049 Phase 4 — the uniform single-Channel read. 'ref' is the Channel's
-    id (no URN yet). Null when missing OR when you may not read its host memory.
+    id or its ADDRESS — the chat root's node URN, which is \`Channel.chatRootUrn\`
+    and what \`createChannel(memoryRef, loc)\` composes to (#1171). Null when
+    missing, when the ref names nothing, OR when you may not read its host
+    memory — identically, so this is never an existence oracle.
     """
     channel(ref: ID!): Channel
 
@@ -5433,6 +5446,7 @@ export const typeDefs = `#graphql
     Spec 049 Phase 7 — an attendee's cursor on a Channel (attendeeRef: a Worker,
     or an Agent with appRef). Same gate as attendeeRegister; lastSeenSeq 0 when
     the attendee has never checkpointed there; null when unreadable or unknown.
+    channelRef: the Channel's id or its address (\`Channel.chatRootUrn\`, #1171).
     """
     channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
 
@@ -5549,7 +5563,8 @@ export const typeDefs = `#graphql
     ): TeamChatMessagesPage!
 
     """
-    Spec 049 Phase 8 — read ANY Channel by ref (its id), with teamChatMessages'
+    Spec 049 Phase 8 — read ANY Channel by ref (its id, or its address —
+    \`Channel.chatRootUrn\`, #1171), with teamChatMessages'
     cursors, mentions filter and paging; teamChatMessages is the
     appRef → App.defaultChannel convenience over this. Authorization is the
     host App's team-chat read gate; a Channel you may not read — or one that
@@ -7155,14 +7170,15 @@ export const typeDefs = `#graphql
     "Spec 049 Phase 4 — create a named Channel with its chat root (host: an app-class memory you may write). LOC_OVERLAPS_CHANNEL when the address overlaps an existing Channel's."
     createChannel(input: CreateChannelInput!): Channel!
 
-    "Spec 049 Phase 4 — rename / re-describe a Channel whose host memory you may write."
+    "Spec 049 Phase 4 — rename / re-describe a Channel whose host memory you may write. ref: its id or its address (Channel.chatRootUrn, #1171)."
     updateChannel(ref: ID!, input: UpdateChannelInput!): Channel!
 
     """
     Spec 049 Phase 4 — soft-delete a Channel AND its chat root together (the
     protection holds while either exists, so the address stays reserved and a
     restore brings both back). Host memory write access required. An App's
-    default Channel is unlinked from the App.
+    default Channel is unlinked from the App. ref: its id or its address
+    (\`Channel.chatRootUrn\`, #1171).
     """
     deleteChannel(ref: ID!): Boolean!
 
@@ -7186,6 +7202,7 @@ export const typeDefs = `#graphql
     write; §8.7 gate: the caller must be the attendee's DRIVER — a user whose
     live session is bound to that Worker, or the App-key principal of the
     attendee's App). Monotonic: a lower seq is a no-op that returns the cursor.
+    channelRef: the Channel's id or its address (\`Channel.chatRootUrn\`, #1171).
     """
     advanceChannelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!, seq: Int!): ChannelReadState!
 
@@ -7650,7 +7667,8 @@ export const typeDefs = `#graphql
     ): TeamChatMessage!
 
     """
-    Spec 049 Phase 8 — post into ANY Channel by ref (its id): the
+    Spec 049 Phase 8 — post into ANY Channel by ref (its id, or its address —
+    \`Channel.chatRootUrn\`, #1171): the
     createTeamChatMessage contract (author derivation, mentions, replyToSeq,
     the body cap, item J) addressed by Channel. createTeamChatMessage is the
     appRef → App.defaultChannel convenience over this — one gate, two entry

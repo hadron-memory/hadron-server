@@ -49,6 +49,14 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   removeAgentImport: ['parentAgentRef', 'importedAgentRef'],
   startImpersonation: ['orgRef', 'userRef'],
   retryFailedEmbeddings: ['memoryRef'],
+  // Spec 049 Channels. Added with #1171, which widened every one of these from
+  // the ULID to the Channel's address — the moment the argument NAMES an
+  // addressable entity rather than carrying a PK is the moment this table
+  // should have covered it.
+  updateChannel: ['ref'],
+  deleteChannel: ['ref'],
+  createChannelMessage: ['channelRef', 'sessionRef'],
+  advanceChannelReadState: ['attendeeRef', 'appRef', 'channelRef'],
 };
 
 /**

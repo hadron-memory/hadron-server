@@ -71,3 +71,23 @@ describe('Channel-addressed chat tools', () => {
     expect(await server(admin.id).callToolText('hadron_channel_read', { channel: 'nope' })).toMatch(/^\[channel_not_found\]/);
   });
 });
+
+describe('#1171 — the address on the MCP channel tools', () => {
+  it('lists the address, posts and reads by it, and names the Channel in the receipt', async () => {
+    const s = server(admin.id);
+    const mem = await db.memory.findFirstOrThrow({ where: { appId: app.id }, select: { urn: true } });
+    const address = `hrn:node:${mem.urn}:chats:release`;
+    // The listing PRINTS the address, so an agent never composes one.
+    const listed = await s.callToolText('hadron_list_channels', {});
+    expect(listed).toContain(`address: ${address}`);
+    // …and the tools take back exactly what was printed. The receipt naming
+    // the Channel is the part that regresses silently: the display lookup used
+    // to be by id, so an address-addressed post would have echoed the ref.
+    expect(await s.callToolText('hadron_channel_post', { channel: address, body: 'by address' })).toContain(
+      'Posted message #1 in Channel release (chats:release)',
+    );
+    expect(await s.callToolText('hadron_channel_read', { channel: address })).toContain('1 message(s) total');
+    expect(await s.callToolText('hadron_team_chat_post', { channel: address, body: 'again' })).toContain('Posted message #2');
+    expect(await s.callToolText('hadron_channel_read', { channel: `hrn:node:${mem.urn}:chats:absent` })).toMatch(/^\[channel_not_found\]/);
+  });
+});

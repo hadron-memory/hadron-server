@@ -31,6 +31,7 @@ import {
   requireOwnerOrOrgRole,
 } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolveAppRef } from './entityRef/appRef.js';
+import { resolveChannelRefId } from './entityRef/channelRef.js';
 import { resolveOrgRef } from './entityRef/orgRef.js';
 import { resolveWorkerRef } from './entityRef/workerRef.js';
 import { resolveAgentRef } from './entityRef/agentRef.js';
@@ -142,8 +143,12 @@ export async function resolveChannelForOwner(
 ): Promise<{ id: string; memoryId: string }> {
   const ref = channelRef.trim();
   const refuse = () => badInput(`No match for channelRef "${ref}".`);
+  // #1171: id OR the chat root's node URN; an unresolvable ref is the same
+  // refusal a foreign one gets — the register never discloses a Channel.
+  const id = await resolveChannelRefId(ctx.db, ref);
+  if (!id) throw refuse();
   const row = await ctx.db.channel.findFirst({
-    where: { id: ref, deletedAt: null },
+    where: { id, deletedAt: null },
     select: { id: true, memoryId: true, memory: { select: { appId: true, organizationId: true } } },
   });
   if (!row) throw refuse();
@@ -156,9 +161,16 @@ export async function resolveChannelForOwner(
   return { id: row.id, memoryId: row.memoryId };
 }
 
-/** A Channel ref for a LIST filter — the rows themselves are bounded by `readableRegisterWhere`. */
+/**
+ * A Channel ref for a LIST filter — the rows themselves are bounded by
+ * `readableRegisterWhere`. Takes the id or the chat root's node URN (#1171);
+ * `null` for anything that resolves to nothing, which the caller turns into an
+ * empty page rather than a refusal (a filter naming nothing matches nothing).
+ */
 export async function resolveChannelFilter(ctx: Context, channelRef: string): Promise<string | null> {
-  const row = await ctx.db.channel.findFirst({ where: { id: channelRef.trim(), deletedAt: null }, select: { id: true } });
+  const id = await resolveChannelRefId(ctx.db, channelRef);
+  if (!id) return null;
+  const row = await ctx.db.channel.findFirst({ where: { id, deletedAt: null }, select: { id: true } });
   return row?.id ?? null;
 }
 

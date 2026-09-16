@@ -285,3 +285,39 @@ describe('PR #1165 review round 2 — the remaining unlocked writers', () => {
     ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
   });
 });
+
+describe('addressing (#1171) — a Channel can be named after it is created', () => {
+  it('emits its address and takes it back on every single-Channel operation', async () => {
+    const { channel } = await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id,
+    });
+    const ChannelType = (resolvers as any).Channel;
+    const address = await ChannelType.chatRootUrn(channel, {}, ctx(admin.id));
+    // The address is the chat root's node URN — composed by the server so no
+    // client has to, and identical to what `createChannel(memoryRef, loc)` was
+    // given. Asserted as a value, not a shape, because a client PASTES it.
+    expect(address).toBe(`hrn:node:${appMem.urn}:chats:team`);
+
+    // Round trip: the string a read emits is a string the refs accept.
+    expect((await Q.channel({}, { ref: address }, ctx(admin.id)))?.id).toBe(channel.id);
+    const renamed = await M.updateChannel({}, { ref: address, input: { name: 'crew' } }, ctx(admin.id));
+    expect(renamed.name).toBe('crew');
+    expect(await M.deleteChannel({}, { ref: address }, ctx(admin.id))).toBe(true);
+    expect(await Q.channel({}, { ref: channel.id }, ctx(admin.id))).toBeNull();
+  });
+
+  it('the address discloses no more than the id: a stranger reads null and cannot write', async () => {
+    const { channel } = await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id });
+    const address = `hrn:node:${appMem.urn}:chats:team`;
+    // Widening a ref to accept a URN is a re-authorization event
+    // (cor:api:140:01), so the gate is asserted on the NEW form, not inherited
+    // from the id form's tests: a real-but-unreadable Channel addressed by URN
+    // reads exactly like an address that names nothing at all.
+    expect(await Q.channel({}, { ref: address }, ctx(stranger.id))).toBeNull();
+    expect(await Q.channel({}, { ref: `hrn:node:${appMem.urn}:chats:absent` }, ctx(stranger.id))).toBeNull();
+    expect(await Q.channel({}, { ref: channel.id }, ctx(stranger.id))).toBeNull();
+    await expect(M.updateChannel({}, { ref: address, input: { name: 'x' } }, ctx(stranger.id))).rejects.toThrow();
+    await expect(M.deleteChannel({}, { ref: address }, ctx(stranger.id))).rejects.toThrow();
+    expect((await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).name).toBe('team');
+  });
+});

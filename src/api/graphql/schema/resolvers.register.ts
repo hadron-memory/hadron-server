@@ -22,6 +22,7 @@ import {
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { normalizeUrnForLookup } from '../../../lib/urn.js';
@@ -256,7 +257,12 @@ async function registeredChannel(
   attendee: RegisterAttendee,
   channelRef: string,
 ): Promise<{ id: string; lastSeq: number } | null> {
-  const id = (channelRef ?? '').trim();
+  // #1171: id OR the chat root's node URN. Resolved to an id FIRST, because
+  // the register check compares ids — a URN compared against `r.channelId`
+  // would miss every time and read as "not registered", which is the same
+  // answer this returns for a foreign Channel and so would have been silent.
+  const id = await resolveChannelRefId(ctx.db, channelRef ?? '');
+  if (!id) return null;
   const collected = await collectRegisterRows(ctx.db, attendee);
   if (!collected || !collected.rows.some((r) => r.channelId === id)) return null;
   return ctx.db.channel.findFirst({ where: { id, deletedAt: null }, select: { id: true, lastSeq: true } });

@@ -39,6 +39,7 @@ import { appendChatMessage } from '../../../lib/chatRoot.js';
 import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import {
   getMemoryEncryptionInfo,
@@ -657,8 +658,13 @@ async function hostMemoryReadable(ctx: Context, memoryId: string): Promise<boole
  */
 async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'post' | 'read'): Promise<ChannelTarget> {
   const ref = (channelRef ?? '').trim();
+  // #1171: id OR the chat root's node URN. A ref that resolves to nothing is
+  // the SAME "no match" as a Channel you may not read — the widening adds an
+  // address, never a way to tell those two apart (cor:api:140:02).
+  const id = await resolveChannelRefId(ctx.db, ref);
+  if (!id) throw channelNotFound(ref);
   const channel = await ctx.db.channel.findFirst({
-    where: { id: ref, deletedAt: null },
+    where: { id, deletedAt: null },
     select: { id: true, memoryId: true, loc: true, chatRootNodeId: true, memory: { select: { appId: true, deletedAt: true } } },
   });
   if (!channel || channel.memory.deletedAt) throw channelNotFound(ref);

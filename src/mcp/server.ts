@@ -119,6 +119,7 @@ import {
 } from '../lib/nodeCrypto.js';
 import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
+import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
 import { renderRunNodeBundle } from '../lib/runNodeRender.js';
 import {
@@ -2414,9 +2415,14 @@ export function createMcpServerInstance(
       select: { id: true, urn: true },
     });
     const urnOf = new Map(memories.map((m) => [m.id, safeEmitEntityUrnV2('memory', m.urn)]));
+    // #1171: the chat root's node URN is the Channel's ADDRESS — every
+    // channelRef accepts it, so print it rather than leaving the id as the
+    // only thing a caller can pass back.
+    const addressOf = new Map(memories.map((m) => [m.id, m.urn]));
     return rows.map((r) =>
       [
         `- ${r.name} (${r.loc}) — id ${r.id}`,
+        ...(addressOf.has(r.memoryId) ? [`  address: ${safeNodeUrnV2(addressOf.get(r.memoryId)!, r.loc)}`] : []),
         `  memory: ${urnOf.get(r.memoryId) ?? r.memoryId}`,
         `  messages: seq ≤ ${r.lastSeq}${r.lastMessageAt ? `, last ${r.lastMessageAt.toISOString()}` : ''}`,
         ...(r.description ? [`  ${r.description}`] : []),
@@ -2524,7 +2530,7 @@ export function createMcpServerInstance(
     'List the chat REGISTER (spec 049): which attendee (a Worker, or an Agent in an App — or everyone in the owner\'s context) takes part in which Channel, as declared by the App or its organization. Intent, never permission: what an attendee may actually read or post is the Channel\'s host memory\'s decision. Default: the active App\'s rows. Every install carries a materialised default row for the App\'s `team` Channel.',
     {
       owner: z.string().optional().describe('An App or organization (URN or id). Defaults to the active App.'),
-      channel: z.string().optional().describe('Only rows for this Channel (id).'),
+      channel: z.string().optional().describe('Only rows for this Channel (its id or address).'),
       attendee: z.string().optional().describe('Only rows naming this Worker or Agent (URN or id).'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
@@ -2549,7 +2555,7 @@ export function createMcpServerInstance(
     'hadron_register_add',
     'Declare that an attendee takes part in a Channel (spec 049 register). Owner: an App (org ADMIN, or the owner of a user-owned App) or an organization (CONTRIBUTOR+); defaults to the active App. attendee: a Worker or an Agent in the owner\'s context; omit it for every attendee there. Intent, never permission — the row grants nothing.',
     {
-      channel: z.string().describe('The Channel id (from hadron_list_channels).'),
+      channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       attendee: z.string().optional().describe('A Worker or Agent (URN or id). Omit = every attendee in the owner\'s context.'),
       owner: z.string().optional().describe('An App or organization (URN or id). Defaults to the active App.'),
       role: z.enum(['WATCH', 'POST', 'BOTH']).optional().describe('Default BOTH.'),
@@ -6979,8 +6985,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (msg.authorAppId) extras.push('cross-App post');
       // Display-only, best-effort: the message is already appended, so a
       // failed lookup must not turn a successful post into an error the
-      // caller retries (Copilot on PR #1169).
-      const ch = await db.channel.findUnique({ where: { id: channelRef.trim() }, select: { name: true, loc: true } }).catch(() => null);
+      // caller retries (Copilot on PR #1169). Routed through the ref resolver
+      // (#1171) so a post addressed by the chat root's node URN names the
+      // Channel in its receipt instead of echoing the ref back.
+      const ch = await resolveChannelRefId(db, channelRef)
+        .then((id) => (id ? db.channel.findUnique({ where: { id }, select: { name: true, loc: true } }) : null))
+        .catch(() => null);
       return textResult(
         `Posted message #${msg.seq} in Channel ${ch ? `${ch.name} (${ch.loc})` : channelRef} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
       );
@@ -7018,7 +7028,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     'hadron_channel_post',
     'Post a message into a Channel by id (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
     {
-      channel: z.string().describe('The Channel id (from hadron_list_channels).'),
+      channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
       replyToSeq: z.number().int().optional().describe('seq of the message this replies to.'),
       session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself.'),
@@ -7033,7 +7043,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     'hadron_channel_read',
     'Read a Channel by id (spec 049), oldest first by seq — hadron_team_chat_read\'s contract (sinceSeq watermark, beforeSeq backward paging, mentions filter) addressed by Channel. A Channel you may not read is [channel_not_found].',
     {
-      channel: z.string().describe('The Channel id (from hadron_list_channels).'),
+      channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
       mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App.'),
@@ -7057,7 +7067,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       replyToSeq: z.number().int().optional().describe('seq of the message this replies to (a replies-to edge is wired).'),
       session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
-      channel: z.string().optional().describe('Spec 049: post into THIS Channel (id, from hadron_list_channels) instead of the App\'s default team chat. Item J: your worker authors there when its App is the Channel\'s, or when you may write the Channel\'s host memory.'),
+      channel: z.string().optional().describe('Spec 049: post into THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat. Item J: your worker authors there when its App is the Channel\'s, or when you may write the Channel\'s host memory.'),
     },
     async ({ body, replyToSeq, session, app, channel }) => {
       // Presence, not truthiness (Copilot on PR #1169): a supplied '' is a
@@ -7145,7 +7155,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       offset: z.number().int().optional().describe('Page offset.'),
       session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
-      channel: z.string().optional().describe('Spec 049: read THIS Channel (id, from hadron_list_channels) instead of the App\'s default team chat.'),
+      channel: z.string().optional().describe('Spec 049: read THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
     },
     async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel }) => {
       // Presence, not truthiness (Copilot on PR #1169): a supplied '' is a

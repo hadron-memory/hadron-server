@@ -176,3 +176,41 @@ describe('PR #1169 review, round 2 — liveness and the convenience read', () =>
     expect((await Q.teamChatMessages({}, { appRef: appA.urn }, ctx(admin.id))).total).toBe(1);
   });
 });
+
+describe('#1171 — the Channel address on the chat surface', () => {
+  it('posts and reads by address, and the address is what tells two Channels named `team` apart', async () => {
+    // memA and memB BOTH host a Channel named `team` at `chats:team` — the
+    // measurement the issue was filed on. The name cannot separate them and
+    // the loc cannot either; only the memory-qualified address can.
+    const addressA = `hrn:node:${memA.urn}:chats:team`;
+    const addressB = `hrn:node:${memB.urn}:chats:team`;
+    expect(addressA).not.toBe(addressB);
+
+    const posted = await M.createChannelMessage({}, { channelRef: addressA, body: 'by address' }, ctx(admin.id));
+    expect(posted.seq).toBe(1);
+    const page = await Q.channelMessages({}, { channelRef: addressA }, ctx(admin.id));
+    expect(page.items.map((m: { body: string }) => m.body)).toEqual(['by address']);
+    // …and it landed in A, not in the identically-named B.
+    expect((await Q.channelMessages({}, { channelRef: addressB }, ctx(admin.id))).total).toBe(0);
+    const teamA = await db.app.findUniqueOrThrow({ where: { id: appA.id } });
+    expect((await Q.channelMessages({}, { channelRef: teamA.defaultChannelId }, ctx(admin.id))).items[0].body).toBe('by address');
+
+    // The address a read emits is the one the refs accept (round trip).
+    const row = await Q.channel({}, { ref: teamA.defaultChannelId }, ctx(admin.id));
+    expect(await (resolvers as any).Channel.chatRootUrn(row, {}, ctx(admin.id))).toBe(addressA);
+  });
+
+  it('an unreadable Channel and an address naming nothing are CHANNEL_NOT_FOUND, identically', async () => {
+    // The id form's posture, re-derived for the new form: the widening adds an
+    // address, never a way to learn a Channel exists (cor:api:140:02).
+    const addressB = `hrn:node:${memB.urn}:chats:team`;
+    for (const ref of [addressB, `hrn:node:${memA.urn}:chats:absent`, `hrn:mem:${memA.urn}:chats:team`, `${memA.urn}:notes:nothing`]) {
+      await expect(Q.channelMessages({}, { channelRef: ref }, ctx(member.id))).rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
+      await expect(M.createChannelMessage({}, { channelRef: ref, body: 'x' }, ctx(member.id))).rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
+    }
+    // And a reader who MAY read B still cannot be told the difference between
+    // "wrong address" and "not yours" by the message either.
+    await expect(Q.channelMessages({}, { channelRef: `hrn:node:${memB.urn}:chats:team` }, ctx(stranger.id))).rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
+    expect(await db.node.count({ where: { memoryId: memB.id, loc: { startsWith: 'chats:team:messages:' } } })).toBe(0);
+  });
+});

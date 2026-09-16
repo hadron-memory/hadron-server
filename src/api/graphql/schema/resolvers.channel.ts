@@ -19,7 +19,9 @@ import {
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { validateLoc } from '../../../lib/validateLoc.js';
@@ -31,7 +33,12 @@ async function readableMemoryWhere(ctx: Context): Promise<Prisma.MemoryWhereInpu
 }
 
 async function readableChannel(ctx: Context, ref: string): Promise<Channel | null> {
-  const row = await ctx.db.channel.findFirst({ where: { id: ref.trim(), deletedAt: null } });
+  // #1171: the ref is the Channel's id OR its chat root's node URN — the
+  // address `createChannel` accepts. An unresolvable ref reads as a missing
+  // one, which is the same answer an unreadable one gets below (§8.6).
+  const id = await resolveChannelRefId(ctx.db, ref);
+  if (!id) return null;
+  const row = await ctx.db.channel.findFirst({ where: { id, deletedAt: null } });
   if (!row) return null;
   const accessible = await getAccessibleMemoryIds(ctx);
   if (accessible !== null && !accessible.includes(row.memoryId)) return null;
@@ -157,5 +164,18 @@ export const channelMutations = {
 export const channelFieldResolvers = {
   Channel: {
     memory: (c: Channel, _: unknown, ctx: Context) => ctx.db.memory.findUnique({ where: { id: c.memoryId } }),
+
+    /**
+     * #1171 — the Channel's address as ONE string every `channelRef` accepts:
+     * its chat root's node URN. Emitted here so no client ever COMPOSES it
+     * (`conventions:portal-links-from-server-output`, the same rule as node
+     * reads' `URL:` line) — a hand-built URN is how a caller ends up addressing
+     * a Channel that is not the one they meant. Sibling of `memory`, so it
+     * costs the same one lookup that field does.
+     */
+    chatRootUrn: async (c: Channel, _: unknown, ctx: Context) => {
+      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: c.memoryId }, select: { urn: true } });
+      return safeNodeUrnV2(memory.urn, c.loc);
+    },
   },
 };

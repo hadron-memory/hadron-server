@@ -197,3 +197,24 @@ describe('PR #1168 review — the oracles and the watermark', () => {
     expect(section.captured.has(channel.id)).toBe(true);
   });
 });
+
+describe('#1171 — the Channel address on the read-state surface', () => {
+  it('reads and advances the cursor by address, and an unregistered address is the same "no match"', async () => {
+    const address = `hrn:node:${appMem.urn}:chats:team`;
+    await post('one');
+    expect(await Q.channelReadState({}, { attendeeRef: worker.id, channelRef: address }, ctx(admin.id))).toMatchObject({ lastSeenSeq: 0, channelId: channel.id });
+    // The register check compares CHANNEL IDS, so the ref has to become one
+    // before it is checked: a URN compared against a stored id would miss and
+    // read as "not registered" — the same answer a foreign Channel gets, and
+    // therefore silent.
+    expect(
+      await M.advanceChannelReadState({}, { attendeeRef: agent.urn, appRef: app.urn, channelRef: address, seq: 1 }, appKeyCtx()),
+    ).toMatchObject({ lastSeenSeq: 1, channelId: channel.id });
+    // Unregistered, unreadable and unknown addresses stay indistinguishable.
+    const side = (await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:side', name: 'side', createdBy: admin.id })).channel;
+    await db.registerEntry.deleteMany({ where: { channelId: side.id } });
+    expect(await Q.channelReadState({}, { attendeeRef: worker.id, channelRef: `hrn:node:${appMem.urn}:chats:side` }, ctx(admin.id))).toBeNull();
+    expect(await Q.channelReadState({}, { attendeeRef: worker.id, channelRef: `hrn:node:${appMem.urn}:chats:absent` }, ctx(admin.id))).toBeNull();
+    expect(await Q.channelReadState({}, { attendeeRef: worker.id, channelRef: address }, ctx(stranger.id))).toBeNull();
+  });
+});
