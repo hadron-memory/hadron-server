@@ -2427,7 +2427,7 @@ export function createMcpServerInstance(
       if (bare === undefined) return [];
       return nodeUrnRoundTrips(bare, loc)
         ? [`  address: ${safeNodeUrnV2(bare, loc)}`]
-        : ['  address: none — this Channel has no URN that resolves back (a pre-v2 host memory urn); address it by id'];
+        : ['  address: none — no URN resolves back to this Channel; address it by id'];
     };
     return rows.map((r) =>
       [

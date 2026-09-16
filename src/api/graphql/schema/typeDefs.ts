@@ -481,10 +481,11 @@ export const typeDefs = `#graphql
     resolve, and a Channel that does not resolve is indistinguishable from one
     you may not read.
 
-    NULL when this Channel has no address that round-trips: a host memory whose
-    stored URN is still pre-v2 compound flattens into a node URN that cannot be
-    split back, so the server emits nothing rather than an address it would
-    itself reject. Use \`id\` for those.
+    NULL when no URN round-trips to this Channel — the server emits nothing
+    rather than an address it would itself reject. A pre-v2 compound host
+    memory URN is the common cause (it flattens into a node URN that cannot be
+    split back), but it is not the only one, so do not read the null as naming
+    a reason. Use \`id\` for those Channels; it always works.
     """
     chatRootUrn: String
     "Highest seq the allocator has issued — a watermark, not a count."

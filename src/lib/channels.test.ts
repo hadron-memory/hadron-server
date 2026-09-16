@@ -328,6 +328,17 @@ describe('addressing (#1171) — a Channel can be named after it is created', ()
     expect(await Q.channel({}, { ref: `hrn:node:${legacyMem.urn}:chats:team` }, ctx(admin.id))).toBeNull();
     // The Channel itself is perfectly addressable by id.
     expect((await Q.channel({}, { ref: channel.id }, ctx(admin.id)))?.id).toBe(channel.id);
+    // The LIST path eager-loads the host memory's urn (#1172, Copilot: a
+    // per-row lookup on a 200-row page is a straight N+1, and this repo
+    // eager-loads rather than reaching for a DataLoader). Assert the field
+    // agrees on BOTH paths, since only one of them hydrates it.
+    const page = await Q.channels({}, { filter: { memoryRef: legacyMem.urn } }, ctx(admin.id));
+    expect(page.total).toBe(1);
+    expect(await ChannelType.chatRootUrn(page.items[0], {}, ctx(admin.id))).toBeNull();
+    const flat = await Q.channels({}, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    for (const item of flat.items) {
+      expect(await ChannelType.chatRootUrn(item, {}, ctx(admin.id))).toBe(`hrn:node:${appMem.urn}:${item.loc}`);
+    }
   });
 
   it('the address discloses no more than the id: a stranger reads null and cannot write', async () => {

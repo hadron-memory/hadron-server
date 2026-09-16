@@ -26,6 +26,12 @@ import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { validateLoc } from '../../../lib/validateLoc.js';
 
+/**
+ * A Channel row as a field resolver may receive it: the `channels` page
+ * eager-loads its host memory's urn (below), every other path does not.
+ */
+type ChannelWithHostUrn = Channel & { memory?: { urn: string } | null };
+
 /** The caller's readable-memory clause, or null for the unrestricted principal. */
 async function readableMemoryWhere(ctx: Context): Promise<Prisma.MemoryWhereInput | null> {
   const accessible = await getAccessibleMemoryIds(ctx);
@@ -86,7 +92,22 @@ export const channelQueries = {
     const skip = Math.max(0, offset ?? 0);
     const [total, items] = await Promise.all([
       ctx.db.channel.count({ where }),
-      take === 0 ? Promise.resolve([] as Channel[]) : ctx.db.channel.findMany({ where, orderBy: [{ loc: 'asc' }, { id: 'asc' }], take, skip }),
+      take === 0
+        ? Promise.resolve([] as Channel[])
+        : ctx.db.channel.findMany({
+            where,
+            orderBy: [{ loc: 'asc' }, { id: 'asc' }],
+            take,
+            skip,
+            // #1172 (Copilot): `chatRootUrn` needs its host memory's urn, and
+            // this page serves up to 200 rows — a per-row field resolver is a
+            // straight N+1, and the repo has no DataLoader (see
+            // SESSION_INCLUDE in resolvers.helpers.ts, the same call for the
+            // same reason). Eager-load the ONE column it needs; the field
+            // resolver still falls back for a Channel that arrived by any
+            // other path.
+            include: { memory: { select: { urn: true } } },
+          }),
     ]);
     return { items, total };
   },
@@ -183,9 +204,11 @@ export const channelFieldResolvers = {
      * flattens their memory's urn — no address beats a broken one, the same
      * call `Node.portalUrl` makes about a link.
      */
-    chatRootUrn: async (c: Channel, _: unknown, ctx: Context) => {
-      const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: c.memoryId }, select: { urn: true } });
-      return nodeUrnRoundTrips(memory.urn, c.loc) ? safeNodeUrnV2(memory.urn, c.loc) : null;
+    chatRootUrn: async (c: ChannelWithHostUrn, _: unknown, ctx: Context) => {
+      const urn =
+        c.memory?.urn ??
+        (await ctx.db.memory.findUniqueOrThrow({ where: { id: c.memoryId }, select: { urn: true } })).urn;
+      return nodeUrnRoundTrips(urn, c.loc) ? safeNodeUrnV2(urn, c.loc) : null;
     },
   },
 };
