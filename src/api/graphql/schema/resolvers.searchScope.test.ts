@@ -204,4 +204,27 @@ describe('#1173 — a refusal states the condition, never another surface\'s rem
     expect(err.extensions).toMatchObject({ code: 'ORG_REQUIRED', missing: 'activeOrg' });
     expect((err.extensions?.memberOrgIds as string[]).length).toBe(2);
   });
+
+  it('a NAMED foreign org is not "missing an active org" — the hint is absent there', async () => {
+    // Copilot on PR #1175: two refusals share ORG_REQUIRED and only one is
+    // about something missing. The caller here DID name an organization; a
+    // client told `missing: 'activeOrg'` would prompt for the selection just
+    // made — the wrong-remedy defect this whole change is about, one level in.
+    // A real organization the caller is not in: the refusal carries the list
+    // to choose from, and NO `missing` hint.
+    const outside = await db.organization.create({
+      data: { id: generateId(), name: 'ss-outside', urn: `ss-outside-${generateId()}` },
+    });
+    const foreign = await refusalOf(Q.findNodes({}, { scope: 'global', orgId: outside.urn }, ctx(twoOrgs.id)));
+    expect(foreign.extensions?.code).toBe('ORG_REQUIRED');
+    expect(foreign.extensions).not.toHaveProperty('missing');
+    expect((foreign.extensions?.memberOrgIds as string[]).length).toBeGreaterThan(0);
+    expect(foreign.message).not.toMatch(FOREIGN_VOCABULARY);
+    // A ref that names nothing takes the same branch, so it must not gain the
+    // hint either. (Its `memberOrgIds` comes back empty — a separate, older
+    // inconsistency in the same refusal, reported rather than changed here.)
+    const unknown = await refusalOf(Q.findNodes({}, { scope: 'global', orgId: `no-such-${generateId()}` }, ctx(twoOrgs.id)));
+    expect(unknown.extensions?.code).toBe('ORG_REQUIRED');
+    expect(unknown.extensions).not.toHaveProperty('missing');
+  });
 });

@@ -690,15 +690,27 @@ async function globalView(
     return { kind: 'user-owned', source, label: 'user-owned memories', ownerUrn: null, memoryIds: own, orgScopeId: null, droppedCount: 0 };
   }
   if (activeOrg.kind === 'required') {
+    // TWO refusals share this code, and only one of them is about something
+    // MISSING (Copilot on PR #1175). A caller who named a foreign or
+    // nonexistent org supplied a selection — it was refused — so telling a
+    // client `missing: 'activeOrg'` there would have it prompt for the
+    // selection just made: the wrong-remedy defect #1173 is about, reappearing
+    // inside its own fix. `memberOrgIds` is the half that is true for both.
+    const namedNotMember = activeOrg.reason === 'named_not_member';
     throw new GraphQLError(
-      activeOrg.reason === 'named_not_member'
+      namedNotMember
         ? 'The named organization is not one you are a member of.'
         // #1173: `orgId` is a GraphQL argument and `hadron_set_active_org` an
         // MCP tool — a CLI user can type neither, and a portal user can click
-        // neither. The condition is all three surfaces share; `memberOrgIds`
-        // already carries the machine-readable half.
+        // neither. State the condition all three surfaces share.
         : `You belong to ${activeOrg.memberOrgIds.length} organizations and none is active.`,
-      { extensions: { code: 'ORG_REQUIRED', missing: 'activeOrg', memberOrgIds: activeOrg.memberOrgIds } },
+      {
+        extensions: {
+          code: 'ORG_REQUIRED',
+          ...(namedNotMember ? {} : { missing: 'activeOrg' }),
+          memberOrgIds: activeOrg.memberOrgIds,
+        },
+      },
     );
   }
   const org = await ctx.db.organization.findUnique({ where: { id: activeOrg.organizationId }, select: { urn: true } });
