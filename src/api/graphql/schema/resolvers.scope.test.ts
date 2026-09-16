@@ -187,9 +187,19 @@ describe('name resolution in an App context — App › Agent › organization, 
     await db.appAgent.create({ data: { appId: app.id, agentId: agent2.id } });
     await M.createScope({}, { input: { name: 'marketing', agentRef: agent.urn, memoryRefs: [memA1.urn] } }, admin);
     await M.createScope({}, { input: { name: 'marketing', agentRef: agent2.urn, memoryRefs: [memA2.urn] } }, admin);
-    await expect(Q.scopeExplain({}, { name: 'marketing', appRef: app.urn }, ctx(reader.id))).rejects.toMatchObject({
-      extensions: { code: 'SCOPE_NAME_AMBIGUOUS' },
-    });
+    const err = await Q.scopeExplain({}, { name: 'marketing', appRef: app.urn }, ctx(reader.id)).catch((e: Error & { extensions?: Record<string, unknown> }) => e);
+    expect(err.extensions).toMatchObject({ code: 'SCOPE_NAME_AMBIGUOUS' });
+    // #1173 (Copilot on PR #1175): the remedy here is "address one by id" —
+    // an id is a VALUE every surface can supply, unlike `scopeRef`, which is a
+    // GraphQL argument name this message used to tell a CLI user to pass.
+    // Without this the wording could regress and only the code would be pinned.
+    expect(err.message).toMatch(/address one by id: /);
+    expect(err.message).not.toMatch(/appRef|orgId|scopeRef|hadron_|\(MCP\)|\(GraphQL\)/);
+    // The ids are named in BOTH halves — the prose for a human, `candidates`
+    // for the client that offers the choice.
+    const candidates = err.extensions?.candidates as string[];
+    expect(candidates).toHaveLength(2);
+    for (const id of candidates) expect(err.message).toContain(id);
   });
 
   it("an App the caller cannot read is no context — no tell from a PUBLIC Agent's scope (Codex on #1160)", async () => {
@@ -241,5 +251,22 @@ describe('order — the one thing only the customization operation consumes', ()
     expect(after.winner.id).toBe(memA1.id);
     const none = await Q.scopeExplain({}, { scopeRef: s.id, loc: 'tasks:nowhere' }, ctx(contributor.id));
     expect(none.winner).toBeNull();
+  });
+});
+
+describe('#1173 — scopeExplain refusals state the condition too', () => {
+  const FOREIGN_VOCABULARY = /appRef|orgId|scopeRef|hadron_|\(MCP\)|\(GraphQL\)/;
+
+  it('a name with no App context, and no selector at all, both name the condition', async () => {
+    await expect(Q.scopeExplain({}, { name: 'marketing' }, ctx(reader.id))).rejects.toMatchObject({
+      message: 'Resolving a scope by name needs an App context.',
+      extensions: { code: 'BAD_USER_INPUT', missing: 'appContext' },
+    });
+    await expect(Q.scopeExplain({}, {}, ctx(reader.id))).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT', missing: 'scopeSelector' },
+    });
+    for (const call of [Q.scopeExplain({}, { name: 'marketing' }, ctx(reader.id)), Q.scopeExplain({}, {}, ctx(reader.id))]) {
+      await expect(call).rejects.toSatisfy((e: Error) => !FOREIGN_VOCABULARY.test(e.message));
+    }
   });
 });

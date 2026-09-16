@@ -2,9 +2,11 @@
  * Not-found errors for the entity-reference helpers (spec 007).
  *
  * Each error carries the input string the caller passed (which may
- * be an ID, a bare URN, or a prefixed URN — see resolveXxxRef). The
- * GraphQL error-code mapping happens at the resolver layer; this
- * module just exports the error classes.
+ * be an ID, a bare URN, or a prefixed URN — see resolveXxxRef) and, since
+ * #1174, its stable wire CODE: they all extend {@link EntityNotFoundError},
+ * which `formatError` maps once so the code reaches `extensions.code` instead
+ * of being recoverable only by parsing the message. Adding a not-found here
+ * needs nothing in formatError — that is the point of mapping the base class.
  *
  * MemoryNotFoundError lives in `src/lib/asset/gate.ts` from spec 006
  * and is re-exported from here for callers that import from one
@@ -12,39 +14,42 @@
  */
 
 export { MemoryNotFoundError } from '../asset/gate.js';
+export { EntityNotFoundError } from './entityNotFound.js';
 
-export class AgentNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`AGENT_NOT_FOUND: ${ref}`);
+import { EntityNotFoundError } from './entityNotFound.js';
+
+export class AgentNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('AGENT_NOT_FOUND', ref);
     this.name = 'AgentNotFoundError';
   }
 }
 
-export class AppNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`APP_NOT_FOUND: ${ref}`);
+export class AppNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('APP_NOT_FOUND', ref);
     this.name = 'AppNotFoundError';
   }
 }
 
-export class OrganizationNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`ORGANIZATION_NOT_FOUND: ${ref}`);
+export class OrganizationNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('ORGANIZATION_NOT_FOUND', ref);
     this.name = 'OrganizationNotFoundError';
   }
 }
 
 /** Spec 049 Phase 2 — a scope ref (id) that resolves to no live Scope. */
-export class ScopeNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`SCOPE_NOT_FOUND: ${ref}`);
+export class ScopeNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('SCOPE_NOT_FOUND', ref);
     this.name = 'ScopeNotFoundError';
   }
 }
 
-export class UserNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`USER_NOT_FOUND: ${ref}`);
+export class UserNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('USER_NOT_FOUND', ref);
     this.name = 'UserNotFoundError';
   }
 }
@@ -85,9 +90,9 @@ export class AmbiguousLegacyUrnError extends Error {
  * when a secret URN is structurally malformed (bad owner marker, wrong
  * segment count).
  */
-export class SecretNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`SECRET_NOT_FOUND: ${ref}`);
+export class SecretNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('SECRET_NOT_FOUND', ref);
     this.name = 'SecretNotFoundError';
   }
 }
@@ -97,9 +102,9 @@ export class SecretNotFoundError extends Error {
  * `hrn:apprun:<root>:<app>:<run-id>` URN, #696) does not name a run — or when
  * the URN is structurally malformed / its app doesn't resolve.
  */
-export class AppRunNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`APP_RUN_NOT_FOUND: ${ref}`);
+export class AppRunNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('APP_RUN_NOT_FOUND', ref);
     this.name = 'AppRunNotFoundError';
   }
 }
@@ -109,9 +114,9 @@ export class AppRunNotFoundError extends Error {
  * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN, #991) does not name a
  * worker — or when the URN is structurally malformed / its App doesn't resolve.
  */
-export class WorkerNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`WORKER_NOT_FOUND: ${ref}`);
+export class WorkerNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('WORKER_NOT_FOUND', ref);
     this.name = 'WorkerNotFoundError';
   }
 }
@@ -121,9 +126,9 @@ export class WorkerNotFoundError extends Error {
  * or an end-anchored `hrn:noderev:<root>:<mem>:<loc...>:<rev>` URN, #696) does
  * not name a revision — or when the URN is malformed / its node doesn't resolve.
  */
-export class NodeRevisionNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`NODE_REVISION_NOT_FOUND: ${ref}`);
+export class NodeRevisionNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('NODE_REVISION_NOT_FOUND', ref);
     this.name = 'NodeRevisionNotFoundError';
   }
 }
@@ -134,9 +139,9 @@ export class NodeRevisionNotFoundError extends Error {
  * Used by `upsertNode` to fail edge-target resolution loudly instead
  * of silently writing to `pending_edges` (issue #105).
  */
-export class NodeNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`NODE_NOT_FOUND: ${ref}`);
+export class NodeNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('NODE_NOT_FOUND', ref);
     this.name = 'NodeNotFoundError';
   }
 }
@@ -147,9 +152,9 @@ export class NodeNotFoundError extends Error {
  * live edge. Spec 037: edges are first-class, loc-addressed peers of
  * nodes, so they get the same typed not-found the other kinds have.
  */
-export class EdgeNotFoundError extends Error {
-  constructor(public ref: string) {
-    super(`EDGE_NOT_FOUND: ${ref}`);
+export class EdgeNotFoundError extends EntityNotFoundError {
+  constructor(ref: string) {
+    super('EDGE_NOT_FOUND', ref);
     this.name = 'EdgeNotFoundError';
   }
 }

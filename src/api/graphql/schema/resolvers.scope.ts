@@ -188,19 +188,25 @@ export const scopeQueries = {
         }
       }
       if (!appId) {
-        throw new GraphQLError('Resolving a scope by name needs an App context: pass appRef.', { extensions: { code: 'BAD_USER_INPUT' } });
+        // #1173: the condition, not `appRef` — the GraphQL argument name is
+        // unactionable for the CLI and portal readers of the same string.
+        throw new GraphQLError('Resolving a scope by name needs an App context.', {
+          extensions: { code: 'BAD_USER_INPUT', missing: 'appContext' },
+        });
       }
       const r = await resolveScopeByNameInApp(ctx, name, appId);
       if (r.ambiguousAmong.length) {
         throw new GraphQLError(
-          `"${name}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass scopeRef to choose one: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
+          `"${name}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; address one by id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
           { extensions: { code: 'SCOPE_NAME_AMBIGUOUS', candidates: r.ambiguousAmong.map((s) => s.id) } },
         );
       }
       scope = r.winner;
       shadowed = r.shadowed;
     } else {
-      throw new GraphQLError('Pass scopeRef, or name with appRef.', { extensions: { code: 'BAD_USER_INPUT' } });
+      throw new GraphQLError('No scope was named: give a scope reference, or a name with an App context.', {
+        extensions: { code: 'BAD_USER_INPUT', missing: 'scopeSelector' },
+      });
     }
     if (!scope) return null;
     const ex = await explainScope(ctx, scope.id, loc);

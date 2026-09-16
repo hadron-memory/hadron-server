@@ -162,3 +162,69 @@ describe('a scope named in the call', () => {
     expect(unscoped.hits.length).toBe(2);
   });
 });
+
+describe('#1173 — a refusal states the condition, never another surface\'s remedy', () => {
+  // The CLI, MCP and the portal read the SAME string, so a remedy phrased in
+  // one surface's vocabulary is unactionable on the other two: `appRef` and
+  // `orgId` are GraphQL argument names, `hadron_set_active_org` is an MCP tool.
+  // A CLI user can type none of them; a portal user can click none of them.
+  // `conventions:the-error-code-is-the-contract-the-prose-is-not`.
+  const FOREIGN_VOCABULARY = /appRef|orgId|scopeRef|hadron_|\(MCP\)|\(GraphQL\)/;
+
+  const refusalOf = async (call: Promise<unknown>) => {
+    try {
+      await call;
+      throw new Error('expected a refusal');
+    } catch (e) {
+      return e as { message: string; extensions?: Record<string, unknown> };
+    }
+  };
+
+  it('`app` without an App context names the condition and carries `missing`', async () => {
+    const err = await refusalOf(Q.findNodes({}, { scope: 'app' }, ctx(reader.id)));
+    expect(err.message).toBe('scope "app" needs an App context.');
+    expect(err.message).not.toMatch(FOREIGN_VOCABULARY);
+    // The structured carrier each client renders in its OWN words.
+    expect(err.extensions).toMatchObject({ code: 'BAD_USER_INPUT', missing: 'appContext' });
+  });
+
+  it('a bare scope NAME without an App context does the same, and still says an id needs none', async () => {
+    const err = await refusalOf(Q.findNodes({}, { scope: 'marketing' }, ctx(reader.id)));
+    expect(err.message).not.toMatch(FOREIGN_VOCABULARY);
+    expect(err.extensions).toMatchObject({ code: 'BAD_USER_INPUT', missing: 'appContext' });
+    // A scope id is a VALUE any surface can supply, so naming it is a fact
+    // about scopes rather than an instruction in one client's vocabulary.
+    expect(err.message).toContain('a scope id needs none');
+  });
+
+  it('`global` with no active org states the condition; memberOrgIds stays the machine-readable half', async () => {
+    const err = await refusalOf(Q.findNodes({}, { scope: 'global' }, ctx(twoOrgs.id)));
+    expect(err.message).toBe('You belong to 2 organizations and none is active.');
+    expect(err.message).not.toMatch(FOREIGN_VOCABULARY);
+    expect(err.extensions).toMatchObject({ code: 'ORG_REQUIRED', missing: 'activeOrg' });
+    expect((err.extensions?.memberOrgIds as string[]).length).toBe(2);
+  });
+
+  it('a NAMED foreign org is not "missing an active org" — the hint is absent there', async () => {
+    // Copilot on PR #1175: two refusals share ORG_REQUIRED and only one is
+    // about something missing. The caller here DID name an organization; a
+    // client told `missing: 'activeOrg'` would prompt for the selection just
+    // made — the wrong-remedy defect this whole change is about, one level in.
+    // A real organization the caller is not in: the refusal carries the list
+    // to choose from, and NO `missing` hint.
+    const outside = await db.organization.create({
+      data: { id: generateId(), name: 'ss-outside', urn: `ss-outside-${generateId()}` },
+    });
+    const foreign = await refusalOf(Q.findNodes({}, { scope: 'global', orgId: outside.urn }, ctx(twoOrgs.id)));
+    expect(foreign.extensions?.code).toBe('ORG_REQUIRED');
+    expect(foreign.extensions).not.toHaveProperty('missing');
+    expect((foreign.extensions?.memberOrgIds as string[]).length).toBeGreaterThan(0);
+    expect(foreign.message).not.toMatch(FOREIGN_VOCABULARY);
+    // A ref that names nothing takes the same branch, so it must not gain the
+    // hint either. (Its `memberOrgIds` comes back empty — a separate, older
+    // inconsistency in the same refusal, reported rather than changed here.)
+    const unknown = await refusalOf(Q.findNodes({}, { scope: 'global', orgId: `no-such-${generateId()}` }, ctx(twoOrgs.id)));
+    expect(unknown.extensions?.code).toBe('ORG_REQUIRED');
+    expect(unknown.extensions).not.toHaveProperty('missing');
+  });
+});
