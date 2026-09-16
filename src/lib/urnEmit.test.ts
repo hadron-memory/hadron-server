@@ -12,6 +12,7 @@ import {
   safeNodeUrnV2,
   safeNodeUrnV2Result,
   safeEdgeUrnV2,
+  nodeUrnRoundTrips,
 } from './urnEmit.js';
 
 describe('urnEmit (v2 emission)', () => {
@@ -167,5 +168,41 @@ describe('urnEmit (v2 emission)', () => {
       // ...and that it does not read as a caller-side problem.
       expect(logged).toContain('STORED');
     });
+  });
+});
+
+describe('nodeUrnRoundTrips (#1172)', () => {
+  it('performs the round trip: the emitted URN must re-split to THIS memory and THIS loc', () => {
+    expect(nodeUrnRoundTrips('acme.com:mmdata', 'review:sort-imports')).toBe(true);
+    // A stored CANONICAL form is the same memory, and the resolver tries both
+    // spellings against the urn column, so it round-trips too.
+    expect(nodeUrnRoundTrips('acme.com::mmdata', 'chats:team')).toBe(true);
+  });
+
+  it('rejects every shape whose emission does not name the row back', () => {
+    // Pre-v2 COMPOUND: emission flattens, and the re-split reads memory
+    // `acme.com:dev-app` + loc `coder:shared:chats:team` — a different row.
+    expect(nodeUrnRoundTrips('acme.com:dev-app:coder:shared', 'chats:team')).toBe(false);
+    expect(nodeUrnRoundTrips('acme.com:coder:app-user:019f00', 'notes:a')).toBe(false);
+    // The `@` owner sigil is stripped on EMISSION and kept in the stored urn
+    // the resolver matches on, so the atom count says yes and the round trip
+    // says no — the false positive that retired the counting version (Codex).
+    expect(nodeUrnRoundTrips('@holger:notes', 'a:b')).toBe(false);
+    // An org-only urn names no memory; a corrupt one never throws here.
+    expect(nodeUrnRoundTrips('acme.com', 'a')).toBe(false);
+    expect(nodeUrnRoundTrips('', 'a')).toBe(false);
+    expect(nodeUrnRoundTrips(':', 'a')).toBe(false);
+  });
+
+  it('rejects a loc safeEmit can only serve best-effort — the fallback is not an address', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // `review:` (empty trailing atom) is un-emittable: safeEmit serves an
+    // unvalidated join and flags it. An address must never be that string.
+    expect(safeNodeUrnV2Result('acme.com:mmdata', 'review:').fellBack).toBe(true);
+    expect(nodeUrnRoundTrips('acme.com:mmdata', 'review:')).toBe(false);
+    // The root node's empty loc has no v2 URN at all (a grammar gap, not a
+    // bad row) — so it has no address either, and silently.
+    expect(nodeUrnRoundTrips('acme.com:mmdata', '')).toBe(false);
+    warn.mockRestore();
   });
 });

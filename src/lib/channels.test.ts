@@ -285,3 +285,74 @@ describe('PR #1165 review round 2 — the remaining unlocked writers', () => {
     ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
   });
 });
+
+describe('addressing (#1171) — a Channel can be named after it is created', () => {
+  it('emits its address and takes it back on every single-Channel operation', async () => {
+    const { channel } = await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id,
+    });
+    const ChannelType = (resolvers as any).Channel;
+    const address = await ChannelType.chatRootUrn(channel, {}, ctx(admin.id));
+    // The address is the chat root's node URN — composed by the server so no
+    // client has to, and identical to what `createChannel(memoryRef, loc)` was
+    // given. Asserted as a value, not a shape, because a client PASTES it.
+    expect(address).toBe(`hrn:node:${appMem.urn}:chats:team`);
+
+    // Round trip: the string a read emits is a string the refs accept.
+    expect((await Q.channel({}, { ref: address }, ctx(admin.id)))?.id).toBe(channel.id);
+    const renamed = await M.updateChannel({}, { ref: address, input: { name: 'crew' } }, ctx(admin.id));
+    expect(renamed.name).toBe('crew');
+    expect(await M.deleteChannel({}, { ref: address }, ctx(admin.id))).toBe(true);
+    expect(await Q.channel({}, { ref: channel.id }, ctx(admin.id))).toBeNull();
+  });
+
+  it('emits NO address for a COMPOUND legacy team-space host memory, whose flattened URN would not round-trip', async () => {
+    // Copilot on PR #1172, measured: a LEGACY team space is stored as
+    // `<app-urn>:<agent-slug>:shared` (still supported —
+    // resolveAppTeamSpaceMemoryIds), so the flat v2 join emits
+    // `hrn:node:<org>:<app>:<agent>:shared:chats:team`, which the resolver
+    // splits as memory `<org>:<app>` + loc `<agent>:shared:chats:team` and
+    // therefore REJECTS. Emitting it would hand a client an address this very
+    // server refuses — the defect `findings:graphql-urn-canonical-on-read`
+    // exists about, and the reason the round-trip test above needs a fixture
+    // of each shape rather than the two-atom one only.
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const legacyMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${app.urn}:${agent.name}:shared`, name: 'legacy', class: 'app', appId: app.id },
+    });
+    const { channel } = await ensureChannelWithRoot(db, { memoryId: legacyMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id });
+    const ChannelType = (resolvers as any).Channel;
+    expect(await ChannelType.chatRootUrn(channel, {}, ctx(admin.id))).toBeNull();
+    // The flat form it WOULD have emitted is exactly the one that resolves to
+    // nothing — asserted, so the null above is a measurement and not a guess.
+    expect(await Q.channel({}, { ref: `hrn:node:${legacyMem.urn}:chats:team` }, ctx(admin.id))).toBeNull();
+    // The Channel itself is perfectly addressable by id.
+    expect((await Q.channel({}, { ref: channel.id }, ctx(admin.id)))?.id).toBe(channel.id);
+    // The LIST path eager-loads the host memory's urn (#1172, Copilot: a
+    // per-row lookup on a 200-row page is a straight N+1, and this repo
+    // eager-loads rather than reaching for a DataLoader). Assert the field
+    // agrees on BOTH paths, since only one of them hydrates it.
+    const page = await Q.channels({}, { filter: { memoryRef: legacyMem.urn } }, ctx(admin.id));
+    expect(page.total).toBe(1);
+    expect(await ChannelType.chatRootUrn(page.items[0], {}, ctx(admin.id))).toBeNull();
+    const flat = await Q.channels({}, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    for (const item of flat.items) {
+      expect(await ChannelType.chatRootUrn(item, {}, ctx(admin.id))).toBe(`hrn:node:${appMem.urn}:${item.loc}`);
+    }
+  });
+
+  it('the address discloses no more than the id: a stranger reads null and cannot write', async () => {
+    const { channel } = await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id });
+    const address = `hrn:node:${appMem.urn}:chats:team`;
+    // Widening a ref to accept a URN is a re-authorization event
+    // (cor:api:140:01), so the gate is asserted on the NEW form, not inherited
+    // from the id form's tests: a real-but-unreadable Channel addressed by URN
+    // reads exactly like an address that names nothing at all.
+    expect(await Q.channel({}, { ref: address }, ctx(stranger.id))).toBeNull();
+    expect(await Q.channel({}, { ref: `hrn:node:${appMem.urn}:chats:absent` }, ctx(stranger.id))).toBeNull();
+    expect(await Q.channel({}, { ref: channel.id }, ctx(stranger.id))).toBeNull();
+    await expect(M.updateChannel({}, { ref: address, input: { name: 'x' } }, ctx(stranger.id))).rejects.toThrow();
+    await expect(M.deleteChannel({}, { ref: address }, ctx(stranger.id))).rejects.toThrow();
+    expect((await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).name).toBe('team');
+  });
+});

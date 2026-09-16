@@ -22,6 +22,7 @@ import {
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { normalizeUrnForLookup } from '../../../lib/urn.js';
@@ -256,7 +257,12 @@ async function registeredChannel(
   attendee: RegisterAttendee,
   channelRef: string,
 ): Promise<{ id: string; lastSeq: number } | null> {
-  const id = (channelRef ?? '').trim();
+  // #1171: id OR the chat root's node URN. Resolved to an id FIRST, because
+  // the register check compares ids — a URN compared against `r.channelId`
+  // would miss every time and read as "not registered", which is the same
+  // answer this returns for a foreign Channel and so would have been silent.
+  const id = await resolveChannelRefId(ctx.db, channelRef ?? '');
+  if (!id) return null;
   const collected = await collectRegisterRows(ctx.db, attendee);
   if (!collected || !collected.rows.some((r) => r.channelId === id)) return null;
   return ctx.db.channel.findFirst({ where: { id, deletedAt: null }, select: { id: true, lastSeq: true } });
@@ -395,7 +401,13 @@ export const registerFieldResolvers = {
     ownerId: (r: RegisterEntry) => registerOwnerIdOf(r),
     /** Gated on the host memory — an owner-side reader who may not read it gets null. */
     channel: async (r: RegisterEntry, _: unknown, ctx: Context) => {
-      const channel = await ctx.db.channel.findFirst({ where: { id: r.channelId, deletedAt: null } });
+      // #1172 (Codex): hydrate the host memory's urn, because `Channel`'s own
+      // `chatRootUrn` needs it — a register page serves up to 200 rows, and
+      // without this each one costs a SECOND query behind this one.
+      const channel = await ctx.db.channel.findFirst({
+        where: { id: r.channelId, deletedAt: null },
+        include: { memory: { select: { urn: true } } },
+      });
       if (!channel) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
       return accessible === null || accessible.includes(channel.memoryId) ? channel : null;

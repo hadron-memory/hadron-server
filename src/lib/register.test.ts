@@ -196,3 +196,28 @@ describe('reads follow the host memory or the owner side', () => {
     expect(await Q.registerEntry({}, { ref: install.id }, ctx(reader.id))).toBeNull();
   });
 });
+
+describe('#1171 — the Channel address on the register surface', () => {
+  it('creates and filters by the address; an address naming nothing gets the refusal a foreign id already got', async () => {
+    const channel = await defaultChannel();
+    const address = `hrn:node:${appMem.urn}:chats:team`;
+    const row = await M.createRegisterEntry(
+      {},
+      { input: { ownerRef: org.urn, channelRef: address, attendeeRef: worker.id, role: 'WATCH' } },
+      ctx(contributor.id),
+    );
+    expect(row.channelId).toBe(channel.id);
+    // The filter takes it too — a list argument and a write argument must not
+    // disagree about what an address is.
+    expect((await Q.registerEntries({}, { filter: { channelRef: address } }, ctx(admin.id))).total).toBe(
+      (await Q.registerEntries({}, { filter: { channelRef: channel.id } }, ctx(admin.id))).total,
+    );
+    // Naming nothing: refused on the write, an empty page on the list — each
+    // the shape that surface already had for a foreign id (no new disclosure).
+    await expect(
+      M.createRegisterEntry({}, { input: { ownerRef: org.urn, channelRef: `hrn:node:${appMem.urn}:chats:absent` } }, ctx(contributor.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect((await Q.registerEntries({}, { filter: { channelRef: `hrn:node:${appMem.urn}:chats:absent` } }, ctx(admin.id))).total).toBe(0);
+    expect((await Q.registerEntries({}, { filter: { channelRef: address } }, ctx(stranger.id))).total).toBe(0);
+  });
+});

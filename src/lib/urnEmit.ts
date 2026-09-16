@@ -249,3 +249,63 @@ export function safeNodeUrnV2(memBareUrn: string, loc: string): string {
 export function safeEdgeUrnV2(memBareUrn: string, loc: string): string {
   return safeEmit('edge', memBareUrn, loc).urn;
 }
+
+/**
+ * Whether the node URN emitted for `(memBareUrn, loc)` can be SPLIT BACK into
+ * that same memory and that same loc — i.e. whether it round-trips through
+ * `resolveNodeRef`, and is therefore safe to hand a client as an ADDRESS.
+ *
+ * **It performs the round trip; it does not reason about the shape** (Codex +
+ * Copilot on PR #1172, round 3). An atom-count predicate looked sufficient and
+ * was not: it says yes to a stored `@holger:notes` (the sigil is stripped on
+ * emission but is part of the stored `urn` the resolver matches on) and to a
+ * malformed loc (`safeEmit` serves an unvalidated best-effort join, which the
+ * resolver need not accept). Both were false positives on exactly the promise
+ * this predicate exists to keep. Emitting and re-splitting catches those, the
+ * compound-memory case, and any later divergence between the two halves,
+ * because the check IS the claim rather than a proxy for it.
+ *
+ * What it rejects, all for one reason — the emitted string does not name this
+ * row back:
+ *
+ *   - a stored PRE-v2 COMPOUND memory urn — the legacy team space
+ *     `<org>:<app>:<agent>:shared` (`resolveAppTeamSpaceMemoryIds`), a
+ *     per-user `<org>:<agent>:app-user:<id>` — since the v2 grammar gives a
+ *     memory ONE atom under its root and the resolver splits on the same
+ *     assumption, so `hrn:node:org:app:agent:shared:chats:team` reads as
+ *     memory `org:app` plus loc `agent:shared:chats:team`;
+ *   - a stored `@`-sigil urn, which emission strips and lookup does not;
+ *   - anything `safeEmit` had to fall back on (a corrupt loc or atom).
+ *
+ * A stored CANONICAL `<root>::<slug>` passes: it normalizes to the same flat
+ * pair, and `resolveNodeRef` tries both spellings against the `urn` column.
+ *
+ * Emission is NOT wrong to flatten — that is the v2 shape, and #697 exists to
+ * flatten the stored urns. This is the narrower question to ask before
+ * PROMISING a URN back: emit nothing rather than something the server rejects
+ * (`findings:graphql-urn-canonical-on-read`,
+ * `findings:compound-app-mem-node-addressing`).
+ *
+ * The re-split mirrors `resolveNodeRef`'s single-colon path deliberately, and
+ * a differential test pins the two together over a table of stored shapes — if
+ * that resolver's splitting rule changes, the test fails here.
+ */
+export function nodeUrnRoundTrips(memBareUrn: string, loc: string): boolean {
+  const emitted = safeEmit('node', memBareUrn, loc);
+  // The fallback is an unvalidated join by construction — never an address.
+  if (emitted.fellBack) return false;
+  const body = emitted.urn.startsWith('hrn:node:') ? emitted.urn.slice('hrn:node:'.length) : null;
+  if (body === null) return false;
+  const parts = body.split(':');
+  if (parts.length < 3) return false;
+  // resolveNodeRef's single-colon path: two atoms of memory, the rest is loc.
+  const memoryCandidate = `${parts[0]}:${parts[1]}`;
+  const locCandidate = parts.slice(2).join(':');
+  let stored: string;
+  try {
+    stored = normalizeUrnForLookup(memBareUrn);
+  } catch {
+    return false;
+  }
+  return memoryCandidate === stored && locCandidate === loc;
+}
