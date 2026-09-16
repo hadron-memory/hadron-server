@@ -2425,9 +2425,9 @@ export function createMcpServerInstance(
     const addressLine = (memoryId: string, loc: string) => {
       const bare = bareUrnOf.get(memoryId);
       if (bare === undefined) return [];
-      return nodeUrnRoundTrips(bare)
+      return nodeUrnRoundTrips(bare, loc)
         ? [`  address: ${safeNodeUrnV2(bare, loc)}`]
-        : ['  address: none — this host memory predates URN v2; address it by id'];
+        : ['  address: none — this Channel has no URN that resolves back (a pre-v2 host memory urn); address it by id'];
     };
     return rows.map((r) =>
       [

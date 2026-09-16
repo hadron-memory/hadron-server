@@ -21,6 +21,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { ensureChannelWithRoot } from '../channels.js';
 import { resolveChannelRefId } from './channelRef.js';
+import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../urnEmit.js';
 
 let org: { id: string; urn: string };
 let memA: { id: string; urn: string };
@@ -128,6 +129,36 @@ describe('resolveChannelRefId', () => {
     expect(await resolveChannelRefId(brokenDb, 'chats:team')).toBeNull();
     // And the id form is untouched: it reads nothing here by design.
     expect(await resolveChannelRefId(brokenDb, channelA.id)).toBe(channelA.id);
+  });
+
+  it('the emit-side predicate and this resolver AGREE on every stored memory shape', async () => {
+    // The differential test the mirrored split rule needs (Codex + Copilot on
+    // PR #1172): `nodeUrnRoundTrips` decides whether a Channel is GIVEN an
+    // address, and this resolver decides whether that address works. Two
+    // implementations of one question, so they are pinned to each other rather
+    // than each asserted against a hand-written expectation — if
+    // `resolveNodeRef`'s splitting rule moves, this fails, not production.
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'D', urn: `${org.urn}:d` } });
+    const shapes: Array<{ what: string; urn: string }> = [
+      { what: 'flat v2', urn: `${org.urn}:flat-shared` },
+      { what: 'stored canonical ::', urn: `${org.urn}::canon-shared` },
+      { what: 'pre-v2 compound', urn: `${org.urn}:d:${agent.name}:shared` },
+      { what: '@-sigil owner root', urn: `@${org.urn}:sig-shared` },
+    ];
+    for (const shape of shapes) {
+      const mem = await db.memory.create({
+        data: { id: generateId(), organizationId: org.id, urn: shape.urn, name: shape.what, class: 'app', appId: app.id },
+      });
+      const { channel } = await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:team', name: 'team', createdBy: null });
+      const advertised = nodeUrnRoundTrips(mem.urn, 'chats:team');
+      const resolves = (await resolveChannelRefId(db, safeNodeUrnV2(mem.urn, 'chats:team'))) === channel.id;
+      expect({ shape: shape.what, advertised, resolves }).toEqual({ shape: shape.what, advertised: resolves, resolves });
+      // And the id keeps working whatever the memory's urn looks like.
+      expect(await resolveChannelRefId(db, channel.id)).toBe(channel.id);
+    }
+    // Not a vacuous agreement: the table must contain both answers.
+    expect(shapes.map((s) => nodeUrnRoundTrips(s.urn, 'chats:team'))).toEqual([true, true, false, false]);
   });
 
   it('a soft-deleted Channel resolves by neither form', async () => {

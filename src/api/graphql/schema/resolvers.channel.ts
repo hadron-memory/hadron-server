@@ -174,16 +174,18 @@ export const channelFieldResolvers = {
      * costs the same one lookup that field does.
      *
      * **Null when the address would not round-trip** — a host memory whose
-     * STORED urn is still pre-v2 compound (the legacy team space
-     * `<org>:<app>:<agent>:shared`). The flat v2 join is then unsplittable and
-     * `channelRef` rejects it, so emitting it would hand a client an address
-     * this very server refuses (Copilot on PR #1172, measured). Those Channels
-     * are addressed by id until #697 flattens their memory's urn — no address
-     * beats a broken one, the same call `Node.portalUrl` makes about a link.
+     * STORED urn is pre-v2 compound (the legacy team space
+     * `<org>:<app>:<agent>:shared`) or `@`-sigilled, or a loc `safeEmit` can
+     * only serve best-effort. Emitting any of those would hand a client an
+     * address this very server refuses (Copilot + Codex on PR #1172,
+     * measured), so `nodeUrnRoundTrips` performs the round trip rather than
+     * reasoning about the shape. Those Channels are addressed by id until #697
+     * flattens their memory's urn — no address beats a broken one, the same
+     * call `Node.portalUrl` makes about a link.
      */
     chatRootUrn: async (c: Channel, _: unknown, ctx: Context) => {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: c.memoryId }, select: { urn: true } });
-      return nodeUrnRoundTrips(memory.urn) ? safeNodeUrnV2(memory.urn, c.loc) : null;
+      return nodeUrnRoundTrips(memory.urn, c.loc) ? safeNodeUrnV2(memory.urn, c.loc) : null;
     },
   },
 };
