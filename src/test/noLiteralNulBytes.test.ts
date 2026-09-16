@@ -23,8 +23,12 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = new URL('../', import.meta.url).pathname; // src/
+// fileURLToPath, not `.pathname`: the latter stays percent-encoded, so a
+// checkout under a path containing a space would fail this with the files
+// right there (Copilot on PR #1172).
+const ROOT = fileURLToPath(new URL('../', import.meta.url)); // src/
 const SKIP_DIRS = new Set(['generated', 'node_modules']);
 
 function sourceFiles(dir: string, out: string[] = []): string[] {

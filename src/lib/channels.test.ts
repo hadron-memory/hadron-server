@@ -306,7 +306,7 @@ describe('addressing (#1171) — a Channel can be named after it is created', ()
     expect(await Q.channel({}, { ref: channel.id }, ctx(admin.id))).toBeNull();
   });
 
-  it('emits NO address for a host memory whose stored urn predates v2, because that one would not round-trip', async () => {
+  it('emits NO address for a COMPOUND legacy team-space host memory, whose flattened URN would not round-trip', async () => {
     // Copilot on PR #1172, measured: a LEGACY team space is stored as
     // `<app-urn>:<agent-slug>:shared` (still supported —
     // resolveAppTeamSpaceMemoryIds), so the flat v2 join emits

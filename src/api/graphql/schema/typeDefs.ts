@@ -476,16 +476,18 @@ export const typeDefs = `#graphql
     chatRootNodeId: ID!
     """
     #1171 — the Channel's ADDRESS: its chat root's node URN
-    (hrn:node:<org>:<memory>:<loc>), which every channelRef accepts. COPY it;
-    never compose one — the id and this are the only two spellings that
-    resolve, and a Channel that does not resolve is indistinguishable from one
-    you may not read.
+    (hrn:node:<org>:<memory>:<loc>). A channelRef takes TWO FORMS — an id, or a
+    chat-root node ref — and the node ref is accepted in every spelling the
+    node resolver takes (\`urn:node:\`, bare fully-qualified, canonical \`::\`);
+    this field emits the one to copy. COPY it rather than composing one: a
+    Channel a ref fails to name is indistinguishable from one you may not read.
 
-    NULL when no URN round-trips to this Channel — the server emits nothing
-    rather than an address it would itself reject. A pre-v2 compound host
-    memory URN is the common cause (it flattens into a node URN that cannot be
-    split back), but it is not the only one, so do not read the null as naming
-    a reason. Use \`id\` for those Channels; it always works.
+    NULL when the server has no flat-v2 address it can safely advertise —
+    commonly a pre-v2 compound host memory URN, which flattens into a node URN
+    that cannot be split back. It does NOT mean the Channel is unaddressable in
+    principle (a canonical \`::\` spelling can still resolve one); it means the
+    server will not hand you a string it would itself reject. Use \`id\` there;
+    it always works.
     """
     chatRootUrn: String
     "Highest seq the allocator has issued — a watermark, not a count."
