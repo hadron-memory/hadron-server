@@ -520,7 +520,7 @@ export const typeResolvers = {
       // (Copilot on PR #1163). Keyed on the serialized snapshot, not the scope
       // id, because two snapshots of one scope can differ.
       const cache = (ctx.runScopeInfoCache ??= new Map());
-      const key = `${r.appId} ${JSON.stringify(r.scopeSnapshot)}`;
+      const key = `${r.appId}\0${JSON.stringify(r.scopeSnapshot)}`;
       let pending = cache.get(key);
       if (!pending) {
         pending = resolveRunScope(ctx, r).then((res) => scopeInfoOf(ctx, res));
@@ -882,7 +882,12 @@ export const typeResolvers = {
      */
     defaultChannel: async (a: { defaultChannelId: string | null }, _: unknown, ctx: Context) => {
       if (!a.defaultChannelId) return null;
-      const row = await ctx.db.channel.findFirst({ where: { id: a.defaultChannelId, deletedAt: null } });
+      const row = await ctx.db.channel.findFirst({
+        where: { id: a.defaultChannelId, deletedAt: null },
+        // #1172: `Channel.chatRootUrn` reads the host memory's urn; hydrate it
+        // here so a page of Apps does not pay a second query per row.
+        include: { memory: { select: { urn: true } } },
+      });
       if (!row) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
       return accessible === null || accessible.includes(row.memoryId) ? row : null;

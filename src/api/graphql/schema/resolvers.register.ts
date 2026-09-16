@@ -401,7 +401,13 @@ export const registerFieldResolvers = {
     ownerId: (r: RegisterEntry) => registerOwnerIdOf(r),
     /** Gated on the host memory — an owner-side reader who may not read it gets null. */
     channel: async (r: RegisterEntry, _: unknown, ctx: Context) => {
-      const channel = await ctx.db.channel.findFirst({ where: { id: r.channelId, deletedAt: null } });
+      // #1172 (Codex): hydrate the host memory's urn, because `Channel`'s own
+      // `chatRootUrn` needs it — a register page serves up to 200 rows, and
+      // without this each one costs a SECOND query behind this one.
+      const channel = await ctx.db.channel.findFirst({
+        where: { id: r.channelId, deletedAt: null },
+        include: { memory: { select: { urn: true } } },
+      });
       if (!channel) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
       return accessible === null || accessible.includes(channel.memoryId) ? channel : null;

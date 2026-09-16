@@ -308,7 +308,7 @@ export const dashboardQueries = {
     // Promise.all preserves array order, so the result stays in position order.
     return Promise.all(
       runnable.map(async (w) => {
-        const key = `${w.type} ${JSON.stringify(w.config ?? null)}`;
+        const key = `${w.type}\0${JSON.stringify(w.config ?? null)}`;
         let pending = inFlight.get(key);
         if (!pending) {
           // Non-null: `runnable` is filtered on `.has()`.

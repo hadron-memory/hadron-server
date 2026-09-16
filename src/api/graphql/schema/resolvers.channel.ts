@@ -196,13 +196,13 @@ export const channelFieldResolvers = {
      *
      * **Null when the address would not round-trip** — a host memory whose
      * STORED urn is pre-v2 compound (the legacy team space
-     * `<org>:<app>:<agent>:shared`) or `@`-sigilled, or a loc `safeEmit` can
-     * only serve best-effort. Emitting any of those would hand a client an
-     * address this very server refuses (Copilot + Codex on PR #1172,
-     * measured), so `nodeUrnRoundTrips` performs the round trip rather than
-     * reasoning about the shape. Those Channels are addressed by id until #697
-     * flattens their memory's urn — no address beats a broken one, the same
-     * call `Node.portalUrl` makes about a link.
+     * `<org>:<app>:<agent>:shared`), one carrying an `@` owner sigil, or a loc
+     * `safeEmit` can only serve best-effort. Emitting any of those would hand
+     * a client an address this very server refuses (Copilot + Codex on PR
+     * #1172, measured), so `nodeUrnRoundTrips` performs the round trip rather
+     * than reasoning about the shape. Those Channels are addressed by id — no
+     * address beats a broken one, the same call `Node.portalUrl` makes about a
+     * link.
      */
     chatRootUrn: async (c: ChannelWithHostUrn, _: unknown, ctx: Context) => {
       const urn =
