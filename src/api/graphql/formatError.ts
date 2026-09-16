@@ -10,7 +10,8 @@
  * and friends, and none of them reached the wire.
  *
  * This module holds ONE list of the error types that are caller errors rather
- * than server faults, and both consumers read it:
+ * than server faults, and both consumers read it (#1174 added the whole
+ * entity-not-found family the same way — one entry, by base class):
  *
  *   - `formatGraphQLError` maps each to its stable `extensions.code`;
  *   - `isExpectedClientError` tells the Sentry plugin not to report it.
@@ -24,6 +25,7 @@
 import type { GraphQLFormattedError } from 'graphql';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
+import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 
 interface ClientErrorMapping {
@@ -103,6 +105,28 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
     (err): err is AssetUploadError => err instanceof AssetUploadError,
     (err) => ({ code: err.code }),
     { silenceInSentry: false },
+  ),
+  // #1174: every "that ref names nothing" error, by BASE CLASS — the code
+  // comes off the instance, so a not-found added later is typed on the wire
+  // without touching this file (the AssetUploadError lesson above).
+  //
+  // Before this, the code existed only inside the message
+  // (`ORGANIZATION_NOT_FOUND: nosuch.example`) while `extensions.code` said
+  // INTERNAL_SERVER_ERROR, so no client could classify a typo without parsing
+  // prose — `conventions:the-error-code-is-the-contract-the-prose-is-not`.
+  //
+  // Sentry: SILENCED, and that is half the fix rather than a tidy-up. The
+  // issue's sharpest argument is about ALERTING — INTERNAL_SERVER_ERROR is
+  // what an operator builds a page-me rule on, so a user's typo trips the
+  // alarm that should mean the server broke. Mapping the code alone would move
+  // that noise from the wire to the issue stream instead of removing it. Every
+  // one of these is raised by a `resolve<Entity>Ref` on a CALLER-SUPPLIED ref:
+  // the miss is a fact about the ref, not about us — the same call already
+  // taken for URN_NOT_QUALIFIED above.
+  mapping(
+    (err): err is EntityNotFoundError => err instanceof EntityNotFoundError,
+    (err) => ({ code: err.code, ref: err.ref }),
+    { silenceInSentry: true },
   ),
 ];
 

@@ -12,7 +12,21 @@ import { describe, it, expect } from 'vitest';
 import { GraphQLError, type GraphQLFormattedError } from 'graphql';
 import { formatGraphQLError, isExpectedClientError } from './formatError.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
-import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
+import {
+  AgentNotFoundError,
+  AmbiguousLegacyUrnError,
+  AppNotFoundError,
+  AppRunNotFoundError,
+  EdgeNotFoundError,
+  MemoryNotFoundError,
+  NodeNotFoundError,
+  NodeRevisionNotFoundError,
+  OrganizationNotFoundError,
+  ScopeNotFoundError,
+  SecretNotFoundError,
+  UserNotFoundError,
+  WorkerNotFoundError,
+} from '../../lib/entityRef/errors.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 
 /** What Apollo hands `formatError` for a thrown (non-GraphQLError) error. */
@@ -150,5 +164,52 @@ describe('isExpectedClientError — mapped and silenced are DIFFERENT questions'
   it('a genuine fault is NOT expected — it still reaches Sentry', () => {
     expect(isExpectedClientError(new Error('boom'))).toBe(false);
     expect(isExpectedClientError(new TypeError('undefined is not a function'))).toBe(false);
+  });
+});
+
+
+describe('EntityNotFoundError → its own code on the wire (#1174)', () => {
+  // The whole family, because the mapping is by BASE CLASS: this list is
+  // documentation, not the mechanism — a not-found added later is carried
+  // without touching formatError. That is the #918 lesson one layer over.
+  const FAMILY: ReadonlyArray<readonly [string, Error]> = [
+    ['ORGANIZATION_NOT_FOUND', new OrganizationNotFoundError('nosuch')],
+    ['AGENT_NOT_FOUND', new AgentNotFoundError('nosuch')],
+    ['APP_NOT_FOUND', new AppNotFoundError('nosuch')],
+    ['MEMORY_NOT_FOUND', new MemoryNotFoundError('nosuch')],
+    ['NODE_NOT_FOUND', new NodeNotFoundError('nosuch')],
+    ['EDGE_NOT_FOUND', new EdgeNotFoundError('nosuch')],
+    ['SCOPE_NOT_FOUND', new ScopeNotFoundError('nosuch')],
+    ['USER_NOT_FOUND', new UserNotFoundError('nosuch')],
+    ['SECRET_NOT_FOUND', new SecretNotFoundError('nosuch')],
+    ['APP_RUN_NOT_FOUND', new AppRunNotFoundError('nosuch')],
+    ['WORKER_NOT_FOUND', new WorkerNotFoundError('nosuch')],
+    ['NODE_REVISION_NOT_FOUND', new NodeRevisionNotFoundError('nosuch')],
+  ];
+
+  it.each(FAMILY)('%s reaches extensions.code instead of the message only', (code, err) => {
+    const out = format(err);
+    expect(out.extensions?.code).toBe(code);
+    expect(out.extensions?.code).not.toBe('INTERNAL_SERVER_ERROR');
+    // The ref the caller passed, structured — so a client never has to split
+    // the message to recover it.
+    expect(out.extensions?.ref).toBe('nosuch');
+  });
+
+  it('the MESSAGE is unchanged — the code is additive, not a rewording', () => {
+    // Resolver-level tests across the suite match on this text, and the whole
+    // point of #1174 is that nobody should NEED to.
+    expect(format(new OrganizationNotFoundError('nosuch.example')).message).toBe(
+      'ORGANIZATION_NOT_FOUND: nosuch.example',
+    );
+  });
+
+  it('is silenced in Sentry, because the ALERTING half is half the fix', () => {
+    // INTERNAL_SERVER_ERROR is what an operator builds a page-me rule on, so a
+    // user typo tripped it. Mapping the code alone would have moved that noise
+    // from the wire into the issue stream rather than removing it.
+    for (const [, err] of FAMILY) expect(isExpectedClientError(err)).toBe(true);
+    // And a genuine fault is still reported.
+    expect(isExpectedClientError(new Error('boom'))).toBe(false);
   });
 });

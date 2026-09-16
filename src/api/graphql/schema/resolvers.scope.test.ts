@@ -243,3 +243,20 @@ describe('order — the one thing only the customization operation consumes', ()
     expect(none.winner).toBeNull();
   });
 });
+
+describe('#1173 — scopeExplain refusals state the condition too', () => {
+  const FOREIGN_VOCABULARY = /appRef|orgId|scopeRef|hadron_|\(MCP\)|\(GraphQL\)/;
+
+  it('a name with no App context, and no selector at all, both name the condition', async () => {
+    await expect(Q.scopeExplain({}, { name: 'marketing' }, ctx(reader.id))).rejects.toMatchObject({
+      message: 'Resolving a scope by name needs an App context.',
+      extensions: { code: 'BAD_USER_INPUT', missing: 'appContext' },
+    });
+    await expect(Q.scopeExplain({}, {}, ctx(reader.id))).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT', missing: 'scopeSelector' },
+    });
+    for (const call of [Q.scopeExplain({}, { name: 'marketing' }, ctx(reader.id)), Q.scopeExplain({}, {}, ctx(reader.id))]) {
+      await expect(call).rejects.toSatisfy((e: Error) => !FOREIGN_VOCABULARY.test(e.message));
+    }
+  });
+});

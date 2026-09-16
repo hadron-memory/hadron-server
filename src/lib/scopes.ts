@@ -574,8 +574,13 @@ export async function resolveSearchScope(
     if (named === BUILTIN_SCOPE_GLOBAL) return globalView(ctx, args.activeOrg ?? null, 'call');
     if (named === BUILTIN_SCOPE_APP) {
       if (!args.appId) {
-        throw new GraphQLError('scope "app" needs an App context: pass appRef (GraphQL) or select an App (MCP).', {
-          extensions: { code: 'BAD_USER_INPUT' },
+        // #1173: state the CONDITION, never a surface's remedy. Three
+        // surfaces read this string, so "pass appRef (GraphQL) or select an
+        // App (MCP)" was unactionable on two of them — a CLI user can type
+        // neither. `missing` is the surface-neutral carrier each client
+        // renders in its own vocabulary.
+        throw new GraphQLError('scope "app" needs an App context.', {
+          extensions: { code: 'BAD_USER_INPUT', missing: 'appContext' },
         });
       }
       return appView(ctx, args.appId, 'call');
@@ -584,8 +589,10 @@ export async function resolveSearchScope(
     if (SCOPE_NAME_RE.test(named) && !(await ctx.db.scope.findFirst({ where: { id: named }, select: { id: true } }))) {
       // A bare NAME, unique only per owner — resolved in the App's context.
       if (!args.appId) {
-        throw new GraphQLError(`Resolving scope "${named}" by name needs an App context: pass appRef (GraphQL) or select an App (MCP), or pass the scope id.`, {
-          extensions: { code: 'BAD_USER_INPUT' },
+        // The second clause is a FACT about scope ids, not an instruction in
+        // one surface's vocabulary: an id is a value every caller can supply.
+        throw new GraphQLError(`Resolving scope "${named}" by name needs an App context; a scope id needs none.`, {
+          extensions: { code: 'BAD_USER_INPUT', missing: 'appContext' },
         });
       }
       const r = await resolveScopeByNameInApp(ctx, named, args.appId);
@@ -686,8 +693,12 @@ async function globalView(
     throw new GraphQLError(
       activeOrg.reason === 'named_not_member'
         ? 'The named organization is not one you are a member of.'
-        : `You belong to ${activeOrg.memberOrgIds.length} organizations and none is active: name one (orgId), select one (hadron_set_active_org), or select an App.`,
-      { extensions: { code: 'ORG_REQUIRED', memberOrgIds: activeOrg.memberOrgIds } },
+        // #1173: `orgId` is a GraphQL argument and `hadron_set_active_org` an
+        // MCP tool — a CLI user can type neither, and a portal user can click
+        // neither. The condition is all three surfaces share; `memberOrgIds`
+        // already carries the machine-readable half.
+        : `You belong to ${activeOrg.memberOrgIds.length} organizations and none is active.`,
+      { extensions: { code: 'ORG_REQUIRED', missing: 'activeOrg', memberOrgIds: activeOrg.memberOrgIds } },
     );
   }
   const org = await ctx.db.organization.findUnique({ where: { id: activeOrg.organizationId }, select: { urn: true } });

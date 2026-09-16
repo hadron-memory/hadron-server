@@ -10,6 +10,7 @@
  */
 
 import type { App, PrismaClient } from '../../generated/prisma/index.js';
+import { EntityNotFoundError } from '../entityRef/entityNotFound.js';
 
 // ─── v1: per-App gate ─────────────────────────────────────────────────
 
@@ -52,9 +53,9 @@ export class MemoryNotAcceptingUploadsError extends Error {
   }
 }
 
-export class MemoryNotFoundError extends Error {
+export class MemoryNotFoundError extends EntityNotFoundError {
   constructor(public memoryId: string) {
-    super(`MEMORY_NOT_FOUND: ${memoryId}`);
+    super('MEMORY_NOT_FOUND', memoryId);
     this.name = 'MemoryNotFoundError';
   }
 }
