@@ -37,7 +37,10 @@
  * folds that into its own uniform denial (`cor:api:140:02`). It deliberately
  * does NOT surface `resolveNodeRef`'s typed `NODE_NOT_FOUND` /
  * `UrnNotQualifiedError`: either one would answer, about a Channel, the
- * question its gate refuses to answer.
+ * question its gate refuses to answer. Those two classes are the WHOLE of what
+ * "names nothing" means here, and nothing else is swallowed — a Prisma failure
+ * propagates, because an outage reported as a missing Channel is an outage
+ * nobody goes looking for.
  *
  * **Liveness stays with the caller.** This returns an id, never a row, so each
  * site keeps its own `deletedAt: null` filter and its own read gate — the
@@ -48,6 +51,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId } from './shape.js';
+import { NodeNotFoundError, UrnNotQualifiedError } from './errors.js';
 import { resolveNodeRef } from './nodeRef.js';
 
 type ChannelRefDb = Pick<PrismaClient, 'channel' | 'node' | 'memory' | 'urnAlias'>;
@@ -67,12 +71,21 @@ export async function resolveChannelRefId(db: ChannelRefDb, ref: string): Promis
   let nodeId: string;
   try {
     // API-boundary call: no contextMemoryId (spec 022 FR-007a), so the input
-    // must be a fully-qualified node URN. Every failure — wrong-type prefix,
-    // relative form, unknown memory, soft-deleted node — arrives here as a
-    // throw and leaves as the same `null`.
+    // must be a fully-qualified node URN. The resolver's two INPUT-miss
+    // classes cover every way an address can name nothing — a wrong-type
+    // prefix, a relative form and a malformed one are `UrnNotQualifiedError`;
+    // an unknown memory and a missing or soft-deleted node are
+    // `NodeNotFoundError` — and both leave here as the same `null`.
     nodeId = (await resolveNodeRef(db, trimmed)).id;
-  } catch {
-    return null;
+  } catch (e) {
+    // Anything else is the DATABASE failing, not the ref missing (Copilot on
+    // PR #1172). `resolveNodeRef` reads Prisma, so a blanket catch would turn
+    // a connection error or a timeout into "no such Channel" — an outage
+    // rendered as a bad ref on every address-addressed read, and the two ref
+    // forms failing differently under the same fault, since the id form
+    // propagates its caller's error. Rethrow.
+    if (e instanceof NodeNotFoundError || e instanceof UrnNotQualifiedError) return null;
+    throw e;
   }
   // A node that is not a chat root has no Channel, and a Channel is never
   // reachable through a second node: `chatRootNodeId` is unique.

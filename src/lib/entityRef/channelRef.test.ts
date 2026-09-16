@@ -106,6 +106,30 @@ describe('resolveChannelRefId', () => {
     expect(await db.channel.findFirst({ where: { id: root.id } })).toBeNull();
   });
 
+  it('lets a DATABASE failure through instead of rendering it as "no such Channel"', async () => {
+    // Copilot on PR #1172: `resolveNodeRef` reads Prisma, so swallowing every
+    // throw would turn an outage into a missing Channel on every
+    // address-addressed read — and would make the two ref forms fail
+    // differently under one fault, since the id form propagates its caller's
+    // error. Only the resolver's typed INPUT misses mean "names nothing".
+    const outage = new Error('connection terminated unexpectedly');
+    const reject = async () => {
+      throw outage;
+    };
+    const brokenDb = {
+      memory: { findFirst: reject, findMany: reject },
+      node: { findFirst: reject, findUnique: reject },
+      urnAlias: { findMany: reject },
+      channel: { findFirst: reject },
+    } as unknown as Parameters<typeof resolveChannelRefId>[0];
+    await expect(resolveChannelRefId(brokenDb, `hrn:node:${org.urn}:a-shared:chats:team`)).rejects.toThrow('connection terminated');
+    // A ref that is malformed rather than unresolvable still answers null —
+    // it never reaches the database to be affected by the outage.
+    expect(await resolveChannelRefId(brokenDb, 'chats:team')).toBeNull();
+    // And the id form is untouched: it reads nothing here by design.
+    expect(await resolveChannelRefId(brokenDb, channelA.id)).toBe(channelA.id);
+  });
+
   it('a soft-deleted Channel resolves by neither form', async () => {
     await db.channel.update({ where: { id: channelA.id }, data: { deletedAt: new Date() } });
     await db.node.updateMany({ where: { id: (await db.channel.findUniqueOrThrow({ where: { id: channelA.id } })).chatRootNodeId }, data: { deletedAt: new Date() } });
