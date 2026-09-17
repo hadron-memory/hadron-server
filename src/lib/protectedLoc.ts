@@ -165,7 +165,7 @@ export function protectedLocCovers(entry: ProtectedLoc, loc: string): boolean {
  * callers' verbs in step: a new op defaults to NO bypass, which under-promises
  * rather than sending someone to a door that cannot help.
  */
-const DOOR_BACKED_OPS = new Set(['write', 'update', 'create under']);
+const DOOR_BACKED_OPS = new Set(['write', 'create', 'update', 'create under']);
 
 /**
  * The same question for the CHANNEL source, whose owning operation is
@@ -180,7 +180,7 @@ const DOOR_BACKED_OPS = new Set(['write', 'update', 'create under']);
  * defect as intended behaviour. A fixture is only as good as the belief behind
  * it.
  */
-const CHANNEL_BACKED_OPS = new Set(['write', 'create under']);
+const CHANNEL_BACKED_OPS = new Set(['write', 'create', 'create under']);
 
 /**
  * The remedy sentence, which depends on the predicate SOURCE and on what the
@@ -203,8 +203,17 @@ function protectedRemedy(entry: ProtectedLoc, op: string): string {
       ? `Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
       : `There is no operation that may ${op} here — the Channel's own operation posts messages, so this operation has no bypass.`;
   }
+  // Name the ONE door that performs this operation. `entry.owner` advertises
+  // both, so printing it for a create offers an edit door that cannot create
+  // the missing node, and for an edit offers a create door that cannot edit an
+  // existing one (@copilot, PR #1198, rounds 3 and 4). It is only correct for
+  // the ambiguous 'write' verb, which covers both — and writeNodeCore no longer
+  // passes that, so the shared string is now the fallback rather than the rule.
   if (op === 'update') {
     return `Use updateProtectedNode (the memory-specific authoring tool's edit door); the generic node surface does not reach it.`;
+  }
+  if (op === 'create' || op === 'create under') {
+    return `Use authorProtectedNode (the memory-specific authoring tool's create door); the generic node surface does not reach it.`;
   }
   return DOOR_BACKED_OPS.has(op)
     ? `Use ${entry.owner}; the generic node surface does not reach it.`

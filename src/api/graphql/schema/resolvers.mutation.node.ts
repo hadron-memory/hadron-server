@@ -184,7 +184,22 @@ export async function writeNodeCore(
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. `authorProtectedNode` is that operation for a
       // Memory.protectedLocs entry and passes the bypass; everyone else omits it.
-      await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write', opts?.owns);
+      // The verb is MODE-DERIVED, not the blanket 'write' (@copilot, PR #1198,
+      // round 4). `write` is ambiguous — it covers create and update at once —
+      // and the remedy has to name a door that can do what the caller asked, so
+      // an ambiguous verb forces the message to guess. It guessed wrong in both
+      // directions: an EDIT at a Channel-overlapping address was told to "post
+      // with createTeamChatMessage" (a post cannot edit), and an edit at a
+      // declared address was offered the create door alongside the edit one.
+      // The core knows its mode; passing it removes the ambiguity at the source
+      // rather than papering over it in the message.
+      await assertLocWritable(
+        ctx.db,
+        input.memoryId,
+        input.loc,
+        mode === 'update' ? 'update' : 'create',
+        opts?.owns,
+      );
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,
       // MCP, tests, future — gets the same typed InvalidLocError instead
@@ -678,6 +693,41 @@ export async function writeNodeCore(
        * authoritative — each statement sees the latest commit, so anything that
        * landed before it is visible.
        */
+      /**
+       * The moved-target refusal, built ONCE so the re-check and the P2025
+       * fallback cannot disagree — and REDACTED across a memory boundary
+       * (@copilot, PR #1198, round 4).
+       *
+       * Naming where a node went is helpful inside the memory the caller was
+       * already authorized against. Across memories it is a disclosure: the
+       * caller is told a loc in a memory they may not read, learned through a
+       * write they were refused. That is the repo's cross-tenant criterion, not
+       * a cosmetic one, so the address is withheld and only the fact of the move
+       * is reported. `currentLoc` is omitted from extensions for the same
+       * reason rather than merely left out of the sentence.
+       */
+      function movedConflict(currentMemoryId: string, currentLoc: string): GraphQLError {
+        const movedMemory = currentMemoryId !== input.memoryId;
+        return new GraphQLError(
+          movedMemory
+            ? `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is no ` +
+              `longer in memory "${input.memoryId}", and this write was authorized against ` +
+              `"${input.loc}". Re-read and retry.`
+            : `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is now ` +
+              `at "${currentLoc}", and this write was authorized against "${input.loc}". ` +
+              `Re-read and retry.`,
+          {
+            extensions: {
+              code: 'NODE_WRITE_CONFLICT',
+              loc: input.loc,
+              memoryId: input.memoryId,
+              movedMemory,
+              ...(movedMemory ? {} : { currentLoc }),
+            },
+          },
+        );
+      }
+
       async function assertTargetStillWritable(
         tx: Pick<Prisma.TransactionClient, 'node'>,
       ): Promise<void> {
@@ -708,21 +758,7 @@ export async function writeNodeCore(
         // NODE_WRITE_CONFLICT rather than a new code: "the target changed since
         // it was read, re-read and retry" is exactly what that code already
         // says on the revSeq compare-and-swap next door.
-        const movedMemory = current.memoryId !== input.memoryId;
-        throw new GraphQLError(
-          `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is now at ` +
-            `"${current.loc}"${movedMemory ? ' in another memory' : ''}, and this write was ` +
-            `authorized against "${input.loc}". Re-read and retry.`,
-          {
-            extensions: {
-              code: 'NODE_WRITE_CONFLICT',
-              loc: input.loc,
-              memoryId: input.memoryId,
-              currentLoc: current.loc,
-              movedMemory,
-            },
-          },
-        );
+        throw movedConflict(current.memoryId, current.loc);
       }
       const {
         loc: _updLoc,
@@ -782,6 +818,7 @@ export async function writeNodeCore(
           const guarded = await ctx.db.$transaction(async (tx) => {
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
+              op: mode === 'update' ? 'update' : 'create',
             });
             await assertTargetStillWritable(tx);
             return tx.node.updateMany({
@@ -818,6 +855,7 @@ export async function writeNodeCore(
           node = await ctx.db.$transaction(async (tx) => {
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
+              op: mode === 'update' ? 'update' : 'create',
             });
             await assertTargetStillWritable(tx);
             return tx.node.update({
@@ -905,8 +943,11 @@ export async function writeNodeCore(
             // Establishing one global order across create/merge/move/bulk is
             // worth doing; it is not this PR, and it is filed.
             if (ancestorLocs(input.loc).length === 0) {
+              // This branch is create/upsert only — the mode union excludes
+              // 'update' here, so the verb is unconditional.
               await lockLocForWrite(tx, input.memoryId, input.loc, {
                 owns: opts?.owns,
+                op: 'create',
               });
             }
 
@@ -1004,20 +1045,7 @@ export async function writeNodeCore(
               select: { loc: true, memoryId: true, deletedAt: true },
             });
             if (moved && !moved.deletedAt) {
-              throw new GraphQLError(
-                `Node "${opts.targetNodeId}" moved since it was read — it is now at ` +
-                  `"${moved.loc}"${moved.memoryId !== input.memoryId ? ' in another memory' : ''}, ` +
-                  `and this write was authorized against "${input.loc}". Re-read and retry.`,
-                {
-                  extensions: {
-                    code: 'NODE_WRITE_CONFLICT',
-                    loc: input.loc,
-                    memoryId: input.memoryId,
-                    currentLoc: moved.loc,
-                    movedMemory: moved.memoryId !== input.memoryId,
-                  },
-                },
-              );
+              throw movedConflict(moved.memoryId, moved.loc);
             }
           }
           throw new GraphQLError(

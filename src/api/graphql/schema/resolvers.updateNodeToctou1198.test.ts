@@ -143,8 +143,13 @@ describe('update TOCTOU 1: the target moved after it was read (@codex P1)', () =
       update({ memoryId, loc: 'doc:one', name: 'AFTER-MOVE' }, node.id),
       'NODE_WRITE_CONFLICT',
     );
+    // REDACTED across a memory boundary (@copilot round 4): the caller is told
+    // the node moved, never WHERE — a loc in a memory they may not read, learned
+    // through a write they were refused, is a disclosure and not a courtesy.
     expect(err.extensions?.movedMemory).toBe(true);
-    expect(err.message).toContain('in another memory');
+    expect(err.extensions?.currentLoc).toBeUndefined();
+    expect(err.message).not.toContain('moved:here');
+    expect(err.message).toContain('no longer in memory');
 
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     expect(after.name).toBe('before');
@@ -167,8 +172,11 @@ describe('update TOCTOU 1: the target moved after it was read (@codex P1)', () =
     // that proves it. The wording is conditional now, and pinned in both
     // directions so it cannot regress to a constant string that happens to
     // satisfy the case above.
+    // Within ONE memory the caller was already authorized against it, so the
+    // new loc is reported — the redaction is a boundary rule, not a blanket one.
     expect(err.extensions?.movedMemory).toBe(false);
-    expect(err.message).not.toContain('in another memory');
+    expect(err.extensions?.currentLoc).toBe('doc:elsewhere');
+    expect(err.message).not.toContain('no longer in memory');
     expect(err.message).toContain('doc:elsewhere');
 
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('before');
@@ -365,6 +373,66 @@ describe('the declared refusal names a remedy that EXISTS, driven through the re
     );
     expect(err.message).toContain('no authoring door');
     expect(err.message).not.toContain('authorProtectedNode');
+  });
+
+  it('writeNodeCore names the ONE door for its MODE — create vs edit', async () => {
+    // The verb writeNodeCore passes used to be a blanket 'write', which is
+    // ambiguous (it covers create and update) and forced the remedy to guess.
+    // These two go through that gate — unlike the updateNodeData case above,
+    // which passes 'update' directly and so cannot see a regression here.
+    // @copilot, PR #1198 round 4; verified by mutation that reverting the verb
+    // fails HERE and nowhere else.
+    const node = await seed('cor:api:010:06');
+    await protectAll();
+
+    const onEdit = await refusalFrom(
+      resolvers.Mutation.updateNode({}, { input: { id: node.id, name: 'x' } as never }, ctx()),
+    );
+    expect(onEdit.message).toContain('updateProtectedNode');
+    expect(onEdit.message).not.toContain('authorProtectedNode');
+
+    const onCreate = await refusalFrom(
+      resolvers.Mutation.createNode(
+        {},
+        { input: { memoryId, loc: 'cor:api:010:07', name: 'x' } as never },
+        ctx(),
+      ),
+    );
+    expect(onCreate.message).toContain('authorProtectedNode');
+    expect(onCreate.message).not.toContain('updateProtectedNode');
+  });
+
+  it('an EDIT at a CHANNEL address is told there is no bypass, not to post a message', async () => {
+    // The sharpest consequence of the ambiguous verb: editing a node under a
+    // Channel was answered with "Post with createTeamChatMessage" — a post
+    // mutation offered as the way to edit an existing node.
+    const chatRoot = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'chats:team', name: 'Team chat', tags: [] },
+    });
+    await db.channel.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        loc: 'chats:team',
+        name: 'Team chat',
+        chatRootNodeId: chatRoot.id,
+      },
+    });
+    const message = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        loc: 'chats:team:messages:0001',
+        name: 'msg',
+        tags: [],
+      },
+    });
+
+    const err = await refusalFrom(
+      resolvers.Mutation.updateNode({}, { input: { id: message.id, name: 'x' } as never }, ctx()),
+    );
+    expect(err.message).toContain('no bypass');
+    expect(err.message).not.toContain('Post with createTeamChatMessage');
   });
 
   it('a CHANNEL DELETE is told there is no bypass — a post mutation cannot delete', async () => {

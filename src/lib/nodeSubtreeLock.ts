@@ -98,6 +98,17 @@ export interface LockOpts {
    * chat authorship (@codex + @copilot, both P1, PR #1190).
    */
   owns?: ProtectedSource;
+  /**
+   * The verb this caller is performing, for the refusal message and — since
+   * #1198 — for the REMEDY, which must not name an authoring door that cannot
+   * do what was asked. Defaults to each helper's own verb.
+   *
+   * `writeNodeCore` passes 'create' / 'update' so its FAST check and this
+   * AUTHORITATIVE one agree; before this they could differ, and the under-lock
+   * refusal (the one a race actually produces) carried the vaguer 'write'
+   * (@copilot, PR #1198). Verb-vs-capability drift is tracked in #1199.
+   */
+  op?: string;
 }
 
 async function guard(tx: Prisma.TransactionClient, memoryId: string, locs: string[], op: string, opts?: LockOpts) {
@@ -113,7 +124,7 @@ export async function lockAncestorsForCreate(
   for (const ancestor of ancestorLocs(loc)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
   }
-  await guard(tx, memoryId, [loc], 'create under', opts);
+  await guard(tx, memoryId, [loc], opts?.op ?? 'create under', opts);
 }
 
 /**
@@ -147,7 +158,7 @@ export async function lockAncestorsForCreateMany(
   for (const ancestor of ordered) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
   }
-  await guard(tx, memoryId, locs, 'create under', opts);
+  await guard(tx, memoryId, locs, opts?.op ?? 'create under', opts);
 }
 
 /**
@@ -171,7 +182,7 @@ export async function lockPathForCreateUnder(
   for (const loc of [...ancestorLocs(parentLoc), parentLoc]) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
   }
-  await guard(tx, memoryId, [parentLoc], 'create under', opts);
+  await guard(tx, memoryId, [parentLoc], opts?.op ?? 'create under', opts);
 }
 
 /**
@@ -199,7 +210,7 @@ export async function lockLocForWrite(
   opts?: LockOpts,
 ): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
-  await guard(tx, memoryId, [loc], 'write', opts);
+  await guard(tx, memoryId, [loc], opts?.op ?? 'write', opts);
 }
 
 /**
