@@ -424,20 +424,39 @@ export async function writeNodeCore(
         claimedRevNo = opts.guardRevSeq + 1;
       }
 
-      if (existing) {
-        // Snapshot the PRE-edit state (#620: shared builder — editedBy holds
-        // the user PK, the #88 `reason` rationale lands in revLabel, and
-        // `changes` records which fields this update is about to modify).
-        // Tags need the serialized form for a faithful compare; other input
-        // fields map 1:1 onto node columns.
-        const supplied: Record<string, unknown> = { ...input };
-        if (input.tags !== undefined) {
-          supplied.tags = serializeTags(input.tags ?? []);
-        }
+      // The fields this write will change, in the shape diffNodeChanges wants.
+      // Hoisted out of the snapshot block below because the create/upsert path
+      // now snapshots inside its own transaction and needs the same value.
+      // Tags need the serialized form for a faithful compare; other input
+      // fields map 1:1 onto node columns.
+      const suppliedForDiff: Record<string, unknown> = { ...input };
+      if (input.tags !== undefined) {
+        suppliedForDiff.tags = serializeTags(input.tags ?? []);
+      }
+
+      // Snapshot the PRE-edit state (#620: shared builder — editedBy holds
+      // the user PK, the #88 `reason` rationale lands in revLabel, and
+      // `changes` records which fields this update is about to modify).
+      //
+      // #1183 — UPDATE MODES ONLY. This runs before the transaction and off the
+      // stale `existing` probe, which is safe enough here because an update's
+      // target is required to exist and its own gate already refused a missing
+      // one. It is NOT safe for create/upsert, where `existing` may be null
+      // while a row is committed moments later: the overwrite would then be
+      // recorded nowhere. That path therefore takes its own snapshot inside its
+      // transaction, from the row it actually observes under the loc lock —
+      // the #977 pattern, which fixed this exact shape for the MCP surface and
+      // was never applied here.
+      //
+      // The remaining pre-transaction snapshot on the update path has its own
+      // smaller defect (a failed write can leave an orphan revision, since the
+      // snapshot does not commit with it). Out of scope here and filed
+      // separately rather than restructured inside a concurrency fix.
+      if (existing && mode === 'update') {
         await createNodeRevision(ctx.db, {
           ...buildNodeRevisionSnapshot(existing, editorFromAuth(ctx), {
             revLabel: input.reason,
-            changes: diffNodeChanges(existing, supplied),
+            changes: diffNodeChanges(existing, suppliedForDiff),
           }),
           // #989: a guarded update already claimed its number atomically.
           ...(claimedRevNo !== undefined ? { revNo: claimedRevNo } : {}),
@@ -661,13 +680,19 @@ export async function writeNodeCore(
           // delete can miss it and orphan it under a now-missing prefix (#664,
           // Model A — see nodeSubtreeLock.ts). Hold advisory locks on the node's
           // ancestor path across the write; the delete side locks its own loc.
-          // A root-level loc has no ancestor to coordinate against, so it skips
-          // the transaction. READ COMMITTED (the default) is REQUIRED: the count
-          // on the delete side must see this row once our commit releases the
-          // lock, which a frozen SERIALIZABLE snapshot would not guarantee.
+          // READ COMMITTED (the default) is REQUIRED: the count on the delete
+          // side must see this row once our commit releases the lock, which a
+          // frozen SERIALIZABLE snapshot would not guarantee.
+          //
+          // EVERY write takes the transaction, root-level locs included — since
+          // #976 for the snapshot's sake, and since #1183 because a root-level
+          // loc takes its own write lock in there. (This paragraph used to say a
+          // root-level loc "skips the transaction"; that stopped being true at
+          // #976 and is doubly untrue now. @copilot, PR #1184 round 5.)
+          //
           // `satisfies` (not a `: NodeUpsertArgs` annotation) so the literal
-          // `include` type is preserved and both upsert calls below still infer
-          // the edge relations onto the result (`node.outgoingEdges`).
+          // `include` type is preserved and the upsert below still infers the
+          // edge relations onto the result (`node.outgoingEdges`).
           const upsertArgs = {
             where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
             create: {
@@ -687,7 +712,97 @@ export async function writeNodeCore(
           // otherwise overwritable here (Copilot on PR #1165, round 2).
           node = await ctx.db.$transaction(async (tx) => {
             await lockAncestorsForCreate(tx, input.memoryId, input.loc);
-            return tx.node.upsert(upsertArgs);
+            // #1183 — serialize two creates at the SAME loc.
+            //
+            // A NESTED loc needs nothing extra: lockAncestorsForCreate above
+            // takes the ancestor path, and two creates at one loc share every
+            // ancestor, so they already serialize. (Measured, not assumed —
+            // removing the lock below left every nested-loc race test green.)
+            //
+            // A ROOT-LEVEL loc has no ancestors, so that helper takes NOTHING
+            // and the two creates are unserialized. Hence this, exactly there.
+            //
+            // Taking it ONLY at root level is deliberate, and the reason is
+            // deadlock rather than economy. Advisory keys are shared across
+            // lockAncestorsForCreate / lockLocForWrite / lockNodeForDelete /
+            // lockSourceForMove, and this repo has no single global acquisition
+            // order — merge takes target-then-source, move takes
+            // destination-ancestors-then-source, bulk sorts length-first. Any
+            // NEW multi-lock edge added here has to be consistent with all of
+            // them at once. An earlier revision of this fix took the loc lock
+            // unconditionally, which made a create hold `a` and wait for `a:b`;
+            // @copilot found it deadlocking against merge, and the obvious
+            // repair (sorting merge's endpoints) promptly inverted merge
+            // against MOVE. Restricting the lock to the root-level case means
+            // create's lock SET is unchanged for every nested loc and is a
+            // SINGLE lock at root level — and one lock cannot be half of a
+            // cycle. No new edge, so nothing to order against.
+            //
+            // Establishing one global order across create/merge/move/bulk is
+            // worth doing; it is not this PR, and it is filed.
+            if (ancestorLocs(input.loc).length === 0) {
+              await lockLocForWrite(tx, input.memoryId, input.loc);
+            }
+
+            // #1183 — THE AUTHORITATIVE read. The `existing` probe far above is
+            // taken before this lock, so under concurrency both callers see no
+            // row: the mode gate passes twice, and because the write below is
+            // an UPSERT the loser does not collide on (loc, memory_id) — it
+            // takes the update branch and overwrites the winner. Measured
+            // before this fix: 40 concurrent pairs, 40 double-successes, zero
+            // refusals. Spec 039 Phase 0 D1's create-only guarantee held only
+            // sequentially, which is why a sequential test pinned it happily.
+            const authoritative = await tx.node.findUnique({
+              where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+            });
+
+            if (mode === 'create' && authoritative && !authoritative.deletedAt) {
+              const err = new NodeLocConflictError(input.loc, input.memoryId);
+              throw new GraphQLError(err.message, {
+                extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
+              });
+            }
+
+            // #1183 — snapshot the row this write will actually overwrite, from
+            // the authoritative read and inside this transaction, so it commits
+            // with the write (a failed write cannot leave an orphan revision)
+            // and so a row that appeared after the stale probe is still
+            // recorded. After the gate above, the only row a `create` can still
+            // overwrite is a SOFT-DELETED one being resurrected — and a
+            // tombstone's content is real content, which losing silently was
+            // the #976 defect. `upsert` mode reaches here for a live row too,
+            // deliberately: that mode is either-way by contract.
+            if (authoritative) {
+              await createNodeRevision(tx, {
+                ...buildNodeRevisionSnapshot(authoritative, editorFromAuth(ctx), {
+                  revLabel: input.reason,
+                  changes: diffNodeChanges(authoritative, suppliedForDiff),
+                }),
+              });
+            }
+
+            // #1183 — resurrect from the AUTHORITATIVE row, not the stale
+            // probe. `updateExtras` above was built from `existing`, which may
+            // have seen nothing while another caller created AND soft-deleted
+            // this loc before we took the lock. The gate lets a tombstone
+            // through by design, so without this override the upsert would
+            // write the new fields and leave `deletedAt` set — the "worst of
+            // both worlds" #543 exists to prevent, reachable again through the
+            // window this transaction was added to close. The MCP path already
+            // overrides the same way (src/mcp/server.ts).
+            return tx.node.upsert({
+              ...upsertArgs,
+              update: {
+                ...upsertArgs.update,
+                // create-ONLY, matching the `isResurrect` it corrects. Widening
+                // it to `upsert` would let an importer revive a soft-deleted
+                // node merely by writing to its loc — a behaviour change this
+                // fix has no business making (@copilot, PR #1184 round 4).
+                ...(mode === 'create' && authoritative?.deletedAt
+                  ? { deletedAt: null, deletedBy: null }
+                  : {}),
+              } as Prisma.NodeUncheckedUpdateInput,
+            });
           });
         }
       } catch (e) {
