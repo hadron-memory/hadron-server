@@ -32,7 +32,10 @@ let member: { id: string };
 let outsider: { id: string };
 let platformAdmin: { id: string };
 
-const ctxFor = (userId: string, roles: string[] = []): Context =>
+// roles typed as Context['roles'] rather than string[] (@copilot): the loose
+// type would accept a role this codebase does not have, so a test could pin
+// behaviour for a principal that cannot exist. Matches resolvers.secret.test.ts.
+const ctxFor = (userId: string, roles: Context['roles'] = []): Context =>
   ({ db, userId, roles }) as Context;
 
 beforeEach(async () => {
