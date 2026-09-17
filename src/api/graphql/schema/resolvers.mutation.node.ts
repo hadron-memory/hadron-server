@@ -424,20 +424,39 @@ export async function writeNodeCore(
         claimedRevNo = opts.guardRevSeq + 1;
       }
 
-      if (existing) {
-        // Snapshot the PRE-edit state (#620: shared builder — editedBy holds
-        // the user PK, the #88 `reason` rationale lands in revLabel, and
-        // `changes` records which fields this update is about to modify).
-        // Tags need the serialized form for a faithful compare; other input
-        // fields map 1:1 onto node columns.
-        const supplied: Record<string, unknown> = { ...input };
-        if (input.tags !== undefined) {
-          supplied.tags = serializeTags(input.tags ?? []);
-        }
+      // The fields this write will change, in the shape diffNodeChanges wants.
+      // Hoisted out of the snapshot block below because the create/upsert path
+      // now snapshots inside its own transaction and needs the same value.
+      // Tags need the serialized form for a faithful compare; other input
+      // fields map 1:1 onto node columns.
+      const suppliedForDiff: Record<string, unknown> = { ...input };
+      if (input.tags !== undefined) {
+        suppliedForDiff.tags = serializeTags(input.tags ?? []);
+      }
+
+      // Snapshot the PRE-edit state (#620: shared builder — editedBy holds
+      // the user PK, the #88 `reason` rationale lands in revLabel, and
+      // `changes` records which fields this update is about to modify).
+      //
+      // #1183 — UPDATE MODES ONLY. This runs before the transaction and off the
+      // stale `existing` probe, which is safe enough here because an update's
+      // target is required to exist and its own gate already refused a missing
+      // one. It is NOT safe for create/upsert, where `existing` may be null
+      // while a row is committed moments later: the overwrite would then be
+      // recorded nowhere. That path therefore takes its own snapshot inside its
+      // transaction, from the row it actually observes under the loc lock —
+      // the #977 pattern, which fixed this exact shape for the MCP surface and
+      // was never applied here.
+      //
+      // The remaining pre-transaction snapshot on the update path has its own
+      // smaller defect (a failed write can leave an orphan revision, since the
+      // snapshot does not commit with it). Out of scope here and filed
+      // separately rather than restructured inside a concurrency fix.
+      if (existing && mode === 'update') {
         await createNodeRevision(ctx.db, {
           ...buildNodeRevisionSnapshot(existing, editorFromAuth(ctx), {
             revLabel: input.reason,
-            changes: diffNodeChanges(existing, supplied),
+            changes: diffNodeChanges(existing, suppliedForDiff),
           }),
           // #989: a guarded update already claimed its number atomically.
           ...(claimedRevNo !== undefined ? { revNo: claimedRevNo } : {}),
@@ -687,6 +706,50 @@ export async function writeNodeCore(
           // otherwise overwritable here (Copilot on PR #1165, round 2).
           node = await ctx.db.$transaction(async (tx) => {
             await lockAncestorsForCreate(tx, input.memoryId, input.loc);
+            // #1183 — the loc's own write lock, acquired AFTER the ancestors so
+            // root→leaf ordering stays deadlock-free (same key as
+            // lockNodeForDelete and as the update branches above, which have
+            // always taken it). Without it this branch held no lock on the row
+            // it was about to write, so two creates could interleave freely.
+            await lockLocForWrite(tx, input.memoryId, input.loc);
+
+            // #1183 — THE AUTHORITATIVE read. The `existing` probe far above is
+            // taken before this lock, so under concurrency both callers see no
+            // row: the mode gate passes twice, and because the write below is
+            // an UPSERT the loser does not collide on (loc, memory_id) — it
+            // takes the update branch and overwrites the winner. Measured
+            // before this fix: 40 concurrent pairs, 40 double-successes, zero
+            // refusals. Spec 039 Phase 0 D1's create-only guarantee held only
+            // sequentially, which is why a sequential test pinned it happily.
+            const authoritative = await tx.node.findUnique({
+              where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+            });
+
+            if (mode === 'create' && authoritative && !authoritative.deletedAt) {
+              const err = new NodeLocConflictError(input.loc, input.memoryId);
+              throw new GraphQLError(err.message, {
+                extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
+              });
+            }
+
+            // #1183 — snapshot the row this write will actually overwrite, from
+            // the authoritative read and inside this transaction, so it commits
+            // with the write (a failed write cannot leave an orphan revision)
+            // and so a row that appeared after the stale probe is still
+            // recorded. After the gate above, the only row a `create` can still
+            // overwrite is a SOFT-DELETED one being resurrected — and a
+            // tombstone's content is real content, which losing silently was
+            // the #976 defect. `upsert` mode reaches here for a live row too,
+            // deliberately: that mode is either-way by contract.
+            if (authoritative) {
+              await createNodeRevision(tx, {
+                ...buildNodeRevisionSnapshot(authoritative, editorFromAuth(ctx), {
+                  revLabel: input.reason,
+                  changes: diffNodeChanges(authoritative, suppliedForDiff),
+                }),
+              });
+            }
+
             return tx.node.upsert(upsertArgs);
           });
         }
