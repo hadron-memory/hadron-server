@@ -141,7 +141,17 @@ export async function writeNodeCore(
   // this option's original caller — updateTeamRole's expectedNames — but the
   // mechanism stays: it is the generic guarded-write primitive, and the next
   // caller-level precondition will need exactly it.)
-  opts?: { targetNodeId?: string; guardRevSeq?: number },
+  opts?: {
+    targetNodeId?: string;
+    guardRevSeq?: number;
+    /**
+     * #1180 — the protected-loc bypass. Passed ONLY by `authorProtectedNode`,
+     * the door a memory-specific authoring tool writes through. Every other
+     * caller omits it and is therefore refused at a protected address, which is
+     * the safe default `a-gate-a-caller-can-omit` asks for.
+     */
+    ownedByOperation?: boolean;
+  },
 ) {
       // Keep the historical `input` name so the body below stays a
       // minimal-diff move from the upsertNode resolver it used to be.
@@ -159,8 +169,12 @@ export async function writeNodeCore(
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, input.memoryId);
       input.memoryId = resolvedMemoryId;
       await requireMemoryWriteAccess(ctx, input.memoryId);
-      // Spec 049 S4: a Channel's address is written by its owning operation only.
-      await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write');
+      // Spec 049 S4 / #1180: a protected address is written by its owning
+      // operation only. `authorProtectedNode` is that operation for a
+      // Memory.protectedLocs entry and passes the bypass; everyone else omits it.
+      if (!opts?.ownedByOperation) {
+        await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write');
+      }
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,
       // MCP, tests, future — gets the same typed InvalidLocError instead
@@ -638,7 +652,9 @@ export async function writeNodeCore(
           // be created, or the node moved under one, in between; Copilot on
           // PR #1165).
           const guarded = await ctx.db.$transaction(async (tx) => {
-            await lockLocForWrite(tx, input.memoryId, input.loc);
+            await lockLocForWrite(tx, input.memoryId, input.loc, {
+              ownedByOperation: opts?.ownedByOperation,
+            });
             return tx.node.updateMany({
               where: guardWhere,
               data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
@@ -665,7 +681,9 @@ export async function writeNodeCore(
         } else if (mode === 'update') {
           // Same lock-then-gate discipline as the guarded branch above.
           node = await ctx.db.$transaction(async (tx) => {
-            await lockLocForWrite(tx, input.memoryId, input.loc);
+            await lockLocForWrite(tx, input.memoryId, input.loc, {
+              ownedByOperation: opts?.ownedByOperation,
+            });
             return tx.node.update({
               where: opts?.targetNodeId
                 ? { id: opts.targetNodeId }
@@ -711,7 +729,9 @@ export async function writeNodeCore(
           // under the transaction — a root-level Channel address was
           // otherwise overwritable here (Copilot on PR #1165, round 2).
           node = await ctx.db.$transaction(async (tx) => {
-            await lockAncestorsForCreate(tx, input.memoryId, input.loc);
+            await lockAncestorsForCreate(tx, input.memoryId, input.loc, {
+              ownedByOperation: opts?.ownedByOperation,
+            });
             // #1183 — serialize two creates at the SAME loc.
             //
             // A NESTED loc needs nothing extra: lockAncestorsForCreate above
@@ -741,7 +761,9 @@ export async function writeNodeCore(
             // Establishing one global order across create/merge/move/bulk is
             // worth doing; it is not this PR, and it is filed.
             if (ancestorLocs(input.loc).length === 0) {
-              await lockLocForWrite(tx, input.memoryId, input.loc);
+              await lockLocForWrite(tx, input.memoryId, input.loc, {
+                ownedByOperation: opts?.ownedByOperation,
+              });
             }
 
             // #1183 — THE AUTHORITATIVE read. The `existing` probe far above is
@@ -994,6 +1016,30 @@ export const nodeMutations = {
     // (importer/sync), never a selector.
     createNode: async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
       writeNodeCore(input, ctx, 'create'),
+
+    // #1180 — the authoring door for a PROTECTED loc. Identical in effect to
+    // createNode (or an upsert when asked); the only difference is that it
+    // carries `ownedByOperation`, so it writes where the generic surface is
+    // refused.
+    //
+    // PURE ROUTING, deliberately (Holger, 2026-09-17): it validates nothing and
+    // knows nothing about spec / review / task nodes. The authoring RULES stay
+    // in the tool that owns them — `hadron spec` and `hadron coding` are closed-
+    // list exceptions on the audience ground, so porting their logic here is
+    // exactly what we are NOT doing. This resolver exists to be a different
+    // door, nothing more.
+    //
+    // What that buys, precisely: the ACCIDENTAL generic write is refused and
+    // told which tool to use. It is not a security boundary — a determined
+    // caller can reach this mutation too. What keeps an AGENT away from it is
+    // that it is not exposed as an MCP tool (the same reason
+    // createTeamChatMessage is not), so `hadron_create_node` is the only node
+    // door on that surface and it refuses.
+    authorProtectedNode: async (
+      _: unknown,
+      { input, upsert }: { input: CreateNodeInput; upsert?: boolean | null },
+      ctx: Context,
+    ) => writeNodeCore(input, ctx, upsert ? 'upsert' : 'create', { ownedByOperation: true }),
 
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,

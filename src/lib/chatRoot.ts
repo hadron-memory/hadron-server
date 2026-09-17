@@ -110,7 +110,7 @@ export async function withChatRootLock<T>(
     // The Channel's own operation passes the protected-loc gate that every
     // generic writer is refused by (spec 049 S4); a chat that is not a Channel
     // passes either way.
-    await lockPathForCreateUnder(tx, chat.memoryId, `${chat.loc}:messages`, { ownedByChannel: opts?.asChannel === true });
+    await lockPathForCreateUnder(tx, chat.memoryId, `${chat.loc}:messages`, { ownedByOperation: opts?.asChannel === true });
     // Read AFTER the lock: at READ COMMITTED this statement takes a fresh
     // snapshot, so it sees whatever committed while we waited to be granted it.
     const row = await tx.node.findUnique({

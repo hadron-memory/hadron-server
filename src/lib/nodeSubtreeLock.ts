@@ -78,9 +78,9 @@ export function ancestorLocs(loc: string): string[] {
  */
 /**
  * Spec 049 §2 S4 — every lock helper below is ALSO the protected-loc gate.
- * A generic writer that omits `ownedByChannel` is REFUSED on a Channel's
+ * A generic writer that omits `ownedByOperation` is REFUSED on a Channel's
  * address (the safe default); only the operations that own a Channel pass
- * `{ ownedByChannel: true }` (`chatRoot.ts`, the team-chat bootstrap). See
+ * `{ ownedByOperation: true }` (`chatRoot.ts`, the team-chat bootstrap). See
  * `protectedLoc.ts` for the rule and why the overlap runs both ways.
  *
  * The gate runs AFTER the locks are granted, never before: Channel creation
@@ -90,11 +90,11 @@ export function ancestorLocs(loc: string): string[] {
  * check before the lock was a TOCTOU window the size of the wait).
  */
 export interface LockOpts {
-  ownedByChannel?: boolean;
+  ownedByOperation?: boolean;
 }
 
 async function guard(tx: Prisma.TransactionClient, memoryId: string, locs: string[], op: string, opts?: LockOpts) {
-  if (opts?.ownedByChannel) return;
+  if (opts?.ownedByOperation) return;
   await assertLocWritable(tx, memoryId, locs, op);
 }
 

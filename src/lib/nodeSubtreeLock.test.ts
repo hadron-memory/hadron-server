@@ -33,10 +33,12 @@ function makeTxSpy() {
     calls.push({ key1, key2 });
     return Promise.resolve(1);
   });
-  // Spec 049 S4: every helper consults the Channel table before locking; a
-  // memory with no Channels is the pre-Phase-4 world these tests describe.
+  // Spec 049 S4 / #1180: every helper consults BOTH predicate sources before
+  // locking — the Channel table and `Memory.protectedLocs`. A memory with no
+  // Channels and no declared locs is the unprotected world these tests describe.
   const channel = { findMany: vi.fn(async () => []) };
-  return { tx: { $executeRaw, channel } as unknown as Prisma.TransactionClient, calls };
+  const memory = { findUnique: vi.fn(async () => ({ name: 'test-memory', protectedLocs: [] })) };
+  return { tx: { $executeRaw, channel, memory } as unknown as Prisma.TransactionClient, calls };
 }
 
 describe('lockAncestorsForCreate', () => {

@@ -817,6 +817,27 @@ model Memory {
   /// Whether this memory accepts asset uploads. system-class memories
   /// typically opt out.
   acceptsUploads       Boolean           @default(true) @map("accepts_uploads")
+  // ─── D-2026-08-25-004 / #1180: protected-loc declarations ───
+  /// Locs in THIS memory whose subtree only a specific authoring operation may
+  /// write — the second predicate source for the spec-049 §2 S4 protected-loc
+  /// gate, whose first is the Channel table (`src/lib/protectedLoc.ts`).
+  ///
+  /// Each entry protects that loc AND its subtree (`locsOverlap`), so `review`
+  /// covers `review:*`. The single entry `*` protects the WHOLE memory — the
+  /// shape a citation corpus needs, because there the identifying signal is the
+  /// memory itself: of the signals marking a spec node, only the memory
+  /// survives a generic write (`node update` drops tags — hadron-cli#1152), so
+  /// tag-based protection is erased by the very write it exists to refuse.
+  ///
+  /// EMPTY BY DEFAULT and per memory, deliberately: turning this on refuses
+  /// every generic writer of those locs at once, including the authoring CLI
+  /// until it moves to the `authorProtectedNode` door. Declared opt-in means
+  /// shipping the mechanism breaks nothing and each corpus is switched on when
+  /// its tooling is ready.
+  ///
+  /// This is a GUARDRAIL, not a security boundary — see `protectedLoc.ts`.
+  protectedLocs        String[]          @default([]) @map("protected_locs")
+
   // ─── 033-rag-vector-retrieval: per-memory vector-index config ───
   /// Opt-in: when true, this memory's nodes are vector-indexed. DB default is
   /// `false`; the **class-derived default** is applied at createMemory — a
