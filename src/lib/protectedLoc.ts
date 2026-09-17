@@ -168,16 +168,46 @@ export function protectedLocCovers(entry: ProtectedLoc, loc: string): boolean {
 const DOOR_BACKED_OPS = new Set(['write', 'update', 'create under']);
 
 /**
- * The remedy sentence for a DECLARED refusal, which depends on what the caller
- * is trying to do (@copilot, PR #1198).
+ * The same question for the CHANNEL source, whose owning operation is
+ * `createTeamChatMessage` — a message POST. It creates; it does not delete,
+ * move or restore a node.
  *
- * Naming a door for an operation it cannot perform is a confident wrong answer:
- * the caller follows the advice to a mutation that refuses them differently.
- * Saying plainly that there is no bypass is more useful.
+ * This list exists because the first version of the op-aware remedy fixed only
+ * the declared arm, and a `deleteNode` refusal at a Channel address still said
+ * "Post with createTeamChatMessage" — a post mutation offered as the way to
+ * delete (@copilot, PR #1198, third round). Worse, the test I wrote for the
+ * declared fix asserted the Channel arm ALWAYS names its operation, pinning the
+ * defect as intended behaviour. A fixture is only as good as the belief behind
+ * it.
  */
-function declaredRemedy(op: string, owner: string): string {
+const CHANNEL_BACKED_OPS = new Set(['write', 'create under']);
+
+/**
+ * The remedy sentence, which depends on the predicate SOURCE and on what the
+ * caller is trying to do (@copilot, PR #1198).
+ *
+ * Naming an operation for something it cannot perform is a confident wrong
+ * answer: the caller follows the advice to a mutation that refuses them
+ * differently. Saying plainly that there is no bypass is more useful.
+ *
+ * `update` gets its own sentence rather than the shared `owner` string, because
+ * `owner` names BOTH doors and `authorProtectedNode` cannot edit an existing
+ * node — so an edit refusal that printed it would offer a create door for an
+ * update. The generic `write` verb keeps naming both, since `writeNodeCore`
+ * genuinely reaches this gate for creates and updates alike and the gate cannot
+ * tell them apart.
+ */
+function protectedRemedy(entry: ProtectedLoc, op: string): string {
+  if (entry.channelId) {
+    return CHANNEL_BACKED_OPS.has(op)
+      ? `Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
+      : `There is no operation that may ${op} here — the Channel's own operation posts messages, so this operation has no bypass.`;
+  }
+  if (op === 'update') {
+    return `Use updateProtectedNode (the memory-specific authoring tool's edit door); the generic node surface does not reach it.`;
+  }
   return DOOR_BACKED_OPS.has(op)
-    ? `Use ${owner}; the generic node surface does not reach it.`
+    ? `Use ${entry.owner}; the generic node surface does not reach it.`
     : `There is no authoring door for "${op}" at a declared address — the authoring tools only create and edit, so this operation has no bypass.`;
 }
 
@@ -190,8 +220,8 @@ export class LocProtectedError extends GraphQLError {
   ) {
     super(
       channel.channelId
-        ? `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
-        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. ${declaredRemedy(op, channel.owner)}`,
+        ? `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. ${protectedRemedy(channel, op)}`
+        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. ${protectedRemedy(channel, op)}`,
       {
         extensions: {
           code: 'LOC_PROTECTED',

@@ -315,7 +315,6 @@ describe('the declared refusal names a remedy that EXISTS, driven through the re
     const err = await refusalFrom(
       resolvers.Mutation.updateNodeData({}, { nodeRef: node.id, data: { a: 1 } }, ctx()),
     );
-    expect(err.message).toContain('authorProtectedNode');
     expect(err.message).toContain('updateProtectedNode');
     expect(err.message).not.toContain('no authoring door');
   });
@@ -368,10 +367,14 @@ describe('the declared refusal names a remedy that EXISTS, driven through the re
     expect(err.message).not.toContain('authorProtectedNode');
   });
 
-  it('a CHANNEL refusal keeps naming its owning operation for EVERY op', async () => {
-    // The no-bypass wording must not leak onto the other predicate source: a
-    // Channel's owning operation is real for every op, so it always has a
-    // remedy to name.
+  it('a CHANNEL DELETE is told there is no bypass — a post mutation cannot delete', async () => {
+    // ROUND 3 CORRECTION, and it was my test that was wrong. I asserted the
+    // Channel arm "keeps naming its owning operation for EVERY op" and it
+    // passed — pinning the defect as intended behaviour. @copilot: a deleteNode
+    // refusal at a Channel address said "Post with createTeamChatMessage",
+    // offering a message-post mutation as the way to delete a node. The Channel
+    // arm needed the same op-awareness as the declared one; a fixture is only
+    // as good as the belief behind it.
     const chatRoot = await db.node.create({
       data: { id: generateId(), memoryId, loc: 'chats:team', name: 'Team chat', tags: [] },
     });
@@ -388,7 +391,31 @@ describe('the declared refusal names a remedy that EXISTS, driven through the re
     const err = await refusalFrom(
       resolvers.Mutation.deleteNode({}, { nodeRef: chatRoot.id } as never, ctx()),
     );
-    expect(err.message).toContain('createTeamChatMessage');
-    expect(err.message).not.toContain('no authoring door');
+    expect(err.message).toContain('no bypass');
+    expect(err.message).not.toContain('Post with createTeamChatMessage');
+
+    // ...while a WRITE at the same address still names it, so this is
+    // op-awareness and not a blanket retreat to the no-bypass wording.
+    const onWrite = await refusalFrom(
+      resolvers.Mutation.createNode(
+        {},
+        { input: { memoryId, loc: 'chats:team:messages:0001', name: 'forged' } as never },
+        ctx(),
+      ),
+    );
+    expect(onWrite.message).toContain('createTeamChatMessage');
+  });
+
+  it('an EDIT names ONLY the edit door — authorProtectedNode cannot edit', async () => {
+    // @copilot round 3: the shared `owner` string names both doors, so an
+    // update refusal was offering a CREATE mutation for an edit.
+    const node = await seed('cor:api:010:05');
+    await protectAll();
+
+    const err = await refusalFrom(
+      resolvers.Mutation.updateNodeData({}, { nodeRef: node.id, data: { a: 1 } }, ctx()),
+    );
+    expect(err.message).toContain('updateProtectedNode');
+    expect(err.message).not.toContain('authorProtectedNode');
   });
 });

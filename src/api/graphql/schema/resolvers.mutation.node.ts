@@ -976,8 +976,50 @@ export async function writeNodeCore(
           e instanceof Prisma.PrismaClientKnownRequestError &&
           e.code === 'P2025'
         ) {
-          // Lost the race with a concurrent delete (or move, on the
-          // loc-keyed path) between the mode gate and the write.
+          // Lost the race between the mode gate (or `assertTargetStillWritable`)
+          // and the write. Since the address and liveness now ride in the
+          // write's own predicate, a no-match here has TWO causes and they
+          // deserve different codes (@copilot, PR #1198): the row was deleted,
+          // or it MOVED — and a move that slips past the re-check would
+          // otherwise report NODE_NOT_FOUND for a node that plainly still
+          // exists, contradicting the NODE_WRITE_CONFLICT contract this PR
+          // introduced two statements earlier. `mergeMemoryGraph` relocates
+          // with an unlocked bulk updateMany, so that ordering is reachable.
+          //
+          // One extra read, only on the already-failed path.
+          //
+          // NOT COVERED BY A TEST, and said here rather than left to be
+          // discovered: a mutation removing this branch leaves the suite green.
+          // That is a real gap, not a redundant check — reaching it needs a
+          // relocation committing between `assertTargetStillWritable` and the
+          // statement immediately after it, inside one transaction, and there
+          // is no seam between those two statements to hook. The deterministic
+          // alternative is a test-only injection point in the canonical write
+          // path, which is a worse trade than an uncovered defensive branch.
+          // Every case reachable WITHOUT that seam is covered in
+          // resolvers.updateNodeToctou1198.test.ts.
+          if (mode === 'update' && opts?.targetNodeId) {
+            const moved = await ctx.db.node.findUnique({
+              where: { id: opts.targetNodeId },
+              select: { loc: true, memoryId: true, deletedAt: true },
+            });
+            if (moved && !moved.deletedAt) {
+              throw new GraphQLError(
+                `Node "${opts.targetNodeId}" moved since it was read — it is now at ` +
+                  `"${moved.loc}"${moved.memoryId !== input.memoryId ? ' in another memory' : ''}, ` +
+                  `and this write was authorized against "${input.loc}". Re-read and retry.`,
+                {
+                  extensions: {
+                    code: 'NODE_WRITE_CONFLICT',
+                    loc: input.loc,
+                    memoryId: input.memoryId,
+                    currentLoc: moved.loc,
+                    movedMemory: moved.memoryId !== input.memoryId,
+                  },
+                },
+              );
+            }
+          }
           throw new GraphQLError(
             `Node not found at loc "${input.loc}" in memory "${input.memoryId}".`,
             { extensions: { code: 'NODE_NOT_FOUND', loc: input.loc, memoryId: input.memoryId } },
