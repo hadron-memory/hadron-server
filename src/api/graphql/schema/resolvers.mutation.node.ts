@@ -302,10 +302,18 @@ export async function writeNodeCore(
       // treated as not-existing for collision purposes — the create
       // resurrects them (the UPDATE branch below clears `deletedAt`/
       // `deletedBy` when this resurrection path runs). Update: the target
-      // must exist — updateNode never creates; a concurrent delete between
-      // this gate and the write surfaces as Prisma P2025, mapped to
-      // NODE_NOT_FOUND at the write below. Upsert (internal callers only):
-      // legacy either-way behavior.
+      // must exist — updateNode never creates.
+      //
+      // This gate runs UNLOCKED, so it settles the common case and not the
+      // race. It used to claim otherwise — "a concurrent delete between this
+      // gate and the write surfaces as Prisma P2025, mapped to NODE_NOT_FOUND
+      // at the write below" — which holds only for a HARD delete. This repo
+      // SOFT-deletes: the row is still there, the write's `where` carries no
+      // `deletedAt` clause, and the edit lands on the tombstone. Measured on
+      // both selector paths (@copilot, PR #1198). `assertTargetStillWritable`
+      // re-checks under the address lock and is what makes this paragraph true.
+      //
+      // Upsert (internal callers only): legacy either-way behavior.
       const isResurrect = mode === 'create' && !!existing?.deletedAt;
       if (mode === 'create' && existing && !existing.deletedAt) {
         const err = new NodeLocConflictError(input.loc, input.memoryId);
@@ -629,58 +637,89 @@ export async function writeNodeCore(
       };
 
       /**
-       * On the update-by-PK path, re-read the target UNDER THE ADDRESS LOCK and
-       * refuse if it no longer lives where this write was authorized.
+       * Re-read the update target UNDER THE ADDRESS LOCK and refuse if the world
+       * moved after the unlocked mode-gate probe. Two TOCTOUs, both found by
+       * review on PR #1198 and both PRE-EXISTING (since PR-460), both reproduced
+       * before they were fixed, and both fixed here because this is the one
+       * point that already holds the lock and already reads the row.
        *
-       * The gap (@codex P1, PR #1198; pre-existing since PR-460 and reproduced
-       * before it was fixed). `updateNode` resolves `id` → (memoryId, loc)
-       * OUTSIDE any transaction, and everything protecting the write is checked
-       * against THAT address — `requireMemoryWriteAccess`, the protected-loc
-       * gate, the memory's property schema — while the UPDATE itself keys on
-       * the immutable PK. A `moveNode` committing in between leaves the two
-       * pointing at different memories, and the write lands on the row at its
-       * NEW address: authorized against the memory the caller could write,
-       * applied in one they may not, under a schema that was never consulted.
-       * Measured, not argued — the write succeeded and the row was in the
-       * destination memory.
+       * 1. THE TARGET MOVED (@codex, P1) — id-selector path only. `updateNode`
+       *    resolves `id` → (memoryId, loc) OUTSIDE any transaction, and
+       *    everything protecting the write is checked against THAT address:
+       *    `requireMemoryWriteAccess`, the protected-loc gate, the memory's
+       *    property schema. The UPDATE itself keys on the immutable PK, so a
+       *    `moveNode` committing in between leaves the two pointing at
+       *    different memories and the write lands on the row at its NEW
+       *    address — authorized against the memory the caller could write,
+       *    applied in one that was never consulted. Refused as
+       *    NODE_WRITE_CONFLICT rather than re-authorized at the new address:
+       *    the caller asked to edit the node at the address they named.
+       *
+       * 2. THE TARGET WAS SOFT-DELETED (@copilot) — BOTH selector paths, which
+       *    is wider than the finding framed it. The mode gate already refuses a
+       *    tombstone (`mode === 'update' && existing.deletedAt` ⇒
+       *    NODE_NOT_FOUND), but it runs unlocked, and `tx.node.update` filters
+       *    on the PK or (loc, memoryId) with NO `deletedAt` clause — so a
+       *    delete landing in between is written straight through, leaving a
+       *    tombstone carrying an edit that was accepted after it died.
+       *
+       *    The comment on that mode gate asserted this was already covered: "a
+       *    concurrent delete between this gate and the write surfaces as Prisma
+       *    P2025, mapped to NODE_NOT_FOUND at the write below." That is true of
+       *    a HARD delete, and this repo soft-deletes — the row is still there,
+       *    so P2025 never fires. Prose describing a protection that does not
+       *    exist; the claim is now corrected at that gate, and this is what
+       *    makes it true. Measured on both paths: the write SUCCEEDED and the
+       *    tombstone's content was rewritten.
        *
        * Ordering note (#1187): this adds a READ, never a lock, so it introduces
        * no new edge into the advisory-lock key space the four helpers share and
-       * cannot be half of a cycle. READ COMMITTED is what makes it work — each
-       * statement sees the latest commit, so a move that landed before this
-       * statement is visible to it.
-       *
-       * NODE_WRITE_CONFLICT rather than a new code: the target moved since it
-       * was read, which is exactly what that code already says, and re-reading
-       * and retrying is exactly the remedy. The write is refused rather than
-       * re-authorized at the new address — the caller asked to edit the node at
-       * the address they named, and silently following it somewhere else is the
-       * behaviour this refuses.
+       * cannot be half of a cycle. READ COMMITTED is what makes it
+       * authoritative — each statement sees the latest commit, so anything that
+       * landed before it is visible.
        */
-      async function assertTargetStillAtAuthorizedAddress(
+      async function assertTargetStillWritable(
         tx: Pick<Prisma.TransactionClient, 'node'>,
       ): Promise<void> {
-        if (!opts?.targetNodeId) return;
         const current = await tx.node.findUnique({
-          where: { id: opts.targetNodeId },
-          select: { memoryId: true, loc: true },
+          where: opts?.targetNodeId
+            ? { id: opts.targetNodeId }
+            : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+          select: { memoryId: true, loc: true, deletedAt: true },
         });
-        // A vanished row is left to the write below, which maps Prisma's P2025
-        // to the typed NODE_NOT_FOUND — refusing here would swap one typed
-        // error for another and change updateNode's contract for a deleted
-        // target, which is not this fix's business.
+        // A row that vanished entirely is left to the write below, which maps
+        // Prisma's P2025 to the typed NODE_NOT_FOUND. Refusing here would swap
+        // one typed error for an identical one.
         if (!current) return;
+
+        if (current.deletedAt) {
+          // Deliberately the SAME shape the unlocked mode gate throws, because
+          // this is the same refusal arriving a few milliseconds later: from
+          // the caller's side "it was deleted" is one outcome, not two.
+          throw new GraphQLError(
+            `Node not found at loc "${input.loc}" in memory "${input.memoryId}".`,
+            {
+              extensions: { code: 'NODE_NOT_FOUND', loc: input.loc, memoryId: input.memoryId },
+            },
+          );
+        }
+
         if (current.memoryId === input.memoryId && current.loc === input.loc) return;
+        // NODE_WRITE_CONFLICT rather than a new code: "the target changed since
+        // it was read, re-read and retry" is exactly what that code already
+        // says on the revSeq compare-and-swap next door.
+        const movedMemory = current.memoryId !== input.memoryId;
         throw new GraphQLError(
-          `Node "${opts.targetNodeId}" moved since it was read — it is now at ` +
-            `"${current.loc}" in another memory, and this write was authorized against ` +
-            `"${input.loc}". Re-read and retry.`,
+          `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is now at ` +
+            `"${current.loc}"${movedMemory ? ' in another memory' : ''}, and this write was ` +
+            `authorized against "${input.loc}". Re-read and retry.`,
           {
             extensions: {
               code: 'NODE_WRITE_CONFLICT',
               loc: input.loc,
               memoryId: input.memoryId,
               currentLoc: current.loc,
+              movedMemory,
             },
           },
         );
@@ -723,7 +762,7 @@ export async function writeNodeCore(
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
             });
-            await assertTargetStillAtAuthorizedAddress(tx);
+            await assertTargetStillWritable(tx);
             return tx.node.updateMany({
               where: guardWhere,
               data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
@@ -753,7 +792,7 @@ export async function writeNodeCore(
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
             });
-            await assertTargetStillAtAuthorizedAddress(tx);
+            await assertTargetStillWritable(tx);
             return tx.node.update({
               where: opts?.targetNodeId
                 ? { id: opts.targetNodeId }
