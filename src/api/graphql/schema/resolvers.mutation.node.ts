@@ -627,6 +627,64 @@ export async function writeNodeCore(
         outgoingEdges: { include: { target: true } },
         incomingEdges: { include: { source: true } },
       };
+
+      /**
+       * On the update-by-PK path, re-read the target UNDER THE ADDRESS LOCK and
+       * refuse if it no longer lives where this write was authorized.
+       *
+       * The gap (@codex P1, PR #1198; pre-existing since PR-460 and reproduced
+       * before it was fixed). `updateNode` resolves `id` → (memoryId, loc)
+       * OUTSIDE any transaction, and everything protecting the write is checked
+       * against THAT address — `requireMemoryWriteAccess`, the protected-loc
+       * gate, the memory's property schema — while the UPDATE itself keys on
+       * the immutable PK. A `moveNode` committing in between leaves the two
+       * pointing at different memories, and the write lands on the row at its
+       * NEW address: authorized against the memory the caller could write,
+       * applied in one they may not, under a schema that was never consulted.
+       * Measured, not argued — the write succeeded and the row was in the
+       * destination memory.
+       *
+       * Ordering note (#1187): this adds a READ, never a lock, so it introduces
+       * no new edge into the advisory-lock key space the four helpers share and
+       * cannot be half of a cycle. READ COMMITTED is what makes it work — each
+       * statement sees the latest commit, so a move that landed before this
+       * statement is visible to it.
+       *
+       * NODE_WRITE_CONFLICT rather than a new code: the target moved since it
+       * was read, which is exactly what that code already says, and re-reading
+       * and retrying is exactly the remedy. The write is refused rather than
+       * re-authorized at the new address — the caller asked to edit the node at
+       * the address they named, and silently following it somewhere else is the
+       * behaviour this refuses.
+       */
+      async function assertTargetStillAtAuthorizedAddress(
+        tx: Pick<Prisma.TransactionClient, 'node'>,
+      ): Promise<void> {
+        if (!opts?.targetNodeId) return;
+        const current = await tx.node.findUnique({
+          where: { id: opts.targetNodeId },
+          select: { memoryId: true, loc: true },
+        });
+        // A vanished row is left to the write below, which maps Prisma's P2025
+        // to the typed NODE_NOT_FOUND — refusing here would swap one typed
+        // error for another and change updateNode's contract for a deleted
+        // target, which is not this fix's business.
+        if (!current) return;
+        if (current.memoryId === input.memoryId && current.loc === input.loc) return;
+        throw new GraphQLError(
+          `Node "${opts.targetNodeId}" moved since it was read — it is now at ` +
+            `"${current.loc}" in another memory, and this write was authorized against ` +
+            `"${input.loc}". Re-read and retry.`,
+          {
+            extensions: {
+              code: 'NODE_WRITE_CONFLICT',
+              loc: input.loc,
+              memoryId: input.memoryId,
+              currentLoc: current.loc,
+            },
+          },
+        );
+      }
       const {
         loc: _updLoc,
         memoryId: _updMemoryId,
@@ -665,6 +723,7 @@ export async function writeNodeCore(
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
             });
+            await assertTargetStillAtAuthorizedAddress(tx);
             return tx.node.updateMany({
               where: guardWhere,
               data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
@@ -694,6 +753,7 @@ export async function writeNodeCore(
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
             });
+            await assertTargetStillAtAuthorizedAddress(tx);
             return tx.node.update({
               where: opts?.targetNodeId
                 ? { id: opts.targetNodeId }

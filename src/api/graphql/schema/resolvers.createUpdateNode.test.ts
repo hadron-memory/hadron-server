@@ -209,6 +209,84 @@ describe('updateNode — name preserve-on-omit (D4)', () => {
 // #476 — contentType: text/html conversion at the write seam
 // ---------------------------------------------------------------------------
 
+describe('updateNode — the id selector is re-checked under the write lock (#1198)', () => {
+  // @codex P1 on PR #1198, pre-existing since PR-460 and reproduced before it
+  // was fixed. The `id` selector resolves to (memoryId, loc) OUTSIDE any
+  // transaction, and everything guarding the write is checked against THAT
+  // address — memory write access, the protected-loc gate, the memory's
+  // property schema — while the UPDATE keys on the immutable PK. A moveNode
+  // committing in between left the two pointing at different memories, and the
+  // write landed on the row at its NEW address: authorized against the memory
+  // the caller could write, applied in one that was never consulted.
+  //
+  // Driven at the writeNodeCore seam rather than by racing two resolvers,
+  // because the post-move state is exactly what the race produces and a
+  // deterministic test pins it without a timing window. The lock is what makes
+  // the re-read authoritative; the assertion is that the write is REFUSED and
+  // the row is untouched.
+  it('REFUSES a write whose target moved to another memory after it was read', async () => {
+    const other = await resolvers.Mutation.createMemory(
+      {},
+      { orgId, name: 'cunmem-dest' },
+      gqlCtx(),
+    );
+    const node = await createNode({ loc: 'doc:one', name: 'before', content: 'ORIG' });
+
+    // The concurrent move, already committed.
+    await db.node.update({
+      where: { id: node.id },
+      data: { memoryId: other.id, loc: 'moved:here' },
+    });
+
+    const { writeNodeCore } = await import('./resolvers.mutation.node.js');
+    await expectCode(
+      writeNodeCore(
+        { memoryId, loc: 'doc:one', name: 'AFTER-MOVE' } as never,
+        gqlCtx(),
+        'update',
+        { targetNodeId: node.id },
+      ),
+      'NODE_WRITE_CONFLICT',
+    );
+
+    // The edit did not land — the assertion that separates a refusal from a
+    // refusal-shaped log line.
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.name).toBe('before');
+    expect(after.memoryId).toBe(other.id);
+  });
+
+  it('still writes when the target has NOT moved — the refusal is not blanket', async () => {
+    // The opposite failure: a re-check that refused everything would satisfy
+    // the case above and break every id-selector update in the product.
+    const node = await createNode({ loc: 'doc:two', name: 'before' });
+
+    await updateNode({ id: node.id, name: 'after' });
+
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('after');
+  });
+
+  it('a target RENAMED within the same memory is refused too — loc is half the address', async () => {
+    // A move inside one memory changes the loc but not the memoryId, so a
+    // re-check comparing only the memory would pass here and write to whatever
+    // now sits at the resolved address.
+    const node = await createNode({ loc: 'doc:three', name: 'before' });
+    await db.node.update({ where: { id: node.id }, data: { loc: 'doc:elsewhere' } });
+
+    const { writeNodeCore } = await import('./resolvers.mutation.node.js');
+    await expectCode(
+      writeNodeCore(
+        { memoryId, loc: 'doc:three', name: 'AFTER-MOVE' } as never,
+        gqlCtx(),
+        'update',
+        { targetNodeId: node.id },
+      ),
+      'NODE_WRITE_CONFLICT',
+    );
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('before');
+  });
+});
+
 describe('#476 — contentType HTML→Markdown conversion', () => {
   it('explicit contentType: null is consumed and stores content as-is (PR-486 Codex P2)', async () => {
     const node = await createNode({
