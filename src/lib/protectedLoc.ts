@@ -146,23 +146,39 @@ export function protectedLocCovers(entry: ProtectedLoc, loc: string): boolean {
 }
 
 /**
- * The remedy sentence for a DECLARED refusal, which depends on the operation
- * (@copilot, PR #1198).
+ * The ops the authoring doors can actually perform. `authorProtectedNode`
+ * creates (so a create under a protected ancestor is reachable) and
+ * `updateProtectedNode` edits; neither deletes and neither moves.
  *
- * The doors only CREATE and UPDATE. The same refusal is raised for `delete`,
- * `move` and `create under` — and for those, pointing at an authoring door is a
- * confident wrong answer: neither mutation performs them, so a caller following
- * the advice finds a door that cannot do what they asked. Saying plainly that
- * there is no bypass is more useful than naming one that does not apply.
+ * This is a CAPABILITY list, not a display-verb list, and the distinction is
+ * the whole point (@copilot, PR #1198, second round). An earlier version keyed
+ * the remedy on `op === 'write'` and was wrong in BOTH directions, because the
+ * verb a caller passes is chosen for the message and not for this:
  *
- * The op strings come from `nodeSubtreeLock`'s guards and `writeNodeCore`
- * ('write', 'delete', 'move', 'create under'); anything unrecognized falls to
- * the no-bypass wording, which is the safe direction — it under-promises.
+ *   - `deleteNode` passed 'write', so a protected DELETE was sent to two
+ *     mutations that cannot delete;
+ *   - `updateNodeData` / `updateNodeProperties` pass 'update', so an edit —
+ *     which `updateProtectedNode` performs — was told no door existed.
+ *
+ * `deleteNode`'s verb is now 'delete', which fixes its message too ("the only
+ * thing that may delete here" rather than "write"). Keep this list and the
+ * callers' verbs in step: a new op defaults to NO bypass, which under-promises
+ * rather than sending someone to a door that cannot help.
+ */
+const DOOR_BACKED_OPS = new Set(['write', 'update', 'create under']);
+
+/**
+ * The remedy sentence for a DECLARED refusal, which depends on what the caller
+ * is trying to do (@copilot, PR #1198).
+ *
+ * Naming a door for an operation it cannot perform is a confident wrong answer:
+ * the caller follows the advice to a mutation that refuses them differently.
+ * Saying plainly that there is no bypass is more useful.
  */
 function declaredRemedy(op: string, owner: string): string {
-  return op === 'write'
+  return DOOR_BACKED_OPS.has(op)
     ? `Use ${owner}; the generic node surface does not reach it.`
-    : `There is no authoring door for "${op}" at a declared address — the authoring tools only create and update, so this operation has no bypass.`;
+    : `There is no authoring door for "${op}" at a declared address — the authoring tools only create and edit, so this operation has no bypass.`;
 }
 
 /** The typed refusal — `extensions.code: 'LOC_PROTECTED'`, naming the Channel and the owning surface. */

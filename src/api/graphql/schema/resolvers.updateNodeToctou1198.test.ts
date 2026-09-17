@@ -293,39 +293,102 @@ describe('update TOCTOU 3: identity is anchored on the PK, not the address (@cop
   });
 });
 
-describe('the declared refusal names a remedy that exists (@copilot)', () => {
-  it('routes a WRITE to the doors, and tells a DELETE there is none', async () => {
-    // The doors only create and update. The same LOC_PROTECTED refusal is
-    // raised for delete/move/create-under, and naming an authoring door there
-    // is a confident wrong answer — the caller follows it to a mutation that
-    // cannot do what they asked.
-    const { LocProtectedError } = await import('../../../lib/protectedLoc.js');
-    const declared = {
-      loc: '*',
-      name: 'corpus',
-      source: 'declared' as const,
-      channelId: null,
-      owner: 'authorProtectedNode (create) / updateProtectedNode (edit)',
-    };
+describe('the declared refusal names a remedy that EXISTS, driven through the real callers (@copilot)', () => {
+  // Round 1 of this test constructed LocProtectedError directly with op:'delete'
+  // and passed while the product still misrouted — because the op a caller
+  // actually passes is chosen for the MESSAGE, not for this decision, and two
+  // callers passed 'write' for operations no door performs. A fixture cannot
+  // see that; only the real refusal paths can. @copilot, second round.
+  const protectAll = () =>
+    db.memory.update({ where: { id: memoryId }, data: { protectedLocs: ['*'] } });
 
-    const write = new LocProtectedError('cor:api:010:01', declared, 'write');
-    expect(write.message).toContain('authorProtectedNode');
-    expect(write.message).toContain('updateProtectedNode');
+  async function refusalFrom(p: Promise<unknown>): Promise<GraphQLError> {
+    return expectCode(p, 'LOC_PROTECTED');
+  }
 
-    for (const op of ['delete', 'move', 'create under']) {
-      const refusal = new LocProtectedError('cor:api:010:01', declared, op);
-      expect(refusal.message).not.toContain('authorProtectedNode');
-      expect(refusal.message).toContain('no authoring door');
-      expect(refusal.message).toContain(op);
-    }
+  it('an EDIT is routed to the doors — both of them', async () => {
+    const node = await seed('cor:api:010:01');
+    await protectAll();
 
-    // A CHANNEL refusal is untouched by this — its owning operation is real for
-    // every op, so it keeps naming it.
-    const channel = new LocProtectedError(
-      'chats:team',
-      { ...declared, source: 'channel', channelId: 'c1', owner: 'createTeamChatMessage' },
-      'delete',
+    // updateNodeData passes op 'update'; keying the remedy on op==='write'
+    // told this caller no door existed, when updateProtectedNode is exactly it.
+    const err = await refusalFrom(
+      resolvers.Mutation.updateNodeData({}, { nodeRef: node.id, data: { a: 1 } }, ctx()),
     );
-    expect(channel.message).toContain('createTeamChatMessage');
+    expect(err.message).toContain('authorProtectedNode');
+    expect(err.message).toContain('updateProtectedNode');
+    expect(err.message).not.toContain('no authoring door');
+  });
+
+  it('a DELETE is told there is no bypass, and its message says "delete"', async () => {
+    const node = await seed('cor:api:010:02');
+    await protectAll();
+
+    // deleteNode passed 'write', so it was offered two mutations that cannot
+    // delete — and its message read "the only thing that may write here".
+    const err = await refusalFrom(
+      resolvers.Mutation.deleteNode({}, { nodeRef: node.id } as never, ctx()),
+    );
+    expect(err.message).toContain('no authoring door');
+    expect(err.message).toContain('delete');
+    expect(err.message).not.toContain('authorProtectedNode');
+  });
+
+  it('a REVISION RESTORE is told there is no bypass either', async () => {
+    const node = await seed('cor:api:010:03');
+    // A revision to restore: any second write produces one.
+    await resolvers.Mutation.updateNode(
+      {},
+      { input: { id: node.id, name: 'v2' } as never },
+      ctx(),
+    );
+    const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id } });
+    await protectAll();
+
+    const err = await refusalFrom(
+      resolvers.Mutation.restoreNodeRevision({}, { revisionId: revision.id } as never, ctx()),
+    );
+    expect(err.message).toContain('no authoring door');
+    expect(err.message).not.toContain('authorProtectedNode');
+  });
+
+  it('a MOVE is told there is no bypass', async () => {
+    const node = await seed('cor:api:010:04');
+    const dest = await resolvers.Mutation.createMemory({}, { orgId, name: 'move-dest' }, ctx());
+    await protectAll();
+
+    const err = await refusalFrom(
+      resolvers.Mutation.moveNode(
+        {},
+        { sourceRef: node.id, targetMemoryRef: dest.id } as never,
+        ctx(),
+      ),
+    );
+    expect(err.message).toContain('no authoring door');
+    expect(err.message).not.toContain('authorProtectedNode');
+  });
+
+  it('a CHANNEL refusal keeps naming its owning operation for EVERY op', async () => {
+    // The no-bypass wording must not leak onto the other predicate source: a
+    // Channel's owning operation is real for every op, so it always has a
+    // remedy to name.
+    const chatRoot = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'chats:team', name: 'Team chat', tags: [] },
+    });
+    await db.channel.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        loc: 'chats:team',
+        name: 'Team chat',
+        chatRootNodeId: chatRoot.id,
+      },
+    });
+
+    const err = await refusalFrom(
+      resolvers.Mutation.deleteNode({}, { nodeRef: chatRoot.id } as never, ctx()),
+    );
+    expect(err.message).toContain('createTeamChatMessage');
+    expect(err.message).not.toContain('no authoring door');
   });
 });

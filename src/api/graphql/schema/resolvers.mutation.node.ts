@@ -1984,7 +1984,10 @@ export const nodeMutations = {
       // One check covers the subtree too: every descendant shares this memory.
       await requireMemoryWriteAccess(ctx, node.memoryId);
       // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
-      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
+      // 'delete', not 'write' (@copilot, PR #1198). The verb reaches the user twice —
+      // "the only thing that may delete here", and the REMEDY, which must not offer
+      // an authoring door for an operation neither door performs.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'delete');
 
       // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
       // node preserves its original deletedAt/deletedBy (matches the
@@ -3169,7 +3172,10 @@ export const nodeMutations = {
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
       // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
-      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
+      // 'restore', not 'write' (@copilot, PR #1198). The verb reaches the user twice —
+      // "the only thing that may restore here", and the REMEDY, which must not offer
+      // an authoring door for an operation neither door performs.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'restore');
 
       // #620 — the restored field set (legacy-sentinel-aware), shared by the
       // pre-restore snapshot's `changes` diff and the write-back.
