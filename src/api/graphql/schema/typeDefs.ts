@@ -509,10 +509,15 @@ export const typeDefs = `#graphql
   }
 
   """
-  Create a named Channel WITH its chat root, in one transaction. The host must
-  be an app-class memory you may write (the chat-host rule). \`loc\` is the
+  Create a named Channel WITH its chat root, in one transaction. The host may
+  be a memory of ANY class that you may write (#1193): the memory IS the
+  boundary, so the host you choose decides who can read and post. \`loc\` is the
   reserved address (e.g. chats:release) and must not overlap an existing
   Channel's; \`chats:team\` is every App's default and is created with the App.
+
+  NOTE: Channel-addressed messaging currently still requires the host memory to
+  belong to an App — a host with no \`appId\` can hold a Channel but not yet be
+  posted to or read through it (CHANNEL_HOST_NOT_APP).
   """
   input CreateChannelInput {
     memoryRef: ID!

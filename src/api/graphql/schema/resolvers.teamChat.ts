@@ -15,9 +15,10 @@
 // Storage shape (D-2026-08-07-001/-004, kept field-compatible with the #921
 // storage rework so it can absorb this surface without a data migration):
 //   - chat root: nodeType `chat`, storage keys (`messageCount`,
-//     `lastMessageAt`) top-level in `data`; `data.scope: 'shared'` is stamped
-//     for compatibility with today's chat-scope invariants and retires with
-//     D-2026-08-10-005.
+//     `lastMessageAt`) top-level in `data`. `data.scope` is GONE (#1193,
+//     D-2026-08-10-005): it stamped 'shared' for the `shared ⇔ app`
+//     invariant, which a Channel hostable in any memory class makes
+//     meaningless — one in a private memory is neither of its two values.
 //   - message: body in `Node.content`, envelope in `Node.data`, nodeType
 //     `chat-message`, ordering key in `Node.seq` (allocated atomically by
 //     `chatRoot.appendChatMessage` — #919; a hand-rolled node write here IS
@@ -233,13 +234,17 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
 
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, memoryId);
   // Storage keys top-level (D-2026-08-10-004 — no engine state here);
-  // `scope: 'shared'` for compatibility with the live chat-scope invariant
+  // #1193 — no `data.scope`: this bootstrap path creates a Channel root too, and
+  // leaving the marker here would give a Channel two different root shapes
+  // depending on whether eager provisioning or first-post bootstrap made it
+  // (@copilot, PR #1194). Fixing one of two writers is the mistake this branch
+  // has already made once.
   // (`shared ⇔ app`, spec 017) until D-2026-08-10-005 drops the marker.
   const rootFields = translateSessionExpired(memEncInfo, () =>
     encryptNodeFields(
       {
         content: null,
-        data: { scope: 'shared', messageCount: 0, createdAt: new Date().toISOString() },
+        data: { messageCount: 0, createdAt: new Date().toISOString() },
       },
       memEncInfo,
     ),
@@ -645,6 +650,39 @@ const channelNotFound = (ref: string): GraphQLError =>
  * team chat and may not read its nodes). Both entry points run this.
  */
 async function hostMemoryReadable(ctx: Context, memoryId: string): Promise<boolean> {
+  // The class is looked up HERE rather than taken as a parameter. An earlier
+  // revision of this fix passed it in, which made the gate's correctness depend
+  // on every caller remembering an optional argument — `a-gate-a-caller-can-omit`
+  // in the shape this repo keeps filing about, and in a strict-owner check where
+  // omitting it fails OPEN. One extra indexed read on a path that already does
+  // several is the right trade.
+  const memory = await ctx.db.memory.findUnique({
+    where: { id: memoryId },
+    select: { class: true },
+  });
+  const memoryClass = memory?.class;
+  // #1193/#1194 (@codex P1) — STRICT-OWNER host classes do not get the
+  // App-wide shortcut below.
+  //
+  // The paragraph above is sound for the hosts that existed when it was
+  // written: while only app-class memories could host a Channel, "wider than
+  // the node-content gate" was a deliberate and safe choice, because an
+  // app-class memory has no single owner to be wider THAN. #1193 removed the
+  // class gate and thereby broke that premise — an app-scoped `personal` or
+  // `private` memory IS strict-owner, and gating it on App participation let
+  // any AppMember or org CONTRIBUTOR read and post into another user's
+  // personal memory through the chat surface. Measured, not theorised: the
+  // regression test for it posted successfully as a non-owner before this.
+  //
+  // For those classes the decision falls through to the host memory's own
+  // rules, which is exactly what the #1193 ruling says — the MEMORY is the
+  // boundary. Shared gate, never a bespoke predicate (CLAUDE.md), and the
+  // GraphQL one rather than MCP's `canReadMemory`, which ignores MemoryShare
+  // (#849).
+  if (memoryClass === 'personal' || memoryClass === 'private') {
+    const accessible = await getAccessibleMemoryIds(ctx, memoryId);
+    return accessible === null || accessible.includes(memoryId);
+  }
   if (ctx.userId || !ctx.sessionId) return true;
   const accessible = await getAccessibleMemoryIds(ctx, memoryId);
   return accessible === null || accessible.includes(memoryId);

@@ -32,6 +32,7 @@ vi.mock('../integrations/github/writeNodeToGit.js', () => ({
 let orgId: string;
 let adminId: string;
 let appId: string;
+let agentId: string;
 
 const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` });
 
@@ -52,6 +53,10 @@ async function memoryOfClass(
       appId: opts.appId ?? (cls === 'app' ? appId : null),
       // chk_personal_visibility_user: personal/private REQUIRE an owner.
       userId: cls === 'personal' || cls === 'private' ? (opts.userId ?? adminId) : null,
+      // chk_memory_personal_agent_id: an agent is required for personal/private
+      // ONLY when app_id is set (CLAUDE.md).
+      userMemoryOfAgentId:
+        (cls === 'personal' || cls === 'private') && (opts.appId ?? null) ? agentId : null,
     },
   });
 }
@@ -76,6 +81,10 @@ beforeEach(async () => {
     },
   });
   appId = app.id;
+  const agent = await db.agent.create({
+    data: { id: generateId(), name: 'p1193-agent', urn: 'p1193-org.test:p1193-agent', organizationId: orgId },
+  });
+  agentId = agent.id;
 });
 
 describe('a Channel may be hosted in any memory class (#1193)', () => {
@@ -199,6 +208,70 @@ describe('the read surfaces FIND a Channel outside an app-class host (#1193)', (
       {},
       { channelRef: appChannel.id, body: 'hello' } as never,
       ctx(),
+    );
+    expect(posted).toBeTruthy();
+  });
+
+  it('an App member CANNOT read or post to a Channel in someone else\'s app-scoped PERSONAL memory', async () => {
+    // @codex P1 on PR #1194. Removing the class gate let a Channel be created
+    // in an app-scoped `personal`/`private` memory — which is STRICT-OWNER —
+    // while `resolveChannelTarget` still gates user principals on
+    // `requireTeamChatAccess`, an App-wide predicate, and `hostMemoryReadable`
+    // returns true for any user principal.
+    //
+    // That docstring's reasoning was sound while hosts were app-class only:
+    // the team-chat audience is deliberately WIDER than the node-content gate.
+    // My change broke its premise, so an ordinary App member reaches another
+    // user's personal memory through the chat surface. A cross-tenant leak.
+    const owner = await db.user.create({
+      data: { id: generateId(), githubId: 11931, githubUsername: 'p1193-owner', roles: [] },
+    });
+    await db.orgMember.create({
+      data: { organizationId: orgId, userId: owner.id, role: 'CONTRIBUTOR' },
+    });
+    const otherMember = await db.user.create({
+      data: { id: generateId(), githubId: 11932, githubUsername: 'p1193-other', roles: [] },
+    });
+    await db.orgMember.create({
+      data: { organizationId: orgId, userId: otherMember.id, role: 'CONTRIBUTOR' },
+    });
+
+    // An app-scoped PERSONAL memory owned by `owner` — appId set, so
+    // resolveChannelTarget finds an App and takes the App-wide branch.
+    const personal = await memoryOfClass('personal', { appId, userId: owner.id });
+    const { channel } = await ensureChannelWithRoot(db, {
+      memoryId: personal.id,
+      loc: 'chats:team',
+      name: 'team',
+      createdBy: owner.id,
+    });
+
+    const asOther = (): Context =>
+      ({ db, roles: [], userId: otherMember.id, clientId: `user:${otherMember.id}` }) as Context;
+
+    await expect(
+      resolvers.Mutation.createChannelMessage(
+        {},
+        { channelRef: channel.id, body: 'intruding' } as never,
+        asOther(),
+      ),
+    ).rejects.toThrow();
+
+    await expect(
+      resolvers.Query.channelMessages(
+        {},
+        { channelRef: channel.id, limit: null, offset: null } as never,
+        asOther(),
+      ),
+    ).rejects.toThrow();
+
+    // ...and the OWNER is unaffected, so this is a boundary rather than a wall.
+    const asOwner = (): Context =>
+      ({ db, roles: [], userId: owner.id, clientId: `user:${owner.id}` }) as Context;
+    const posted = await resolvers.Mutation.createChannelMessage(
+      {},
+      { channelRef: channel.id, body: 'mine' } as never,
+      asOwner(),
     );
     expect(posted).toBeTruthy();
   });

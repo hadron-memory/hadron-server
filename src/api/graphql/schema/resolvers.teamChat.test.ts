@@ -173,7 +173,12 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
     expect(root).not.toBeNull();
     expect(root!.nodeType).toBe('chat');
     const rootData = root!.data as Record<string, unknown>;
-    expect(rootData.scope).toBe('shared');
+    // #1193 — no `data.scope`. This assertion pinned the marker D-2026-08-10-005
+    // retires; a Channel hostable in any memory class makes `shared ⇔ app`
+    // meaningless. Both root-creating paths agree on the shape now (the eager
+    // one in channels.ts and this first-post bootstrap), which is the point:
+    // @copilot caught that I had removed it from only one of the two.
+    expect(rootData).not.toHaveProperty('scope');
     expect(rootData.messageCount).toBe(1);
 
     const row = await db.node.findUnique({ where: { id: msg.nodeId } });
