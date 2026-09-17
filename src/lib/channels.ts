@@ -18,9 +18,20 @@
  * not occupied by a LIVE node that is not a chat root (a Channel adopting an
  * arbitrary record would later delete a node nobody made a Channel).
  *
- * The audience is the host memory's (`cor:acl:030:01`). Only app-class
- * memories host a chat today (`shared ⇔ app`), and this core enforces it: a
- * Channel in a personal memory waits on the chat-host typology (plan §12.1).
+ * The audience is the host memory's (`cor:acl:030:01`) — and since #1193 that
+ * is the WHOLE rule: a Channel may be hosted in a memory of ANY class, so the
+ * host choice decides who can read and post. There is no chat-host typology
+ * and there will not be one; `shared ⇔ app` and the `data.scope` marker it
+ * rested on are gone (D-2026-08-10-005, the Channel half).
+ *
+ * ONE axis did NOT move, and it is easy to misread this file as having moved
+ * it: **CLASS is now free, APP-ness is not.** Creating a Channel works in any
+ * class, but Channel-addressed MESSAGING (`resolveChannelTarget` in
+ * `resolvers.teamChat.ts`) still requires `memory.appId` and refuses
+ * `CHANNEL_HOST_NOT_APP` without one, because its access gate
+ * (`requireTeamChatAccess`) is App-shaped. A knowledge memory WITH an App can
+ * be messaged; one without cannot. Closing that needs a memory-based gate —
+ * real access-control design, tracked separately, not assumed here.
  */
 
 import { GraphQLError } from 'graphql';
@@ -166,19 +177,41 @@ export async function ensureChannelWithRoot(
     select: { id: true, class: true },
   });
   if (!memory) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
-  if (memory.class !== 'app') {
-    throw new GraphQLError(
-      `A Channel is hosted in an app-class memory; "${memory.class}" cannot host one yet (the chat-host typology, spec 028, is not built).`,
-      { extensions: { code: 'CHANNEL_HOST_NOT_APP_CLASS', memoryClass: memory.class } },
-    );
-  }
+  // #1193 — a Channel is hosted in a memory of ANY class. There is no
+  // chat-host typology and there will not be one: the MEMORY is the boundary,
+  // which is `cor:acl:030:01`'s durable rule already — chat access, read and
+  // write, falls through the host memory's per-class rules, and there is no
+  // separate chat ACL. So the host choice decides who can read and post, and
+  // that is the owner's decision, made by choosing the memory:
+  //
+  //   "I see no disadvantage to hosting a channel in any class memory. The
+  //    choice will affect access, but that's the owner's problem. Why close
+  //    doors? Say the owner wants a channel in a private memory where only the
+  //    owner has access to. Why not? Have two personal agents chat there."
+  //                                                  — Holger, 2026-09-17
+  //
+  // The old gate refused every non-app class with CHANNEL_HOST_NOT_APP_CLASS,
+  // deferring to spec 028's four-class typology. That code is now unreachable
+  // and is retired rather than repurposed — a refusal code outliving its
+  // refusal is the stale-error-map half of
+  // findings:removing-a-mechanism-leaves-prose-describing-it.
   const memEncInfo = await getMemoryEncryptionInfo(db, args.memoryId);
-  // Storage keys top-level (D-2026-08-10-004); `scope: 'shared'` for the live
-  // chat-scope invariant (`shared ⇔ app`) until D-2026-08-10-005 drops it.
+  // Storage keys top-level (D-2026-08-10-004).
+  //
+  // #1193 implements D-2026-08-10-005 for the CHANNEL half: `data.scope` is
+  // gone. It stamped `'shared'` to satisfy the chat-scope invariant
+  // (`shared ⇔ app`), which under this ruling is not merely derivable but
+  // MEANINGLESS — a Channel in a private memory is neither of its two values.
+  //
+  // Deliberately NOT retiring `validateChatScopeInvariants` / `chat-scope.ts`,
+  // which D-005 also names: measured rather than assumed, the Channel path
+  // never calls them. Their only callers are the chatbot-engine paths in
+  // resolvers.mutation.chat.ts, whose chats still carry a scope. Retiring them
+  // belongs to #921's storage rework, not here.
   let rootFields: { content: string | null; data: unknown };
   try {
     rootFields = encryptNodeFields(
-      { content: null, data: { scope: 'shared', messageCount: 0, createdAt: new Date().toISOString() } },
+      { content: null, data: { messageCount: 0, createdAt: new Date().toISOString() } },
       memEncInfo,
     );
   } catch (e) {

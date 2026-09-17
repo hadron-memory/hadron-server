@@ -74,10 +74,27 @@ describe('creation', () => {
     expect(again.channel.id).toBe(channel.id);
   });
 
-  it('refuses a host that is not app-class', async () => {
-    await expect(
-      ensureChannelWithRoot(db, { memoryId: knowledge.id, loc: 'chats:x', name: 'x', createdBy: admin.id }),
-    ).rejects.toMatchObject({ extensions: { code: 'CHANNEL_HOST_NOT_APP_CLASS' } });
+  it('hosts a Channel in a NON-app-class memory (#1193)', async () => {
+    // This case previously asserted CHANNEL_HOST_NOT_APP_CLASS. Holger ruled
+    // the opposite on 2026-09-17: a Channel may be hosted in a memory of any
+    // class, because the MEMORY is the boundary — `cor:acl:030:01`'s existing
+    // rule — so the host choice decides who can read and post, and that is the
+    // owner's decision. The refusal code is retired, not repurposed.
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: knowledge.id,
+      loc: 'chats:x',
+      name: 'x',
+      createdBy: admin.id,
+    });
+    expect(channel.chatRootNodeId).toBe(rootId);
+
+    // D-2026-08-10-005: the root carries NO `data.scope`. It stamped 'shared'
+    // to satisfy the `shared ⇔ app` invariant, which this ruling makes
+    // meaningless — a Channel in a private memory is neither of its values.
+    const root = await db.node.findUniqueOrThrow({ where: { id: rootId } });
+    expect((root.data as Record<string, unknown>) ?? {}).not.toHaveProperty('scope');
+    // ...and still carries the fields the Channel path actually uses.
+    expect((root.data as Record<string, unknown>).messageCount).toBe(0);
   });
 
   it('createChannel refuses an address overlapping an existing Channel', async () => {
