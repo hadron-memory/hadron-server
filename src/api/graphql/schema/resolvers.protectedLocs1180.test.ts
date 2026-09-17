@@ -193,6 +193,46 @@ describe('authorProtectedNode — the door (#1180)', () => {
     expect(await db.node.count({ where: { memoryId, loc: 'cor:api:010:01' } })).toBe(0);
   });
 
+  it('CANNOT write under a Channel — the bypass is source-specific, not universal', async () => {
+    // @codex and @copilot, independently, both P1 on PR #1190's first revision.
+    // The bypass was one boolean that skipped the WHOLE gate, so the authoring
+    // door — a GUARDRAIL's door, fronted by pure routing — could write under a
+    // Channel address and forge chat authorship, which is the SECURITY boundary
+    // #1047 exists to provide. The PR documented that the two sources differ in
+    // strength and then collapsed them in code.
+    //
+    // `owns: 'declared'` now exempts only a Memory.protectedLocs entry; a
+    // Channel entry still refuses.
+    const chatRoot = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'chats:team', name: 'Team chat', tags: [] },
+    });
+    await db.channel.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        loc: 'chats:team',
+        name: 'Team chat',
+        chatRootNodeId: chatRoot.id,
+      },
+    });
+
+    // Declared protection is in force too — this proves the door is exempt from
+    // ONE source while still refused by the other, rather than simply broken.
+    await protect(['*']);
+    expect(await authoredCreate('cor:api:010:01')).toBe('OK');
+
+    expect(await authoredCreate('chats:team')).toBe('ERR:LOC_PROTECTED');
+    expect(await authoredCreate('chats:team:messages:0001')).toBe('ERR:LOC_PROTECTED');
+    expect(await genericCreate('chats:team:messages:0002')).toBe('ERR:LOC_PROTECTED');
+
+    // Scoped past the fixture: the chat ROOT is seeded above, so a `chats:`-wide
+    // count is 1 and would fail for the wrong reason. What must not exist is
+    // anything the refused writes would have created.
+    expect(
+      await db.node.count({ where: { memoryId, loc: { startsWith: 'chats:team:messages' } } }),
+    ).toBe(0);
+  });
+
   it('is NOT exposed as an MCP tool — that is what keeps agents on the refused path', async () => {
     // The protection is a guardrail, and this is the mechanism that makes the
     // guardrail effective rather than decorative: an agent's node surface is

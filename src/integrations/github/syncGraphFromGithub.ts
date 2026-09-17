@@ -1,6 +1,6 @@
 import { createDecipheriv } from 'crypto';
 // Spec 049 S4 — a Channel's address is skipped and reported, never overwritten from git.
-import { protectedLocsIn, locsOverlap } from '../../lib/protectedLoc.js';
+import { protectedLocsIn, protectedLocCovers } from '../../lib/protectedLoc.js';
 import { generateId } from '../../lib/id.js';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -156,7 +156,7 @@ export const syncGraphFromGithub = async (
       // could otherwise overwrite the one record whose authorship is derived
       // (#1047). Skipped and reported, never a failed sync.
       const protectedLocs = await protectedLocsIn(tx, graph.id);
-      const isProtected = (loc: string) => protectedLocs.some((p) => locsOverlap(p.loc, loc));
+      const isProtected = (loc: string) => protectedLocs.some((p) => protectedLocCovers(p, loc));
       await lockAncestorsForCreateMany(
         tx,
         graph.id,

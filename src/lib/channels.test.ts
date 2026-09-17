@@ -121,7 +121,7 @@ describe('protection (S4)', () => {
       await expect(lockLocForWrite(tx, appMem.id, 'chats:team')).rejects.toBeInstanceOf(LocProtectedError);
     });
     await db.$transaction(async (tx) => {
-      await lockAncestorsForCreate(tx, appMem.id, 'chats:team:messages:0002', { ownedByOperation: true });
+      await lockAncestorsForCreate(tx, appMem.id, 'chats:team:messages:0002', { owns: 'channel' });
     });
     const split = await partitionProtected(db, appMem.id, ['chats:team:messages:x', 'notes:a']);
     expect(split.allowed).toEqual(['notes:a']);

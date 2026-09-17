@@ -1,7 +1,13 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
-import { assertLocWritable, protectedLocsIn, locsOverlap } from '../../../lib/protectedLoc.js';
+import {
+  assertLocWritable,
+  protectedLocsIn,
+  protectedLocCovers,
+  type ProtectedLoc,
+  type ProtectedSource,
+} from '../../../lib/protectedLoc.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -145,12 +151,17 @@ export async function writeNodeCore(
     targetNodeId?: string;
     guardRevSeq?: number;
     /**
-     * #1180 — the protected-loc bypass. Passed ONLY by `authorProtectedNode`,
-     * the door a memory-specific authoring tool writes through. Every other
-     * caller omits it and is therefore refused at a protected address, which is
-     * the safe default `a-gate-a-caller-can-omit` asks for.
+     * #1180 — the predicate source this caller OWNS. Passed ONLY by
+     * `authorProtectedNode` (`'declared'`), the door a memory-specific
+     * authoring tool writes through. Every other caller omits it and is
+     * refused at any protected address — the safe default
+     * `a-gate-a-caller-can-omit` asks for.
+     *
+     * NOT a universal bypass: `'declared'` exempts a `Memory.protectedLocs`
+     * entry and leaves CHANNEL protection fully in force, so this door cannot
+     * write under `chats:team` and forge authorship.
      */
-    ownedByOperation?: boolean;
+    owns?: ProtectedSource;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -172,9 +183,7 @@ export async function writeNodeCore(
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. `authorProtectedNode` is that operation for a
       // Memory.protectedLocs entry and passes the bypass; everyone else omits it.
-      if (!opts?.ownedByOperation) {
-        await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write');
-      }
+      await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write', opts?.owns);
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,
       // MCP, tests, future — gets the same typed InvalidLocError instead
@@ -653,7 +662,7 @@ export async function writeNodeCore(
           // PR #1165).
           const guarded = await ctx.db.$transaction(async (tx) => {
             await lockLocForWrite(tx, input.memoryId, input.loc, {
-              ownedByOperation: opts?.ownedByOperation,
+              owns: opts?.owns,
             });
             return tx.node.updateMany({
               where: guardWhere,
@@ -682,7 +691,7 @@ export async function writeNodeCore(
           // Same lock-then-gate discipline as the guarded branch above.
           node = await ctx.db.$transaction(async (tx) => {
             await lockLocForWrite(tx, input.memoryId, input.loc, {
-              ownedByOperation: opts?.ownedByOperation,
+              owns: opts?.owns,
             });
             return tx.node.update({
               where: opts?.targetNodeId
@@ -730,7 +739,7 @@ export async function writeNodeCore(
           // otherwise overwritable here (Copilot on PR #1165, round 2).
           node = await ctx.db.$transaction(async (tx) => {
             await lockAncestorsForCreate(tx, input.memoryId, input.loc, {
-              ownedByOperation: opts?.ownedByOperation,
+              owns: opts?.owns,
             });
             // #1183 — serialize two creates at the SAME loc.
             //
@@ -762,7 +771,7 @@ export async function writeNodeCore(
             // worth doing; it is not this PR, and it is filed.
             if (ancestorLocs(input.loc).length === 0) {
               await lockLocForWrite(tx, input.memoryId, input.loc, {
-                ownedByOperation: opts?.ownedByOperation,
+                owns: opts?.owns,
               });
             }
 
@@ -1039,7 +1048,7 @@ export const nodeMutations = {
       _: unknown,
       { input, upsert }: { input: CreateNodeInput; upsert?: boolean | null },
       ctx: Context,
-    ) => writeNodeCore(input, ctx, upsert ? 'upsert' : 'create', { ownedByOperation: true }),
+    ) => writeNodeCore(input, ctx, upsert ? 'upsert' : 'create', { owns: 'declared' }),
 
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
@@ -1479,14 +1488,14 @@ export const nodeMutations = {
       // Spec 049 S4: a node under a Channel's address is SKIPPED, never
       // rewritten — the bulk surface reports rather than failing the batch.
       // One Channel-table read per memory, not per node (Copilot on PR #1165).
-      const protectedByMemory = new Map<string, Array<{ loc: string }>>();
+      const protectedByMemory = new Map<string, ProtectedLoc[]>();
       const isProtectedLoc = async (memoryId: string, loc: string) => {
         let locs = protectedByMemory.get(memoryId);
         if (!locs) {
           locs = await protectedLocsIn(ctx.db, memoryId);
           protectedByMemory.set(memoryId, locs);
         }
-        return locs.some((p) => locsOverlap(p.loc, loc));
+        return locs.some((p) => protectedLocCovers(p, loc));
       };
 
       for (const raw of rawNodes) {

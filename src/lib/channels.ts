@@ -198,7 +198,7 @@ export async function ensureChannelWithRoot(
     // Re-checked under that lock: the preflight above ran outside it.
     const live = await tx.memory.findFirst({ where: { id: args.memoryId, deletedAt: null }, select: { id: true } });
     if (!live) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
-    await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { ownedByOperation: true });
+    await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { owns: 'channel' });
     await assertNoChannelOverlap(tx, args.memoryId, args.loc);
     const restoreOrCreate = async (
       loc: string,
