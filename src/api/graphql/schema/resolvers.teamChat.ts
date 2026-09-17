@@ -248,7 +248,7 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
     await ctx.db.$transaction(async (tx) => {
       // #664/#752: create under the ancestor-path lock so a concurrent
       // non-recursive delete of `chats` can't orphan the subtree.
-      await lockAncestorsForCreateMany(tx, memoryId, [TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC], { ownedByChannel: true });
+      await lockAncestorsForCreateMany(tx, memoryId, [TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC], { owns: 'channel' });
       // Each of the three nodes is create-OR-RESTORE: a soft-deleted row
       // still occupies `@@unique([loc, memoryId])`, so a plain create would
       // P2002 forever and the canonical loc would be permanently bricked

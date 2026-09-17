@@ -1,7 +1,14 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
-import { assertLocWritable, protectedLocsIn, locsOverlap } from '../../../lib/protectedLoc.js';
+import {
+  assertLocWritable,
+  protectedLocsIn,
+  protectedLocCovers,
+  protectedDeletionFilter,
+  type ProtectedLoc,
+  type ProtectedSource,
+} from '../../../lib/protectedLoc.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -141,7 +148,22 @@ export async function writeNodeCore(
   // this option's original caller — updateTeamRole's expectedNames — but the
   // mechanism stays: it is the generic guarded-write primitive, and the next
   // caller-level precondition will need exactly it.)
-  opts?: { targetNodeId?: string; guardRevSeq?: number },
+  opts?: {
+    targetNodeId?: string;
+    guardRevSeq?: number;
+    /**
+     * #1180 — the predicate source this caller OWNS. Passed ONLY by
+     * `authorProtectedNode` (`'declared'`), the door a memory-specific
+     * authoring tool writes through. Every other caller omits it and is
+     * refused at any protected address — the safe default
+     * `a-gate-a-caller-can-omit` asks for.
+     *
+     * NOT a universal bypass: `'declared'` exempts a `Memory.protectedLocs`
+     * entry and leaves CHANNEL protection fully in force, so this door cannot
+     * write under `chats:team` and forge authorship.
+     */
+    owns?: ProtectedSource;
+  },
 ) {
       // Keep the historical `input` name so the body below stays a
       // minimal-diff move from the upsertNode resolver it used to be.
@@ -159,8 +181,10 @@ export async function writeNodeCore(
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, input.memoryId);
       input.memoryId = resolvedMemoryId;
       await requireMemoryWriteAccess(ctx, input.memoryId);
-      // Spec 049 S4: a Channel's address is written by its owning operation only.
-      await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write');
+      // Spec 049 S4 / #1180: a protected address is written by its owning
+      // operation only. `authorProtectedNode` is that operation for a
+      // Memory.protectedLocs entry and passes the bypass; everyone else omits it.
+      await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write', opts?.owns);
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,
       // MCP, tests, future — gets the same typed InvalidLocError instead
@@ -638,7 +662,9 @@ export async function writeNodeCore(
           // be created, or the node moved under one, in between; Copilot on
           // PR #1165).
           const guarded = await ctx.db.$transaction(async (tx) => {
-            await lockLocForWrite(tx, input.memoryId, input.loc);
+            await lockLocForWrite(tx, input.memoryId, input.loc, {
+              owns: opts?.owns,
+            });
             return tx.node.updateMany({
               where: guardWhere,
               data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
@@ -665,7 +691,9 @@ export async function writeNodeCore(
         } else if (mode === 'update') {
           // Same lock-then-gate discipline as the guarded branch above.
           node = await ctx.db.$transaction(async (tx) => {
-            await lockLocForWrite(tx, input.memoryId, input.loc);
+            await lockLocForWrite(tx, input.memoryId, input.loc, {
+              owns: opts?.owns,
+            });
             return tx.node.update({
               where: opts?.targetNodeId
                 ? { id: opts.targetNodeId }
@@ -711,7 +739,9 @@ export async function writeNodeCore(
           // under the transaction — a root-level Channel address was
           // otherwise overwritable here (Copilot on PR #1165, round 2).
           node = await ctx.db.$transaction(async (tx) => {
-            await lockAncestorsForCreate(tx, input.memoryId, input.loc);
+            await lockAncestorsForCreate(tx, input.memoryId, input.loc, {
+              owns: opts?.owns,
+            });
             // #1183 — serialize two creates at the SAME loc.
             //
             // A NESTED loc needs nothing extra: lockAncestorsForCreate above
@@ -741,7 +771,9 @@ export async function writeNodeCore(
             // Establishing one global order across create/merge/move/bulk is
             // worth doing; it is not this PR, and it is filed.
             if (ancestorLocs(input.loc).length === 0) {
-              await lockLocForWrite(tx, input.memoryId, input.loc);
+              await lockLocForWrite(tx, input.memoryId, input.loc, {
+                owns: opts?.owns,
+              });
             }
 
             // #1183 — THE AUTHORITATIVE read. The `existing` probe far above is
@@ -994,6 +1026,30 @@ export const nodeMutations = {
     // (importer/sync), never a selector.
     createNode: async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
       writeNodeCore(input, ctx, 'create'),
+
+    // #1180 — the authoring door for a PROTECTED loc. Identical in effect to
+    // createNode (or an upsert when asked); the only difference is that it
+    // carries `ownedByOperation`, so it writes where the generic surface is
+    // refused.
+    //
+    // PURE ROUTING, deliberately (Holger, 2026-09-17): it validates nothing and
+    // knows nothing about spec / review / task nodes. The authoring RULES stay
+    // in the tool that owns them — `hadron spec` and `hadron coding` are closed-
+    // list exceptions on the audience ground, so porting their logic here is
+    // exactly what we are NOT doing. This resolver exists to be a different
+    // door, nothing more.
+    //
+    // What that buys, precisely: the ACCIDENTAL generic write is refused and
+    // told which tool to use. It is not a security boundary — a determined
+    // caller can reach this mutation too. What keeps an AGENT away from it is
+    // that it is not exposed as an MCP tool (the same reason
+    // createTeamChatMessage is not), so `hadron_create_node` is the only node
+    // door on that surface and it refuses.
+    authorProtectedNode: async (
+      _: unknown,
+      { input, upsert }: { input: CreateNodeInput; upsert?: boolean | null },
+      ctx: Context,
+    ) => writeNodeCore(input, ctx, upsert ? 'upsert' : 'create', { owns: 'declared' }),
 
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
@@ -1433,14 +1489,14 @@ export const nodeMutations = {
       // Spec 049 S4: a node under a Channel's address is SKIPPED, never
       // rewritten — the bulk surface reports rather than failing the batch.
       // One Channel-table read per memory, not per node (Copilot on PR #1165).
-      const protectedByMemory = new Map<string, Array<{ loc: string }>>();
+      const protectedByMemory = new Map<string, ProtectedLoc[]>();
       const isProtectedLoc = async (memoryId: string, loc: string) => {
         let locs = protectedByMemory.get(memoryId);
         if (!locs) {
           locs = await protectedLocsIn(ctx.db, memoryId);
           protectedByMemory.set(memoryId, locs);
         }
-        return locs.some((p) => locsOverlap(p.loc, loc));
+        return locs.some((p) => protectedLocCovers(p, loc));
       };
 
       for (const raw of rawNodes) {
@@ -2801,7 +2857,25 @@ export const nodeMutations = {
           nodes.map((n) => n.loc).filter((l): l is string => typeof l === 'string' && l !== ''),
         );
 
-        await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
+        // #1180 — this deletes by ownerRepo, NOT by the locs it was handed, so
+        // the lock helper above (which only sees INCOMING locs) protects
+        // nothing on the way out: a payload containing no protected loc would
+        // still delete existing protected rows (@copilot, PR #1190). Route
+        // through the shared filter rather than rebuilding the predicate.
+        const replaceFilter = protectedDeletionFilter(
+          await protectedLocsIn(tx, resolvedMemoryId),
+        );
+        if (!replaceFilter.wholeMemory) {
+          await tx.node.deleteMany({
+            where: {
+              ownerRepo,
+              memoryId: resolvedMemoryId,
+              ...(replaceFilter.notClauses.length
+                ? { NOT: { OR: replaceFilter.notClauses as Prisma.NodeWhereInput[] } }
+                : {}),
+            },
+          });
+        }
 
         for (const input of nodes) {
           // #725 — normalize an empty objectType to null, then enforce the schema.

@@ -4,7 +4,7 @@
  *     default when asked;
  *   - the address is PROTECTED: a generic node create under it is refused
  *     (LOC_PROTECTED) on the resolver AND the lock helper, while the
- *     Channel's own writer passes (`ownedByChannel`);
+ *     Channel's own writer passes (`ownedByOperation`);
  *   - a tombstoned Channel still protects, and deletion removes the root and
  *     unlinks the App default; an overlapping address is refused;
  *   - a non-app-class host is refused (the chat-host rule);
@@ -113,7 +113,7 @@ describe('protection (S4)', () => {
     expect(ok.loc).toBe('chats-notes');
   });
 
-  it('the lock helpers gate, and the Channel owner passes with ownedByChannel', async () => {
+  it('the lock helpers gate, and the Channel owner passes with ownedByOperation', async () => {
     await db.$transaction(async (tx) => {
       await expect(lockAncestorsForCreate(tx, appMem.id, 'chats:team:messages:0002')).rejects.toBeInstanceOf(LocProtectedError);
     });
@@ -121,7 +121,7 @@ describe('protection (S4)', () => {
       await expect(lockLocForWrite(tx, appMem.id, 'chats:team')).rejects.toBeInstanceOf(LocProtectedError);
     });
     await db.$transaction(async (tx) => {
-      await lockAncestorsForCreate(tx, appMem.id, 'chats:team:messages:0002', { ownedByChannel: true });
+      await lockAncestorsForCreate(tx, appMem.id, 'chats:team:messages:0002', { owns: 'channel' });
     });
     const split = await partitionProtected(db, appMem.id, ['chats:team:messages:x', 'notes:a']);
     expect(split.allowed).toEqual(['notes:a']);

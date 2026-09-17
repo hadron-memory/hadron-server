@@ -5972,6 +5972,29 @@ export const typeDefs = `#graphql
     createNode(input: CreateNodeInput!): Node!
 
     """
+    Create or update a node at a PROTECTED loc — the door a memory-specific
+    authoring tool uses (#1180). Identical in effect to createNode/updateNode;
+    the ONLY difference is that it carries the protected-loc bypass, so it can
+    write where the generic node surface is refused.
+
+    PURE ROUTING: it validates nothing beyond what createNode validates. It
+    does not know what a spec, review or task node is, and it does not check
+    one. The authoring RULES stay in the tool that owns them ('hadron spec',
+    'hadron coding'), which is a closed-list exception on the audience ground —
+    both target a technical audience that can be required to install the CLI.
+
+    This is therefore a GUARDRAIL, not a security boundary: the protection it
+    provides is that the ACCIDENTAL generic write is refused and told which
+    tool to use. It is deliberately NOT exposed as an MCP tool, which is what
+    keeps an agent's normal surface away from it.
+
+    'upsert' (default false) writes over an existing live node instead of
+    rejecting with NodeLocConflictError — an authoring tool re-running over its
+    own corpus is the normal case, unlike a generic create.
+    """
+    authorProtectedNode(input: CreateNodeInput!, upsert: Boolean): Node!
+
+    """
     Update an existing node. Identify it by 'id' (PK or fully-qualified node
     URN) XOR the ('memoryId', 'loc') combo — supplying both selectors, or
     neither, is an error (D2). Rejects with NODE_NOT_FOUND when the target

@@ -46,7 +46,7 @@
 // is a tracked follow-up.
 import type { Prisma } from '../generated/prisma/index.js';
 // Spec 049 §2 S4 — the protected-loc gate every lock helper enforces.
-import { assertLocWritable } from './protectedLoc.js';
+import { assertLocWritable, type ProtectedSource } from './protectedLoc.js';
 
 /**
  * The strict ancestor locs of `loc`, shortest first (root → parent). A loc is a
@@ -78,9 +78,10 @@ export function ancestorLocs(loc: string): string[] {
  */
 /**
  * Spec 049 §2 S4 — every lock helper below is ALSO the protected-loc gate.
- * A generic writer that omits `ownedByChannel` is REFUSED on a Channel's
- * address (the safe default); only the operations that own a Channel pass
- * `{ ownedByChannel: true }` (`chatRoot.ts`, the team-chat bootstrap). See
+ * A generic writer that omits `owns` is REFUSED on any protected address (the
+ * safe default); an owning operation passes the ONE source it owns —
+ * `{ owns: 'channel' }` for the chat paths, `{ owns: 'declared' }` for the
+ * authoring door — and stays subject to the other. See
  * `protectedLoc.ts` for the rule and why the overlap runs both ways.
  *
  * The gate runs AFTER the locks are granted, never before: Channel creation
@@ -90,12 +91,17 @@ export function ancestorLocs(loc: string): string[] {
  * check before the lock was a TOCTOU window the size of the wait).
  */
 export interface LockOpts {
-  ownedByChannel?: boolean;
+  /**
+   * The predicate source this caller OWNS. Entries from that source are
+   * skipped; every other source still refuses. Deliberately NOT a boolean:
+   * a universal bypass let the authoring door write under a Channel and forge
+   * chat authorship (@codex + @copilot, both P1, PR #1190).
+   */
+  owns?: ProtectedSource;
 }
 
 async function guard(tx: Prisma.TransactionClient, memoryId: string, locs: string[], op: string, opts?: LockOpts) {
-  if (opts?.ownedByChannel) return;
-  await assertLocWritable(tx, memoryId, locs, op);
+  await assertLocWritable(tx, memoryId, locs, op, opts?.owns);
 }
 
 export async function lockAncestorsForCreate(

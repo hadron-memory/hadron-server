@@ -168,7 +168,7 @@ export const channelMutations = {
       // path): a post in flight finishes before the tombstone lands and none
       // starts after it, so a deleted Channel never gains messages (Copilot
       // on PR #1165, round 2).
-      await lockPathForCreateUnder(tx, row.memoryId, `${row.loc}:messages`, { ownedByChannel: true });
+      await lockPathForCreateUnder(tx, row.memoryId, `${row.loc}:messages`, { owns: 'channel' });
       // Row and root together; the address stays protected while either
       // exists (a tombstoned Channel still guards — protectedLoc.ts).
       await tx.channel.update({ where: { id: row.id }, data: { deletedAt: now, deletedBy: ctx.userId ?? null } });

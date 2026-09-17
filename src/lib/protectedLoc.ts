@@ -1,7 +1,21 @@
 /**
- * Spec 049 §2 S4 — the protected-loc write gate (shape B: the Channel table is
- * its only predicate source until D-2026-08-25-004 adds `Memory.protectedLocs`
- * as a second one).
+ * Spec 049 §2 S4 — the protected-loc write gate. TWO predicate sources now:
+ * the Channel table (shape B, shipped with #1047) and `Memory.protectedLocs`
+ * (D-2026-08-25-004, added by #1180).
+ *
+ * STRENGTHS DIFFER BY SOURCE, and that must not be forgotten because they
+ * share one mechanism and one error code. A Channel's protection is a SECURITY
+ * BOUNDARY: #1047 existed because chat authorship was forgeable and not
+ * tamper-evident, and the owning operation derives authorship the caller cannot
+ * supply. A `Memory.protectedLocs` entry is a GUARDRAIL: `authorProtectedNode`
+ * is PURE ROUTING — it writes what it is given and validates nothing (Holger,
+ * 2026-09-17: "I can't think of any validation needed. It should protect the
+ * special nodes from being created and edited by non-specific tools, that is
+ * all"). So a determined caller can still author a malformed spec node THROUGH
+ * that door; what is refused is the ACCIDENTAL generic write — which is the
+ * threat, since the door is deliberately absent from the MCP tool surface an
+ * agent reaches for. Do not let a later reader assume a spec node's provenance
+ * is as tamper-evident as a chat message's.
  *
  * A Channel row declares an address (`chats:team`) whose subtree is written by
  * ONE owning operation (`createTeamChatMessage` and its Channel-addressed
@@ -21,7 +35,7 @@
  * The check lives in TWO places, deliberately (a-gate-a-caller-can-omit):
  *   - inside the subtree LOCK helpers (`nodeSubtreeLock.ts`) — every create,
  *     delete and move takes one, and the parameter that bypasses the check is
- *     one an owning operation must PASS (`ownedByChannel`), so omitting it
+ *     one an owning operation must PASS (`ownedByOperation`), so omitting it
  *     refuses rather than admits;
  *   - explicitly in the in-place update paths, which take no lock.
  *
@@ -33,13 +47,40 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 
-/** Any client that can read the Channel table — the root client or a transaction. */
-export type ChannelReader = Pick<Prisma.TransactionClient, 'channel'>;
+/**
+ * Any client that can read the two predicate sources — the root client or a
+ * transaction.
+ */
+export type ChannelReader = Pick<Prisma.TransactionClient, 'channel' | 'memory'>;
+
+/** The wildcard entry in `Memory.protectedLocs` meaning "this whole memory". */
+export const PROTECT_WHOLE_MEMORY = '*';
+
+/**
+ * Which predicate source protects an address. The bypass is keyed on this and
+ * is NEVER universal: an operation exempts itself from the source it OWNS and
+ * stays subject to the other.
+ *
+ * That matters because the two sources are not equally strong. A Channel's
+ * protection is a SECURITY boundary — the owning operation derives authorship
+ * the caller cannot supply (#1047) — while a declared `Memory.protectedLocs`
+ * entry is a GUARDRAIL fronted by pure routing. A single boolean bypass would
+ * let the guardrail's door walk through the boundary: `authorProtectedNode`
+ * could write under `chats:team` and forge chat authorship (@codex + @copilot,
+ * both P1, PR #1190).
+ */
+export type ProtectedSource = 'channel' | 'declared';
 
 export interface ProtectedLoc {
   loc: string;
+  /** Human name for the refusal message — a Channel's name, or the memory's. */
   name: string;
-  channelId: string;
+  /** Which predicate source declared this address. */
+  source: ProtectedSource;
+  /** Set when the source is a Channel; null for a declared `Memory.protectedLocs` entry. */
+  channelId: string | null;
+  /** Which authoring surface owns this address, named in the refusal. */
+  owner: string;
 }
 
 /** Two locs overlap when one IS the other or one is inside the other's subtree. */
@@ -47,13 +88,54 @@ export function locsOverlap(a: string, b: string): boolean {
   return a === b || a.startsWith(`${b}:`) || b.startsWith(`${a}:`);
 }
 
-/** Every protected address in a memory — live AND tombstoned Channels (see the header). */
+/**
+ * Every protected address in a memory, from BOTH predicate sources:
+ *
+ *   - Channel rows — live AND tombstoned (see the header);
+ *   - `Memory.protectedLocs` — declared per memory (D-2026-08-25-004, #1180).
+ *
+ * A `*` entry protects the whole memory and is represented as a loc that
+ * overlaps everything, so `locsOverlap` needs no special case at the call sites.
+ */
 export async function protectedLocsIn(db: ChannelReader, memoryId: string): Promise<ProtectedLoc[]> {
-  const rows = await db.channel.findMany({
-    where: { memoryId },
-    select: { id: true, loc: true, name: true },
-  });
-  return rows.map((r) => ({ loc: r.loc, name: r.name, channelId: r.id }));
+  const [channels, memory] = await Promise.all([
+    db.channel.findMany({ where: { memoryId }, select: { id: true, loc: true, name: true } }),
+    db.memory.findUnique({ where: { id: memoryId }, select: { name: true, protectedLocs: true } }),
+  ]);
+
+  const out: ProtectedLoc[] = channels.map((r) => ({
+    loc: r.loc,
+    name: r.name,
+    source: 'channel',
+    channelId: r.id,
+    owner: 'createTeamChatMessage / hadron_team_chat_post',
+  }));
+
+  for (const declared of memory?.protectedLocs ?? []) {
+    out.push({
+      loc: declared,
+      name: memory?.name ?? 'this memory',
+      source: 'declared',
+      channelId: null,
+      owner: 'authorProtectedNode (the memory-specific authoring tool)',
+    });
+  }
+  return out;
+}
+
+/**
+ * Does a protected entry cover `loc`? `*` covers everything in its memory;
+ * otherwise the ordinary subtree overlap applies.
+ *
+ * EXPORTED, and the only correct way to ask. `locsOverlap(p.loc, loc)` is NOT
+ * equivalent — `locsOverlap('*', 'anything')` is false, so a consumer that
+ * matches raw would silently ignore a whole-memory declaration. That bit the
+ * bulk paths in this PR's first revision (@codex + @copilot, both P1): git sync
+ * and search-replace could rewrite and delete nodes in a memory declared
+ * wholly protected. Two copies of a predicate, one of which learned a new case.
+ */
+export function protectedLocCovers(entry: ProtectedLoc, loc: string): boolean {
+  return entry.loc === PROTECT_WHOLE_MEMORY || locsOverlap(entry.loc, loc);
 }
 
 /** The typed refusal — `extensions.code: 'LOC_PROTECTED'`, naming the Channel and the owning surface. */
@@ -64,8 +146,20 @@ export class LocProtectedError extends GraphQLError {
     public readonly op: string,
   ) {
     super(
-      `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`,
-      { extensions: { code: 'LOC_PROTECTED', loc, channelLoc: channel.loc, channelId: channel.channelId, op } },
+      channel.channelId
+        ? `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
+        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. Use that tool; the generic node surface does not reach it.`,
+      {
+        extensions: {
+          code: 'LOC_PROTECTED',
+          loc,
+          protectedLoc: channel.loc,
+          channelLoc: channel.channelId ? channel.loc : undefined,
+          channelId: channel.channelId ?? undefined,
+          owner: channel.owner,
+          op,
+        },
+      },
     );
     this.name = 'LocProtectedError';
   }
@@ -80,13 +174,20 @@ export async function assertLocWritable(
   memoryId: string,
   locs: string | string[],
   op: string,
+  /**
+   * The predicate source this caller OWNS, if any. Entries from that source are
+   * skipped; entries from every other source still refuse. Omit it — as every
+   * generic writer does — and nothing is skipped.
+   */
+  owns?: ProtectedSource,
 ): Promise<void> {
   const list = Array.isArray(locs) ? locs : [locs];
   if (list.length === 0) return;
-  const protectedLocs = await protectedLocsIn(db, memoryId);
+  const all = await protectedLocsIn(db, memoryId);
+  const protectedLocs = owns ? all.filter((p) => p.source !== owns) : all;
   if (protectedLocs.length === 0) return;
   for (const loc of list) {
-    const hit = protectedLocs.find((p) => locsOverlap(p.loc, loc));
+    const hit = protectedLocs.find((p) => protectedLocCovers(p, loc));
     if (hit) throw new LocProtectedError(loc, hit, op);
   }
 }
@@ -105,9 +206,48 @@ export async function partitionProtected(
   const allowed: string[] = [];
   const refused: Array<{ loc: string; channel: ProtectedLoc }> = [];
   for (const loc of locs) {
-    const hit = protectedLocs.find((p) => locsOverlap(p.loc, loc));
+    const hit = protectedLocs.find((p) => protectedLocCovers(p, loc));
     if (hit) refused.push({ loc, channel: hit });
     else allowed.push(loc);
   }
   return { allowed, refused };
+}
+
+/** The strict ancestors of a loc, root→leaf. Local copy to keep this module dependency-free. */
+function ancestorsOf(loc: string): string[] {
+  const parts = loc.split(':');
+  return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join(':'));
+}
+
+/**
+ * The exclusion a DELETING bulk surface must apply so it never removes a
+ * protected row — git-sync cleanup and `replaceSubtree` both delete by
+ * `ownerRepo`, not by the locs they were handed, so checking the INCOMING locs
+ * protects nothing on the way out.
+ *
+ * THE WHOLE POINT OF THIS LIVING HERE: the wildcard has now been missed twice
+ * by consumers building their own clauses — `loc = '*'` and
+ * `startsWith '*:'` match nothing, so a memory declared wholly protected had
+ * its rows deleted by the very query meant to spare them (@copilot, PR #1190,
+ * rounds 1 and 2). Ask this function; do not rebuild the predicate.
+ *
+ *   - `wholeMemory: true`  ⇒ delete NOTHING in this memory.
+ *   - otherwise `notClauses` ⇒ pass as `NOT: { OR: notClauses }`.
+ */
+export function protectedDeletionFilter(protectedLocs: ProtectedLoc[]): {
+  wholeMemory: boolean;
+  notClauses: Array<{ loc: string } | { loc: { startsWith: string } } | { loc: { in: string[] } }>;
+} {
+  if (protectedLocs.some((p) => p.loc === PROTECT_WHOLE_MEMORY)) {
+    return { wholeMemory: true, notClauses: [] };
+  }
+  const notClauses = protectedLocs.flatMap((p) => {
+    const ancestors = ancestorsOf(p.loc);
+    return [
+      { loc: p.loc },
+      { loc: { startsWith: `${p.loc}:` } },
+      ...(ancestors.length ? [{ loc: { in: ancestors } }] : []),
+    ];
+  });
+  return { wholeMemory: false, notClauses };
 }
