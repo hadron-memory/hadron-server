@@ -104,8 +104,10 @@ describe('a Channel may be hosted in any memory class (#1193)', () => {
       expect(channel.memoryId).toBe(mem.id);
       const root = await db.node.findUniqueOrThrow({ where: { id: rootId } });
       expect(root.loc).toBe('chats:team');
-      // D-2026-08-10-005 — no scope marker, in any class.
-      expect((root.data as Record<string, unknown>) ?? {}).not.toHaveProperty('scope');
+      // `data.scope` is still stamped — D-2026-08-10-005 retires it with #921,
+      // not here: it is the only chat-root signal nodeSubtreeMove has, so
+      // dropping it silently disabled that guard for Channels.
+      expect((root.data as Record<string, unknown>).scope).toBe('shared');
     });
   }
 

@@ -21,8 +21,12 @@
  * The audience is the host memory's (`cor:acl:030:01`) — and since #1193 that
  * is the WHOLE rule: a Channel may be hosted in a memory of ANY class, so the
  * host choice decides who can read and post. There is no chat-host typology
- * and there will not be one; `shared ⇔ app` and the `data.scope` marker it
- * rested on are gone (D-2026-08-10-005, the Channel half).
+ * and there will not be one.
+ *
+ * `data.scope: 'shared'` is still stamped, deliberately: D-2026-08-10-005
+ * retires it, but it is the ONLY chat-root signal `nodeSubtreeMove` has, and
+ * dropping it here silently disabled that guard for Channels. It retires with
+ * #921's rework, alongside the surfaces that read it.
  *
  * ONE axis did NOT move, and it is easy to misread this file as having moved
  * it: **CLASS is now free, APP-ness is not.** Creating a Channel works in any
@@ -154,10 +158,9 @@ export async function ensureChannelRow(
 /**
  * Create a Channel WITH its chat root — parents, root, `:messages` child, the
  * row and the App default link — in one transaction under the ancestor lock,
- * create-or-restore per node. Refuses a host memory that is not app-class
- * (the chat-host rule), an address overlapping another Channel's
- * (`LOC_OVERLAPS_CHANNEL`), and a live occupant that is not a chat root
- * (`LOC_OCCUPIED`).
+ * create-or-restore per node. The host may be ANY class (#1193). Refuses an
+ * address overlapping another Channel's (`LOC_OVERLAPS_CHANNEL`) and a live
+ * occupant that is not a chat root (`LOC_OCCUPIED`).
  */
 export async function ensureChannelWithRoot(
   db: PrismaClient,
@@ -198,20 +201,32 @@ export async function ensureChannelWithRoot(
   const memEncInfo = await getMemoryEncryptionInfo(db, args.memoryId);
   // Storage keys top-level (D-2026-08-10-004).
   //
-  // #1193 implements D-2026-08-10-005 for the CHANNEL half: `data.scope` is
-  // gone. It stamped `'shared'` to satisfy the chat-scope invariant
-  // (`shared ⇔ app`), which under this ruling is not merely derivable but
-  // MEANINGLESS — a Channel in a private memory is neither of its two values.
+  // `data.scope: 'shared'` STAYS, and this PR deliberately does not drop it —
+  // reversing my own first revision (@copilot, PR #1194 round 2).
   //
-  // Deliberately NOT retiring `validateChatScopeInvariants` / `chat-scope.ts`,
-  // which D-005 also names: measured rather than assumed, the Channel path
-  // never calls them. Their only callers are the chatbot-engine paths in
-  // resolvers.mutation.chat.ts, whose chats still carry a scope. Retiring them
-  // belongs to #921's storage rework, not here.
+  // D-2026-08-10-005 does retire it, and under this ruling the value is indeed
+  // meaningless for a non-app host. But the marker is NOT inert: it is
+  // load-bearing for consumers outside this path, and dropping it here broke
+  // them silently.
+  //
+  //   - `nodeSubtreeMove.ts` detects a chat-root SOLELY by
+  //     `data.scope === 'private' | 'shared'`. Without it the cross-memory
+  //     move guard stops seeing Channel roots, and `hadron_move_node` (which
+  //     calls the shared helper without the GraphQL path's separate check) can
+  //     move a Channel subtree out of its host memory — `Channel.memoryId`
+  //     stays on the source while `chatRootNodeId` follows the node.
+  //   - `resolvers.query.chat.ts` fabricates `'private'` when scope is absent,
+  //     so an app-hosted Channel would start misreporting its tier.
+  //
+  // That is why D-005 bundles the drop WITH retiring
+  // `validateChatScopeInvariants` and the legacy chat surfaces: they go
+  // together, and they are #921's storage rework, not this ruling. Keeping the
+  // marker is strictly safer — it preserves the move guard and today's
+  // reporting, and costs only that the field reads oddly for a non-app host.
   let rootFields: { content: string | null; data: unknown };
   try {
     rootFields = encryptNodeFields(
-      { content: null, data: { messageCount: 0, createdAt: new Date().toISOString() } },
+      { content: null, data: { scope: 'shared', messageCount: 0, createdAt: new Date().toISOString() } },
       memEncInfo,
     );
   } catch (e) {

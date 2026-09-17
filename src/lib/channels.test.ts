@@ -88,11 +88,10 @@ describe('creation', () => {
     });
     expect(channel.chatRootNodeId).toBe(rootId);
 
-    // D-2026-08-10-005: the root carries NO `data.scope`. It stamped 'shared'
-    // to satisfy the `shared ⇔ app` invariant, which this ruling makes
-    // meaningless — a Channel in a private memory is neither of its values.
+    // `data.scope` is still stamped: D-2026-08-10-005 retires it with #921's
+    // rework, since it is the only chat-root signal nodeSubtreeMove has.
     const root = await db.node.findUniqueOrThrow({ where: { id: rootId } });
-    expect((root.data as Record<string, unknown>) ?? {}).not.toHaveProperty('scope');
+    expect((root.data as Record<string, unknown>).scope).toBe('shared');
     // ...and still carries the fields the Channel path actually uses.
     expect((root.data as Record<string, unknown>).messageCount).toBe(0);
   });

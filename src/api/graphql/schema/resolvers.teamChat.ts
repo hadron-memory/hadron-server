@@ -15,10 +15,9 @@
 // Storage shape (D-2026-08-07-001/-004, kept field-compatible with the #921
 // storage rework so it can absorb this surface without a data migration):
 //   - chat root: nodeType `chat`, storage keys (`messageCount`,
-//     `lastMessageAt`) top-level in `data`. `data.scope` is GONE (#1193,
-//     D-2026-08-10-005): it stamped 'shared' for the `shared ⇔ app`
-//     invariant, which a Channel hostable in any memory class makes
-//     meaningless — one in a private memory is neither of its two values.
+//     `lastMessageAt`) top-level in `data`; `data.scope: 'shared'` is stamped
+//     and RETIRES WITH #921, not with #1193 — the value is meaningless for a
+//     non-app host, but it is the only chat-root signal nodeSubtreeMove has.
 //   - message: body in `Node.content`, envelope in `Node.data`, nodeType
 //     `chat-message`, ordering key in `Node.seq` (allocated atomically by
 //     `chatRoot.appendChatMessage` — #919; a hand-rolled node write here IS
@@ -234,17 +233,15 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
 
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, memoryId);
   // Storage keys top-level (D-2026-08-10-004 — no engine state here);
-  // #1193 — no `data.scope`: this bootstrap path creates a Channel root too, and
-  // leaving the marker here would give a Channel two different root shapes
-  // depending on whether eager provisioning or first-post bootstrap made it
-  // (@copilot, PR #1194). Fixing one of two writers is the mistake this branch
-  // has already made once.
+  // `scope: 'shared'` — kept, matching channels.ts. See the note there: the
+  // marker is the only chat-root signal nodeSubtreeMove has, so it retires with
+  // #921's rework rather than with this ruling.
   // (`shared ⇔ app`, spec 017) until D-2026-08-10-005 drops the marker.
   const rootFields = translateSessionExpired(memEncInfo, () =>
     encryptNodeFields(
       {
         content: null,
-        data: { messageCount: 0, createdAt: new Date().toISOString() },
+        data: { scope: 'shared', messageCount: 0, createdAt: new Date().toISOString() },
       },
       memEncInfo,
     ),
@@ -679,7 +676,17 @@ async function hostMemoryReadable(ctx: Context, memoryId: string): Promise<boole
   // boundary. Shared gate, never a bespoke predicate (CLAUDE.md), and the
   // GraphQL one rather than MCP's `canReadMemory`, which ignores MemoryShare
   // (#849).
-  if (memoryClass === 'personal' || memoryClass === 'private') {
+  // The App-wide shortcut below applies to APP-CLASS hosts ONLY. For every
+  // other class the decision falls through to the host memory's own rules,
+  // which is what the #1193 ruling says: the MEMORY is the boundary.
+  //
+  // Narrowed from personal/private to everything-but-app after a second
+  // @copilot pass: an app-scoped `knowledge` or `group` host was still reached
+  // by an org CONTRIBUTOR whom `getAccessibleMemoryIds` excludes. The
+  // "deliberately wider" rationale above was written for app-class, where
+  // there is no owner to be wider THAN — extending it to classes this PR newly
+  // admitted was a widening I introduced, not an inherited one.
+  if (memoryClass && memoryClass !== 'app') {
     const accessible = await getAccessibleMemoryIds(ctx, memoryId);
     return accessible === null || accessible.includes(memoryId);
   }
