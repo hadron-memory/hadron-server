@@ -487,3 +487,52 @@ describe('the declared refusal names a remedy that EXISTS, driven through the re
     expect(err.message).not.toContain('authorProtectedNode');
   });
 });
+
+describe('classifyFailedUpdate — the zero-row discriminator (@copilot, round 5)', () => {
+  // The RACE that reaches this in writeNodeCore is not deterministically
+  // testable (it needs a relocation between two adjacent statements inside one
+  // transaction, with no seam to hook). The DECISION is, and it is the half
+  // that could be silently wrong — so it is extracted and pinned here rather
+  // than left as a defensive branch nothing exercises.
+  it('a live row at a different address is MOVED', async () => {
+    const node = await seed('doc:classify-a');
+    await db.node.update({ where: { id: node.id }, data: { loc: 'doc:moved-away' } });
+
+    const { classifyFailedUpdate } = await import('./resolvers.mutation.node.js');
+    expect(await classifyFailedUpdate(db, node.id)).toEqual({
+      kind: 'moved',
+      memoryId,
+      loc: 'doc:moved-away',
+    });
+  });
+
+  it('a soft-deleted row is DELETED', async () => {
+    const node = await seed('doc:classify-b');
+    await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
+
+    const { classifyFailedUpdate } = await import('./resolvers.mutation.node.js');
+    expect(await classifyFailedUpdate(db, node.id)).toEqual({ kind: 'deleted' });
+  });
+
+  it('a row that is BOTH deleted and moved reports DELETED', async () => {
+    // Order matters and is a real choice: the caller cannot act on a
+    // tombstone's new address, and "it was deleted" is the outcome they need.
+    // Without this case the two branches could be swapped undetectably.
+    const node = await seed('doc:classify-c');
+    await db.node.update({
+      where: { id: node.id },
+      data: { loc: 'doc:gone-elsewhere', deletedAt: new Date() },
+    });
+
+    const { classifyFailedUpdate } = await import('./resolvers.mutation.node.js');
+    expect(await classifyFailedUpdate(db, node.id)).toEqual({ kind: 'deleted' });
+  });
+
+  it('no row at all is GONE', async () => {
+    const node = await seed('doc:classify-d');
+    await db.node.delete({ where: { id: node.id } });
+
+    const { classifyFailedUpdate } = await import('./resolvers.mutation.node.js');
+    expect(await classifyFailedUpdate(db, node.id)).toEqual({ kind: 'gone' });
+  });
+});

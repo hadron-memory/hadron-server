@@ -125,6 +125,38 @@ type NodeWriteMode = 'create' | 'update' | 'upsert';
 /** NodeInput with `name` optional — update mode preserves it on omit (D4). */
 type NodeWriteInput = Omit<NodeInput, 'name'> & { name?: string };
 
+/**
+ * Why did an update-by-PK match no row? Extracted so the decision is testable
+ * even though the race that reaches it is not (@copilot, PR #1198).
+ *
+ * With the address and liveness carried in the write's own predicate, a
+ * zero-row update has three causes and they are not interchangeable:
+ *
+ *   - `moved`   — the row is alive at a DIFFERENT address, so reporting "not
+ *                 found" would contradict the NODE_WRITE_CONFLICT contract for
+ *                 a node that plainly still exists;
+ *   - `deleted` — soft-deleted; NODE_NOT_FOUND is correct and matches the
+ *                 unlocked mode gate's own refusal;
+ *   - `gone`    — no row at all (hard delete), likewise NODE_NOT_FOUND.
+ *
+ * A soft-deleted row that ALSO moved reports `deleted`: the caller cannot act
+ * on a tombstone's new address, and "it was deleted" is the outcome they need.
+ */
+export async function classifyFailedUpdate(
+  db: Pick<Prisma.TransactionClient, 'node'>,
+  targetNodeId: string,
+): Promise<
+  { kind: 'moved'; memoryId: string; loc: string } | { kind: 'deleted' } | { kind: 'gone' }
+> {
+  const row = await db.node.findUnique({
+    where: { id: targetNodeId },
+    select: { loc: true, memoryId: true, deletedAt: true },
+  });
+  if (!row) return { kind: 'gone' };
+  if (row.deletedAt) return { kind: 'deleted' };
+  return { kind: 'moved', memoryId: row.memoryId, loc: row.loc };
+}
+
 export async function writeNodeCore(
   rawInput: NodeWriteInput,
   ctx: Context,
@@ -152,11 +184,18 @@ export async function writeNodeCore(
     targetNodeId?: string;
     guardRevSeq?: number;
     /**
-     * #1180 — the predicate source this caller OWNS. Passed ONLY by
-     * `authorProtectedNode` (`'declared'`), the door a memory-specific
-     * authoring tool writes through. Every other caller omits it and is
+     * #1180 — the predicate source this caller OWNS. Passed by the TWO
+     * authoring doors a memory-specific tool writes through, and by nothing
+     * else: `authorProtectedNode` (create, #1180) and `updateProtectedNode`
+     * (edit, #1192), both with `'declared'`. Every other caller omits it and is
      * refused at any protected address — the safe default
      * `a-gate-a-caller-can-omit` asks for.
+     *
+     * This paragraph said "passed ONLY by `authorProtectedNode`" until #1192
+     * added the second door and left it standing — the central authorization
+     * contract describing the surface as create-only, which is the exact
+     * premise that issue existed to correct (@copilot, PR #1198). Any door
+     * added here has to be named here.
      *
      * NOT a universal bypass: `'declared'` exempts a `Memory.protectedLocs`
      * entry and leaves CHANNEL protection fully in force, so this door cannot
@@ -1029,23 +1068,19 @@ export async function writeNodeCore(
           //
           // One extra read, only on the already-failed path.
           //
-          // NOT COVERED BY A TEST, and said here rather than left to be
-          // discovered: a mutation removing this branch leaves the suite green.
-          // That is a real gap, not a redundant check — reaching it needs a
-          // relocation committing between `assertTargetStillWritable` and the
-          // statement immediately after it, inside one transaction, and there
-          // is no seam between those two statements to hook. The deterministic
-          // alternative is a test-only injection point in the canonical write
-          // path, which is a worse trade than an uncovered defensive branch.
-          // Every case reachable WITHOUT that seam is covered in
-          // resolvers.updateNodeToctou1198.test.ts.
+          // The DECISION is extracted to `classifyFailedUpdate` and unit-tested
+          // against all three end states (@copilot, PR #1198, round 5). The
+          // WIRING — that a P2025 here reaches it — stays uncovered, because
+          // reaching it needs a relocation committing between
+          // `assertTargetStillWritable` and the statement immediately after it,
+          // inside one transaction, with no seam between them to hook. Adding a
+          // test-only injection point to the canonical write path is a worse
+          // trade. What was untestable was never the branching; it was the
+          // race, and the branching is what could be silently wrong.
           if (mode === 'update' && opts?.targetNodeId) {
-            const moved = await ctx.db.node.findUnique({
-              where: { id: opts.targetNodeId },
-              select: { loc: true, memoryId: true, deletedAt: true },
-            });
-            if (moved && !moved.deletedAt) {
-              throw movedConflict(moved.memoryId, moved.loc);
+            const outcome = await classifyFailedUpdate(ctx.db, opts.targetNodeId);
+            if (outcome.kind === 'moved') {
+              throw movedConflict(outcome.memoryId, outcome.loc);
             }
           }
           throw new GraphQLError(
