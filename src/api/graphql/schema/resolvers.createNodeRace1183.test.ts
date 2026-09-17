@@ -51,6 +51,27 @@ function gqlCtx(): Context {
   return { db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` };
 }
 
+/**
+ * Block until some backend is WAITING on an advisory lock — i.e. the call under
+ * test has reached the loc lock and is queued behind the holder. This is the
+ * deterministic barrier a `setTimeout` only approximates.
+ */
+async function waitForAdvisoryWaiter(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT count(*)::bigint AS count
+      FROM pg_locks
+      WHERE locktype = 'advisory' AND NOT granted
+    `;
+    if (Number(count) > 0) return;
+    if (Date.now() > deadline) {
+      throw new Error('timed out waiting for a blocked advisory-lock waiter');
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 /** Fire createNode, flattening success/refusal into a comparable token. */
 async function create(loc: string, content: string): Promise<string> {
   try {
@@ -287,7 +308,15 @@ describe('createNode is create-only under concurrency (#1183)', () => {
     await lockIsHeld;
     // createNode runs its probe (sees nothing) and then blocks at the lock.
     const creating = create(loc, 'reborn content');
-    await new Promise((r) => setTimeout(r, 200));
+
+    // A sleep here would NOT establish that createNode got past its probe
+    // (@copilot, PR #1184 round 2): on a slow worker the holder could commit
+    // first, the probe would then SEE the tombstone, and the test would pass
+    // even with the authoritative re-read removed — green for the wrong reason
+    // on the very defect it exists to catch. So wait for the real thing: an
+    // UNGRANTED advisory lock, which is createNode blocked on this loc's key.
+    await waitForAdvisoryWaiter();
+
     signalRelease();
     await holder;
 

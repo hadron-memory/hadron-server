@@ -2516,12 +2516,17 @@ export const nodeMutations = {
         // `a:b`, merge holding `a:b` waiting on `a`, and Postgres aborts one
         // with a deadlock.
         //
-        // Sorting by loc fixes it because the `:` hierarchy already sorts
-        // ancestor-first ("a" < "a:b"), so this IS root→leaf for the
-        // overlapping case and an arbitrary-but-consistent order otherwise,
-        // which is all a deadlock-free protocol needs. Plain comparison rather
-        // than localeCompare: the order must be stable across locales, not
-        // human-friendly.
+        // The comparator must be the SAME one every other multi-lock caller
+        // uses, not merely *a* consistent one (@copilot, PR #1184 round 2):
+        // lockAncestorsForCreateMany orders same-memory keys LENGTH-first with
+        // a lexical tiebreak (nodeSubtreeLock.ts), and length-first disagrees
+        // with plain lexical — on {`b`, `a:x`} lexical says `a:x` first while
+        // length says `b` first. Two callers each internally consistent but
+        // ordered differently still deadlock, so this mirrors that comparator
+        // exactly. Length-first is also what makes it root→leaf: a parent's loc
+        // is a prefix of its child's, hence shorter. Plain comparison rather
+        // than localeCompare, because the order must be stable across locales
+        // rather than human-friendly.
         const endpoints = [
           {
             memoryId: target.memoryId,
@@ -2539,11 +2544,7 @@ export const nodeMutations = {
             : []),
         ].sort((a, b) =>
           a.memoryId === b.memoryId
-            ? a.loc < b.loc
-              ? -1
-              : a.loc > b.loc
-                ? 1
-                : 0
+            ? a.loc.length - b.loc.length || (a.loc < b.loc ? -1 : a.loc > b.loc ? 1 : 0)
             : a.memoryId < b.memoryId
               ? -1
               : 1,
