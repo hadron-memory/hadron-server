@@ -1412,8 +1412,17 @@ export const nodeMutations = {
           ? { ...(existing as Record<string, unknown>), ...(data as Record<string, unknown>) }
           : (data as Record<string, unknown>);
 
-      // Delegate the write to the core in update mode. Addressing by the
-      // existing (memoryId, loc); omitted fields (name included) preserve.
+      // Delegate the write to the core in update mode; omitted fields (name
+      // included) preserve.
+      //
+      // ANCHORED ON THE PK, like updateNodeProperties next door and for its
+      // reason (@copilot, PR #1198). This resolver resolves a node REF and then
+      // addressed the write by the (memoryId, loc) it read — so if that node
+      // moved and another live node took the old address, the write landed on
+      // the REPLACEMENT: a caller's `data` patch applied to a different node
+      // than the one they named. `updateNodeProperties` already threaded
+      // `targetNodeId` and documented why; this path was simply never brought
+      // into line.
       return writeNodeCore(
         {
           memoryId: meta.memoryId,
@@ -1425,6 +1434,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
+        { targetNodeId: meta.id },
       );
     },
 

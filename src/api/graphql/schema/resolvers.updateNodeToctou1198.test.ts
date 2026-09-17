@@ -1,14 +1,27 @@
 /**
- * Two time-of-check/time-of-use gaps on the single-node UPDATE path, both found
- * by review on PR #1198, both PRE-EXISTING since PR-460, and both closed by one
- * re-read under the address lock (`assertTargetStillWritable` in
- * resolvers.mutation.node.ts).
+ * THREE time-of-check/time-of-use gaps on the single-node UPDATE path, all
+ * found by review on PR #1198 and all PRE-EXISTING — the first two since
+ * PR-460, the third for as long as `updateNodeData` has existed. The first two
+ * are closed by a re-read under the address lock (`assertTargetStillWritable`)
+ * PLUS the address/liveness terms now carried in the write's own predicate; the
+ * third by anchoring an id-resolving caller on the PK.
+ *
+ * (This header said "two" while the file held three sections — the same stale
+ * prose these tests exist to catch, so it is worth noting that it was.)
  *
  * The shared shape: `writeNodeCore`'s mode gate probes the target OUTSIDE any
  * transaction, everything that protects the write is decided from that probe,
- * and the UPDATE then runs inside a transaction whose `where` clause re-derives
- * nothing. Anything that commits in the gap is invisible to the decision and
- * still lands.
+ * and the UPDATE then runs inside a transaction whose `where` clause re-derived
+ * nothing. Anything that commits in the gap was invisible to the decision and
+ * still landed.
+ *
+ * WHICH HALF DOES WHAT, measured by neutralizing the re-check: the write's
+ * PREDICATE is the correctness half — with the re-check disabled all four race
+ * cases are still refused — and the RE-CHECK is the accurate-diagnostics half,
+ * turning a bare NODE_NOT_FOUND into a NODE_WRITE_CONFLICT that says the target
+ * moved. A check and the statement after it are not atomic against a relocator
+ * that takes no lock (`mergeMemoryGraph` moves rows with a bulk updateMany),
+ * which is why correctness cannot live in the check alone.
  *
  *   1. THE TARGET MOVED (@codex, P1) — id-selector path. `updateNode` resolves
  *      `id` → (memoryId, loc) before the transaction, and memory write access,
@@ -233,5 +246,86 @@ describe('update TOCTOU 2: the target was soft-deleted mid-write (@copilot)', ()
     expect(fromRace.message.replace('doc:raced', 'LOC')).toBe(
       fromGate.message.replace('doc:plain', 'LOC'),
     );
+  });
+});
+
+describe('update TOCTOU 3: identity is anchored on the PK, not the address (@copilot)', () => {
+  it('updateNodeData REFUSES rather than patching whatever took its address mid-write', async () => {
+    // updateNodeData resolves a node REF, reads that node's CURRENT loc, and
+    // then addressed the write by (memoryId, loc) with no identity anchor. The
+    // window is between that read and the write, so the move and the squat have
+    // to land INSIDE it — which is what the lock hook does.
+    //
+    // My first version of this test moved the node BEFORE calling the resolver.
+    // That passes with or without the fix, because the resolver simply reads
+    // the post-move loc: a careful measurement of the wrong thing, and the
+    // mutation is what said so — removing the anchor left it green.
+    //
+    // The outcome is a REFUSAL, not a redirected patch. Anchoring on the PK
+    // means the write carries both the id and the address it was authorized
+    // against, so a target that moved mid-flight no longer matches and the
+    // caller is told to re-read. What matters is the third assertion: the
+    // innocent occupant of the freed address is not written. Before the anchor
+    // it was, silently, with the caller's data.
+    const target = await seed('doc:target', 'target');
+    let squatterId = '';
+
+    onLock.fire = async () => {
+      await db.node.update({ where: { id: target.id }, data: { loc: 'doc:moved' } });
+      squatterId = (await seed('doc:target', 'squatter')).id;
+    };
+
+    await expectCode(
+      resolvers.Mutation.updateNodeData(
+        {},
+        { nodeRef: target.id, data: { marker: 'mine' } },
+        ctx(),
+      ),
+      'NODE_WRITE_CONFLICT',
+    );
+
+    // THE assertion: the node that merely happened to occupy the old address is
+    // untouched. Without the PK anchor this row carries `{marker:'mine'}`.
+    expect((await db.node.findUniqueOrThrow({ where: { id: squatterId } })).data).toBeNull();
+    // And the named node is unchanged too — a refusal that still wrote would
+    // satisfy the line above while being just as wrong.
+    expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).data).toBeNull();
+  });
+});
+
+describe('the declared refusal names a remedy that exists (@copilot)', () => {
+  it('routes a WRITE to the doors, and tells a DELETE there is none', async () => {
+    // The doors only create and update. The same LOC_PROTECTED refusal is
+    // raised for delete/move/create-under, and naming an authoring door there
+    // is a confident wrong answer — the caller follows it to a mutation that
+    // cannot do what they asked.
+    const { LocProtectedError } = await import('../../../lib/protectedLoc.js');
+    const declared = {
+      loc: '*',
+      name: 'corpus',
+      source: 'declared' as const,
+      channelId: null,
+      owner: 'authorProtectedNode (create) / updateProtectedNode (edit)',
+    };
+
+    const write = new LocProtectedError('cor:api:010:01', declared, 'write');
+    expect(write.message).toContain('authorProtectedNode');
+    expect(write.message).toContain('updateProtectedNode');
+
+    for (const op of ['delete', 'move', 'create under']) {
+      const refusal = new LocProtectedError('cor:api:010:01', declared, op);
+      expect(refusal.message).not.toContain('authorProtectedNode');
+      expect(refusal.message).toContain('no authoring door');
+      expect(refusal.message).toContain(op);
+    }
+
+    // A CHANNEL refusal is untouched by this — its owning operation is real for
+    // every op, so it keeps naming it.
+    const channel = new LocProtectedError(
+      'chats:team',
+      { ...declared, source: 'channel', channelId: 'c1', owner: 'createTeamChatMessage' },
+      'delete',
+    );
+    expect(channel.message).toContain('createTeamChatMessage');
   });
 });

@@ -145,6 +145,26 @@ export function protectedLocCovers(entry: ProtectedLoc, loc: string): boolean {
   return entry.loc === PROTECT_WHOLE_MEMORY || locsOverlap(entry.loc, loc);
 }
 
+/**
+ * The remedy sentence for a DECLARED refusal, which depends on the operation
+ * (@copilot, PR #1198).
+ *
+ * The doors only CREATE and UPDATE. The same refusal is raised for `delete`,
+ * `move` and `create under` — and for those, pointing at an authoring door is a
+ * confident wrong answer: neither mutation performs them, so a caller following
+ * the advice finds a door that cannot do what they asked. Saying plainly that
+ * there is no bypass is more useful than naming one that does not apply.
+ *
+ * The op strings come from `nodeSubtreeLock`'s guards and `writeNodeCore`
+ * ('write', 'delete', 'move', 'create under'); anything unrecognized falls to
+ * the no-bypass wording, which is the safe direction — it under-promises.
+ */
+function declaredRemedy(op: string, owner: string): string {
+  return op === 'write'
+    ? `Use ${owner}; the generic node surface does not reach it.`
+    : `There is no authoring door for "${op}" at a declared address — the authoring tools only create and update, so this operation has no bypass.`;
+}
+
 /** The typed refusal — `extensions.code: 'LOC_PROTECTED'`, naming the Channel and the owning surface. */
 export class LocProtectedError extends GraphQLError {
   constructor(
@@ -155,7 +175,7 @@ export class LocProtectedError extends GraphQLError {
     super(
       channel.channelId
         ? `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
-        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. Use ${channel.owner}; the generic node surface does not reach it.`,
+        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. ${declaredRemedy(op, channel.owner)}`,
       {
         extensions: {
           code: 'LOC_PROTECTED',
