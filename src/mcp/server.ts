@@ -4161,7 +4161,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_node',
-    'Add a new node to the memory graph (creates or updates). The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory. Writing to a loc that already holds a node OVERWRITES it: an omitted `description`, `abstract`, `content` or `tags` is CLEARED, not preserved (the other fields — nodeType, objectType, isRunnable, seq, properties, data, llmModel, aiAgent — are kept when omitted). Use hadron_update_node for a partial edit. The overwritten state is snapshotted to revision history first (#976), and encryption is honored.',
+    'Add a NEW node to the memory graph. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory. CREATE-ONLY: a loc that already holds a live node is REFUSED, not overwritten — use hadron_update_node to edit an existing node (#1181; same contract as the GraphQL createNode mutation). A loc holding a SOFT-DELETED node is the one exception: that row is resurrected and rewritten, so an omitted `description`, `abstract`, `content` or `tags` is CLEARED rather than carried over from the tombstone (the other fields — nodeType, objectType, isRunnable, seq, properties, data, llmModel, aiAgent — are kept when omitted). Resurrection snapshots the prior state to revision history first (#976), and encryption is honored.',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports". Both bare and prefixed forms accepted, in either URN grammar. Relative-form URNs (no memory) are rejected.'),
       name: z.string().describe('Node name'),
@@ -4253,12 +4253,43 @@ export function createMcpServerInstance(
         resolvedEdges = r.resolved;
       }
 
+      // A STALE read, kept for PAYLOAD PREPARATION only — never for a decision.
+      // It supplies the create-payload `id`, the auto-assigned `seq` for a new
+      // node, and the preserve-on-omit fallbacks for `objectType` / `properties`.
+      // It is read before the loc write lock is taken, so it may be out of date
+      // by the time anything is written; treat it as "what was probably there",
+      // not as the state of the row.
       const existing = await db.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
 
-      // Issue #543 — hadron_create_node is create-or-update (upsert). When the
-      // target loc holds a SOFT-DELETED node, writing to it must resurrect the
-      // row (clear deletedAt/deletedBy), matching the GraphQL createNode
-      // contract (resolvers.mutation.node.ts `isResurrect`). Without this the
+      // Issue #1181 — a LIVE node at (loc, memoryId) REFUSES rather than being
+      // overwritten, which is parity with the two sibling surfaces: the GraphQL
+      // `createNode` mutation (writeNodeCore mode 'create', spec 039 Phase 0 D1,
+      // resolvers.mutation.node.ts) and the runner's own hadron_create_node tool
+      // (src/lib/runner/tools/nodeTools.ts). Until that gate existed, one tool
+      // name had two opposite behaviours on the operation that decides whether
+      // the node at an address is still the same node — and the overwriting one
+      // was the surface AGENTS drive, i.e. the callers least able to notice.
+      //
+      // That gate is NOT here, and no refusal short-circuits at this point: the
+      // handler enters the transaction below for a free loc and an occupied one
+      // alike, and the authoritative decision is a re-read taken there under the
+      // loc's write lock. `existing` cannot make it — being pre-lock, two racing
+      // calls both see no row. An early-out here would pass every test the real
+      // gate passes while doing nothing in the one case that matters, so it is
+      // deliberately absent rather than kept as a "fast path": a redundant check
+      // that no test can distinguish from the authoritative one is how the
+      // authoritative one gets deleted later.
+      //
+      // To be explicit for anyone pruning: the probe above still earns its
+      // keep for the payload reasons listed on it. It is the GATE that is
+      // absent here, not the READ.
+      //
+      // Issue #543 — hadron_create_node resurrects a SOFT-DELETED node at the
+      // target loc (the gate tests liveness, so a tombstone falls through).
+      // Writing to it must clear deletedAt/deletedBy, matching the GraphQL
+      // createNode contract (resolvers.mutation.node.ts `isResurrect`). Note
+      // this flag is derived from the STALE probe and is overridden inside the
+      // transaction from the authoritative row. Without this the
       // update branch below writes the new fields but leaves the row flagged
       // deleted — the "worst of both worlds": findable nowhere, yet still
       // feeding compiled reads only via stale paths.
@@ -4273,12 +4304,15 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      // Spec 032 — hadron_create_node is upsert-semantically a fresh write: every
-      // call writes the full set of provided fields. If the caller is
-      // supplying an abstract, the hash is recomputed from the supplied
-      // content (FR-003). Null/empty content with an abstract yields null
-      // hash (FR-007). No abstract → no hash (FR-006). Hash is computed
-      // on plaintext content (FR-009).
+      // Spec 032 — every call that REACHES a write writes the full set of
+      // provided fields, so there is no field-level merge to reason about.
+      // Since #1181 the calls that reach one are a fresh create and a
+      // soft-deleted-node resurrection; a live loc returns before any write, so
+      // read "every call writes" as scoped to those two rather than as the old
+      // upsert-semantics claim. If the caller is supplying an abstract, the hash
+      // is recomputed from the supplied content (FR-003). Null/empty content
+      // with an abstract yields null hash (FR-007). No abstract → no hash
+      // (FR-006). Hash is computed on plaintext content (FR-009).
       const nextAbstractOriginHash: string | null =
         normalizedAbstract !== null ? computeContentHash(content ?? null) : null;
 
@@ -4388,12 +4422,17 @@ export function createMcpServerInstance(
 
       /**
        * #976 — snapshot the row this "create" is about to OVERWRITE.
-       * hadron_create_node is create-OR-update (#543), and its update branch
+       * hadron_create_node WAS create-OR-update (#543), and its update branch
        * used to write no NodeRevision at all, so re-minting an existing loc
        * destroyed the prior content with no recoverable history — while every
        * sibling surface snapshots (hadron_update_node, hadron_replace_text and
        * hadron_update_node_data via the resolver, hadron_move_node, and
        * writeNodeCore's own `if (existing)` branch).
+       *
+       * Since #1181 a LIVE row is refused before reaching here, so the only row
+       * this can still overwrite is a SOFT-DELETED one being resurrected. That
+       * narrows what it protects but does not retire it: a tombstone's content
+       * is still real content, and losing it silently was the #976 defect.
        *
        * The create-vs-overwrite decision is made HERE, under the loc's write
        * lock — never from the `existing` probe above, which is read before the
@@ -4462,21 +4501,55 @@ export function createMcpServerInstance(
       // create branch (PR #977 review, both bots). lockLocForWrite takes the
       // same key as an ancestor-create and as lockNodeForDelete, acquired after
       // the ancestors so the root→leaf order stays deadlock-free.
-      const upserted = await db.$transaction(async (tx) => {
-        await lockAncestorsForCreate(tx, memoryId, loc); // no-op at a root-level loc
-        await lockLocForWrite(tx, memoryId, loc);
-        const pre = await snapshotOverwrittenNode(tx);
-        return tx.node.upsert({
-          ...upsertArgs,
-          // Resurrect (#543) on the authoritative row, not the stale probe: a
-          // tombstone that appeared after it would otherwise stay flagged
-          // deleted while taking the new content.
-          update: {
-            ...upsertArgs.update,
-            ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
-          } as any,
+      // #1181 — thrown from INSIDE the transaction by the authoritative gate
+      // below and mapped to a refusal outside it. A sentinel rather than a
+      // string match: throwing aborts the transaction, which is exactly what we
+      // want (no revision written, no upsert), and identity comparison cannot
+      // be confused with a genuine Prisma error.
+      const LIVE_LOC_CONFLICT = Symbol('live-loc-conflict');
+
+      let upserted;
+      try {
+        upserted = await db.$transaction(async (tx) => {
+          await lockAncestorsForCreate(tx, memoryId, loc); // no-op at a root-level loc
+          await lockLocForWrite(tx, memoryId, loc);
+
+          // #1181 — THE AUTHORITATIVE live-collision gate, and the ONLY one.
+          // The pre-transaction `existing` probe far above is payload
+          // preparation, not a first line of defence: it is read before this
+          // lock, so two racing calls both see no row (the same staleness #977
+          // fixed for the snapshot decision, one line below, for the same
+          // reason). Re-reading here, under the loc's own write lock, is what
+          // makes the refusal true: the second caller sees the first's
+          // committed row and is told, instead of overwriting it through the
+          // upsert's update branch.
+          //
+          // This is what makes create-over-a-live-loc genuinely unreachable
+          // rather than merely unlikely, and it is the property #1178 needs from
+          // a citation allocator — one attempt, a typed refusal, no lease.
+          const authoritative = await tx.node.findUnique({
+            where: { loc_memoryId: { loc, memoryId } },
+          });
+          if (authoritative && !authoritative.deletedAt) throw LIVE_LOC_CONFLICT;
+
+          const pre = await snapshotOverwrittenNode(tx);
+          return tx.node.upsert({
+            ...upsertArgs,
+            // Resurrect (#543) on the authoritative row, not the stale probe: a
+            // tombstone that appeared after it would otherwise stay flagged
+            // deleted while taking the new content.
+            update: {
+              ...upsertArgs.update,
+              ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
+            } as any,
+          });
         });
-      });
+      } catch (e) {
+        if (e === LIVE_LOC_CONFLICT) {
+          return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
+        }
+        throw e;
+      }
 
       if (resolvedEdges !== null) {
         await replaceOutgoingEdges({

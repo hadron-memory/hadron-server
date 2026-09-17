@@ -1,19 +1,32 @@
 /**
  * Regression coverage for issue #976 — hadron_create_node's UPSERT branch
- * wrote no NodeRevision.
+ * wrote no NodeRevision — as it stands after #1181.
  *
- * hadron_create_node is create-OR-update (#543). Until this fix, re-minting an
- * existing loc overwrote the row's content with no recoverable history, while
- * every sibling write surface snapshots the pre-edit state: hadron_update_node,
- * hadron_replace_text / hadron_update_node_data (via the GraphQL resolver),
- * hadron_move_node, and writeNodeCore's own `if (existing)` branch. The tell in
- * production was `Node.revSeq = 0` on a node with a post-creation write in
- * usage_events — revSeq is bumped inside the same tx as each revision insert
- * (#696), so a pruned or cleared history would still leave it > 0.
+ * ORIGINAL BUG (#976): hadron_create_node was create-OR-update (#543), and
+ * re-minting an existing loc overwrote the row's content with no recoverable
+ * history, while every sibling write surface snapshots the pre-edit state:
+ * hadron_update_node, hadron_replace_text / hadron_update_node_data (via the
+ * GraphQL resolver), hadron_move_node, and writeNodeCore's own `if (existing)`
+ * branch. The tell in production was `Node.revSeq = 0` on a node with a
+ * post-creation write in usage_events — revSeq is bumped inside the same tx as
+ * each revision insert (#696), so a pruned or cleared history would still leave
+ * it > 0.
  *
- * The parity test is the load-bearing one: it pins create-over-existing and
- * hadron_update_node to the SAME snapshot shape, so the two surfaces cannot
- * drift apart again.
+ * WHAT #1181 CHANGED, and why most of this file moved: hadron_create_node no
+ * longer overwrites a LIVE loc at all — it refuses, matching the GraphQL
+ * createNode mutation and the runner tool. So "create over an existing live
+ * row" is no longer a reachable state, and the tests that drove #976 through it
+ * now drive it through the ONE path where create_node still lands on an
+ * existing row: RESURRECTING a soft-deleted node. The #976 guarantee is
+ * unchanged and still needs its coverage — the prior state must survive the
+ * write — it is simply only reachable over a tombstone now.
+ *
+ * Note this makes the original bug harder to hit rather than merely audited:
+ * #976 made a silent overwrite recoverable, #1181 stops most of it happening.
+ *
+ * The parity test remains the load-bearing one: it pins create-over-existing
+ * (now: resurrect) and hadron_update_node to the SAME snapshot shape, so the
+ * two surfaces cannot drift apart again.
  *
  * Test harness: `createTestableMcpServer` drives the real production closure
  * (auth + canWriteToMemory + Prisma) without an HTTP transport.
@@ -62,6 +75,16 @@ async function seedNode(loc: string, over: Record<string, unknown> = {}) {
   });
 }
 
+/**
+ * Seed a SOFT-DELETED node — since #1181 this is the only state in which
+ * hadron_create_node still lands on an existing row (a live one is refused),
+ * and therefore the only way to exercise #976's snapshot-the-prior-state
+ * guarantee through this surface.
+ */
+async function seedTombstone(loc: string, over: Record<string, unknown> = {}) {
+  return seedNode(loc, { deletedAt: new Date(), deletedBy: fx.admin.id, ...over });
+}
+
 beforeEach(async () => {
   await cleanDb(db);
 
@@ -84,9 +107,9 @@ beforeEach(async () => {
   fx = { admin, memory };
 });
 
-describe('hadron_create_node over an existing loc — revision history (#976)', () => {
+describe('hadron_create_node over an existing loc — revision history (#976/#1181)', () => {
   it('snapshots the overwritten content and bumps revSeq', async () => {
-    const node = await seedNode('ops:overwrite-me');
+    const node = await seedTombstone('ops:overwrite-me');
 
     const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_create_node', {
       urn: `hrn:node:${fx.memory.urn}:${node.loc}`,
@@ -114,7 +137,7 @@ describe('hadron_create_node over an existing loc — revision history (#976)', 
   });
 
   it('records the clobbered fields in `changes`, including those reset by omission', async () => {
-    const node = await seedNode('ops:clobber');
+    const node = await seedTombstone('ops:clobber');
 
     await createTestableMcpServer(adminAuth()).callToolText('hadron_create_node', {
       urn: `hrn:node:${fx.memory.urn}:${node.loc}`,
@@ -129,7 +152,7 @@ describe('hadron_create_node over an existing loc — revision history (#976)', 
   });
 
   it('stamps updatedBy on the overwrite', async () => {
-    const node = await seedNode('ops:stamped');
+    const node = await seedTombstone('ops:stamped');
 
     await createTestableMcpServer(adminAuth()).callToolText('hadron_create_node', {
       urn: `hrn:node:${fx.memory.urn}:${node.loc}`,
@@ -146,7 +169,7 @@ describe('hadron_create_node over an existing loc — revision history (#976)', 
     // different branch of the upsert than a root-level loc, and it must
     // snapshot on the same terms.
     await seedNode('ops');
-    const child = await seedNode('ops:nested:deep');
+    const child = await seedTombstone('ops:nested:deep');
 
     await createTestableMcpServer(adminAuth()).callToolText('hadron_create_node', {
       urn: `hrn:node:${fx.memory.urn}:${child.loc}`,
@@ -196,7 +219,7 @@ describe('hadron_create_node over an existing loc — revision history (#976)', 
     // objectType is captured by the snapshot and restored on revert, but was
     // missing from TRACKED_NODE_FIELDS — so this diff came back empty (PR #977
     // review, Copilot).
-    const node = await seedNode('ops:collection', { objectType: 'competitor' });
+    const node = await seedTombstone('ops:collection', { objectType: 'competitor' });
 
     await createTestableMcpServer(adminAuth()).callToolText('hadron_create_node', {
       urn: `hrn:node:${fx.memory.urn}:${node.loc}`,
@@ -212,13 +235,23 @@ describe('hadron_create_node over an existing loc — revision history (#976)', 
     expect(rev.changes).toContain('objectType');
   });
 
-  it('two concurrent writes to one free loc still leave a revision of the loser', async () => {
-    // The create-vs-overwrite decision used to come from a probe taken BEFORE
-    // the transaction: both calls saw no row, so both took the create branch
-    // and the second silently overwrote the first with no snapshot (PR #977
-    // review, both bots). Under the loc write lock the two serialize, so the
-    // second ALWAYS sees the first's committed row — this is deterministic now,
-    // not a race the test hopes to catch.
+  it('two concurrent writes to one free loc: one creates, the other is REFUSED', async () => {
+    // History of this case, because the guarantee has strengthened twice:
+    //
+    //   pre-#977  both calls probed BEFORE the transaction, both saw no row,
+    //             both took the create branch, and the second silently
+    //             overwrote the first with no snapshot (PR #977 review).
+    //   #977      the loc write lock serialized them, so the second always saw
+    //             the first's committed row and snapshotted it before
+    //             overwriting. Nothing was destroyed silently.
+    //   #1181     the second now sees a LIVE row and REFUSES. Nothing is
+    //             overwritten at all, so there is nothing to snapshot.
+    //
+    // This is the property #1178 wants from a citation allocator, and it is
+    // worth stating plainly because it is easy to assume otherwise: the
+    // (loc, memory_id) unique plus the loc write lock plus this gate already
+    // make concurrent minting mint-or-refuse. The loser is told, rather than
+    // quietly winning.
     const srv = createTestableMcpServer(adminAuth());
     const write = (content: string) =>
       srv.callToolText('hadron_create_node', {
@@ -227,26 +260,31 @@ describe('hadron_create_node over an existing loc — revision history (#976)', 
         content,
       });
 
-    await Promise.all([write('content from A'), write('content from B')]);
+    const results = await Promise.all([write('content from A'), write('content from B')]);
 
-    const row = await db.node.findFirst({
+    // Exactly one winner and one refusal — not two successes, not two refusals.
+    const refused = results.filter((r) => /already exists/i.test(r));
+    const saved = results.filter((r) => /Node saved/i.test(r));
+    expect(refused).toHaveLength(1);
+    expect(saved).toHaveLength(1);
+
+    const rows = await db.node.findMany({
       where: { memoryId: fx.memory.id, loc: 'ops:contested' },
     });
-    const revisions = await db.nodeRevision.findMany({ where: { nodeId: row!.id } });
-    expect(revisions).toHaveLength(1);
-    expect(row?.revSeq).toBe(1);
-    // Whichever landed first is the one preserved in history; the survivor is
-    // the other. Both are accounted for — nothing was destroyed silently.
-    const loser = revisions[0].content;
-    expect(['content from A', 'content from B']).toContain(loser);
-    expect(row?.content).not.toBe(loser);
+    expect(rows).toHaveLength(1);
+
+    // The winner's content stands, untouched, and no revision was cut because
+    // nothing was ever overwritten.
+    expect(['content from A', 'content from B']).toContain(rows[0].content);
+    expect(rows[0].revSeq).toBe(0);
+    expect(await db.nodeRevision.count({ where: { nodeId: rows[0].id } })).toBe(0);
   });
 
   it('produces the same snapshot shape as hadron_update_node (parity)', async () => {
     // Two identical nodes, the same edit applied through each surface. The
     // snapshots must agree on everything but their own identity/timestamps —
     // that equivalence is what stops the two surfaces drifting again.
-    const viaCreate = await seedNode('ops:parity-create');
+    const viaCreate = await seedTombstone('ops:parity-create');
     const viaUpdate = await seedNode('ops:parity-update');
 
     const srv = createTestableMcpServer(adminAuth());
