@@ -229,12 +229,47 @@ describe('createNode is create-only under concurrency (#1183)', () => {
     // (findings:prisma-upsert-not-race-safe) — so the loser surfaces a raw
     // P2002 rather than the typed NodeLocConflictError this contract promises,
     // and the outer catch only maps P2025.
-    const results = await Promise.all([create('rootloc', 'from A'), create('rootloc', 'from B')]);
+    // Forced overlap rather than scheduler luck (@copilot, PR #1184 round 5).
+    // A bare Promise.all lets caller A commit before caller B even reads, after
+    // which B sees the row and refuses for a reason that has nothing to do with
+    // the lock — so the test would pass with the root lock removed. Instead:
+    // start A, wait until it is genuinely BLOCKED on the loc key held below,
+    // and only then let it through. Both callers are therefore inside the
+    // window at once, which is the only state this lock exists for.
+    const loc = 'rootloc';
+
+    let signalHeld!: () => void;
+    const lockIsHeld = new Promise<void>((r) => {
+      signalHeld = r;
+    });
+    let signalRelease!: () => void;
+    const mayRelease = new Promise<void>((r) => {
+      signalRelease = r;
+    });
+
+    const holder = db.$transaction(
+      async (tx) => {
+        await lockLocForWrite(tx, memoryId, loc);
+        signalHeld();
+        await mayRelease;
+      },
+      { timeout: 20_000 },
+    );
+
+    await lockIsHeld;
+    const a = create(loc, 'from A');
+    await waitForAdvisoryWaiter(memoryId, loc);
+    const b = create(loc, 'from B');
+    // Both are now queued on the same key; releasing lets them run back to back.
+    signalRelease();
+    await holder;
+
+    const results = await Promise.all([a, b]);
 
     expect(results.filter((r) => r === 'OK')).toHaveLength(1);
     expect(results.filter((r) => r === 'ERR:NodeLocConflictError')).toHaveLength(1);
 
-    const rows = await db.node.findMany({ where: { memoryId, loc: 'rootloc' } });
+    const rows = await db.node.findMany({ where: { memoryId, loc } });
     expect(rows).toHaveLength(1);
     expect(rows[0].content).toBe(results[0] === 'OK' ? 'from A' : 'from B');
   });

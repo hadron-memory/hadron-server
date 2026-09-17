@@ -680,13 +680,19 @@ export async function writeNodeCore(
           // delete can miss it and orphan it under a now-missing prefix (#664,
           // Model A — see nodeSubtreeLock.ts). Hold advisory locks on the node's
           // ancestor path across the write; the delete side locks its own loc.
-          // A root-level loc has no ancestor to coordinate against, so it skips
-          // the transaction. READ COMMITTED (the default) is REQUIRED: the count
-          // on the delete side must see this row once our commit releases the
-          // lock, which a frozen SERIALIZABLE snapshot would not guarantee.
+          // READ COMMITTED (the default) is REQUIRED: the count on the delete
+          // side must see this row once our commit releases the lock, which a
+          // frozen SERIALIZABLE snapshot would not guarantee.
+          //
+          // EVERY write takes the transaction, root-level locs included — since
+          // #976 for the snapshot's sake, and since #1183 because a root-level
+          // loc takes its own write lock in there. (This paragraph used to say a
+          // root-level loc "skips the transaction"; that stopped being true at
+          // #976 and is doubly untrue now. @copilot, PR #1184 round 5.)
+          //
           // `satisfies` (not a `: NodeUpsertArgs` annotation) so the literal
-          // `include` type is preserved and both upsert calls below still infer
-          // the edge relations onto the result (`node.outgoingEdges`).
+          // `include` type is preserved and the upsert below still infers the
+          // edge relations onto the result (`node.outgoingEdges`).
           const upsertArgs = {
             where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
             create: {
