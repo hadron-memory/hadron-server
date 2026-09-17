@@ -12,10 +12,12 @@
  *
  *   1. the mode gate read `existing` BEFORE the transaction, so two callers
  *      both saw no row and both passed it;
- *   2. the create path took only `lockAncestorsForCreate` — no loc lock — and
- *      wrote with `tx.node.upsert`, so the loser did not collide on the
- *      (loc, memory_id) unique, it took the upsert's UPDATE branch and
- *      overwrote the winner's live row;
+ *   2. a ROOT-LEVEL loc took no lock at all — `lockAncestorsForCreate` locks
+ *      strict ancestors, and a root-level loc has none — and the write is a
+ *      `tx.node.upsert`, so the loser did not collide on the (loc, memory_id)
+ *      unique: it took the upsert's UPDATE branch and overwrote the winner.
+ *      (A NESTED loc was luckier than correct — two creates at one loc share
+ *      every ancestor, so they already serialized there.);
  *   3. the revision snapshot ran on `ctx.db` (not the transaction) from that
  *      same stale `existing`, so a raced overwrite was recorded NOWHERE — and
  *      a failed write could leave an orphan revision behind.
@@ -28,8 +30,9 @@
  * that contract was itself unenforced under load.
  *
  * These tests are deterministic AFTER the fix, not races hoping to catch
- * something: the loc write lock serializes the two calls, so the second always
- * observes the first's committed row. Before the fix they fail every run.
+ * something: the two calls serialize (on the ancestor path for a nested loc,
+ * on the loc's own lock at root level), so the second always observes the
+ * first's committed row. Before the fix they fail every run.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -164,10 +167,10 @@ describe('createNode is create-only under concurrency (#1183)', () => {
   });
 
   it('holds at a NESTED loc too, where the ancestor lock is also taken', async () => {
-    // A nested loc takes lockAncestorsForCreate as well as the loc lock, in
-    // root→leaf order. Pinned separately because the pre-fix path took ONLY
-    // the ancestor lock — so this is the case where a reader might assume the
-    // existing locking already covered it.
+    // A nested loc serializes on its ancestor path alone — it takes no loc
+    // lock, because two creates at one loc already share every ancestor. This
+    // case is what MEASURED that: removing the loc lock left it green, which
+    // is how the root-level case below was found to be the one that needs it.
     await create('cor', 'root');
     await create('cor:api', 'branch');
 
@@ -271,7 +274,10 @@ describe('createNode is create-only under concurrency (#1183)', () => {
     // then blocks at the lock. The tombstone is inserted while it waits, and
     // released; createNode then proceeds with authoritative = tombstone and
     // existing = null, which is exactly the window.
-    const loc = 'cor:api:060:01';
+    // ROOT-LEVEL on purpose: create takes the loc's own advisory lock only
+    // where there is no ancestor path to serialize on, so this is the loc
+    // shape whose write actually queues behind the holder below.
+    const loc = 'tombstone-window';
 
     let signalHeld!: () => void;
     const lockIsHeld = new Promise<void>((r) => {

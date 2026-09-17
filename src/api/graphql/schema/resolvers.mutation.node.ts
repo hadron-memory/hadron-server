@@ -706,12 +706,37 @@ export async function writeNodeCore(
           // otherwise overwritable here (Copilot on PR #1165, round 2).
           node = await ctx.db.$transaction(async (tx) => {
             await lockAncestorsForCreate(tx, input.memoryId, input.loc);
-            // #1183 — the loc's own write lock, acquired AFTER the ancestors so
-            // root→leaf ordering stays deadlock-free (same key as
-            // lockNodeForDelete and as the update branches above, which have
-            // always taken it). Without it this branch held no lock on the row
-            // it was about to write, so two creates could interleave freely.
-            await lockLocForWrite(tx, input.memoryId, input.loc);
+            // #1183 — serialize two creates at the SAME loc.
+            //
+            // A NESTED loc needs nothing extra: lockAncestorsForCreate above
+            // takes the ancestor path, and two creates at one loc share every
+            // ancestor, so they already serialize. (Measured, not assumed —
+            // removing the lock below left every nested-loc race test green.)
+            //
+            // A ROOT-LEVEL loc has no ancestors, so that helper takes NOTHING
+            // and the two creates are unserialized. Hence this, exactly there.
+            //
+            // Taking it ONLY at root level is deliberate, and the reason is
+            // deadlock rather than economy. Advisory keys are shared across
+            // lockAncestorsForCreate / lockLocForWrite / lockNodeForDelete /
+            // lockSourceForMove, and this repo has no single global acquisition
+            // order — merge takes target-then-source, move takes
+            // destination-ancestors-then-source, bulk sorts length-first. Any
+            // NEW multi-lock edge added here has to be consistent with all of
+            // them at once. An earlier revision of this fix took the loc lock
+            // unconditionally, which made a create hold `a` and wait for `a:b`;
+            // @copilot found it deadlocking against merge, and the obvious
+            // repair (sorting merge's endpoints) promptly inverted merge
+            // against MOVE. Restricting the lock to the root-level case means
+            // create's lock SET is unchanged for every nested loc and is a
+            // SINGLE lock at root level — and one lock cannot be half of a
+            // cycle. No new edge, so nothing to order against.
+            //
+            // Establishing one global order across create/merge/move/bulk is
+            // worth doing; it is not this PR, and it is filed.
+            if (ancestorLocs(input.loc).length === 0) {
+              await lockLocForWrite(tx, input.memoryId, input.loc);
+            }
 
             // #1183 — THE AUTHORITATIVE read. The `existing` probe far above is
             // taken before this lock, so under concurrency both callers see no
@@ -2503,54 +2528,10 @@ export const nodeMutations = {
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       await ctx.db.$transaction(async (tx) => {
-        // Lock-then-gate on both endpoints (spec 049 S4), acquired in a
-        // deterministic ROOT→LEAF order.
-        //
-        // #1183 — the order matters now, and did not before. lockLocForWrite
-        // and lockNodeForDelete share one advisory key space with
-        // lockAncestorsForCreate, and a create now takes ancestor-then-loc
-        // (`a`, then `a:b`). Merging an ancestor INTO its descendant is legal —
-        // the only identity guard here is source !== target — so a merge with
-        // source `a` and target `a:b` used to take target-then-source, i.e.
-        // `a:b` then `a`: the exact inverse. Create holding `a` waiting on
-        // `a:b`, merge holding `a:b` waiting on `a`, and Postgres aborts one
-        // with a deadlock.
-        //
-        // The comparator must be the SAME one every other multi-lock caller
-        // uses, not merely *a* consistent one (@copilot, PR #1184 round 2):
-        // lockAncestorsForCreateMany orders same-memory keys LENGTH-first with
-        // a lexical tiebreak (nodeSubtreeLock.ts), and length-first disagrees
-        // with plain lexical — on {`b`, `a:x`} lexical says `a:x` first while
-        // length says `b` first. Two callers each internally consistent but
-        // ordered differently still deadlock, so this mirrors that comparator
-        // exactly. Length-first is also what makes it root→leaf: a parent's loc
-        // is a prefix of its child's, hence shorter. Plain comparison rather
-        // than localeCompare, because the order must be stable across locales
-        // rather than human-friendly.
-        const endpoints = [
-          {
-            memoryId: target.memoryId,
-            loc: target.loc,
-            acquire: () => lockLocForWrite(tx, target.memoryId, target.loc),
-          },
-          ...(deleteSource || fields.has('EDGES')
-            ? [
-                {
-                  memoryId: source.memoryId,
-                  loc: source.loc,
-                  acquire: () => lockNodeForDelete(tx, source.memoryId, source.loc),
-                },
-              ]
-            : []),
-        ].sort((a, b) =>
-          a.memoryId === b.memoryId
-            ? a.loc.length - b.loc.length || (a.loc < b.loc ? -1 : a.loc > b.loc ? 1 : 0)
-            : a.memoryId < b.memoryId
-              ? -1
-              : 1,
-        );
-        for (const endpoint of endpoints) {
-          await endpoint.acquire();
+        // Lock-then-gate on both endpoints (spec 049 S4).
+        await lockLocForWrite(tx, target.memoryId, target.loc);
+        if (deleteSource || fields.has('EDGES')) {
+          await lockNodeForDelete(tx, source.memoryId, source.loc);
         }
         await createNodeRevision(
           tx,
