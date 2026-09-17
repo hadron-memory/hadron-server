@@ -1019,6 +1019,93 @@ async function resolveRelocationTarget(
   return { destMemoryId, destLoc };
 }
 
+/**
+ * The update half of the single-node write path: selector resolution (spec 039
+ * D2 — `id` XOR `memoryId` + `loc`) followed by `writeNodeCore` in update mode.
+ *
+ * SHARED, not copied (#1192). `updateNode` and `updateProtectedNode` differ in
+ * exactly one argument — the `owns` bypass — and everything else about an
+ * update is identical: the same selectors, the same NODE_NOT_FOUND shape, the
+ * same PK anchoring against a concurrent move. A second copy of this would be
+ * a predicate with two homes, and the one that is edited next is whichever the
+ * next author happens to open (PR #1190 shipped exactly that mistake with
+ * `locsOverlap`, twice).
+ *
+ * @param input  the caller's UpdateNodeInput, selectors included.
+ * @param ctx    request context.
+ * @param op     the mutation name, used in the two selector refusals so each
+ *               door names itself rather than the one it was extracted from.
+ * @param opts.owns  the protected-loc predicate source this caller OWNS.
+ *               Passed ONLY by `updateProtectedNode` (`'declared'`); omitted by
+ *               the generic surface, which is then refused at any protected
+ *               address. NOT a universal bypass — Channel protection stays in
+ *               force, so this cannot rewrite a chat message.
+ */
+async function updateNodeCore(
+  input: UpdateNodeInput,
+  ctx: Context,
+  op: string,
+  opts?: { owns?: ProtectedSource },
+) {
+  const { id, memoryId, loc, ...fields } = input;
+  const hasId = id != null && id !== '';
+  if (hasId && (memoryId != null || loc != null)) {
+    throw new GraphQLError(
+      `${op}: identify the node by \`id\` OR by \`memoryId\` + \`loc\`, not both. ` +
+        '(`loc`/`memoryId` are selectors, not writable fields — moveNode relocates.)',
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+  if (!hasId && (memoryId == null || loc == null)) {
+    throw new GraphQLError(
+      `${op}: supply \`id\` (PK or fully-qualified node URN) or both \`memoryId\` and \`loc\`.`,
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+
+  let targetMemoryId: string;
+  let targetLoc: string;
+  let targetNodeId: string | undefined;
+  if (hasId) {
+    // ID-or-URN dispatch (spec 007/022). A genuine miss → NODE_NOT_FOUND;
+    // a relative-form URN propagates as UrnNotQualifiedError.
+    try {
+      ({ id: targetNodeId } = await resolveNodeRef(ctx.db, id));
+    } catch (e) {
+      if (e instanceof NodeNotFoundError) {
+        throw new GraphQLError(`Node not found: "${id}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: id },
+        });
+      }
+      throw e;
+    }
+    const row = await ctx.db.node.findUnique({
+      where: { id: targetNodeId },
+      select: { memoryId: true, loc: true },
+    });
+    if (!row) {
+      throw new GraphQLError(`Node not found: "${id}"`, {
+        extensions: { code: 'NODE_NOT_FOUND', ref: id },
+      });
+    }
+    targetMemoryId = row.memoryId;
+    targetLoc = row.loc;
+  } else {
+    // Pass the raw ref through — writeNodeCore's own resolveMemoryRef
+    // handles ID-or-URN dispatch (no need to resolve twice).
+    targetMemoryId = memoryId as string;
+    targetLoc = loc as string;
+  }
+
+  // The PK anchors the write on the id-selector path so a concurrent
+  // move (which frees the loc for reuse) can't make the loc-keyed
+  // write hit a different node.
+  return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
+    targetNodeId,
+    owns: opts?.owns,
+  });
+}
+
 export const nodeMutations = {
     // Create a single node (spec 039 Phase 0 D1/D4). Create-only: a live
     // node at (memoryId, loc) rejects with NodeLocConflictError; a
@@ -1054,67 +1141,42 @@ export const nodeMutations = {
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
     // never moves. All content fields preserve-on-omit.
-    updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) => {
-      const { id, memoryId, loc, ...fields } = input;
-      const hasId = id != null && id !== '';
-      if (hasId && (memoryId != null || loc != null)) {
-        throw new GraphQLError(
-          'updateNode: identify the node by `id` OR by `memoryId` + `loc`, not both. ' +
-            '(`loc`/`memoryId` are selectors, not writable fields — moveNode relocates.)',
-          { extensions: { code: 'BAD_USER_INPUT' } },
-        );
-      }
-      if (!hasId && (memoryId == null || loc == null)) {
-        throw new GraphQLError(
-          'updateNode: supply `id` (PK or fully-qualified node URN) or both `memoryId` and `loc`.',
-          { extensions: { code: 'BAD_USER_INPUT' } },
-        );
-      }
+    updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
+      updateNodeCore(input, ctx, 'updateNode'),
 
-      let targetMemoryId: string;
-      let targetLoc: string;
-      let targetNodeId: string | undefined;
-      if (hasId) {
-        // ID-or-URN dispatch (spec 007/022). A genuine miss → NODE_NOT_FOUND;
-        // a relative-form URN propagates as UrnNotQualifiedError.
-        try {
-          ({ id: targetNodeId } = await resolveNodeRef(ctx.db, id));
-        } catch (e) {
-          if (e instanceof NodeNotFoundError) {
-            throw new GraphQLError(`Node not found: "${id}"`, {
-              extensions: { code: 'NODE_NOT_FOUND', ref: id },
-            });
-          }
-          throw e;
-        }
-        const row = await ctx.db.node.findUnique({
-          where: { id: targetNodeId },
-          select: { memoryId: true, loc: true },
-        });
-        if (!row) {
-          throw new GraphQLError(`Node not found: "${id}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: id },
-          });
-        }
-        targetMemoryId = row.memoryId;
-        targetLoc = row.loc;
-      } else {
-        // Pass the raw ref through — writeNodeCore's own resolveMemoryRef
-        // handles ID-or-URN dispatch (no need to resolve twice).
-        targetMemoryId = memoryId as string;
-        targetLoc = loc as string;
-      }
-
-      // The PK anchors the write on the id-selector path so a concurrent
-      // move (which frees the loc for reuse) can't make the loc-keyed
-      // write hit a different node.
-      return writeNodeCore(
-        { ...fields, memoryId: targetMemoryId, loc: targetLoc },
-        ctx,
-        'update',
-        targetNodeId ? { targetNodeId } : undefined,
-      );
-    },
+    // #1192 — the authoring door for EDITING a protected loc, and the
+    // update-side counterpart of authorProtectedNode above. Same posture:
+    // pure routing, validates nothing, deliberately not an MCP tool.
+    //
+    // It exists because the gate is not create-only. `writeNodeCore`'s update
+    // branches pass `owns` into `lockLocForWrite` exactly as the create branch
+    // does, so an ordinary updateNode at a declared loc is refused with
+    // LOC_PROTECTED and — before this — had nowhere to route. A declared
+    // corpus would have been append-only, and `hadron spec supersede` would
+    // have been refused halfway through its own two-step.
+    //
+    // TWO doors rather than one, mirroring createNode/updateNode. The
+    // alternative — `authorProtectedNode` taking an update input too — keeps
+    // one mutation name but needs a runtime XOR between two nullable inputs
+    // that the type system could have decided instead.
+    //
+    // And `upsert: true` is not a substitute, though NOT for the reason #1192
+    // gives. The issue says an edit routed through the create door "blanks
+    // every field the caller did not resend". MEASURED, it does not: Prisma
+    // leaves an undefined column untouched on the upsert's update branch
+    // exactly as it does on an update. What actually differs:
+    //
+    //   - an upsert CREATES at an empty loc (measured) where an update refuses
+    //     NODE_NOT_FOUND — so a mistyped citation becomes a real node at a
+    //     protected address instead of a refusal;
+    //   - `id` is a forced create-PK on CreateNodeInput and THE SELECTOR (PK
+    //     or node URN) on UpdateNodeInput, so edit-by-URN has no route at all;
+    //   - `name` is required on create, omit-to-preserve on update.
+    //
+    // The conclusion survives the correction; the stated reason did not, and
+    // it is restated here so the next reader inherits the measured version.
+    updateProtectedNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
+      updateNodeCore(input, ctx, 'updateProtectedNode', { owns: 'declared' }),
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
     // The supplied object's top-level keys overwrite the node's existing
