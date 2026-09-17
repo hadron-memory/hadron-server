@@ -4304,12 +4304,15 @@ export function createMcpServerInstance(
         throw e;
       }
 
-      // Spec 032 — hadron_create_node is upsert-semantically a fresh write: every
-      // call writes the full set of provided fields. If the caller is
-      // supplying an abstract, the hash is recomputed from the supplied
-      // content (FR-003). Null/empty content with an abstract yields null
-      // hash (FR-007). No abstract → no hash (FR-006). Hash is computed
-      // on plaintext content (FR-009).
+      // Spec 032 — every call that REACHES a write writes the full set of
+      // provided fields, so there is no field-level merge to reason about.
+      // Since #1181 the calls that reach one are a fresh create and a
+      // soft-deleted-node resurrection; a live loc returns before any write, so
+      // read "every call writes" as scoped to those two rather than as the old
+      // upsert-semantics claim. If the caller is supplying an abstract, the hash
+      // is recomputed from the supplied content (FR-003). Null/empty content
+      // with an abstract yields null hash (FR-007). No abstract → no hash
+      // (FR-006). Hash is computed on plaintext content (FR-009).
       const nextAbstractOriginHash: string | null =
         normalizedAbstract !== null ? computeContentHash(content ?? null) : null;
 
