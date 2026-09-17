@@ -443,7 +443,17 @@ export const orgQueries = {
         // Spec 048: `isVisible` was dropped with the auto-personal org. Every org
         // is now listable, so a platform admin may resolve any org by ref; a
         // non-admin non-member is still Forbidden (membership is the read gate).
-        if (!isAdmin) throw new Error('Forbidden');
+        //
+        // TYPED, matching the two sibling refusals in this file. A bare
+        // `Error` reaches the wire as INTERNAL_SERVER_ERROR, so every client
+        // has to decide between "you may not read this org" and "the API is
+        // broken" by reading prose — and the portal could not, which is why it
+        // mapped INTERNAL_SERVER_ERROR to 404 and told users their org did not
+        // exist whenever the backend was down (hadron-portal#843).
+        // conventions:the-error-code-is-the-contract-the-prose-is-not.
+        if (!isAdmin) {
+          throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+        }
       }
       return ctx.db.organization.findUnique({ where: { id: resolvedId }, include: ORG_INCLUDE });
     },
