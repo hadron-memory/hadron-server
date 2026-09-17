@@ -788,7 +788,13 @@ export async function writeNodeCore(
               ...upsertArgs,
               update: {
                 ...upsertArgs.update,
-                ...(authoritative?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
+                // create-ONLY, matching the `isResurrect` it corrects. Widening
+                // it to `upsert` would let an importer revive a soft-deleted
+                // node merely by writing to its loc — a behaviour change this
+                // fix has no business making (@copilot, PR #1184 round 4).
+                ...(mode === 'create' && authoritative?.deletedAt
+                  ? { deletedAt: null, deletedBy: null }
+                  : {}),
               } as Prisma.NodeUncheckedUpdateInput,
             });
           });

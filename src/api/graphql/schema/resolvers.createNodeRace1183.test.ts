@@ -55,21 +55,41 @@ function gqlCtx(): Context {
 }
 
 /**
- * Block until some backend is WAITING on an advisory lock — i.e. the call under
- * test has reached the loc lock and is queued behind the holder. This is the
+ * Block until a backend is waiting on THIS loc's advisory key — i.e. the call
+ * under test has reached the loc lock and queued behind the holder. The
  * deterministic barrier a `setTimeout` only approximates.
+ *
+ * Scoped to this database AND this exact key, not just "some ungranted
+ * advisory lock" (@copilot, PR #1184 round 4): vitest runs workers in parallel
+ * against per-worker database clones on ONE cluster, so an unscoped count sees
+ * other workers' waiters and can return before this create has reached the
+ * lock at all — which would let the test pass with the authoritative re-read
+ * removed. The same "green for the wrong reason" this whole file exists to
+ * avoid, imported via the harness instead of the assertion.
+ *
+ * `pg_advisory_xact_lock(int4, int4)` stores its two arguments as
+ * (classid, objid), so the key is matched with the same hashtext() pair the
+ * lock was taken with.
  */
-async function waitForAdvisoryWaiter(timeoutMs = 10_000): Promise<void> {
+async function waitForAdvisoryWaiter(
+  memId: string,
+  loc: string,
+  timeoutMs = 10_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
       SELECT count(*)::bigint AS count
       FROM pg_locks
-      WHERE locktype = 'advisory' AND NOT granted
+      WHERE locktype = 'advisory'
+        AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND classid = hashtext(${memId})::oid
+        AND objid = hashtext(${loc})::oid
     `;
     if (Number(count) > 0) return;
     if (Date.now() > deadline) {
-      throw new Error('timed out waiting for a blocked advisory-lock waiter');
+      throw new Error(`timed out waiting for a blocked advisory-lock waiter on ${loc}`);
     }
     await new Promise((r) => setTimeout(r, 10));
   }
@@ -321,7 +341,7 @@ describe('createNode is create-only under concurrency (#1183)', () => {
     // even with the authoritative re-read removed — green for the wrong reason
     // on the very defect it exists to catch. So wait for the real thing: an
     // UNGRANTED advisory lock, which is createNode blocked on this loc's key.
-    await waitForAdvisoryWaiter();
+    await waitForAdvisoryWaiter(memoryId, loc);
 
     signalRelease();
     await holder;
