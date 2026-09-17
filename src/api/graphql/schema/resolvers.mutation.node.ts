@@ -750,7 +750,22 @@ export async function writeNodeCore(
               });
             }
 
-            return tx.node.upsert(upsertArgs);
+            // #1183 — resurrect from the AUTHORITATIVE row, not the stale
+            // probe. `updateExtras` above was built from `existing`, which may
+            // have seen nothing while another caller created AND soft-deleted
+            // this loc before we took the lock. The gate lets a tombstone
+            // through by design, so without this override the upsert would
+            // write the new fields and leave `deletedAt` set — the "worst of
+            // both worlds" #543 exists to prevent, reachable again through the
+            // window this transaction was added to close. The MCP path already
+            // overrides the same way (src/mcp/server.ts).
+            return tx.node.upsert({
+              ...upsertArgs,
+              update: {
+                ...upsertArgs.update,
+                ...(authoritative?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
+              } as Prisma.NodeUncheckedUpdateInput,
+            });
           });
         }
       } catch (e) {
@@ -2488,10 +2503,53 @@ export const nodeMutations = {
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       await ctx.db.$transaction(async (tx) => {
-        // Lock-then-gate on both endpoints (spec 049 S4).
-        await lockLocForWrite(tx, target.memoryId, target.loc);
-        if (deleteSource || fields.has('EDGES')) {
-          await lockNodeForDelete(tx, source.memoryId, source.loc);
+        // Lock-then-gate on both endpoints (spec 049 S4), acquired in a
+        // deterministic ROOT→LEAF order.
+        //
+        // #1183 — the order matters now, and did not before. lockLocForWrite
+        // and lockNodeForDelete share one advisory key space with
+        // lockAncestorsForCreate, and a create now takes ancestor-then-loc
+        // (`a`, then `a:b`). Merging an ancestor INTO its descendant is legal —
+        // the only identity guard here is source !== target — so a merge with
+        // source `a` and target `a:b` used to take target-then-source, i.e.
+        // `a:b` then `a`: the exact inverse. Create holding `a` waiting on
+        // `a:b`, merge holding `a:b` waiting on `a`, and Postgres aborts one
+        // with a deadlock.
+        //
+        // Sorting by loc fixes it because the `:` hierarchy already sorts
+        // ancestor-first ("a" < "a:b"), so this IS root→leaf for the
+        // overlapping case and an arbitrary-but-consistent order otherwise,
+        // which is all a deadlock-free protocol needs. Plain comparison rather
+        // than localeCompare: the order must be stable across locales, not
+        // human-friendly.
+        const endpoints = [
+          {
+            memoryId: target.memoryId,
+            loc: target.loc,
+            acquire: () => lockLocForWrite(tx, target.memoryId, target.loc),
+          },
+          ...(deleteSource || fields.has('EDGES')
+            ? [
+                {
+                  memoryId: source.memoryId,
+                  loc: source.loc,
+                  acquire: () => lockNodeForDelete(tx, source.memoryId, source.loc),
+                },
+              ]
+            : []),
+        ].sort((a, b) =>
+          a.memoryId === b.memoryId
+            ? a.loc < b.loc
+              ? -1
+              : a.loc > b.loc
+                ? 1
+                : 0
+            : a.memoryId < b.memoryId
+              ? -1
+              : 1,
+        );
+        for (const endpoint of endpoints) {
+          await endpoint.acquire();
         }
         await createNodeRevision(
           tx,

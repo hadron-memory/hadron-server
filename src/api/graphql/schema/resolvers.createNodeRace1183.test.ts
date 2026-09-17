@@ -37,6 +37,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -233,6 +234,70 @@ describe('createNode is create-only under concurrency (#1183)', () => {
     const revisions = await db.nodeRevision.findMany({ where: { nodeId: ghost.id } });
     expect(revisions).toHaveLength(1);
     expect(revisions[0].content).toBe('tombstoned content');
+  });
+
+  it('resurrects a tombstone that appeared AFTER the pre-transaction probe', async () => {
+    // @copilot on PR #1184. The gate lets a tombstone through by design, but
+    // `updateExtras` (which clears deletedAt/deletedBy) was built from the
+    // STALE probe. If that probe saw nothing while another caller created and
+    // soft-deleted the loc before we took the lock, the upsert would write the
+    // new fields and leave the row flagged deleted — the "worst of both
+    // worlds" #543 exists to prevent, reachable again through the very window
+    // this transaction was added to close.
+    //
+    // Forced, not hoped for: a holder transaction takes the loc's advisory
+    // lock FIRST, so the createNode below runs its probe (seeing nothing) and
+    // then blocks at the lock. The tombstone is inserted while it waits, and
+    // released; createNode then proceeds with authoritative = tombstone and
+    // existing = null, which is exactly the window.
+    const loc = 'cor:api:060:01';
+
+    let signalHeld!: () => void;
+    const lockIsHeld = new Promise<void>((r) => {
+      signalHeld = r;
+    });
+    let signalRelease!: () => void;
+    const mayRelease = new Promise<void>((r) => {
+      signalRelease = r;
+    });
+
+    const holder = db.$transaction(
+      async (tx) => {
+        await lockLocForWrite(tx, memoryId, loc);
+        signalHeld();
+        await mayRelease;
+        // Inserted INSIDE the holder, so the tombstone commits as the lock drops.
+        await tx.node.create({
+          data: {
+            id: generateId(),
+            memoryId,
+            loc,
+            name: 'Ghost',
+            nodeType: 'info',
+            tags: [],
+            content: 'tombstoned content',
+            deletedAt: new Date(),
+            deletedBy: adminId,
+          },
+        });
+      },
+      { timeout: 20_000 },
+    );
+
+    await lockIsHeld;
+    // createNode runs its probe (sees nothing) and then blocks at the lock.
+    const creating = create(loc, 'reborn content');
+    await new Promise((r) => setTimeout(r, 200));
+    signalRelease();
+    await holder;
+
+    expect(await creating).toBe('OK');
+
+    const row = await db.node.findFirst({ where: { memoryId, loc } });
+    // The whole point: NOT still flagged deleted.
+    expect(row?.deletedAt).toBeNull();
+    expect(row?.deletedBy).toBeNull();
+    expect(row?.content).toBe('reborn content');
   });
 
   it('a genuinely free loc still creates, concurrently with an unrelated one', async () => {
