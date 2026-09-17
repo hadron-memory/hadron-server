@@ -4253,6 +4253,12 @@ export function createMcpServerInstance(
         resolvedEdges = r.resolved;
       }
 
+      // A STALE read, kept for PAYLOAD PREPARATION only — never for a decision.
+      // It supplies the create-payload `id`, the auto-assigned `seq` for a new
+      // node, and the preserve-on-omit fallbacks for `objectType` / `properties`.
+      // It is read before the loc write lock is taken, so it may be out of date
+      // by the time anything is written; treat it as "what was probably there",
+      // not as the state of the row.
       const existing = await db.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
 
       // Issue #1181 — a LIVE node at (loc, memoryId) REFUSES rather than being
@@ -4264,14 +4270,19 @@ export function createMcpServerInstance(
       // the node at an address is still the same node — and the overwriting one
       // was the surface AGENTS drive, i.e. the callers least able to notice.
       //
-      // The gate itself is NOT here. It is inside the transaction below, under
-      // the loc's write lock, because `existing` is read before that lock and is
-      // therefore stale under concurrency — two racing calls both see no row.
-      // An early-out here would pass every test the real gate passes while
-      // silently doing nothing in the one case that matters, so it is
+      // That gate is NOT here, and no refusal short-circuits at this point: the
+      // handler enters the transaction below for a free loc and an occupied one
+      // alike, and the authoritative decision is a re-read taken there under the
+      // loc's write lock. `existing` cannot make it — being pre-lock, two racing
+      // calls both see no row. An early-out here would pass every test the real
+      // gate passes while doing nothing in the one case that matters, so it is
       // deliberately absent rather than kept as a "fast path": a redundant check
       // that no test can distinguish from the authoritative one is how the
       // authoritative one gets deleted later.
+      //
+      // To be explicit for anyone pruning: the probe above still earns its
+      // keep for the payload reasons listed on it. It is the GATE that is
+      // absent here, not the READ.
       //
       // Issue #543 — hadron_create_node resurrects a SOFT-DELETED node at the
       // target loc (the gate tests liveness, so a tombstone falls through).
@@ -4500,14 +4511,15 @@ export function createMcpServerInstance(
           await lockAncestorsForCreate(tx, memoryId, loc); // no-op at a root-level loc
           await lockLocForWrite(tx, memoryId, loc);
 
-          // #1181 — THE AUTHORITATIVE live-collision gate. The pre-transaction
-          // probe far above is an early-out for the ordinary case; it cannot be
-          // the decision, because it is read before this lock and two racing
-          // calls both see no row (the same staleness #977 fixed for the
-          // snapshot decision, for the same reason). Re-reading here, under the
-          // loc's own write lock, is what makes the refusal true: the second
-          // caller sees the first's committed row and is told, instead of
-          // overwriting it through the upsert's update branch.
+          // #1181 — THE AUTHORITATIVE live-collision gate, and the ONLY one.
+          // The pre-transaction `existing` probe far above is payload
+          // preparation, not a first line of defence: it is read before this
+          // lock, so two racing calls both see no row (the same staleness #977
+          // fixed for the snapshot decision, one line below, for the same
+          // reason). Re-reading here, under the loc's own write lock, is what
+          // makes the refusal true: the second caller sees the first's
+          // committed row and is told, instead of overwriting it through the
+          // upsert's update branch.
           //
           // This is what makes create-over-a-live-loc genuinely unreachable
           // rather than merely unlikely, and it is the property #1178 needs from
