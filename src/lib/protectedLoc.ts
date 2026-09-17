@@ -117,7 +117,14 @@ export async function protectedLocsIn(db: ChannelReader, memoryId: string): Prom
       name: memory?.name ?? 'this memory',
       source: 'declared',
       channelId: null,
-      owner: 'authorProtectedNode (the memory-specific authoring tool)',
+      // BOTH doors, because this one string is all a refused caller gets and
+      // the refusal does not know whether they were creating or editing
+      // (`assertLocWritable` is called with op 'write' from every path). Naming
+      // only the create door sent an authoring client that hit this while
+      // EDITING to a create/upsert mutation — wrong API, and the kind of
+      // confident wrong answer that costs more than no answer (@copilot, #1198).
+      owner:
+        'authorProtectedNode (create) / updateProtectedNode (edit) — the memory-specific authoring tools',
     });
   }
   return out;
@@ -148,7 +155,7 @@ export class LocProtectedError extends GraphQLError {
     super(
       channel.channelId
         ? `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
-        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. Use that tool; the generic node surface does not reach it.`,
+        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. Use ${channel.owner}; the generic node surface does not reach it.`,
       {
         extensions: {
           code: 'LOC_PROTECTED',

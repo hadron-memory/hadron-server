@@ -750,9 +750,30 @@ export async function writeNodeCore(
           // and this write. updateMany because a unique `where` can't carry
           // the extra predicate; the row is then re-read for the include
           // shape.
+          // The ADDRESS and LIVENESS travel in the write's own predicate, not
+          // only in the re-check above it (@copilot, PR #1198). A check inside
+          // this transaction is not atomic with the statement after it: a
+          // relocation that does NOT take our lock — `mergeMemoryGraph` moves
+          // rows with a bulk `updateMany` on memoryId, taking none — can commit
+          // in between, and the write would land at the new address with
+          // authorization, schema and `owns` all decided for the old one.
+          // Carrying the predicate here closes that window instead of narrowing
+          // it; the re-check survives because it produces the accurate typed
+          // error, while this produces the correctness.
           const guardWhere: Prisma.NodeWhereInput = opts?.targetNodeId
-            ? { id: opts.targetNodeId, revSeq: claimedRevNo }
-            : { loc: input.loc, memoryId: input.memoryId, revSeq: claimedRevNo };
+            ? {
+                id: opts.targetNodeId,
+                revSeq: claimedRevNo,
+                memoryId: input.memoryId,
+                loc: input.loc,
+                deletedAt: null,
+              }
+            : {
+                loc: input.loc,
+                memoryId: input.memoryId,
+                revSeq: claimedRevNo,
+                deletedAt: null,
+              };
           // Spec 049 S4: the write holds the address lock, and the
           // protected-loc gate runs under it — the early check above is the
           // fast typed refusal, this is the authoritative one (a Channel can
@@ -787,7 +808,13 @@ export async function writeNodeCore(
             include,
           });
         } else if (mode === 'update') {
-          // Same lock-then-gate discipline as the guarded branch above.
+          // Same lock-then-gate discipline as the guarded branch above, and the
+          // same reason for the extra `where` terms: the re-check is not atomic
+          // with this statement against a relocator that takes no lock, so the
+          // address and liveness ride in the write's own predicate. Prisma's
+          // extended-where-unique (5.0+) is what lets a unique `update` carry
+          // them; a no-match raises P2025, which the catch below maps to the
+          // typed NODE_NOT_FOUND.
           node = await ctx.db.$transaction(async (tx) => {
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
@@ -795,8 +822,16 @@ export async function writeNodeCore(
             await assertTargetStillWritable(tx);
             return tx.node.update({
               where: opts?.targetNodeId
-                ? { id: opts.targetNodeId }
-                : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+                ? {
+                    id: opts.targetNodeId,
+                    memoryId: input.memoryId,
+                    loc: input.loc,
+                    deletedAt: null,
+                  }
+                : {
+                    loc_memoryId: { loc: input.loc, memoryId: input.memoryId },
+                    deletedAt: null,
+                  },
               data: updatePayload,
               include,
             });
