@@ -1,6 +1,10 @@
 import { createDecipheriv } from 'crypto';
 // Spec 049 S4 — a Channel's address is skipped and reported, never overwritten from git.
-import { protectedLocsIn, protectedLocCovers } from '../../lib/protectedLoc.js';
+import {
+  protectedLocsIn,
+  protectedLocCovers,
+  protectedDeletionFilter,
+} from '../../lib/protectedLoc.js';
 import { generateId } from '../../lib/id.js';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -320,19 +324,23 @@ export const syncGraphFromGithub = async (
       // Spec 049 S4: never delete a row under (or above) a Channel's address,
       // whether it was skipped this run or was git-owned before the Channel
       // existed — the reservation outlives the mirror.
-      const protectedLocClauses: Prisma.NodeWhereInput[] = protectedLocs.flatMap((p) => [
-        { loc: p.loc },
-        { loc: { startsWith: `${p.loc}:` } },
-        ...(ancestorLocs(p.loc).length ? [{ loc: { in: ancestorLocs(p.loc) } }] : []),
-      ]);
-      await tx.node.deleteMany({
-        where: {
-          ownerRepo,
-          memoryId: graph.id,
-          id: { notIn: [...upsertedIds, ...protectedRowIds] },
-          ...(protectedLocClauses.length ? { NOT: { OR: protectedLocClauses } } : {}),
-        },
-      });
+      // Built by the shared helper, NOT here: a hand-rolled clause list missed
+      // the whole-memory wildcard twice (@copilot, PR #1190) — `loc = '*'`
+      // matches nothing, so the NOT excluded nothing and this cleanup deleted
+      // the very rows the declaration exists to preserve.
+      const deletionFilter = protectedDeletionFilter(protectedLocs);
+      if (!deletionFilter.wholeMemory) {
+        await tx.node.deleteMany({
+          where: {
+            ownerRepo,
+            memoryId: graph.id,
+            id: { notIn: [...upsertedIds, ...protectedRowIds] },
+            ...(deletionFilter.notClauses.length
+              ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
+              : {}),
+          },
+        });
+      }
 
       for (const edge of edges) {
         // Resolve endpoints through the remaps: the source is always a file

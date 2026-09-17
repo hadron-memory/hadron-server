@@ -5,6 +5,7 @@ import {
   assertLocWritable,
   protectedLocsIn,
   protectedLocCovers,
+  protectedDeletionFilter,
   type ProtectedLoc,
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
@@ -2856,7 +2857,25 @@ export const nodeMutations = {
           nodes.map((n) => n.loc).filter((l): l is string => typeof l === 'string' && l !== ''),
         );
 
-        await tx.node.deleteMany({ where: { ownerRepo, memoryId: resolvedMemoryId } });
+        // #1180 — this deletes by ownerRepo, NOT by the locs it was handed, so
+        // the lock helper above (which only sees INCOMING locs) protects
+        // nothing on the way out: a payload containing no protected loc would
+        // still delete existing protected rows (@copilot, PR #1190). Route
+        // through the shared filter rather than rebuilding the predicate.
+        const replaceFilter = protectedDeletionFilter(
+          await protectedLocsIn(tx, resolvedMemoryId),
+        );
+        if (!replaceFilter.wholeMemory) {
+          await tx.node.deleteMany({
+            where: {
+              ownerRepo,
+              memoryId: resolvedMemoryId,
+              ...(replaceFilter.notClauses.length
+                ? { NOT: { OR: replaceFilter.notClauses as Prisma.NodeWhereInput[] } }
+                : {}),
+            },
+          });
+        }
 
         for (const input of nodes) {
           // #725 — normalize an empty objectType to null, then enforce the schema.

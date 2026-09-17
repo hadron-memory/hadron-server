@@ -212,3 +212,42 @@ export async function partitionProtected(
   }
   return { allowed, refused };
 }
+
+/** The strict ancestors of a loc, root→leaf. Local copy to keep this module dependency-free. */
+function ancestorsOf(loc: string): string[] {
+  const parts = loc.split(':');
+  return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join(':'));
+}
+
+/**
+ * The exclusion a DELETING bulk surface must apply so it never removes a
+ * protected row — git-sync cleanup and `replaceSubtree` both delete by
+ * `ownerRepo`, not by the locs they were handed, so checking the INCOMING locs
+ * protects nothing on the way out.
+ *
+ * THE WHOLE POINT OF THIS LIVING HERE: the wildcard has now been missed twice
+ * by consumers building their own clauses — `loc = '*'` and
+ * `startsWith '*:'` match nothing, so a memory declared wholly protected had
+ * its rows deleted by the very query meant to spare them (@copilot, PR #1190,
+ * rounds 1 and 2). Ask this function; do not rebuild the predicate.
+ *
+ *   - `wholeMemory: true`  ⇒ delete NOTHING in this memory.
+ *   - otherwise `notClauses` ⇒ pass as `NOT: { OR: notClauses }`.
+ */
+export function protectedDeletionFilter(protectedLocs: ProtectedLoc[]): {
+  wholeMemory: boolean;
+  notClauses: Array<{ loc: string } | { loc: { startsWith: string } } | { loc: { in: string[] } }>;
+} {
+  if (protectedLocs.some((p) => p.loc === PROTECT_WHOLE_MEMORY)) {
+    return { wholeMemory: true, notClauses: [] };
+  }
+  const notClauses = protectedLocs.flatMap((p) => {
+    const ancestors = ancestorsOf(p.loc);
+    return [
+      { loc: p.loc },
+      { loc: { startsWith: `${p.loc}:` } },
+      ...(ancestors.length ? [{ loc: { in: ancestors } }] : []),
+    ];
+  });
+  return { wholeMemory: false, notClauses };
+}

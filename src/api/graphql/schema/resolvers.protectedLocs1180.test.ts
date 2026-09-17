@@ -233,6 +233,83 @@ describe('authorProtectedNode — the door (#1180)', () => {
     ).toBe(0);
   });
 
+  it('a bulk replaceSubtree cannot DELETE protected rows it was not handed', async () => {
+    // @copilot, PR #1190 round 2. replaceSubtree deletes by ownerRepo, not by
+    // the locs it receives — so the lock helper (which only sees INCOMING locs)
+    // protects nothing on the way out. A payload containing no protected loc
+    // would still wipe existing protected rows.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        loc: 'review:keep-me',
+        name: 'Protected',
+        tags: [],
+        ownerRepo: 'acme/repo',
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        loc: 'notes:replace-me',
+        name: 'Ordinary',
+        tags: [],
+        ownerRepo: 'acme/repo',
+      },
+    });
+
+    await protect(['review']);
+
+    await resolvers.Mutation.replaceSubtree(
+      {},
+      {
+        memoryId,
+        ownerRepo: 'acme/repo',
+        nodes: [{ memoryId, loc: 'notes:fresh', name: 'Fresh' }],
+        edges: [],
+      } as never,
+      ctx(),
+    );
+
+    // The protected row survives a replacement that never mentioned it...
+    expect(await db.node.findFirst({ where: { memoryId, loc: 'review:keep-me' } })).not.toBeNull();
+    // ...and the ordinary one is still replaced, so this is not a no-op.
+    expect(await db.node.findFirst({ where: { memoryId, loc: 'notes:replace-me' } })).toBeNull();
+    expect(await db.node.findFirst({ where: { memoryId, loc: 'notes:fresh' } })).not.toBeNull();
+  });
+
+  it('a WHOLLY protected memory loses nothing to a bulk delete', async () => {
+    // The `*` branch of protectedDeletionFilter, which a mutation showed was
+    // otherwise unguarded. It is the branch git-sync cleanup depends on too —
+    // that path is far harder to drive, and this exercises the same code.
+    //
+    // Why it needs its own case: the non-wildcard path builds NOT-clauses from
+    // the literal loc, and `loc = '*'` / startsWith `'*:'` match nothing — so
+    // without the branch the exclusion is empty and the delete takes the whole
+    // memory, which is the exact inversion of what the declaration asked for.
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        loc: 'cor:api:010:01',
+        name: 'A cited rule',
+        tags: [],
+        ownerRepo: 'acme/repo',
+      },
+    });
+
+    await protect(['*']);
+
+    await resolvers.Mutation.replaceSubtree(
+      {},
+      { memoryId, ownerRepo: 'acme/repo', nodes: [], edges: [] } as never,
+      ctx(),
+    );
+
+    expect(await db.node.findFirst({ where: { memoryId, loc: 'cor:api:010:01' } })).not.toBeNull();
+  });
+
   it('is NOT exposed as an MCP tool — that is what keeps agents on the refused path', async () => {
     // The protection is a guardrail, and this is the mechanism that makes the
     // guardrail effective rather than decorative: an agent's node surface is
