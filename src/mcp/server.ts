@@ -5192,23 +5192,34 @@ export function createMcpServerInstance(
    * governed node can be RETIRED through the door that owns it. Absent from the
    * create args on purpose — there the tool is the statement of intent.
    */
-  const governedUpdateArgs = {
+  //
+  // PER KIND, not shared (@copilot, PR #1203). A single arg set carrying both
+  // signals reads as if both are actionable on both tools, and they are not:
+  // `isRunnable` through the review door is refused by the gate every time,
+  // because the review door owns the review kind and not the task kind. A
+  // description that promises an argument the gate always refuses is worse than
+  // no argument.
+  const taskUpdateArgs = {
     ...governedDoorArgs,
     isRunnable: z
       .boolean()
       .optional()
-      .describe('Set false to RETIRE this task — it stops being runnable. Omit to preserve. Only this door may change it; the generic surface is refused, because clearing the signal is how a governed node is un-governed.'),
+      .describe('Set false to RETIRE this task — it stops being runnable. Omit to preserve. This door is the only way to change it: the generic surface is refused, because clearing the signal is how a governed node is un-governed.'),
+  };
+
+  const reviewUpdateArgs = {
+    ...governedDoorArgs,
     role: z
       .string()
       .nullable()
       .optional()
-      .describe('Set null to RETIRE this node from its governed kind. Omit to preserve. Only this door may change it.'),
+      .describe('Set null to RETIRE this node from the review kind. Omit to preserve. This door is the only way to change it. Setting it to another GOVERNED value ("spec") is refused — that kind has its own door.'),
   };
 
   server.tool(
     'hadron_update_task',
     'Edit an existing RUNNABLE node. Needed because `hadron_update_node` refuses ANY edit whose result is still a runnable node — including one that changes only prose — so that a procedure the platform executes cannot be rewritten through the generic surface. Omitted fields are preserved. Pass isRunnable: false to RETIRE the task.',
-    governedUpdateArgs,
+    taskUpdateArgs,
     async (args) => callGovernedDoor('task', 'update', args),
   );
 
@@ -5222,7 +5233,7 @@ export function createMcpServerInstance(
   server.tool(
     'hadron_update_review',
     'Edit an existing REVIEW node. Needed because `hadron_update_node` refuses any edit whose result is still a review node — a safety check must not be rewritable through the generic surface. Omitted fields are preserved. Pass role: null to RETIRE the node from the review kind.',
-    governedUpdateArgs,
+    reviewUpdateArgs,
     async (args) => callGovernedDoor('review', 'update', args),
   );
 

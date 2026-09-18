@@ -625,3 +625,50 @@ describe('refusal ORDER — the remedy has to be one the caller can follow (@cop
     expect(await genericCreate({ loc: 'o:3', name: 'revived' })).toBe('ERR:ROLE_GOVERNED');
   });
 });
+
+describe('the refusal says WHICH way the write touched governance (@copilot)', () => {
+  // The message said a write "would produce" a governed node even when it was
+  // CLEARING one — plainly wrong for `updateNode(role: null)`, where the result
+  // is explicitly not a review. The gate went before-union-after and the
+  // sentence did not follow it.
+  async function refusal(p: Promise<unknown>) {
+    try {
+      await p;
+      throw new Error('expected a refusal');
+    } catch (e) {
+      return e as { message: string; extensions?: { refusal?: string } };
+    }
+  }
+
+  it('PRODUCES — a generic write that would create governance', async () => {
+    const e = await refusal(
+      resolvers.Mutation.createNode(
+        {},
+        { input: { memoryId, loc: 'p:1', name: 'n', role: 'review' } } as never,
+        ctx(),
+      ),
+    );
+    expect(e.extensions?.refusal).toBe('produces');
+    expect(e.message).toContain('would produce');
+  });
+
+  it('REMOVES — a generic write that would un-govern', async () => {
+    expect(await door('createReviewNode', { loc: 'p:2', name: 'check', role: 'review' })).toBe('OK');
+    const e = await refusal(
+      resolvers.Mutation.updateNode({}, { input: { memoryId, loc: 'p:2', role: null } } as never, ctx()),
+    );
+    expect(e.extensions?.refusal).toBe('removes');
+    expect(e.message).toContain('un-governing');
+    expect(e.message).not.toContain('would produce');
+  });
+
+  it('EDITS — a generic write against a node that stays governed', async () => {
+    expect(await door('createReviewNode', { loc: 'p:3', name: 'check', role: 'review' })).toBe('OK');
+    const e = await refusal(
+      resolvers.Mutation.updateNode({}, { input: { memoryId, loc: 'p:3', name: 'x' } } as never, ctx()),
+    );
+    expect(e.extensions?.refusal).toBe('edits');
+    expect(e.message).toContain('edits');
+    expect(e.message).not.toContain('would produce');
+  });
+});

@@ -139,27 +139,48 @@ export function governedKindsOf(state: GovernedState): GovernedKindEntry[] {
   );
 }
 
+/**
+ * WHY a write is refused, which is not one thing since the gate went
+ * before-union-after. Carried so the message can be accurate: a refusal that
+ * says a write "would produce" a governed node is plainly wrong when the write
+ * was CLEARING one (@copilot, PR #1203) — `updateNode(role: null)` leaves a
+ * node that is explicitly not a review, and being told otherwise sends the
+ * reader looking for a node state that does not exist.
+ */
+export type GovernedRefusal = 'produces' | 'removes' | 'edits';
+
 /** The typed refusal — `extensions.code: 'ROLE_GOVERNED'`, naming the door that can act. */
 export class RoleGovernedError extends GraphQLError {
   constructor(
     public readonly entry: GovernedKindEntry,
     public readonly op: 'create' | 'update',
+    public readonly refusal: GovernedRefusal = 'produces',
   ) {
     const door = entry.doors[op];
-    super(
+    const subject =
       entry.signal.field === 'isRunnable'
-        ? `This write would produce a RUNNABLE node, which only ${door} may ${op}. Authoring something the platform will execute is not the same act as writing prose; the generic node surface does not reach it.`
-        : `This write would produce a node with role "${entry.signal.value}", which only ${door} may ${op}. The generic node surface does not reach it.`,
-      {
-        extensions: {
-          code: 'ROLE_GOVERNED',
-          kind: entry.kind,
-          strength: entry.strength,
-          door,
-          op,
-        },
+        ? 'a RUNNABLE node'
+        : `a node with role "${entry.signal.value}"`;
+    const act =
+      refusal === 'produces'
+        ? `This write would produce ${subject}`
+        : refusal === 'removes'
+          ? `This write would REMOVE the marker that makes this ${subject} — un-governing it`
+          : `This write edits ${subject}`;
+    const tail =
+      entry.signal.field === 'isRunnable'
+        ? 'Authoring or retiring something the platform will execute is not the same act as writing prose; the generic node surface does not reach it.'
+        : 'The generic node surface does not reach it.';
+    super(`${act}, which only ${door} may ${op}. ${tail}`, {
+      extensions: {
+        code: 'ROLE_GOVERNED',
+        kind: entry.kind,
+        strength: entry.strength,
+        door,
+        op,
+        refusal,
       },
-    );
+    });
     this.name = 'RoleGovernedError';
   }
 }
@@ -212,12 +233,20 @@ export function assertGovernedWrite(
   // Requiring the kind's door to REMOVE its own marker is a routing rule, so it
   // belongs here. WHO may then do it through that door is #1202's question and
   // is deliberately still unanswered.
+  const before = new Set(governedKindsOf(prior ?? {}).map((e) => e.kind));
+  const after = new Set(governedKindsOf(next).map((e) => e.kind));
   const affected = new Map<GovernedKind, GovernedKindEntry>();
-  for (const e of governedKindsOf(prior ?? {})) affected.set(e.kind, e);
-  for (const e of governedKindsOf(next)) affected.set(e.kind, e);
+  for (const e of [...governedKindsOf(prior ?? {}), ...governedKindsOf(next)]) {
+    affected.set(e.kind, e);
+  }
   for (const entry of affected.values()) {
     if (entry.kind === owns) continue;
-    throw new RoleGovernedError(entry, op);
+    const refusal: GovernedRefusal = !before.has(entry.kind)
+      ? 'produces'
+      : !after.has(entry.kind)
+        ? 'removes'
+        : 'edits';
+    throw new RoleGovernedError(entry, op, refusal);
   }
 }
 
