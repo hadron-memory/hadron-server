@@ -386,3 +386,91 @@ describe('mergedGovernedState — omit preserves, null clears (D4)', () => {
     expect(mergedGovernedState(null, {})).toEqual({ role: null, isRunnable: null });
   });
 });
+
+describe('the bypasses review found — each was a way in the gate did not cover', () => {
+  it('RESURRECTION: a soft-deleted governed node cannot be revived by a generic create', async () => {
+    // @codex P1. `createNode` resurrects a soft-deleted row at the target loc
+    // and PRESERVES the fields the caller omits — so a create is not always a
+    // create. Soft-delete a review, create at the same loc naming neither
+    // signal, and an input-only check saw an ordinary create while the write
+    // revived a still-governed node with fresh content.
+    //
+    // The fix is to merge on EVERY mode rather than special-case the tombstone:
+    // with no row the merge is the input, and a live row is refused by the mode
+    // gate anyway.
+    expect(await door('createReviewNode', { loc: 'z:1', name: 'check', role: 'review' })).toBe('OK');
+    const id = (await db.node.findFirstOrThrow({ where: { memoryId, loc: 'z:1' } })).id;
+    await db.node.update({ where: { id }, data: { deletedAt: new Date() } });
+
+    expect(await genericCreate({ loc: 'z:1', name: 'revived', content: 'mine' })).toBe(
+      'ERR:ROLE_GOVERNED',
+    );
+
+    const row = await db.node.findFirstOrThrow({ where: { id } });
+    expect(row.deletedAt).not.toBeNull();
+    expect(row.content).toBeNull();
+    expect(row.role).toBe('review');
+  });
+
+  it('...and the review door may still resurrect its own', async () => {
+    // The opposite failure: refusing every resurrection would satisfy the case
+    // above while making a soft-deleted review permanently unrecoverable.
+    expect(await door('createReviewNode', { loc: 'z:2', name: 'check', role: 'review' })).toBe('OK');
+    const id = (await db.node.findFirstOrThrow({ where: { memoryId, loc: 'z:2' } })).id;
+    await db.node.update({ where: { id }, data: { deletedAt: new Date() } });
+
+    expect(await door('createReviewNode', { loc: 'z:2', name: 'again', role: 'review' })).toBe('OK');
+    expect((await db.node.findFirstOrThrow({ where: { id } })).deletedAt).toBeNull();
+  });
+
+  it('BULK SEARCH-REPLACE skips governed nodes instead of rewriting them', async () => {
+    // @codex P1. searchReplaceInNodes writes with `tx.node.update` and never
+    // reached the gate, so hadron_replace_text could rewrite a review or a
+    // runnable task through a generic tool. Skipped rather than refused,
+    // matching how the Channel gate treats bulk paths — failing a whole batch
+    // on one governed row makes the tool unusable on any memory containing one.
+    expect(await genericCreate({ loc: 'y:1', name: 'ordinary', content: 'OLD here' })).toBe('OK');
+    expect(
+      await door('createReviewNode', { loc: 'y:2', name: 'check', role: 'review', content: 'OLD here' }),
+    ).toBe('OK');
+
+    await resolvers.Mutation.searchReplaceInNodes(
+      {},
+      { input: { oldText: 'OLD', newText: 'NEW', memoryIds: [memoryId], fields: ['content'] } } as never,
+      ctx(),
+    );
+
+    // The ordinary node changed...
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'y:1' } })).content).toContain(
+      'NEW',
+    );
+    // ...and the review did not. Asserting BOTH, because a no-op replace would
+    // satisfy the second alone.
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'y:2' } })).content).toContain(
+      'OLD',
+    );
+  });
+
+  it('a revision RESTORES the role it captured', async () => {
+    // @codex + @copilot. `role` was captured but not restored, so restoring a
+    // pre-review snapshot left the live node still marked as a review — the
+    // restore silently disagreeing with the revision it claims to reproduce.
+    expect(await genericCreate({ loc: 'x:1', name: 'plain' })).toBe('OK');
+    const id = (await db.node.findFirstOrThrow({ where: { memoryId, loc: 'x:1' } })).id;
+
+    // Become a review (through its door), which snapshots the pre-edit state.
+    expect(
+      await code(
+        (resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)
+          .updateReviewNode({}, { input: { id, role: 'review' } }, ctx()),
+      ),
+    ).toBe('OK');
+    expect((await db.node.findFirstOrThrow({ where: { id } })).role).toBe('review');
+
+    const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: id } });
+    expect(rev.role).toBeNull();
+
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: rev.id } as never, ctx());
+    expect((await db.node.findFirstOrThrow({ where: { id } })).role).toBeNull();
+  });
+});

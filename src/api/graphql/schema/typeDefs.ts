@@ -1285,6 +1285,8 @@ export const typeDefs = `#graphql
     data: JSON
     seq: Int
     isRunnable: Boolean
+    "#1201 — Node.role at capture time. In the curated subset because CLEARING a governed role is the escalation #1202 exists for: a history that cannot show the role cannot show the un-governing."
+    role: String
     llmModel: String
     aiAgent: String
     "The editing User id, when a user is known (#620). Use editedByUser for resolution."

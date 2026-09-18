@@ -356,6 +356,12 @@ export function restorableNodeFields(revision: {
     data: revision.data,
     seq: revision.seq,
     isRunnable: revision.isRunnable,
+    // #1201 (@codex + @copilot, PR #1203). Captured but not restored is the
+    // worst of both: restoring a pre-review snapshot would leave the live node
+    // still marked `role: 'review'`, so the restore silently disagrees with the
+    // revision it claims to reproduce. A field in the curated subset has to
+    // round-trip both ways or it is decoration.
+    role: revision.role,
     llmModel: revision.llmModel,
     aiAgent: revision.aiAgent,
   };

@@ -12,6 +12,7 @@ import {
 import {
   assertMayProduceGovernedNode,
   mergedGovernedState,
+  governedKindsOf,
   GOVERNED_KINDS,
   type GovernedKind,
 } from '../../../lib/governedRole.js';
@@ -376,10 +377,20 @@ export async function writeNodeCore(
       //
       // Runs BEFORE the mode gate so a caller reaching the wrong door is told
       // which door to use, rather than first being told the node does not exist.
+      //
+      // MERGED ON EVERY MODE, create included (@codex P1, PR #1203). A create
+      // is not always a create: `createNode` RESURRECTS a soft-deleted row at
+      // the target loc and PRESERVES the fields the caller omits. So
+      // soft-deleting a review and then creating at the same loc, naming
+      // neither signal, passed an input-only check and resurrected a
+      // still-governed node with fresh content — the resulting-state rule
+      // defeated by the one path where a create carries prior state.
+      //
+      // Merging unconditionally is also simpler than special-casing the
+      // tombstone: with no existing row the merge IS the input, and a LIVE row
+      // in create mode is refused by the mode gate below regardless.
       assertMayProduceGovernedNode(
-        mode === 'create'
-          ? { role: input.role ?? null, isRunnable: input.isRunnable ?? null }
-          : mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
+        mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
         mode === 'update' ? 'update' : 'create',
         opts?.ownsKind,
       );
@@ -809,12 +820,25 @@ export async function writeNodeCore(
           where: opts?.targetNodeId
             ? { id: opts.targetNodeId }
             : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-          select: { memoryId: true, loc: true, deletedAt: true },
+          select: { memoryId: true, loc: true, deletedAt: true, role: true, isRunnable: true },
         });
         // A row that vanished entirely is left to the write below, which maps
         // Prisma's P2025 to the typed NODE_NOT_FOUND. Refusing here would swap
         // one typed error for an identical one.
         if (!current) return;
+
+        // #1201 governed state, RE-CHECKED under the lock (@codex P2, PR #1203).
+        // The gate far above decides from an UNLOCKED read, so a kind door
+        // setting `role: 'review'` or `isRunnable: true` between that read and
+        // this transaction would leave a generic update rewriting a node that
+        // has since become governed. Address and liveness were already
+        // re-checked here; governance is the third thing that can change under
+        // the same window, and it is the one with teeth.
+        assertMayProduceGovernedNode(
+          mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
+          'update',
+          opts?.ownsKind,
+        );
 
         if (current.deletedAt) {
           // Deliberately the SAME shape the unlocked mode gate throws, because
@@ -1790,7 +1814,21 @@ export const nodeMutations = {
         }
       }
 
-      const rawNodes = [...nodeById.values()];
+      // #1201 — GOVERNED nodes are excluded from a bulk search-replace
+      // (@codex P1, PR #1203). This path writes with `tx.node.update` and never
+      // reached the gate, so `hadron_replace_text` could rewrite a review node
+      // or a runnable task through a generic tool — the exact bypass the gate
+      // exists to close, arriving through a surface that does not create nodes
+      // and so was not on the list of writers I checked.
+      //
+      // SKIPPED, not refused, matching how `partitionProtected` treats a
+      // Channel address on the bulk paths: failing a whole batch on one
+      // governed row makes the tool unusable on any memory that contains one,
+      // and a skip writes nothing, which is the safe direction. They simply do
+      // not appear in `nodesScanned`.
+      const rawNodes = [...nodeById.values()].filter(
+        (r) => governedKindsOf({ role: r.role, isRunnable: r.isRunnable }).length === 0,
+      );
 
       // ── Compute pass: replace on PLAINTEXT, validate, plan writes ──
       // All validation (empty name, abstract cap, SESSION_EXPIRED) happens here
