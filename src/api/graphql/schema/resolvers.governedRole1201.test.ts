@@ -135,9 +135,15 @@ describe('the generic surface is refused, per kind', () => {
   });
 
   it('refuses the TWO-STEP evasion: create unmarked, then mark', async () => {
-    // THE case the resulting-state rule exists for. Neither write declares a
-    // governed node; the pair produces one. A gate reading the input alone
-    // passes both.
+    // Worth having, but NOT for the reason I first wrote on it. I claimed this
+    // was "the case the resulting-state rule exists for" — a mutation making
+    // the gate read the INPUT instead of the merged state left this test GREEN
+    // and failed only the one below. Step 2 *does* declare the marker, so an
+    // input-reading gate catches it too.
+    //
+    // What this actually pins is that the second step is refused at all: the
+    // create being legal must not buy a later promotion. The resulting-state
+    // rule earns its keep on EXISTING governed nodes — the next case.
     expect(await genericCreate({ loc: 'c:1', name: 'n' })).toBe('OK');
     expect(await genericUpdate({ memoryId, loc: 'c:1', isRunnable: true })).toBe(
       'ERR:ROLE_GOVERNED',
@@ -150,10 +156,15 @@ describe('the generic surface is refused, per kind', () => {
   });
 
   it('refuses an edit to an ALREADY-governed node that touches neither signal', async () => {
-    // The result is still a review node, so the review door still owns it.
-    // Without this, a safety check is rewritable through the generic surface —
-    // which is the attack the review entry exists for.
-    expect(await door('authorReviewNode', { loc: 'd:1', name: 'check', role: 'review' })).toBe('OK');
+    // THE case the resulting-state rule exists for, established by mutation
+    // rather than asserted: making the gate read the input instead of the
+    // merged state fails HERE and nowhere else. The edit mentions neither
+    // signal, so an input-reading gate sees an ordinary write — while the
+    // result is still a review node.
+    //
+    // Which is the attack the review entry exists for: a safety check that can
+    // be rewritten through the generic surface is not a check.
+    expect(await door('createReviewNode', { loc: 'd:1', name: 'check', role: 'review' })).toBe('OK');
 
     expect(await genericUpdate({ memoryId, loc: 'd:1', name: 'tampered' })).toBe(
       'ERR:ROLE_GOVERNED',
@@ -168,9 +179,9 @@ describe('the generic surface is refused, per kind', () => {
 
 describe('the doors', () => {
   it('each writes its own kind where the generic surface is refused', async () => {
-    expect(await door('authorSpecNode', { loc: 'e:1', name: 'n', role: 'spec' })).toBe('OK');
-    expect(await door('authorReviewNode', { loc: 'e:2', name: 'n', role: 'review' })).toBe('OK');
-    expect(await door('authorTaskNode', { loc: 'e:3', name: 'n', isRunnable: true })).toBe('OK');
+    expect(await door('createSpecNode', { loc: 'e:1', name: 'n', role: 'spec' })).toBe('OK');
+    expect(await door('createReviewNode', { loc: 'e:2', name: 'n', role: 'review' })).toBe('OK');
+    expect(await door('createTaskNode', { loc: 'e:3', name: 'n', isRunnable: true })).toBe('OK');
 
     expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'e:1' } })).role).toBe('spec');
     expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'e:3' } })).isRunnable).toBe(
@@ -181,21 +192,21 @@ describe('the doors', () => {
   it('is exempt from its OWN kind only — never a universal bypass', async () => {
     // The #1190 P1 in its new clothes. A door that skipped the whole gate would
     // satisfy every "writes its own kind" assertion above.
-    expect(await door('authorSpecNode', { loc: 'f:1', name: 'n', role: 'review' })).toBe(
+    expect(await door('createSpecNode', { loc: 'f:1', name: 'n', role: 'review' })).toBe(
       'ERR:ROLE_GOVERNED',
     );
-    expect(await door('authorReviewNode', { loc: 'f:2', name: 'n', role: 'spec' })).toBe(
+    expect(await door('createReviewNode', { loc: 'f:2', name: 'n', role: 'spec' })).toBe(
       'ERR:ROLE_GOVERNED',
     );
     // And the sharpest pair: neither label door may mint something RUNNABLE.
-    expect(await door('authorSpecNode', { loc: 'f:3', name: 'n', isRunnable: true })).toBe(
+    expect(await door('createSpecNode', { loc: 'f:3', name: 'n', isRunnable: true })).toBe(
       'ERR:ROLE_GOVERNED',
     );
-    expect(await door('authorReviewNode', { loc: 'f:4', name: 'n', isRunnable: true })).toBe(
+    expect(await door('createReviewNode', { loc: 'f:4', name: 'n', isRunnable: true })).toBe(
       'ERR:ROLE_GOVERNED',
     );
     // ...nor may the task door mint a review.
-    expect(await door('authorTaskNode', { loc: 'f:5', name: 'n', role: 'review' })).toBe(
+    expect(await door('createTaskNode', { loc: 'f:5', name: 'n', role: 'review' })).toBe(
       'ERR:ROLE_GOVERNED',
     );
   });
@@ -204,16 +215,16 @@ describe('the doors', () => {
     // Governance is not exclusive, and the conservative reading is the safe
     // one: a caller must own every kind the result matches.
     expect(
-      await door('authorReviewNode', { loc: 'g:1', name: 'n', role: 'review', isRunnable: true }),
+      await door('createReviewNode', { loc: 'g:1', name: 'n', role: 'review', isRunnable: true }),
     ).toBe('ERR:ROLE_GOVERNED');
     expect(
-      await door('authorTaskNode', { loc: 'g:2', name: 'n', role: 'review', isRunnable: true }),
+      await door('createTaskNode', { loc: 'g:2', name: 'n', role: 'review', isRunnable: true }),
     ).toBe('ERR:ROLE_GOVERNED');
   });
 
   it('the update doors edit their own kind, and preserve on omit', async () => {
     expect(
-      await door('authorSpecNode', { loc: 'h:1', name: 'first', role: 'spec', content: 'BODY' }),
+      await door('createSpecNode', { loc: 'h:1', name: 'first', role: 'spec', content: 'BODY' }),
     ).toBe('OK');
 
     expect(
@@ -236,7 +247,7 @@ describe('the doors', () => {
     await expect(
       (
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>
-      ).authorSpecNode(
+      ).createSpecNode(
         {},
         { input: { memoryId, loc: 'i:1', name: 'n', role: 'spec' } },
         { db, roles: [], userId: outsider.id, clientId: `user:${outsider.id}` } as Context,
@@ -263,8 +274,8 @@ describe('the doors', () => {
       },
     });
 
-    for (const d of ['authorSpecNode', 'authorReviewNode', 'authorTaskNode']) {
-      const kind = d === 'authorTaskNode' ? { isRunnable: true } : { role: d === 'authorSpecNode' ? 'spec' : 'review' };
+    for (const d of ['createSpecNode', 'createReviewNode', 'createTaskNode']) {
+      const kind = d === 'createTaskNode' ? { isRunnable: true } : { role: d === 'createSpecNode' ? 'spec' : 'review' };
       expect(await door(d, { loc: 'chats:team:messages:0001', name: 'forged', ...kind })).toBe(
         'ERR:LOC_PROTECTED',
       );
@@ -276,17 +287,52 @@ describe('the doors', () => {
 });
 
 describe('the MCP surface — the threat this exists for', () => {
-  it('NO door is an MCP tool, asserted over the REGISTER', async () => {
-    // Per-door assertions are the shape where nobody writes the test for the
-    // door they forgot. Iterating the register means a kind added without its
-    // pin fails on arrival.
+  it('SPEC has no MCP tool, and task/review DO — the rule follows the threat', async () => {
+    // The absence rule was written for one threat: an agent reaching for the
+    // GENERIC tool by habit. That is still exactly right for spec, whose
+    // authoring surface is `hadron spec` in the CLI — so neither spec door
+    // appears here. It was wrong for the other two, and the register's own
+    // strength column says why:
+    //
+    //   - TASK's threat is a PRINCIPAL (#1202), not a tool. A door no
+    //     legitimate surface can reach does not mitigate it; it just removes
+    //     the ability to author tasks, which is how this platform's own task
+    //     corpus is written.
+    //   - REVIEW is a component of any task or run rather than a coding
+    //     convenience, so the agent doing the work must be able to author one.
+    //
+    // What still protects all three is unchanged and asserted elsewhere in this
+    // file: the GENERIC surface refuses, so producing a governed node takes a
+    // deliberate switch of tool.
     const mcpSource = await import('node:fs/promises').then((fs) =>
       fs.readFile(new URL('../../../mcp/server.ts', import.meta.url), 'utf8'),
     );
-    for (const entry of GOVERNED_KINDS) {
-      expect(mcpSource).not.toContain(entry.doors.create);
-      expect(mcpSource).not.toContain(entry.doors.update);
+    const spec = GOVERNED_KINDS.find((k) => k.kind === 'spec')!;
+    expect(mcpSource).not.toContain(spec.doors.create);
+    expect(mcpSource).not.toContain(spec.doors.update);
+
+    // ...and the two that DO have tools have all four of them. Driven off the
+    // register so a kind added without its tools fails here rather than
+    // shipping unreachable.
+    for (const kind of ['task', 'review'] as const) {
+      expect(mcpSource).toContain(`'hadron_create_${kind}'`);
+      expect(mcpSource).toContain(`'hadron_update_${kind}'`);
     }
+  });
+
+  it('the MCP doors set the governed signal themselves — the caller cannot disagree', async () => {
+    // The tool IS the statement of intent, so accepting `role` or `isRunnable`
+    // as an argument would let the two disagree — a node authored as one kind
+    // and labelled another. The signal is derived from the register entry.
+    const mcpSource = await import('node:fs/promises').then((fs) =>
+      fs.readFile(new URL('../../../mcp/server.ts', import.meta.url), 'utf8'),
+    );
+    const args = mcpSource.slice(
+      mcpSource.indexOf('const governedDoorArgs = {'),
+      mcpSource.indexOf('};', mcpSource.indexOf('const governedDoorArgs = {')),
+    );
+    expect(args).not.toContain('role:');
+    expect(args).not.toContain('isRunnable:');
   });
 
   it('hadron_create_node and hadron_update_node carry the gate themselves', async () => {

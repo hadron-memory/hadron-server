@@ -96,19 +96,19 @@ export const GOVERNED_KINDS: readonly GovernedKindEntry[] = [
     kind: 'task',
     signal: { field: 'isRunnable' },
     strength: 'capability',
-    doors: { create: 'authorTaskNode', update: 'updateTaskNode' },
+    doors: { create: 'createTaskNode', update: 'updateTaskNode' },
   },
   {
     kind: 'review',
     signal: { field: 'role', value: 'review' },
     strength: 'security',
-    doors: { create: 'authorReviewNode', update: 'updateReviewNode' },
+    doors: { create: 'createReviewNode', update: 'updateReviewNode' },
   },
   {
     kind: 'spec',
     signal: { field: 'role', value: 'spec' },
     strength: 'diligence',
-    doors: { create: 'authorSpecNode', update: 'updateSpecNode' },
+    doors: { create: 'createSpecNode', update: 'updateSpecNode' },
   },
 ] as const;
 

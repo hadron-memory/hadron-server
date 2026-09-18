@@ -205,7 +205,7 @@ export async function writeNodeCore(
     owns?: ProtectedSource;
     /**
      * #1201 — the GOVERNED KIND this caller is the door for. Passed only by a
-     * kind's own doors (`authorSpecNode` → `'spec'`, and so on); every generic
+     * kind's own doors (`createSpecNode` → `'spec'`, and so on); every generic
      * writer omits it and is refused when its write would PRODUCE that kind.
      *
      * Never a boolean, and never universal: a door exempts itself from its own

@@ -5,6 +5,7 @@ import {
   assertMayProduceGovernedNode,
   mergedGovernedState,
   RoleGovernedError,
+  GOVERNED_KINDS,
 } from '../lib/governedRole.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
@@ -5007,6 +5008,141 @@ export function createMcpServerInstance(
       // #322: surface the stable PK (immutable across move/rename).
       return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})`);
     },
+  );
+
+  // ── the GOVERNED-KIND doors: hadron_create_task / _review and their updates ──
+  //
+  // #1201. `hadron_create_node` and `hadron_update_node` REFUSE a write that
+  // would produce a governed node; these are how an agent produces one
+  // deliberately. They delegate to the kind's GraphQL door rather than
+  // reimplementing the write, so the exemption is decided server-side per kind
+  // and there is exactly one place it lives.
+  //
+  // WHY THESE ARE ON THE AGENT SURFACE AT ALL, since the doors were originally
+  // specified as absent from it. The absence rule was written for one threat —
+  // an agent reaching for the GENERIC tool by habit — and it is still exactly
+  // right for `spec`, whose authoring surface is `hadron spec` in the CLI and
+  // which therefore gets NO tool here. It is wrong for these two:
+  //
+  //   - TASK's threat is a PRINCIPAL, not a tool (#1202: a memory shared with
+  //     someone who authors a runnable node that reads the owner's data when
+  //     the OWNER runs it). A door no legitimate surface can reach does not
+  //     mitigate that; it just removes the ability to author tasks, which is
+  //     how this platform's own task corpus is written.
+  //   - REVIEW is now a component of any task or run rather than a coding
+  //     convenience (@Holger, 2026-09-18) — work results should be reviewed, so
+  //     the agent doing the work needs to be able to author the review.
+  //
+  // What still protects them is unchanged: the GENERIC surface refuses, so
+  // producing a governed node takes a deliberate switch of tool. These are that
+  // switch. The principal check lands on the same doors in #1202.
+  //
+  // Named `create`/`update`, not `author`: six `create_*` tools and six
+  // `update_*` tools already exist here and zero `author_*` ones, and
+  // `hadron_run_task` already establishes "task" as a noun on this surface.
+  // A second verb for the same act buys nothing a reader can act on.
+
+  /** The GraphQL context for a delegated door call — same shape as chatCtx below. */
+  const doorCtx = (): Context => ({
+    db,
+    clientId: auth.clientId ?? undefined,
+    userId: auth.userId ?? undefined,
+    appId: auth.appId ?? undefined,
+    sessionId: auth.sessionId ?? undefined,
+    roles: auth.roles as Context['roles'],
+    organizationId: auth.organizationId ?? undefined,
+  });
+
+  const governedDoorArgs = {
+    urn: z.string().describe('Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>).'),
+    name: z.string().optional().describe('Node name. Required when creating.'),
+    description: z.string().optional().describe('Short description'),
+    abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars).'),
+    content: z.string().optional().describe('Markdown content'),
+    tags: z.array(z.string()).optional().describe('Tags'),
+    nodeType: z.string().optional().describe('Node classification. Distinct from the governed kind — see Node.role.'),
+    seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
+    properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
+    data: z.record(z.string(), z.unknown()).optional().describe('Runtime data bag'),
+  };
+
+  /** One handler shape for all four tools — the kind and the mode are the only variables. */
+  async function callGovernedDoor(
+    kind: 'task' | 'review',
+    mode: 'create' | 'update',
+    args: Record<string, unknown>,
+  ): Promise<{ content: { type: 'text'; text: string }[] }> {
+    const entry = GOVERNED_KINDS.find((e) => e.kind === kind)!;
+    const doorName = entry.doors[mode];
+    const { urn: rawUrn, ...fields } = args as { urn: string } & Record<string, unknown>;
+    let memoryUrn: string;
+    let loc: string;
+    let fragment: string | undefined;
+    try {
+      assertFullyQualifiedUrn(rawUrn, 'node');
+      ({ memoryUrn, loc, fragment } = splitNodeUrn(rawUrn));
+    } catch (e) {
+      return textResult((e as Error).message);
+    }
+    const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+    if (fragRefusal) return textResult(fragRefusal);
+    const memory = await resolveMemoryByUrn(memoryUrn);
+    if (!memory) return textResult(`Memory not found: "${memoryUrn}".`);
+    try {
+      validateLoc(loc);
+    } catch (e) {
+      return textResult((e as Error).message);
+    }
+
+    // The governed signal is set BY THE DOOR, never by the caller: the tool IS
+    // the statement of intent, so asking for `role` again would let the two
+    // disagree — and a disagreement here is a node authored as one kind and
+    // labelled another.
+    const signal = entry.signal.field === 'isRunnable'
+      ? { isRunnable: true }
+      : { role: entry.signal.value };
+
+    try {
+      const node = await (
+        resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
+      )[doorName](
+        {},
+        { input: { memoryId: memory.id, loc, ...fields, ...signal } },
+        doorCtx(),
+      );
+      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
+    } catch (e) {
+      const code = (e as { extensions?: { code?: string } }).extensions?.code;
+      return textResult(code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`);
+    }
+  }
+
+  server.tool(
+    'hadron_create_task',
+    'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node.',
+    governedDoorArgs,
+    async (args) => callGovernedDoor('task', 'create', args),
+  );
+
+  server.tool(
+    'hadron_update_task',
+    'Edit an existing RUNNABLE node. Needed because `hadron_update_node` refuses ANY edit whose result is still a runnable node — including one that changes only prose — so that a procedure the platform executes cannot be rewritten through the generic surface. Omitted fields are preserved.',
+    governedDoorArgs,
+    async (args) => callGovernedDoor('task', 'update', args),
+  );
+
+  server.tool(
+    'hadron_create_review',
+    'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool, so you do not pass it. Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
+    governedDoorArgs,
+    async (args) => callGovernedDoor('review', 'create', args),
+  );
+
+  server.tool(
+    'hadron_update_review',
+    'Edit an existing REVIEW node. Needed because `hadron_update_node` refuses any edit whose result is still a review node — a safety check must not be rewritable through the generic surface. Omitted fields are preserved.',
+    governedDoorArgs,
+    async (args) => callGovernedDoor('review', 'update', args),
   );
 
   // ── hadron_update_node_data ───────────────────────────────────────────

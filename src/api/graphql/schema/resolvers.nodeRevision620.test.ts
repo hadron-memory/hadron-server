@@ -74,9 +74,15 @@ describe('updateNode snapshot capture (#620)', () => {
       tags: ['a'],
     });
 
-    await resolvers.Mutation.updateNode(
+    // #1201 — through the TASK door, because this fixture is runnable and the
+    // generic updateNode now refuses any edit whose result is still a runnable
+    // node. The subject of this test is unchanged (what the revision captures);
+    // only the door it goes through moved.
+    await (
+      resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>
+    ).updateTaskNode(
       {},
-      { input: { id: n.id, content: 'v2 body', tags: ['a', 'b'], reason: 'tighten wording' } } as never,
+      { input: { id: n.id, content: 'v2 body', tags: ['a', 'b'], reason: 'tighten wording' } },
       ctx(),
     );
 
@@ -92,6 +98,11 @@ describe('updateNode snapshot capture (#620)', () => {
     expect(v.data).toEqual({ stage: 1 });
     expect(v.seq).toBe(5);
     expect(v.isRunnable).toBe(true);
+    // #1201 — `role` joined the curated subset. NULL here (this fixture is
+    // governed by its capability, not a label), and it is asserted rather than
+    // left out because the escalation #1202 exists for is CLEARING a role: a
+    // history that cannot show the role cannot show the un-governing.
+    expect(v.role).toBeNull();
     expect(v.llmModel).toBe('claude-fable-5');
     expect(v.aiAgent).toBe('claude-code');
     // #620 editor split + reason routing + change list.

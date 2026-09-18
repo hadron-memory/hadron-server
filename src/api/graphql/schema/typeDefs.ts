@@ -1001,7 +1001,7 @@ export const typeDefs = `#graphql
     Whether this node can be run as a task (nullable; #513) — it drives the tree
     action indicator, and since #1201 it is also the CAPABILITY gate for the
     task kind: a write that would PRODUCE a runnable node must come through
-    authorTaskNode / updateTaskNode. Gated here rather than on a label because
+    createTaskNode / updateTaskNode. Gated here rather than on a label because
     omitting a label is free, while omitting this means the node does not run.
     """
     isRunnable: Boolean
@@ -6040,11 +6040,11 @@ export const typeDefs = `#graphql
     Deliberately NOT an MCP tool: an agent's node surface is hadron_create_node,
     which refuses, and that absence is the mechanism rather than an oversight.
     """
-    authorSpecNode(input: CreateNodeInput!): Node!
+    createSpecNode(input: CreateNodeInput!): Node!
 
     """
     #1201 — the UPDATE door for the spec kind, and the counterpart of
-    authorSpecNode. Same posture: pure routing, exempt from its own kind only,
+    createSpecNode. Same posture: pure routing, exempt from its own kind only,
     not an MCP tool.
 
     It is needed because the gate reads the RESULTING state: editing a node that
@@ -6074,11 +6074,11 @@ export const typeDefs = `#graphql
     Deliberately NOT an MCP tool: an agent's node surface is hadron_create_node,
     which refuses, and that absence is the mechanism rather than an oversight.
     """
-    authorReviewNode(input: CreateNodeInput!): Node!
+    createReviewNode(input: CreateNodeInput!): Node!
 
     """
     #1201 — the UPDATE door for the review kind, and the counterpart of
-    authorReviewNode. Same posture: pure routing, exempt from its own kind only,
+    createReviewNode. Same posture: pure routing, exempt from its own kind only,
     not an MCP tool.
 
     It is needed because the gate reads the RESULTING state: editing a node that
@@ -6108,11 +6108,11 @@ export const typeDefs = `#graphql
     Deliberately NOT an MCP tool: an agent's node surface is hadron_create_node,
     which refuses, and that absence is the mechanism rather than an oversight.
     """
-    authorTaskNode(input: CreateNodeInput!): Node!
+    createTaskNode(input: CreateNodeInput!): Node!
 
     """
     #1201 — the UPDATE door for the task kind, and the counterpart of
-    authorTaskNode. Same posture: pure routing, exempt from its own kind only,
+    createTaskNode. Same posture: pure routing, exempt from its own kind only,
     not an MCP tool.
 
     It is needed because the gate reads the RESULTING state: editing a node that
