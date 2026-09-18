@@ -117,7 +117,14 @@ export async function protectedLocsIn(db: ChannelReader, memoryId: string): Prom
       name: memory?.name ?? 'this memory',
       source: 'declared',
       channelId: null,
-      owner: 'authorProtectedNode (the memory-specific authoring tool)',
+      // BOTH doors, because this one string is all a refused caller gets and
+      // the refusal does not know whether they were creating or editing
+      // (`assertLocWritable` is called with op 'write' from every path). Naming
+      // only the create door sent an authoring client that hit this while
+      // EDITING to a create/upsert mutation — wrong API, and the kind of
+      // confident wrong answer that costs more than no answer (@copilot, #1198).
+      owner:
+        'authorProtectedNode (create) / updateProtectedNode (edit) — the memory-specific authoring tools',
     });
   }
   return out;
@@ -138,6 +145,81 @@ export function protectedLocCovers(entry: ProtectedLoc, loc: string): boolean {
   return entry.loc === PROTECT_WHOLE_MEMORY || locsOverlap(entry.loc, loc);
 }
 
+/**
+ * The ops the authoring doors can actually perform. `authorProtectedNode`
+ * creates (so a create under a protected ancestor is reachable) and
+ * `updateProtectedNode` edits; neither deletes and neither moves.
+ *
+ * This is a CAPABILITY list, not a display-verb list, and the distinction is
+ * the whole point (@copilot, PR #1198, second round). An earlier version keyed
+ * the remedy on `op === 'write'` and was wrong in BOTH directions, because the
+ * verb a caller passes is chosen for the message and not for this:
+ *
+ *   - `deleteNode` passed 'write', so a protected DELETE was sent to two
+ *     mutations that cannot delete;
+ *   - `updateNodeData` / `updateNodeProperties` pass 'update', so an edit —
+ *     which `updateProtectedNode` performs — was told no door existed.
+ *
+ * `deleteNode`'s verb is now 'delete', which fixes its message too ("the only
+ * thing that may delete here" rather than "write"). Keep this list and the
+ * callers' verbs in step: a new op defaults to NO bypass, which under-promises
+ * rather than sending someone to a door that cannot help.
+ */
+const DOOR_BACKED_OPS = new Set(['write', 'create', 'update', 'create under']);
+
+/**
+ * The same question for the CHANNEL source, whose owning operation is
+ * `createTeamChatMessage` — a message POST. It creates; it does not delete,
+ * move or restore a node.
+ *
+ * This list exists because the first version of the op-aware remedy fixed only
+ * the declared arm, and a `deleteNode` refusal at a Channel address still said
+ * "Post with createTeamChatMessage" — a post mutation offered as the way to
+ * delete (@copilot, PR #1198, third round). Worse, the test I wrote for the
+ * declared fix asserted the Channel arm ALWAYS names its operation, pinning the
+ * defect as intended behaviour. A fixture is only as good as the belief behind
+ * it.
+ */
+const CHANNEL_BACKED_OPS = new Set(['write', 'create', 'create under']);
+
+/**
+ * The remedy sentence, which depends on the predicate SOURCE and on what the
+ * caller is trying to do (@copilot, PR #1198).
+ *
+ * Naming an operation for something it cannot perform is a confident wrong
+ * answer: the caller follows the advice to a mutation that refuses them
+ * differently. Saying plainly that there is no bypass is more useful.
+ *
+ * `update` gets its own sentence rather than the shared `owner` string, because
+ * `owner` names BOTH doors and `authorProtectedNode` cannot edit an existing
+ * node — so an edit refusal that printed it would offer a create door for an
+ * update. The generic `write` verb keeps naming both, since `writeNodeCore`
+ * genuinely reaches this gate for creates and updates alike and the gate cannot
+ * tell them apart.
+ */
+function protectedRemedy(entry: ProtectedLoc, op: string): string {
+  if (entry.channelId) {
+    return CHANNEL_BACKED_OPS.has(op)
+      ? `Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
+      : `There is no operation that may ${op} here — the Channel's own operation posts messages, so this operation has no bypass.`;
+  }
+  // Name the ONE door that performs this operation. `entry.owner` advertises
+  // both, so printing it for a create offers an edit door that cannot create
+  // the missing node, and for an edit offers a create door that cannot edit an
+  // existing one (@copilot, PR #1198, rounds 3 and 4). It is only correct for
+  // the ambiguous 'write' verb, which covers both — and writeNodeCore no longer
+  // passes that, so the shared string is now the fallback rather than the rule.
+  if (op === 'update') {
+    return `Use updateProtectedNode (the memory-specific authoring tool's edit door); the generic node surface does not reach it.`;
+  }
+  if (op === 'create' || op === 'create under') {
+    return `Use authorProtectedNode (the memory-specific authoring tool's create door); the generic node surface does not reach it.`;
+  }
+  return DOOR_BACKED_OPS.has(op)
+    ? `Use ${entry.owner}; the generic node surface does not reach it.`
+    : `There is no authoring door for "${op}" at a declared address — the authoring tools only create and edit, so this operation has no bypass.`;
+}
+
 /** The typed refusal — `extensions.code: 'LOC_PROTECTED'`, naming the Channel and the owning surface. */
 export class LocProtectedError extends GraphQLError {
   constructor(
@@ -147,8 +229,8 @@ export class LocProtectedError extends GraphQLError {
   ) {
     super(
       channel.channelId
-        ? `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
-        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. Use that tool; the generic node surface does not reach it.`,
+        ? `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. ${protectedRemedy(channel, op)}`
+        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. ${protectedRemedy(channel, op)}`,
       {
         extensions: {
           code: 'LOC_PROTECTED',

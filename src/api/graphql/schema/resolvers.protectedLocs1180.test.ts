@@ -65,6 +65,29 @@ async function authoredCreate(loc: string, name = 'N', upsert = false): Promise<
   }
 }
 
+/** Generic update with an arbitrary input — the raw form the differential test needs. */
+async function genericUpdateRaw(fields: Record<string, unknown>): Promise<string> {
+  try {
+    await resolvers.Mutation.updateNode({}, { input: fields as never }, ctx());
+    return 'OK';
+  } catch (e) {
+    return `ERR:${(e as { extensions?: { code?: string } }).extensions?.code ?? 'unknown'}`;
+  }
+}
+
+/** Generic update — the path an agent's hadron_update_node reaches. */
+const genericUpdate = (loc: string, name: string) => genericUpdateRaw({ memoryId, loc, name });
+
+/** The authoring door for an EDIT (#1192). `fields` carries the partial update. */
+async function authoredUpdate(fields: Record<string, unknown>): Promise<string> {
+  try {
+    await resolvers.Mutation.updateProtectedNode({}, { input: fields as never }, ctx());
+    return 'OK';
+  } catch (e) {
+    return `ERR:${(e as { extensions?: { code?: string } }).extensions?.code ?? 'unknown'}`;
+  }
+}
+
 const protect = (locs: string[]) =>
   db.memory.update({ where: { id: memoryId }, data: { protectedLocs: locs } });
 
@@ -310,6 +333,21 @@ describe('authorProtectedNode — the door (#1180)', () => {
     expect(await db.node.findFirst({ where: { memoryId, loc: 'cor:api:010:01' } })).not.toBeNull();
   });
 
+  it('PREMISE CHECK (#1192): the gate is NOT create-only, so an EDIT is refused too', async () => {
+    // Measured rather than reasoned about — this is the premise the whole of
+    // #1192 rests on, and it is worth a standing assertion because it is easy
+    // to read the gate as a create-time check (it is named for a "write", and
+    // its only door creates).
+    await protect(['*']);
+    expect(await authoredCreate('cor:api:010:01', 'first')).toBe('OK');
+
+    // An ordinary edit of a node the authoring tool legitimately owns.
+    expect(await genericUpdate('cor:api:010:01', 'edited')).toBe('ERR:LOC_PROTECTED');
+
+    const row = await db.node.findFirst({ where: { memoryId, loc: 'cor:api:010:01' } });
+    expect(row?.name).toBe('first');
+  });
+
   it('is NOT exposed as an MCP tool — that is what keeps agents on the refused path', async () => {
     // The protection is a guardrail, and this is the mechanism that makes the
     // guardrail effective rather than decorative: an agent's node surface is
@@ -319,5 +357,195 @@ describe('authorProtectedNode — the door (#1180)', () => {
       fs.readFile(new URL('../../../mcp/server.ts', import.meta.url), 'utf8'),
     );
     expect(mcpSource).not.toContain('authorProtectedNode');
+  });
+});
+
+describe('updateProtectedNode — the EDIT door (#1192)', () => {
+  /** Seed a node through the create door, at a loc the generic surface cannot reach. */
+  async function seed(loc = 'cor:api:010:01') {
+    await protect(['*']);
+    await resolvers.Mutation.authorProtectedNode(
+      {},
+      {
+        input: {
+          memoryId,
+          loc,
+          name: 'first',
+          content: 'BODY',
+          description: 'DESC',
+          tags: ['t1'],
+        } as never,
+        upsert: false,
+      },
+      ctx(),
+    );
+    return db.node.findFirstOrThrow({ where: { memoryId, loc } });
+  }
+
+  it('edits where the generic update is refused', async () => {
+    await seed();
+
+    expect(await genericUpdate('cor:api:010:01', 'edited')).toBe('ERR:LOC_PROTECTED');
+    expect(await authoredUpdate({ memoryId, loc: 'cor:api:010:01', name: 'edited' })).toBe('OK');
+
+    const row = await db.node.findFirst({ where: { memoryId, loc: 'cor:api:010:01' } });
+    expect(row?.name).toBe('edited');
+  });
+
+  it('PRESERVES what the caller omits — the contract the create door cannot express', async () => {
+    // D4 omit-to-preserve, reached through the door. This is `spec edit`'s
+    // working assumption, so it is asserted here rather than inherited from
+    // updateNode's own tests: the two now share a core, and a future caller
+    // passing the whole input through `authorProtectedNode` instead would
+    // still satisfy every OTHER assertion in this block.
+    await seed();
+
+    expect(await authoredUpdate({ memoryId, loc: 'cor:api:010:01', name: 'renamed' })).toBe('OK');
+
+    const row = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'cor:api:010:01' } });
+    expect(row.name).toBe('renamed');
+    expect(row.content).toBe('BODY');
+    expect(row.description).toBe('DESC');
+    expect(row.tags).toEqual(['t1']);
+  });
+
+  it('NEVER creates — a mistyped citation is refused, not fabricated', async () => {
+    // The real reason this is a second door rather than `upsert: true`, and it
+    // is the opposite of what #1192 assumed (it expected omitted fields to be
+    // blanked; measured, they are preserved on both paths). An upsert at an
+    // empty loc CREATES — so an authoring tool that routed its edits through
+    // the create door would answer a typo by minting a node at a protected
+    // address, in the corpus whose whole premise is that a citation is
+    // permanent. The asymmetry is pinned in both directions below.
+    await protect(['*']);
+
+    expect(await authoredUpdate({ memoryId, loc: 'cor:api:999:99', name: 'typo' })).toBe(
+      'ERR:NODE_NOT_FOUND',
+    );
+    expect(await db.node.count({ where: { memoryId, loc: 'cor:api:999:99' } })).toBe(0);
+
+    // ...while the CREATE door's upsert does create there. Not an assertion
+    // about a defect — it is the documented create/upsert contract — but it is
+    // what makes routing an edit through it wrong.
+    await resolvers.Mutation.authorProtectedNode(
+      {},
+      { input: { memoryId, loc: 'cor:api:999:99', name: 'typo' } as never, upsert: true },
+      ctx(),
+    );
+    expect(await db.node.count({ where: { memoryId, loc: 'cor:api:999:99' } })).toBe(1);
+  });
+
+  it('takes the id selector too — the route the create door structurally lacks', async () => {
+    // `id` is a forced create-PK on CreateNodeInput and THE selector on
+    // UpdateNodeInput, so edit-by-PK/URN has no create-door equivalent at all.
+    const seeded = await seed();
+
+    expect(await authoredUpdate({ id: seeded.id, name: 'by-pk' })).toBe('OK');
+    expect((await db.node.findFirstOrThrow({ where: { id: seeded.id } })).name).toBe('by-pk');
+  });
+
+  it('CANNOT edit under a Channel — the bypass is source-specific, not universal', async () => {
+    // The create door shipped this defect in PR #1190's first revision (@codex
+    // + @copilot, both P1): one boolean that skipped the whole gate, letting a
+    // GUARDRAIL's door write under a SECURITY boundary's address. The edit door
+    // is the second chance to make that mistake, and rewriting a chat message
+    // is the sharper version of it — #1047 exists because chat authorship was
+    // forgeable and not tamper-evident.
+    const chatRoot = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'chats:team', name: 'Team chat', tags: [] },
+    });
+    await db.channel.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        loc: 'chats:team',
+        name: 'Team chat',
+        chatRootNodeId: chatRoot.id,
+      },
+    });
+    const message = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        loc: 'chats:team:messages:0001',
+        name: 'msg',
+        content: 'as posted',
+        tags: [],
+      },
+    });
+
+    // Declared protection is in force too, so this proves the door is exempt
+    // from ONE source while still refused by the other, rather than broken.
+    await protect(['*']);
+    await seed('cor:api:010:01');
+    expect(await authoredUpdate({ memoryId, loc: 'cor:api:010:01', name: 'ok' })).toBe('OK');
+
+    expect(await authoredUpdate({ memoryId, loc: 'chats:team', name: 'renamed' })).toBe(
+      'ERR:LOC_PROTECTED',
+    );
+    expect(await authoredUpdate({ id: message.id, content: 'tampered' })).toBe('ERR:LOC_PROTECTED');
+
+    expect((await db.node.findFirstOrThrow({ where: { id: message.id } })).content).toBe('as posted');
+  });
+
+  it('still enforces write access — the bypass is the LOC gate, not the auth gate', async () => {
+    const seeded = await seed();
+    const outsider = await db.user.create({
+      data: { id: generateId(), githubId: 11802, githubUsername: 'p1192-outsider', roles: [] },
+    });
+
+    await expect(
+      resolvers.Mutation.updateProtectedNode(
+        {},
+        { input: { memoryId, loc: 'cor:api:010:01', name: 'stolen' } as never },
+        { db, roles: [], userId: outsider.id, clientId: `user:${outsider.id}` } as Context,
+      ),
+    ).rejects.toThrow();
+
+    expect((await db.node.findFirstOrThrow({ where: { id: seeded.id } })).name).toBe('first');
+  });
+
+  it('shares ONE selector contract with updateNode — differentially, not by inspection', async () => {
+    // cor:agt:020:11's shape applied to a smaller pair: two doors that must
+    // decide the same thing should be ONE computation. They are
+    // (`updateNodeCore`), and this pins the BEHAVIOUR rather than the sharing —
+    // it catches a future copy that DRIFTS, not the act of copying (a faithful
+    // copy passes, and that is the honest limit of a differential test).
+    // Verified by mutation: diverging the two on the both-selectors rule fails
+    // here and nowhere else, because every happy path above uses one
+    // well-formed selector and cannot see the difference.
+    const both = async (input: Record<string, unknown>) => [
+      await genericUpdateRaw(input),
+      await authoredUpdate(input),
+    ];
+
+    // Both selectors at once, and neither: the two D2 refusals.
+    expect(await both({ id: 'x', memoryId, loc: 'a' })).toEqual([
+      'ERR:BAD_USER_INPUT',
+      'ERR:BAD_USER_INPUT',
+    ]);
+    expect(await both({ name: 'no selector' })).toEqual([
+      'ERR:BAD_USER_INPUT',
+      'ERR:BAD_USER_INPUT',
+    ]);
+    // A genuine miss on each selector form.
+    expect(await both({ id: '00000000000000000000000000000000' })).toEqual([
+      'ERR:NODE_NOT_FOUND',
+      'ERR:NODE_NOT_FOUND',
+    ]);
+    expect(await both({ memoryId, loc: 'nothing:here' })).toEqual([
+      'ERR:NODE_NOT_FOUND',
+      'ERR:NODE_NOT_FOUND',
+    ]);
+  });
+
+  it('is NOT exposed as an MCP tool either — the same reason as its create-side twin', async () => {
+    // Pinned per door, not per issue: exposing EITHER on the agent surface
+    // reopens the whole thing, and a test naming only the create door would
+    // pass while the edit door sat in the tool list.
+    const mcpSource = await import('node:fs/promises').then((fs) =>
+      fs.readFile(new URL('../../../mcp/server.ts', import.meta.url), 'utf8'),
+    );
+    expect(mcpSource).not.toContain('updateProtectedNode');
   });
 });

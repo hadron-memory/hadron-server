@@ -125,6 +125,38 @@ type NodeWriteMode = 'create' | 'update' | 'upsert';
 /** NodeInput with `name` optional — update mode preserves it on omit (D4). */
 type NodeWriteInput = Omit<NodeInput, 'name'> & { name?: string };
 
+/**
+ * Why did an update-by-PK match no row? Extracted so the decision is testable
+ * even though the race that reaches it is not (@copilot, PR #1198).
+ *
+ * With the address and liveness carried in the write's own predicate, a
+ * zero-row update has three causes and they are not interchangeable:
+ *
+ *   - `moved`   — the row is alive at a DIFFERENT address, so reporting "not
+ *                 found" would contradict the NODE_WRITE_CONFLICT contract for
+ *                 a node that plainly still exists;
+ *   - `deleted` — soft-deleted; NODE_NOT_FOUND is correct and matches the
+ *                 unlocked mode gate's own refusal;
+ *   - `gone`    — no row at all (hard delete), likewise NODE_NOT_FOUND.
+ *
+ * A soft-deleted row that ALSO moved reports `deleted`: the caller cannot act
+ * on a tombstone's new address, and "it was deleted" is the outcome they need.
+ */
+export async function classifyFailedUpdate(
+  db: Pick<Prisma.TransactionClient, 'node'>,
+  targetNodeId: string,
+): Promise<
+  { kind: 'moved'; memoryId: string; loc: string } | { kind: 'deleted' } | { kind: 'gone' }
+> {
+  const row = await db.node.findUnique({
+    where: { id: targetNodeId },
+    select: { loc: true, memoryId: true, deletedAt: true },
+  });
+  if (!row) return { kind: 'gone' };
+  if (row.deletedAt) return { kind: 'deleted' };
+  return { kind: 'moved', memoryId: row.memoryId, loc: row.loc };
+}
+
 export async function writeNodeCore(
   rawInput: NodeWriteInput,
   ctx: Context,
@@ -152,11 +184,18 @@ export async function writeNodeCore(
     targetNodeId?: string;
     guardRevSeq?: number;
     /**
-     * #1180 — the predicate source this caller OWNS. Passed ONLY by
-     * `authorProtectedNode` (`'declared'`), the door a memory-specific
-     * authoring tool writes through. Every other caller omits it and is
+     * #1180 — the predicate source this caller OWNS. Passed by the TWO
+     * authoring doors a memory-specific tool writes through, and by nothing
+     * else: `authorProtectedNode` (create, #1180) and `updateProtectedNode`
+     * (edit, #1192), both with `'declared'`. Every other caller omits it and is
      * refused at any protected address — the safe default
      * `a-gate-a-caller-can-omit` asks for.
+     *
+     * This paragraph said "passed ONLY by `authorProtectedNode`" until #1192
+     * added the second door and left it standing — the central authorization
+     * contract describing the surface as create-only, which is the exact
+     * premise that issue existed to correct (@copilot, PR #1198). Any door
+     * added here has to be named here.
      *
      * NOT a universal bypass: `'declared'` exempts a `Memory.protectedLocs`
      * entry and leaves CHANNEL protection fully in force, so this door cannot
@@ -184,7 +223,22 @@ export async function writeNodeCore(
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. `authorProtectedNode` is that operation for a
       // Memory.protectedLocs entry and passes the bypass; everyone else omits it.
-      await assertLocWritable(ctx.db, input.memoryId, input.loc, 'write', opts?.owns);
+      // The verb is MODE-DERIVED, not the blanket 'write' (@copilot, PR #1198,
+      // round 4). `write` is ambiguous — it covers create and update at once —
+      // and the remedy has to name a door that can do what the caller asked, so
+      // an ambiguous verb forces the message to guess. It guessed wrong in both
+      // directions: an EDIT at a Channel-overlapping address was told to "post
+      // with createTeamChatMessage" (a post cannot edit), and an edit at a
+      // declared address was offered the create door alongside the edit one.
+      // The core knows its mode; passing it removes the ambiguity at the source
+      // rather than papering over it in the message.
+      await assertLocWritable(
+        ctx.db,
+        input.memoryId,
+        input.loc,
+        mode === 'update' ? 'update' : 'create',
+        opts?.owns,
+      );
 
       // Validate loc shape at the GraphQL boundary so any caller — portal,
       // MCP, tests, future — gets the same typed InvalidLocError instead
@@ -302,10 +356,18 @@ export async function writeNodeCore(
       // treated as not-existing for collision purposes — the create
       // resurrects them (the UPDATE branch below clears `deletedAt`/
       // `deletedBy` when this resurrection path runs). Update: the target
-      // must exist — updateNode never creates; a concurrent delete between
-      // this gate and the write surfaces as Prisma P2025, mapped to
-      // NODE_NOT_FOUND at the write below. Upsert (internal callers only):
-      // legacy either-way behavior.
+      // must exist — updateNode never creates.
+      //
+      // This gate runs UNLOCKED, so it settles the common case and not the
+      // race. It used to claim otherwise — "a concurrent delete between this
+      // gate and the write surfaces as Prisma P2025, mapped to NODE_NOT_FOUND
+      // at the write below" — which holds only for a HARD delete. This repo
+      // SOFT-deletes: the row is still there, the write's `where` carries no
+      // `deletedAt` clause, and the edit lands on the tombstone. Measured on
+      // both selector paths (@copilot, PR #1198). `assertTargetStillWritable`
+      // re-checks under the address lock and is what makes this paragraph true.
+      //
+      // Upsert (internal callers only): legacy either-way behavior.
       const isResurrect = mode === 'create' && !!existing?.deletedAt;
       if (mode === 'create' && existing && !existing.deletedAt) {
         const err = new NodeLocConflictError(input.loc, input.memoryId);
@@ -627,6 +689,116 @@ export async function writeNodeCore(
         outgoingEdges: { include: { target: true } },
         incomingEdges: { include: { source: true } },
       };
+
+      /**
+       * Re-read the update target UNDER THE ADDRESS LOCK and refuse if the world
+       * moved after the unlocked mode-gate probe. Two TOCTOUs, both found by
+       * review on PR #1198 and both PRE-EXISTING (since PR-460), both reproduced
+       * before they were fixed, and both fixed here because this is the one
+       * point that already holds the lock and already reads the row.
+       *
+       * 1. THE TARGET MOVED (@codex, P1) — id-selector path only. `updateNode`
+       *    resolves `id` → (memoryId, loc) OUTSIDE any transaction, and
+       *    everything protecting the write is checked against THAT address:
+       *    `requireMemoryWriteAccess`, the protected-loc gate, the memory's
+       *    property schema. The UPDATE itself keys on the immutable PK, so a
+       *    `moveNode` committing in between leaves the two pointing at
+       *    different memories and the write lands on the row at its NEW
+       *    address — authorized against the memory the caller could write,
+       *    applied in one that was never consulted. Refused as
+       *    NODE_WRITE_CONFLICT rather than re-authorized at the new address:
+       *    the caller asked to edit the node at the address they named.
+       *
+       * 2. THE TARGET WAS SOFT-DELETED (@copilot) — BOTH selector paths, which
+       *    is wider than the finding framed it. The mode gate already refuses a
+       *    tombstone (`mode === 'update' && existing.deletedAt` ⇒
+       *    NODE_NOT_FOUND), but it runs unlocked, and `tx.node.update` filters
+       *    on the PK or (loc, memoryId) with NO `deletedAt` clause — so a
+       *    delete landing in between is written straight through, leaving a
+       *    tombstone carrying an edit that was accepted after it died.
+       *
+       *    The comment on that mode gate asserted this was already covered: "a
+       *    concurrent delete between this gate and the write surfaces as Prisma
+       *    P2025, mapped to NODE_NOT_FOUND at the write below." That is true of
+       *    a HARD delete, and this repo soft-deletes — the row is still there,
+       *    so P2025 never fires. Prose describing a protection that does not
+       *    exist; the claim is now corrected at that gate, and this is what
+       *    makes it true. Measured on both paths: the write SUCCEEDED and the
+       *    tombstone's content was rewritten.
+       *
+       * Ordering note (#1187): this adds a READ, never a lock, so it introduces
+       * no new edge into the advisory-lock key space the four helpers share and
+       * cannot be half of a cycle. READ COMMITTED is what makes it
+       * authoritative — each statement sees the latest commit, so anything that
+       * landed before it is visible.
+       */
+      /**
+       * The moved-target refusal, built ONCE so the re-check and the P2025
+       * fallback cannot disagree — and REDACTED across a memory boundary
+       * (@copilot, PR #1198, round 4).
+       *
+       * Naming where a node went is helpful inside the memory the caller was
+       * already authorized against. Across memories it is a disclosure: the
+       * caller is told a loc in a memory they may not read, learned through a
+       * write they were refused. That is the repo's cross-tenant criterion, not
+       * a cosmetic one, so the address is withheld and only the fact of the move
+       * is reported. `currentLoc` is omitted from extensions for the same
+       * reason rather than merely left out of the sentence.
+       */
+      function movedConflict(currentMemoryId: string, currentLoc: string): GraphQLError {
+        const movedMemory = currentMemoryId !== input.memoryId;
+        return new GraphQLError(
+          movedMemory
+            ? `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is no ` +
+              `longer in memory "${input.memoryId}", and this write was authorized against ` +
+              `"${input.loc}". Re-read and retry.`
+            : `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is now ` +
+              `at "${currentLoc}", and this write was authorized against "${input.loc}". ` +
+              `Re-read and retry.`,
+          {
+            extensions: {
+              code: 'NODE_WRITE_CONFLICT',
+              loc: input.loc,
+              memoryId: input.memoryId,
+              movedMemory,
+              ...(movedMemory ? {} : { currentLoc }),
+            },
+          },
+        );
+      }
+
+      async function assertTargetStillWritable(
+        tx: Pick<Prisma.TransactionClient, 'node'>,
+      ): Promise<void> {
+        const current = await tx.node.findUnique({
+          where: opts?.targetNodeId
+            ? { id: opts.targetNodeId }
+            : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+          select: { memoryId: true, loc: true, deletedAt: true },
+        });
+        // A row that vanished entirely is left to the write below, which maps
+        // Prisma's P2025 to the typed NODE_NOT_FOUND. Refusing here would swap
+        // one typed error for an identical one.
+        if (!current) return;
+
+        if (current.deletedAt) {
+          // Deliberately the SAME shape the unlocked mode gate throws, because
+          // this is the same refusal arriving a few milliseconds later: from
+          // the caller's side "it was deleted" is one outcome, not two.
+          throw new GraphQLError(
+            `Node not found at loc "${input.loc}" in memory "${input.memoryId}".`,
+            {
+              extensions: { code: 'NODE_NOT_FOUND', loc: input.loc, memoryId: input.memoryId },
+            },
+          );
+        }
+
+        if (current.memoryId === input.memoryId && current.loc === input.loc) return;
+        // NODE_WRITE_CONFLICT rather than a new code: "the target changed since
+        // it was read, re-read and retry" is exactly what that code already
+        // says on the revSeq compare-and-swap next door.
+        throw movedConflict(current.memoryId, current.loc);
+      }
       const {
         loc: _updLoc,
         memoryId: _updMemoryId,
@@ -653,9 +825,30 @@ export async function writeNodeCore(
           // and this write. updateMany because a unique `where` can't carry
           // the extra predicate; the row is then re-read for the include
           // shape.
+          // The ADDRESS and LIVENESS travel in the write's own predicate, not
+          // only in the re-check above it (@copilot, PR #1198). A check inside
+          // this transaction is not atomic with the statement after it: a
+          // relocation that does NOT take our lock — `mergeMemoryGraph` moves
+          // rows with a bulk `updateMany` on memoryId, taking none — can commit
+          // in between, and the write would land at the new address with
+          // authorization, schema and `owns` all decided for the old one.
+          // Carrying the predicate here closes that window instead of narrowing
+          // it; the re-check survives because it produces the accurate typed
+          // error, while this produces the correctness.
           const guardWhere: Prisma.NodeWhereInput = opts?.targetNodeId
-            ? { id: opts.targetNodeId, revSeq: claimedRevNo }
-            : { loc: input.loc, memoryId: input.memoryId, revSeq: claimedRevNo };
+            ? {
+                id: opts.targetNodeId,
+                revSeq: claimedRevNo,
+                memoryId: input.memoryId,
+                loc: input.loc,
+                deletedAt: null,
+              }
+            : {
+                loc: input.loc,
+                memoryId: input.memoryId,
+                revSeq: claimedRevNo,
+                deletedAt: null,
+              };
           // Spec 049 S4: the write holds the address lock, and the
           // protected-loc gate runs under it — the early check above is the
           // fast typed refusal, this is the authoritative one (a Channel can
@@ -664,7 +857,9 @@ export async function writeNodeCore(
           const guarded = await ctx.db.$transaction(async (tx) => {
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
+              op: mode === 'update' ? 'update' : 'create',
             });
+            await assertTargetStillWritable(tx);
             return tx.node.updateMany({
               where: guardWhere,
               data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
@@ -689,15 +884,31 @@ export async function writeNodeCore(
             include,
           });
         } else if (mode === 'update') {
-          // Same lock-then-gate discipline as the guarded branch above.
+          // Same lock-then-gate discipline as the guarded branch above, and the
+          // same reason for the extra `where` terms: the re-check is not atomic
+          // with this statement against a relocator that takes no lock, so the
+          // address and liveness ride in the write's own predicate. Prisma's
+          // extended-where-unique (5.0+) is what lets a unique `update` carry
+          // them; a no-match raises P2025, which the catch below maps to the
+          // typed NODE_NOT_FOUND.
           node = await ctx.db.$transaction(async (tx) => {
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
+              op: mode === 'update' ? 'update' : 'create',
             });
+            await assertTargetStillWritable(tx);
             return tx.node.update({
               where: opts?.targetNodeId
-                ? { id: opts.targetNodeId }
-                : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+                ? {
+                    id: opts.targetNodeId,
+                    memoryId: input.memoryId,
+                    loc: input.loc,
+                    deletedAt: null,
+                  }
+                : {
+                    loc_memoryId: { loc: input.loc, memoryId: input.memoryId },
+                    deletedAt: null,
+                  },
               data: updatePayload,
               include,
             });
@@ -771,8 +982,11 @@ export async function writeNodeCore(
             // Establishing one global order across create/merge/move/bulk is
             // worth doing; it is not this PR, and it is filed.
             if (ancestorLocs(input.loc).length === 0) {
+              // This branch is create/upsert only — the mode union excludes
+              // 'update' here, so the verb is unconditional.
               await lockLocForWrite(tx, input.memoryId, input.loc, {
                 owns: opts?.owns,
+                op: 'create',
               });
             }
 
@@ -842,8 +1056,33 @@ export async function writeNodeCore(
           e instanceof Prisma.PrismaClientKnownRequestError &&
           e.code === 'P2025'
         ) {
-          // Lost the race with a concurrent delete (or move, on the
-          // loc-keyed path) between the mode gate and the write.
+          // Lost the race between the mode gate (or `assertTargetStillWritable`)
+          // and the write. Since the address and liveness now ride in the
+          // write's own predicate, a no-match here has TWO causes and they
+          // deserve different codes (@copilot, PR #1198): the row was deleted,
+          // or it MOVED — and a move that slips past the re-check would
+          // otherwise report NODE_NOT_FOUND for a node that plainly still
+          // exists, contradicting the NODE_WRITE_CONFLICT contract this PR
+          // introduced two statements earlier. `mergeMemoryGraph` relocates
+          // with an unlocked bulk updateMany, so that ordering is reachable.
+          //
+          // One extra read, only on the already-failed path.
+          //
+          // The DECISION is extracted to `classifyFailedUpdate` and unit-tested
+          // against all three end states (@copilot, PR #1198, round 5). The
+          // WIRING — that a P2025 here reaches it — stays uncovered, because
+          // reaching it needs a relocation committing between
+          // `assertTargetStillWritable` and the statement immediately after it,
+          // inside one transaction, with no seam between them to hook. Adding a
+          // test-only injection point to the canonical write path is a worse
+          // trade. What was untestable was never the branching; it was the
+          // race, and the branching is what could be silently wrong.
+          if (mode === 'update' && opts?.targetNodeId) {
+            const outcome = await classifyFailedUpdate(ctx.db, opts.targetNodeId);
+            if (outcome.kind === 'moved') {
+              throw movedConflict(outcome.memoryId, outcome.loc);
+            }
+          }
           throw new GraphQLError(
             `Node not found at loc "${input.loc}" in memory "${input.memoryId}".`,
             { extensions: { code: 'NODE_NOT_FOUND', loc: input.loc, memoryId: input.memoryId } },
@@ -1019,6 +1258,93 @@ async function resolveRelocationTarget(
   return { destMemoryId, destLoc };
 }
 
+/**
+ * The update half of the single-node write path: selector resolution (spec 039
+ * D2 — `id` XOR `memoryId` + `loc`) followed by `writeNodeCore` in update mode.
+ *
+ * SHARED, not copied (#1192). `updateNode` and `updateProtectedNode` differ in
+ * exactly one argument — the `owns` bypass — and everything else about an
+ * update is identical: the same selectors, the same NODE_NOT_FOUND shape, the
+ * same PK anchoring against a concurrent move. A second copy of this would be
+ * a predicate with two homes, and the one that is edited next is whichever the
+ * next author happens to open (PR #1190 shipped exactly that mistake with
+ * `locsOverlap`, twice).
+ *
+ * @param input  the caller's UpdateNodeInput, selectors included.
+ * @param ctx    request context.
+ * @param op     the mutation name, used in the two selector refusals so each
+ *               door names itself rather than the one it was extracted from.
+ * @param opts.owns  the protected-loc predicate source this caller OWNS.
+ *               Passed ONLY by `updateProtectedNode` (`'declared'`); omitted by
+ *               the generic surface, which is then refused at any protected
+ *               address. NOT a universal bypass — Channel protection stays in
+ *               force, so this cannot rewrite a chat message.
+ */
+async function updateNodeCore(
+  input: UpdateNodeInput,
+  ctx: Context,
+  op: string,
+  opts?: { owns?: ProtectedSource },
+) {
+  const { id, memoryId, loc, ...fields } = input;
+  const hasId = id != null && id !== '';
+  if (hasId && (memoryId != null || loc != null)) {
+    throw new GraphQLError(
+      `${op}: identify the node by \`id\` OR by \`memoryId\` + \`loc\`, not both. ` +
+        '(`loc`/`memoryId` are selectors, not writable fields — moveNode relocates.)',
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+  if (!hasId && (memoryId == null || loc == null)) {
+    throw new GraphQLError(
+      `${op}: supply \`id\` (PK or fully-qualified node URN) or both \`memoryId\` and \`loc\`.`,
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+
+  let targetMemoryId: string;
+  let targetLoc: string;
+  let targetNodeId: string | undefined;
+  if (hasId) {
+    // ID-or-URN dispatch (spec 007/022). A genuine miss → NODE_NOT_FOUND;
+    // a relative-form URN propagates as UrnNotQualifiedError.
+    try {
+      ({ id: targetNodeId } = await resolveNodeRef(ctx.db, id));
+    } catch (e) {
+      if (e instanceof NodeNotFoundError) {
+        throw new GraphQLError(`Node not found: "${id}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: id },
+        });
+      }
+      throw e;
+    }
+    const row = await ctx.db.node.findUnique({
+      where: { id: targetNodeId },
+      select: { memoryId: true, loc: true },
+    });
+    if (!row) {
+      throw new GraphQLError(`Node not found: "${id}"`, {
+        extensions: { code: 'NODE_NOT_FOUND', ref: id },
+      });
+    }
+    targetMemoryId = row.memoryId;
+    targetLoc = row.loc;
+  } else {
+    // Pass the raw ref through — writeNodeCore's own resolveMemoryRef
+    // handles ID-or-URN dispatch (no need to resolve twice).
+    targetMemoryId = memoryId as string;
+    targetLoc = loc as string;
+  }
+
+  // The PK anchors the write on the id-selector path so a concurrent
+  // move (which frees the loc for reuse) can't make the loc-keyed
+  // write hit a different node.
+  return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
+    targetNodeId,
+    owns: opts?.owns,
+  });
+}
+
 export const nodeMutations = {
     // Create a single node (spec 039 Phase 0 D1/D4). Create-only: a live
     // node at (memoryId, loc) rejects with NodeLocConflictError; a
@@ -1054,67 +1380,42 @@ export const nodeMutations = {
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
     // never moves. All content fields preserve-on-omit.
-    updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) => {
-      const { id, memoryId, loc, ...fields } = input;
-      const hasId = id != null && id !== '';
-      if (hasId && (memoryId != null || loc != null)) {
-        throw new GraphQLError(
-          'updateNode: identify the node by `id` OR by `memoryId` + `loc`, not both. ' +
-            '(`loc`/`memoryId` are selectors, not writable fields — moveNode relocates.)',
-          { extensions: { code: 'BAD_USER_INPUT' } },
-        );
-      }
-      if (!hasId && (memoryId == null || loc == null)) {
-        throw new GraphQLError(
-          'updateNode: supply `id` (PK or fully-qualified node URN) or both `memoryId` and `loc`.',
-          { extensions: { code: 'BAD_USER_INPUT' } },
-        );
-      }
+    updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
+      updateNodeCore(input, ctx, 'updateNode'),
 
-      let targetMemoryId: string;
-      let targetLoc: string;
-      let targetNodeId: string | undefined;
-      if (hasId) {
-        // ID-or-URN dispatch (spec 007/022). A genuine miss → NODE_NOT_FOUND;
-        // a relative-form URN propagates as UrnNotQualifiedError.
-        try {
-          ({ id: targetNodeId } = await resolveNodeRef(ctx.db, id));
-        } catch (e) {
-          if (e instanceof NodeNotFoundError) {
-            throw new GraphQLError(`Node not found: "${id}"`, {
-              extensions: { code: 'NODE_NOT_FOUND', ref: id },
-            });
-          }
-          throw e;
-        }
-        const row = await ctx.db.node.findUnique({
-          where: { id: targetNodeId },
-          select: { memoryId: true, loc: true },
-        });
-        if (!row) {
-          throw new GraphQLError(`Node not found: "${id}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: id },
-          });
-        }
-        targetMemoryId = row.memoryId;
-        targetLoc = row.loc;
-      } else {
-        // Pass the raw ref through — writeNodeCore's own resolveMemoryRef
-        // handles ID-or-URN dispatch (no need to resolve twice).
-        targetMemoryId = memoryId as string;
-        targetLoc = loc as string;
-      }
-
-      // The PK anchors the write on the id-selector path so a concurrent
-      // move (which frees the loc for reuse) can't make the loc-keyed
-      // write hit a different node.
-      return writeNodeCore(
-        { ...fields, memoryId: targetMemoryId, loc: targetLoc },
-        ctx,
-        'update',
-        targetNodeId ? { targetNodeId } : undefined,
-      );
-    },
+    // #1192 — the authoring door for EDITING a protected loc, and the
+    // update-side counterpart of authorProtectedNode above. Same posture:
+    // pure routing, validates nothing, deliberately not an MCP tool.
+    //
+    // It exists because the gate is not create-only. `writeNodeCore`'s update
+    // branches pass `owns` into `lockLocForWrite` exactly as the create branch
+    // does, so an ordinary updateNode at a declared loc is refused with
+    // LOC_PROTECTED and — before this — had nowhere to route. A declared
+    // corpus would have been append-only, and `hadron spec supersede` would
+    // have been refused halfway through its own two-step.
+    //
+    // TWO doors rather than one, mirroring createNode/updateNode. The
+    // alternative — `authorProtectedNode` taking an update input too — keeps
+    // one mutation name but needs a runtime XOR between two nullable inputs
+    // that the type system could have decided instead.
+    //
+    // And `upsert: true` is not a substitute, though NOT for the reason #1192
+    // gives. The issue says an edit routed through the create door "blanks
+    // every field the caller did not resend". MEASURED, it does not: Prisma
+    // leaves an undefined column untouched on the upsert's update branch
+    // exactly as it does on an update. What actually differs:
+    //
+    //   - an upsert CREATES at an empty loc (measured) where an update refuses
+    //     NODE_NOT_FOUND — so a mistyped citation becomes a real node at a
+    //     protected address instead of a refusal;
+    //   - `id` is a forced create-PK on CreateNodeInput and THE SELECTOR (PK
+    //     or node URN) on UpdateNodeInput, so edit-by-URN has no route at all;
+    //   - `name` is required on create, omit-to-preserve on update.
+    //
+    // The conclusion survives the correction; the stated reason did not, and
+    // it is restated here so the next reader inherits the measured version.
+    updateProtectedNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
+      updateNodeCore(input, ctx, 'updateProtectedNode', { owns: 'declared' }),
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
     // The supplied object's top-level keys overwrite the node's existing
@@ -1216,8 +1517,17 @@ export const nodeMutations = {
           ? { ...(existing as Record<string, unknown>), ...(data as Record<string, unknown>) }
           : (data as Record<string, unknown>);
 
-      // Delegate the write to the core in update mode. Addressing by the
-      // existing (memoryId, loc); omitted fields (name included) preserve.
+      // Delegate the write to the core in update mode; omitted fields (name
+      // included) preserve.
+      //
+      // ANCHORED ON THE PK, like updateNodeProperties next door and for its
+      // reason (@copilot, PR #1198). This resolver resolves a node REF and then
+      // addressed the write by the (memoryId, loc) it read — so if that node
+      // moved and another live node took the old address, the write landed on
+      // the REPLACEMENT: a caller's `data` patch applied to a different node
+      // than the one they named. `updateNodeProperties` already threaded
+      // `targetNodeId` and documented why; this path was simply never brought
+      // into line.
       return writeNodeCore(
         {
           memoryId: meta.memoryId,
@@ -1229,6 +1539,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
+        { targetNodeId: meta.id },
       );
     },
 
@@ -1778,7 +2089,10 @@ export const nodeMutations = {
       // One check covers the subtree too: every descendant shares this memory.
       await requireMemoryWriteAccess(ctx, node.memoryId);
       // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
-      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
+      // 'delete', not 'write' (@copilot, PR #1198). The verb reaches the user twice —
+      // "the only thing that may delete here", and the REMEDY, which must not offer
+      // an authoring door for an operation neither door performs.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'delete');
 
       // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
       // node preserves its original deletedAt/deletedBy (matches the
@@ -2963,7 +3277,10 @@ export const nodeMutations = {
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
       // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
-      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'write');
+      // 'restore', not 'write' (@copilot, PR #1198). The verb reaches the user twice —
+      // "the only thing that may restore here", and the REMEDY, which must not offer
+      // an authoring door for an operation neither door performs.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'restore');
 
       // #620 — the restored field set (legacy-sentinel-aware), shared by the
       // pre-restore snapshot's `changes` diff and the write-back.

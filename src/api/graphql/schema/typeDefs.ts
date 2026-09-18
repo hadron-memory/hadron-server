@@ -5972,10 +5972,10 @@ export const typeDefs = `#graphql
     createNode(input: CreateNodeInput!): Node!
 
     """
-    Create or update a node at a PROTECTED loc — the door a memory-specific
-    authoring tool uses (#1180). Identical in effect to createNode/updateNode;
-    the ONLY difference is that it carries the protected-loc bypass, so it can
-    write where the generic node surface is refused.
+    CREATE a node at a PROTECTED loc — the door a memory-specific authoring tool
+    uses (#1180). Identical in effect to createNode; the ONLY difference is that
+    it carries the protected-loc bypass, so it can write where the generic node
+    surface is refused. Its update-side counterpart is updateProtectedNode.
 
     PURE ROUTING: it validates nothing beyond what createNode validates. It
     does not know what a spec, review or task node is, and it does not check
@@ -5991,8 +5991,51 @@ export const typeDefs = `#graphql
     'upsert' (default false) writes over an existing live node instead of
     rejecting with NodeLocConflictError — an authoring tool re-running over its
     own corpus is the normal case, unlike a generic create.
+
+    'upsert' is NOT an edit, and the difference is not about omitted fields:
+    measured, an upsert leaves a field it is not given untouched, exactly as an
+    update does. What differs is that an upsert CREATES when the loc is empty,
+    so a mistyped citation becomes a real node at a protected address instead
+    of being refused. Use updateProtectedNode to edit.
     """
     authorProtectedNode(input: CreateNodeInput!, upsert: Boolean): Node!
+
+    """
+    UPDATE a node at a PROTECTED loc (#1192) — the update-side counterpart of
+    authorProtectedNode, and the same posture: pure routing, validates nothing,
+    deliberately NOT an MCP tool.
+
+    It exists because the protected-loc gate is not create-only. Every write
+    path consults it, so an ordinary updateNode against a declared loc is
+    refused exactly like a create — which would leave a declared corpus
+    APPEND-ONLY, and would refuse 'hadron spec supersede' halfway through its
+    own two-step (the lifecycle command that is the correct alternative to
+    deleting a citation).
+
+    Two doors rather than one, mirroring createNode/updateNode, because
+    CreateNodeInput cannot express an edit. Measured on the two inputs, not
+    inferred:
+
+      - An upsert CREATES at an empty loc; an update refuses NODE_NOT_FOUND.
+        Routing 'spec edit' or 'spec supersede's retire step through the create
+        door would turn a mistyped citation into a real node at a protected
+        address — a fabricated citation, in the corpus whose whole point is
+        that a citation is permanent.
+      - 'id' means OPPOSITE things on the two inputs. On CreateNodeInput it is
+        a forced create-PK, never a selector; on UpdateNodeInput it IS the
+        selector (PK or fully-qualified node URN). So editing by URN has no
+        route through the create door at all.
+      - 'name' is required on create and omit-to-preserve on update.
+
+    What is NOT a difference, because the issue behind this said it was: a
+    create-door upsert does NOT blank the fields a caller omits. Prisma leaves
+    an undefined column untouched on the upsert's update branch just as it does
+    on an update, and that was measured before this was written.
+
+    Identical in effect to updateNode, selectors included ('id' XOR
+    'memoryId' + 'loc'); it never creates and never moves.
+    """
+    updateProtectedNode(input: UpdateNodeInput!): Node!
 
     """
     Update an existing node. Identify it by 'id' (PK or fully-qualified node
