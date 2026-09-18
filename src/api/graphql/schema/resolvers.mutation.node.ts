@@ -9,6 +9,12 @@ import {
   type ProtectedLoc,
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
+import {
+  assertMayProduceGovernedNode,
+  mergedGovernedState,
+  GOVERNED_KINDS,
+  type GovernedKind,
+} from '../../../lib/governedRole.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -184,24 +190,29 @@ export async function writeNodeCore(
     targetNodeId?: string;
     guardRevSeq?: number;
     /**
-     * #1180 — the predicate source this caller OWNS. Passed by the TWO
-     * authoring doors a memory-specific tool writes through, and by nothing
-     * else: `authorProtectedNode` (create, #1180) and `updateProtectedNode`
-     * (edit, #1192), both with `'declared'`. Every other caller omits it and is
-     * refused at any protected address — the safe default
-     * `a-gate-a-caller-can-omit` asks for.
+     * The ADDRESS-protection source this caller owns — `'channel'`, passed by a
+     * Channel's own operations. Since #1201 the Channel table is the only
+     * source of address protection again (`Memory.protectedLocs` is gone), so
+     * every node-authoring caller omits this and is refused at a Channel
+     * address — the safe default `a-gate-a-caller-can-omit` asks for.
      *
-     * This paragraph said "passed ONLY by `authorProtectedNode`" until #1192
-     * added the second door and left it standing — the central authorization
-     * contract describing the surface as create-only, which is the exact
-     * premise that issue existed to correct (@copilot, PR #1198). Any door
-     * added here has to be named here.
-     *
-     * NOT a universal bypass: `'declared'` exempts a `Memory.protectedLocs`
-     * entry and leaves CHANNEL protection fully in force, so this door cannot
-     * write under `chats:team` and forge authorship.
+     * DISTINCT FROM `ownsKind` below, and the two must not be merged: this one
+     * is about WHERE a write lands, that one about WHAT it produces. A spec
+     * door is exempt from the spec ROLE gate and still fully subject to Channel
+     * protection, which is what stops it forging chat authorship (#1190 shipped
+     * a single boolean covering both and @codex + @copilot flagged it P1).
      */
     owns?: ProtectedSource;
+    /**
+     * #1201 — the GOVERNED KIND this caller is the door for. Passed only by a
+     * kind's own doors (`authorSpecNode` → `'spec'`, and so on); every generic
+     * writer omits it and is refused when its write would PRODUCE that kind.
+     *
+     * Never a boolean, and never universal: a door exempts itself from its own
+     * kind and stays subject to every other, so the task door cannot mint a
+     * review and neither can reach a Channel address.
+     */
+    ownsKind?: GovernedKind;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -221,8 +232,9 @@ export async function writeNodeCore(
       input.memoryId = resolvedMemoryId;
       await requireMemoryWriteAccess(ctx, input.memoryId);
       // Spec 049 S4 / #1180: a protected address is written by its owning
-      // operation only. `authorProtectedNode` is that operation for a
-      // Memory.protectedLocs entry and passes the bypass; everyone else omits it.
+      // operation only. Since #1201 the ONLY source is the Channel table, and
+      // only a Channel's own operations pass the bypass; every node-authoring
+      // caller — the kind doors included — omits it and is refused there.
       // The verb is MODE-DERIVED, not the blanket 'write' (@copilot, PR #1198,
       // round 4). `write` is ambiguous — it covers create and update at once —
       // and the remedy has to name a door that can do what the caller asked, so
@@ -348,6 +360,29 @@ export async function writeNodeCore(
           ? { id: opts.targetNodeId }
           : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
       });
+
+      // #1201 — the GOVERNED-KIND gate, on the RESULTING STATE.
+      //
+      // Deliberately reads the merged post-write state rather than the input.
+      // A gate reading only what a write DECLARES is evaded in two legal steps:
+      // create a node carrying no `isRunnable`, then set `isRunnable: true` in a
+      // second generic update against a node that was not governed when it was
+      // written. Neither step declares a governed node; the pair produces one.
+      //
+      // It also means an UPDATE to an existing governed node is gated even when
+      // it touches neither signal — editing a review node's body still produces
+      // a review node, so it still needs the review door. That is the point: a
+      // safety check must not be rewritable through the generic surface.
+      //
+      // Runs BEFORE the mode gate so a caller reaching the wrong door is told
+      // which door to use, rather than first being told the node does not exist.
+      assertMayProduceGovernedNode(
+        mode === 'create'
+          ? { role: input.role ?? null, isRunnable: input.isRunnable ?? null }
+          : mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
+        mode === 'update' ? 'update' : 'create',
+        opts?.ownsKind,
+      );
 
       // Mode gate (spec 039 Phase 0 D1). Create: reject if a **live** node
       // already lives at (loc, memoryId) — the portal's create form (and any
@@ -1262,8 +1297,9 @@ async function resolveRelocationTarget(
  * The update half of the single-node write path: selector resolution (spec 039
  * D2 — `id` XOR `memoryId` + `loc`) followed by `writeNodeCore` in update mode.
  *
- * SHARED, not copied (#1192). `updateNode` and `updateProtectedNode` differ in
- * exactly one argument — the `owns` bypass — and everything else about an
+ * SHARED, not copied (#1192, extended by #1201). `updateNode` and every
+ * kind-specific update door differ in exactly one argument — `ownsKind` — and
+ * everything else about an
  * update is identical: the same selectors, the same NODE_NOT_FOUND shape, the
  * same PK anchoring against a concurrent move. A second copy of this would be
  * a predicate with two homes, and the one that is edited next is whichever the
@@ -1274,17 +1310,17 @@ async function resolveRelocationTarget(
  * @param ctx    request context.
  * @param op     the mutation name, used in the two selector refusals so each
  *               door names itself rather than the one it was extracted from.
- * @param opts.owns  the protected-loc predicate source this caller OWNS.
- *               Passed ONLY by `updateProtectedNode` (`'declared'`); omitted by
- *               the generic surface, which is then refused at any protected
- *               address. NOT a universal bypass — Channel protection stays in
- *               force, so this cannot rewrite a chat message.
+ * @param opts.ownsKind  the GOVERNED KIND this caller is the door for. Passed
+ *               only by that kind's own update door; omitted by the generic
+ *               surface, which is then refused when its write would produce a
+ *               governed node. NOT a universal bypass — every other kind, and
+ *               Channel address protection, stay in force.
  */
 async function updateNodeCore(
   input: UpdateNodeInput,
   ctx: Context,
   op: string,
-  opts?: { owns?: ProtectedSource },
+  opts?: { ownsKind?: GovernedKind },
 ) {
   const { id, memoryId, loc, ...fields } = input;
   const hasId = id != null && id !== '';
@@ -1341,7 +1377,7 @@ async function updateNodeCore(
   // write hit a different node.
   return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
     targetNodeId,
-    owns: opts?.owns,
+    ownsKind: opts?.ownsKind,
   });
 }
 
@@ -1353,29 +1389,47 @@ export const nodeMutations = {
     createNode: async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
       writeNodeCore(input, ctx, 'create'),
 
-    // #1180 — the authoring door for a PROTECTED loc. Identical in effect to
-    // createNode (or an upsert when asked); the only difference is that it
-    // carries `ownedByOperation`, so it writes where the generic surface is
-    // refused.
+    // #1201 — THE KIND-SPECIFIC AUTHORING DOORS. One create + one update per
+    // governed kind, generated from the register so a kind cannot ship with a
+    // door missing or with the wrong `ownsKind` wired in.
     //
-    // PURE ROUTING, deliberately (Holger, 2026-09-17): it validates nothing and
-    // knows nothing about spec / review / task nodes. The authoring RULES stay
-    // in the tool that owns them — `hadron spec` and `hadron coding` are closed-
-    // list exceptions on the audience ground, so porting their logic here is
-    // exactly what we are NOT doing. This resolver exists to be a different
-    // door, nothing more.
+    // PURE ROUTING, deliberately (@Holger): a door validates nothing and knows
+    // nothing beyond which kind it is the door for. The authoring RULES stay in
+    // the tool that owns them — `hadron spec` and `hadron coding` are
+    // closed-list exceptions on the audience ground, so porting their logic
+    // here is exactly what we are NOT doing.
     //
-    // What that buys, precisely: the ACCIDENTAL generic write is refused and
-    // told which tool to use. It is not a security boundary — a determined
-    // caller can reach this mutation too. What keeps an AGENT away from it is
-    // that it is not exposed as an MCP tool (the same reason
-    // createTeamChatMessage is not), so `hadron_create_node` is the only node
-    // door on that surface and it refuses.
-    authorProtectedNode: async (
-      _: unknown,
-      { input, upsert }: { input: CreateNodeInput; upsert?: boolean | null },
-      ctx: Context,
-    ) => writeNodeCore(input, ctx, upsert ? 'upsert' : 'create', { owns: 'declared' }),
+    // WHAT EACH DOOR BUYS IS NOT THE SAME, and the register records it rather
+    // than leaving a reader to assume the strongest reading: `task` is a
+    // CAPABILITY gate (evasion means the node does not run), `review` is a
+    // SECURITY gate (a review may be a safety check, and removing one is the
+    // attack), `spec` is DILIGENCE (it proves the spec tool authored the node,
+    // not that nothing else could have).
+    //
+    // These replace the generic `authorProtectedNode` / `updateProtectedNode`,
+    // which took the same inputs as createNode/updateNode and differed only by
+    // name — one door exempt from EVERY declaration, which is the skeleton key
+    // this split exists to remove. Each door here is exempt from its own kind
+    // and subject to every other, Channel protection included.
+    //
+    // NONE of them is exposed as an MCP tool, and that absence is the mechanism
+    // rather than an oversight: an agent's node surface is hadron_create_node /
+    // hadron_update_node, which now refuse. Pinned per door by a test that
+    // iterates this same register.
+    ...Object.fromEntries(
+      GOVERNED_KINDS.flatMap((entry) => [
+        [
+          entry.doors.create,
+          async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
+            writeNodeCore(input, ctx, 'create', { ownsKind: entry.kind }),
+        ],
+        [
+          entry.doors.update,
+          async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
+            updateNodeCore(input, ctx, entry.doors.update, { ownsKind: entry.kind }),
+        ],
+      ]),
+    ),
 
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
@@ -1383,39 +1437,6 @@ export const nodeMutations = {
     updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
       updateNodeCore(input, ctx, 'updateNode'),
 
-    // #1192 — the authoring door for EDITING a protected loc, and the
-    // update-side counterpart of authorProtectedNode above. Same posture:
-    // pure routing, validates nothing, deliberately not an MCP tool.
-    //
-    // It exists because the gate is not create-only. `writeNodeCore`'s update
-    // branches pass `owns` into `lockLocForWrite` exactly as the create branch
-    // does, so an ordinary updateNode at a declared loc is refused with
-    // LOC_PROTECTED and — before this — had nowhere to route. A declared
-    // corpus would have been append-only, and `hadron spec supersede` would
-    // have been refused halfway through its own two-step.
-    //
-    // TWO doors rather than one, mirroring createNode/updateNode. The
-    // alternative — `authorProtectedNode` taking an update input too — keeps
-    // one mutation name but needs a runtime XOR between two nullable inputs
-    // that the type system could have decided instead.
-    //
-    // And `upsert: true` is not a substitute, though NOT for the reason #1192
-    // gives. The issue says an edit routed through the create door "blanks
-    // every field the caller did not resend". MEASURED, it does not: Prisma
-    // leaves an undefined column untouched on the upsert's update branch
-    // exactly as it does on an update. What actually differs:
-    //
-    //   - an upsert CREATES at an empty loc (measured) where an update refuses
-    //     NODE_NOT_FOUND — so a mistyped citation becomes a real node at a
-    //     protected address instead of a refusal;
-    //   - `id` is a forced create-PK on CreateNodeInput and THE SELECTOR (PK
-    //     or node URN) on UpdateNodeInput, so edit-by-URN has no route at all;
-    //   - `name` is required on create, omit-to-preserve on update.
-    //
-    // The conclusion survives the correction; the stated reason did not, and
-    // it is restated here so the next reader inherits the measured version.
-    updateProtectedNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
-      updateNodeCore(input, ctx, 'updateProtectedNode', { owns: 'declared' }),
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
     // The supplied object's top-level keys overwrite the node's existing
@@ -3179,7 +3200,7 @@ export const nodeMutations = {
         const replaceFilter = protectedDeletionFilter(
           await protectedLocsIn(tx, resolvedMemoryId),
         );
-        if (!replaceFilter.wholeMemory) {
+        {
           await tx.node.deleteMany({
             where: {
               ownerRepo,

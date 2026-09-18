@@ -1,6 +1,11 @@
 import { randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
+import {
+  assertMayProduceGovernedNode,
+  mergedGovernedState,
+  RoleGovernedError,
+} from '../lib/governedRole.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
@@ -2687,6 +2692,7 @@ export function createMcpServerInstance(
         return textResult('Write access denied for this memory.');
       }
 
+
       const upsertArgs = {
         where: { loc_memoryId: { loc, memoryId } },
         create: {
@@ -4168,6 +4174,7 @@ export function createMcpServerInstance(
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
       isRunnable: z.boolean().optional().describe('Whether this node can be run as a task by hadron_run_task (cor:api:060). Defaults to not-runnable. Independent of nodeType — a runnable node may carry any nodeType.'),
+      role: z.string().optional().describe('#1201 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role has no retrieval impact. Most values are inert, but the GOVERNED ones — "review", "spec" — are refused on this tool and must be authored through that kind\'s own server-side door, which is deliberately not an MCP tool. The same applies to isRunnable: this tool cannot create a runnable node.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
@@ -4185,7 +4192,7 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
       // Spec 022: enforce qualification at the API boundary. Relative-form
       // URNs (e.g., `review:sort-imports` without org+memory) reject here
       // before any DB lookup runs.
@@ -4214,6 +4221,23 @@ export function createMcpServerInstance(
 
       if (!(await canWriteToMemory(db, auth, memoryId))) {
         return textResult('Write access denied for this memory.');
+      }
+
+      // #1201 — the GOVERNED-KIND gate, on the state this create would PRODUCE.
+      // Inline here for the same reason as on hadron_update_node: this handler
+      // is a parity implementation of writeNodeCore (#206), not a delegate, and
+      // MCP is the surface an agent actually reaches — which makes it the
+      // threat this mechanism exists for rather than an afterthought. No
+      // ownsKind is ever passed: there is deliberately no MCP door, and that
+      // absence is what keeps the agent surface on the refused path.
+      try {
+        assertMayProduceGovernedNode(
+          { role: role ?? null, isRunnable: isRunnable ?? null },
+          'create',
+        );
+      } catch (e) {
+        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        throw e;
       }
 
       // Resolve edge targets BEFORE the source upsert so an
@@ -4384,6 +4408,7 @@ export function createMcpServerInstance(
           nodeType: nodeType ?? 'info',
           objectType: objectType?.trim() || null,
           isRunnable: isRunnable ?? null,
+          role: role ?? null,
           description: description ?? null,
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
@@ -4401,6 +4426,7 @@ export function createMcpServerInstance(
           ...(nodeType ? { nodeType } : {}),
           ...(objectType !== undefined ? { objectType: objectType.trim() || null } : {}),
           ...(isRunnable !== undefined ? { isRunnable } : {}),
+          ...(role !== undefined ? { role } : {}),
           description: description ?? null,
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
@@ -4633,6 +4659,7 @@ export function createMcpServerInstance(
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by hadron_run_task. Pass true/false; omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
+      role: z.string().nullable().optional().describe('#1201 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED values ("review", "spec") are refused here, and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Read the ABSENCE of the marker narrowly: it means "checked against this exact content" ONLY on a read that could have shown it — `contentScope` of `abstract` or `all`, on a memory that is unencrypted or unlocked. Under the default `content` scope, or on a locked memory, no marker is emitted either way and its absence says nothing at all. Spec 031/032.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
@@ -4652,7 +4679,7 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -4687,6 +4714,23 @@ export function createMcpServerInstance(
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
       });
+
+      // #1201 — the GOVERNED-KIND gate, on the RESULTING state. This handler is
+      // an INLINE parity implementation of writeNodeCore (#206), not a delegate,
+      // so the gate has to be here too: MCP is the surface an agent actually
+      // reaches, which makes it the threat this mechanism exists for rather
+      // than an afterthought. Never passes an ownsKind — there is no MCP door,
+      // by design.
+      try {
+        assertMayProduceGovernedNode(
+          mergedGovernedState(existing, { role, isRunnable }),
+          'update',
+        );
+      } catch (e) {
+        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        throw e;
+      }
+
       // A soft-deleted node is treated as not-found here (#543), mirroring the
       // GraphQL update-mode contract (resolvers.mutation.node.ts) and every MCP
       // read/find/list path, which all exclude deletedAt. hadron_update_node is
@@ -4857,6 +4901,7 @@ export function createMcpServerInstance(
               nodeType,
               objectType,
               isRunnable,
+              role,
               description,
               abstract: normalizedAbstract,
               content,
@@ -4877,6 +4922,8 @@ export function createMcpServerInstance(
       if (nodeType !== undefined) data.nodeType = nodeType;
       if (objectType !== undefined) data.objectType = objectType.trim() || null;
       if (isRunnable !== undefined) data.isRunnable = isRunnable;
+      // #1201 — null CLEARS, omit preserves, matching every other partial field here.
+      if (role !== undefined) data.role = role;
       if (description !== undefined) data.description = description;
       if (normalizedAbstract !== undefined) data.abstract = normalizedAbstract;
       if (nextAbstractOriginHash !== undefined) data.abstractOriginHash = nextAbstractOriginHash;

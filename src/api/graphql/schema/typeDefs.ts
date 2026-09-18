@@ -911,8 +911,24 @@ export const typeDefs = `#graphql
   type Node {
     id: ID!
     memoryId: String!
+    """
+    The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
+    retrieval and rendering.
+
+    NOT 'objectType', which says which domain COLLECTION a node belongs to, and
+    NOT 'role', which says what the node is FOR. Three kind-ish fields is the
+    accepted price of keeping retrieval stable while roles stay open, so each
+    one says what it is not — mixing them up is the predictable failure.
+    """
     nodeType: String!
-    "#725 — collection discriminator (which domain object this node is, e.g. \\"competitor\\"). NULL for an ordinary node."
+    """
+    #725 — the COLLECTION discriminator: which domain object this node is an
+    instance of, e.g. \"competitor\" / \"insight\". Validated against the memory's
+    property schema when it has one. NULL for an ordinary node.
+
+    NOT 'nodeType' (the platform-kind axis, which drives retrieval) and NOT
+    'role' (what the node is for, which has no retrieval impact).
+    """
     objectType: String
     loc: String!
     "Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>), composed server-side from the node's memory URN + loc (#481). Carried by every Node-returning surface (findNodes, node, appNodes, nodeBatch, mutation returns)."
@@ -981,7 +997,29 @@ export const typeDefs = `#graphql
     data: JSON
     seq: Int
     ownerRepo: String
+    """
+    Whether this node can be run as a task (nullable; #513) — it drives the tree
+    action indicator, and since #1201 it is also the CAPABILITY gate for the
+    task kind: a write that would PRODUCE a runnable node must come through
+    authorTaskNode / updateTaskNode. Gated here rather than on a label because
+    omitting a label is free, while omitting this means the node does not run.
+    """
     isRunnable: Boolean
+    """
+    #1201 — what this node is FOR, as an OPEN string. Set it to anything; the
+    platform reads a small CLOSED subset and ignores every other value.
+
+    NOT 'nodeType' (the platform-kind axis, load-bearing for retrieval) and NOT
+    'objectType' (the collection discriminator, schema-validated). This field
+    has NO retrieval impact.
+
+    A GOVERNED value routes the write to that kind's own authoring door, and the
+    generic node surface is refused: 'review' and 'spec' today, alongside the
+    task kind, which is gated on 'isRunnable' rather than on any label because a
+    label can be omitted and a capability cannot. 'role: \"weather-widget\"'
+    does nothing at all.
+    """
+    role: String
     llmModel: String
     aiAgent: String
     createdAt: DateTime!
@@ -3237,6 +3275,13 @@ export const typeDefs = `#graphql
     objectType: String
     "Whether this node can be run as a task by hadron_run_task (cor:api:060)."
     isRunnable: Boolean
+    """
+    #1201 — what this node is FOR (open string). NOT 'nodeType' (the
+    platform-kind axis) and NOT 'objectType' (the collection discriminator).
+    A GOVERNED value ('review', 'spec') requires that kind's own door; the
+    generic createNode refuses it.
+    """
+    role: String
     alias: String
     description: String
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Optional. Empty + whitespace-only normalize to null. Cap is 2000 characters."
@@ -3277,6 +3322,13 @@ export const typeDefs = `#graphql
     objectType: String
     "Whether this node can be run as a task by hadron_run_task (cor:api:060). Omit to preserve."
     isRunnable: Boolean
+    """
+    #1201 — what this node is FOR (open string). NOT 'nodeType' and NOT
+    'objectType' — see Node.role. Omit to preserve; null to clear. A GOVERNED
+    value requires that kind's own door, and so does editing a node that
+    ALREADY carries one: the gate reads the resulting state, not the change.
+    """
+    role: String
     alias: String
     description: String
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
@@ -5972,70 +6024,106 @@ export const typeDefs = `#graphql
     createNode(input: CreateNodeInput!): Node!
 
     """
-    CREATE a node at a PROTECTED loc — the door a memory-specific authoring tool
-    uses (#1180). Identical in effect to createNode; the ONLY difference is that
-    it carries the protected-loc bypass, so it can write where the generic node
-    surface is refused. Its update-side counterpart is updateProtectedNode.
+    #1201 — the CREATE door for the spec kind. A write that would produce a
+    node with role: 'spec' must come through here; the generic createNode
+    refuses it.
 
-    PURE ROUTING: it validates nothing beyond what createNode validates. It
-    does not know what a spec, review or task node is, and it does not check
-    one. The authoring RULES stay in the tool that owns them ('hadron spec',
-    'hadron coding'), which is a closed-list exception on the audience ground —
-    both target a technical audience that can be required to install the CLI.
+    PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
+    the door for. The authoring RULES stay in the tool that owns them ('hadron
+    spec', 'hadron coding'), which is a closed-list exception on the audience
+    ground.
 
-    This is therefore a GUARDRAIL, not a security boundary: the protection it
-    provides is that the ACCIDENTAL generic write is refused and told which
-    tool to use. It is deliberately NOT exposed as an MCP tool, which is what
-    keeps an agent's normal surface away from it.
+    STRENGTH: DILIGENCE. It guarantees a spec node was authored by the spec tool (#1152, and the corpus discipline resting on it). It does NOT claim a determined caller could not author one another way: the label is free to omit and a citation resolves without it. Specs are deliberately not treated as a security concern; the destructive half is closed by #1182/#1184, which made createNode mint-or-refuse and race-safe.
 
-    'upsert' (default false) writes over an existing live node instead of
-    rejecting with NodeLocConflictError — an authoring tool re-running over its
-    own corpus is the normal case, unlike a generic create.
-
-    'upsert' is NOT an edit, and the difference is not about omitted fields:
-    measured, an upsert leaves a field it is not given untouched, exactly as an
-    update does. What differs is that an upsert CREATES when the loc is empty,
-    so a mistyped citation becomes a real node at a protected address instead
-    of being refused. Use updateProtectedNode to edit.
+    Exempt from its OWN kind only — it is fully subject to every other kind and
+    to Channel address protection, so it cannot forge a chat message.
+    Deliberately NOT an MCP tool: an agent's node surface is hadron_create_node,
+    which refuses, and that absence is the mechanism rather than an oversight.
     """
-    authorProtectedNode(input: CreateNodeInput!, upsert: Boolean): Node!
+    authorSpecNode(input: CreateNodeInput!): Node!
 
     """
-    UPDATE a node at a PROTECTED loc (#1192) — the update-side counterpart of
-    authorProtectedNode, and the same posture: pure routing, validates nothing,
-    deliberately NOT an MCP tool.
+    #1201 — the UPDATE door for the spec kind, and the counterpart of
+    authorSpecNode. Same posture: pure routing, exempt from its own kind only,
+    not an MCP tool.
 
-    It exists because the protected-loc gate is not create-only. Every write
-    path consults it, so an ordinary updateNode against a declared loc is
-    refused exactly like a create — which would leave a declared corpus
-    APPEND-ONLY, and would refuse 'hadron spec supersede' halfway through its
-    own two-step (the lifecycle command that is the correct alternative to
-    deleting a citation).
+    It is needed because the gate reads the RESULTING state: editing a node that
+    already carries this kind still produces one, so the generic updateNode
+    refuses it even when the edit touches neither signal. That is the point — a
+    spec node must not be rewritable through the generic surface.
 
-    Two doors rather than one, mirroring createNode/updateNode, because
-    CreateNodeInput cannot express an edit. Measured on the two inputs, not
-    inferred:
-
-      - An upsert CREATES at an empty loc; an update refuses NODE_NOT_FOUND.
-        Routing 'spec edit' or 'spec supersede's retire step through the create
-        door would turn a mistyped citation into a real node at a protected
-        address — a fabricated citation, in the corpus whose whole point is
-        that a citation is permanent.
-      - 'id' means OPPOSITE things on the two inputs. On CreateNodeInput it is
-        a forced create-PK, never a selector; on UpdateNodeInput it IS the
-        selector (PK or fully-qualified node URN). So editing by URN has no
-        route through the create door at all.
-      - 'name' is required on create and omit-to-preserve on update.
-
-    What is NOT a difference, because the issue behind this said it was: a
-    create-door upsert does NOT blank the fields a caller omits. Prisma leaves
-    an undefined column untouched on the upsert's update branch just as it does
-    on an update, and that was measured before this was written.
-
-    Identical in effect to updateNode, selectors included ('id' XOR
-    'memoryId' + 'loc'); it never creates and never moves.
+    Identical to updateNode otherwise, selectors included ('id' XOR 'memoryId' +
+    'loc'); it never creates and never moves.
     """
-    updateProtectedNode(input: UpdateNodeInput!): Node!
+    updateSpecNode(input: UpdateNodeInput!): Node!
+
+    """
+    #1201 — the CREATE door for the review kind. A write that would produce a
+    node with role: 'review' must come through here; the generic createNode
+    refuses it.
+
+    PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
+    the door for. The authoring RULES stay in the tool that owns them ('hadron
+    spec', 'hadron coding'), which is a closed-list exception on the audience
+    ground.
+
+    STRENGTH: SECURITY. A review is not coding-specific — any work performed can be reviewed, and a review may be a SAFETY CHECK. So an attacker can modify a work assignment AND remove the reviews meant to catch that. Omitting the label is self-defeating in its own way: an unlabelled check is invisible to the review tooling, so it is not a check.
+
+    Exempt from its OWN kind only — it is fully subject to every other kind and
+    to Channel address protection, so it cannot forge a chat message.
+    Deliberately NOT an MCP tool: an agent's node surface is hadron_create_node,
+    which refuses, and that absence is the mechanism rather than an oversight.
+    """
+    authorReviewNode(input: CreateNodeInput!): Node!
+
+    """
+    #1201 — the UPDATE door for the review kind, and the counterpart of
+    authorReviewNode. Same posture: pure routing, exempt from its own kind only,
+    not an MCP tool.
+
+    It is needed because the gate reads the RESULTING state: editing a node that
+    already carries this kind still produces one, so the generic updateNode
+    refuses it even when the edit touches neither signal. That is the point — a
+    review node must not be rewritable through the generic surface.
+
+    Identical to updateNode otherwise, selectors included ('id' XOR 'memoryId' +
+    'loc'); it never creates and never moves.
+    """
+    updateReviewNode(input: UpdateNodeInput!): Node!
+
+    """
+    #1201 — the CREATE door for the task kind. A write that would produce a
+    node with isRunnable: true must come through here; the generic createNode
+    refuses it.
+
+    PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
+    the door for. The authoring RULES stay in the tool that owns them ('hadron
+    spec', 'hadron coding'), which is a closed-list exception on the audience
+    ground.
+
+    STRENGTH: CAPABILITY. The only one of the three whose gate cannot be evaded by omission, which is why it carries the security case. It keys on 'isRunnable' rather than on 'role': a label is caller-set and freely dropped, while omitting the capability means the node does not run. The threat is a memory shared with someone who authors a runnable node that reads the owner's data when the OWNER runs it (#1202).
+
+    Exempt from its OWN kind only — it is fully subject to every other kind and
+    to Channel address protection, so it cannot forge a chat message.
+    Deliberately NOT an MCP tool: an agent's node surface is hadron_create_node,
+    which refuses, and that absence is the mechanism rather than an oversight.
+    """
+    authorTaskNode(input: CreateNodeInput!): Node!
+
+    """
+    #1201 — the UPDATE door for the task kind, and the counterpart of
+    authorTaskNode. Same posture: pure routing, exempt from its own kind only,
+    not an MCP tool.
+
+    It is needed because the gate reads the RESULTING state: editing a node that
+    already carries this kind still produces one, so the generic updateNode
+    refuses it even when the edit touches neither signal. That is the point — a
+    task node must not be rewritable through the generic surface.
+
+    Identical to updateNode otherwise, selectors included ('id' XOR 'memoryId' +
+    'loc'); it never creates and never moves.
+    """
+    updateTaskNode(input: UpdateNodeInput!): Node!
 
     """
     Update an existing node. Identify it by 'id' (PK or fully-qualified node

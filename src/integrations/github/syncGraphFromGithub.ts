@@ -329,7 +329,7 @@ export const syncGraphFromGithub = async (
       // matches nothing, so the NOT excluded nothing and this cleanup deleted
       // the very rows the declaration exists to preserve.
       const deletionFilter = protectedDeletionFilter(protectedLocs);
-      if (!deletionFilter.wholeMemory) {
+      {
         await tx.node.deleteMany({
           where: {
             ownerRepo,

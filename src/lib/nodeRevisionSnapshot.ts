@@ -43,6 +43,8 @@ export interface SnapshotSourceNode {
   data: Prisma.JsonValue | null;
   seq: number | null;
   isRunnable: boolean | null;
+  /** #1201 — Node.role at capture time; see the schema note on why it is curated. */
+  role: string | null;
   llmModel: string | null;
   aiAgent: string | null;
 }
@@ -119,6 +121,7 @@ export function buildNodeRevisionSnapshot(
     data: jsonOrDbNull(node.data),
     seq: node.seq,
     isRunnable: node.isRunnable,
+    role: node.role,
     llmModel: node.llmModel,
     aiAgent: node.aiAgent,
     editedBy: editor.userId ?? null,
@@ -249,6 +252,9 @@ export const TRACKED_NODE_FIELDS = [
   'data',
   'seq',
   'isRunnable',
+  // #1201 — a role change must show in `changes`, because CLEARING a governed
+  // role is the escalation #1202 exists for and an empty diff would hide it.
+  'role',
   'llmModel',
   'aiAgent',
 ] as const satisfies readonly (keyof SnapshotSourceNode)[];
@@ -326,6 +332,8 @@ export function restorableNodeFields(revision: {
   data: Prisma.JsonValue | null;
   seq: number | null;
   isRunnable: boolean | null;
+  /** #1201 — Node.role at capture time; see the schema note on why it is curated. */
+  role: string | null;
   llmModel: string | null;
   aiAgent: string | null;
 }): Record<string, unknown> {

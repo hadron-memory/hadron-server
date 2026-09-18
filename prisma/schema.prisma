@@ -819,24 +819,6 @@ model Memory {
   acceptsUploads       Boolean           @default(true) @map("accepts_uploads")
   // ─── D-2026-08-25-004 / #1180: protected-loc declarations ───
   /// Locs in THIS memory whose subtree only a specific authoring operation may
-  /// write — the second predicate source for the spec-049 §2 S4 protected-loc
-  /// gate, whose first is the Channel table (`src/lib/protectedLoc.ts`).
-  ///
-  /// Each entry protects that loc AND its subtree (`locsOverlap`), so `review`
-  /// covers `review:*`. The single entry `*` protects the WHOLE memory — the
-  /// shape a citation corpus needs, because there the identifying signal is the
-  /// memory itself: of the signals marking a spec node, only the memory
-  /// survives a generic write (`node update` drops tags — hadron-cli#1152), so
-  /// tag-based protection is erased by the very write it exists to refuse.
-  ///
-  /// EMPTY BY DEFAULT and per memory, deliberately: turning this on refuses
-  /// every generic writer of those locs at once, including the authoring CLI
-  /// until it moves to the `authorProtectedNode` door. Declared opt-in means
-  /// shipping the mechanism breaks nothing and each corpus is switched on when
-  /// its tooling is ready.
-  ///
-  /// This is a GUARDRAIL, not a security boundary — see `protectedLoc.ts`.
-  protectedLocs        String[]          @default([]) @map("protected_locs")
 
   // ─── 033-rag-vector-retrieval: per-memory vector-index config ───
   /// Opt-in: when true, this memory's nodes are vector-indexed. DB default is
@@ -1162,6 +1144,27 @@ model Node {
   ownerRepo          String?   @map("owner_repo")
   /// If true, this node can be executed as a task.
   isRunnable         Boolean?  @map("is_runnable")
+  /// #1201 — what this node IS TO ITS AUTHOR, as an open string. Set it to
+  /// anything; the platform reads a small CLOSED subset and ignores the rest.
+  ///
+  /// THREE KIND-ISH FIELDS, and the distinction is what readers get wrong:
+  ///   - `nodeType`   — the PLATFORM-kind axis (info/task/prompt/…), load-bearing
+  ///                    for retrieval and rendering. NOT this field.
+  ///   - `objectType` — the COLLECTION discriminator (#725): which domain object
+  ///                    this is an instance of, schema-validated. NOT this field.
+  ///   - `role`       — what the node is FOR. No retrieval impact whatsoever.
+  ///
+  /// This is the axis the law corpus already named and the schema never had:
+  /// `cor:urn:010:01` lists node TYPES and node ROLES as separate categories,
+  /// and the roles (chat, chat-message, config, …) live in `nodeType` today.
+  /// Migrating those off `nodeType` is deliberately NOT part of #1201 — live
+  /// consumers include `isChecklistItemListing`, the chat surfaces and
+  /// `preflight_add --type`.
+  ///
+  /// GOVERNED values (`src/lib/governedRole.ts`) route a write to that kind's
+  /// own door; every other value is inert. Open so an agent builder may use it
+  /// freely, closed where it gates so the gate is never caller-defined.
+  role               String?
   /// LLM model that created or last modified this node (e.g.
   /// "claude-opus-4-6", "gpt-4o").
   llmModel           String?   @map("llm_model")
@@ -2184,6 +2187,11 @@ model NodeRevision {
   data               Json?
   seq                Int?
   isRunnable         Boolean? @map("is_runnable")
+  /// #1201 — `Node.role` at capture time. In the curated subset for a specific
+  /// reason rather than for parity: the escalation path #1202 exists for is
+  /// CLEARING a governed role, and a history that cannot show the role cannot
+  /// show the un-governing.
+  role               String?
   llmModel           String?  @map("llm_model")
   aiAgent            String?  @map("ai_agent")
   /// #620: the User.id of the editor, when a user is known — nothing
@@ -4175,9 +4183,12 @@ enum ChannelKind {
 ///
 /// Creating a row RESERVES and PROTECTS its address: every generic node write
 /// under `loc` (and any subtree operation overlapping it) is refused
-/// (`src/lib/protectedLoc.ts`, spec 049 §2 S4 shape B — the Channel table is
-/// the protection's only source until D-2026-08-25-004 adds
-/// `Memory.protectedLocs` as a second one). The owning operations write
+/// (`src/lib/protectedLoc.ts`, spec 049 §2 S4 shape B). The Channel table is
+/// the protection's ONLY source: D-2026-08-25-004 added `Memory.protectedLocs`
+/// as a second one and #1201 removed it again — governance of authored kinds
+/// moved to `Node.role` + `isRunnable`, a property of the WRITE rather than of
+/// the address. ADDRESS-based protection is a Channel concept and only that.
+/// The owning operations write
 /// through their own gate. This is hadron-server#1047's closure: the loc is
 /// operation-exclusive because it is protected, and protected because this
 /// row declared it.
