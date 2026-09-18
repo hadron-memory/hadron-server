@@ -344,7 +344,7 @@ describe('the MCP surface — the threat this exists for', () => {
     const mcpSource = await import('node:fs/promises').then((fs) =>
       fs.readFile(new URL('../../../mcp/server.ts', import.meta.url), 'utf8'),
     );
-    const calls = mcpSource.split('assertMayProduceGovernedNode(').length - 1;
+    const calls = mcpSource.split('assertGovernedWrite(').length - 1;
     expect(calls).toBeGreaterThanOrEqual(2);
 
     // ...and neither ever claims to own a kind: there is no MCP door.
@@ -360,7 +360,7 @@ describe('the MCP surface — the threat this exists for', () => {
       .split('\n')
       .map((l) => l.replace(/\/\/.*$/, ''))
       .join('\n');
-    expect(codeOnly).toContain('assertMayProduceGovernedNode(');
+    expect(codeOnly).toContain('assertGovernedWrite(');
     expect(codeOnly).not.toContain('ownsKind');
   });
 });
@@ -471,8 +471,48 @@ describe('the bypasses review found — each was a way in the gate did not cover
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: id } });
     expect(rev.role).toBeNull();
 
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: rev.id } as never, ctx());
-    expect((await db.node.findFirstOrThrow({ where: { id } })).role).toBeNull();
+    // #1201 round 3: the restore is now REFUSED, because the node IS a review
+    // at the time of the write. Restoring a pre-review revision would have
+    // CLEARED the role — the un-governing escalation, reached through a generic
+    // mutation. The revision still captures the role (asserted above); what
+    // changed is that replaying it needs a door, and no door has a restore
+    // variant yet (#1204).
+    await expect(
+      resolvers.Mutation.restoreNodeRevision({}, { revisionId: rev.id } as never, ctx()),
+    ).rejects.toThrow();
+    expect((await db.node.findFirstOrThrow({ where: { id } })).role).toBe('review');
+  });
+
+  it('UN-GOVERNING through the generic surface is refused — before UNION after', async () => {
+    // Measured before it was fixed: `updateNode(role: null)` cleared a review
+    // and `isRunnable: false` cleared a task, both SUCCEEDING. A gate reading
+    // only the RESULT sees an ordinary write, and the safety check evaporates.
+    //
+    // That is the escalation #1202 describes — except #1202 assumes the door
+    // was required to reach it, and it was not. Requiring the kind's door to
+    // remove its own marker is a ROUTING rule, so it belongs here; who may then
+    // do it through that door is still #1202's question.
+    expect(await door('createReviewNode', { loc: 'w:1', name: 'check', role: 'review' })).toBe('OK');
+    expect(await genericUpdate({ memoryId, loc: 'w:1', role: null })).toBe('ERR:ROLE_GOVERNED');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'w:1' } })).role).toBe('review');
+
+    expect(await door('createTaskNode', { loc: 'w:2', name: 'task', isRunnable: true })).toBe('OK');
+    expect(await genericUpdate({ memoryId, loc: 'w:2', isRunnable: false })).toBe(
+      'ERR:ROLE_GOVERNED',
+    );
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'w:2' } })).isRunnable).toBe(
+      true,
+    );
+
+    // ...and the kind's OWN door may still do it, or a governed node could
+    // never be retired at all.
+    expect(
+      await code(
+        (resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)
+          .updateReviewNode({}, { input: { memoryId, loc: 'w:1', role: null } }, ctx()),
+      ),
+    ).toBe('OK');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'w:1' } })).role).toBeNull();
   });
 });
 

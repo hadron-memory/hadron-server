@@ -165,7 +165,8 @@ export class RoleGovernedError extends GraphQLError {
 }
 
 /**
- * Refuse a generic write that would PRODUCE a governed node.
+ * Refuse a generic write that touches governance — one that would PRODUCE a
+ * governed node, or one against a node that ALREADY is one.
  *
  * ## The resulting state is the whole point
  *
@@ -193,12 +194,28 @@ export class RoleGovernedError extends GraphQLError {
  * @param owns  the kind this caller is the door for, if any. Every generic
  *              writer omits it and is refused — the safe default.
  */
-export function assertMayProduceGovernedNode(
-  state: GovernedState,
+export function assertGovernedWrite(
+  prior: GovernedState | null | undefined,
+  next: GovernedState,
   op: 'create' | 'update',
   owns?: GovernedKind,
 ): void {
-  for (const entry of governedKindsOf(state)) {
+  // BEFORE **union** AFTER, and the union is the whole correction.
+  //
+  // Checking only the result let the generic surface UN-GOVERN a node in one
+  // call: `updateNode(role: null)` cleared a review, `isRunnable: false`
+  // cleared a task, and both succeeded — measured, not feared. The resulting
+  // state is ungoverned, so a result-only gate sees an ordinary write and the
+  // safety check simply evaporates. That is the escalation #1202 describes,
+  // except #1202 assumes the DOOR was required to reach it; it was not.
+  //
+  // Requiring the kind's door to REMOVE its own marker is a routing rule, so it
+  // belongs here. WHO may then do it through that door is #1202's question and
+  // is deliberately still unanswered.
+  const affected = new Map<GovernedKind, GovernedKindEntry>();
+  for (const e of governedKindsOf(prior ?? {})) affected.set(e.kind, e);
+  for (const e of governedKindsOf(next)) affected.set(e.kind, e);
+  for (const entry of affected.values()) {
     if (entry.kind === owns) continue;
     throw new RoleGovernedError(entry, op);
   }

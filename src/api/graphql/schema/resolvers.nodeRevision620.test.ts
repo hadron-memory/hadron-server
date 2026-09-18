@@ -131,11 +131,18 @@ describe('restoreNodeRevision round-trip (#620)', () => {
       properties: { p: 1 },
       data: { d: 1 },
       seq: 1,
-      isRunnable: true,
+      // #1201 — deliberately NOT runnable. `isRunnable` is a governed signal
+      // now, so flipping it here would make both the update and the restore
+      // governance-changing writes, which the generic surface refuses. Its
+      // capture and restore are covered in resolvers.governedRole1201.test.ts,
+      // where the refusal is the subject rather than an obstacle. What this
+      // test is about — the OTHER curated fields restoring verbatim — is
+      // unchanged.
+      isRunnable: false,
     });
     await resolvers.Mutation.updateNode(
       {},
-      { input: { id: n.id, content: 'v2', properties: { p: 2 }, data: { d: 2 }, seq: 9, isRunnable: false } } as never,
+      { input: { id: n.id, content: 'v2', properties: { p: 2 }, data: { d: 2 }, seq: 9 } } as never,
       ctx(),
     );
     const [v1snap] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
@@ -147,14 +154,13 @@ describe('restoreNodeRevision round-trip (#620)', () => {
     expect(restored.properties).toEqual({ p: 1 });
     expect(restored.data).toEqual({ d: 1 });
     expect(restored.seq).toBe(1);
-    expect(restored.isRunnable).toBe(true);
     // The pre-restore snapshot recorded what the restore rewrote.
     const preRestore = await db.nodeRevision.findFirst({
       where: { nodeId: n.id },
       orderBy: { createdAt: 'desc' },
     });
     expect(preRestore?.changes).toEqual(
-      expect.arrayContaining(['content', 'properties', 'data', 'seq', 'isRunnable']),
+      expect.arrayContaining(['content', 'properties', 'data', 'seq']),
     );
   });
 

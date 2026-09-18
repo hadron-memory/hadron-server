@@ -10,7 +10,7 @@ import {
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
 import {
-  assertMayProduceGovernedNode,
+  assertGovernedWrite,
   mergedGovernedState,
   governedKindsOf,
   GOVERNED_KINDS,
@@ -389,7 +389,8 @@ export async function writeNodeCore(
       // Merging unconditionally is also simpler than special-casing the
       // tombstone: with no existing row the merge IS the input, and a LIVE row
       // in create mode is refused by the mode gate below regardless.
-      assertMayProduceGovernedNode(
+      assertGovernedWrite(
+        existing,
         mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
         mode === 'update' ? 'update' : 'create',
         opts?.ownsKind,
@@ -834,7 +835,8 @@ export async function writeNodeCore(
         // has since become governed. Address and liveness were already
         // re-checked here; governance is the third thing that can change under
         // the same window, and it is the one with teeth.
-        assertMayProduceGovernedNode(
+        assertGovernedWrite(
+          current,
           mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
           'update',
           opts?.ownsKind,
@@ -3344,6 +3346,28 @@ export const nodeMutations = {
       // #620 — the restored field set (legacy-sentinel-aware), shared by the
       // pre-restore snapshot's `changes` diff and the write-back.
       const restoreFields = restorableNodeFields(revision);
+
+      // #1201 (@copilot, PR #1203 round 3) — a bypass my OWN fix created.
+      // Making `role` restorable turned a restore into a way to write a
+      // governed role with no door: restore a revision captured while the node
+      // was a review, or one carrying `isRunnable: true`, and the node becomes
+      // governed through a generic mutation.
+      //
+      // Gated on the RESULTING state like every other write, and it refuses in
+      // both directions on purpose: a revision cannot make an ordinary node
+      // governed, and a governed node's history cannot be restored through the
+      // generic surface either. The kind doors have no restore variant, so a
+      // governed node is currently not restorable at all — the same
+      // no-door-for-this-operation shape as deletes, tracked with them in
+      // #1204 rather than answered here.
+      assertGovernedWrite(
+        node,
+        mergedGovernedState(node, {
+          role: (restoreFields as { role?: string | null }).role,
+          isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
+        }),
+        'update',
+      );
 
       // #725/#737 — a restored snapshot must satisfy the CURRENT schema. Validate
       // the resulting objectType/properties (restored value, else the node's

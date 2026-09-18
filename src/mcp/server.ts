@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
-  assertMayProduceGovernedNode,
+  assertGovernedWrite,
   mergedGovernedState,
   RoleGovernedError,
   GOVERNED_KINDS,
@@ -2720,7 +2720,11 @@ export function createMcpServerInstance(
         select: { role: true, isRunnable: true },
       });
       try {
-        assertMayProduceGovernedNode(mergedGovernedState(parentGovernedProbe, {}), 'update');
+        assertGovernedWrite(
+          parentGovernedProbe,
+          mergedGovernedState(parentGovernedProbe, {}),
+          'update',
+        );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
         throw e;
@@ -4281,7 +4285,8 @@ export function createMcpServerInstance(
         select: { role: true, isRunnable: true },
       });
       try {
-        assertMayProduceGovernedNode(
+        assertGovernedWrite(
+          governedProbe,
           mergedGovernedState(governedProbe, { role, isRunnable }),
           'create',
         );
@@ -4772,7 +4777,8 @@ export function createMcpServerInstance(
       // than an afterthought. Never passes an ownsKind — there is no MCP door,
       // by design.
       try {
-        assertMayProduceGovernedNode(
+        assertGovernedWrite(
+          existing,
           mergedGovernedState(existing, { role, isRunnable }),
           'update',
         );
@@ -5143,13 +5149,21 @@ export function createMcpServerInstance(
       return textResult((e as Error).message);
     }
 
-    // The governed signal is set BY THE DOOR, never by the caller: the tool IS
-    // the statement of intent, so asking for `role` again would let the two
-    // disagree — and a disagreement here is a node authored as one kind and
-    // labelled another.
-    const signal = entry.signal.field === 'isRunnable'
-      ? { isRunnable: true }
-      : { role: entry.signal.value };
+    // On CREATE the governed signal is set BY THE DOOR, never by the caller:
+    // the tool IS the statement of intent, so asking for it again would let the
+    // two disagree — a node authored as one kind and labelled another.
+    //
+    // On UPDATE the door must NOT force it, or a governed node can never be
+    // RETIRED: clearing `isRunnable` is how a task stops being runnable, and
+    // that is legitimate — it just belongs to the task's own door rather than
+    // to the generic surface, which is exactly what the before-union-after gate
+    // now requires. Omitted still preserves, so an ordinary edit is unaffected.
+    const signal =
+      mode === 'create'
+        ? entry.signal.field === 'isRunnable'
+          ? { isRunnable: true }
+          : { role: entry.signal.value }
+        : {};
 
     try {
       const node = await (
@@ -5173,10 +5187,28 @@ export function createMcpServerInstance(
     async (args) => callGovernedDoor('task', 'create', args),
   );
 
+  /**
+   * The UPDATE doors additionally accept their own governed signal, so a
+   * governed node can be RETIRED through the door that owns it. Absent from the
+   * create args on purpose — there the tool is the statement of intent.
+   */
+  const governedUpdateArgs = {
+    ...governedDoorArgs,
+    isRunnable: z
+      .boolean()
+      .optional()
+      .describe('Set false to RETIRE this task — it stops being runnable. Omit to preserve. Only this door may change it; the generic surface is refused, because clearing the signal is how a governed node is un-governed.'),
+    role: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('Set null to RETIRE this node from its governed kind. Omit to preserve. Only this door may change it.'),
+  };
+
   server.tool(
     'hadron_update_task',
-    'Edit an existing RUNNABLE node. Needed because `hadron_update_node` refuses ANY edit whose result is still a runnable node — including one that changes only prose — so that a procedure the platform executes cannot be rewritten through the generic surface. Omitted fields are preserved.',
-    governedDoorArgs,
+    'Edit an existing RUNNABLE node. Needed because `hadron_update_node` refuses ANY edit whose result is still a runnable node — including one that changes only prose — so that a procedure the platform executes cannot be rewritten through the generic surface. Omitted fields are preserved. Pass isRunnable: false to RETIRE the task.',
+    governedUpdateArgs,
     async (args) => callGovernedDoor('task', 'update', args),
   );
 
@@ -5189,8 +5221,8 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_update_review',
-    'Edit an existing REVIEW node. Needed because `hadron_update_node` refuses any edit whose result is still a review node — a safety check must not be rewritable through the generic surface. Omitted fields are preserved.',
-    governedDoorArgs,
+    'Edit an existing REVIEW node. Needed because `hadron_update_node` refuses any edit whose result is still a review node — a safety check must not be rewritable through the generic surface. Omitted fields are preserved. Pass role: null to RETIRE the node from the review kind.',
+    governedUpdateArgs,
     async (args) => callGovernedDoor('review', 'update', args),
   );
 

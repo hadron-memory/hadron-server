@@ -355,9 +355,13 @@ describe('isRunnable write path (hadron_create_node / hadron_update_node / Graph
     expect(text).toContain('do the new thing');
   });
 
-  it('hadron_update_node can clear isRunnable, removing the node from the task list', async () => {
+  it('hadron_update_task can clear isRunnable, removing the node from the task list', async () => {
+    // #1201 — moved off the generic tool, and this test WAS the hole: clearing
+    // `isRunnable` un-governs a node, so allowing it on `hadron_update_node`
+    // meant the safety gate could be removed by the surface it protects
+    // against. Retiring a task is legitimate; it just needs the task door.
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('hadron_update_node', {
+    await srv.callToolText('hadron_update_task', {
       urn: nodeUrnOf(fx.alpha, 'tasks:add-note'),
       isRunnable: false,
     });
