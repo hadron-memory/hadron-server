@@ -33,12 +33,19 @@ function makeTxSpy() {
     calls.push({ key1, key2 });
     return Promise.resolve(1);
   });
-  // Spec 049 S4 / #1180: every helper consults BOTH predicate sources before
-  // locking — the Channel table and `Memory.protectedLocs`. A memory with no
-  // Channels and no declared locs is the unprotected world these tests describe.
+  // Spec 049 S4: every helper consults the protected-loc gate before locking.
+  // Its ONE source is the Channel table, so a memory with no Channels is the
+  // unprotected world these tests describe.
+  //
+  // #1180 briefly added `Memory.protectedLocs` as a second source and this fake
+  // stubbed `memory.findUnique` to satisfy it; #1201 removed the column, and
+  // the stub is removed with it (@copilot, PR #1203). Not because it broke
+  // anything — the cast below absorbs an extra property, which is why nothing
+  // failed — but because a fake that answers a call the code no longer makes is
+  // a fixture describing a world that does not exist, and it would silently
+  // satisfy the gate if that read ever came back.
   const channel = { findMany: vi.fn(async () => []) };
-  const memory = { findUnique: vi.fn(async () => ({ name: 'test-memory', protectedLocs: [] })) };
-  return { tx: { $executeRaw, channel, memory } as unknown as Prisma.TransactionClient, calls };
+  return { tx: { $executeRaw, channel } as unknown as Prisma.TransactionClient, calls };
 }
 
 describe('lockAncestorsForCreate', () => {
