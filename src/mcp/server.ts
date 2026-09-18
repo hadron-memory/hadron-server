@@ -917,6 +917,9 @@ type ReadProjectionNode = {
   memoryId: string;
   description: string | null;
   nodeType: string;
+  /** #1201 — governed kind markers, rendered so a reader can tell which door applies. */
+  role: string | null;
+  isRunnable: boolean | null;
   tags: string[];
   seq: number | null;
   properties: unknown;
@@ -1019,6 +1022,14 @@ async function renderNodeReadProjection(
     portalUrl ? `URL: ${portalUrl}` : '',
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
+    // #1201 (@codex P2, PR #1203). Without these a governed node reads as an
+    // ordinary one, so a caller cannot tell which door applies until a write
+    // fails — the field would not round-trip through the primary agent API it
+    // is written from. Omitted when unset, like every other optional meta line;
+    // `Runnable:` only when true, matching the frontmatter convention that
+    // false and null are one state.
+    node.role ? `Role: ${node.role}` : '',
+    node.isRunnable ? 'Runnable: true' : '',
     opts.locked
       ? 'Locked: encrypted memory — call hadron_unlock_memory to read/write its content (spec 041)'
       : '',
@@ -2693,6 +2704,27 @@ export function createMcpServerInstance(
         return textResult('Write access denied for this memory.');
       }
 
+      // #1201 (@copilot, PR #1203 round 2). This helper writes through a RAW
+      // upsert whose update branch preserves omitted fields, so pointed at an
+      // existing review or runnable task it rewrites the node while keeping its
+      // governed signals — a generic MCP surface editing a governed node, which
+      // is the thing the gate exists to stop.
+      //
+      // It never SETS a governed signal (its create branch has neither), so the
+      // only reachable case is the one above: an existing governed node. The
+      // merge is still written as a merge rather than a bare read, because the
+      // rule is "what does this write PRODUCE" and a shortcut here would be the
+      // next thing to drift.
+      const parentGovernedProbe = await db.node.findUnique({
+        where: { loc_memoryId: { loc, memoryId } },
+        select: { role: true, isRunnable: true },
+      });
+      try {
+        assertMayProduceGovernedNode(mergedGovernedState(parentGovernedProbe, {}), 'update');
+      } catch (e) {
+        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        throw e;
+      }
 
       const upsertArgs = {
         where: { loc_memoryId: { loc, memoryId } },
@@ -4231,9 +4263,26 @@ export function createMcpServerInstance(
       // threat this mechanism exists for rather than an afterthought. No
       // ownsKind is ever passed: there is deliberately no MCP door, and that
       // absence is what keeps the agent surface on the refused path.
+      //
+      // MERGED with whatever is at the loc, tombstone included (@copilot,
+      // PR #1203 round 2) — the identical defect to the one fixed in
+      // writeNodeCore, left behind here because this handler is a PARITY
+      // implementation and I fixed one consumer of the shared rule and not the
+      // other. This tool resurrects a soft-deleted row and preserves the fields
+      // the caller omits, so the resulting state can be governed while the
+      // input names nothing.
+      //
+      // The probe is read AFTER this point in the handler, so it is read here
+      // instead; it is the same stale-read-for-payload-purposes row, and the
+      // authoritative decision for a RACE is the one writeNodeCore takes under
+      // the lock. What this closes is the ordinary, unraced case.
+      const governedProbe = await db.node.findUnique({
+        where: { loc_memoryId: { loc, memoryId } },
+        select: { role: true, isRunnable: true },
+      });
       try {
         assertMayProduceGovernedNode(
-          { role: role ?? null, isRunnable: isRunnable ?? null },
+          mergedGovernedState(governedProbe, { role, isRunnable }),
           'create',
         );
       } catch (e) {

@@ -37,6 +37,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 import {
   GOVERNED_KINDS,
   governedKindsOf,
@@ -472,5 +473,85 @@ describe('the bypasses review found — each was a way in the gate did not cover
 
     await resolvers.Mutation.restoreNodeRevision({}, { revisionId: rev.id } as never, ctx());
     expect((await db.node.findFirstOrThrow({ where: { id } })).role).toBeNull();
+  });
+});
+
+describe('the MCP handlers, driven for real — they are parity implementations, not delegates', () => {
+  // Structural assertions elsewhere in this file prove the gate CALL exists in
+  // mcp/server.ts. These prove it WORKS, which is a different claim — and the
+  // difference is exactly what round 2 of review caught: the call was there and
+  // read only the input, so it passed every structural check while leaving the
+  // resurrection bypass open on the surface agents actually use.
+  const mcp = () =>
+    createTestableMcpServer({ userId: adminId, roles: ['ADMIN'], clientId: `user:${adminId}` });
+  const nodeUrn = (loc: string) => `hrn:node:gov-org.test:corpus:${loc}`;
+
+  it('hadron_create_node refuses a governed create', async () => {
+    const text = await mcp().callToolText('hadron_create_node', {
+      urn: nodeUrn('m:1'),
+      name: 'n',
+      role: 'review',
+    });
+    expect(text).toContain('[role_governed]');
+    expect(await db.node.count({ where: { memoryId, loc: 'm:1' } })).toBe(0);
+  });
+
+  it('hadron_create_node cannot RESURRECT a tombstoned governed node', async () => {
+    // @copilot round 2, and the same defect as the GraphQL one a commit
+    // earlier: I fixed one consumer of the shared rule and not the other.
+    expect(await door('createReviewNode', { loc: 'm:2', name: 'check', role: 'review' })).toBe('OK');
+    const id = (await db.node.findFirstOrThrow({ where: { memoryId, loc: 'm:2' } })).id;
+    await db.node.update({ where: { id }, data: { deletedAt: new Date() } });
+
+    const text = await mcp().callToolText('hadron_create_node', {
+      urn: nodeUrn('m:2'),
+      name: 'revived',
+      content: 'mine',
+    });
+    expect(text).toContain('[role_governed]');
+
+    const row = await db.node.findFirstOrThrow({ where: { id } });
+    expect(row.deletedAt).not.toBeNull();
+    expect(row.content).toBeNull();
+  });
+
+  it('hadron_update_node refuses an edit to a governed node', async () => {
+    expect(await door('createTaskNode', { loc: 'm:3', name: 'task', isRunnable: true })).toBe('OK');
+    const text = await mcp().callToolText('hadron_update_node', {
+      urn: nodeUrn('m:3'),
+      description: 'tampered',
+    });
+    expect(text).toContain('[role_governed]');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'm:3' } })).description).toBeNull();
+  });
+
+  it('hadron_create_parent_node cannot rewrite a governed node either', async () => {
+    // @copilot round 2. It writes through a RAW upsert whose update branch
+    // preserves omitted fields, so pointed at an existing review it rewrote the
+    // node while keeping its role — a generic surface editing a governed node.
+    expect(await door('createReviewNode', { loc: 'm:4', name: 'check', role: 'review' })).toBe('OK');
+    const text = await mcp().callToolText('hadron_create_parent_node', {
+      urn: nodeUrn('m:4'),
+      name: 'hijacked',
+    });
+    expect(text).toContain('[role_governed]');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'm:4' } })).name).toBe('check');
+  });
+
+  it('...and still creates an ordinary parent node', async () => {
+    // The opposite failure: gating every parent-node write would satisfy the
+    // case above while breaking the tool.
+    const text = await mcp().callToolText('hadron_create_parent_node', {
+      urn: nodeUrn('m:5'),
+      name: 'ordinary parent',
+    });
+    expect(text).not.toContain('[role_governed]');
+    expect(await db.node.count({ where: { memoryId, loc: 'm:5' } })).toBe(1);
+  });
+
+  it('a governed node READS back with its role, so a caller can tell which door applies', async () => {
+    expect(await door('createReviewNode', { loc: 'm:6', name: 'check', role: 'review' })).toBe('OK');
+    const text = await mcp().callToolText('hadron_get_node', { urn: nodeUrn('m:6') });
+    expect(text).toContain('Role: review');
   });
 });
