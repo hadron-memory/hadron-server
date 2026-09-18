@@ -375,8 +375,19 @@ export async function writeNodeCore(
       // a review node, so it still needs the review door. That is the point: a
       // safety check must not be rewritable through the generic surface.
       //
-      // Runs BEFORE the mode gate so a caller reaching the wrong door is told
-      // which door to use, rather than first being told the node does not exist.
+      // ORDER: before the mode gate for an UPDATE, after its live-collision
+      // refusal for a CREATE (@copilot, PR #1203).
+      //
+      // For an update, "you need the review door" is more useful than "that
+      // node does not exist", so the governed gate goes first. For a create at
+      // a loc that already holds a LIVE node, the opposite: the collision is
+      // the real answer and a ROLE_GOVERNED refusal naming a create door is
+      // actively misleading, because the create door cannot create over a live
+      // node either. Same refusal either way — only the remedy differs, and a
+      // remedy that cannot be followed is worse than a blunt one.
+      //
+      // Both are unlocked fast checks, so which fires first is a message
+      // decision and not a safety one; the authoritative refusals are unchanged.
       //
       // MERGED ON EVERY MODE, create included (@codex P1, PR #1203). A create
       // is not always a create: `createNode` RESURRECTS a soft-deleted row at
@@ -389,6 +400,12 @@ export async function writeNodeCore(
       // Merging unconditionally is also simpler than special-casing the
       // tombstone: with no existing row the merge IS the input, and a LIVE row
       // in create mode is refused by the mode gate below regardless.
+      if (mode === 'create' && existing && !existing.deletedAt) {
+        const collision = new NodeLocConflictError(input.loc, input.memoryId);
+        throw new GraphQLError(collision.message, {
+          extensions: { code: collision.name, loc: collision.loc, memoryId: collision.memoryId },
+        });
+      }
       assertGovernedWrite(
         existing,
         mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),

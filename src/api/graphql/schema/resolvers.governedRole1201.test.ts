@@ -595,3 +595,33 @@ describe('the MCP handlers, driven for real — they are parity implementations,
     expect(text).toContain('Role: review');
   });
 });
+
+describe('refusal ORDER — the remedy has to be one the caller can follow (@copilot)', () => {
+  it('a create over a LIVE governed node reports the COLLISION, not the door', async () => {
+    // The governed gate ran first and answered ROLE_GOVERNED, naming a create
+    // door — which cannot create over a live node either, so the remedy could
+    // not be followed. The collision is the real answer here.
+    expect(await door('createReviewNode', { loc: 'o:1', name: 'check', role: 'review' })).toBe('OK');
+    expect(await genericCreate({ loc: 'o:1', name: 'again' })).toBe('ERR:NodeLocConflictError');
+  });
+
+  it('...but an UPDATE to a governed node still names the door', async () => {
+    // The opposite order, and the reason this is a per-mode decision rather
+    // than a blanket one: for an update "you need the review door" is exactly
+    // what the caller can act on.
+    expect(await door('createReviewNode', { loc: 'o:2', name: 'check', role: 'review' })).toBe('OK');
+    expect(await genericUpdate({ memoryId, loc: 'o:2', name: 'x' })).toBe('ERR:ROLE_GOVERNED');
+  });
+
+  it('and a create over a TOMBSTONED governed node still reports the door', async () => {
+    // The resurrection case is NOT a collision — the mode gate lets a tombstone
+    // through — so the governed refusal is both correct and followable there.
+    // Without this, hoisting the collision check could have been widened to all
+    // creates and quietly reopened the resurrection bypass.
+    expect(await door('createReviewNode', { loc: 'o:3', name: 'check', role: 'review' })).toBe('OK');
+    const id = (await db.node.findFirstOrThrow({ where: { memoryId, loc: 'o:3' } })).id;
+    await db.node.update({ where: { id }, data: { deletedAt: new Date() } });
+
+    expect(await genericCreate({ loc: 'o:3', name: 'revived' })).toBe('ERR:ROLE_GOVERNED');
+  });
+});
