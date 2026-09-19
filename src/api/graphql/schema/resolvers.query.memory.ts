@@ -297,6 +297,7 @@ export const memoryQueries = {
           memoryClasses?: string[] | null;
           visibility?: string | null;
           sharedWithMe?: boolean | null;
+          ownedByMe?: boolean | null;
         } | null;
         orgId?: string | null;
         limit?: number | null;
@@ -318,12 +319,6 @@ export const memoryQueries = {
         ? { class: { in: [...classSet] as any } }
         : { class: { not: 'system' as const } };
 
-      // #463 / cor:api:100:01 — optional single-org narrowing ("active
-      // organization"): member -> scope, non-member/unresolvable -> empty
-      // page with no org-existence disclosure, no platform-admin bypass.
-      const scope = await resolveOrgScope(ctx, orgId);
-      if (!scope) return empty;
-
       const page = async (where: Record<string, unknown>) => {
         const [total, items] = await Promise.all([
           ctx.db.memory.count({ where }),
@@ -339,6 +334,69 @@ export const memoryQueries = {
         ]);
         return { items, total };
       };
+
+      // #1179 — filter.ownedByMe: the caller's OWN user-owned (org-less)
+      // memories, `organizationId IS NULL AND ownerUserId = ctx.userId`. The
+      // memory twin of agents(filter.ownedByMe) / apps(filter.ownedByMe) (#782),
+      // and deliberately the SAME predicate as those two so the three read
+      // identically (cor:api:120:03 — slices are filters, and an owner slice
+      // constrains even a platform admin rather than bypassing anything).
+      //
+      // Keyed on `ownerUserId`, the spec-047 user TENANT owner — NOT on
+      // `userId` (the personal/private strict owner) and NOT on `class`.
+      // `class IN (personal, private)` was only ever a PROXY for ownership,
+      // correct while every user-owned memory was personal (#1176): a
+      // `knowledge`-class memory under a user root is user-owned today, so a
+      // class-keyed filter would omit exactly the rows this issue was reported
+      // for. The columns are two independent axes (`chk_memory_owner_xor` for
+      // this one, `chk_personal_visibility_user` for the other).
+      //
+      // Ahead of `resolveOrgScope` because the slice is org-less by definition,
+      // so `orgId` is not consulted — matching the sibling filters, which skip
+      // the scope resolution entirely. A foreign orgId therefore neither empties
+      // this slice nor discloses anything: every row it returns is the caller's
+      // own and belongs to no org.
+      if (f.ownedByMe) {
+        // App-key callers have no user context, and user-owned memories are
+        // identity-scoped, so an impersonated support session sees none of the
+        // target's (#876 — the same drop `getAccessibleMemoryIds` and the
+        // sibling filters make).
+        if (!ctx.userId || ctx.impersonation) return empty;
+        // A user-owned memory is never in the marketplace slice (#758 pins
+        // `ownerUserId: null` there), so this combination is empty by
+        // construction rather than by a silent predicate collision — the same
+        // reasoning that kept `ownedByMe` off PublicAgentFilter (#782).
+        if (f.visibility === 'PUBLIC') return empty;
+        return page({
+          deletedAt: null,
+          // Redundant under `chk_memory_owner_xor` — `ownerUserId` set implies
+          // `organizationId` NULL — and therefore NOT independently testable
+          // while that constraint holds. Kept because the sibling filters carry
+          // it, and because a predicate that spells out both halves of the XOR
+          // stays correct if the XOR is ever relaxed. Stated so a reader does
+          // not mistake it for a clause under test.
+          organizationId: null,
+          ownerUserId: ctx.userId,
+          // Per-user agent holdings stay out of the regular memory list
+          // (cor:api:120:03), so the owner slice excludes them too — a filter
+          // that surfaced rows the default list hides would WIDEN rather than
+          // narrow. No live row is both today (measured: 0 of 24 user-owned
+          // rows carry `userMemoryOfAgentId`); the clause keeps it that way.
+          userMemoryOfAgentId: null,
+          ...(f.visibility ? { visibility: f.visibility as any } : {}),
+          ...classFilter,
+          // A memory the caller owns AND was granted: narrows this slice
+          // instead of replacing it, so the two clauses compose by AND like
+          // every other pair.
+          ...(f.sharedWithMe ? { shares: { some: { granteeId: ctx.userId } } } : {}),
+        });
+      }
+
+      // #463 / cor:api:100:01 — optional single-org narrowing ("active
+      // organization"): member -> scope, non-member/unresolvable -> empty
+      // page with no org-existence disclosure, no platform-admin bypass.
+      const scope = await resolveOrgScope(ctx, orgId);
+      if (!scope) return empty;
 
       // #778 — filter.sharedWithMe: the distinct set of personal memories shared
       // WITH the caller via MemoryShare (the caller is a grantee) — the portal's
@@ -441,6 +499,8 @@ export const memoryQueries = {
       //       independent of the active org (they're user-owned, not part of
       //       any org's collection; selecting an active org must not hide
       //       your own notes),
+      //   (1b) their OWN user-owned memories of ANY class (`ownerUserId`),
+      //       on the same always-visible terms as (1) — see below,
       //   (2) memories their member orgs OWN,
       //   (3) memories their member orgs SUBSCRIBE to.
       // Per-user agent memories (userMemoryOfAgentId) are excluded — they
@@ -458,12 +518,38 @@ export const memoryQueries = {
           OR: [
             { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
             { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
-            // Admin impersonation: the personal clause is identity-scoped and
-            // dropped — the shared-org session never lists the target's
-            // personal/private memories (matches getAccessibleMemoryIds).
+            // Admin impersonation: the identity-scoped clauses are dropped —
+            // the shared-org session never lists the target's personal/private
+            // or user-owned memories (matches getAccessibleMemoryIds).
             ...(ctx.impersonation
               ? []
-              : [{ class: { in: ['personal', 'private'] as any }, userId: ctx.userId }]),
+              : [
+                  { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
+                  // #1176 — the caller's own USER-OWNED rows, of any class.
+                  // This list had no `ownerUserId` clause at all, so a
+                  // user-owned memory outside `personal`/`private` was absent
+                  // from the only surface that enumerates a user's memories,
+                  // while `getAccessibleMemoryIds` (every node read),
+                  // `canReadMemoryRecord` (`memory(ref:)`), MCP's
+                  // `getMemoryAccess` and `scopes.ts` all admitted it. That is
+                  // the whole of the reported bug: `hrn:mem:holger:holgers-gear`
+                  // is `knowledge`-class with `organization_id` NULL and
+                  // `owner_user_id` set, so it was readable by URN, returned by
+                  // `hadron_list_memories`, and missing from the portal's list —
+                  // reachable only by direct link. cor:api:120:03 makes
+                  // "default = accessible set" durable, so the omission was a
+                  // spec violation, not a missing capability; nothing about the
+                  // DATA needed changing (the owner XOR means a free-standing
+                  // memory always HAS an owner, and 24 of 24 live rows do).
+                  //
+                  // Unscoped by org for the same reason as the personal clause
+                  // above: cor:api:120:03 — "selecting an active org must not
+                  // hide your own notes". This is where the memory surface
+                  // deliberately differs from `agents()`, which drops its
+                  // user-owned fold under an explicit orgId; a memory the
+                  // caller owns is theirs in every org context.
+                  { ownerUserId: ctx.userId },
+                ]),
           ],
         });
       }

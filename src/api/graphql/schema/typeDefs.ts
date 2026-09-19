@@ -690,7 +690,7 @@ export const typeDefs = `#graphql
   SELECTIONS, each switching which readable set the list draws from (never
   widening access beyond what the caller may already read):
     - visibility: PUBLIC switches from the caller's own union (org-owned +
-      org-subscribed + own personal/private) to the public marketplace slice
+      org-subscribed + own user-owned) to the public marketplace slice
       (every PUBLIC memory — the old publicMemories query).
     - sharedWithMe: true switches to the memories shared WITH the caller via
       MemoryShare (the caller is a grantee) — the portal's
@@ -711,6 +711,30 @@ export const typeDefs = `#graphql
     per-row grantor + role.
     """
     sharedWithMe: Boolean
+    """
+    #1179 — true restricts the list to the caller's OWN user-owned (org-less)
+    memories: organizationId IS NULL AND ownerUserId = the caller. For ALL
+    callers INCLUDING platform ADMIN/OWNER (owner scope is never an
+    admin-bypass surface), the same contract as AgentFilter.ownedByMe and
+    AppFilter.ownedByMe. Org-less by definition, so orgId is not consulted.
+    App-key callers (no user context) and impersonated sessions get an empty
+    page. Powers the portal's "My memories".
+
+    Keyed on ownerUserId — the spec-047 user TENANT owner, which is
+    independent of class — NOT on userId (the personal/private strict owner)
+    and NOT on the class itself. A knowledge-class memory under a user root
+    (hrn:mem:holger:holgers-gear) is user-owned and IS in this slice; an
+    ORG-owned personal memory is not (it has an organizationId), which
+    matches what the portal's class-plus-client-side-repair query already
+    returned. The class pair (personal, private) was only ever a proxy for
+    ownership, correct while the two coincided (#1176).
+
+    Composes by AND like every other clause, so it only ever narrows:
+    combined with visibility PUBLIC it is empty by construction (#758
+    excludes user-owned rows from the marketplace slice), and combined with
+    sharedWithMe it narrows that slice rather than replacing it.
+    """
+    ownedByMe: Boolean
   }
 
   "Filter for the uniform organizations() list (#473)."
