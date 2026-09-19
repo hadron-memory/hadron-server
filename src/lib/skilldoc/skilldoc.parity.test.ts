@@ -243,8 +243,48 @@ describe('#1177 — parseFile agrees with Go', () => {
     expect(got.source).toBe(c.source ?? '');
     expect(got.hash).toBe(c.hash ?? '');
     expect(got.body).toBe(c.body ?? '');
-    if (c.extra) expect(got.extra).toEqual(c.extra);
-    else expect(got.extra).toBeUndefined();
+    if (c.extra) {
+      // `toEqual` on a null-prototype object compares own enumerable keys,
+      // which is what we want — but assert the KEY is own rather than
+      // inherited, since that is the whole point of the `__proto__` case.
+      for (const k of Object.keys(c.extra)) {
+        expect(Object.prototype.hasOwnProperty.call(got.extra, k), `own key ${k}`).toBe(true);
+      }
+      expect({ ...got.extra }).toEqual(c.extra);
+    } else expect(got.extra).toBeUndefined();
+  });
+
+  it('a __proto__ frontmatter key is recorded as an OWN property', () => {
+    // @copilot, PR #1223, and it is the sharpest finding on this PR: `extra`
+    // being non-empty is what marks a local edit, and a plain `{}` would have
+    // swallowed this one key into the prototype — so the single frontmatter
+    // key with a JS footgun attached is the one that would have made a
+    // hand-edited file read as untouched. Go records it; the port must too.
+    const c = F.parseFile.find((x) => x.name === 'proto-frontmatter-key-is-extra')!;
+    const got = parseFile(c.input);
+    expect(Object.prototype.hasOwnProperty.call(got.extra, '__proto__')).toBe(true);
+    // The expectation needs a COMPUTED key: `{ __proto__: 'polluted' }` as a
+    // literal invokes the very setter this test is about, so the expected
+    // object would be empty and the assertion would fail against correct code.
+    // The footgun caught the test before it caught the parser.
+    expect({ ...got.extra }).toEqual({ ['__proto__']: 'polluted' });
+    // …and nothing was polluted.
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+  });
+
+  it('a space-bearing source URN does not round-trip — in BOTH implementations', () => {
+    // @copilot flagged this as a port defect. Measured against Go: it renders
+    // the URN and then recovers NEITHER source nor hash, identically, because
+    // both header grammars read `\S+`. So `isNodeUrn`'s acceptance set is
+    // WIDER than the header format can carry — a real gap, shared, and not
+    // this port's to close unilaterally. Pinned from the reference so a
+    // one-sided "fix" reds here. Reported to @Eli.
+    const c = F.parseFile.find((x) => x.name === 'space-bearing-source-urn-does-not-round-trip')!;
+    const got = parseFile(c.input);
+    expect(got.source).toBe('');
+    expect(got.hash).toBe('');
+    expect(isNodeUrn('hrn:node:a.com:m:a b')).toBe(true); // accepted, yet uncarryable
   });
 
   it('a legacy header yields a source and NO hash — the whole live corpus', () => {

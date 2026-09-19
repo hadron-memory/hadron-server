@@ -159,7 +159,18 @@ export function parseFile(data: string): SkillFile {
       if (k === 'name') file.name = v;
       else file.description = normalizeDescription(v);
     } else {
-      file.extra ??= {};
+      // NULL-PROTOTYPE, and that is not style (@copilot, PR #1223). A plain
+      // `{}` has a `__proto__` SETTER, so `extra['__proto__'] = v` mutates the
+      // object's prototype instead of recording an own property — the key
+      // vanishes, `extra` stays empty, and a file carrying it reads as
+      // unedited. `extra` being non-empty is precisely what marks a local
+      // edit, so the one frontmatter key with a JS footgun attached is the one
+      // that would have slipped past the check meant to catch hand edits.
+      //
+      // Go has no such hazard — a map has no prototype — so this is a place the
+      // port must do MORE than the reference to behave the same. The fixture
+      // (`proto-frontmatter-key-is-extra`) carries Go's answer.
+      file.extra ??= Object.create(null) as Record<string, unknown>;
       file.extra[k] = v;
     }
   }
