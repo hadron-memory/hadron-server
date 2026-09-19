@@ -53,6 +53,25 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/**
+ * KNOWN LIMIT, stated rather than denied (@copilot round 4, PR #1221): this is
+ * per FILE, not per call site. A file with two `node.createMany` calls passes
+ * if EITHER spreads the helper, so a second uncarried writer added to an
+ * existing carrier's file goes undetected.
+ *
+ * Not closed here because closing it properly means parsing the file and
+ * binding each `createMany` to the object literal it receives — an AST check,
+ * which is a different tool than this one and wants its own PR rather than a
+ * regex that approximates one. Both files in scope today hold exactly one such
+ * call, so the limit is reachable only by a shape that does not exist yet.
+ *
+ * What makes that acceptable rather than a hole: the type-level requirement on
+ * `NodeForGit` and the exhaustiveness check in `governedSignals.ts` are the
+ * load-bearing guarantees, and neither can be evaded by where a call sits in a
+ * file. This guard is the backstop for the one path they do not cover — a bulk
+ * row literal built by hand.
+ */
+
 /** Files performing a BULK node-row create — the shape a subtree copy has. */
 function bulkNodeWriters(): string[] {
   return walk(SRC)
