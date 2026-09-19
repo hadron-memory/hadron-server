@@ -28,6 +28,15 @@ export interface FrontmatterNodeFields {
   seq?: number | null;
   data?: unknown;
   properties?: unknown;
+  /**
+   * #1218 — the governed signals (`governedSignals.ts`). Emitted ONLY when set,
+   * like every other optional key here, which is what keeps this change off
+   * every existing mirrored file: today exactly one live node carries a role,
+   * so nothing else re-exports with a new key and no memory sees a mass diff.
+   * `runnable` matches the key the edge codec already uses.
+   */
+  role?: string | null;
+  isRunnable?: boolean | null;
 }
 
 /**
@@ -105,6 +114,13 @@ export function buildNodeFrontmatter(
   if (node.contentHash) frontmatter.contentHash = node.contentHash;
   if (node.tags.length > 0) frontmatter.tags = node.tags;
   if (node.seq != null) frontmatter.seq = node.seq;
+  // #1218 — governed signals, importer-consumed, so they must round-trip or a
+  // memory rebuilt from its mirror arrives ungoverned (#1205). Emitted only
+  // when set: an absent key means "no opinion" on import and preserves the
+  // stored value, which is what makes this safe to ship against mirrors that
+  // predate it.
+  if (node.role) frontmatter.role = node.role;
+  if (node.isRunnable) frontmatter.runnable = node.isRunnable;
   // Node-level JSON — not importer-consumed yet, but part of a faithful mirror.
   if (node.data != null) frontmatter.data = node.data;
   if (node.properties != null) frontmatter.properties = node.properties;

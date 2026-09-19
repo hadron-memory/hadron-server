@@ -38,6 +38,9 @@ export interface NodeForGit {
   /** Node-level structured JSON; exported for a faithful mirror. */
   data?: unknown;
   properties?: unknown;
+  /** #1218 — governed signals; importer-consumed, emitted only when set. */
+  role?: string | null;
+  isRunnable?: boolean | null;
   outgoingEdges: Array<{
     target: { id: string; loc?: string | null };
     name: string | null;

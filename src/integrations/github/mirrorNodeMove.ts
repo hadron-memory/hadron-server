@@ -186,6 +186,7 @@ function toNodeForGit(
     alias: string | null; description: string | null; abstract: string | null;
     abstractOriginHash: string | null; contentHash: string | null; content: string | null;
     tags: string[] | string; seq: number | null; data: unknown; properties: unknown;
+    role?: string | null; isRunnable?: boolean | null;
     outgoingEdges?: NodeForGit['outgoingEdges'];
   },
 ): NodeForGit {
@@ -205,6 +206,10 @@ function toNodeForGit(
     seq: row.seq,
     data: row.data,
     properties: row.properties,
+    // #1218 — the mirror carries the governed signals so a memory rebuilt from
+    // its repo is not rebuilt ungoverned.
+    role: row.role ?? null,
+    isRunnable: row.isRunnable ?? null,
     outgoingEdges: row.outgoingEdges ?? [],
   };
 }

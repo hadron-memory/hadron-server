@@ -3,6 +3,7 @@ import { assertBatchMutable } from '../../lib/bulkMutationGate.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
+import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
 
@@ -223,7 +224,12 @@ export async function extractParentNodeGraph(
         data: jsonOrDbNull(n.data),
         seq: n.seq,
         ownerRepo: n.ownerRepo,
-        isRunnable: n.isRunnable,
+        // #1218/#1210 — extract is an OWNING OPERATION: it carries the governed
+        // signals (`role`, `isRunnable`) instead of dropping them. This list
+        // copied `isRunnable` and not `role`, so an extracted review or spec
+        // arrived UNGOVERNED while an extracted task did not. Preserves, never
+        // mints. See `governedSignals.ts`.
+        ...carryGovernedSignals(n),
         llmModel: n.llmModel,
         aiAgent: n.aiAgent,
         tokens: n.tokens,

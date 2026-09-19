@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'fs';
+import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { join, relative, sep, basename, dirname } from 'path';
 import { parse } from 'yaml';
 import type { Node } from '../../index.d.js';
@@ -29,6 +30,23 @@ interface NodeYaml {
    * summaries and `description` for one-line headlines.
    */
   summary?: string;
+  /**
+   * #1218 — the governed signals, round-tripping through the mirror so a
+   * memory rebuilt from its repo does not arrive ungoverned (#1205). `runnable`
+   * matches the key the edge codec already uses; `isRunnable` is accepted as
+   * the legacy spelling for the same reason edges accept it.
+   *
+   * ABSENCE IS NOT `null` HERE. Every other optional field on this interface is
+   * read as `meta.x ?? null`, which is right for them and catastrophic for
+   * these two: no file already on disk carries either key, so coercing absent
+   * to null would clear the column on the next sync of every mirrored memory —
+   * un-governing on a schedule, introduced by the fix for it. They are routed
+   * through `governedSignalsFromMirror`, which omits an absent key so the
+   * stored value is preserved.
+   */
+  role?: string | null;
+  runnable?: boolean | null;
+  isRunnable?: boolean | null;
   tags?: string[];
   nodes?: Array<{ id: string; rel: string; loc?: string }>;
   alias?: string;
@@ -238,6 +256,9 @@ async function loadFrontmatterNode(
       contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],
       ownerRepo,
+      // #1218 — spread, NOT `?? null`: an absent key must stay absent so the
+      // sync update preserves the stored value. See the NodeYaml doc above.
+      ...governedSignalsFromMirror({ role: meta.role, isRunnable: meta.runnable ?? meta.isRunnable }),
     },
     edges,
   };
