@@ -43,7 +43,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { getAccessibleMemoryIds } from './resolvers.helpers.js';
+import { getAccessibleMemoryIds, canReadMemoryRecord } from './resolvers.helpers.js';
 
 function ctx(overrides: Partial<Context> = {}): Context {
   return { db, ...overrides };
@@ -67,6 +67,11 @@ type Fixture = {
   sharedWithOwner: string;
   /** org NULL + ownerUserId=owner + userMemoryOfAgentId set — a chatbot holding. */
   userOwnedHolding: string;
+  /** org NULL, class personal, ownerUserId=owner but userId=OTHER — the two
+   *  owner columns disagreeing. Legal (nothing ties them), absent from
+   *  production (0 of 15), and the shape the record gate and the list answered
+   *  differently. */
+  divergentPersonal: string;
 };
 
 let f: Fixture;
@@ -153,6 +158,12 @@ beforeEach(async () => {
       ownerUserId: owner.id,
       userMemoryOfAgentId: holdingAgent.id,
       createdBy: owner.id,
+    }),
+    divergentPersonal: await mem({
+      class: 'personal',
+      name: 'Divergent Personal',
+      ownerUserId: owner.id,
+      userId: other.id,
     }),
   };
   await db.memoryShare.create({
@@ -267,6 +278,61 @@ describe('#1176 — the list does not diverge from the node read gate', () => {
 
     expect(expected.length).toBeGreaterThan(0);
     expect([...listed].sort()).toEqual([...new Set(expected)].sort());
+  });
+});
+
+/**
+ * @codex on PR #1215 — the two owner columns are INDEPENDENT (nothing ties
+ * them), so `ownerUserId = A, userId = B` is a legal personal row. For
+ * personal/private, `canReadMemoryRecord` returns at its FIRST branch and admits
+ * only `userId` or a share grantee — it never reaches its own `ownerUserId`
+ * branch. So a list arm keyed on `ownerUserId` alone answered this row
+ * differently from the point read, in the direction that leaks: the tenant owner
+ * got the record (with `description`, `data`, `source`) and, through
+ * `getAccessibleMemoryIds`, its NODES.
+ *
+ * Latent — production has 0 such rows of 15 personal user-owned ones — so these
+ * fixtures build the shape directly, the way #758's tests pinned user-owned
+ * PUBLIC before free-standing creation made it reachable.
+ *
+ * The assertion that matters is not "A is denied" on its own; it is that all
+ * four surfaces AGREE about this row. A single-surface test here would have let
+ * the next copy of the clause drift again.
+ */
+describe('#1215 — a personal row whose two owner columns disagree', () => {
+  it('denies the TENANT owner on every surface, and admits the STRICT owner', async () => {
+    const tenant = ctx({ userId: f.ownerId, roles: ['READER'] });
+    const strict = ctx({ userId: f.otherId, roles: ['READER'] });
+    const row = await db.memory.findUniqueOrThrow({
+      where: { id: f.divergentPersonal },
+      select: {
+        id: true, class: true, userId: true, ownerUserId: true,
+        organizationId: true, appId: true, userMemoryOfAgentId: true,
+      },
+    });
+
+    // The record gate is the authority for this class, and it is unchanged by
+    // this PR — it is what the other three are being held to.
+    expect(await canReadMemoryRecord(tenant, row)).toBe(false);
+    expect(await canReadMemoryRecord(strict, row)).toBe(true);
+
+    // Node enumeration (the shared gate) must agree.
+    expect((await getAccessibleMemoryIds(tenant)) ?? []).not.toContain(row.id);
+    expect((await getAccessibleMemoryIds(strict)) ?? []).toContain(row.id);
+
+    // The default list must agree.
+    expect(ids(await list(null, { userId: f.ownerId, roles: ['READER'] }))).not.toContain(row.id);
+    expect(ids(await list(null, { userId: f.otherId, roles: ['READER'] }))).toContain(row.id);
+
+    // And so must the new owner slice: "owned" means what the record gate means
+    // by it, per class — the strict owner, not the tenant owner.
+    const ownedByTenant = await list({ ownedByMe: true }, { userId: f.ownerId, roles: ['READER'] });
+    expect(ids(ownedByTenant)).not.toContain(row.id);
+    const ownedByStrict = await list({ ownedByMe: true }, { userId: f.otherId, roles: ['READER'] });
+    expect(ids(ownedByStrict)).toContain(row.id);
+    // Not an empty page for an unrelated reason: the tenant owner still gets
+    // their own other rows in the same call.
+    expect(ids(ownedByTenant)).toContain(f.userOwnedKnowledge);
   });
 });
 

@@ -369,14 +369,34 @@ export const memoryQueries = {
         if (f.visibility === 'PUBLIC') return empty;
         return page({
           deletedAt: null,
-          // Redundant under `chk_memory_owner_xor` — `ownerUserId` set implies
-          // `organizationId` NULL — and therefore NOT independently testable
-          // while that constraint holds. Kept because the sibling filters carry
-          // it, and because a predicate that spells out both halves of the XOR
-          // stays correct if the XOR is ever relaxed. Stated so a reader does
-          // not mistake it for a clause under test.
+          // LOAD-BEARING, and it was not in the first version of this branch.
+          // While the slice keyed on `ownerUserId` alone this was redundant
+          // under `chk_memory_owner_xor` (owner set implies org NULL) and said
+          // so. The strict-owner arm below keys on `userId`, which an ORG-owned
+          // personal memory also carries — so this clause is now the only thing
+          // keeping such a row out of an "org-less" slice. Pinned by "excludes
+          // an ORG-owned personal memory the caller is the strict owner of".
           organizationId: null,
-          ownerUserId: ctx.userId,
+          // "Owned" means what the RECORD GATE means by it, per class — not one
+          // column (@codex, PR #1215). `canReadMemoryRecord` branches first on
+          // personal/private and admits `userId` there, falling through to
+          // `ownerUserId` for every other class; the two columns are
+          // independent, so a slice keyed on `ownerUserId` alone would hand the
+          // tenant owner a personal memory whose strict owner is someone else.
+          //
+          // Codex asked for the non-personal restriction ALONE here, which would
+          // have been the other half of the same mistake: the portal's "My
+          // memories" is mostly personal rows, so an owner slice without the
+          // strict-owner arm would have emptied the page this filter exists to
+          // fill. Both arms, split exactly where the read gate splits.
+          //
+          // In the aligned case — `ownerUserId === userId`, the only shape in
+          // production (15 of 15) — the two arms are indistinguishable from the
+          // single-column form.
+          OR: [
+            { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
+            { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
+          ],
           // Per-user agent holdings stay out of the regular memory list
           // (cor:api:120:03), so the owner slice excludes them too — a filter
           // that surfaced rows the default list hides would WIDEN rather than
@@ -548,7 +568,24 @@ export const memoryQueries = {
                   // deliberately differs from `agents()`, which drops its
                   // user-owned fold under an explicit orgId; a memory the
                   // caller owns is theirs in every org context.
-                  { ownerUserId: ctx.userId },
+                  //
+                  // NON-personal classes only (@codex, PR #1215). The two owner
+                  // columns are independent, so `ownerUserId = A, userId = B` is
+                  // a legal row — nothing constrains them to agree — and for
+                  // personal/private `canReadMemoryRecord` returns at its FIRST
+                  // branch, admitting only `userId` (or a share grantee) and
+                  // never reaching its own `ownerUserId` branch. An unrestricted
+                  // arm here would therefore list B's personal memory to A, with
+                  // `description` / `data` / `source` on the row, while
+                  // `memory(ref:)` correctly refused the same caller — the list
+                  // BROADER than the point read, which is the direction that
+                  // leaks. The strict-owner clause above governs those classes,
+                  // so nothing is lost: an aligned row (the only shape in
+                  // production — 15 of 15 measured) still reaches its owner
+                  // through it. MCP's `getMemoryAccess` has drawn this exact
+                  // line since spec 047 ("the map is personal-free by design");
+                  // this is the GraphQL side catching up, not a new rule.
+                  { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
                 ]),
           ],
         });
