@@ -45,6 +45,7 @@
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { isTeamChatLoc } from './teamChatLoc.js';
 import { participantAppIds } from './auth/appParticipation.js';
+import { ancestorLocs } from './nodeSubtreeLock.js';
 
 /** The fields of a GraphQL `Context` / MCP `AuthContext` this needs. */
 export interface ChatLocPrincipal {
@@ -124,16 +125,54 @@ export async function chatLocFilter(
   // AND it covers a `chats:team` root that has no Channel row yet — the
   // backfill-on-touch window (spec 049 §7.1).
   //
-  // Expressed as a RELATION filter (`channel: null` — the `ChannelRoot`
-  // back-relation) rather than an id list: a subquery the database evaluates
-  // per row cannot go stale between building the filter and running it, and it
-  // does not enumerate. A Channel is not a `cor:cht` conversation, so no
-  // chatbot surface may reach one — that is the same refusal as above, keyed on
-  // what the node IS rather than on what it is called.
+  // Expressed as RELATION filters rather than an id list: a subquery the
+  // database evaluates per row cannot go stale between building the filter and
+  // running it, and it does not enumerate. A Channel is not a `cor:cht`
+  // conversation, so no chatbot surface may reach one — the same refusal as
+  // above, keyed on what the node IS rather than on what it is called.
+  //
+  // TWO clauses, because the root is not the whole Channel (@copilot round 3).
+  // `channel: null` uses the `ChannelRoot` back-relation and therefore excludes
+  // ONLY the root: the `:messages` container and the message rows beneath it
+  // have no such relation. This filter matches an EXACT loc the caller supplies,
+  // and `chats:team:messages` is a documented shape — so a Channel at
+  // `chats:release` was still reachable as `chats:release:messages`, where
+  // `deleteChat` would soft-delete the transcript container of a chat the chatbot
+  // surfaces are not supposed to be able to see at all.
+  //
+  // The subtree clause closes it by asking whether any ANCESTOR of this loc (or
+  // the loc itself) is a Channel's address IN THE SAME MEMORY — the relation
+  // supplies that scoping, so it is not a cross-memory loc match
+  // (findings:unscoped-loc-lookup-crosses-memories). A bounded `IN` over the
+  // loc's own prefixes, never a `startsWith`, so the unescaped-LIKE hazard in
+  // `findings:prisma-string-filters-are-unescaped-like` cannot reach a caller
+  // value.
   base.channel = null;
+  base.memory = { channels: { none: { loc: { in: [...ancestorLocs(chatId), chatId] } } } };
 
+  // Platform ADMIN/OWNER skip entitlement narrowing — EXCEPT into the
+  // strict-owner classes, where `cor:acl:010:02` gives them no bypass at all
+  // (@copilot round 3). Without this carve-out the admin branch selected a chat
+  // in another user's `personal`/`private` memory, the site gate then refused
+  // it, and the admin learned the chat EXISTS: a random loc answers "not
+  // found", a real one answered `Forbidden`. That is the existence oracle #829
+  // built this filter to remove, so it belongs here — narrowing the candidate
+  // set — rather than as a collapse of the refusal at the call site, which
+  // would also have cost the entitled-but-unauthorized caller their
+  // (deliberate, documented) `Forbidden`.
+  //
+  // Mirrors `getAccessibleMemoryIds`' admin branch, which returns an explicit
+  // id list rather than "no filter" for exactly this reason.
+  const strictOwnerOk: Prisma.NodeWhereInput = {
+    memory: {
+      OR: [
+        { class: { notIn: ['personal', 'private'] as never } },
+        { userId: principal.userId ?? '__no_principal__' },
+      ],
+    },
+  };
   const isAdmin = !!principal.roles?.some((r) => r === 'ADMIN' || r === 'OWNER');
-  if (isAdmin) return base;
+  if (isAdmin) return { ...base, AND: [strictOwnerOk] };
 
   const userId = principal.userId;
   // No user identity (e.g. a bare App-key caller) — entitlement can only come

@@ -413,3 +413,53 @@ describe('class=app is STILL four row shapes (@copilot round 2 on PR #1207)', ()
     await expectCode(Q.channelMessages({}, { channelRef: ch.id }, ctx(colleague.id)), 'CHANNEL_NOT_FOUND');
   });
 });
+
+describe('the Channel is its SUBTREE, and the admin branch is not a bypass (@copilot round 3)', () => {
+  it('a Channel\'s :messages container is not reachable as an agent chat', async () => {
+    // `channel: null` uses the `ChannelRoot` back-relation, so it excludes the
+    // ROOT only. The `:messages` container has no such relation, and this
+    // filter matches an exact caller-supplied loc — so a Channel at
+    // `chats:journal` was still reachable as `chats:journal:messages`, where
+    // `deleteChat` would soft-delete the transcript container of a chat the
+    // chatbot surfaces cannot otherwise see.
+    await M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'mine' }, ctx(owner.id));
+    const container = await db.node.findFirstOrThrow({
+      where: { memoryId: personal.id, loc: 'chats:journal:messages' },
+    });
+
+    await expect(
+      M.deleteChat({}, { chatId: 'chats:journal:messages' }, ctx(owner.id)),
+    ).rejects.toThrow(/not found/i);
+    // Still live — the refusal is real, not a message about a row that went
+    // anyway.
+    expect((await db.node.findUniqueOrThrow({ where: { id: container.id } })).deletedAt).toBeNull();
+  });
+
+  it('a platform ADMIN gets "not found", not "Forbidden", for a chat in another user\'s personal memory', async () => {
+    // The existence oracle: `chatLocFilter`'s admin branch skipped entitlement
+    // narrowing, the site gate then refused (cor:acl:010:02 gives no bypass
+    // into personal/private), and the difference between "Forbidden" and "not
+    // found" told the admin the chat exists. Both answers must be identical.
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:owner-private`,
+        name: 'owner-private',
+        class: 'private',
+        userId: owner.id,
+        createdBy: owner.id,
+        userMemoryOfAgentId: agent.id,
+      },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: holding.id, loc: 'chats:secret', name: 'secret', nodeType: 'record', data: { scope: 'private' } },
+    });
+
+    const real = await Q.chatHistory({}, { chatId: 'chats:secret' }, adminCtx(colleague.id)).catch((e: Error) => e);
+    const fake = await Q.chatHistory({}, { chatId: 'chats:nothing-here' }, adminCtx(colleague.id)).catch((e: Error) => e);
+    expect(real.message.replace(/"[^"]*"/, '"X"')).toBe(fake.message.replace(/"[^"]*"/, '"X"'));
+    expect(real.message).toMatch(/not found/i);
+  });
+});
