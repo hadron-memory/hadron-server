@@ -589,6 +589,30 @@ describe('the MCP handlers, driven for real — they are parity implementations,
     expect(await db.node.count({ where: { memoryId, loc: 'm:5' } })).toBe(1);
   });
 
+  it('a create through a door without a name is refused at the TOOL, not deeper', async () => {
+    // `name` is optional in the shared arg set because an update preserves it,
+    // and these tools call the resolver directly — so GraphQL's `String!` never
+    // gets a chance to speak (@copilot). Without the explicit check the
+    // omission surfaced from somewhere deeper, naming neither the field nor the
+    // tool.
+    const text = await mcp().callToolText('hadron_create_review', { urn: nodeUrn('m:7') });
+    expect(text).toContain('"name" is required');
+    expect(text).toContain('hadron_create_review');
+    expect(await db.node.count({ where: { memoryId, loc: 'm:7' } })).toBe(0);
+  });
+
+  it('...and an UPDATE without a name is fine, because it preserves', async () => {
+    expect(await door('createReviewNode', { loc: 'm:8', name: 'keep me', role: 'review' })).toBe('OK');
+    const text = await mcp().callToolText('hadron_update_review', {
+      urn: nodeUrn('m:8'),
+      description: 'touched',
+    });
+    expect(text).not.toContain('"name" is required');
+    const row = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'm:8' } });
+    expect(row.name).toBe('keep me');
+    expect(row.description).toBe('touched');
+  });
+
   it('a governed node READS back with its role, so a caller can tell which door applies', async () => {
     expect(await door('createReviewNode', { loc: 'm:6', name: 'check', role: 'review' })).toBe('OK');
     const text = await mcp().callToolText('hadron_get_node', { urn: nodeUrn('m:6') });

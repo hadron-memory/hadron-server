@@ -5149,6 +5149,15 @@ export function createMcpServerInstance(
       return textResult((e as Error).message);
     }
 
+    // `name` is optional in the shared arg set because an UPDATE preserves it,
+    // but a CREATE requires it — and these tools call the resolver directly, so
+    // GraphQL's `String!` never gets a chance to say so (@copilot, PR #1203).
+    // Without this the omission surfaces from somewhere deeper as a Prisma or
+    // validation error that names neither the field nor the tool.
+    if (mode === 'create' && (typeof fields.name !== 'string' || fields.name.trim() === '')) {
+      return textResult(`hadron_create_${kind}: "name" is required when creating a node.`);
+    }
+
     // On CREATE the governed signal is set BY THE DOOR, never by the caller:
     // the tool IS the statement of intent, so asking for it again would let the
     // two disagree — a node authored as one kind and labelled another.
