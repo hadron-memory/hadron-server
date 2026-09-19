@@ -35,7 +35,7 @@ import { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './n
 import { deriveName, validName, validPrefix } from './derive.js';
 import { hash } from './hash.js';
 import { render } from './render.js';
-import { parseFile, SkillFileParseError } from './parse.js';
+import { isNodeUrn, parseFile, SkillFileParseError } from './parse.js';
 
 interface Fixtures {
   sourceCommit: string;
@@ -54,6 +54,12 @@ interface Fixtures {
     name: string; input: string; err?: boolean; skillName?: string; description?: string;
     source?: string; hash?: string; body?: string; extra?: Record<string, unknown>;
   }[];
+  isNodeUrn: { name: string; why?: string; in: string; valid: boolean }[];
+  /** Go's own render→parse result, so the round trip is compared ACROSS
+   *  languages rather than against this port's own output (@copilot, PR #1223). */
+  renderParseRoundTrip: {
+    name: string; source: string; skillName: string; description: string; content: string; out: string;
+  }[];
 }
 
 /** Loads the fixtures, refusing an empty or absent set rather than yielding []. */
@@ -64,6 +70,7 @@ function loadFixtures(): Fixtures {
   const sections: (keyof Fixtures)[] = [
     'normalizeDescription', 'normalizeBody', 'deriveName',
     'validName', 'validPrefix', 'hash', 'render', 'parseFile',
+    'isNodeUrn', 'renderParseRoundTrip',
   ];
   for (const s of sections) {
     const v = f[s];
@@ -175,18 +182,51 @@ describe('#1177 — render agrees SEMANTICALLY, and on the hash byte-for-byte', 
     expect(body(got)).toBe(body(c.out));
   });
 
-  it('round-trips through parseFile with the hash intact', () => {
-    // The invariant @Eli names as the thing to test — the preamble strip is the
-    // exact inverse of render — rather than the two functions separately.
-    for (const c of F.render) {
-      const file = parseFile(render(c.skillName, c.source, c.description, c.content));
-      expect(file.source, c.name).toBe(c.source);
-      expect(file.name, c.name).toBe(c.skillName);
-      expect(file.description, c.name).toBe(normalizeDescription(c.description));
-      expect(file.body, c.name).toBe(normalizeBody(c.content));
-      // Recomputed from the FILE alone — the property that makes a local edit
-      // detectable without the server.
-      expect(hash(file.source, file.name, file.description, file.body), c.name).toBe(file.hash);
+  it.each(F.renderParseRoundTrip.map((c) => [c.name, c] as const))(
+    'round-trips %s to the values GO read back',
+    (_n, expected) => {
+      // The invariant @Eli names as the thing to test — the preamble strip is
+      // the exact inverse of render — asserted ACROSS LANGUAGES. An earlier
+      // version compared this port's parse against this port's render, which
+      // is self-consistency: it would pass with both halves wrong in the same
+      // direction, and it left this Go-generated section unread (@copilot).
+      const src = F.render.find((r) => r.name === expected.name)!;
+      const file = parseFile(render(src.skillName, src.source, src.description, src.content));
+      expect(file.source).toBe(expected.source);
+      expect(file.name).toBe(expected.skillName);
+      expect(file.description).toBe(expected.description);
+      expect(file.body).toBe(expected.content);
+      // `out` is the hash GO read back off its own rendered file.
+      expect(file.hash).toBe(expected.out);
+      // …and recomputing from the FILE alone reproduces it — the property that
+      // makes a local edit detectable without the server.
+      expect(hash(file.source, file.name, file.description, file.body)).toBe(expected.out);
+    },
+  );
+});
+
+describe('#1177 — isNodeUrn matches the Go reference exactly', () => {
+  // @codex P2 asked for strict atom/loc validation here, on the grounds that
+  // the node-loc grammar rejects `?` and caps atoms at 64 characters. MEASURED
+  // against `urnlib.AssertFullyQualifiedUrn`, the function the Go side calls:
+  // it ACCEPTS `hrn:node:a.com:m:bad?loc`, a 70-character atom, a space and
+  // uppercase. So tightening would make this port DIVERGE from the reference
+  // — and divergence here is not cosmetic: it decides whether a file is ours,
+  // so the two sides would disagree about which files to touch.
+  //
+  // These rows are generated from Go, so the question is settled by the
+  // reference rather than by either of us, and a future tightening reds here
+  // rather than shipping.
+  it.each(F.isNodeUrn.map((c) => [c.name, c] as const))('isNodeUrn %s', (_n, c) => {
+    expect(isNodeUrn(c.in)).toBe(c.valid);
+  });
+
+  it('the rows @codex proposed rejecting are ACCEPTED by Go', () => {
+    // Named explicitly so removing them is a visible act.
+    for (const n of ['question-mark-in-loc', 'long-atom']) {
+      const c = F.isNodeUrn.find((x) => x.name === n)!;
+      expect(c.valid, `${n} is accepted by urn-lib-go`).toBe(true);
+      expect(isNodeUrn(c.in)).toBe(true);
     }
   });
 });

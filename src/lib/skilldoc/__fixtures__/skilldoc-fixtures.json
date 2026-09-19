@@ -119,6 +119,77 @@
       "out": "8eee487e6a395806"
     }
   ],
+  "isNodeUrn": [
+    {
+      "name": "flat-v2",
+      "in": "hrn:node:a.com:m:tasks:x",
+      "valid": true
+    },
+    {
+      "name": "deep-loc",
+      "in": "hrn:node:a.com:m:a:b:c",
+      "valid": true
+    },
+    {
+      "name": "not-a-node-kind",
+      "why": "another entity kind is not ours",
+      "in": "hrn:agent:a.com:m:x",
+      "valid": false
+    },
+    {
+      "name": "too-few-segments",
+      "in": "hrn:node:a.com:m",
+      "valid": false
+    },
+    {
+      "name": "legacy-double-colon",
+      "why": "no v1 on this surface",
+      "in": "hrn:node:a.com::m::x",
+      "valid": false
+    },
+    {
+      "name": "bare-id",
+      "in": "01a0b7fa34d57509b0822d658ebb85a0",
+      "valid": false
+    },
+    {
+      "name": "empty",
+      "in": "",
+      "valid": false
+    },
+    {
+      "name": "question-mark-in-loc",
+      "why": "urn-lib-go ACCEPTS this; a stricter port would diverge",
+      "in": "hrn:node:a.com:m:bad?loc",
+      "valid": true
+    },
+    {
+      "name": "long-atom",
+      "why": "no 64-char atom cap here",
+      "in": "hrn:node:a.com:m:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "valid": true
+    },
+    {
+      "name": "space-in-loc",
+      "in": "hrn:node:a.com:m:a b",
+      "valid": true
+    },
+    {
+      "name": "uppercase-loc",
+      "in": "hrn:node:a.com:m:UPPER",
+      "valid": true
+    },
+    {
+      "name": "trailing-colon",
+      "in": "hrn:node:a.com:m:",
+      "valid": false
+    },
+    {
+      "name": "empty-root",
+      "in": "hrn:node::m:x",
+      "valid": false
+    }
+  ],
   "normalizeBody": [
     {
       "name": "crlf-folded",
@@ -148,24 +219,6 @@
       "out": "a\n\n\nb"
     },
     {
-      "name": "body-untouched-by-NEL",
-      "why": "NormalizeBody trims only \\n, so every space code point survives it",
-      "in": "\na\n",
-      "out": "\na\n"
-    },
-    {
-      "name": "body-untouched-by-ZWNBSP",
-      "why": "NormalizeBody trims only \\n, so every space code point survives it",
-      "in": "﻿\na\n﻿",
-      "out": "﻿\na\n﻿"
-    },
-    {
-      "name": "body-untouched-by-NBSP",
-      "why": "NormalizeBody trims only \\n, so every space code point survives it",
-      "in": " \na\n ",
-      "out": " \na\n "
-    },
-    {
       "name": "body-untouched-by-LS",
       "why": "NormalizeBody trims only \\n, so every space code point survives it",
       "in": "\u2028\na\n\u2028",
@@ -182,6 +235,24 @@
       "why": "NormalizeBody trims only \\n, so every space code point survives it",
       "in": "\u000b\na\n\u000b",
       "out": "\u000b\na\n\u000b"
+    },
+    {
+      "name": "body-untouched-by-NEL",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "\na\n",
+      "out": "\na\n"
+    },
+    {
+      "name": "body-untouched-by-ZWNBSP",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "﻿\na\n﻿",
+      "out": "﻿\na\n﻿"
+    },
+    {
+      "name": "body-untouched-by-NBSP",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": " \na\n ",
+      "out": " \na\n "
     }
   ],
   "normalizeDescription": [
@@ -206,18 +277,6 @@
       "out": "a  b"
     },
     {
-      "name": "trim-PS",
-      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
-      "in": "\u2029x\u2029",
-      "out": "x"
-    },
-    {
-      "name": "trim-VT",
-      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
-      "in": "\u000bx\u000b",
-      "out": "x"
-    },
-    {
       "name": "trim-NEL",
       "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
       "in": "x",
@@ -239,6 +298,18 @@
       "name": "trim-LS",
       "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
       "in": "\u2028x\u2028",
+      "out": "x"
+    },
+    {
+      "name": "trim-PS",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "\u2029x\u2029",
+      "out": "x"
+    },
+    {
+      "name": "trim-VT",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "\u000bx\u000b",
       "out": "x"
     }
   ],
