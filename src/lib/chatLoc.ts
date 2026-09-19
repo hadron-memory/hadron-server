@@ -163,13 +163,20 @@ export async function chatLocFilter(
   //
   // Mirrors `getAccessibleMemoryIds`' admin branch, which returns an explicit
   // id list rather than "no filter" for exactly this reason.
+  //
+  // TWO strict-ownership axes, not one (@copilot round 4). `class IN
+  // (personal, private)` keyed on `Memory.userId` is the 034 axis; spec 047
+  // added `ownerUserId` as a SECOND, ORTHOGONAL one — a user-owned memory of
+  // ANY class is owner-only and a platform admin gets no bypass into it either.
+  // `getAccessibleMemoryIds`' admin branch excludes both, so covering only the
+  // first left the same oracle alive for a user-owned knowledge or system
+  // memory.
+  const self = principal.userId ?? '__no_principal__';
   const strictOwnerOk: Prisma.NodeWhereInput = {
-    memory: {
-      OR: [
-        { class: { notIn: ['personal', 'private'] as never } },
-        { userId: principal.userId ?? '__no_principal__' },
-      ],
-    },
+    AND: [
+      { memory: { OR: [{ class: { notIn: ['personal', 'private'] as never } }, { userId: self }] } },
+      { memory: { OR: [{ ownerUserId: null }, { ownerUserId: self }] } },
+    ],
   };
   const isAdmin = !!principal.roles?.some((r) => r === 'ADMIN' || r === 'OWNER');
   if (isAdmin) return { ...base, AND: [strictOwnerOk] };

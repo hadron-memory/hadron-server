@@ -34,6 +34,7 @@ import {
   createDbAppMember,
 } from '../test/helpers.js';
 import { getMemoryAccess, getPrincipalAppMemoryAccess } from './access-control.js';
+import { participantAppIds } from '../lib/auth/appParticipation.js';
 import {
   getAccessibleMemoryIds,
   isAppParticipant,
@@ -301,5 +302,28 @@ describe('#1196 — the App fold implements participation, not the member table'
     await createDbAppMember(db, app.id, external.id, 'reader');
     const ctx = userCtx(external.id);
     expect(await inAccessibleSet(ctx, teamSpace.id)).toBe(await isAppParticipant(ctx, appRow));
+  });
+
+  it('DIFFERENTIAL: the SET form agrees with isAppParticipant on a USER-OWNED App', async () => {
+    // The shape that caught round 4 (@copilot), and the one the differential
+    // above could not see: `isAppParticipant` returns IMMEDIATELY for
+    // `ownerUserId !== null` and admits only the owner, while
+    // `participantAppIds`' membership arm admitted any AppMember of one. Two
+    // spellings of one audience disagreeing on exactly the shape spec 047 is
+    // strictest about — and reachable, since `chatLocFilter` requests that arm
+    // and `sendChatMessage` uses the filter as its write entitlement.
+    const owner = await db.user.create({ data: { id: generateId(), name: 'solo-owner' } });
+    const joiner = await db.user.create({ data: { id: generateId(), name: 'solo-joiner' } });
+    const solo = await db.app.create({
+      data: { id: generateId(), name: 'solo', urn: `u-${owner.id}:solo`, ownerUserId: owner.id },
+    });
+    await createDbAppMember(db, solo.id, joiner.id, 'admin');
+    const soloRow = await db.app.findUniqueOrThrow({ where: { id: solo.id } });
+
+    for (const [who, user] of [['owner', owner], ['joiner', joiner]] as const) {
+      const ctx = userCtx(user.id);
+      const inSet = (await participantAppIds(db, { userId: user.id }, { includeMemberships: true })).includes(solo.id);
+      expect({ who, inSet }).toEqual({ who, inSet: await isAppParticipant(ctx, soloRow) });
+    }
   });
 });

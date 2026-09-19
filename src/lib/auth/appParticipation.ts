@@ -75,7 +75,17 @@ export async function participantAppIds(
   if (contributorOrgIds.length > 0) arms.push({ organizationId: { in: contributorOrgIds } });
   // Identity-scoped, so never via impersonation.
   if (!principal.impersonation) arms.push({ ownerUserId: userId });
-  if (opts.includeMemberships) arms.push({ members: { some: { userId } } });
+  // `ownerUserId: null` is load-bearing, not tidiness (@copilot round 4).
+  // `isAppParticipant` returns IMMEDIATELY for a user-owned App and admits only
+  // its owner — spec 047, `cor:acl:010:01`: "a user-owned App admits its owner
+  // and nobody else". Without this clause the membership arm admitted any
+  // AppMember of one, so the set and the predicate disagreed on exactly the
+  // shape they most need to agree on. `chatLocFilter` requests this arm and
+  // `sendChatMessage` uses that filter as its write entitlement, so the
+  // disagreement was reachable: a non-owner who joins a user-owned App could
+  // append to its chat. A user-owned App is reachable here ONLY through the
+  // owner arm above.
+  if (opts.includeMemberships) arms.push({ members: { some: { userId } }, ownerUserId: null });
   if (arms.length === 0) return [];
 
   const apps = await db.app.findMany({

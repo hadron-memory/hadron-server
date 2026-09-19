@@ -462,4 +462,33 @@ describe('the Channel is its SUBTREE, and the admin branch is not a bypass (@cop
     expect(real.message.replace(/"[^"]*"/, '"X"')).toBe(fake.message.replace(/"[^"]*"/, '"X"'));
     expect(real.message).toMatch(/not found/i);
   });
+
+  it('...and for a USER-OWNED memory of an ordinary class — the second strict axis', async () => {
+    // Strict ownership has TWO orthogonal axes (@copilot round 4). The 034 one
+    // is `class IN (personal, private)` keyed on `Memory.userId`; spec 047
+    // added `ownerUserId`, under which a user-owned memory of ANY class is
+    // owner-only with no platform bypass. Covering only the first left the
+    // oracle alive here — a `knowledge` memory owned by a user.
+    const other = await db.user.create({
+      data: { id: generateId(), githubId: 71297, githubUsername: `owned-${Date.now()}` },
+    });
+    const userOwned = await db.memory.create({
+      data: {
+        id: generateId(),
+        ownerUserId: other.id,
+        urn: `u-${other.id}:notes`,
+        name: 'notes',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION' as never,
+        createdBy: other.id,
+      },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: userOwned.id, loc: 'chats:owned', name: 'owned', nodeType: 'record', data: { scope: 'private' } },
+    });
+
+    const real = await Q.chatHistory({}, { chatId: 'chats:owned' }, adminCtx(colleague.id)).catch((e: Error) => e);
+    const fake = await Q.chatHistory({}, { chatId: 'chats:nothing-here' }, adminCtx(colleague.id)).catch((e: Error) => e);
+    expect(real.message.replace(/"[^"]*"/, '"X"')).toBe(fake.message.replace(/"[^"]*"/, '"X"'));
+  });
 });
