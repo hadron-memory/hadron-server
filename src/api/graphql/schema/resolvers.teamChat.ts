@@ -59,7 +59,7 @@ import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActiv
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
-import { isTeamSpaceRow, teamSpaceAudienceFilter } from '../../../lib/auth/teamSpace.js';
+import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelRow } from '../../../lib/channels.js';
 import { locateTeamAgent } from './resolvers.worker.js';
@@ -173,7 +173,8 @@ type ChatRootRow = { id: string; memoryId: string; loc: string };
  * is deterministic even if a second `chats:team` was hand-created in another
  * installed agent's shared memory.
  */
-async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRootRow | null> {
+async function locateTeamChatRoot(ctx: Context, app: AppRow): Promise<ChatRootRow | null> {
+  const appId = app.id;
   return ctx.db.node.findFirst({
     // loc-scope-ok: deliberately spans the App's OWN app-class memories (one
     // per installed agent) — the relation filter is the tenant scope (#939).
@@ -190,7 +191,15 @@ async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRoot
       // App-ref conveniences then handed it the participation gate and the
       // impersonation shortcut. Same narrowing as `resolveChannelTarget`, from
       // the same shared predicate rather than a fourth copy of it.
-      memory: { appId, ...teamSpaceAudienceFilter, OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }] },
+      memory: {
+        appId,
+        ...teamSpaceAudienceFilter,
+        ...teamSpaceOwnerFilter({
+          appOwnerUserId: app.ownerUserId,
+          callerUserId: ctx.userId ?? null,
+          impersonating: !!ctx.impersonation,
+        }),
+      },
     },
     orderBy: { createdAt: 'asc' },
     select: { id: true, memoryId: true, loc: true },
@@ -342,7 +351,7 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
       typeof e === 'object' && e !== null && (e as { code?: string }).code === 'P2002';
     if (!isUniqueViolation) throw e;
   }
-  const root = await locateTeamChatRoot(ctx, app.id);
+  const root = await locateTeamChatRoot(ctx, app);
   if (!root) throw new Error(`Team chat bootstrap failed for App ${app.id}`);
   // Spec 049 Phase 4: the root is a Channel from its first moment — the row is
   // what reserves and protects the address (D-2026-09-13-006). Idempotent for
@@ -813,9 +822,19 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   // The discriminators are columns, not the class, which is the whole point of
   // that spec paragraph. Every other shape keeps the canonical per-class gates.
   const mem = channel.memory;
-  const app = isTeamSpaceRow(mem, ctx.userId ?? null)
-    ? await ctx.db.app.findUniqueOrThrow({ where: { id: mem.appId! } })
-    : null;
+  // The App is loaded BEFORE the classification, because the classification
+  // needs its ownership (@copilot round 6) — "is this the App's team space?" is
+  // a question about the App, not about who is asking.
+  const hostApp = mem.appId ? await ctx.db.app.findUniqueOrThrow({ where: { id: mem.appId } }) : null;
+  const app =
+    hostApp &&
+    isTeamSpaceRow(mem, {
+      appOwnerUserId: hostApp.ownerUserId,
+      callerUserId: ctx.userId ?? null,
+      impersonating: !!ctx.impersonation,
+    })
+      ? hostApp
+      : null;
   // The READ gate decides existence; a reader who may not post gets FORBIDDEN
   // on a post, never "no match" — the Channel is known to them.
   if (app) {
@@ -1161,7 +1180,7 @@ export const teamChatMutations = {
     }
     await requireTeamChatAccess(ctx, app, 'post');
 
-    const located = await locateTeamChatRoot(ctx, appId);
+    const located = await locateTeamChatRoot(ctx, app);
     const root = located ?? (await bootstrapTeamChat(ctx, app));
     // Backfill-on-touch (spec 049 §7.1): a root that predates the Channel table
     // gets its row on the next post, so the address is protected from then on
@@ -1233,7 +1252,7 @@ export const teamChatQueries = {
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     await requireTeamChatAccess(ctx, app, 'read');
 
-    const root = await locateTeamChatRoot(ctx, appId);
+    const root = await locateTeamChatRoot(ctx, app);
     if (!root) return { items: [], total: 0 };
     // One gate, two entry points: the convenience runs the same host-memory
     // point check the Channel-addressed read runs (Copilot on PR #1169).

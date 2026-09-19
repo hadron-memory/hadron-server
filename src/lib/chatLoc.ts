@@ -226,7 +226,12 @@ export async function chatLocFilter(
               memory: {
                 appId: { in: appIds },
                 ...teamSpaceAudienceFilter,
-                OR: [{ ownerUserId: null }, { ownerUserId: self }],
+                // Under impersonation `self` is the TARGET, so an owner arm here
+                // would classify a row owned by them as a team space (@copilot
+                // round 6). Support sessions get org-owned rows only.
+                ...(principal.impersonation
+                  ? { ownerUserId: null }
+                  : { OR: [{ ownerUserId: null }, { ownerUserId: self }] }),
               },
             } as Prisma.NodeWhereInput,
           ]

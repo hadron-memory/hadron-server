@@ -69,15 +69,66 @@ export interface TeamSpaceRowShape {
  * The same rule over an already-loaded row, for a caller that has the memory in
  * hand rather than a query to constrain.
  *
- * `callerUserId` applies the spec-047 axis: a user-owned row is the OWNER's
- * team space and nobody else's, so it is a team space *for them* and an
- * ordinary owner-only memory for everyone else. Pass `null` for a principal
- * with no user identity, which can never be an owner.
+ * **The ownership discriminator is the APP's, not the caller's** (@copilot round
+ * 6). "Is this row the App's team space?" is a question about the App; keying it
+ * on `callerUserId` alone meant a user-owned app-class memory attached to an
+ * ORG-owned App classified as that App's team space for whoever happened to own
+ * it — and under impersonation `ctx.userId` is the TARGET, so a row owned by the
+ * target took the participation path and `hostMemoryReadable` returned true on
+ * `app` alone, bypassing the shared gate's rule that user-owned memories are
+ * invisible to support sessions. Fifth instance of the #876 class in this PR's
+ * review, and the first inside a predicate I had just extracted to stop exactly
+ * this.
+ *
+ * So a user-owned row is a team space only when BOTH hold — the same pair
+ * `getAppTeamSpaceAccess` has always applied, restated here rather than
+ * approximated:
+ *
+ *   1. it is owned by the APP's owner (an org-owned App's team space is
+ *      `ownerUserId: null`, full stop), and
+ *   2. the CALLER is that owner — a co-member does not get the owner's row.
+ *
+ * And never under impersonation: arm 2 is identity-scoped, and `ctx.userId` is
+ * not the caller there.
  */
-export function isTeamSpaceRow(mem: TeamSpaceRowShape, callerUserId: string | null): boolean {
+export function isTeamSpaceRow(
+  mem: TeamSpaceRowShape,
+  opts: {
+    /** `App.ownerUserId` — null for an org-owned App. */
+    appOwnerUserId: string | null;
+    /** The acting user, or null for a principal with no user identity. */
+    callerUserId: string | null;
+    /** True when the context is an impersonated support session. */
+    impersonating: boolean;
+  },
+): boolean {
   if (mem.class !== 'app' || mem.appId === null) return false;
   if (mem.userMemoryOfAgentId !== null || mem.workerOf.length > 0) return false;
-  // spec 047: strictly owner-only, no participation path, no admin path.
-  if (mem.ownerUserId !== null && mem.ownerUserId !== callerUserId) return false;
-  return true;
+  if (mem.ownerUserId === null) return true;
+  // spec 047: strictly owner-only — no participation path, no admin path, and
+  // no support-session path.
+  if (opts.impersonating) return false;
+  return mem.ownerUserId === opts.appOwnerUserId && mem.ownerUserId === opts.callerUserId;
+}
+
+/**
+ * The ownership half of {@link teamSpaceAudienceFilter}, as a `where` fragment —
+ * for the query-shaped callers, which must apply the same pair.
+ *
+ * An org-owned App's team space is `ownerUserId: null`. A user-owned App's may
+ * be its owner's row, and only that owner may see it, so the caller must equal
+ * the App's owner for the second arm to exist at all.
+ */
+export function teamSpaceOwnerFilter(opts: {
+  appOwnerUserId: string | null;
+  callerUserId: string | null;
+  impersonating: boolean;
+}): Prisma.MemoryWhereInput {
+  const ownerArmApplies =
+    !opts.impersonating &&
+    opts.appOwnerUserId !== null &&
+    opts.appOwnerUserId === opts.callerUserId;
+  return ownerArmApplies
+    ? { OR: [{ ownerUserId: null }, { ownerUserId: opts.appOwnerUserId }] }
+    : { ownerUserId: null };
 }

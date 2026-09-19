@@ -607,3 +607,74 @@ describe('the team-space narrowing applies to EVERY site that classifies one (@c
     ).rejects.toThrow(/not found/i);
   });
 });
+
+describe('the ownership discriminator is the APP\'s, not the caller\'s (@copilot round 6)', () => {
+  /**
+   * `isTeamSpaceRow` took `callerUserId` as the ownership discriminator. But
+   * "is this row the App's team space?" is a question about the APP — so a
+   * user-owned app-class memory attached to an ORG-owned App classified as that
+   * App's team space for whoever owned it, and under impersonation `ctx.userId`
+   * is the TARGET, so a row owned by the target took the participation path and
+   * `hostMemoryReadable` returned true on `app` alone.
+   */
+  async function orgAppOwnedByCaller(ownerId: string) {
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        ownerUserId: ownerId,
+        urn: `u-${ownerId}:caller-owned-${Date.now()}`,
+        name: 'caller-owned',
+        class: 'app',
+        appId: app.id, // ORG-owned App
+        createdBy: ownerId,
+      },
+    });
+    return (
+      await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:mine', name: 'mine', createdBy: ownerId })
+    ).channel;
+  }
+
+  it('an org-owned App\'s team space must be org-owned — a caller-owned row is not one', async () => {
+    // The owner still reaches it (it is their memory), but via the MEMORY gate,
+    // not via App participation — so a co-member does not come with them.
+    const ch = await orgAppOwnedByCaller(owner.id);
+    await M.createChannelMessage({}, { channelRef: ch.id, body: 'mine' }, ctx(owner.id));
+    await expectCode(Q.channelMessages({}, { channelRef: ch.id }, ctx(colleague.id)), 'CHANNEL_NOT_FOUND');
+  });
+
+  it('an impersonated session cannot reach a row owned by its TARGET', async () => {
+    // `ctx.userId` is the target, so a caller-keyed discriminator classified
+    // the target's own memory as a team space and served it.
+    const ch = await orgAppOwnedByCaller(owner.id);
+    await M.createChannelMessage({}, { channelRef: ch.id, body: 'mine' }, ctx(owner.id));
+    const imp = ctx(owner.id, { impersonation: { orgId: org.id } } as Partial<Context>);
+    await expectCode(Q.channelMessages({}, { channelRef: ch.id }, imp), 'CHANNEL_NOT_FOUND');
+  });
+
+  it('myChats does not list chats in another user\'s SESSION memory', async () => {
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:h-${Date.now()}`, name: 'h',
+        class: 'knowledge', visibility: 'ORGANIZATION' as never, userMemoryOfAgentId: agent.id, createdBy: colleague.id,
+      },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: holding.id, loc: 'chats:own', name: 'own', nodeType: 'record', data: { scope: 'private' } },
+    });
+    // Another user's SESSION memory under the same App — the row myChats used
+    // to sweep in via `class: 'app'` alone.
+    const sessionMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:sess-${Date.now()}`, name: 'sess',
+        class: 'app', appId: app.id, userMemoryOfAgentId: agent.id, createdBy: owner.id,
+      },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: sessionMem.id, loc: 'chats:theirs', name: 'theirs', nodeType: 'record', data: { scope: 'private' } },
+    });
+
+    const listed = await Q.myChats({}, { agentRef: agent.id }, ctx(colleague.id));
+    expect(listed.map((c: { loc: string }) => c.loc)).toEqual(['chats:own']);
+  });
+});

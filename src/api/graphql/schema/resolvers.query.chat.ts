@@ -7,6 +7,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { excludeTeamChat, excludeChannelRoots } from '../../../lib/teamChatLoc.js';
+import { teamSpaceAudienceFilter } from '../../../lib/auth/teamSpace.js';
 import {
   type Context,
   deriveChatTitle,
@@ -68,8 +69,17 @@ export const chatQueries = {
         const sharedMemories = await ctx.db.memory.findMany({
           where: {
             appId: { in: sharedMemberships.map((m) => m.app.id) },
-            class: 'app',
-            deletedAt: null,
+            // #1196 (@copilot round 6) — `class: 'app'` alone listed chats in
+            // another user's SESSION or a Worker's casting memory, and the
+            // first-message lookup below returns transcript CONTENT with no
+            // further memory gate. Pre-existing rather than introduced here,
+            // but it is the same missing clause this change fixes everywhere
+            // else, so leaving the one instance in a file I am editing would be
+            // a choice rather than an oversight. Owner-owned rows are excluded
+            // outright: this resolver already refuses impersonation, and a
+            // co-member has no claim on the App owner's row.
+            ...teamSpaceAudienceFilter,
+            ownerUserId: null,
           },
           select: { id: true },
         });
