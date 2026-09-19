@@ -1,4 +1,5 @@
 import { createDecipheriv } from 'crypto';
+import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 // Spec 049 S4 — a Channel's address is skipped and reported, never overwritten from git.
 import {
   protectedLocsIn,
@@ -212,6 +213,21 @@ export const syncGraphFromGithub = async (
           contentHash: node.contentHash ?? null,
           tags: serializeTags(node.tags ?? []) as string[],
           ownerRepo,
+          // #1218 — git sync is an OWNING OPERATION: the repo is the source of
+          // truth for a mirrored memory, so a file may SET a governed signal
+          // (which means a principal with repo write can mark a node
+          // `role: 'review'` by committing — not new reach, they already author
+          // node content wholesale, but true from here on and worth stating).
+          //
+          // SPREAD, never `?? null`. `loadNodeFromFs` omits a key the file does
+          // not carry, and an omitted key in a Prisma `update` leaves the column
+          // ALONE. Writing `role: node.role ?? null` here instead would clear
+          // the column on every sync of every mirrored memory, since no file on
+          // disk predating this change carries the key — un-governing on a
+          // schedule with nothing refused, introduced by the fix for it. On the
+          // `create` path below the same absence yields the column default,
+          // which is right: a new node whose file declares no signal has none.
+          ...governedSignalsFromMirror(node),
         };
 
         // Identity is ID-FIRST (repo wins): a file that kept its frontmatter

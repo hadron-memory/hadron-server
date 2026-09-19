@@ -79,6 +79,9 @@ export async function handleNodeWrittenForGit(
       seq: node.seq,
       data: node.data,
       properties: node.properties,
+      // #1218 — the mirror carries the governed signals.
+      role: node.role ?? null,
+      isRunnable: node.isRunnable ?? null,
       outgoingEdges: node.outgoingEdges ?? [],
     },
     evt.ownerRepo ?? '',

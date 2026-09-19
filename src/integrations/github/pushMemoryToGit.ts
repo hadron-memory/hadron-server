@@ -140,6 +140,10 @@ export async function pushMemoryToGit(
       seq: node.seq,
       data: node.data,
       properties: node.properties,
+      // #1218 — governed signals cross the mirror on the bulk path too, or the
+      // two export paths disagree about what a faithful mirror contains.
+      role: node.role,
+      isRunnable: node.isRunnable,
     }, node.outgoingEdges);
     preserveUnmanagedFrontmatter(frontmatter, mdPath);
 

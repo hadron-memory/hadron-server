@@ -2,6 +2,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
+import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 
 /**
@@ -228,7 +229,14 @@ export async function cloneMemoryGraph(
           data: jsonOrDbNull(n.data),
           seq: n.seq,
           ownerRepo: n.ownerRepo,
-          isRunnable: n.isRunnable,
+          // #1218 — clone is an OWNING OPERATION: it carries the governed
+          // signals (`role`, `isRunnable`) instead of dropping them. Before
+          // this, `isRunnable` was copied by hand and `role` was not, so a
+          // cloned task stayed governed and a cloned review or spec silently
+          // did not — from one field's absence in this list. Preserves, never
+          // mints. See `governedSignals.ts` for why the set is derived from the
+          // register rather than written out here.
+          ...carryGovernedSignals(n),
           llmModel: n.llmModel,
           aiAgent: n.aiAgent,
           tokens: n.tokens,
