@@ -50,6 +50,24 @@ export const LEGACY_HUMAN_LINE =
 export class SkillRenderError extends Error {}
 
 /**
+ * The characters a legitimate flat-v2 node URN can contain: `hrn:node:` plus a
+ * loc whose segments satisfy spec 021 FR-016 (`[a-zA-Z0-9._-]`), colon-joined.
+ *
+ * Written as an ALLOW-list rather than a ban-list of `-->` (@copilot round 3,
+ * PR #1223). The first version refused the comment terminator and nothing else,
+ * which left the same hole open one character over: a source containing a
+ * NEWLINE ends the header line, and everything after it is body — the identical
+ * outcome by a different route. Banning the exploit I had been shown, rather
+ * than admitting only what is valid, is the mistake the ban-list encodes.
+ *
+ * An allow-list also closes the space case reported earlier in this PR — a
+ * space-bearing source renders in Go and then cannot be parsed back, pairing
+ * nothing. Refusing to write it is better than writing a file that silently
+ * orphans itself.
+ */
+const SAFE_SOURCE_RE = /^[A-Za-z0-9._:-]+$/;
+
+/**
  * Compose the skill file.
  *
  * `content` and `description` are normalized here, so a caller cannot produce a
@@ -77,10 +95,11 @@ export class SkillRenderError extends Error {}
  * locs, which is not a skills problem — is reported separately.
  */
 export function render(name: string, source: string, description: string, content: string): string {
-  if (source.includes('-->')) {
+  if (!SAFE_SOURCE_RE.test(source)) {
     throw new SkillRenderError(
-      `skill source URN contains "-->" and would terminate the provenance comment, ` +
-        `turning the remainder of the header into agent-visible instructions: ${JSON.stringify(source)}`,
+      `skill source URN contains characters that cannot be written into a one-line ` +
+        `provenance comment; the remainder of the header would become agent-visible ` +
+        `instructions: ${JSON.stringify(source)}`,
     );
   }
   const d = normalizeDescription(description);
