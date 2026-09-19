@@ -59,6 +59,7 @@ import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActiv
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
+import { isTeamSpaceRow, teamSpaceAudienceFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelRow } from '../../../lib/channels.js';
 import { locateTeamAgent } from './resolvers.worker.js';
@@ -183,7 +184,13 @@ async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRoot
       // (LOC_OCCUPIED) rather than posting into an arbitrary record.
       nodeType: 'chat',
       deletedAt: null,
-      memory: { appId, class: 'app', deletedAt: null },
+      // #1207 round 5 (@copilot): `appId + class='app'` selects all FOUR
+      // app-class row roles, so this locator could return a `chats:team` root
+      // in a Worker's casting memory or a per-user session memory — and both
+      // App-ref conveniences then handed it the participation gate and the
+      // impersonation shortcut. Same narrowing as `resolveChannelTarget`, from
+      // the same shared predicate rather than a fourth copy of it.
+      memory: { appId, ...teamSpaceAudienceFilter, OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }] },
     },
     orderBy: { createdAt: 'asc' },
     select: { id: true, memoryId: true, loc: true },
@@ -765,8 +772,9 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
           appId: true,
           class: true,
           deletedAt: true,
-          // The two discriminators that tell the team space apart from the
-          // OTHER app-class row shapes — see the `app` derivation below.
+          // The discriminators that tell the team space apart from the OTHER
+          // app-class row shapes — see `isTeamSpaceRow`.
+          ownerUserId: true,
           userMemoryOfAgentId: true,
           workerOf: { select: { id: true }, take: 1 },
         },
@@ -805,12 +813,7 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   // The discriminators are columns, not the class, which is the whole point of
   // that spec paragraph. Every other shape keeps the canonical per-class gates.
   const mem = channel.memory;
-  const isTeamSpace =
-    mem.class === 'app' &&
-    mem.appId !== null &&
-    mem.userMemoryOfAgentId === null &&
-    mem.workerOf.length === 0;
-  const app = isTeamSpace
+  const app = isTeamSpaceRow(mem, ctx.userId ?? null)
     ? await ctx.db.app.findUniqueOrThrow({ where: { id: mem.appId! } })
     : null;
   // The READ gate decides existence; a reader who may not post gets FORBIDDEN

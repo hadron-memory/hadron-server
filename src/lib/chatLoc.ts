@@ -46,6 +46,7 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { isTeamChatLoc } from './teamChatLoc.js';
 import { participantAppIds } from './auth/appParticipation.js';
 import { ancestorLocs } from './nodeSubtreeLock.js';
+import { teamSpaceAudienceFilter } from './auth/teamSpace.js';
 
 /** The fields of a GraphQL `Context` / MCP `AuthContext` this needs. */
 export interface ChatLocPrincipal {
@@ -211,9 +212,24 @@ export async function chatLocFilter(
       // The caller owns the memory holding it (per-user agent holdings, and the
       // defensive personal-class fallback the read gate keeps).
       { memory: { createdBy: userId } },
-      // A shared app chat in an App the caller belongs to.
+      // A shared app chat in an App the caller participates in — and in the
+      // App's TEAM SPACE, not in any app-class row it happens to own (#1207
+      // round 5, @copilot). `class='app'` also covers a Worker's casting memory
+      // and a per-user SESSION memory, so the participation arms widened this
+      // clause into other users' session transcripts — which `saveChatSummary`
+      // writes to through this very filter, with no node-memory write gate of
+      // its own. Same shared predicate as `resolveChannelTarget` and
+      // `locateTeamChatRoot`.
       ...(appIds.length > 0
-        ? [{ memory: { class: 'app', appId: { in: appIds } } } as Prisma.NodeWhereInput]
+        ? [
+            {
+              memory: {
+                appId: { in: appIds },
+                ...teamSpaceAudienceFilter,
+                OR: [{ ownerUserId: null }, { ownerUserId: self }],
+              },
+            } as Prisma.NodeWhereInput,
+          ]
         : []),
     ],
   };

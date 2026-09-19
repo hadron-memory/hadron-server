@@ -492,3 +492,118 @@ describe('the Channel is its SUBTREE, and the admin branch is not a bypass (@cop
     expect(real.message.replace(/"[^"]*"/, '"X"')).toBe(fake.message.replace(/"[^"]*"/, '"X"'));
   });
 });
+
+describe('the team-space narrowing applies to EVERY site that classifies one (@copilot round 5)', () => {
+  /**
+   * Round 2 narrowed `resolveChannelTarget` and stopped. Three siblings kept
+   * classifying a team space as `class='app' + appId` — the trap
+   * `cor:acl:010:01` names — so the same misclassification stayed reachable by
+   * a different route each time. All four now share ONE predicate
+   * (`src/lib/auth/teamSpace.ts`); these pin the routes.
+   */
+  /**
+   * The reachable shape, and the first draft of these tests got it wrong: a
+   * USER-OWNED APP is blocked by `isAppParticipant` for an unrelated reason
+   * (spec 047 admits only its owner), so a fixture built on one proves nothing
+   * about `isTeamSpaceRow`. What IS reachable is an ORG-owned App holding a
+   * USER-OWNED app-class memory — `chk_memory_owner_xor` permits it, the App
+   * gate passes for any org participant, and `hostMemoryReadable`'s
+   * impersonation shortcut then keys on `app` alone.
+   */
+  async function orgAppUserOwnedSpace() {
+    const other = await db.user.create({
+      data: { id: generateId(), githubId: 71296, githubUsername: `uo-${Date.now()}` },
+    });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        ownerUserId: other.id,
+        urn: `u-${other.id}:uo-shared`,
+        name: 'uo-shared',
+        class: 'app',
+        appId: app.id, // org-owned App
+        createdBy: other.id,
+      },
+    });
+    const ch = (
+      await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:owned', name: 'owned', createdBy: other.id })
+    ).channel;
+    return { other, mem, ch };
+  }
+
+  it('a USER-OWNED app-class row is not a team space — even for an impersonated participant', async () => {
+    // The fourth discriminator (spec 047), missed in round 2.
+    // `getAppTeamSpaceAccess` excludes a user-owned row from anyone but its
+    // owner; `isTeamSpaceRow` did not, so the row read as a team space and the
+    // impersonation shortcut served it.
+    const { ch } = await orgAppUserOwnedSpace();
+    const imp = ctx(colleague.id, { impersonation: { orgId: org.id } } as Partial<Context>);
+    await expectCode(Q.channelMessages({}, { channelRef: ch.id }, imp), 'CHANNEL_NOT_FOUND');
+  });
+
+  it("teamChatMessages does not serve a chats:team root in a WORKER's memory", async () => {
+    // `locateTeamChatRoot` filtered only `class='app' + appId`, so it could
+    // return a worker-scoped root — and the App-ref convenience then applies the
+    // participation gate and the impersonation shortcut to it. Asserted through
+    // an IMPERSONATED reader, because for an ordinary one the memory gate
+    // catches it independently and the test would pass either way.
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const workerMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:iris-mem`,
+        name: 'iris-mem',
+        class: 'app',
+        appId: app.id,
+        createdBy: owner.id,
+      },
+    });
+    await db.worker.create({
+      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', memoryId: workerMem.id },
+    });
+    const wch = (
+      await ensureChannelWithRoot(db, { memoryId: workerMem.id, loc: 'chats:team', name: 'team', createdBy: owner.id })
+    ).channel;
+    // A real message, so an empty page is EVIDENCE rather than the trivial
+    // answer — the first draft asserted `{ items: [], total: 0 }` against a
+    // channel with nothing in it, which passes whether the locator is narrowed
+    // or not.
+    // Seeded as a platform ADMIN: a worker memory is in nobody's App-derived
+    // reach, so an ordinary principal cannot even post here — which is itself
+    // the gate working.
+    await M.createChannelMessage({}, { channelRef: wch.id, body: 'worker-internal' }, adminCtx(owner.id));
+    expect((await Q.channelMessages({}, { channelRef: wch.id }, adminCtx(owner.id))).total).toBe(1);
+
+    const imp = ctx(colleague.id, { impersonation: { orgId: org.id } } as Partial<Context>);
+    expect(await Q.teamChatMessages({}, { appRef: app.id }, imp)).toEqual({ items: [], total: 0 });
+  });
+
+  it('chatLocFilter does not reach an agent chat in another user\'s SESSION memory', async () => {
+    // The participation arms widened the app-class clause into per-user session
+    // memories — and `saveChatSummary` writes through this filter with no
+    // node-memory write gate of its own.
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const sessionMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:enduser-session`,
+        name: 'enduser-session',
+        class: 'app',
+        appId: app.id,
+        userMemoryOfAgentId: agent.id,
+        createdBy: owner.id,
+      },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: sessionMem.id, loc: 'chats:enduser', name: 'end user', nodeType: 'record', data: { scope: 'private' } },
+    });
+
+    // The colleague is an org CONTRIBUTOR and an AppMember — a participant of
+    // the App, and no part of this end user's session.
+    await expect(
+      Q.chatHistory({}, { chatId: 'chats:enduser' }, ctx(colleague.id)),
+    ).rejects.toThrow(/not found/i);
+  });
+});
