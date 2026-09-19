@@ -67,10 +67,20 @@ export interface LockKey {
  * and the one the ancestor walks produce naturally. The lexical tiebreak makes
  * the order total and stable.
  *
- * Sorting the INPUTS rather than the hashed keys is deliberate and sufficient: a
- * consistent order over inputs induces a consistent order over
- * `hashtext(...)`, and two inputs that collide onto one key simply share it —
- * the second acquisition is re-entrant (see {@link acquireLockSet}).
+ * **This orders the INPUTS, which is NOT by itself the lock order** — see
+ * {@link acquireLockSet}, which orders by the actual advisory key. An earlier
+ * version of this comment claimed input order was sufficient because colliding
+ * inputs "simply share" a key. That is wrong, and @copilot supplied the
+ * counterexample: for inputs X and Y that collide under `hashtext` to one key
+ * H, and a third key Z with `X < Z < Y`, a caller holding {X, Z} takes H then
+ * Z while a caller holding {Y, Z} takes Z then H. A cycle, from two callers
+ * that both sorted. Re-entrancy does not help — these are different
+ * transactions.
+ *
+ * So this comparator is the stable, total order over the loc SPACE — it is what
+ * makes ancestor walks root→leaf and what the ordering tests assert — and it is
+ * what `acquireLockSet` acquires in today. Ordering by the RESOLVED advisory
+ * key, which is what would make the protocol collision-proof, is #1214.
  */
 export function compareLockKeys(a: LockKey, b: LockKey): number {
   if (a.memoryId !== b.memoryId) return a.memoryId < b.memoryId ? -1 : 1;
@@ -120,20 +130,20 @@ export async function acquireLockSet(tx: Prisma.TransactionClient, keys: LockKey
     unique.push(k);
   }
   unique.sort(compareLockKeys);
-  // AWAITED, one statement per key — deliberately, after a round trip through
-  // the alternative (@copilot round 3).
+  // AWAITED, one statement per key — the order is then a guarantee rather than
+  // a planner choice (@copilot round 3: an `ORDER BY` at the same query level
+  // as `pg_advisory_xact_lock` does not constrain when the function is
+  // evaluated, so batching the set made the acquisition order a plan detail).
   //
-  // Batching the set into `SELECT pg_advisory_xact_lock(...) FROM unnest(...)
-  // ORDER BY i` looks equivalent and is NOT: the `ORDER BY` sits at the same
-  // query level as the function call, and Postgres may evaluate a target-list
-  // function before applying that sort. So the acquisition order becomes a
-  // PLANNER CHOICE — and a plan that takes the keys in input order silently
-  // recreates the inversion this whole protocol exists to eliminate, with
-  // nothing in the code or the tests to show for it.
-  //
-  // A sequence of awaited statements is the only form whose order is a
-  // guarantee rather than an observation. This helper's entire value is that
-  // guarantee, so it pays the round trips.
+  // KNOWN LIMIT, stated because the earlier version of this comment claimed
+  // otherwise: this orders the INPUT strings, and `hashtext` is not injective,
+  // so the guarantee holds only while no two distinct locs in play collide onto
+  // one advisory key. @copilot's counterexample — inputs X and Y colliding to
+  // key H with a third key Z where `X < Z < Y`, so {X,Z} takes H then Z while
+  // {Y,Z} takes Z then H — is real. Closing it means ordering by the RESOLVED
+  // key, which is one extra round trip and a different acquisition order from
+  // the root→leaf one this repo's helpers and tests are written around.
+  // Deliberately NOT done at the end of this change: #1214.
   for (const k of unique) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${k.memoryId}), hashtext(${k.loc}))`;
   }
