@@ -28,6 +28,7 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
+import { orgRoleAtLeast } from '../lib/auth/orgRole.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { isAgentInstalled } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
@@ -222,7 +223,10 @@ type AppAccessRow = {
  */
 async function getAppTeamSpaceAccess(
   db: PrismaClient,
-  app: AppAccessRow,
+  // Only the App's identity and ownership are read, so the type is narrowed to
+  // those two fields (#1196): `participantTeamSpaceFolds` calls this WITHOUT
+  // loading the App's installed agents, which only the agent-derived half needs.
+  app: Pick<AppAccessRow, 'id' | 'ownerUserId'>,
   callerUserId: string | null,
 ): Promise<Map<string, string>> {
   const rows = await db.memory.findMany({
@@ -373,10 +377,20 @@ async function getPrimaryAgentAccess(
  * ABOVE the map. A caller that consumes this map WITHOUT such a per-row check
  * (the GraphQL gate turns it straight into `memoryId IN (…)`) must apply its own
  * strict-owner filter rather than inherit the assumption.
+ *
+ * #1196 adds a THIRD fold on top of the two exclusive arms:
+ * {@link participantTeamSpaceFolds}, the App-PARTICIPATION arms no AppMember
+ * row can express. It is additive and team-space-only — see that function for
+ * why widening the App list instead would have been the wrong fix.
  */
 export async function getPrincipalAppMemoryAccess(
   db: PrismaClient,
-  principal: { userId?: string | null; appId?: string | null; sessionId?: string | null },
+  principal: {
+    userId?: string | null;
+    appId?: string | null;
+    sessionId?: string | null;
+    impersonation?: { orgId: string } | null;
+  },
 ): Promise<Map<string, string>> {
   const folds: Array<{ appId: string; map: Map<string, string> }> = [];
 
@@ -397,6 +411,18 @@ export async function getPrincipalAppMemoryAccess(
     apps.forEach((app, i) => folds.push({ appId: app.id, map: maps[i] }));
   }
 
+  // #1196 — the participation arms neither branch above can see. Additive, and
+  // run for BOTH shapes: an App SELECTION focuses a request and never narrows
+  // what its driver may read (`cor:acl:020:01`), so a user who selected App B
+  // keeps the team space of App A they contribute to.
+  folds.push(
+    ...(await participantTeamSpaceFolds(
+      db,
+      principal,
+      folds.map((f) => f.appId),
+    )),
+  );
+
   const admitted = await admissibleFoldRows(db, principal.userId ?? null, folds);
 
   const access = new Map<string, string>();
@@ -414,6 +440,97 @@ export async function getPrincipalAppMemoryAccess(
     }
   }
   return access;
+}
+
+/**
+ * #1196 — the App-PARTICIPATION arms an `AppMember` row cannot express: an org
+ * `CONTRIBUTOR`+ on the App's org, and the owner of a user-owned App.
+ *
+ * [`cor:acl:010:01`](hrn:node:hadronmemory.com:specs:cor:acl:010:01) states the
+ * team space's audience as PARTICIPATION — *"an App member at any role, an org
+ * `CONTRIBUTOR`+ on the App's org, or the owner of a user-owned App. A gate
+ * keyed on the member row alone silently excludes the latter two"* — and names
+ * *"re-keying the team space's audience off participation (e.g. onto the member
+ * table alone)"* as invalidating it. Both fold arms above reach Apps through
+ * `resolveUserApps`, which is `appMember.findMany` and nothing else, so both
+ * of those arms were missing; and no other branch of the gate covers them,
+ * because `getOrgReadableMemoryIds` is `class IN (knowledge, group)` AND
+ * `appId: null`, which an app-class row can never satisfy.
+ *
+ * Measured before it was fixed, not inferred: an org CONTRIBUTOR who is not an
+ * AppMember returned `isAppParticipant = true` and was ABSENT from
+ * `getAccessibleMemoryIds` for the same App's team space. So the team-chat gate
+ * was right and this one had drifted — which is why #1196's unification widens
+ * the memory gate rather than narrowing the chat.
+ *
+ * **Team space only, and the narrowness is the point.** These principals get
+ * {@link getAppTeamSpaceAccess} — the App's own app-class rows, always
+ * `READ_ONLY`, with the spec-047 exclusions intact — and NOT
+ * {@link getAppMemoryAccess}, whose agent-derived half can carry `READ_WRITE`
+ * from an install's granted role and answers to a different audience (the
+ * per-class rules). Widening the App LIST instead is the one-line version of
+ * this fix and would have handed an org CONTRIBUTOR WRITE on an Agent's memory
+ * items.
+ *
+ * **Impersonation narrows it, exactly as `isAppParticipant` narrows** (#876
+ * class — `userId` is the TARGET, so an unbounded arm answers a question about
+ * the target's memberships anywhere): the org arm is bounded to the support
+ * session's ONE shared org, and the owner arm is denied outright because it is
+ * identity-scoped and a user-owned App has no org to match.
+ *
+ * No platform-ADMIN arm, deliberately: `getAccessibleMemoryIds` answers that
+ * principal in its own branch above the App fold, so an arm here would be
+ * unreachable code carrying real risk. {@link isAppParticipant} keeps its
+ * admin arm via `requireOrgRole`; the differential test between the two is
+ * scoped to non-admin principals and says so.
+ */
+async function participantTeamSpaceFolds(
+  db: PrismaClient,
+  principal: { userId?: string | null; impersonation?: { orgId: string } | null },
+  alreadyFolded: string[],
+): Promise<Array<{ appId: string; map: Map<string, string> }>> {
+  const userId = principal.userId;
+  // No user identity: a pure App-key (or anonymous) principal has no
+  // participation to derive. This is also what keeps the session-isolated
+  // shape out — it is `appId + sessionId + !userId` by definition.
+  if (!userId) return [];
+
+  // findMany + `deletedAt: null`, never findUnique on the composite PK: a
+  // REVOKED org membership must not authorize (findings:revoked-membership-auth-gates,
+  // the `requireOrgRole` rule).
+  const memberships = await db.orgMember.findMany({
+    where: {
+      userId,
+      deletedAt: null,
+      ...(principal.impersonation ? { organizationId: principal.impersonation.orgId } : {}),
+    },
+    select: { organizationId: true, role: true },
+  });
+  const contributorOrgIds = memberships
+    .filter((m) => orgRoleAtLeast(m.role, 'CONTRIBUTOR'))
+    .map((m) => m.organizationId);
+
+  const arms: Array<Record<string, unknown>> = [];
+  if (contributorOrgIds.length > 0) arms.push({ organizationId: { in: contributorOrgIds } });
+  if (!principal.impersonation) arms.push({ ownerUserId: userId });
+  if (arms.length === 0) return [];
+
+  const apps = await db.app.findMany({
+    where: {
+      deletedAt: null,
+      uninstalledAt: null,
+      // An App already folded by a branch above keeps that branch's (possibly
+      // wider) map; re-folding it team-space-only could not add anything and
+      // would only make the max-merge below do redundant work.
+      id: { notIn: alreadyFolded },
+      OR: arms,
+    },
+    select: { id: true, ownerUserId: true },
+  });
+  if (apps.length === 0) return [];
+
+  const maps = await Promise.all(apps.map((app) => getAppTeamSpaceAccess(db, app, userId)));
+  return apps.map((app, i) => ({ appId: app.id, map: maps[i] }));
 }
 
 /**
