@@ -37,7 +37,6 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 import { lockMemoryForChannelChange } from './channels.js';
-import { acquireLockSet } from './nodeSubtreeLock.js';
 import { LocProtectedError, protectedLocsIn, protectedLocCovers, type ChannelReader } from './protectedLoc.js';
 import { GOVERNED_ROLES, governedKindsOf, RoleGovernedError } from './governedRole.js';
 
@@ -180,26 +179,25 @@ export async function assertBatchMutable(
     await assertNoProtectedReach(tx, memoryId, locs, op);
   }
 
-  // The GOVERNED half needs the per-node keys, not the memory key (@copilot,
-  // round 2). The kind doors coordinate on `lockLocForWrite(memoryId, loc)` —
-  // a NODE key — so holding only `channel-host:<memory>` leaves a door free to
-  // promote one of these rows between the caller's snapshot and this write, and
-  // the check would pass on a stale `role`/`isRunnable`.
+  // The GOVERNED half re-reads under the MEMORY lock, and deliberately does
+  // NOT take a key per row (@copilot rounds 2 and 3, which pull in opposite
+  // directions and are both right).
   //
-  // Taking a key per row is only affordable because #1187 made acquisition
-  // BOUNDED and ORDERED: `acquireLockSet` sorts the whole set into the one
-  // global order and takes it in a single round trip, so a 250-row merge batch
-  // or an extracted subtree costs one statement and cannot invert against the
-  // per-node writers it is serializing against. The lock protocol is what makes
-  // this gate closable at all — which is why these two issues shipped together.
+  // Round 2 was correct that the kind doors coordinate on
+  // `lockLocForWrite(memoryId, loc)`, so the memory key alone does not
+  // serialize against them. Round 3 was correct that the per-row answer is
+  // unaffordable here: `extractParentNodeGraph` passes its ENTIRE live subtree
+  // with no cap and no paging, so one advisory key per node — held until that
+  // single transaction ends — is an unbounded claim on a finite shared-memory
+  // lock table. A gate that can exhaust the lock table on a large but perfectly
+  // valid extract is not a safer gate.
   //
-  // Then RE-READ under those keys. The rows the caller passed were read before
-  // the locks; these are read after, on the fresh READ COMMITTED snapshot the
-  // grant produces, so a promotion that committed while we waited is visible.
-  await acquireLockSet(
-    tx as Prisma.TransactionClient,
-    rows.flatMap((r) => memoryIds.map((memoryId) => ({ memoryId, loc: r.loc }))),
-  );
+  // So this re-reads rather than trusting the caller's snapshot, which closes
+  // the window that matters in practice — a promotion committed before this
+  // transaction's read — and leaves ONE narrow window open: a promotion that
+  // commits between this read and the batch's write. That is filed rather than
+  // papered over, and closing it properly means giving the governed writers a
+  // BOUNDED shared serialization point instead of a key per row.
   const fresh = await tx.node.findMany({
     where: {
       memoryId: { in: [...new Set(memoryIds)] },

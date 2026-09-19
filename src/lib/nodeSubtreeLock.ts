@@ -120,21 +120,23 @@ export async function acquireLockSet(tx: Prisma.TransactionClient, keys: LockKey
     unique.push(k);
   }
   unique.sort(compareLockKeys);
-  if (unique.length === 0) return;
-  // ONE round trip for the whole set, in order. A per-key loop is N round
-  // trips, which is fine for an ancestor path and is not for a bulk caller:
-  // #1191's per-batch gate locks every row in a merge batch (250) or an
-  // extracted subtree. `WITH ORDINALITY` keeps the arrays' pairing, and the
-  // ORDER BY makes the acquisition sequence the sorted one rather than
-  // whatever order the planner feels like — which is the entire contract.
-  const memoryIds = unique.map((k) => k.memoryId);
-  const locs = unique.map((k) => k.loc);
-  await tx.$executeRaw`
-    SELECT pg_advisory_xact_lock(hashtext(m.v), hashtext(l.v))
-    FROM unnest(${memoryIds}::text[]) WITH ORDINALITY AS m(v, i)
-    JOIN unnest(${locs}::text[]) WITH ORDINALITY AS l(v, i) USING (i)
-    ORDER BY m.i
-  `;
+  // AWAITED, one statement per key — deliberately, after a round trip through
+  // the alternative (@copilot round 3).
+  //
+  // Batching the set into `SELECT pg_advisory_xact_lock(...) FROM unnest(...)
+  // ORDER BY i` looks equivalent and is NOT: the `ORDER BY` sits at the same
+  // query level as the function call, and Postgres may evaluate a target-list
+  // function before applying that sort. So the acquisition order becomes a
+  // PLANNER CHOICE — and a plan that takes the keys in input order silently
+  // recreates the inversion this whole protocol exists to eliminate, with
+  // nothing in the code or the tests to show for it.
+  //
+  // A sequence of awaited statements is the only form whose order is a
+  // guarantee rather than an observation. This helper's entire value is that
+  // guarantee, so it pays the round trips.
+  for (const k of unique) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${k.memoryId}), hashtext(${k.loc}))`;
+  }
 }
 
 /**

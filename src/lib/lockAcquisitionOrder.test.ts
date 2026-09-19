@@ -108,10 +108,9 @@ describe('compareLockKeys — the one global order', () => {
 describe('acquireLockSet', () => {
   it('dedupes — a key named twice is acquired once', async () => {
     const calls: string[] = [];
-    // One statement, arrays in order — expanded back to per-key pairs.
     const tx = {
-      $executeRaw: (_s: TemplateStringsArray, m: string[], l: string[]) => {
-        m.forEach((mem, i) => calls.push(`${mem}/${l[i]}`));
+      $executeRaw: (_s: TemplateStringsArray, m: string, l: string) => {
+        calls.push(`${m}/${l}`);
         return Promise.resolve(1);
       },
     } as never;
@@ -188,13 +187,7 @@ function recordingCtx(): { ctx: Context; keys: LockKey[] } {
               if (p !== '$executeRaw') return Reflect.get(t, p, r);
               return (strings: TemplateStringsArray, ...values: unknown[]) => {
                 if (LOCK_RE.test(strings.join(''))) {
-                  const [m, l] = values;
-                  if (Array.isArray(m) && Array.isArray(l)) {
-                    // The set form: one statement, arrays in acquisition order.
-                    m.forEach((mem, i) => keys.push({ memoryId: String(mem), loc: String(l[i]) }));
-                  } else {
-                    keys.push({ memoryId: String(m), loc: String(l) });
-                  }
+                  keys.push({ memoryId: String(values[0]), loc: String(values[1]) });
                 }
                 return (t as typeof tx).$executeRaw(strings, ...values);
               };
