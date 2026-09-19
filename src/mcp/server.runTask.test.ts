@@ -327,13 +327,21 @@ describe('hadron_run_task — URN bypass + shared run core', () => {
 });
 
 describe('isRunnable write path (hadron_create_node / hadron_update_node / GraphQL createNode)', () => {
-  it('hadron_create_node creates a runnable node that hadron_run_task then finds and runs', async () => {
+  it('hadron_create_task creates a runnable node that hadron_run_task then finds and runs', async () => {
+    // #1201 moved this off hadron_create_node, which now REFUSES a write that
+    // would produce a runnable node — authoring something the platform will
+    // EXECUTE is not the same act as writing prose. The end-to-end contract is
+    // unchanged and is what this asserts: the tool that authors a task and the
+    // tool that runs it still meet.
+    //
+    // Note there is no `isRunnable` argument any more. The tool IS the
+    // statement of intent, so it sets the signal; a caller that could also pass
+    // it could disagree with the tool it chose.
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('hadron_create_node', {
+    await srv.callToolText('hadron_create_task', {
       urn: nodeUrnOf(fx.alpha, 'tasks:brand-new'),
       name: 'Brand new task',
       nodeType: 'info',
-      isRunnable: true,
       content: 'do the new thing',
     });
     const row = await db.node.findFirst({
@@ -347,9 +355,13 @@ describe('isRunnable write path (hadron_create_node / hadron_update_node / Graph
     expect(text).toContain('do the new thing');
   });
 
-  it('hadron_update_node can clear isRunnable, removing the node from the task list', async () => {
+  it('hadron_update_task can clear isRunnable, removing the node from the task list', async () => {
+    // #1201 — moved off the generic tool, and this test WAS the hole: clearing
+    // `isRunnable` un-governs a node, so allowing it on `hadron_update_node`
+    // meant the safety gate could be removed by the surface it protects
+    // against. Retiring a task is legitimate; it just needs the task door.
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('hadron_update_node', {
+    await srv.callToolText('hadron_update_task', {
       urn: nodeUrnOf(fx.alpha, 'tasks:add-note'),
       isRunnable: false,
     });
@@ -363,9 +375,13 @@ describe('isRunnable write path (hadron_create_node / hadron_update_node / Graph
     expect(text).toContain('No runnable task matching "Add note" in Alpha');
   });
 
-  it('hadron_update_node preserves isRunnable when the field is omitted (partial update)', async () => {
+  it('hadron_update_task edits a runnable node, preserving what is omitted', async () => {
+    // Also moved off the generic tool, and for a sharper reason than the create
+    // case: the gate reads the RESULTING state, so hadron_update_node refuses
+    // even an edit that touches neither signal. A procedure the platform
+    // executes must not be rewritable through the generic surface.
     const srv = createTestableMcpServer(adminAuth());
-    await srv.callToolText('hadron_update_node', {
+    await srv.callToolText('hadron_update_task', {
       urn: nodeUrnOf(fx.alpha, 'tasks:add-review'),
       description: 'touched',
     });
@@ -377,9 +393,15 @@ describe('isRunnable write path (hadron_create_node / hadron_update_node / Graph
     expect(row?.description).toBe('touched');
   });
 
-  it('GraphQL createNode threads isRunnable into the node', async () => {
+  it('GraphQL createTaskNode threads isRunnable into the node', async () => {
+    // The GraphQL half of the same move: createNode refuses isRunnable now, and
+    // createTaskNode is the door. Kept as a separate case from the MCP one
+    // because the two are independent implementations (#206) — the MCP tool
+    // delegates here, but a regression in either would otherwise hide.
     const ctx: Context = { db, roles: ['ADMIN'], userId: fx.admin.id };
-    await resolvers.Mutation.createNode(
+    await (
+      resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>
+    ).createTaskNode(
       {},
       { input: { memoryId: fx.alpha.id, loc: 'tasks:via-gql', name: 'Via GQL', isRunnable: true } },
       ctx,

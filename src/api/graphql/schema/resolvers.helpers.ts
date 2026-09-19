@@ -2697,6 +2697,13 @@ export interface NodeInput {
   /** #725 — collection discriminator (e.g. "competitor"). Omit preserves; null clears. */
   objectType?: string | null;
   isRunnable?: boolean | null;
+  /**
+   * #1201 — what this node is FOR (open string). Distinct from `nodeType` (the
+   * platform-kind axis) and `objectType` (the collection discriminator). A
+   * GOVERNED value routes the write to that kind's door; anything else is
+   * inert. Omit preserves on update; null clears.
+   */
+  role?: string | null;
   loc: string;
   name: string;
   alias?: string;

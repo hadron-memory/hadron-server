@@ -26,6 +26,7 @@ const NODE: SnapshotSourceNode = {
   tags: ['x'],
   nodeType: 'info',
   objectType: null,
+  role: null,
   isLink: false,
   properties: { k: 1 },
   data: null,

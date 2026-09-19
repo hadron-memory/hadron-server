@@ -74,9 +74,15 @@ describe('updateNode snapshot capture (#620)', () => {
       tags: ['a'],
     });
 
-    await resolvers.Mutation.updateNode(
+    // #1201 — through the TASK door, because this fixture is runnable and the
+    // generic updateNode now refuses any edit whose result is still a runnable
+    // node. The subject of this test is unchanged (what the revision captures);
+    // only the door it goes through moved.
+    await (
+      resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>
+    ).updateTaskNode(
       {},
-      { input: { id: n.id, content: 'v2 body', tags: ['a', 'b'], reason: 'tighten wording' } } as never,
+      { input: { id: n.id, content: 'v2 body', tags: ['a', 'b'], reason: 'tighten wording' } },
       ctx(),
     );
 
@@ -92,6 +98,11 @@ describe('updateNode snapshot capture (#620)', () => {
     expect(v.data).toEqual({ stage: 1 });
     expect(v.seq).toBe(5);
     expect(v.isRunnable).toBe(true);
+    // #1201 — `role` joined the curated subset. NULL here (this fixture is
+    // governed by its capability, not a label), and it is asserted rather than
+    // left out because the escalation #1202 exists for is CLEARING a role: a
+    // history that cannot show the role cannot show the un-governing.
+    expect(v.role).toBeNull();
     expect(v.llmModel).toBe('claude-fable-5');
     expect(v.aiAgent).toBe('claude-code');
     // #620 editor split + reason routing + change list.
@@ -120,11 +131,18 @@ describe('restoreNodeRevision round-trip (#620)', () => {
       properties: { p: 1 },
       data: { d: 1 },
       seq: 1,
-      isRunnable: true,
+      // #1201 — deliberately NOT runnable. `isRunnable` is a governed signal
+      // now, so flipping it here would make both the update and the restore
+      // governance-changing writes, which the generic surface refuses. Its
+      // capture and restore are covered in resolvers.governedRole1201.test.ts,
+      // where the refusal is the subject rather than an obstacle. What this
+      // test is about — the OTHER curated fields restoring verbatim — is
+      // unchanged.
+      isRunnable: false,
     });
     await resolvers.Mutation.updateNode(
       {},
-      { input: { id: n.id, content: 'v2', properties: { p: 2 }, data: { d: 2 }, seq: 9, isRunnable: false } } as never,
+      { input: { id: n.id, content: 'v2', properties: { p: 2 }, data: { d: 2 }, seq: 9 } } as never,
       ctx(),
     );
     const [v1snap] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
@@ -136,14 +154,13 @@ describe('restoreNodeRevision round-trip (#620)', () => {
     expect(restored.properties).toEqual({ p: 1 });
     expect(restored.data).toEqual({ d: 1 });
     expect(restored.seq).toBe(1);
-    expect(restored.isRunnable).toBe(true);
     // The pre-restore snapshot recorded what the restore rewrote.
     const preRestore = await db.nodeRevision.findFirst({
       where: { nodeId: n.id },
       orderBy: { createdAt: 'desc' },
     });
     expect(preRestore?.changes).toEqual(
-      expect.arrayContaining(['content', 'properties', 'data', 'seq', 'isRunnable']),
+      expect.arrayContaining(['content', 'properties', 'data', 'seq']),
     );
   });
 

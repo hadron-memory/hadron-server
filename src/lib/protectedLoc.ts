@@ -1,21 +1,22 @@
 /**
- * Spec 049 §2 S4 — the protected-loc write gate. TWO predicate sources now:
- * the Channel table (shape B, shipped with #1047) and `Memory.protectedLocs`
- * (D-2026-08-25-004, added by #1180).
+ * Spec 049 §2 S4 — the protected-loc write gate. ONE predicate source: the
+ * Channel table (shape B, #1047).
  *
- * STRENGTHS DIFFER BY SOURCE, and that must not be forgotten because they
- * share one mechanism and one error code. A Channel's protection is a SECURITY
- * BOUNDARY: #1047 existed because chat authorship was forgeable and not
- * tamper-evident, and the owning operation derives authorship the caller cannot
- * supply. A `Memory.protectedLocs` entry is a GUARDRAIL: `authorProtectedNode`
- * is PURE ROUTING — it writes what it is given and validates nothing (Holger,
- * 2026-09-17: "I can't think of any validation needed. It should protect the
- * special nodes from being created and edited by non-specific tools, that is
- * all"). So a determined caller can still author a malformed spec node THROUGH
- * that door; what is refused is the ACCIDENTAL generic write — which is the
- * threat, since the door is deliberately absent from the MCP tool surface an
- * agent reaches for. Do not let a later reader assume a spec node's provenance
- * is as tamper-evident as a chat message's.
+ * THIS MODULE IS ABOUT *WHERE* A WRITE LANDS, and only that. #1180 briefly
+ * added `Memory.protectedLocs` as a second source so a corpus could declare its
+ * own addresses; #1201 removed it, because governing AUTHORED KINDS by address
+ * was the wrong axis — a task node is dangerous because it is RUNNABLE, not
+ * because of where it sits. That job moved to `src/lib/governedRole.ts`, which
+ * keys on what a write PRODUCES.
+ *
+ * Keep the two apart. A Channel's protection is a SECURITY BOUNDARY about an
+ * operation owning an address: #1047 existed because chat authorship was
+ * forgeable and not tamper-evident, and `createChannelMessage` derives
+ * authorship the caller cannot supply. The governed-role gate is about what a
+ * node IS. A caller exempt from one is fully subject to the other — which is
+ * what stops a kind door writing under `chats:team` and forging chat
+ * authorship (#1190 shipped a single boolean covering both; @codex + @copilot
+ * flagged it P1).
  *
  * A Channel row declares an address (`chats:team`) whose subtree is written by
  * ONE owning operation (`createTeamChatMessage` and its Channel-addressed
@@ -47,37 +48,26 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 
-/**
- * Any client that can read the two predicate sources — the root client or a
- * transaction.
- */
-export type ChannelReader = Pick<Prisma.TransactionClient, 'channel' | 'memory'>;
-
-/** The wildcard entry in `Memory.protectedLocs` meaning "this whole memory". */
-export const PROTECT_WHOLE_MEMORY = '*';
+/** Any client that can read the Channel table — the root client or a transaction. */
+export type ChannelReader = Pick<Prisma.TransactionClient, 'channel'>;
 
 /**
- * Which predicate source protects an address. The bypass is keyed on this and
- * is NEVER universal: an operation exempts itself from the source it OWNS and
- * stays subject to the other.
- *
- * That matters because the two sources are not equally strong. A Channel's
- * protection is a SECURITY boundary — the owning operation derives authorship
- * the caller cannot supply (#1047) — while a declared `Memory.protectedLocs`
- * entry is a GUARDRAIL fronted by pure routing. A single boolean bypass would
- * let the guardrail's door walk through the boundary: `authorProtectedNode`
- * could write under `chats:team` and forge chat authorship (@codex + @copilot,
- * both P1, PR #1190).
+ * Which predicate source protects an address. One member today, and it stays a
+ * union rather than collapsing to a boolean **on purpose**: the bypass must be
+ * keyed on the source a caller OWNS, so that adding a second source later
+ * cannot silently make an existing caller exempt from it. #1190 shipped the
+ * boolean form and it let an authoring door write under `chats:team`
+ * (@codex + @copilot, both P1).
  */
-export type ProtectedSource = 'channel' | 'declared';
+export type ProtectedSource = 'channel';
 
 export interface ProtectedLoc {
   loc: string;
-  /** Human name for the refusal message — a Channel's name, or the memory's. */
+  /** The Channel's name, for the refusal message. */
   name: string;
   /** Which predicate source declared this address. */
   source: ProtectedSource;
-  /** Set when the source is a Channel; null for a declared `Memory.protectedLocs` entry. */
+  /** The Channel row's id. Nullable only because a second source may return null again. */
   channelId: string | null;
   /** Which authoring surface owns this address, named in the refusal. */
   owner: string;
@@ -89,135 +79,64 @@ export function locsOverlap(a: string, b: string): boolean {
 }
 
 /**
- * Every protected address in a memory, from BOTH predicate sources:
- *
- *   - Channel rows — live AND tombstoned (see the header);
- *   - `Memory.protectedLocs` — declared per memory (D-2026-08-25-004, #1180).
- *
- * A `*` entry protects the whole memory and is represented as a loc that
- * overlaps everything, so `locsOverlap` needs no special case at the call sites.
+ * Every protected address in a memory: Channel rows, live AND tombstoned (see
+ * the header for why a tombstone still protects).
  */
 export async function protectedLocsIn(db: ChannelReader, memoryId: string): Promise<ProtectedLoc[]> {
-  const [channels, memory] = await Promise.all([
-    db.channel.findMany({ where: { memoryId }, select: { id: true, loc: true, name: true } }),
-    db.memory.findUnique({ where: { id: memoryId }, select: { name: true, protectedLocs: true } }),
-  ]);
-
-  const out: ProtectedLoc[] = channels.map((r) => ({
+  const channels = await db.channel.findMany({
+    where: { memoryId },
+    select: { id: true, loc: true, name: true },
+  });
+  return channels.map((r) => ({
     loc: r.loc,
     name: r.name,
     source: 'channel',
     channelId: r.id,
     owner: 'createTeamChatMessage / hadron_team_chat_post',
   }));
-
-  for (const declared of memory?.protectedLocs ?? []) {
-    out.push({
-      loc: declared,
-      name: memory?.name ?? 'this memory',
-      source: 'declared',
-      channelId: null,
-      // BOTH doors, because this one string is all a refused caller gets and
-      // the refusal does not know whether they were creating or editing
-      // (`assertLocWritable` is called with op 'write' from every path). Naming
-      // only the create door sent an authoring client that hit this while
-      // EDITING to a create/upsert mutation — wrong API, and the kind of
-      // confident wrong answer that costs more than no answer (@copilot, #1198).
-      owner:
-        'authorProtectedNode (create) / updateProtectedNode (edit) — the memory-specific authoring tools',
-    });
-  }
-  return out;
 }
 
 /**
- * Does a protected entry cover `loc`? `*` covers everything in its memory;
- * otherwise the ordinary subtree overlap applies.
+ * Does a protected entry cover `loc`? Subtree overlap in both directions.
  *
- * EXPORTED, and the only correct way to ask. `locsOverlap(p.loc, loc)` is NOT
- * equivalent — `locsOverlap('*', 'anything')` is false, so a consumer that
- * matches raw would silently ignore a whole-memory declaration. That bit the
- * bulk paths in this PR's first revision (@codex + @copilot, both P1): git sync
- * and search-replace could rewrite and delete nodes in a memory declared
- * wholly protected. Two copies of a predicate, one of which learned a new case.
+ * EXPORTED, and the only correct way to ask, even though it is now a one-line
+ * delegation. It carried a `*` whole-memory case for `Memory.protectedLocs`
+ * (#1190) and two consumers that called `locsOverlap` directly silently ignored
+ * it — `locsOverlap('*', x)` is false — so git sync and search-replace could
+ * delete rows in a memory declared wholly protected (@codex + @copilot, both
+ * P1). #1201 removed the wildcard with the column, but the lesson is why this
+ * stays the single entry point rather than being inlined back: the next case it
+ * learns must reach every consumer, and that only works if there is one.
  */
 export function protectedLocCovers(entry: ProtectedLoc, loc: string): boolean {
-  return entry.loc === PROTECT_WHOLE_MEMORY || locsOverlap(entry.loc, loc);
+  return locsOverlap(entry.loc, loc);
 }
 
 /**
- * The ops the authoring doors can actually perform. `authorProtectedNode`
- * creates (so a create under a protected ancestor is reachable) and
- * `updateProtectedNode` edits; neither deletes and neither moves.
+ * The ops a Channel's owning operation can actually perform.
+ * `createTeamChatMessage` / `createChannelMessage` POST a message: they create,
+ * and they do not delete, move or restore a node.
  *
- * This is a CAPABILITY list, not a display-verb list, and the distinction is
- * the whole point (@copilot, PR #1198, second round). An earlier version keyed
- * the remedy on `op === 'write'` and was wrong in BOTH directions, because the
- * verb a caller passes is chosen for the message and not for this:
+ * A CAPABILITY list, not a display-verb list, and the distinction is the whole
+ * point (@copilot, PR #1198). The verb a caller passes is chosen for the
+ * message — `deleteNode` passed 'write' — so keying the remedy on it offered a
+ * post mutation as the way to delete. An op not in this list gets the
+ * no-bypass wording, which under-promises rather than sending someone to an
+ * operation that cannot help; keep it in step with the callers' verbs.
  *
- *   - `deleteNode` passed 'write', so a protected DELETE was sent to two
- *     mutations that cannot delete;
- *   - `updateNodeData` / `updateNodeProperties` pass 'update', so an edit —
- *     which `updateProtectedNode` performs — was told no door existed.
- *
- * `deleteNode`'s verb is now 'delete', which fixes its message too ("the only
- * thing that may delete here" rather than "write"). Keep this list and the
- * callers' verbs in step: a new op defaults to NO bypass, which under-promises
- * rather than sending someone to a door that cannot help.
- */
-const DOOR_BACKED_OPS = new Set(['write', 'create', 'update', 'create under']);
-
-/**
- * The same question for the CHANNEL source, whose owning operation is
- * `createTeamChatMessage` — a message POST. It creates; it does not delete,
- * move or restore a node.
- *
- * This list exists because the first version of the op-aware remedy fixed only
- * the declared arm, and a `deleteNode` refusal at a Channel address still said
- * "Post with createTeamChatMessage" — a post mutation offered as the way to
- * delete (@copilot, PR #1198, third round). Worse, the test I wrote for the
- * declared fix asserted the Channel arm ALWAYS names its operation, pinning the
- * defect as intended behaviour. A fixture is only as good as the belief behind
- * it.
+ * #1201 removed the second, DECLARED arm of this function along with
+ * `Memory.protectedLocs`. The lesson it left is recorded on its replacement
+ * (`governedRole.ts`): a test I wrote for the declared arm asserted the Channel
+ * arm always names its operation, and passed, pinning the defect as intended
+ * behaviour. A fixture is only as good as the belief behind it.
  */
 const CHANNEL_BACKED_OPS = new Set(['write', 'create', 'create under']);
 
-/**
- * The remedy sentence, which depends on the predicate SOURCE and on what the
- * caller is trying to do (@copilot, PR #1198).
- *
- * Naming an operation for something it cannot perform is a confident wrong
- * answer: the caller follows the advice to a mutation that refuses them
- * differently. Saying plainly that there is no bypass is more useful.
- *
- * `update` gets its own sentence rather than the shared `owner` string, because
- * `owner` names BOTH doors and `authorProtectedNode` cannot edit an existing
- * node — so an edit refusal that printed it would offer a create door for an
- * update. The generic `write` verb keeps naming both, since `writeNodeCore`
- * genuinely reaches this gate for creates and updates alike and the gate cannot
- * tell them apart.
- */
-function protectedRemedy(entry: ProtectedLoc, op: string): string {
-  if (entry.channelId) {
-    return CHANNEL_BACKED_OPS.has(op)
-      ? `Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
-      : `There is no operation that may ${op} here — the Channel's own operation posts messages, so this operation has no bypass.`;
-  }
-  // Name the ONE door that performs this operation. `entry.owner` advertises
-  // both, so printing it for a create offers an edit door that cannot create
-  // the missing node, and for an edit offers a create door that cannot edit an
-  // existing one (@copilot, PR #1198, rounds 3 and 4). It is only correct for
-  // the ambiguous 'write' verb, which covers both — and writeNodeCore no longer
-  // passes that, so the shared string is now the fallback rather than the rule.
-  if (op === 'update') {
-    return `Use updateProtectedNode (the memory-specific authoring tool's edit door); the generic node surface does not reach it.`;
-  }
-  if (op === 'create' || op === 'create under') {
-    return `Use authorProtectedNode (the memory-specific authoring tool's create door); the generic node surface does not reach it.`;
-  }
-  return DOOR_BACKED_OPS.has(op)
-    ? `Use ${entry.owner}; the generic node surface does not reach it.`
-    : `There is no authoring door for "${op}" at a declared address — the authoring tools only create and edit, so this operation has no bypass.`;
+/** The remedy sentence — what a refused caller should use INSTEAD, when anything can. */
+function protectedRemedy(op: string): string {
+  return CHANNEL_BACKED_OPS.has(op)
+    ? `Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
+    : `There is no operation that may ${op} here — the Channel's own operation posts messages, so this operation has no bypass.`;
 }
 
 /** The typed refusal — `extensions.code: 'LOC_PROTECTED'`, naming the Channel and the owning surface. */
@@ -228,9 +147,7 @@ export class LocProtectedError extends GraphQLError {
     public readonly op: string,
   ) {
     super(
-      channel.channelId
-        ? `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. ${protectedRemedy(channel, op)}`
-        : `"${loc}" is protected: memory "${channel.name}" declares ${channel.loc === '*' ? 'its whole address space' : `"${channel.loc}"`} as written only by its own authoring tool, which is the only thing that may ${op} here. ${protectedRemedy(channel, op)}`,
+      `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. ${protectedRemedy(op)}`,
       {
         extensions: {
           code: 'LOC_PROTECTED',
@@ -307,22 +224,19 @@ function ancestorsOf(loc: string): string[] {
  * `ownerRepo`, not by the locs they were handed, so checking the INCOMING locs
  * protects nothing on the way out.
  *
- * THE WHOLE POINT OF THIS LIVING HERE: the wildcard has now been missed twice
- * by consumers building their own clauses — `loc = '*'` and
- * `startsWith '*:'` match nothing, so a memory declared wholly protected had
- * its rows deleted by the very query meant to spare them (@copilot, PR #1190,
- * rounds 1 and 2). Ask this function; do not rebuild the predicate.
+ * THE WHOLE POINT OF THIS LIVING HERE: a consumer that rebuilds the predicate
+ * learns a new case late. The wildcard was missed twice that way — `loc = '*'`
+ * and `startsWith '*:'` match nothing, so a memory declared wholly protected
+ * had its rows deleted by the very query meant to spare them (@copilot,
+ * PR #1190, rounds 1 and 2). #1201 removed the wildcard with
+ * `Memory.protectedLocs`, and with it the `wholeMemory` return this function
+ * used to carry — but the rule stands: ask this function, do not rebuild it.
  *
- *   - `wholeMemory: true`  ⇒ delete NOTHING in this memory.
- *   - otherwise `notClauses` ⇒ pass as `NOT: { OR: notClauses }`.
+ * Pass `notClauses` as `NOT: { OR: notClauses }`.
  */
 export function protectedDeletionFilter(protectedLocs: ProtectedLoc[]): {
-  wholeMemory: boolean;
   notClauses: Array<{ loc: string } | { loc: { startsWith: string } } | { loc: { in: string[] } }>;
 } {
-  if (protectedLocs.some((p) => p.loc === PROTECT_WHOLE_MEMORY)) {
-    return { wholeMemory: true, notClauses: [] };
-  }
   const notClauses = protectedLocs.flatMap((p) => {
     const ancestors = ancestorsOf(p.loc);
     return [
@@ -331,5 +245,5 @@ export function protectedDeletionFilter(protectedLocs: ProtectedLoc[]): {
       ...(ancestors.length ? [{ loc: { in: ancestors } }] : []),
     ];
   });
-  return { wholeMemory: false, notClauses };
+  return { notClauses };
 }

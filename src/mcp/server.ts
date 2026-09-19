@@ -1,6 +1,12 @@
 import { randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
+import {
+  assertGovernedWrite,
+  mergedGovernedState,
+  RoleGovernedError,
+  GOVERNED_KINDS,
+} from '../lib/governedRole.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
@@ -911,6 +917,9 @@ type ReadProjectionNode = {
   memoryId: string;
   description: string | null;
   nodeType: string;
+  /** #1201 — governed kind markers, rendered so a reader can tell which door applies. */
+  role: string | null;
+  isRunnable: boolean | null;
   tags: string[];
   seq: number | null;
   properties: unknown;
@@ -1013,6 +1022,14 @@ async function renderNodeReadProjection(
     portalUrl ? `URL: ${portalUrl}` : '',
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
+    // #1201 (@codex P2, PR #1203). Without these a governed node reads as an
+    // ordinary one, so a caller cannot tell which door applies until a write
+    // fails — the field would not round-trip through the primary agent API it
+    // is written from. Omitted when unset, like every other optional meta line;
+    // `Runnable:` only when true, matching the frontmatter convention that
+    // false and null are one state.
+    node.role ? `Role: ${node.role}` : '',
+    node.isRunnable ? 'Runnable: true' : '',
     opts.locked
       ? 'Locked: encrypted memory — call hadron_unlock_memory to read/write its content (spec 041)'
       : '',
@@ -2687,6 +2704,32 @@ export function createMcpServerInstance(
         return textResult('Write access denied for this memory.');
       }
 
+      // #1201 (@copilot, PR #1203 round 2). This helper writes through a RAW
+      // upsert whose update branch preserves omitted fields, so pointed at an
+      // existing review or runnable task it rewrites the node while keeping its
+      // governed signals — a generic MCP surface editing a governed node, which
+      // is the thing the gate exists to stop.
+      //
+      // It never SETS a governed signal (its create branch has neither), so the
+      // only reachable case is the one above: an existing governed node. The
+      // merge is still written as a merge rather than a bare read, because the
+      // rule is "what does this write PRODUCE" and a shortcut here would be the
+      // next thing to drift.
+      const parentGovernedProbe = await db.node.findUnique({
+        where: { loc_memoryId: { loc, memoryId } },
+        select: { role: true, isRunnable: true },
+      });
+      try {
+        assertGovernedWrite(
+          parentGovernedProbe,
+          mergedGovernedState(parentGovernedProbe, {}),
+          'update',
+        );
+      } catch (e) {
+        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        throw e;
+      }
+
       const upsertArgs = {
         where: { loc_memoryId: { loc, memoryId } },
         create: {
@@ -4167,7 +4210,8 @@ export function createMcpServerInstance(
       name: z.string().describe('Node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
-      isRunnable: z.boolean().optional().describe('Whether this node can be run as a task by hadron_run_task (cor:api:060). Defaults to not-runnable. Independent of nodeType — a runnable node may carry any nodeType.'),
+      isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool if true: a write producing a runnable node must go through hadron_create_task, because authoring something the platform will EXECUTE is not the same act as writing prose. Accepted only as false/omitted (the default). Independent of nodeType — a runnable node may carry any nodeType.'),
+      role: z.string().optional().describe('#1201 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role has no retrieval impact. Most values are inert, but the GOVERNED ones — "review", "spec" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface. The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
@@ -4185,7 +4229,7 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
       // Spec 022: enforce qualification at the API boundary. Relative-form
       // URNs (e.g., `review:sort-imports` without org+memory) reject here
       // before any DB lookup runs.
@@ -4214,6 +4258,41 @@ export function createMcpServerInstance(
 
       if (!(await canWriteToMemory(db, auth, memoryId))) {
         return textResult('Write access denied for this memory.');
+      }
+
+      // #1201 — the GOVERNED-KIND gate, on the state this create would PRODUCE.
+      // Inline here for the same reason as on hadron_update_node: this handler
+      // is a parity implementation of writeNodeCore (#206), not a delegate, and
+      // MCP is the surface an agent actually reaches — which makes it the
+      // threat this mechanism exists for rather than an afterthought. No
+      // ownsKind is ever passed: there is deliberately no MCP door, and that
+      // absence is what keeps the agent surface on the refused path.
+      //
+      // MERGED with whatever is at the loc, tombstone included (@copilot,
+      // PR #1203 round 2) — the identical defect to the one fixed in
+      // writeNodeCore, left behind here because this handler is a PARITY
+      // implementation and I fixed one consumer of the shared rule and not the
+      // other. This tool resurrects a soft-deleted row and preserves the fields
+      // the caller omits, so the resulting state can be governed while the
+      // input names nothing.
+      //
+      // The probe is read AFTER this point in the handler, so it is read here
+      // instead; it is the same stale-read-for-payload-purposes row, and the
+      // authoritative decision for a RACE is the one writeNodeCore takes under
+      // the lock. What this closes is the ordinary, unraced case.
+      const governedProbe = await db.node.findUnique({
+        where: { loc_memoryId: { loc, memoryId } },
+        select: { role: true, isRunnable: true },
+      });
+      try {
+        assertGovernedWrite(
+          governedProbe,
+          mergedGovernedState(governedProbe, { role, isRunnable }),
+          'create',
+        );
+      } catch (e) {
+        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        throw e;
       }
 
       // Resolve edge targets BEFORE the source upsert so an
@@ -4384,6 +4463,7 @@ export function createMcpServerInstance(
           nodeType: nodeType ?? 'info',
           objectType: objectType?.trim() || null,
           isRunnable: isRunnable ?? null,
+          role: role ?? null,
           description: description ?? null,
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
@@ -4401,6 +4481,7 @@ export function createMcpServerInstance(
           ...(nodeType ? { nodeType } : {}),
           ...(objectType !== undefined ? { objectType: objectType.trim() || null } : {}),
           ...(isRunnable !== undefined ? { isRunnable } : {}),
+          ...(role !== undefined ? { role } : {}),
           description: description ?? null,
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
@@ -4632,7 +4713,8 @@ export function createMcpServerInstance(
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
-      isRunnable: z.boolean().optional().describe('Set whether this node can be run as a task by hadron_run_task. Pass true/false; omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
+      isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool: making a node runnable, and RETIRING a runnable one, both go through hadron_update_task. Editing a node that is already runnable is refused here too, whatever this field says, because the result is still a runnable node. Omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
+      role: z.string().nullable().optional().describe('#1201 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED values ("review", "spec") are refused here — use hadron_update_review, or the `hadron spec` CLI for a spec — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Read the ABSENCE of the marker narrowly: it means "checked against this exact content" ONLY on a read that could have shown it — `contentScope` of `abstract` or `all`, on a memory that is unencrypted or unlocked. Under the default `content` scope, or on a locked memory, no marker is emitted either way and its absence says nothing at all. Spec 031/032.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
@@ -4652,7 +4734,7 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -4687,6 +4769,24 @@ export function createMcpServerInstance(
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
       });
+
+      // #1201 — the GOVERNED-KIND gate, on the RESULTING state. This handler is
+      // an INLINE parity implementation of writeNodeCore (#206), not a delegate,
+      // so the gate has to be here too: MCP is the surface an agent actually
+      // reaches, which makes it the threat this mechanism exists for rather
+      // than an afterthought. Never passes an ownsKind — there is no MCP door,
+      // by design.
+      try {
+        assertGovernedWrite(
+          existing,
+          mergedGovernedState(existing, { role, isRunnable }),
+          'update',
+        );
+      } catch (e) {
+        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        throw e;
+      }
+
       // A soft-deleted node is treated as not-found here (#543), mirroring the
       // GraphQL update-mode contract (resolvers.mutation.node.ts) and every MCP
       // read/find/list path, which all exclude deletedAt. hadron_update_node is
@@ -4857,6 +4957,7 @@ export function createMcpServerInstance(
               nodeType,
               objectType,
               isRunnable,
+              role,
               description,
               abstract: normalizedAbstract,
               content,
@@ -4877,6 +4978,8 @@ export function createMcpServerInstance(
       if (nodeType !== undefined) data.nodeType = nodeType;
       if (objectType !== undefined) data.objectType = objectType.trim() || null;
       if (isRunnable !== undefined) data.isRunnable = isRunnable;
+      // #1201 — null CLEARS, omit preserves, matching every other partial field here.
+      if (role !== undefined) data.role = role;
       if (description !== undefined) data.description = description;
       if (normalizedAbstract !== undefined) data.abstract = normalizedAbstract;
       if (nextAbstractOriginHash !== undefined) data.abstractOriginHash = nextAbstractOriginHash;
@@ -4960,6 +5063,187 @@ export function createMcpServerInstance(
       // #322: surface the stable PK (immutable across move/rename).
       return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})`);
     },
+  );
+
+  // ── the GOVERNED-KIND doors: hadron_create_task / _review and their updates ──
+  //
+  // #1201. `hadron_create_node` and `hadron_update_node` REFUSE a write that
+  // would produce a governed node; these are how an agent produces one
+  // deliberately. They delegate to the kind's GraphQL door rather than
+  // reimplementing the write, so the exemption is decided server-side per kind
+  // and there is exactly one place it lives.
+  //
+  // WHY THESE ARE ON THE AGENT SURFACE AT ALL, since the doors were originally
+  // specified as absent from it. The absence rule was written for one threat —
+  // an agent reaching for the GENERIC tool by habit — and it is still exactly
+  // right for `spec`, whose authoring surface is `hadron spec` in the CLI and
+  // which therefore gets NO tool here. It is wrong for these two:
+  //
+  //   - TASK's threat is a PRINCIPAL, not a tool (#1202: a memory shared with
+  //     someone who authors a runnable node that reads the owner's data when
+  //     the OWNER runs it). A door no legitimate surface can reach does not
+  //     mitigate that; it just removes the ability to author tasks, which is
+  //     how this platform's own task corpus is written.
+  //   - REVIEW is now a component of any task or run rather than a coding
+  //     convenience (@Holger, 2026-09-18) — work results should be reviewed, so
+  //     the agent doing the work needs to be able to author the review.
+  //
+  // What still protects them is unchanged: the GENERIC surface refuses, so
+  // producing a governed node takes a deliberate switch of tool. These are that
+  // switch. The principal check lands on the same doors in #1202.
+  //
+  // Named `create`/`update`, not `author`: six `create_*` tools and six
+  // `update_*` tools already exist here and zero `author_*` ones, and
+  // `hadron_run_task` already establishes "task" as a noun on this surface.
+  // A second verb for the same act buys nothing a reader can act on.
+
+  /** The GraphQL context for a delegated door call — same shape as chatCtx below. */
+  const doorCtx = (): Context => ({
+    db,
+    clientId: auth.clientId ?? undefined,
+    userId: auth.userId ?? undefined,
+    appId: auth.appId ?? undefined,
+    sessionId: auth.sessionId ?? undefined,
+    roles: auth.roles as Context['roles'],
+    organizationId: auth.organizationId ?? undefined,
+  });
+
+  const governedDoorArgs = {
+    urn: z.string().describe('Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>).'),
+    name: z.string().optional().describe('Node name. Required when creating.'),
+    description: z.string().optional().describe('Short description'),
+    abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars).'),
+    content: z.string().optional().describe('Markdown content'),
+    tags: z.array(z.string()).optional().describe('Tags'),
+    nodeType: z.string().optional().describe('Node classification. Distinct from the governed kind — see Node.role.'),
+    seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
+    properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
+    data: z.record(z.string(), z.unknown()).optional().describe('Runtime data bag'),
+  };
+
+  /** One handler shape for all four tools — the kind and the mode are the only variables. */
+  async function callGovernedDoor(
+    kind: 'task' | 'review',
+    mode: 'create' | 'update',
+    args: Record<string, unknown>,
+  ): Promise<{ content: { type: 'text'; text: string }[] }> {
+    const entry = GOVERNED_KINDS.find((e) => e.kind === kind)!;
+    const doorName = entry.doors[mode];
+    const { urn: rawUrn, ...fields } = args as { urn: string } & Record<string, unknown>;
+    let memoryUrn: string;
+    let loc: string;
+    let fragment: string | undefined;
+    try {
+      assertFullyQualifiedUrn(rawUrn, 'node');
+      ({ memoryUrn, loc, fragment } = splitNodeUrn(rawUrn));
+    } catch (e) {
+      return textResult((e as Error).message);
+    }
+    const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
+    if (fragRefusal) return textResult(fragRefusal);
+    const memory = await resolveMemoryByUrn(memoryUrn);
+    if (!memory) return textResult(`Memory not found: "${memoryUrn}".`);
+    try {
+      validateLoc(loc);
+    } catch (e) {
+      return textResult((e as Error).message);
+    }
+
+    // `name` is optional in the shared arg set because an UPDATE preserves it,
+    // but a CREATE requires it — and these tools call the resolver directly, so
+    // GraphQL's `String!` never gets a chance to say so (@copilot, PR #1203).
+    // Without this the omission surfaces from somewhere deeper as a Prisma or
+    // validation error that names neither the field nor the tool.
+    if (mode === 'create' && (typeof fields.name !== 'string' || fields.name.trim() === '')) {
+      return textResult(`hadron_create_${kind}: "name" is required when creating a node.`);
+    }
+
+    // On CREATE the governed signal is set BY THE DOOR, never by the caller:
+    // the tool IS the statement of intent, so asking for it again would let the
+    // two disagree — a node authored as one kind and labelled another.
+    //
+    // On UPDATE the door must NOT force it, or a governed node can never be
+    // RETIRED: clearing `isRunnable` is how a task stops being runnable, and
+    // that is legitimate — it just belongs to the task's own door rather than
+    // to the generic surface, which is exactly what the before-union-after gate
+    // now requires. Omitted still preserves, so an ordinary edit is unaffected.
+    const signal =
+      mode === 'create'
+        ? entry.signal.field === 'isRunnable'
+          ? { isRunnable: true }
+          : { role: entry.signal.value }
+        : {};
+
+    try {
+      const node = await (
+        resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
+      )[doorName](
+        {},
+        { input: { memoryId: memory.id, loc, ...fields, ...signal } },
+        doorCtx(),
+      );
+      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
+    } catch (e) {
+      const code = (e as { extensions?: { code?: string } }).extensions?.code;
+      return textResult(code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`);
+    }
+  }
+
+  server.tool(
+    'hadron_create_task',
+    'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node.',
+    governedDoorArgs,
+    async (args) => callGovernedDoor('task', 'create', args),
+  );
+
+  /**
+   * The UPDATE doors additionally accept their own governed signal, so a
+   * governed node can be RETIRED through the door that owns it. Absent from the
+   * create args on purpose — there the tool is the statement of intent.
+   */
+  //
+  // PER KIND, not shared (@copilot, PR #1203). A single arg set carrying both
+  // signals reads as if both are actionable on both tools, and they are not:
+  // `isRunnable` through the review door is refused by the gate every time,
+  // because the review door owns the review kind and not the task kind. A
+  // description that promises an argument the gate always refuses is worse than
+  // no argument.
+  const taskUpdateArgs = {
+    ...governedDoorArgs,
+    isRunnable: z
+      .boolean()
+      .optional()
+      .describe('Set false to RETIRE this task — it stops being runnable. Omit to preserve. This door is the only way to change it: the generic surface is refused, because clearing the signal is how a governed node is un-governed.'),
+  };
+
+  const reviewUpdateArgs = {
+    ...governedDoorArgs,
+    role: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('Set null to RETIRE this node from the review kind. Omit to preserve. This door is the only way to change it. Setting it to another GOVERNED value ("spec") is refused — that kind has its own door.'),
+  };
+
+  server.tool(
+    'hadron_update_task',
+    'Edit an existing RUNNABLE node. Needed because `hadron_update_node` refuses ANY edit whose result is still a runnable node — including one that changes only prose — so that a procedure the platform executes cannot be rewritten through the generic surface. Omitted fields are preserved. Pass isRunnable: false to RETIRE the task.',
+    taskUpdateArgs,
+    async (args) => callGovernedDoor('task', 'update', args),
+  );
+
+  server.tool(
+    'hadron_create_review',
+    'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool, so you do not pass it. Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
+    governedDoorArgs,
+    async (args) => callGovernedDoor('review', 'create', args),
+  );
+
+  server.tool(
+    'hadron_update_review',
+    'Edit an existing REVIEW node. Needed because `hadron_update_node` refuses any edit whose result is still a review node — a safety check must not be rewritable through the generic surface. Omitted fields are preserved. Pass role: null to RETIRE the node from the review kind.',
+    reviewUpdateArgs,
+    async (args) => callGovernedDoor('review', 'update', args),
   );
 
   // ── hadron_update_node_data ───────────────────────────────────────────
