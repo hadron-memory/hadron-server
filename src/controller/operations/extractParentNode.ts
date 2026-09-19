@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { assertNoGovernedRows, assertNoProtectedReach } from '../../lib/bulkMutationGate.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
@@ -110,6 +111,24 @@ export async function extractParentNodeGraph(
       if (!parent) {
         throw new ParentNodeNotFoundError(args.parentLoc, args.sourceMemoryId);
       }
+
+      // ── The two gates every per-node writer consults (#1191) ────────────
+      // Counted on `main` before this: ZERO in this whole operation.
+      //
+      // BOTH dispositions are gated, not just `move`. #1191 names the move —
+      // it soft-deletes the source subtree, so it is a delete in everything but
+      // name, and it relocates a Channel's address out from under its row. But
+      // the COPY needs it too, and for a reason the issue does not have: the
+      // copied rows carry `isRunnable`, so extracting a subtree containing a
+      // task node MINTS a governed task node in a brand-new memory through a
+      // generic surface, with no task door anywhere in the call. That is the
+      // "a create is not always a create" shape from #1203's nine bypasses.
+      //
+      // In memory, over rows already loaded — no extra query, and no
+      // `startsWith` on a caller-supplied loc (which compiles to an unescaped
+      // LIKE where `_` is a legal loc character).
+      await assertNoProtectedReach(tx, args.sourceMemoryId, nodes.map((n) => n.loc), args.move ? 'move' : 'copy');
+      assertNoGovernedRows(nodes, 'create');
 
       // Rebase a source loc onto the new root: parentLoc → rootLoc,
       // parentLoc:x → rootLoc:x. `slice(parentLoc.length)` yields '' for the

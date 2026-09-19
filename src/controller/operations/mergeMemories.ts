@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { assertMemoryBulkMutable } from '../../lib/bulkMutationGate.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -149,6 +150,25 @@ export async function mergeMemoryGraph(
       throw e;
     }
   };
+
+  // === Preflight: the two gates every per-node writer consults (#1191). ===
+  // Counted on `main` before this: ZERO gate calls in this whole operation, so
+  // an authorized merge could relocate, rewrite or delete the nodes under a
+  // Channel's address, or move a review node out from under the review door.
+  //
+  // BOTH endpoints, because a merge touches both: every source node relocates
+  // or folds, and a fold OVERWRITES its target counterpart. Whole-memory
+  // (`'all'`) rather than a loc set, because there is no partial merge — a
+  // Channel left behind in the source would keep `Channel.memoryId`/`loc`
+  // reserving an address its root no longer occupies, which is why
+  // `nodeSubtreeMove` refuses a cross-memory move of a chat root for the same
+  // reason.
+  //
+  // Refusing before Phase 1 rather than per page is deliberate: a merge is a
+  // long batched operation with partial commits, so a refusal discovered in
+  // page nine would leave eight pages of nodes already relocated.
+  await assertMemoryBulkMutable(db, sourceMemoryId, 'merge');
+  await assertMemoryBulkMutable(db, targetMemoryId, 'merge into');
 
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
   // Page the live source nodes by id (id+loc projection only — never the full
