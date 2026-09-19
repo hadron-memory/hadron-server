@@ -55,7 +55,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
-import { ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
@@ -5904,6 +5904,24 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // count zero descendants and then let this move land under it. Taken
           // before any row-locking statement to keep advisory-before-row ordering
           // consistent with the delete path (no lock-order inversion).
+          // #1187 (@codex + @copilot on PR #1211) — DECLARE the complete key
+          // set first, in the one global order, exactly as the GraphQL
+          // `moveNode` resolver does. This surface was missed when that
+          // protocol landed: it took the destination ancestors here and reached
+          // the source path only later, inside `moveNodeSubtree`
+          // (`lockSourceForMove`). For source `a` and destination `z:child`
+          // that is `z` then `a`, while the GraphQL path takes `a` then `z` —
+          // so the two SURFACES could deadlock against each other, and two MCP
+          // moves with opposing paths against themselves.
+          //
+          // Enumerating the multi-key callers from the GraphQL resolvers alone
+          // is how this was missed; the writers are enumerated by STATE (who
+          // takes two keys), never by the call sites one happens to know.
+          await acquireLockSet(tx, [
+            ...ancestorLocs(toLoc).map((loc) => ({ memoryId: toMemory.id, loc })),
+            ...ancestorLocs(fromLoc).map((loc) => ({ memoryId: fromMemory.id, loc })),
+            { memoryId: fromMemory.id, loc: fromLoc },
+          ]);
           await lockAncestorsForCreate(tx, toMemory.id, toLoc);
 
           if (isSameSlot) {

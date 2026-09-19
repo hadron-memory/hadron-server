@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { assertBatchMutable } from '../../lib/bulkMutationGate.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
@@ -110,6 +111,39 @@ export async function extractParentNodeGraph(
       if (!parent) {
         throw new ParentNodeNotFoundError(args.parentLoc, args.sourceMemoryId);
       }
+
+      // ── The two gates every per-node writer consults (#1191) ────────────
+      // Counted on `main` before this: ZERO in this whole operation.
+      //
+      // BOTH dispositions are gated, not just `move`. #1191 names the move —
+      // it soft-deletes the source subtree, so it is a delete in everything but
+      // name, and it relocates a Channel's address out from under its row. But
+      // the COPY needs it too, and for a reason the issue does not have: the
+      // copied rows carry `isRunnable`, so extracting a subtree containing a
+      // task node MINTS a governed task node in a brand-new memory through a
+      // generic surface, with no task door anywhere in the call. That is the
+      // "a create is not always a create" shape from #1203's nine bypasses.
+      //
+      // In memory, over rows already loaded — no extra query, and no
+      // `startsWith` on a caller-supplied loc (which compiles to an unescaped
+      // LIKE where `_` is a legal loc character).
+      // AUTHORITATIVE, not a point-in-time read (@codex + @copilot, both P1 on
+      // PR #1211). `assertBatchMutable` takes the Channel-memory lock that
+      // `ensureChannelWithRoot` holds while it creates one, then re-reads the
+      // protected set under it — so a Channel adopted between this check and
+      // the `createMany`/soft-delete below either commits first and is seen, or
+      // waits behind this transaction.
+      //
+      // Unlike the merge this whole operation is ONE transaction, so holding
+      // the lock here covers every write it performs; `nodes` was read inside
+      // it a few lines above, so the governed check is on this transaction's
+      // own snapshot rather than a stale one.
+      await assertBatchMutable(
+        tx,
+        [args.sourceMemoryId],
+        nodes,
+        args.move ? 'move' : 'copy',
+      );
 
       // Rebase a source loc onto the new root: parentLoc → rootLoc,
       // parentLoc:x → rootLoc:x. `slice(parentLoc.length)` yields '' for the

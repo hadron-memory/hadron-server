@@ -1,4 +1,6 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } from '../../lib/bulkMutationGate.js';
+import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -150,6 +152,33 @@ export async function mergeMemoryGraph(
     }
   };
 
+  // === Preflight: the two gates every per-node writer consults (#1191). ===
+  // Counted on `main` before this: ZERO gate calls in this whole operation, so
+  // an authorized merge could relocate, rewrite or delete the nodes under a
+  // Channel's address, or move a review node out from under the review door.
+  //
+  // BOTH endpoints, because a merge touches both: every source node relocates
+  // or folds, and a fold OVERWRITES its target counterpart. Whole-memory
+  // (`'all'`) rather than a loc set, because there is no partial merge — a
+  // Channel left behind in the source would keep `Channel.memoryId`/`loc`
+  // reserving an address its root no longer occupies, which is why
+  // `nodeSubtreeMove` refuses a cross-memory move of a chat root for the same
+  // reason.
+  //
+  // This preflight is FAIL-FAST ONLY and is not the authoritative check
+  // (@codex + @copilot, both P1). A merge is paged across SEPARATE
+  // transactions, so a Channel created — or a node promoted to a governed kind
+  // — after this read and before a later page is invisible to it: "a check
+  // before the lock was a TOCTOU window the size of the wait" (PR #1165), and
+  // here the window was the whole merge. `assertBatchMutable` runs inside each
+  // writing transaction and is what actually holds.
+  //
+  // It stays because refusing a doomed merge before it relocates anything is
+  // worth one query per endpoint, and because the refusal is far more useful
+  // up front than eight pages in.
+  await assertMemoryBulkMutable(db, sourceMemoryId, 'merge');
+  await assertMemoryBulkMutable(db, targetMemoryId, 'merge into');
+
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
   // Page the live source nodes by id (id+loc projection only — never the full
   // rows) and match each page against the target by loc. A source node whose
@@ -202,9 +231,20 @@ export async function mergeMemoryGraph(
         });
         for (const t of typed) assertConformsAgainst(relocateSchema, t.objectType, t.properties);
       }
-      const relocate = await db.node.updateMany({
-        where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
-        data: { memoryId: targetMemoryId },
+      // The relocate moves into its own transaction so the AUTHORITATIVE gate
+      // can hold the Channel-memory locks across the check and the write. It
+      // was a bare `updateMany` before, which left nothing for the gate to be
+      // authoritative inside.
+      const relocate = await db.$transaction(async (tx) => {
+        const rows = await tx.node.findMany({
+          where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
+          select: { loc: true, role: true, isRunnable: true },
+        });
+        await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+        return tx.node.updateMany({
+          where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
+          data: { memoryId: targetMemoryId },
+        });
       });
       relocatedCount += relocate.count;
     }
@@ -252,6 +292,10 @@ export async function mergeMemoryGraph(
         },
       });
       const tgtById = new Map(tgtRows.map((t) => [t.id, t]));
+      // The AUTHORITATIVE gate for this batch — both endpoints' rows, read
+      // inside this transaction, under the Channel-memory locks. The Phase-1
+      // preflight cannot cover a fold that runs transactions later.
+      await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], [...srcRows, ...tgtRows], 'merge');
       const foldedIds: string[] = []; // source rows actually folded → safe to delete
 
       // -- Fold fields (per colliding node). --
@@ -435,7 +479,20 @@ export async function mergeMemoryGraph(
 
   // === Final: soft-delete the now-empty source memory when asked. ===
   if (deleteSourceMem) {
-    await db.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
+    // Under the lock and re-checked (@copilot round 2). The per-batch gates
+    // release `channel-host:<source>` when their transactions end, so a Channel
+    // created between the last batch and this update would otherwise let a
+    // merge soft-delete a memory that now HOSTS one — the normal delete path
+    // locks and re-checks for exactly this reason, and this one did not.
+    await db.$transaction(async (tx) => {
+      // `'all'`, not the batch form with an empty row list — that would make
+      // the check vacuous, since an empty loc list overlaps nothing. Deleting
+      // the memory puts EVERY address in it out of reach, so any Channel at all
+      // refuses.
+      await lockMemoryForChannelChange(tx, sourceMemoryId);
+      await assertNoProtectedReach(tx, sourceMemoryId, 'all', 'delete');
+      await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
+    });
   }
 
   return { relocatedCount, foldedCount, edgesMovedCount, edgesDroppedCount };

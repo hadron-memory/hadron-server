@@ -49,6 +49,107 @@ import type { Prisma } from '../generated/prisma/index.js';
 import { assertLocWritable, type ProtectedSource } from './protectedLoc.js';
 
 /**
+ * One advisory key in the `(memoryId, loc)` space every helper here shares.
+ */
+export interface LockKey {
+  memoryId: string;
+  loc: string;
+}
+
+/**
+ * THE global acquisition order (#1187). Every multi-key caller sorts with this
+ * and nothing else.
+ *
+ * `memoryId` first — `mergeNodes` can cross memories, so the cross-memory rule
+ * is load-bearing rather than theoretical. Then **length, then lexical**: a
+ * parent's loc is a prefix of its child's and therefore shorter, so length-first
+ * IS root→leaf, which is the order `lockAncestorsForCreateMany` has always used
+ * and the one the ancestor walks produce naturally. The lexical tiebreak makes
+ * the order total and stable.
+ *
+ * **This orders the INPUTS, which is NOT by itself the lock order** — see
+ * {@link acquireLockSet}, which orders by the actual advisory key. An earlier
+ * version of this comment claimed input order was sufficient because colliding
+ * inputs "simply share" a key. That is wrong, and @copilot supplied the
+ * counterexample: for inputs X and Y that collide under `hashtext` to one key
+ * H, and a third key Z with `X < Z < Y`, a caller holding {X, Z} takes H then
+ * Z while a caller holding {Y, Z} takes Z then H. A cycle, from two callers
+ * that both sorted. Re-entrancy does not help — these are different
+ * transactions.
+ *
+ * So this comparator is the stable, total order over the loc SPACE — it is what
+ * makes ancestor walks root→leaf and what the ordering tests assert — and it is
+ * what `acquireLockSet` acquires in today. Ordering by the RESOLVED advisory
+ * key, which is what would make the protocol collision-proof, is #1214.
+ */
+export function compareLockKeys(a: LockKey, b: LockKey): number {
+  if (a.memoryId !== b.memoryId) return a.memoryId < b.memoryId ? -1 : 1;
+  return a.loc.length - b.loc.length || (a.loc < b.loc ? -1 : a.loc > b.loc ? 1 : 0);
+}
+
+/**
+ * Acquire a caller's COMPLETE advisory key set, deduped and in the one global
+ * order — the protocol #1187 exists to establish.
+ *
+ * **The rule: a call site that needs more than one key declares them all here,
+ * once, before doing anything else.** It may then call the individual helpers
+ * below for their gate and revalidation behaviour; those re-acquisitions are
+ * free, because `pg_advisory_xact_lock` is RE-ENTRANT within a transaction
+ * (measured, not assumed: three acquisitions of one key in one transaction
+ * succeed, and the lock is released once at transaction end regardless).
+ *
+ * That re-entrancy is what makes this minimally invasive — the helpers keep
+ * their own semantics and a caller's lock SET is unchanged; only the order in
+ * which it first takes them moves.
+ *
+ * **Why an order had to be imposed at all.** The four helpers share one key
+ * space and their callers had no common order: bulk sorted length-first, merge
+ * took target-then-source, move took destination-then-source, create took its
+ * ancestor path. Individually deterministic; collectively not a protocol. #1184
+ * added one edge to the create path and produced three pairwise inversions in
+ * three review rounds, each from a locally-correct repair of the last — the
+ * signature of a missing global invariant rather than of three bugs.
+ *
+ * **Scope note.** `lockMemoryForChannelChange` (`src/lib/channels.ts`) keys the
+ * ONE-ARGUMENT advisory space, which Postgres keeps disjoint from this
+ * two-argument one, so it can never contend with a key here. It is still
+ * ordered against them by convention: **memory-scope keys before loc-scope
+ * keys**, which is what `ensureChannelWithRoot` already does.
+ */
+export async function acquireLockSet(tx: Prisma.TransactionClient, keys: LockKey[]): Promise<void> {
+  const seen = new Set<string>();
+  const unique: LockKey[] = [];
+  for (const k of keys) {
+    // `\0` as the separator, written as the ESCAPE and not the raw byte: a NUL
+    // cannot occur in a memory id or a loc, so the composite key is unambiguous
+    // where a `:` or a space would not be — but a literal NUL in a source file
+    // makes grep skip the whole file, which `noLiteralNulBytes.test.ts` fails on.
+    const id = `${k.memoryId}\0${k.loc}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    unique.push(k);
+  }
+  unique.sort(compareLockKeys);
+  // AWAITED, one statement per key — the order is then a guarantee rather than
+  // a planner choice (@copilot round 3: an `ORDER BY` at the same query level
+  // as `pg_advisory_xact_lock` does not constrain when the function is
+  // evaluated, so batching the set made the acquisition order a plan detail).
+  //
+  // KNOWN LIMIT, stated because the earlier version of this comment claimed
+  // otherwise: this orders the INPUT strings, and `hashtext` is not injective,
+  // so the guarantee holds only while no two distinct locs in play collide onto
+  // one advisory key. @copilot's counterexample — inputs X and Y colliding to
+  // key H with a third key Z where `X < Z < Y`, so {X,Z} takes H then Z while
+  // {Y,Z} takes Z then H — is real. Closing it means ordering by the RESOLVED
+  // key, which is one extra round trip and a different acquisition order from
+  // the root→leaf one this repo's helpers and tests are written around.
+  // Deliberately NOT done at the end of this change: #1214.
+  for (const k of unique) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${k.memoryId}), hashtext(${k.loc}))`;
+  }
+}
+
+/**
  * The strict ancestor locs of `loc`, shortest first (root → parent). A loc is a
  * ':'-delimited path, so `a:b:c` has ancestors `['a', 'a:b']`. A root-level loc
  * (no ':') has none. The node's own loc is never included.
@@ -121,9 +222,7 @@ export async function lockAncestorsForCreate(
   loc: string,
   opts?: LockOpts,
 ): Promise<void> {
-  for (const ancestor of ancestorLocs(loc)) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
-  }
+  await acquireLockSet(tx, ancestorLocs(loc).map((ancestor) => ({ memoryId, loc: ancestor })));
   await guard(tx, memoryId, [loc], opts?.op ?? 'create under', opts);
 }
 
@@ -147,17 +246,10 @@ export async function lockAncestorsForCreateMany(
   for (const loc of locs) {
     for (const ancestor of ancestorLocs(loc)) ancestors.add(ancestor);
   }
-  // Sort so every caller acquires shared ancestors in one global order. Length
-  // first keeps it root→leaf (a parent's loc is a prefix, hence shorter, than
-  // its child's); the lexical tiebreak makes the order total & stable (returns
-  // 0 on equal to satisfy the comparator contract, though the Set makes ties
-  // impossible in practice).
-  const ordered = [...ancestors].sort(
-    (a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0),
-  );
-  for (const ancestor of ordered) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${ancestor}))`;
-  }
+  // The ordering moved to `acquireLockSet` / `compareLockKeys` (#1187) — this
+  // helper's length-first rule was the only one in the family and is now the
+  // one every caller uses.
+  await acquireLockSet(tx, [...ancestors].map((ancestor) => ({ memoryId, loc: ancestor })));
   await guard(tx, memoryId, locs, opts?.op ?? 'create under', opts);
 }
 
@@ -179,9 +271,10 @@ export async function lockPathForCreateUnder(
   parentLoc: string,
   opts?: LockOpts,
 ): Promise<void> {
-  for (const loc of [...ancestorLocs(parentLoc), parentLoc]) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
-  }
+  await acquireLockSet(
+    tx,
+    [...ancestorLocs(parentLoc), parentLoc].map((loc) => ({ memoryId, loc })),
+  );
   await guard(tx, memoryId, [parentLoc], opts?.op ?? 'create under', opts);
 }
 
@@ -209,7 +302,7 @@ export async function lockLocForWrite(
   loc: string,
   opts?: LockOpts,
 ): Promise<void> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
+  await acquireLockSet(tx, [{ memoryId, loc }]);
   await guard(tx, memoryId, [loc], opts?.op ?? 'write', opts);
 }
 
@@ -229,6 +322,6 @@ export async function lockNodeForDelete(
   loc: string,
   opts?: LockOpts,
 ): Promise<void> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memoryId}), hashtext(${loc}))`;
+  await acquireLockSet(tx, [{ memoryId, loc }]);
   await guard(tx, memoryId, [loc], 'delete', opts);
 }
