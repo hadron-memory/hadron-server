@@ -33,6 +33,16 @@ describe('export — governed signals reach the frontmatter', () => {
     expect(fm.runnable).toBe(true);
   });
 
+  it('emits isRunnable FALSE — it is a distinct state from null, not an absence', () => {
+    // @copilot, PR #1221. `findNodes(isRunnable: false)` matches only
+    // explicitly-false rows and excludes the nulls, so false is observable on
+    // its own; a truthy emit test rebuilt such a node as null. Deliberately
+    // UNLIKE the edge codec below it, where false and absent are one state.
+    const fm = buildNodeFrontmatter({ ...base, isRunnable: false });
+    expect(fm.runnable).toBe(false);
+    expect('runnable' in fm).toBe(true);
+  });
+
   it('omits them when unset — which is what keeps this off every existing file', () => {
     // Emit-when-set is not tidiness: it is why shipping this produces no diff
     // on the mirrors of memories that carry no governed node, and why a file
@@ -152,6 +162,13 @@ describe('import — absence is preserved, presence is applied', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('round-trips FALSE, not just true', async () => {
+    const fm = buildNodeFrontmatter({ ...base, isRunnable: false });
+    const node = await load(`runnable: ${fm.runnable}\n`);
+    expect('isRunnable' in node).toBe(true);
+    expect(node.isRunnable).toBe(false);
   });
 
   it('round-trips: export → import returns what went in', async () => {

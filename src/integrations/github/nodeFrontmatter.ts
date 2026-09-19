@@ -115,12 +115,25 @@ export function buildNodeFrontmatter(
   if (node.tags.length > 0) frontmatter.tags = node.tags;
   if (node.seq != null) frontmatter.seq = node.seq;
   // #1218 — governed signals, importer-consumed, so they must round-trip or a
-  // memory rebuilt from its mirror arrives ungoverned (#1205). Emitted only
-  // when set: an absent key means "no opinion" on import and preserves the
+  // memory rebuilt from its mirror arrives ungoverned (#1205). Emitted when
+  // NON-NULL: an absent key means "no opinion" on import and preserves the
   // stored value, which is what makes this safe to ship against mirrors that
   // predate it.
-  if (node.role) frontmatter.role = node.role;
-  if (node.isRunnable) frontmatter.runnable = node.isRunnable;
+  //
+  // NON-NULL, not truthy (@copilot, PR #1221). `Node.isRunnable` is nullable
+  // and `false` is observable SEPARATELY from null — `findNodes(isRunnable:
+  // false)` matches only explicitly-false rows and deliberately excludes the
+  // nulls — so a truthy test rebuilt an explicitly-non-runnable node as null
+  // and never updated an existing row to the repo's `false`. **This is where
+  // nodes differ from EDGES**, three functions down, which omit `runnable:
+  // false` on purpose: an edge's column is not nullable in practice, so false
+  // and absent are the same state there and emitting it would only break
+  // byte-compatibility with the CLI's export. On a node they are two states.
+  //
+  // Free to ship: 25 live nodes carry `isRunnable: false` and NONE of them is
+  // mirrored (measured), so no file on disk gains a key today.
+  if (node.role != null) frontmatter.role = node.role;
+  if (node.isRunnable != null) frontmatter.runnable = node.isRunnable;
   // Node-level JSON — not importer-consumed yet, but part of a faithful mirror.
   if (node.data != null) frontmatter.data = node.data;
   if (node.properties != null) frontmatter.properties = node.properties;
