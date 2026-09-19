@@ -36,6 +36,7 @@
 
 import { stringify } from 'yaml';
 import { hash } from './hash.js';
+import { isNodeUrn } from './parse.js';
 import { normalizeBody, normalizeDescription } from './normalize.js';
 
 /** The human note a generated file carries. Prose — nothing parses it. */
@@ -95,7 +96,13 @@ const SAFE_SOURCE_RE = /^[A-Za-z0-9._:-]+$/;
  * locs, which is not a skills problem — is reported separately.
  */
 export function render(name: string, source: string, description: string, content: string): string {
-  if (!SAFE_SOURCE_RE.test(source)) {
+  // BOTH: the charset a one-line comment can carry, AND the shape the parser
+  // will accept back (@copilot round 4). Charset alone still let `render` write
+  // a header `parseFile` refuses as not-ours — the file would orphan itself and
+  // a re-export would write a second copy beside it. Render and parse are
+  // inverses or they are not; this is the half that makes that true in the
+  // write direction.
+  if (!SAFE_SOURCE_RE.test(source) || !isNodeUrn(source)) {
     throw new SkillRenderError(
       `skill source URN contains characters that cannot be written into a one-line ` +
         `provenance comment; the remainder of the header would become agent-visible ` +

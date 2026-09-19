@@ -226,6 +226,11 @@ describe('#1177 — render refuses a comment-terminating source', () => {
     // …and the space case reported earlier in this PR, which renders in Go and
     // then cannot be parsed back — refusing beats writing a self-orphaning file.
     expect(() => render('hadron-x', 'hrn:node:a.com:m:a b', 'd', 'body')).toThrow(SkillRenderError);
+    // …and a charset-clean source that is NOT a node URN is refused too
+    // (@copilot round 4): render would otherwise write a header parseFile
+    // rejects as not-ours, orphaning the file against itself.
+    expect(() => render('hadron-x', 'not-a-urn', 'd', 'body')).toThrow(SkillRenderError);
+    expect(() => render('hadron-x', 'hrn:agent:a.com:m:x', 'd', 'body')).toThrow(SkillRenderError);
     // A legitimate source is unaffected — the guard must not be a blanket ban
     // on hyphens or angle brackets.
     expect(() => render('hadron-x', 'hrn:node:a.com:m:tasks:a-b-c', 'd', 'body')).not.toThrow();
