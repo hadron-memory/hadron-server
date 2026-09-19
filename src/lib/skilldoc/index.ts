@@ -15,5 +15,5 @@ export {
   deriveName, validName, validPrefix, type Prefix,
 } from './derive.js';
 export { hash } from './hash.js';
-export { HUMAN_LINE, LEGACY_HUMAN_LINE, render } from './render.js';
+export { HUMAN_LINE, LEGACY_HUMAN_LINE, render, SkillRenderError } from './render.js';
 export { isNodeUrn, parseFile, SkillFileParseError, type SkillFile } from './parse.js';
