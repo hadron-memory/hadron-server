@@ -305,6 +305,29 @@ describe('moveNode subtree cascade (#768)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: chatRoot.id } })).memoryId).toBe(memA.id);
   });
 
+  it('refuses moving a CHANNEL root across memories — which carries no data.scope (#1196)', async () => {
+    // The sibling of the test above, and the reason the guard is a UNION. #1196
+    // dropped `data.scope` from Channel roots, so the scope predicate alone no
+    // longer sees them; the obvious replacement — swap it for
+    // `nodeType === 'chat'` — would have passed THIS test and silently dropped
+    // the one above, because `startChat` writes its chat root as
+    // `nodeType: 'record'`. Both markers, both arms, both pinned.
+    //
+    // The refusal survives its original rationale (a scope tied to memory
+    // class) going away, for a stronger reason `cor:api:190:02` anticipated:
+    // `Channel.memoryId`/`loc` are the address reservation and the register
+    // rows point at the root, so moving the node without the row leaves a
+    // Channel reserving an address in a memory its root no longer lives in.
+    const chatRoot = await db.node.create({
+      data: { id: generateId(), memoryId: memA.id, loc: 'chats:release', name: 'release', nodeType: 'chat', tags: [], data: { messageCount: 0 } },
+    });
+    await createDbNode(db, { loc: 'chats:release:messages', memoryId: memA.id });
+    await expect(
+      M.moveNode(null, { sourceRef: chatRoot.id, targetUrn: urnB('q') }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: chatRoot.id } })).memoryId).toBe(memA.id);
+  });
+
   it('refuses a cross-memory move that violates the destination SCHEMA (#781)', async () => {
     // A schema-governed dest: objectType "widget" must have a required "size" field.
     const schema = { objectTypes: { widget: { fields: { size: { type: 'text', required: true } } } } };

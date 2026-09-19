@@ -1,0 +1,277 @@
+/**
+ * #1196 — chat participation is DERIVED from the host memory, for read AND for
+ * write, on a Channel hosted in a memory of any class.
+ *
+ * Holger's #1193 ruling opened Channel hosting to every class. That ruling is
+ * only safe because of what is pinned here: before this change the chat
+ * surfaces decided on APP membership, and `hostMemoryReadable` short-circuited
+ * `true` for anything carrying a `userId` — so a Channel in someone's
+ * `personal` memory was readable AND postable by every AppMember of whichever
+ * App happened to be in context. That is the first row of #1196's table, and
+ * these tests fail loudly against the pre-#1196 gates.
+ *
+ * `cor:acl:030:01`: *"A chat has no access layer of its own — for reading or for
+ * writing. Both are decided entirely by the memory that hosts it."*
+ *
+ * The write side is deliberately NOT one rule, because `cor:acl:010:01` is not:
+ * an app-class host writes through the surface's own participation gate
+ * (*"membership confers READ, not write … the team space receives writes
+ * through surfaces that run their own participant gates"*), everything else
+ * through that memory's per-class write rules. Both arms are exercised.
+ */
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { resolvers, type Context } from './resolvers.js';
+import { ensureChannelWithRoot } from '../../../lib/channels.js';
+
+const Q = resolvers.Query as any;
+const M = resolvers.Mutation as any;
+
+let org: { id: string; urn: string };
+/** The memory's owner. */
+let owner: { id: string };
+/** An AppMember + org CONTRIBUTOR who has no business in the owner's memory. */
+let colleague: { id: string };
+let app: { id: string };
+let personal: { id: string; urn: string };
+let personalChannel: { id: string };
+
+const ctx = (userId?: string, extra: Partial<Context> = {}): Context =>
+  ({ db, userId, roles: ['READER'], ...extra }) as Context;
+/** A platform operator — the principal `chatHistory`'s old gate never refused. */
+const adminCtx = (userId: string): Context =>
+  ({ db, userId, roles: ['ADMIN'] }) as Context;
+
+async function expectCode(p: Promise<unknown>, code: string) {
+  await expect(p).rejects.toMatchObject({ extensions: { code } });
+}
+
+beforeEach(async () => {
+  await cleanDb(db);
+  const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+  org = await db.organization.create({ data: { id: generateId(), name: 'hg', urn: `hg-${t}` } });
+  const mk = (n: number, tag: string) =>
+    db.user.create({
+      data: { id: generateId(), githubId: 71200 + n, githubUsername: `hg-${tag}-${t}`, handle: `hg-${tag}-${t}` },
+    });
+  owner = await mk(1, 'owner');
+  colleague = await mk(2, 'colleague');
+
+  // The colleague is as privileged as anyone can be WITHOUT being the owner:
+  // org CONTRIBUTOR and an AppMember. Under the pre-#1196 gates that was enough
+  // to read and post into the owner's personal chat.
+  await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: owner.id, role: 'CONTRIBUTOR' } });
+  await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: colleague.id, role: 'CONTRIBUTOR' } });
+
+  const agent = await db.agent.create({
+    data: { id: generateId(), organizationId: org.id, name: 'agent', urn: `${org.urn}:agent`, visibility: 'ORGANIZATION' },
+  });
+  app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'A', urn: `${org.urn}:a` } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await db.appMember.create({ data: { appId: app.id, userId: owner.id, role: 'admin' } });
+  await db.appMember.create({ data: { appId: app.id, userId: colleague.id, role: 'admin' } });
+
+  // A free-standing PERSONAL memory (spec 034): owner-only, `app_id` and agent
+  // both NULL. `organizationId` is set to satisfy `chk_memory_owner_xor` —
+  // ownership for this class rides `Memory.userId`, not the org column.
+  personal = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: org.id,
+      urn: `${org.urn}:owner-notes`,
+      name: 'owner-notes',
+      class: 'personal',
+      userId: owner.id,
+      visibility: null,
+    },
+  });
+  personalChannel = (
+    await ensureChannelWithRoot(db, { memoryId: personal.id, loc: 'chats:journal', name: 'journal', createdBy: owner.id })
+  ).channel;
+});
+
+describe('a Channel in a personal memory is the OWNER\'s', () => {
+  it('the owner reads and posts', async () => {
+    const msg = await M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'mine' }, ctx(owner.id));
+    expect(msg).toMatchObject({ seq: 1, authorUserId: owner.id });
+    const page = await Q.channelMessages({}, { channelRef: personalChannel.id }, ctx(owner.id));
+    expect(page.total).toBe(1);
+  });
+
+  it('an AppMember + org CONTRIBUTOR can neither read nor post — the leak the class gate was hiding', async () => {
+    await M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'mine' }, ctx(owner.id));
+
+    // Read is "no match", not FORBIDDEN: a Channel you may not read must be
+    // indistinguishable from one that does not exist (§8.6).
+    await expectCode(Q.channelMessages({}, { channelRef: personalChannel.id }, ctx(colleague.id)), 'CHANNEL_NOT_FOUND');
+    await expectCode(
+      M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'intruding' }, ctx(colleague.id)),
+      'CHANNEL_NOT_FOUND',
+    );
+  });
+
+  it('a platform ADMIN can neither read nor post — strict ownership has no bypass', async () => {
+    // cor:acl:010:02: the ADMIN/OWNER bypass does not reach personal/private.
+    // The pre-#1196 `hostMemoryReadable` returned true for ANY userId, so this
+    // was open to every principal, operator or not.
+    await M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'mine' }, ctx(owner.id));
+    await expectCode(Q.channelMessages({}, { channelRef: personalChannel.id }, adminCtx(colleague.id)), 'CHANNEL_NOT_FOUND');
+  });
+
+  it('an impersonated support session cannot reach it', async () => {
+    // An App-hosted Channel has `requireTeamChatAccess`'s bounded impersonation
+    // read; a host with NO App has no such gate, so the memory gate decides —
+    // and denies. `ctx.userId` is the TARGET here, which is exactly the #876
+    // shape that fails open if the gate is left to compare it to `memory.userId`.
+    await M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'mine' }, ctx(owner.id));
+    const imp = ctx(owner.id, { impersonation: { orgId: org.id } } as Partial<Context>);
+    await expectCode(Q.channelMessages({}, { channelRef: personalChannel.id }, imp), 'CHANNEL_NOT_FOUND');
+  });
+});
+
+describe('MemoryShare splits read from write — the escalation #1196 names', () => {
+  it('a READER grantee reads but may NOT post', async () => {
+    // Posting was gated on a READ check, and MemoryShare has a `reader` role,
+    // so before this change a reader-grantee could append. Splitting the gates
+    // is what fixes it: read passes, post is FORBIDDEN — and FORBIDDEN rather
+    // than "no match", because the Channel is known to them.
+    await db.memoryShare.create({
+      data: { memoryId: personal.id, granteeId: colleague.id, grantorId: owner.id, role: 'reader', createdBy: owner.id },
+    });
+    await M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'mine' }, ctx(owner.id));
+
+    const page = await Q.channelMessages({}, { channelRef: personalChannel.id }, ctx(colleague.id));
+    expect(page.total).toBe(1);
+    await expect(
+      M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'appending' }, ctx(colleague.id)),
+    ).rejects.toThrow(/Forbidden/);
+  });
+
+  it('a WRITER grantee reads and posts', async () => {
+    await db.memoryShare.create({
+      data: { memoryId: personal.id, granteeId: colleague.id, grantorId: owner.id, role: 'writer', createdBy: owner.id },
+    });
+    const msg = await M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'joint' }, ctx(colleague.id));
+    expect(msg).toMatchObject({ seq: 1, authorUserId: colleague.id });
+  });
+});
+
+describe('a host with no App is no longer refused', () => {
+  it('CHANNEL_HOST_NOT_APP is retired — the owner simply reads and posts', async () => {
+    // The refusal was thrown BEFORE the read gate, so a Channel id distinguished
+    // "inaccessible" from "missing" (the existence oracle, #1196 item 4). It is
+    // removed rather than reordered: no refusal, no oracle.
+    const knowledge = await db.memory.create({
+      data: {
+        id: generateId(),
+        urn: `${org.urn}:free`,
+        name: 'free',
+        class: 'knowledge',
+        organizationId: org.id,
+        visibility: 'ORGANIZATION',
+      },
+    });
+    const ch = (
+      await ensureChannelWithRoot(db, { memoryId: knowledge.id, loc: 'chats:open', name: 'open', createdBy: owner.id })
+    ).channel;
+
+    const msg = await M.createChannelMessage({}, { channelRef: ch.id, body: 'hello' }, ctx(owner.id));
+    expect(msg).toMatchObject({ seq: 1 });
+    // An org member reads it — the memory's own ORGANIZATION visibility, which
+    // is the entire gate now.
+    expect((await Q.channelMessages({}, { channelRef: ch.id }, ctx(colleague.id))).total).toBe(1);
+  });
+
+  it('a non-reader gets the same CHANNEL_NOT_FOUND as for a nonexistent id', async () => {
+    const outsiderOrg = await db.organization.create({
+      data: { id: generateId(), name: 'out', urn: `out-${Date.now()}` },
+    });
+    const outsider = await db.user.create({ data: { id: generateId(), githubId: 71299, githubUsername: `out-${Date.now()}` } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: outsiderOrg.id, userId: outsider.id, role: 'ADMIN' } });
+
+    const real = await Q.channelMessages({}, { channelRef: personalChannel.id }, ctx(outsider.id)).catch((e: any) => e);
+    const fake = await Q.channelMessages({}, { channelRef: generateId() }, ctx(outsider.id)).catch((e: any) => e);
+    expect(real.extensions.code).toBe('CHANNEL_NOT_FOUND');
+    expect(fake.extensions.code).toBe(real.extensions.code);
+    expect(fake.message.replace(/"[^"]*"/, '"X"')).toBe(real.message.replace(/"[^"]*"/, '"X"'));
+  });
+});
+
+describe('the App-hosted arm keeps the participation write audience', () => {
+  it('an EXTERNAL AppMember with no org role still posts', async () => {
+    // The arm #1196's "write => requireMemoryWriteAccess" shorthand would have
+    // broken: that gate's user path grants an app-class write to an org
+    // CONTRIBUTOR+ and nobody else, so the supported B2C shape — an AppMember
+    // who is not in the org at all — would have been refused. cor:acl:010:01
+    // routes app-class chat writes through the surface's participation gate on
+    // purpose, and this pins that they still do.
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const appMem = await db.memory.create({
+      data: {
+        id: generateId(),
+        urn: `${org.urn}:a-shared`,
+        name: 'a-shared',
+        class: 'app',
+        organizationId: org.id,
+        appId: app.id,
+        sharedMemoryOfAgentId: agent.id,
+      },
+    });
+    const ch = (
+      await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: owner.id, asDefaultOfAppId: app.id })
+    ).channel;
+
+    const external = await db.user.create({
+      data: { id: generateId(), githubId: 71298, githubUsername: `ext-${Date.now()}`, handle: `ext-${Date.now()}` },
+    });
+    await db.appMember.create({ data: { appId: app.id, userId: external.id, role: 'member' } });
+
+    const msg = await M.createChannelMessage({}, { channelRef: ch.id, body: 'from outside the org' }, ctx(external.id));
+    expect(msg).toMatchObject({ seq: 1, authorUserId: external.id });
+  });
+});
+
+describe('a Channel is not a cor:cht conversation — the chatbot surfaces cannot reach one', () => {
+  /**
+   * `chatLocFilter` and `myChats` both excluded the team chat by LOC
+   * (`isTeamChatLoc` / `excludeTeamChat`). That was sufficient only while a
+   * Channel WAS `chats:team`; a Channel at any other address passed both.
+   * #1196 keys the rule on the Channel ROW instead — and keeps the loc rule,
+   * which additionally covers a root whose row has not been created yet.
+   */
+  it('chatHistory refuses a Channel root at a non-team address', async () => {
+    await M.createChannelMessage({}, { channelRef: personalChannel.id, body: 'mine' }, ctx(owner.id));
+    // `chats:journal` — a perfectly ordinary-looking agent-chat loc. Even the
+    // OWNER, who may read the memory, gets "not found": the refusal is about
+    // what the node is, not about who is asking.
+    await expect(Q.chatHistory({}, { chatId: 'chats:journal' }, ctx(owner.id))).rejects.toThrow(/not found/i);
+  });
+
+  it('myChats does not list a Channel root', async () => {
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    // A per-user agent holding memory, so myChats has something to scan, plus
+    // an ordinary agent chat in it that MUST still list.
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:holding`,
+        name: 'holding',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+        userMemoryOfAgentId: agent.id,
+        createdBy: owner.id,
+      },
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: holding.id, loc: 'chats:abc', name: 'a chat', nodeType: 'record', data: { scope: 'private' } },
+    });
+    await ensureChannelWithRoot(db, { memoryId: holding.id, loc: 'chats:standup', name: 'standup', createdBy: owner.id });
+
+    const listed = await Q.myChats({}, { agentRef: agent.id }, ctx(owner.id));
+    expect(listed.map((c: { loc: string }) => c.loc)).toEqual(['chats:abc']);
+  });
+});

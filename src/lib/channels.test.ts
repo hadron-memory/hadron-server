@@ -74,10 +74,27 @@ describe('creation', () => {
     expect(again.channel.id).toBe(channel.id);
   });
 
-  it('refuses a host that is not app-class', async () => {
-    await expect(
-      ensureChannelWithRoot(db, { memoryId: knowledge.id, loc: 'chats:x', name: 'x', createdBy: admin.id }),
-    ).rejects.toMatchObject({ extensions: { code: 'CHANNEL_HOST_NOT_APP_CLASS' } });
+  it('hosts a Channel in a memory of ANY class, and writes NO data.scope', async () => {
+    // #1196 / Holger's #1193 ruling — the class gate is gone and
+    // `CHANNEL_HOST_NOT_APP_CLASS` is retired, not repurposed. This replaces
+    // `refuses a host that is not app-class`, which asserted the removed rule.
+    // Safe only because the chat surfaces gate on the HOST MEMORY now: the
+    // read/write half is pinned in resolvers.channelChat.test.ts.
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: knowledge.id,
+      loc: 'chats:x',
+      name: 'x',
+      createdBy: admin.id,
+    });
+    expect(channel.memoryId).toBe(knowledge.id);
+
+    // D-2026-08-10-005: the marker is GONE rather than stamped `'shared'`. A
+    // Channel in a `private` memory is neither of its two values, so keeping it
+    // would have meant writing something false.
+    const root = await db.node.findUniqueOrThrow({ where: { id: rootId } });
+    expect(root.nodeType).toBe('chat');
+    expect((root.data as Record<string, unknown>).scope).toBeUndefined();
+    expect((root.data as Record<string, unknown>).messageCount).toBe(0);
   });
 
   it('createChannel refuses an address overlapping an existing Channel', async () => {

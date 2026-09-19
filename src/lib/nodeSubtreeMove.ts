@@ -285,11 +285,32 @@ export async function moveNodeSubtree(
     // the source side can strand a file. Callers fire the mirror after the
     // transaction commits; it is fire-and-forget, so a repo that is unreachable
     // degrades to the same DB-only state a same-memory move has always had.
-    // Chat: a chat-root node carries a class-specific `data.scope` invariant
-    // (validateChatScopeInvariants) — moving it to a different memory class can
-    // make the chat unusable (CHAT_MEMORY_OUT_OF_SCOPE). Refuse a subtree that
-    // contains a chat-root. #781 follow-up.
+    // Chat: refuse a subtree containing a chat-root. #781 follow-up.
+    //
+    // **Two kinds of chat root, carrying DIFFERENT markers — this predicate is
+    // a union, and measuring that is what stopped #1196 from silently deleting
+    // half the guard.** The obvious move when `data.scope` was dropped was to
+    // swap this for `nodeType === 'chat'`; that reads like the canonical
+    // chat-root marker because `ensureChannelWithRoot` and `locateTeamChatRoot`
+    // both use it. But `startChat` writes its chat root as
+    // `nodeType: 'record'` (resolvers.mutation.chat.ts) — so the swap would
+    // have kept the guard for Channels and quietly dropped it for every AGENT
+    // chat, which is the larger population and the one #781 was about.
+    //
+    //   - **Agent chats** (`startChat`) still carry `data.scope`, untouched by
+    //     #1196. The original reason holds verbatim for them: the marker is
+    //     denormalized from the host's class, so a cross-memory move can make
+    //     the chat unusable (`CHAT_MEMORY_OUT_OF_SCOPE`).
+    //   - **Channel roots** carry `nodeType: 'chat'` and NO scope marker since
+    //     #1196. Their reason is different and stronger, which is why the
+    //     refusal survives its original rationale going away
+    //     (`cor:api:190:02` anticipated exactly this): `Channel.memoryId` and
+    //     `Channel.loc` are the address reservation, and the register rows and
+    //     read states point at the root. Moving the node without the row leaves
+    //     a Channel reserving an address in a memory its root no longer lives
+    //     in.
     const chatRoot = subtree.find((n) => {
+      if (n.nodeType === 'chat') return true;
       const d = n.data as { scope?: unknown } | null;
       return d != null && typeof d === 'object' && !Array.isArray(d) && (d.scope === 'private' || d.scope === 'shared');
     });
@@ -300,7 +321,7 @@ export async function moveNodeSubtree(
       throw new CrossMemoryMoveUnsupportedError(
         `Cannot move ${describeMoved(source.loc, subtree.length)} across memories: it ` +
           `${chatRoot.loc === source.loc ? 'is a chat' : `contains the chat "${chatRoot.loc}"`}, ` +
-          'and a chat\'s scope is tied to its memory class. Move it within its memory.',
+          'and a chat is bound to the memory that hosts it. Move it within its memory.',
       );
     }
     destVectorIndexEnabled = destMem?.vectorIndexEnabled ?? false;

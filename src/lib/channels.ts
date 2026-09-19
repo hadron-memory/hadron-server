@@ -18,9 +18,22 @@
  * not occupied by a LIVE node that is not a chat root (a Channel adopting an
  * arbitrary record would later delete a node nobody made a Channel).
  *
- * The audience is the host memory's (`cor:acl:030:01`). Only app-class
- * memories host a chat today (`shared ⇔ app`), and this core enforces it: a
- * Channel in a personal memory waits on the chat-host typology (plan §12.1).
+ * The audience is the host memory's (`cor:acl:030:01`), and since #1196 that is
+ * the WHOLE rule: a Channel may be hosted in a memory of ANY class. The
+ * `class !== 'app'` refusal is gone and `CHANNEL_HOST_NOT_APP_CLASS` is RETIRED
+ * rather than repurposed — a refusal code outliving its refusal is the
+ * stale-error-map half of `findings:removing-a-mechanism-leaves-prose-describing-it`.
+ *
+ * Holger's ruling (#1193): *"I see no disadvantage to hosting a channel in any
+ * class memory. The choice will affect access, but that's the owner's problem.
+ * Why close doors? Say the owner wants a channel in a private memory where only
+ * the owner has access to. Why not? Have two personal agents chat there."*
+ *
+ * That is safe ONLY because the chat surfaces now gate on the host memory
+ * instead of on App membership — before #1196 a Channel in someone's `personal`
+ * memory was readable and postable by every AppMember of whichever App happened
+ * to be in context, which is why the class gate could not simply be deleted on
+ * its own (#1194 is this change's draft ancestor).
  */
 
 import { GraphQLError } from 'graphql';
@@ -166,19 +179,17 @@ export async function ensureChannelWithRoot(
     select: { id: true, class: true },
   });
   if (!memory) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
-  if (memory.class !== 'app') {
-    throw new GraphQLError(
-      `A Channel is hosted in an app-class memory; "${memory.class}" cannot host one yet (the chat-host typology, spec 028, is not built).`,
-      { extensions: { code: 'CHANNEL_HOST_NOT_APP_CLASS', memoryClass: memory.class } },
-    );
-  }
   const memEncInfo = await getMemoryEncryptionInfo(db, args.memoryId);
-  // Storage keys top-level (D-2026-08-10-004); `scope: 'shared'` for the live
-  // chat-scope invariant (`shared ⇔ app`) until D-2026-08-10-005 drops it.
+  // Storage keys top-level (D-2026-08-10-004). `data.scope` is GONE
+  // (D-2026-08-10-005, #1196): it stamped `'shared'` to satisfy the
+  // `shared ⇔ app` invariant, which a Channel in a `private` memory makes not
+  // merely derivable but MEANINGLESS — it is neither of the marker's two
+  // values. Nothing on the Channel path read it; `nodeSubtreeMove` did, and
+  // now keys on `nodeType: 'chat'` instead (see its header).
   let rootFields: { content: string | null; data: unknown };
   try {
     rootFields = encryptNodeFields(
-      { content: null, data: { scope: 'shared', messageCount: 0, createdAt: new Date().toISOString() } },
+      { content: null, data: { messageCount: 0, createdAt: new Date().toISOString() } },
       memEncInfo,
     );
   } catch (e) {

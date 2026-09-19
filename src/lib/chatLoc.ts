@@ -104,6 +104,21 @@ export async function chatLocFilter(
   // one still able to. The team chat's own operations are unaffected — they
   // never come through here.
   if (isTeamChatLoc(chatId)) return matchesNothing(base);
+  // #1196 — the loc-shaped half of that rule stopped being sufficient. A
+  // Channel used to be `chats:team` in an app-class memory, so its LOC
+  // identified it; since spec 049 Phase 4 a Channel may be created at any
+  // address, and since #1196 in a memory of any class. `isTeamChatLoc` is kept
+  // rather than replaced because it is a cheap pre-check that needs no query
+  // AND it covers a `chats:team` root that has no Channel row yet — the
+  // backfill-on-touch window (spec 049 §7.1).
+  //
+  // Expressed as a RELATION filter (`channel: null` — the `ChannelRoot`
+  // back-relation) rather than an id list: a subquery the database evaluates
+  // per row cannot go stale between building the filter and running it, and it
+  // does not enumerate. A Channel is not a `cor:cht` conversation, so no
+  // chatbot surface may reach one — that is the same refusal as above, keyed on
+  // what the node IS rather than on what it is called.
+  base.channel = null;
 
   const isAdmin = !!principal.roles?.some((r) => r === 'ADMIN' || r === 'OWNER');
   if (isAdmin) return base;
