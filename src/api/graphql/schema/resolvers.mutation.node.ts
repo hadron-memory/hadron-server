@@ -90,6 +90,7 @@ import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import {
   ancestorLocs,
   lockAncestorsForCreate,
+  acquireLockSet,
   lockLocForWrite,
   lockAncestorsForCreateMany,
   lockNodeForDelete,
@@ -1041,24 +1042,32 @@ export async function writeNodeCore(
             // A ROOT-LEVEL loc has no ancestors, so that helper takes NOTHING
             // and the two creates are unserialized. Hence this, exactly there.
             //
-            // Taking it ONLY at root level is deliberate, and the reason is
-            // deadlock rather than economy. Advisory keys are shared across
-            // lockAncestorsForCreate / lockLocForWrite / lockNodeForDelete /
-            // lockSourceForMove, and this repo has no single global acquisition
-            // order — merge takes target-then-source, move takes
-            // destination-ancestors-then-source, bulk sorts length-first. Any
-            // NEW multi-lock edge added here has to be consistent with all of
-            // them at once. An earlier revision of this fix took the loc lock
-            // unconditionally, which made a create hold `a` and wait for `a:b`;
-            // @copilot found it deadlocking against merge, and the obvious
-            // repair (sorting merge's endpoints) promptly inverted merge
-            // against MOVE. Restricting the lock to the root-level case means
-            // create's lock SET is unchanged for every nested loc and is a
-            // SINGLE lock at root level — and one lock cannot be half of a
-            // cycle. No new edge, so nothing to order against.
+            // Taking it ONLY at root level is still deliberate, but #1187
+            // changed WHY — and the old reason is worth keeping visible,
+            // because it is the one that will tempt the next reader.
             //
-            // Establishing one global order across create/merge/move/bulk is
-            // worth doing; it is not this PR, and it is filed.
+            // It USED to be deadlock. The four helpers share one key space and
+            // this repo had no global acquisition order, so an earlier revision
+            // that took this lock unconditionally made a create hold `a` and
+            // wait for `a:b`, which @copilot found deadlocking against merge —
+            // and the obvious repair (sorting merge's endpoints) promptly
+            // inverted merge against MOVE. Restricting the lock to root level
+            // meant create never held two keys at all: no new edge, nothing to
+            // order against.
+            //
+            // #1187 established the order (`acquireLockSet` / `compareLockKeys`)
+            // and merge and move now declare their full sets through it, so
+            // that constraint is GONE: ancestors-then-own-loc is already the
+            // global order (length-ascending), and taking this lock
+            // unconditionally would be safe today.
+            //
+            // It stays root-level-only for the ORIGINAL, narrower reason —
+            // redundancy. Two creates at one NESTED loc already serialize on
+            // their shared ancestors; measured, not assumed, when #1183 removed
+            // this lock and every nested-loc race test stayed green. Only a
+            // root-level loc has no ancestors and therefore nothing to
+            // serialize on. An unconditional lock would buy nothing and cost a
+            // round trip per create.
             if (ancestorLocs(input.loc).length === 0) {
               // This branch is create/upsert only — the mode union excludes
               // 'update' here, so the verb is unconditional.
@@ -2617,6 +2626,18 @@ export const nodeMutations = {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
         const moved = await ctx.db.$transaction(
           async (tx) => {
+            // #1187 — DECLARE the complete key set first, in the one global
+            // order: the destination ancestor path AND the source path that
+            // `lockSourceForMove` takes further down. Previously those were two
+            // separate acquisitions in caller order (destination, then source),
+            // which is one of the three pairwise inversions #1187 catalogues.
+            // Both helpers below still run for their gates and the source
+            // revalidation; their re-acquisitions are re-entrant no-ops.
+            await acquireLockSet(tx, [
+              ...ancestorLocs(destLoc).map((loc) => ({ memoryId: destMemoryId, loc })),
+              ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),
+              { memoryId: source.memoryId, loc: source.loc },
+            ]);
             // #664/#752: moving a node INTO a subtree is the same orphan vector as
             // a create there — a concurrent non-recursive delete of a destination
             // ancestor could count zero descendants, then this move lands the row
@@ -2988,9 +3009,24 @@ export const nodeMutations = {
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       await ctx.db.$transaction(async (tx) => {
+        // #1187 — DECLARE the complete key set first, in the one global order.
+        // A merge takes two keys and used to take them target-then-source,
+        // which inverted against move's destination-then-source; sorting only
+        // merge's endpoints then inverted merge against move the other way.
+        // Handing the whole set to `acquireLockSet` removes the choice: a call
+        // site that cannot pick its own order cannot invert against another.
+        //
+        // The per-endpoint helpers below still run — they carry the spec-049 S4
+        // gate and its per-verb refusal — and their re-acquisitions are free
+        // (pg advisory locks are re-entrant within a transaction).
+        const takesSource = deleteSource || fields.has('EDGES');
+        await acquireLockSet(tx, [
+          { memoryId: target.memoryId, loc: target.loc },
+          ...(takesSource ? [{ memoryId: source.memoryId, loc: source.loc }] : []),
+        ]);
         // Lock-then-gate on both endpoints (spec 049 S4).
         await lockLocForWrite(tx, target.memoryId, target.loc);
-        if (deleteSource || fields.has('EDGES')) {
+        if (takesSource) {
           await lockNodeForDelete(tx, source.memoryId, source.loc);
         }
         await createNodeRevision(
