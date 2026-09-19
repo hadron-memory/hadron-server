@@ -297,6 +297,7 @@ export const memoryQueries = {
           memoryClasses?: string[] | null;
           visibility?: string | null;
           sharedWithMe?: boolean | null;
+          ownedByMe?: boolean | null;
         } | null;
         orgId?: string | null;
         limit?: number | null;
@@ -318,12 +319,6 @@ export const memoryQueries = {
         ? { class: { in: [...classSet] as any } }
         : { class: { not: 'system' as const } };
 
-      // #463 / cor:api:100:01 — optional single-org narrowing ("active
-      // organization"): member -> scope, non-member/unresolvable -> empty
-      // page with no org-existence disclosure, no platform-admin bypass.
-      const scope = await resolveOrgScope(ctx, orgId);
-      if (!scope) return empty;
-
       const page = async (where: Record<string, unknown>) => {
         const [total, items] = await Promise.all([
           ctx.db.memory.count({ where }),
@@ -339,6 +334,89 @@ export const memoryQueries = {
         ]);
         return { items, total };
       };
+
+      // #1179 — filter.ownedByMe: the caller's OWN user-owned (org-less)
+      // memories, `organizationId IS NULL AND ownerUserId = ctx.userId`. The
+      // memory twin of agents(filter.ownedByMe) / apps(filter.ownedByMe) (#782),
+      // and deliberately the SAME predicate as those two so the three read
+      // identically (cor:api:120:03 — slices are filters, and an owner slice
+      // constrains even a platform admin rather than bypassing anything).
+      //
+      // Keyed on `ownerUserId`, the spec-047 user TENANT owner — NOT on
+      // `userId` (the personal/private strict owner) and NOT on `class`.
+      // `class IN (personal, private)` was only ever a PROXY for ownership,
+      // correct while every user-owned memory was personal (#1176): a
+      // `knowledge`-class memory under a user root is user-owned today, so a
+      // class-keyed filter would omit exactly the rows this issue was reported
+      // for. The columns are two independent axes (`chk_memory_owner_xor` for
+      // this one, `chk_personal_visibility_user` for the other).
+      //
+      // Ahead of `resolveOrgScope` because the slice is org-less by definition,
+      // so `orgId` is not consulted — matching the sibling filters, which skip
+      // the scope resolution entirely. A foreign orgId therefore neither empties
+      // this slice nor discloses anything: every row it returns is the caller's
+      // own and belongs to no org.
+      if (f.ownedByMe) {
+        // App-key callers have no user context, and user-owned memories are
+        // identity-scoped, so an impersonated support session sees none of the
+        // target's (#876 — the same drop `getAccessibleMemoryIds` and the
+        // sibling filters make).
+        if (!ctx.userId || ctx.impersonation) return empty;
+        // A user-owned memory is never in the marketplace slice (#758 pins
+        // `ownerUserId: null` there), so this combination is empty by
+        // construction rather than by a silent predicate collision — the same
+        // reasoning that kept `ownedByMe` off PublicAgentFilter (#782).
+        if (f.visibility === 'PUBLIC') return empty;
+        return page({
+          deletedAt: null,
+          // LOAD-BEARING, and it was not in the first version of this branch.
+          // While the slice keyed on `ownerUserId` alone this was redundant
+          // under `chk_memory_owner_xor` (owner set implies org NULL) and said
+          // so. The strict-owner arm below keys on `userId`, which an ORG-owned
+          // personal memory also carries — so this clause is now the only thing
+          // keeping such a row out of an "org-less" slice. Pinned by "excludes
+          // an ORG-owned personal memory the caller is the strict owner of".
+          organizationId: null,
+          // "Owned" means what the RECORD GATE means by it, per class — not one
+          // column (@codex, PR #1215). `canReadMemoryRecord` branches first on
+          // personal/private and admits `userId` there, falling through to
+          // `ownerUserId` for every other class; the two columns are
+          // independent, so a slice keyed on `ownerUserId` alone would hand the
+          // tenant owner a personal memory whose strict owner is someone else.
+          //
+          // Codex asked for the non-personal restriction ALONE here, which would
+          // have been the other half of the same mistake: the portal's "My
+          // memories" is mostly personal rows, so an owner slice without the
+          // strict-owner arm would have emptied the page this filter exists to
+          // fill. Both arms, split exactly where the read gate splits.
+          //
+          // In the aligned case — `ownerUserId === userId`, the only shape in
+          // production (15 of 15) — the two arms are indistinguishable from the
+          // single-column form.
+          OR: [
+            { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
+            { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
+          ],
+          // Per-user agent holdings stay out of the regular memory list
+          // (cor:api:120:03), so the owner slice excludes them too — a filter
+          // that surfaced rows the default list hides would WIDEN rather than
+          // narrow. No live row is both today (measured: 0 of 24 user-owned
+          // rows carry `userMemoryOfAgentId`); the clause keeps it that way.
+          userMemoryOfAgentId: null,
+          ...(f.visibility ? { visibility: f.visibility as any } : {}),
+          ...classFilter,
+          // A memory the caller owns AND was granted: narrows this slice
+          // instead of replacing it, so the two clauses compose by AND like
+          // every other pair.
+          ...(f.sharedWithMe ? { shares: { some: { granteeId: ctx.userId } } } : {}),
+        });
+      }
+
+      // #463 / cor:api:100:01 — optional single-org narrowing ("active
+      // organization"): member -> scope, non-member/unresolvable -> empty
+      // page with no org-existence disclosure, no platform-admin bypass.
+      const scope = await resolveOrgScope(ctx, orgId);
+      if (!scope) return empty;
 
       // #778 — filter.sharedWithMe: the distinct set of personal memories shared
       // WITH the caller via MemoryShare (the caller is a grantee) — the portal's
@@ -441,6 +519,8 @@ export const memoryQueries = {
       //       independent of the active org (they're user-owned, not part of
       //       any org's collection; selecting an active org must not hide
       //       your own notes),
+      //   (1b) their OWN user-owned memories of ANY class (`ownerUserId`),
+      //       on the same always-visible terms as (1) — see below,
       //   (2) memories their member orgs OWN,
       //   (3) memories their member orgs SUBSCRIBE to.
       // Per-user agent memories (userMemoryOfAgentId) are excluded — they
@@ -458,12 +538,55 @@ export const memoryQueries = {
           OR: [
             { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
             { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
-            // Admin impersonation: the personal clause is identity-scoped and
-            // dropped — the shared-org session never lists the target's
-            // personal/private memories (matches getAccessibleMemoryIds).
+            // Admin impersonation: the identity-scoped clauses are dropped —
+            // the shared-org session never lists the target's personal/private
+            // or user-owned memories (matches getAccessibleMemoryIds).
             ...(ctx.impersonation
               ? []
-              : [{ class: { in: ['personal', 'private'] as any }, userId: ctx.userId }]),
+              : [
+                  { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
+                  // #1176 — the caller's own USER-OWNED rows, of any class.
+                  // This list had no `ownerUserId` clause at all, so a
+                  // user-owned memory outside `personal`/`private` was absent
+                  // from the only surface that enumerates a user's memories,
+                  // while `getAccessibleMemoryIds` (every node read),
+                  // `canReadMemoryRecord` (`memory(ref:)`), MCP's
+                  // `getMemoryAccess` and `scopes.ts` all admitted it. That is
+                  // the whole of the reported bug: `hrn:mem:holger:holgers-gear`
+                  // is `knowledge`-class with `organization_id` NULL and
+                  // `owner_user_id` set, so it was readable by URN, returned by
+                  // `hadron_list_memories`, and missing from the portal's list —
+                  // reachable only by direct link. cor:api:120:03 makes
+                  // "default = accessible set" durable, so the omission was a
+                  // spec violation, not a missing capability; nothing about the
+                  // DATA needed changing (the owner XOR means a free-standing
+                  // memory always HAS an owner, and 24 of 24 live rows do).
+                  //
+                  // Unscoped by org for the same reason as the personal clause
+                  // above: cor:api:120:03 — "selecting an active org must not
+                  // hide your own notes". This is where the memory surface
+                  // deliberately differs from `agents()`, which drops its
+                  // user-owned fold under an explicit orgId; a memory the
+                  // caller owns is theirs in every org context.
+                  //
+                  // NON-personal classes only (@codex, PR #1215). The two owner
+                  // columns are independent, so `ownerUserId = A, userId = B` is
+                  // a legal row — nothing constrains them to agree — and for
+                  // personal/private `canReadMemoryRecord` returns at its FIRST
+                  // branch, admitting only `userId` (or a share grantee) and
+                  // never reaching its own `ownerUserId` branch. An unrestricted
+                  // arm here would therefore list B's personal memory to A, with
+                  // `description` / `data` / `source` on the row, while
+                  // `memory(ref:)` correctly refused the same caller — the list
+                  // BROADER than the point read, which is the direction that
+                  // leaks. The strict-owner clause above governs those classes,
+                  // so nothing is lost: an aligned row (the only shape in
+                  // production — 15 of 15 measured) still reaches its owner
+                  // through it. MCP's `getMemoryAccess` has drawn this exact
+                  // line since spec 047 ("the map is personal-free by design");
+                  // this is the GraphQL side catching up, not a new rule.
+                  { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
+                ]),
           ],
         });
       }

@@ -1218,7 +1218,25 @@ export async function getAccessibleMemoryIds(
             { class: { in: ['personal', 'private'] as any }, userId: { not: ctx.userId ?? '__none__' } },
             // spec 047: a user-owned memory is STRICTLY private — a platform
             // admin does NOT see another user's user-owned rows either.
-            { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: ctx.userId ?? '__none__' } }] },
+            //
+            // NON-personal classes only (@copilot, PR #1215). The clause above
+            // is the authority for personal/private — `userId` — exactly as
+            // `canReadMemoryRecord` and MCP's `canReadMemory` both branch (the
+            // latter says so outright: "Personal/private user-owned rows are
+            // already handled by the block above"). Unrestricted, this arm
+            // excluded a personal row on its TENANT owner, so an admin who is
+            // its STRICT owner lost node enumeration for a memory the record
+            // gate and this PR's list both admit them to. Fails CLOSED, so it
+            // was an over-narrowing rather than a leak — but this function is
+            // the one the parity test holds the list to, and a divergence that
+            // only shows for the admin shape is how the next copy drifts.
+            {
+              AND: [
+                { class: { notIn: ['personal', 'private'] as any } },
+                { ownerUserId: { not: null } },
+                { ownerUserId: { not: ctx.userId ?? '__none__' } },
+              ],
+            },
           ],
         },
       },
@@ -1303,7 +1321,25 @@ export async function getAccessibleMemoryIds(
           { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
           { userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
           // spec 047: a user-owned memory is readable ONLY by its owner.
-          { ownerUserId: ctx.userId },
+          //
+          // NON-personal classes, for the reason MCP's `getMemoryAccess` states
+          // as "the map is personal-free by design" — and this copy did not have
+          // it (found reviewing PR #1215, @codex on the sibling clause in
+          // `Query.memories`). The two owner columns are independent and no
+          // constraint ties them, so `ownerUserId = A, userId = B` is a legal
+          // personal row; `canReadMemory` and `canReadMemoryRecord` both branch
+          // on personal/private FIRST and admit only `userId`, so an
+          // unrestricted clause here put B's personal memory into A's
+          // node-enumeration set — the NODE CONTENTS, which is strictly worse
+          // than the record metadata the list exposed.
+          //
+          // Narrowing a shared read gate is normally a decision to escalate
+          // (#1208 is exactly that). This one is not, and the difference is
+          // measured rather than argued: the clause only ever mattered for rows
+          // where the two columns DISAGREE, and production has none (0 of 15
+          // personal user-owned rows). Nobody loses reach; an aligned row still
+          // arrives through the strict-owner clause above.
+          { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
         ],
       },
       select: { id: true },
