@@ -1396,26 +1396,61 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(history.length).toBeGreaterThan(0);
   });
 
-  it("chatHistory: non-AppMember cannot read a shared chat's messages", async () => {
+  it("chatHistory: a caller outside the App's audience entirely cannot read a shared chat", async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
-    // otherUser is intentionally NOT an AppMember of research-app.
+    // #1196 SPLIT this test. It used to assert that `otherUser` — NOT an
+    // AppMember — could not read, and that was the member table standing in for
+    // the audience. `otherUser` is an org CONTRIBUTOR on orgA, which owns
+    // research-app, so `cor:acl:010:01` makes them an App PARTICIPANT and the
+    // app-class host's audience is participation: they may read, and the next
+    // test asserts that they do.
+    //
+    // What this test is actually about survives intact, with a caller who is
+    // outside the audience by every arm: no org role, no AppMember row, not the
+    // author.
+    const stranger = await db.user.create({
+      data: { id: generateId(), githubId: 880231, githubUsername: `stranger-${Date.now()}` },
+    });
     const shared = await resolvers.Mutation.startChat(
       {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
       {}, { chatId: shared.chatId, userMessage: 'secret family chat' }, userCtx(adminUser.id),
     );
-    // #829: a caller with NO entitlement to this chat now gets not-found
-    // rather than Forbidden — the chat-loc lookup filters to the caller's
-    // entitled set before selecting, so an unentitled node is invisible, not
-    // merely refused. That also removes an existence oracle for chat ids. A
-    // caller who IS entitled but not authorized (e.g. an AppMember who did not
-    // author the chat) still gets Forbidden — see below.
+    // #829: a caller with NO entitlement to this chat gets not-found rather
+    // than Forbidden — the chat-loc lookup filters to the caller's entitled set
+    // before selecting, so an unentitled node is invisible, not merely refused.
+    // That also removes an existence oracle for chat ids. A caller who IS
+    // entitled but not authorized (e.g. a participant who did not author the
+    // chat) still gets Forbidden — see below.
     await expect(
       resolvers.Query.chatHistory(
-        {}, { chatId: shared.chatId }, userCtx(otherUser.id),
+        {}, { chatId: shared.chatId }, userCtx(stranger.id),
       ),
     ).rejects.toThrow(/not found/i);
+  });
+
+  it("chatHistory: an org CONTRIBUTOR who is not an AppMember CAN read a shared chat (#1196)", async () => {
+    // The other half of the split above, asserted rather than left implied.
+    // `cor:acl:010:01`: "The audience is PARTICIPATION, not the member table …
+    // a gate keyed on the member row alone silently excludes [an org
+    // CONTRIBUTOR+], who may already act in the App everywhere else."
+    //
+    // Both layers had to move for this: the shared memory gate's App fold
+    // (which is what admits them) and `chatLocFilter`, whose own contract is to
+    // be a SUPERSET of every chat surface's gate — it was still keyed on
+    // AppMember rows and filtered them out before the real gate ran.
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const shared = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: shared.chatId, userMessage: 'team-visible' }, userCtx(adminUser.id),
+    );
+    const history = await resolvers.Query.chatHistory(
+      {}, { chatId: shared.chatId }, userCtx(otherUser.id),
+    );
+    expect(history.length).toBeGreaterThan(0);
   });
 
   it("deleteChat: only the chat author can delete a shared chat, not any AppMember", async () => {

@@ -6,10 +6,12 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
-import { excludeTeamChat } from '../../../lib/teamChatLoc.js';
+import { excludeTeamChat, excludeChannelRoots } from '../../../lib/teamChatLoc.js';
+import { teamSpaceAudienceFilter } from '../../../lib/auth/teamSpace.js';
 import {
   type Context,
   deriveChatTitle,
+  isMemoryReadableCached,
 } from './resolvers.helpers.js';
 
 export const chatQueries = {
@@ -67,8 +69,17 @@ export const chatQueries = {
         const sharedMemories = await ctx.db.memory.findMany({
           where: {
             appId: { in: sharedMemberships.map((m) => m.app.id) },
-            class: 'app',
-            deletedAt: null,
+            // #1196 (@copilot round 6) — `class: 'app'` alone listed chats in
+            // another user's SESSION or a Worker's casting memory, and the
+            // first-message lookup below returns transcript CONTENT with no
+            // further memory gate. Pre-existing rather than introduced here,
+            // but it is the same missing clause this change fixes everywhere
+            // else, so leaving the one instance in a file I am editing would be
+            // a choice rather than an oversight. Owner-owned rows are excluded
+            // outright: this resolver already refuses impersonation, and a
+            // co-member has no claim on the App owner's row.
+            ...teamSpaceAudienceFilter,
+            ownerUserId: null,
           },
           select: { id: true },
         });
@@ -106,6 +117,9 @@ export const chatQueries = {
           NOT: { loc: { contains: ':messages' } },
           deletedAt: null,
           ...excludeTeamChat,
+          // #1196: and every Channel root, whatever its address — the loc rule
+          // above only ever knew about `chats:team`.
+          ...excludeChannelRoots,
         },
         orderBy: { updatedAt: 'desc' as const },
         take: limit ?? 100,
@@ -189,42 +203,35 @@ export const chatQueries = {
         chatId,
       );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
-      // Spec 017 — read-visibility check (FR-007/FR-008):
-      //   - shared (app-class memory)         → any AppMember of memory.appId
-      //   - per-user agent memory             → memory.createdBy only.
-      //     Covers both class='personal' AND class='knowledge': startChat
-      //     provisions the chat's holding memory as 'personal' when the
-      //     agent has a matching App in the caller's orgs, and downgrades
-      //     to 'knowledge' otherwise (see startChat target-memory selection,
-      //     and the chk_memory_class_app_id CHECK constraint that forces
-      //     personal-class to carry an appId). Both shapes are bound to a
-      //     single user via userMemoryOfAgentId — so authorize on
-      //     createdBy in either case rather than the class label.
-      //   - other classes                     → no chat-read path
-      //   - global ADMIN/OWNER bypass remains for ops
-      const mem = await ctx.db.memory.findUniqueOrThrow({
-        where: { id: chatNode.memoryId },
-        select: { createdBy: true, class: true, appId: true, userMemoryOfAgentId: true },
-      });
-      const isAdmin = !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
-      let canRead = isAdmin;
-      if (!canRead) {
-        if (mem.class === 'app' && mem.appId) {
-          const member = await ctx.db.appMember.findFirst({
-            where: { appId: mem.appId, userId: ctx.userId },
-            select: { userId: true },
-          });
-          canRead = !!member;
-        } else if (mem.userMemoryOfAgentId) {
-          canRead = mem.createdBy === ctx.userId;
-        } else if (mem.class === 'personal') {
-          // Defensive fallback for any pre-spec personal-class chat
-          // memory that wasn't bound via userMemoryOfAgentId. Modern
-          // chat creation always sets the binding (see startChat).
-          canRead = mem.createdBy === ctx.userId;
-        }
-      }
-      if (!canRead) throw new Error('Forbidden');
+      // #1196 — the SHARED node-content gate, replacing a hand-rolled
+      // per-class one. `cor:acl:030:01`: a chat has no access layer of its own;
+      // read falls through the host memory's per-class rules. This resolver
+      // returns node CONTENT, so the gate is `isMemoryReadableCached`, not the
+      // record gate (`findings:record-vs-node-content-memory-gate` — the
+      // payload decides).
+      //
+      // What the replaced block got wrong, in the order it mattered:
+      //
+      //   1. **`let canRead = isAdmin` was an UNCONDITIONAL platform bypass**,
+      //      so an operator read a chat in anyone's `personal` or `private`
+      //      memory. `cor:acl:010:02` makes those two strict-owner: the
+      //      ADMIN/OWNER bypass does not reach them, and the shared gate's
+      //      admin branch encodes exactly that carve-out by returning an
+      //      explicit id list rather than "no filter".
+      //   2. The app-class arm keyed on the **AppMember row alone** — the
+      //      re-keying `cor:acl:010:01` names as invalidating. Participation
+      //      (org CONTRIBUTOR+, the user-owned App's owner) now admits through
+      //      the shared gate's App fold.
+      //   3. Every arm was a restatement of a clause the shared predicate
+      //      already carries — including the `userMemoryOfAgentId` one, which
+      //      IS `findings:chathistory-knowledge-class-auth-gap` folded into
+      //      `getAccessibleMemoryIds` as `{ userMemoryOfAgentId: { not: null },
+      //      createdBy: ctx.userId }`. The `createdBy` fallback for a
+      //      personal-class memory with no binding went with them: the shared
+      //      clause keys on the OWNER (`Memory.userId`), which
+      //      `chk_personal_visibility_user` makes NOT NULL for that class, so
+      //      the fallback guarded a row the database forbids.
+      if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw new Error('Forbidden');
       const rows = await ctx.db.node.findMany({
         where: {
           memoryId: chatNode.memoryId,

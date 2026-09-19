@@ -59,6 +59,7 @@ import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActiv
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
+import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelRow } from '../../../lib/channels.js';
 import { locateTeamAgent } from './resolvers.worker.js';
@@ -172,7 +173,8 @@ type ChatRootRow = { id: string; memoryId: string; loc: string };
  * is deterministic even if a second `chats:team` was hand-created in another
  * installed agent's shared memory.
  */
-async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRootRow | null> {
+async function locateTeamChatRoot(ctx: Context, app: AppRow): Promise<ChatRootRow | null> {
+  const appId = app.id;
   return ctx.db.node.findFirst({
     // loc-scope-ok: deliberately spans the App's OWN app-class memories (one
     // per installed agent) — the relation filter is the tenant scope (#939).
@@ -183,7 +185,21 @@ async function locateTeamChatRoot(ctx: Context, appId: string): Promise<ChatRoot
       // (LOC_OCCUPIED) rather than posting into an arbitrary record.
       nodeType: 'chat',
       deletedAt: null,
-      memory: { appId, class: 'app', deletedAt: null },
+      // #1207 round 5 (@copilot): `appId + class='app'` selects all FOUR
+      // app-class row roles, so this locator could return a `chats:team` root
+      // in a Worker's casting memory or a per-user session memory — and both
+      // App-ref conveniences then handed it the participation gate and the
+      // impersonation shortcut. Same narrowing as `resolveChannelTarget`, from
+      // the same shared predicate rather than a fourth copy of it.
+      memory: {
+        appId,
+        ...teamSpaceAudienceFilter,
+        ...teamSpaceOwnerFilter({
+          appOwnerUserId: app.ownerUserId,
+          callerUserId: ctx.userId ?? null,
+          impersonating: !!ctx.impersonation,
+        }),
+      },
     },
     orderBy: { createdAt: 'asc' },
     select: { id: true, memoryId: true, loc: true },
@@ -335,7 +351,7 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
       typeof e === 'object' && e !== null && (e as { code?: string }).code === 'P2002';
     if (!isUniqueViolation) throw e;
   }
-  const root = await locateTeamChatRoot(ctx, app.id);
+  const root = await locateTeamChatRoot(ctx, app);
   if (!root) throw new Error(`Team chat bootstrap failed for App ${app.id}`);
   // Spec 049 Phase 4: the root is a Channel from its first moment — the row is
   // what reserves and protects the address (D-2026-09-13-006). Idempotent for
@@ -439,7 +455,12 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo): Team
  */
 async function resolveSessionAuthor(
   ctx: Context,
-  app: AppRow,
+  // #1196: null when the host memory belongs to no App. Every Worker is then
+  // "of another App" by construction — there is no host App for one to match —
+  // so item J's cross-App arm becomes the ONLY arm, and the question reduces to
+  // the one that arm already asks: may this session's driver WRITE the host
+  // memory? That is the correct rule rather than a degenerate case of it.
+  app: AppRow | null,
   hostMemoryId: string,
   sessionRef: string,
 ): Promise<{ workerId: string; name: string; sessionId: string; workerAppId: string; crossApp: boolean }> {
@@ -520,7 +541,7 @@ async function resolveSessionAuthor(
   // App-isolation gate, which is a different question). A pure App-key session
   // has nothing to derive the right from and is admitted only on the same-App
   // branch — never widened.
-  const crossApp = worker.appId !== app.id;
+  const crossApp = app === null || worker.appId !== app.id;
   if (crossApp) {
     let driverMayWrite = false;
     // The on-behalf-of user is the SESSION's user, never the caller's:
@@ -544,8 +565,12 @@ async function resolveSessionAuthor(
     }
     if (!driverMayWrite) {
       throw new GraphQLError(
-        `Session "${sessionRef}" is bound to a worker of another App, and its driver may not write this Channel's host memory — it cannot author here.`,
-        { extensions: { code: 'CHANNEL_HOST_NOT_WRITABLE', appId: app.id, workerAppId: worker.appId } },
+        app === null
+          ? `Session "${sessionRef}" is bound to a worker, and its driver may not write this Channel's host memory — it cannot author here.`
+          : `Session "${sessionRef}" is bound to a worker of another App, and its driver may not write this Channel's host memory — it cannot author here.`,
+        // `appId` names the Channel's HOST App, so it is absent when there is
+        // none — an omitted field, never a null one masquerading as an id.
+        { extensions: { code: 'CHANNEL_HOST_NOT_WRITABLE', ...(app ? { appId: app.id } : {}), workerAppId: worker.appId } },
       );
     }
   }
@@ -624,37 +649,118 @@ async function resolveMentionTokens(
  * `createTeamChatMessage` are the `appRef → App.defaultChannel` convenience
  * over these.
  */
-type ChannelTarget = { channelId: string; app: AppRow; root: ChatRootRow };
+// #1196: `app` is NULLABLE — a Channel may be hosted in a memory that belongs
+// to no App. Narrowing the type is the census: every consumer that assumed an
+// App had to answer for it at the compiler rather than at runtime
+// (hadron-portal's `review:narrowing-a-fetch-narrows-its-type`, same lesson).
+type ChannelTarget = { channelId: string; app: AppRow | null; root: ChatRootRow };
 
 const channelNotFound = (ref: string): GraphQLError =>
   new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'CHANNEL_NOT_FOUND', channelRef: ref } });
 
 /**
- * The canonical memory-read boundary for the ONE principal shape it narrows
- * below the team-chat audience: a pure App-key context carrying an end-user
- * session, which `getAccessibleMemoryIds` hard-isolates to that session's
- * memories — the team space is not among them, and the App-participant
- * check alone would admit it (Codex P1 on PR #1169). Run as a POINT check
- * (`onlyMemoryId`), never a materialised set (Copilot).
+ * May this caller READ the Channel's host memory? Since #1196 this is the whole
+ * read gate — `cor:acl:030:01`'s rule made literal: *"a chat has no access layer
+ * of its own … both are decided entirely by the memory that hosts it."*
  *
- * Every OTHER shape is decided by `requireTeamChatAccess`, on purpose: the
- * team-chat audience is `cor:acl:030:01`'s — AppMembers at any role, org
- * CONTRIBUTOR+, the user-owned App's owner, and an impersonation read within
- * its org — which is deliberately WIDER than the node-content gate for an
- * App-class memory (an org CONTRIBUTOR who is not an AppMember reads the
- * team chat and may not read its nodes). Both entry points run this.
+ * It used to short-circuit `true` for every principal carrying a `userId`,
+ * narrowing only a pure App-key context bound to an end-user session (Codex P1
+ * on PR #1169). That was survivable **only while a Channel could not exist
+ * outside an app-class memory**: with the class gate gone, the short-circuit
+ * means any AppMember of the host App reads a Channel in another user's
+ * `personal` or `private` memory. It is the first row of #1196's table and the
+ * reason that issue exists.
+ *
+ * The header this replaces said the team-chat audience is *deliberately WIDER*
+ * than the node-content gate, because *"an org CONTRIBUTOR who is not an
+ * AppMember reads the team chat and may not read its nodes."* That was true and
+ * is no longer: it was the drift #1196 measured, and the App fold now
+ * implements the participation audience `cor:acl:010:01` states
+ * (`participantTeamSpaceFolds`). The two gates compute the same set for every
+ * non-impersonated shape, which is what makes routing the chat through this one
+ * a unification rather than a narrowing. `access-control.participation.test.ts`
+ * pins them against each other.
+ *
+ * **One exception, and it narrows rather than widens: an IMPERSONATED session
+ * on an App-hosted Channel.** `getAccessibleMemoryIds` drops ALL App-derived
+ * reach for an impersonated caller — a deliberate support-session boundary, not
+ * an oversight — so consulting it here would revoke the bounded team-chat read
+ * that `requireTeamChatAccess` grants and `resolvers.teamChat.test.ts` pins.
+ * That decision stays where it is: every caller runs `requireTeamChatAccess`
+ * FIRST for an App-hosted Channel, and it bounds impersonation to the support
+ * session's ONE shared org, refuses an org-less App outright, and never admits a
+ * post. A Channel with NO App has no such gate and therefore no exception — an
+ * impersonated caller falls through to the memory gate, which denies. That is
+ * the right answer: a support session has no business in someone's personal
+ * chat, and widening `getAccessibleMemoryIds` to reach it is a separate decision
+ * about support-session reach, not a side effect of a chat change.
+ *
+ * Run as a POINT check (`onlyMemoryId`), never a materialised set (Copilot).
  */
-async function hostMemoryReadable(ctx: Context, memoryId: string): Promise<boolean> {
-  if (ctx.userId || !ctx.sessionId) return true;
+async function hostMemoryReadable(
+  ctx: Context,
+  memoryId: string,
+  app: AppRow | null,
+): Promise<boolean> {
+  if (ctx.impersonation && app) return true;
   const accessible = await getAccessibleMemoryIds(ctx, memoryId);
   return accessible === null || accessible.includes(memoryId);
 }
 
 /**
- * Resolve a Channel ref to its host App and chat root — or "no match": a
- * missing Channel, a deleted one, and one whose host memory the caller may
- * not read all read identically (§8.6, no existence oracle). A Channel in a
- * host with no App cannot exist today (the chat-host typology, plan §12.1).
+ * May this caller POST into the Channel's host memory?
+ *
+ * Split by host class, because `cor:acl:010:01` splits it — and this is the one
+ * place #1196's *"write → `requireMemoryWriteAccess`"* shorthand does not hold:
+ *
+ *   - **App-hosted** → the App's participation gate. The law is explicit that
+ *     this is not an oversight: *"Membership confers READ, not write. The team
+ *     space receives writes through surfaces that run their own participant
+ *     gates (team chat, worklog). App membership does not by itself authorize
+ *     arbitrary node writes into the team space."* Routing this arm through
+ *     `requireMemoryWriteAccess` instead would have broken the supported B2C
+ *     shape outright — that gate's user path grants an app-class write to an org
+ *     CONTRIBUTOR+ and to nobody else, so an EXTERNAL AppMember (no org role),
+ *     who posts today, would have been refused.
+ *   - **No App** → the host memory's own per-class write rules. This is what
+ *     closes the escalation #1196 names: posting was gated on a READ check, and
+ *     `MemoryShare` has a `reader` role, so a reader-grantee could append. On
+ *     `personal`/`private` `requireMemoryWriteAccess` is owner-or-`writer`-share,
+ *     which is the answer that rule wanted.
+ *
+ * Impersonation never posts, on either arm. The App arm is refused inside
+ * `requireTeamChatAccess`; the memory arm is refused HERE rather than left to
+ * `requireMemoryWriteAccess`, which would fail OPEN — its personal/private
+ * branch compares `memory.userId === ctx.userId`, and under impersonation
+ * `ctx.userId` is the TARGET, so it would admit a support session into exactly
+ * the chat it must never reach (#876 class).
+ */
+async function requireChannelPostAccess(
+  ctx: Context,
+  app: AppRow | null,
+  memoryId: string,
+): Promise<void> {
+  if (app) {
+    await requireTeamChatAccess(ctx, app, 'post');
+    return;
+  }
+  if (ctx.impersonation) throw forbidden();
+  await requireMemoryWriteAccess(ctx, memoryId);
+}
+
+/**
+ * Resolve a Channel ref to its chat root and — when the host IS an App's team
+ * space — that App. "No match" covers a missing Channel, a deleted one, and one
+ * whose host memory the caller may not read, all identically (§8.6, no
+ * existence oracle).
+ *
+ * #1196: a host with no App is now ORDINARY, not impossible. The returned `app`
+ * is null for one, and null is also the answer for an APP-SCOPED memory of any
+ * other class — `app` here means *"this Channel lives in the App's team space,
+ * whose audience is participation"*, never merely *"this memory has an
+ * appId"*. The previous contract said such a Channel could not exist (the
+ * chat-host typology, plan §12.1); that typology was replaced rather than
+ * implemented, so do not reintroduce `CHANNEL_HOST_NOT_APP` on its authority.
  */
 async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'post' | 'read'): Promise<ChannelTarget> {
   const ref = (channelRef ?? '').trim();
@@ -665,32 +771,92 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   if (!id) throw channelNotFound(ref);
   const channel = await ctx.db.channel.findFirst({
     where: { id, deletedAt: null },
-    select: { id: true, memoryId: true, loc: true, chatRootNodeId: true, memory: { select: { appId: true, deletedAt: true } } },
+    select: {
+      id: true,
+      memoryId: true,
+      loc: true,
+      chatRootNodeId: true,
+      memory: {
+        select: {
+          appId: true,
+          class: true,
+          deletedAt: true,
+          // The discriminators that tell the team space apart from the OTHER
+          // app-class row shapes — see `isTeamSpaceRow`.
+          ownerUserId: true,
+          userMemoryOfAgentId: true,
+          workerOf: { select: { id: true }, take: 1 },
+        },
+      },
+    },
   });
   if (!channel || channel.memory.deletedAt) throw channelNotFound(ref);
-  if (!channel.memory.appId) {
-    throw new GraphQLError('This Channel is hosted outside an App; Channel-addressed chat there is not built yet.', {
-      extensions: { code: 'CHANNEL_HOST_NOT_APP', channelId: channel.id },
-    });
-  }
-  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: channel.memory.appId } });
+  // #1196 — a host with no App is no longer refused. `CHANNEL_HOST_NOT_APP` is
+  // RETIRED rather than reordered: the ordering fix #1196 asked for ("throw it
+  // after the read gate, so a Channel id cannot distinguish inaccessible from
+  // missing") was the remedy for a refusal that had to exist. It does not, so
+  // the existence oracle is removed by deleting the thing that leaked, which is
+  // the stronger fix and leaves no refusal code outliving its refusal
+  // (findings:removing-a-mechanism-leaves-prose-describing-it).
+  //
+  // **The App branch is the TEAM SPACE, and nothing else that carries an
+  // `appId`.** `cor:acl:010:01` is blunt about this — *"`app` is a tenancy
+  // bucket, not an audience … `appId + class='app'` selects all four roles and
+  // must be narrowed"* — and this line took TWO review rounds to get there,
+  // narrowing once per round:
+  //
+  //   1. `appId != null` (@codex P1). `chk_memory_class_app_id` — read off the
+  //      live constraint, not assumed — makes `app_id` REQUIRED for
+  //      `class='app'` and merely OPTIONAL for
+  //      `knowledge`/`group`/`personal`/`private` (034, #653). So an APP-SCOPED
+  //      personal memory, the ordinary `(app_id, user_id)` pivot, was reading
+  //      as a team space.
+  //   2. `class === 'app'` (@copilot). Still FOUR row shapes, and two of them
+  //      answer to a narrower audience than App participation: a Worker's
+  //      casting memory (`workerOf`) and a per-user/session memory
+  //      (`userMemoryOfAgentId`). `getAppTeamSpaceAccess` excludes both, so the
+  //      memory gate already refused them — but `hostMemoryReadable`'s
+  //      impersonation shortcut keys on `app` ALONE, so a support session could
+  //      read a Channel in an end-user's session memory.
+  //
+  // The discriminators are columns, not the class, which is the whole point of
+  // that spec paragraph. Every other shape keeps the canonical per-class gates.
+  const mem = channel.memory;
+  // The App is loaded BEFORE the classification, because the classification
+  // needs its ownership (@copilot round 6) — "is this the App's team space?" is
+  // a question about the App, not about who is asking.
+  const hostApp = mem.appId ? await ctx.db.app.findUniqueOrThrow({ where: { id: mem.appId } }) : null;
+  const app =
+    hostApp &&
+    isTeamSpaceRow(mem, {
+      appOwnerUserId: hostApp.ownerUserId,
+      callerUserId: ctx.userId ?? null,
+      impersonating: !!ctx.impersonation,
+    })
+      ? hostApp
+      : null;
   // The READ gate decides existence; a reader who may not post gets FORBIDDEN
   // on a post, never "no match" — the Channel is known to them.
-  try {
-    await requireTeamChatAccess(ctx, app, 'read');
-  } catch (e) {
-    // Only the gate's refusal is "no match"; anything else is rethrown.
-    if (e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') throw channelNotFound(ref);
-    throw e;
+  if (app) {
+    // App-hosted: participation IS this memory's read audience
+    // (`cor:acl:010:01`), and this gate carries the impersonation bound that
+    // `hostMemoryReadable` defers to. It runs FIRST — that ordering is the
+    // precondition of the impersonation exception documented there.
+    try {
+      await requireTeamChatAccess(ctx, app, 'read');
+    } catch (e) {
+      // Only the gate's refusal is "no match"; anything else is rethrown.
+      if (e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') throw channelNotFound(ref);
+      throw e;
+    }
   }
-  // AND the canonical memory-read boundary (Codex P1 on PR #1169): a pure
-  // App-key context carrying an end-user session is deliberately narrowed by
-  // getAccessibleMemoryIds to that session's memories — the team space is
-  // not among them — and the App-participant check alone would admit it. A
-  // Channel is addressed by id, so the host memory decides, as for every
-  // other Channel read (§8.6).
-  if (!(await hostMemoryReadable(ctx, channel.memoryId))) throw channelNotFound(ref);
-  if (mode === 'post') await requireTeamChatAccess(ctx, app, 'post');
+  // AND the host memory's own read gate, for every shape (#1196). For an
+  // App-hosted Channel this is what keeps a pure App-key context carrying an
+  // end-user session out of the team space (Codex P1 on PR #1169); for a host
+  // with no App it is the ENTIRE gate, and the reason a Channel may now live in
+  // a `personal` memory without every AppMember of some App reading it.
+  if (!(await hostMemoryReadable(ctx, channel.memoryId, app))) throw channelNotFound(ref);
+  if (mode === 'post') await requireChannelPostAccess(ctx, app, channel.memoryId);
   return { channelId: channel.id, app, root: { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc } };
 }
 
@@ -720,7 +886,9 @@ function assertBody(body: unknown): asserts body is string {
  */
 async function postToChannelRoot(
   ctx: Context,
-  app: AppRow,
+  // #1196: null for a Channel whose host memory belongs to no App. Used only to
+  // answer item J's "is this Worker of THIS App?" — see `resolveSessionAuthor`.
+  app: AppRow | null,
   root: ChatRootRow,
   args: { body: string; replyToSeq: number | null; sessionRef: string | null },
 ): Promise<TeamChatMessageOut> {
@@ -866,7 +1034,12 @@ async function postToChannelRoot(
  */
 async function readChannelRoot(
   ctx: Context,
-  appId: string,
+  // #1196: null when the host memory belongs to no App. Used ONLY to resolve a
+  // `mentionsRef` against that App's staff and members — an App-less host has
+  // neither, so the ref resolves to nothing and the caller gets the empty page
+  // the unresolvable-ref case already produces (the anti-oracle collapse, Codex
+  // P1 on PR #941). Everything else this function does is memory-scoped.
+  appId: string | null,
   root: ChatRootRow,
   args: { sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; limit?: number | null; offset?: number | null },
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
@@ -940,7 +1113,7 @@ async function readChannelRoot(
   };
 
   if (mentionsRef) {
-    const tokens = await resolveMentionTokens(ctx, appId, mentionsRef);
+    const tokens = appId === null ? null : await resolveMentionTokens(ctx, appId, mentionsRef);
     if (!tokens) return { items: [], total: 0 };
     // Always scanned ASCENDING regardless of paging direction: this branch
     // filters in memory, so the direction is applied to the RESULT below.
@@ -1007,7 +1180,7 @@ export const teamChatMutations = {
     }
     await requireTeamChatAccess(ctx, app, 'post');
 
-    const located = await locateTeamChatRoot(ctx, appId);
+    const located = await locateTeamChatRoot(ctx, app);
     const root = located ?? (await bootstrapTeamChat(ctx, app));
     // Backfill-on-touch (spec 049 §7.1): a root that predates the Channel table
     // gets its row on the next post, so the address is protected from then on
@@ -1044,7 +1217,9 @@ export const teamChatMutations = {
   ): Promise<TeamChatMessageOut> => {
     assertBody(body);
     const target = await resolveChannelTarget(ctx, channelRef, 'post');
-    if (target.app.uninstalledAt) {
+    // An App-less host has no App to be uninstalled — the check is about the
+    // App, not about the Channel, so it simply does not apply (#1196).
+    if (target.app?.uninstalledAt) {
       throw new GraphQLError('Cannot post into a Channel of an uninstalled App.', {
         extensions: { code: 'APP_UNINSTALLED', appId: target.app.id },
       });
@@ -1077,11 +1252,11 @@ export const teamChatQueries = {
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     await requireTeamChatAccess(ctx, app, 'read');
 
-    const root = await locateTeamChatRoot(ctx, appId);
+    const root = await locateTeamChatRoot(ctx, app);
     if (!root) return { items: [], total: 0 };
     // One gate, two entry points: the convenience runs the same host-memory
     // point check the Channel-addressed read runs (Copilot on PR #1169).
-    if (!(await hostMemoryReadable(ctx, root.memoryId))) return { items: [], total: 0 };
+    if (!(await hostMemoryReadable(ctx, root.memoryId, app))) return { items: [], total: 0 };
     return readChannelRoot(ctx, appId, root, args);
   },
 
@@ -1102,6 +1277,6 @@ export const teamChatQueries = {
     ctx: Context,
   ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
     const target = await resolveChannelTarget(ctx, channelRef, 'read');
-    return readChannelRoot(ctx, target.app.id, target.root, args);
+    return readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
   },
 };

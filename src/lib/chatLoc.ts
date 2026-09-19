@@ -44,11 +44,23 @@
 
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { isTeamChatLoc } from './teamChatLoc.js';
+import { participantAppIds } from './auth/appParticipation.js';
+import { ancestorLocs } from './nodeSubtreeLock.js';
+import { teamSpaceAudienceFilter } from './auth/teamSpace.js';
 
 /** The fields of a GraphQL `Context` / MCP `AuthContext` this needs. */
 export interface ChatLocPrincipal {
   userId?: string | null;
   roles?: readonly string[] | null;
+  /**
+   * #1196 — carried so `participantAppIds`' org arm stays BOUNDED to the
+   * support session's one shared org. Without it that arm would answer a
+   * question about the TARGET's memberships anywhere, which is the #876 shape:
+   * `userId` is the target under impersonation, so an identity-keyed predicate
+   * fails OPEN. Every caller passes its `Context`/`AuthContext` whole, so this
+   * arrives by structural typing rather than needing a new argument.
+   */
+  impersonation?: { orgId: string } | null;
 }
 
 /**
@@ -83,7 +95,9 @@ const matchesNothing = (base: Prisma.NodeWhereInput): Prisma.NodeWhereInput => (
  * Pair it with `orderBy: { createdAt: 'asc' }`, `take: 2`, and `pickChatNode`.
  */
 export async function chatLocFilter(
-  db: Pick<PrismaClient, 'appMember'>,
+  // Widened for `participantAppIds` (#1196): the audience is no longer
+  // answerable from the member table alone.
+  db: Pick<PrismaClient, 'appMember' | 'orgMember' | 'app'>,
   chatId: string,
   principal: ChatLocPrincipal,
   opts: { includeDeleted?: boolean } = {},
@@ -104,9 +118,69 @@ export async function chatLocFilter(
   // one still able to. The team chat's own operations are unaffected — they
   // never come through here.
   if (isTeamChatLoc(chatId)) return matchesNothing(base);
+  // #1196 — the loc-shaped half of that rule stopped being sufficient. A
+  // Channel used to be `chats:team` in an app-class memory, so its LOC
+  // identified it; since spec 049 Phase 4 a Channel may be created at any
+  // address, and since #1196 in a memory of any class. `isTeamChatLoc` is kept
+  // rather than replaced because it is a cheap pre-check that needs no query
+  // AND it covers a `chats:team` root that has no Channel row yet — the
+  // backfill-on-touch window (spec 049 §7.1).
+  //
+  // Expressed as RELATION filters rather than an id list: a subquery the
+  // database evaluates per row cannot go stale between building the filter and
+  // running it, and it does not enumerate. A Channel is not a `cor:cht`
+  // conversation, so no chatbot surface may reach one — the same refusal as
+  // above, keyed on what the node IS rather than on what it is called.
+  //
+  // TWO clauses, because the root is not the whole Channel (@copilot round 3).
+  // `channel: null` uses the `ChannelRoot` back-relation and therefore excludes
+  // ONLY the root: the `:messages` container and the message rows beneath it
+  // have no such relation. This filter matches an EXACT loc the caller supplies,
+  // and `chats:team:messages` is a documented shape — so a Channel at
+  // `chats:release` was still reachable as `chats:release:messages`, where
+  // `deleteChat` would soft-delete the transcript container of a chat the chatbot
+  // surfaces are not supposed to be able to see at all.
+  //
+  // The subtree clause closes it by asking whether any ANCESTOR of this loc (or
+  // the loc itself) is a Channel's address IN THE SAME MEMORY — the relation
+  // supplies that scoping, so it is not a cross-memory loc match
+  // (findings:unscoped-loc-lookup-crosses-memories). A bounded `IN` over the
+  // loc's own prefixes, never a `startsWith`, so the unescaped-LIKE hazard in
+  // `findings:prisma-string-filters-are-unescaped-like` cannot reach a caller
+  // value.
+  base.channel = null;
+  base.memory = { channels: { none: { loc: { in: [...ancestorLocs(chatId), chatId] } } } };
 
+  // Platform ADMIN/OWNER skip entitlement narrowing — EXCEPT into the
+  // strict-owner classes, where `cor:acl:010:02` gives them no bypass at all
+  // (@copilot round 3). Without this carve-out the admin branch selected a chat
+  // in another user's `personal`/`private` memory, the site gate then refused
+  // it, and the admin learned the chat EXISTS: a random loc answers "not
+  // found", a real one answered `Forbidden`. That is the existence oracle #829
+  // built this filter to remove, so it belongs here — narrowing the candidate
+  // set — rather than as a collapse of the refusal at the call site, which
+  // would also have cost the entitled-but-unauthorized caller their
+  // (deliberate, documented) `Forbidden`.
+  //
+  // Mirrors `getAccessibleMemoryIds`' admin branch, which returns an explicit
+  // id list rather than "no filter" for exactly this reason.
+  //
+  // TWO strict-ownership axes, not one (@copilot round 4). `class IN
+  // (personal, private)` keyed on `Memory.userId` is the 034 axis; spec 047
+  // added `ownerUserId` as a SECOND, ORTHOGONAL one — a user-owned memory of
+  // ANY class is owner-only and a platform admin gets no bypass into it either.
+  // `getAccessibleMemoryIds`' admin branch excludes both, so covering only the
+  // first left the same oracle alive for a user-owned knowledge or system
+  // memory.
+  const self = principal.userId ?? '__no_principal__';
+  const strictOwnerOk: Prisma.NodeWhereInput = {
+    AND: [
+      { memory: { OR: [{ class: { notIn: ['personal', 'private'] as never } }, { userId: self }] } },
+      { memory: { OR: [{ ownerUserId: null }, { ownerUserId: self }] } },
+    ],
+  };
   const isAdmin = !!principal.roles?.some((r) => r === 'ADMIN' || r === 'OWNER');
-  if (isAdmin) return base;
+  if (isAdmin) return { ...base, AND: [strictOwnerOk] };
 
   const userId = principal.userId;
   // No user identity (e.g. a bare App-key caller) — entitlement can only come
@@ -114,13 +188,21 @@ export async function chatLocFilter(
   // filter that matches nothing rather than one that matches everything.
   if (!userId) return matchesNothing(base);
 
-  // App-class chats are shared with every member of the owning App — the branch
-  // the generic read gate deliberately does not cover.
-  const memberships = await db.appMember.findMany({
-    where: { userId },
-    select: { appId: true },
-  });
-  const appIds = memberships.map((m) => m.appId);
+  // App-class chats are shared with every PARTICIPANT of the owning App.
+  //
+  // This used to be `appMember.findMany` alone, and the header above claims the
+  // filter is a SUPERSET of every chat surface's gate — "it can only remove
+  // rows no call site would have accepted". #1196 broke that claim from the
+  // other end: `chatHistory` now gates on the shared participation audience, so
+  // an org CONTRIBUTOR who is not an AppMember passed the real gate and was
+  // filtered out HERE, before reaching it, receiving "not found" for a chat
+  // they may read (@copilot on PR #1207).
+  //
+  // Fixed by sharing the rule rather than by copying it again
+  // (`participantAppIds`): a set copy and a predicate copy of one audience is
+  // the drift #1196 exists to remove. `includeMemberships` puts the AppMember
+  // arm back, which this caller needs and the access-control fold does not.
+  const appIds = await participantAppIds(db, principal, { includeMemberships: true });
 
   return {
     ...base,
@@ -130,9 +212,29 @@ export async function chatLocFilter(
       // The caller owns the memory holding it (per-user agent holdings, and the
       // defensive personal-class fallback the read gate keeps).
       { memory: { createdBy: userId } },
-      // A shared app chat in an App the caller belongs to.
+      // A shared app chat in an App the caller participates in — and in the
+      // App's TEAM SPACE, not in any app-class row it happens to own (#1207
+      // round 5, @copilot). `class='app'` also covers a Worker's casting memory
+      // and a per-user SESSION memory, so the participation arms widened this
+      // clause into other users' session transcripts — which `saveChatSummary`
+      // writes to through this very filter, with no node-memory write gate of
+      // its own. Same shared predicate as `resolveChannelTarget` and
+      // `locateTeamChatRoot`.
       ...(appIds.length > 0
-        ? [{ memory: { class: 'app', appId: { in: appIds } } } as Prisma.NodeWhereInput]
+        ? [
+            {
+              memory: {
+                appId: { in: appIds },
+                ...teamSpaceAudienceFilter,
+                // Under impersonation `self` is the TARGET, so an owner arm here
+                // would classify a row owned by them as a team space (@copilot
+                // round 6). Support sessions get org-owned rows only.
+                ...(principal.impersonation
+                  ? { ownerUserId: null }
+                  : { OR: [{ ownerUserId: null }, { ownerUserId: self }] }),
+              },
+            } as Prisma.NodeWhereInput,
+          ]
         : []),
     ],
   };

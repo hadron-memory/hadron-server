@@ -69,3 +69,23 @@ export const excludeTeamChat: Prisma.NodeWhereInput = {
     { NOT: { loc: { startsWith: `${TEAM_CHAT_LOC}:` } } },
   ],
 };
+
+/**
+ * #1196 — the same rule keyed on what a node IS rather than what it is called.
+ *
+ * {@link excludeTeamChat} is loc-shaped, and that was sufficient only while a
+ * Channel WAS `chats:team`. Spec 049 Phase 4 lets a Channel be created at any
+ * address and #1196 in a memory of any class, so a Channel at `chats:release`
+ * passes the loc test and would list as an agent chat — a Channel is not a
+ * `cor:cht` conversation, and the chatbot surfaces must not reach one.
+ *
+ * Spread this ALONGSIDE `excludeTeamChat`, not instead of it: the loc rule
+ * additionally covers a `chats:team` root whose Channel row has not been
+ * created yet (the backfill-on-touch window, spec 049 §7.1), which this
+ * relation filter cannot see.
+ *
+ * A relation subquery rather than a materialised id list: the database
+ * evaluates it per row, so it cannot go stale between building the filter and
+ * running it, and it enumerates nothing.
+ */
+export const excludeChannelRoots: Prisma.NodeWhereInput = { channel: null };

@@ -25,6 +25,7 @@ import {
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
@@ -486,7 +487,11 @@ export async function canReadMemoryRecord(
   return accessibleIds === null || accessibleIds.includes(memory.id);
 }
 
-export const ROLE_ORDER: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2, OWNER: 3 };
+// The ordering moved to src/lib/auth/orgRole.ts (#1196): this module imports
+// from src/mcp/access-control.ts, so the MCP layer could not import the
+// threshold back without a cycle and had to restate it. Re-exported so existing
+// importers are unchanged (the `mentionTokenOf` precedent).
+export { ROLE_ORDER };
 
 export function requireRole(ctx: Context, required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER') {
   const highest = ctx.roles ? Math.max(...ctx.roles.map((r) => ROLE_ORDER[r] ?? -1)) : -1;
