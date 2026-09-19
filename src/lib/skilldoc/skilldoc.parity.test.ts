@@ -231,6 +231,14 @@ describe('#1177 — render refuses a comment-terminating source', () => {
     // rejects as not-ours, orphaning the file against itself.
     expect(() => render('hadron-x', 'not-a-urn', 'd', 'body')).toThrow(SkillRenderError);
     expect(() => render('hadron-x', 'hrn:agent:a.com:m:x', 'd', 'body')).toThrow(SkillRenderError);
+    // TRAILING terminators too, not just embedded ones (@copilot round 5 asked
+    // for this; its premise was that `$` admits a final newline, which is
+    // Python's rule and not JavaScript's — measured: `/^…$/.test("x\n")` is
+    // false without the `m` flag. The test is worth having anyway, because the
+    // behaviour it pins is one an `m` flag added later would silently break).
+    expect(() => render('hadron-x', 'hrn:node:a.com:m:x\n', 'd', 'body')).toThrow(SkillRenderError);
+    expect(() => render('hadron-x', 'hrn:node:a.com:m:x\r', 'd', 'body')).toThrow(SkillRenderError);
+    expect(() => render('hadron-x', 'hrn:node:a.com:m:x ', 'd', 'body')).toThrow(SkillRenderError);
     // A legitimate source is unaffected — the guard must not be a blanket ban
     // on hyphens or angle brackets.
     expect(() => render('hadron-x', 'hrn:node:a.com:m:tasks:a-b-c', 'd', 'body')).not.toThrow();
