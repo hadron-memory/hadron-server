@@ -1,5 +1,5 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { assertNoGovernedRows, assertNoProtectedReach } from '../../lib/bulkMutationGate.js';
+import { assertBatchMutable } from '../../lib/bulkMutationGate.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
@@ -127,8 +127,23 @@ export async function extractParentNodeGraph(
       // In memory, over rows already loaded — no extra query, and no
       // `startsWith` on a caller-supplied loc (which compiles to an unescaped
       // LIKE where `_` is a legal loc character).
-      await assertNoProtectedReach(tx, args.sourceMemoryId, nodes.map((n) => n.loc), args.move ? 'move' : 'copy');
-      assertNoGovernedRows(nodes, 'create');
+      // AUTHORITATIVE, not a point-in-time read (@codex + @copilot, both P1 on
+      // PR #1211). `assertBatchMutable` takes the Channel-memory lock that
+      // `ensureChannelWithRoot` holds while it creates one, then re-reads the
+      // protected set under it — so a Channel adopted between this check and
+      // the `createMany`/soft-delete below either commits first and is seen, or
+      // waits behind this transaction.
+      //
+      // Unlike the merge this whole operation is ONE transaction, so holding
+      // the lock here covers every write it performs; `nodes` was read inside
+      // it a few lines above, so the governed check is on this transaction's
+      // own snapshot rather than a stale one.
+      await assertBatchMutable(
+        tx,
+        [args.sourceMemoryId],
+        nodes,
+        args.move ? 'move' : 'copy',
+      );
 
       // Rebase a source loc onto the new root: parentLoc → rootLoc,
       // parentLoc:x → rootLoc:x. `slice(parentLoc.length)` yields '' for the

@@ -1,5 +1,5 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { assertMemoryBulkMutable } from '../../lib/bulkMutationGate.js';
+import { assertBatchMutable, assertMemoryBulkMutable } from '../../lib/bulkMutationGate.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -164,9 +164,17 @@ export async function mergeMemoryGraph(
   // `nodeSubtreeMove` refuses a cross-memory move of a chat root for the same
   // reason.
   //
-  // Refusing before Phase 1 rather than per page is deliberate: a merge is a
-  // long batched operation with partial commits, so a refusal discovered in
-  // page nine would leave eight pages of nodes already relocated.
+  // This preflight is FAIL-FAST ONLY and is not the authoritative check
+  // (@codex + @copilot, both P1). A merge is paged across SEPARATE
+  // transactions, so a Channel created — or a node promoted to a governed kind
+  // — after this read and before a later page is invisible to it: "a check
+  // before the lock was a TOCTOU window the size of the wait" (PR #1165), and
+  // here the window was the whole merge. `assertBatchMutable` runs inside each
+  // writing transaction and is what actually holds.
+  //
+  // It stays because refusing a doomed merge before it relocates anything is
+  // worth one query per endpoint, and because the refusal is far more useful
+  // up front than eight pages in.
   await assertMemoryBulkMutable(db, sourceMemoryId, 'merge');
   await assertMemoryBulkMutable(db, targetMemoryId, 'merge into');
 
@@ -222,9 +230,20 @@ export async function mergeMemoryGraph(
         });
         for (const t of typed) assertConformsAgainst(relocateSchema, t.objectType, t.properties);
       }
-      const relocate = await db.node.updateMany({
-        where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
-        data: { memoryId: targetMemoryId },
+      // The relocate moves into its own transaction so the AUTHORITATIVE gate
+      // can hold the Channel-memory locks across the check and the write. It
+      // was a bare `updateMany` before, which left nothing for the gate to be
+      // authoritative inside.
+      const relocate = await db.$transaction(async (tx) => {
+        const rows = await tx.node.findMany({
+          where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
+          select: { loc: true, role: true, isRunnable: true },
+        });
+        await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+        return tx.node.updateMany({
+          where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
+          data: { memoryId: targetMemoryId },
+        });
       });
       relocatedCount += relocate.count;
     }
@@ -272,6 +291,10 @@ export async function mergeMemoryGraph(
         },
       });
       const tgtById = new Map(tgtRows.map((t) => [t.id, t]));
+      // The AUTHORITATIVE gate for this batch — both endpoints' rows, read
+      // inside this transaction, under the Channel-memory locks. The Phase-1
+      // preflight cannot cover a fold that runs transactions later.
+      await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], [...srcRows, ...tgtRows], 'merge');
       const foldedIds: string[] = []; // source rows actually folded → safe to delete
 
       // -- Fold fields (per colliding node). --

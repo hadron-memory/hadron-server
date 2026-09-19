@@ -34,7 +34,9 @@
  * refuses a cross-memory move of a chat root, for the same reason.
  */
 
+import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
+import { lockMemoryForChannelChange } from './channels.js';
 import { LocProtectedError, protectedLocsIn, protectedLocCovers, type ChannelReader } from './protectedLoc.js';
 import { GOVERNED_ROLES, governedKindsOf, RoleGovernedError } from './governedRole.js';
 
@@ -61,7 +63,16 @@ export function assertNoGovernedRows(rows: readonly GatedRow[], op: 'create' | '
       // 'edits' — this operation is neither minting the marker nor clearing it;
       // it is mutating a node that already carries one, which is exactly the
       // case the generic surface must not reach.
-      throw new RoleGovernedError(kinds[0], op, 'edits');
+      const err = new RoleGovernedError(kinds[0], op, 'edits');
+      // NAME THE NODE. `RoleGovernedError` describes the KIND, which is all a
+      // per-node writer needs — it already knows which node it was writing.
+      // A bulk caller does not: a merge or extract refused over one row among
+      // thousands is unactionable without its loc (the #1099 rule). @copilot
+      // caught this as a contract the doc comment promised and the code did not
+      // keep.
+      throw new GraphQLError(`${err.message} (at "${row.loc}")`, {
+        extensions: { ...err.extensions, loc: row.loc },
+      });
     }
   }
 }
@@ -120,4 +131,52 @@ export async function assertMemoryBulkMutable(
     select: { loc: true, role: true, isRunnable: true },
   });
   if (governed) assertNoGovernedRows([governed], 'update');
+}
+
+/**
+ * The AUTHORITATIVE per-batch gate — the one that actually holds.
+ *
+ * {@link assertMemoryBulkMutable} is a point-in-time read, and @codex and
+ * @copilot both landed on the same P1: a merge is paged across SEPARATE
+ * transactions, so a Channel created (or a node promoted to a governed kind)
+ * after the preflight and before a later page is invisible to it. "A check
+ * before the lock was a TOCTOU window the size of the wait" (PR #1165) — here
+ * the window was the size of the whole merge.
+ *
+ * So the preflight stays only as FAIL-FAST (refusing a doomed merge before it
+ * moves anything is worth one query), and THIS runs inside each writing
+ * transaction, over the rows that transaction is about to write:
+ *
+ *   - it takes `lockMemoryForChannelChange` on every memory involved, which is
+ *     the key `ensureChannelWithRoot` holds while it creates a Channel — so a
+ *     concurrent Channel create either commits before this check sees it, or
+ *     waits behind this batch;
+ *   - it re-reads the protected set under that lock, on a fresh READ COMMITTED
+ *     snapshot taken after the grant;
+ *   - it checks the batch's OWN rows, read inside the same transaction, so a
+ *     row promoted to a governed kind between classification and write is seen.
+ *
+ * The memory locks are taken in sorted order for the same reason
+ * `compareLockKeys` sorts on memory first (#1187): two merges with swapped
+ * endpoints must not invert against each other.
+ *
+ * What this does NOT claim: a merge that has already relocated pages one to
+ * eight does not un-relocate them when page nine refuses. Bulk paging makes
+ * partial completion a property of the operation, not of this gate — the
+ * merge is resumable by design.
+ */
+export async function assertBatchMutable(
+  tx: ChannelReader & Pick<Prisma.TransactionClient, '$executeRaw'>,
+  memoryIds: readonly string[],
+  rows: readonly GatedRow[],
+  op: string,
+): Promise<void> {
+  for (const memoryId of [...new Set(memoryIds)].sort()) {
+    await lockMemoryForChannelChange(tx as Prisma.TransactionClient, memoryId);
+  }
+  const locs = rows.map((r) => r.loc);
+  for (const memoryId of new Set(memoryIds)) {
+    await assertNoProtectedReach(tx, memoryId, locs, op);
+  }
+  assertNoGovernedRows(rows, 'update');
 }

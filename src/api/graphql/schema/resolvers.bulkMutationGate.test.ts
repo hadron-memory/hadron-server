@@ -170,3 +170,68 @@ describe('extractParentNodeToMemory consults both gates (#1191)', () => {
     expect(await codeOf(extract(parent.id, target(), true))).toBe('OK');
   });
 });
+
+describe('the gate is AUTHORITATIVE, not a point-in-time read (@codex + @copilot P1)', () => {
+  it('assertBatchMutable refuses under the Channel-memory LOCK, not from a stale read', async () => {
+    // The TOCTOU both bots found: a merge is paged across SEPARATE
+    // transactions, so a preflight before Phase 1 cannot see a Channel adopted
+    // between pages. `assertBatchMutable` is the answer and runs inside each
+    // writing transaction.
+    //
+    // Asserted at the HELPER, deterministically, and that is a deliberate
+    // choice rather than a shortcut. A merge-level version has to create the
+    // Channel in the window between the preflight and a later page — real
+    // concurrency, with no seam to force the interleaving. I wrote that test
+    // first: it passed in isolation and failed under parallel load, because it
+    // was measuring timing rather than the gate. A flaky test asserting a
+    // security property is worse than none.
+    //
+    // What IS deterministic, and is the whole mechanism: the helper takes the
+    // key `ensureChannelWithRoot` holds while it creates a Channel, re-reads
+    // the protected set under it, and refuses on the batch's own rows.
+    await ensureChannelWithRoot(db, {
+      memoryId: srcMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+    const { assertBatchMutable } = await import('../../../lib/bulkMutationGate.js');
+
+    await expect(
+      db.$transaction((tx) =>
+        assertBatchMutable(tx, [srcMem.id], [{ loc: 'chats:team' }], 'merge'),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+
+    // CONTROL — a row outside every protected address passes, so the refusal
+    // above is about the address and not about the helper refusing everything.
+    await expect(
+      db.$transaction((tx) => assertBatchMutable(tx, [srcMem.id], [{ loc: 'elsewhere' }], 'merge')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('the merge calls it per BATCH — a fold-time Channel in the target refuses', async () => {
+    // The batch-level path, driven through the real operation. The target's
+    // Channel is present from the start (so the preflight would also catch it),
+    // but with the preflight removed this still refuses — which is what pins
+    // the per-batch call rather than the preflight.
+    await mkNode(srcMem.id, 'shared');
+    await mkNode(tgtMem.id, 'shared');
+    await ensureChannelWithRoot(db, {
+      memoryId: tgtMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+    expect(await codeOf(merge({ source: srcMem.id, target: tgtMem.id }))).toBe('LOC_PROTECTED');
+  });
+
+  it('names the offending LOC, not just the kind', async () => {
+    // @copilot: the helper's contract promised the loc and the code delivered
+    // only the kind. A merge refused over one row among thousands is
+    // unactionable without it (#1099).
+    await mkNode(srcMem.id, 'reviews:auth-gate', { role: 'review' });
+    try {
+      await merge({ source: srcMem.id, target: tgtMem.id });
+      throw new Error('expected a refusal');
+    } catch (e) {
+      const err = e as { message: string; extensions?: { loc?: string } };
+      expect(err.extensions?.loc).toBe('reviews:auth-gate');
+      expect(err.message).toContain('reviews:auth-gate');
+    }
+  });
+});
