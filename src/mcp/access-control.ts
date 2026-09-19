@@ -28,7 +28,7 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
-import { orgRoleAtLeast } from '../lib/auth/orgRole.js';
+import { participantAppIds } from '../lib/auth/appParticipation.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { isAgentInstalled } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
@@ -495,40 +495,17 @@ async function participantTeamSpaceFolds(
   // shape out — it is `appId + sessionId + !userId` by definition.
   if (!userId) return [];
 
-  // findMany + `deletedAt: null`, never findUnique on the composite PK: a
-  // REVOKED org membership must not authorize (findings:revoked-membership-auth-gates,
-  // the `requireOrgRole` rule).
-  const memberships = await db.orgMember.findMany({
-    where: {
-      userId,
-      deletedAt: null,
-      ...(principal.impersonation ? { organizationId: principal.impersonation.orgId } : {}),
-    },
-    select: { organizationId: true, role: true },
-  });
-  const contributorOrgIds = memberships
-    .filter((m) => orgRoleAtLeast(m.role, 'CONTRIBUTOR'))
-    .map((m) => m.organizationId);
+  // The shared SET form of the audience (`participantAppIds`), so this fold and
+  // `chatLocFilter` cannot drift into two spellings of one rule — which is the
+  // defect class #1196 exists to remove, not to add a third instance of.
+  const ids = (await participantAppIds(db, principal))
+    // An App already folded by a branch above keeps that branch's (possibly
+    // wider) map; re-folding it team-space-only could not add anything and
+    // would only make the max-merge below do redundant work.
+    .filter((id) => !alreadyFolded.includes(id));
+  if (ids.length === 0) return [];
 
-  const arms: Array<Record<string, unknown>> = [];
-  if (contributorOrgIds.length > 0) arms.push({ organizationId: { in: contributorOrgIds } });
-  if (!principal.impersonation) arms.push({ ownerUserId: userId });
-  if (arms.length === 0) return [];
-
-  const apps = await db.app.findMany({
-    where: {
-      deletedAt: null,
-      uninstalledAt: null,
-      // An App already folded by a branch above keeps that branch's (possibly
-      // wider) map; re-folding it team-space-only could not add anything and
-      // would only make the max-merge below do redundant work.
-      id: { notIn: alreadyFolded },
-      OR: arms,
-    },
-    select: { id: true, ownerUserId: true },
-  });
-  if (apps.length === 0) return [];
-
+  const apps = await db.app.findMany({ where: { id: { in: ids } }, select: { id: true, ownerUserId: true } });
   const maps = await Promise.all(apps.map((app) => getAppTeamSpaceAccess(db, app, userId)));
   return apps.map((app, i) => ({ appId: app.id, map: maps[i] }));
 }

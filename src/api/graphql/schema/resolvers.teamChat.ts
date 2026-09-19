@@ -733,10 +733,18 @@ async function requireChannelPostAccess(
 }
 
 /**
- * Resolve a Channel ref to its host App and chat root — or "no match": a
- * missing Channel, a deleted one, and one whose host memory the caller may
- * not read all read identically (§8.6, no existence oracle). A Channel in a
- * host with no App cannot exist today (the chat-host typology, plan §12.1).
+ * Resolve a Channel ref to its chat root and — when the host IS an App's team
+ * space — that App. "No match" covers a missing Channel, a deleted one, and one
+ * whose host memory the caller may not read, all identically (§8.6, no
+ * existence oracle).
+ *
+ * #1196: a host with no App is now ORDINARY, not impossible. The returned `app`
+ * is null for one, and null is also the answer for an APP-SCOPED memory of any
+ * other class — `app` here means *"this Channel lives in the App's team space,
+ * whose audience is participation"*, never merely *"this memory has an
+ * appId"*. The previous contract said such a Channel could not exist (the
+ * chat-host typology, plan §12.1); that typology was replaced rather than
+ * implemented, so do not reintroduce `CHANNEL_HOST_NOT_APP` on its authority.
  */
 async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'post' | 'read'): Promise<ChannelTarget> {
   const ref = (channelRef ?? '').trim();
@@ -747,7 +755,13 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   if (!id) throw channelNotFound(ref);
   const channel = await ctx.db.channel.findFirst({
     where: { id, deletedAt: null },
-    select: { id: true, memoryId: true, loc: true, chatRootNodeId: true, memory: { select: { appId: true, deletedAt: true } } },
+    select: {
+      id: true,
+      memoryId: true,
+      loc: true,
+      chatRootNodeId: true,
+      memory: { select: { appId: true, class: true, deletedAt: true } },
+    },
   });
   if (!channel || channel.memory.deletedAt) throw channelNotFound(ref);
   // #1196 — a host with no App is no longer refused. `CHANNEL_HOST_NOT_APP` is
@@ -757,9 +771,23 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   // the existence oracle is removed by deleting the thing that leaked, which is
   // the stronger fix and leaves no refusal code outliving its refusal
   // (findings:removing-a-mechanism-leaves-prose-describing-it).
-  const app = channel.memory.appId
-    ? await ctx.db.app.findUniqueOrThrow({ where: { id: channel.memory.appId } })
-    : null;
+  //
+  // **`class === 'app'`, NOT `appId != null`** (@codex P1 on PR #1207). The
+  // first draft of this line keyed on `appId` alone, which is the trap
+  // `cor:acl:010:01` spells out: *"`app` is a tenancy bucket, not an audience"*,
+  // and `chk_memory_class_app_id` makes `app_id` REQUIRED for `class='app'` but
+  // merely OPTIONAL for `knowledge`/`group`/`personal`/`private` (034, #653) —
+  // verified against the live constraint, not assumed. So an APP-SCOPED
+  // personal memory (the ordinary `(app_id, user_id)` pivot) has an `appId` and
+  // is emphatically not a team space. Treating one as App-hosted would have
+  // handed it the participation WRITE gate — letting an AppMember append to a
+  // memory they may only read — and the impersonation READ shortcut below.
+  // Only the team space answers to participation; every other class keeps the
+  // canonical per-class gates.
+  const app =
+    channel.memory.class === 'app' && channel.memory.appId
+      ? await ctx.db.app.findUniqueOrThrow({ where: { id: channel.memory.appId } })
+      : null;
   // The READ gate decides existence; a reader who may not post gets FORBIDDEN
   // on a post, never "no match" — the Channel is known to them.
   if (app) {

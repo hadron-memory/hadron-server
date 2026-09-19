@@ -275,3 +275,87 @@ describe('a Channel is not a cor:cht conversation — the chatbot surfaces canno
     expect(listed.map((c: { loc: string }) => c.loc)).toEqual(['chats:abc']);
   });
 });
+
+describe('app_id is not app-CLASS — the four row shapes (@codex P1 on PR #1207)', () => {
+  /**
+   * `cor:acl:010:01`: "`app` is a tenancy bucket, not an audience." The first
+   * draft of `resolveChannelTarget` keyed the App branch on `appId != null`,
+   * but `chk_memory_class_app_id` makes `app_id` REQUIRED for `class='app'` and
+   * merely OPTIONAL for knowledge/group/personal/private (034, #653) — verified
+   * against the live constraint. So an APP-SCOPED personal memory, the ordinary
+   * `(app_id, user_id)` pivot, was being treated as a team space: it got the
+   * participation WRITE gate and the impersonation READ shortcut.
+   *
+   * The whole first round of these tests missed it because every fixture used a
+   * FREE-STANDING personal memory (`app_id` NULL) — the shape where the two
+   * predicates agree.
+   */
+  async function appScoped(cls: 'personal' | 'knowledge') {
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:scoped-${cls}`,
+        name: `scoped-${cls}`,
+        class: cls,
+        appId: app.id, // ← app-SCOPED, not app-CLASS
+        createdBy: owner.id,
+        // `chk_memory_personal_agent_id`: personal/private carrying an app_id
+        // MUST name the agent. This is the ordinary (app_id, user_id) pivot —
+        // the shape the first round of these tests never built, which is
+        // exactly why the appId-vs-class bug survived them.
+        ...(cls === 'personal'
+          ? { userId: owner.id, userMemoryOfAgentId: agent.id, visibility: null }
+          : { visibility: 'ORGANIZATION' as never }),
+      },
+    });
+    const ch = (
+      await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:scoped', name: 'scoped', createdBy: owner.id })
+    ).channel;
+    return { mem, ch };
+  }
+
+  it('an app-scoped PERSONAL host stays owner-only — an AppMember cannot read or post', async () => {
+    const { ch } = await appScoped('personal');
+    await M.createChannelMessage({}, { channelRef: ch.id, body: 'mine' }, ctx(owner.id));
+
+    // The colleague is an AppMember of this very App. Keyed on appId, they were
+    // a "participant" of a memory that is strictly the owner's.
+    await expectCode(Q.channelMessages({}, { channelRef: ch.id }, ctx(colleague.id)), 'CHANNEL_NOT_FOUND');
+    await expectCode(
+      M.createChannelMessage({}, { channelRef: ch.id, body: 'intruding' }, ctx(colleague.id)),
+      'CHANNEL_NOT_FOUND',
+    );
+  });
+
+  it('an app-scoped PERSONAL host is not reachable by an impersonated session', async () => {
+    // The impersonation shortcut in `hostMemoryReadable` is conditioned on
+    // `app`, so misclassifying the host handed a support session someone's
+    // private chat.
+    const { ch } = await appScoped('personal');
+    await M.createChannelMessage({}, { channelRef: ch.id, body: 'mine' }, ctx(owner.id));
+    const imp = ctx(owner.id, { impersonation: { orgId: org.id } } as Partial<Context>);
+    await expectCode(Q.channelMessages({}, { channelRef: ch.id }, imp), 'CHANNEL_NOT_FOUND');
+  });
+
+  it('an app-scoped KNOWLEDGE host is App-INTERNAL, not a team space', async () => {
+    // Measured, and it corrected my first draft of this test: I expected the
+    // colleague to READ it (ORGANIZATION visibility) and be refused the write.
+    // They cannot read it either — #653 makes an app-scoped knowledge memory
+    // App-internal, so `getOrgReadableMemoryIds` excludes it (`appId: null`)
+    // and only the agent-attach path reaches it. Being an AppMember buys
+    // nothing here.
+    //
+    // Which is the sharper version of the P1: keyed on `appId`, this host would
+    // have taken the participation branch and admitted every AppMember to both
+    // reading and posting. It takes the memory's own gates instead, and they
+    // say no.
+    const { ch } = await appScoped('knowledge');
+    await expectCode(Q.channelMessages({}, { channelRef: ch.id }, ctx(colleague.id)), 'CHANNEL_NOT_FOUND');
+    await expectCode(
+      M.createChannelMessage({}, { channelRef: ch.id, body: 'appending' }, ctx(colleague.id)),
+      'CHANNEL_NOT_FOUND',
+    );
+  });
+});

@@ -44,11 +44,21 @@
 
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { isTeamChatLoc } from './teamChatLoc.js';
+import { participantAppIds } from './auth/appParticipation.js';
 
 /** The fields of a GraphQL `Context` / MCP `AuthContext` this needs. */
 export interface ChatLocPrincipal {
   userId?: string | null;
   roles?: readonly string[] | null;
+  /**
+   * #1196 — carried so `participantAppIds`' org arm stays BOUNDED to the
+   * support session's one shared org. Without it that arm would answer a
+   * question about the TARGET's memberships anywhere, which is the #876 shape:
+   * `userId` is the target under impersonation, so an identity-keyed predicate
+   * fails OPEN. Every caller passes its `Context`/`AuthContext` whole, so this
+   * arrives by structural typing rather than needing a new argument.
+   */
+  impersonation?: { orgId: string } | null;
 }
 
 /**
@@ -83,7 +93,9 @@ const matchesNothing = (base: Prisma.NodeWhereInput): Prisma.NodeWhereInput => (
  * Pair it with `orderBy: { createdAt: 'asc' }`, `take: 2`, and `pickChatNode`.
  */
 export async function chatLocFilter(
-  db: Pick<PrismaClient, 'appMember'>,
+  // Widened for `participantAppIds` (#1196): the audience is no longer
+  // answerable from the member table alone.
+  db: Pick<PrismaClient, 'appMember' | 'orgMember' | 'app'>,
   chatId: string,
   principal: ChatLocPrincipal,
   opts: { includeDeleted?: boolean } = {},
@@ -129,13 +141,21 @@ export async function chatLocFilter(
   // filter that matches nothing rather than one that matches everything.
   if (!userId) return matchesNothing(base);
 
-  // App-class chats are shared with every member of the owning App — the branch
-  // the generic read gate deliberately does not cover.
-  const memberships = await db.appMember.findMany({
-    where: { userId },
-    select: { appId: true },
-  });
-  const appIds = memberships.map((m) => m.appId);
+  // App-class chats are shared with every PARTICIPANT of the owning App.
+  //
+  // This used to be `appMember.findMany` alone, and the header above claims the
+  // filter is a SUPERSET of every chat surface's gate — "it can only remove
+  // rows no call site would have accepted". #1196 broke that claim from the
+  // other end: `chatHistory` now gates on the shared participation audience, so
+  // an org CONTRIBUTOR who is not an AppMember passed the real gate and was
+  // filtered out HERE, before reaching it, receiving "not found" for a chat
+  // they may read (@copilot on PR #1207).
+  //
+  // Fixed by sharing the rule rather than by copying it again
+  // (`participantAppIds`): a set copy and a predicate copy of one audience is
+  // the drift #1196 exists to remove. `includeMemberships` puts the AppMember
+  // arm back, which this caller needs and the access-control fold does not.
+  const appIds = await participantAppIds(db, principal, { includeMemberships: true });
 
   return {
     ...base,

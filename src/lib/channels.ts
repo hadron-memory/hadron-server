@@ -156,10 +156,15 @@ export async function ensureChannelRow(
 /**
  * Create a Channel WITH its chat root — parents, root, `:messages` child, the
  * row and the App default link — in one transaction under the ancestor lock,
- * create-or-restore per node. Refuses a host memory that is not app-class
- * (the chat-host rule), an address overlapping another Channel's
- * (`LOC_OVERLAPS_CHANNEL`), and a live occupant that is not a chat root
- * (`LOC_OCCUPIED`).
+ * create-or-restore per node.
+ *
+ * Refuses a host memory that does not exist (`NOT_FOUND`), an address
+ * overlapping another Channel's (`LOC_OVERLAPS_CHANNEL`), and a live occupant
+ * that is not a chat root (`LOC_OCCUPIED`).
+ *
+ * It does NOT refuse a host by CLASS — that precondition is retired (#1196,
+ * Holger's #1193 ruling); see the module header. Do not reinstate it on the
+ * strength of an older caller comment.
  */
 export async function ensureChannelWithRoot(
   db: PrismaClient,
