@@ -253,7 +253,7 @@ describe('#1176 — memories() folds in the caller’s own user-owned rows', () 
  */
 describe('#1176 — the list does not diverge from the node read gate', () => {
   it('lists every accessible memory that no documented rule excludes', async () => {
-    const over = { userId: f.ownerId, roles: ['READER'] as string[] };
+    const over: Partial<Context> = { userId: f.ownerId, roles: ['READER'] };
     const accessible = (await getAccessibleMemoryIds(ctx(over))) ?? [];
     const listed = ids(await list(null, over));
 
@@ -394,7 +394,7 @@ describe('#1179 — filter.ownedByMe', () => {
     // slice would have been empty for exactly the memories it was asked for —
     // the filter lands with nothing to return, and the reported symptom does
     // not move.
-    const over = { userId: f.ownerId, roles: ['READER'] as string[] };
+    const over: Partial<Context> = { userId: f.ownerId, roles: ['READER'] };
     const dflt = new Set(ids(await list(null, over)));
     const slice = ids(await owned(over));
     expect(slice.length).toBeGreaterThan(0);
