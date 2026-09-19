@@ -760,7 +760,17 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
       memoryId: true,
       loc: true,
       chatRootNodeId: true,
-      memory: { select: { appId: true, class: true, deletedAt: true } },
+      memory: {
+        select: {
+          appId: true,
+          class: true,
+          deletedAt: true,
+          // The two discriminators that tell the team space apart from the
+          // OTHER app-class row shapes — see the `app` derivation below.
+          userMemoryOfAgentId: true,
+          workerOf: { select: { id: true }, take: 1 },
+        },
+      },
     },
   });
   if (!channel || channel.memory.deletedAt) throw channelNotFound(ref);
@@ -772,22 +782,37 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   // the stronger fix and leaves no refusal code outliving its refusal
   // (findings:removing-a-mechanism-leaves-prose-describing-it).
   //
-  // **`class === 'app'`, NOT `appId != null`** (@codex P1 on PR #1207). The
-  // first draft of this line keyed on `appId` alone, which is the trap
-  // `cor:acl:010:01` spells out: *"`app` is a tenancy bucket, not an audience"*,
-  // and `chk_memory_class_app_id` makes `app_id` REQUIRED for `class='app'` but
-  // merely OPTIONAL for `knowledge`/`group`/`personal`/`private` (034, #653) —
-  // verified against the live constraint, not assumed. So an APP-SCOPED
-  // personal memory (the ordinary `(app_id, user_id)` pivot) has an `appId` and
-  // is emphatically not a team space. Treating one as App-hosted would have
-  // handed it the participation WRITE gate — letting an AppMember append to a
-  // memory they may only read — and the impersonation READ shortcut below.
-  // Only the team space answers to participation; every other class keeps the
-  // canonical per-class gates.
-  const app =
-    channel.memory.class === 'app' && channel.memory.appId
-      ? await ctx.db.app.findUniqueOrThrow({ where: { id: channel.memory.appId } })
-      : null;
+  // **The App branch is the TEAM SPACE, and nothing else that carries an
+  // `appId`.** `cor:acl:010:01` is blunt about this — *"`app` is a tenancy
+  // bucket, not an audience … `appId + class='app'` selects all four roles and
+  // must be narrowed"* — and this line took TWO review rounds to get there,
+  // narrowing once per round:
+  //
+  //   1. `appId != null` (@codex P1). `chk_memory_class_app_id` — read off the
+  //      live constraint, not assumed — makes `app_id` REQUIRED for
+  //      `class='app'` and merely OPTIONAL for
+  //      `knowledge`/`group`/`personal`/`private` (034, #653). So an APP-SCOPED
+  //      personal memory, the ordinary `(app_id, user_id)` pivot, was reading
+  //      as a team space.
+  //   2. `class === 'app'` (@copilot). Still FOUR row shapes, and two of them
+  //      answer to a narrower audience than App participation: a Worker's
+  //      casting memory (`workerOf`) and a per-user/session memory
+  //      (`userMemoryOfAgentId`). `getAppTeamSpaceAccess` excludes both, so the
+  //      memory gate already refused them — but `hostMemoryReadable`'s
+  //      impersonation shortcut keys on `app` ALONE, so a support session could
+  //      read a Channel in an end-user's session memory.
+  //
+  // The discriminators are columns, not the class, which is the whole point of
+  // that spec paragraph. Every other shape keeps the canonical per-class gates.
+  const mem = channel.memory;
+  const isTeamSpace =
+    mem.class === 'app' &&
+    mem.appId !== null &&
+    mem.userMemoryOfAgentId === null &&
+    mem.workerOf.length === 0;
+  const app = isTeamSpace
+    ? await ctx.db.app.findUniqueOrThrow({ where: { id: mem.appId! } })
+    : null;
   // The READ gate decides existence; a reader who may not post gets FORBIDDEN
   // on a post, never "no match" — the Channel is known to them.
   if (app) {

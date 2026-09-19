@@ -359,3 +359,57 @@ describe('app_id is not app-CLASS — the four row shapes (@codex P1 on PR #1207
     );
   });
 });
+
+describe('class=app is STILL four row shapes (@copilot round 2 on PR #1207)', () => {
+  /**
+   * `cor:acl:010:01`: "`appId + class='app'` selects all four roles and must be
+   * narrowed." Round 1 narrowed `appId` → `class === 'app'` and stopped one
+   * step short: a Worker's casting memory and a per-user/session memory are
+   * both `class='app'` and both answer to a narrower audience than
+   * participation. `getAppTeamSpaceAccess` excludes them, so the memory gate
+   * already refused an ordinary caller — but `hostMemoryReadable`'s
+   * impersonation shortcut keys on `app` alone, so a support session could read
+   * a Channel in an end-user's session memory.
+   */
+  async function appClassRow(kind: 'worker' | 'session') {
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:appclass-${kind}`,
+        name: `appclass-${kind}`,
+        class: 'app',
+        appId: app.id,
+        createdBy: owner.id,
+        ...(kind === 'session' ? { userMemoryOfAgentId: agent.id } : {}),
+      },
+    });
+    if (kind === 'worker') {
+      await db.worker.create({
+        data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', memoryId: mem.id },
+      });
+    }
+    const ch = (
+      await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:scoped', name: 'scoped', createdBy: owner.id })
+    ).channel;
+    return { mem, ch };
+  }
+
+  it('a Channel in a SESSION memory is not reachable by an impersonated support session', async () => {
+    const { ch } = await appClassRow('session');
+    const imp = ctx(owner.id, { impersonation: { orgId: org.id } } as Partial<Context>);
+    await expectCode(Q.channelMessages({}, { channelRef: ch.id }, imp), 'CHANNEL_NOT_FOUND');
+  });
+
+  it('a Channel in a WORKER casting memory is not reachable by an impersonated support session', async () => {
+    const { ch } = await appClassRow('worker');
+    const imp = ctx(owner.id, { impersonation: { orgId: org.id } } as Partial<Context>);
+    await expectCode(Q.channelMessages({}, { channelRef: ch.id }, imp), 'CHANNEL_NOT_FOUND');
+  });
+
+  it('an ordinary AppMember is refused both too — the memory gate, unchanged', async () => {
+    const { ch } = await appClassRow('session');
+    await expectCode(Q.channelMessages({}, { channelRef: ch.id }, ctx(colleague.id)), 'CHANNEL_NOT_FOUND');
+  });
+});

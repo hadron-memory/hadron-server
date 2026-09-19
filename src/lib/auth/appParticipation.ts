@@ -79,7 +79,19 @@ export async function participantAppIds(
   if (arms.length === 0) return [];
 
   const apps = await db.app.findMany({
-    where: { deletedAt: null, uninstalledAt: null, OR: arms },
+    where: {
+      deletedAt: null,
+      uninstalledAt: null,
+      // The impersonation bound is applied ONCE, outside the arms, so it
+      // governs every arm including any added later. The first version bounded
+      // only the org arm, and `includeMemberships` then returned Apps the
+      // TARGET belongs to in any other org — contradicting this function's own
+      // documented one-org boundary (@copilot on PR #1207). `isAppParticipant`
+      // has the same structure for the same reason: it bounds once, above its
+      // arms, rather than per arm.
+      ...(principal.impersonation ? { organizationId: principal.impersonation.orgId } : {}),
+      OR: arms,
+    },
     select: { id: true },
   });
   return apps.map((a) => a.id);
