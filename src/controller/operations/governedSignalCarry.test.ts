@@ -87,6 +87,22 @@ describe('governedSignals — the set is derived, not hand-listed', () => {
     expect([...GOVERNED_SIGNAL_FIELDS].sort()).toEqual(['isRunnable', 'role']);
   });
 
+  it('BOTH helpers map every field the register names — not just the type', () => {
+    // @copilot round 3: the exhaustiveness type-check catches a register entry
+    // `GovernedSignals` does not DECLARE, and cannot catch one the function
+    // bodies do not MAP. The bodies iterate GOVERNED_SIGNAL_FIELDS now, and
+    // this asserts the result actually carries every one of them — so the
+    // module's promise is checked end to end rather than at its type.
+    const carried = carryGovernedSignals({ role: 'review', isRunnable: true }) as unknown as Record<string, unknown>;
+    for (const field of GOVERNED_SIGNAL_FIELDS) expect(field in carried).toBe(true);
+
+    const everySignalPresent = Object.fromEntries(
+      GOVERNED_SIGNAL_FIELDS.map((f) => [f, null]),
+    ) as Record<string, null>;
+    const mirrored = governedSignalsFromMirror(everySignalPresent) as Record<string, unknown>;
+    for (const field of GOVERNED_SIGNAL_FIELDS) expect(field in mirrored).toBe(true);
+  });
+
   it('carryGovernedSignals preserves and never mints', () => {
     expect(carryGovernedSignals({ role: 'review', isRunnable: null })).toEqual({
       role: 'review',

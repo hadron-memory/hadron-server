@@ -101,10 +101,16 @@ export function carryGovernedSignals(source: {
   role?: string | null;
   isRunnable?: boolean | null;
 }): GovernedSignals {
-  return {
-    role: source.role ?? null,
-    isRunnable: source.isRunnable ?? null,
-  };
+  // ITERATES the derived set rather than naming two keys (@copilot round 3,
+  // PR #1221). The type-level exhaustiveness check above catches a register
+  // entry `GovernedSignals` does not DECLARE; it cannot catch one this
+  // function does not MAP. Walking `GOVERNED_SIGNAL_FIELDS` closes that half,
+  // so the module's promise holds in the body as well as the type.
+  const out: Record<string, unknown> = {};
+  for (const field of GOVERNED_SIGNAL_FIELDS) {
+    out[field] = (source as Record<string, unknown>)[field] ?? null;
+  }
+  return out as unknown as GovernedSignals;
 }
 
 /**
@@ -129,10 +135,12 @@ export function governedSignalsFromMirror(parsed: {
   role?: string | null;
   isRunnable?: boolean | null;
 }): Partial<GovernedSignals> {
-  const out: Partial<GovernedSignals> = {};
-  if ('role' in parsed && parsed.role !== undefined) out.role = parsed.role ?? null;
-  if ('isRunnable' in parsed && parsed.isRunnable !== undefined) {
-    out.isRunnable = parsed.isRunnable ?? null;
+  // Same iteration as the carry, for the same reason — a new register field
+  // must not be silently unmapped here while the type check passes.
+  const src = parsed as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const field of GOVERNED_SIGNAL_FIELDS) {
+    if (field in src && src[field] !== undefined) out[field] = src[field] ?? null;
   }
-  return out;
+  return out as Partial<GovernedSignals>;
 }
