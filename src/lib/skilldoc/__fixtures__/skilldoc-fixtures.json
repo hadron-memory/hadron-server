@@ -1,0 +1,508 @@
+{
+  "$comment": "GENERATED from hadron-cli internal/skilldoc at 973cd1f by the #1177 fixture generator. Language-neutral: the Go and TypeScript suites both load this file, so a port that diverges reds rather than passing its own restatement of itself. Regenerate rather than hand-edit.",
+  "deriveName": [
+    {
+      "name": "hadron-tasks:create-release-tag",
+      "prefix": "hadron-",
+      "loc": "tasks:create-release-tag",
+      "out": "hadron-create-release-tag"
+    },
+    {
+      "name": "hadron-export-task-as-claude-skill",
+      "prefix": "hadron-",
+      "loc": "export-task-as-claude-skill",
+      "out": "hadron-export-task-as-claude-skill"
+    },
+    {
+      "name": "hadron-tasks:review:run",
+      "prefix": "hadron-",
+      "loc": "tasks:review:run",
+      "out": "hadron-review-run"
+    },
+    {
+      "name": "hadron-tasks",
+      "prefix": "hadron-",
+      "loc": "tasks",
+      "out": "hadron-tasks"
+    },
+    {
+      "name": "mm-tasks:a:b:c",
+      "prefix": "mm-",
+      "loc": "tasks:a:b:c",
+      "out": "mm-a-b-c"
+    }
+  ],
+  "hash": [
+    {
+      "name": "plain",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "body",
+      "out": "1de22ed9280cf7ff"
+    },
+    {
+      "name": "description-is-normalized-first",
+      "why": "a padded description must hash as its trimmed form",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "  d  ",
+      "content": "body",
+      "out": "1de22ed9280cf7ff"
+    },
+    {
+      "name": "body-is-normalized-first",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "\n\nbody\n\n",
+      "out": "1de22ed9280cf7ff"
+    },
+    {
+      "name": "crlf-body-equals-lf-body",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "a\r\nb",
+      "out": "f39b8b59bed08930"
+    },
+    {
+      "name": "source-is-in-the-hash",
+      "why": "a hand-edited provenance line naming another node must read as a local edit",
+      "source": "hrn:node:a.com:m:tasks:OTHER",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "body",
+      "out": "ef93fe0669419c93"
+    },
+    {
+      "name": "nul-separated-boundary",
+      "why": "a boundary shift must not collide",
+      "source": "ab",
+      "skillName": "c",
+      "description": "d",
+      "content": "e",
+      "out": "1685b5a766e6b31c"
+    },
+    {
+      "name": "nul-separated-boundary-shifted",
+      "source": "a",
+      "skillName": "bc",
+      "description": "d",
+      "content": "e",
+      "out": "70801242d460cdb1"
+    },
+    {
+      "name": "astral-description",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "trigger 👍 now",
+      "content": "body",
+      "out": "370a32773ddb57cf"
+    },
+    {
+      "name": "nel-in-description",
+      "why": "Go trims NEL, JS does not — the hash diverges if ported naively",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "body",
+      "out": "1de22ed9280cf7ff"
+    },
+    {
+      "name": "zwnbsp-in-description",
+      "why": "JS trims ZWNBSP, Go does not — diverges the other way",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "﻿d﻿",
+      "content": "body",
+      "out": "8eee487e6a395806"
+    }
+  ],
+  "normalizeBody": [
+    {
+      "name": "crlf-folded",
+      "in": "a\r\nb",
+      "out": "a\nb"
+    },
+    {
+      "name": "lone-cr-preserved",
+      "why": "the CRLF fold must not become a general newline normalization",
+      "in": "a\rb",
+      "out": "a\rb"
+    },
+    {
+      "name": "surrounding-newlines-trimmed",
+      "in": "\n\na\n\n",
+      "out": "a"
+    },
+    {
+      "name": "spaces-not-trimmed",
+      "why": "body trims ONLY newlines, unlike the description",
+      "in": "  a  ",
+      "out": "  a  "
+    },
+    {
+      "name": "inner-blank-lines-kept",
+      "in": "a\n\n\nb",
+      "out": "a\n\n\nb"
+    },
+    {
+      "name": "body-untouched-by-NEL",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "\na\n",
+      "out": "\na\n"
+    },
+    {
+      "name": "body-untouched-by-ZWNBSP",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "﻿\na\n﻿",
+      "out": "﻿\na\n﻿"
+    },
+    {
+      "name": "body-untouched-by-NBSP",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": " \na\n ",
+      "out": " \na\n "
+    },
+    {
+      "name": "body-untouched-by-LS",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "\u2028\na\n\u2028",
+      "out": "\u2028\na\n\u2028"
+    },
+    {
+      "name": "body-untouched-by-PS",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "\u2029\na\n\u2029",
+      "out": "\u2029\na\n\u2029"
+    },
+    {
+      "name": "body-untouched-by-VT",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "\u000b\na\n\u000b",
+      "out": "\u000b\na\n\u000b"
+    }
+  ],
+  "normalizeDescription": [
+    {
+      "name": "plain",
+      "in": "  hello  ",
+      "out": "hello"
+    },
+    {
+      "name": "empty",
+      "in": "",
+      "out": ""
+    },
+    {
+      "name": "all-space",
+      "in": "   ",
+      "out": ""
+    },
+    {
+      "name": "inner-space-kept",
+      "in": " a  b ",
+      "out": "a  b"
+    },
+    {
+      "name": "trim-PS",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "\u2029x\u2029",
+      "out": "x"
+    },
+    {
+      "name": "trim-VT",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "\u000bx\u000b",
+      "out": "x"
+    },
+    {
+      "name": "trim-NEL",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "x",
+      "out": "x"
+    },
+    {
+      "name": "trim-ZWNBSP",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "﻿x﻿",
+      "out": "﻿x﻿"
+    },
+    {
+      "name": "trim-NBSP",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": " x ",
+      "out": "x"
+    },
+    {
+      "name": "trim-LS",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "\u2028x\u2028",
+      "out": "x"
+    }
+  ],
+  "parseFile": [
+    {
+      "name": "no-frontmatter",
+      "input": "just a body\n",
+      "err": true
+    },
+    {
+      "name": "foreign-skill-no-header",
+      "why": "somebody else's skill: parses, Source empty, left alone",
+      "input": "---\nname: other\ndescription: d\n---\n\nbody\n",
+      "err": false,
+      "skillName": "other",
+      "description": "d",
+      "body": "body"
+    },
+    {
+      "name": "legacy-header-is-unhashed",
+      "why": "all 20 files on disk are this shape",
+      "input": "---\nname: x\ndescription: d\n---\n\n\u003c!-- Generated from hrn:node:a.com:m:tasks:x --\u003e\n\u003c!-- Edit the source node and re-export; do not edit this file directly. --\u003e\n\nbody\n",
+      "err": false,
+      "skillName": "x",
+      "description": "d",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "body": "body"
+    },
+    {
+      "name": "extra-frontmatter-key-is-a-local-edit",
+      "input": "---\nname: x\ndescription: d\nallowed-tools: Bash\n---\n\nbody\n",
+      "err": false,
+      "skillName": "x",
+      "description": "d",
+      "body": "body",
+      "extra": {
+        "allowed-tools": "Bash"
+      }
+    },
+    {
+      "name": "non-string-name-refused",
+      "why": "yaml would coerce 123 to \"123\" and the hash would not be the host's view",
+      "input": "---\nname: 123\ndescription: d\n---\n\nbody\n",
+      "err": true
+    },
+    {
+      "name": "generated-from-a-template-is-a-body",
+      "why": "the token must LOOK like a node URN",
+      "input": "---\nname: x\ndescription: d\n---\n\n\u003c!-- Generated from a template --\u003e\n\nbody\n",
+      "err": false,
+      "skillName": "x",
+      "description": "d",
+      "body": "\u003c!-- Generated from a template --\u003e\n\nbody"
+    },
+    {
+      "name": "indented-lookalike-is-body",
+      "input": "---\nname: x\ndescription: d\n---\n\n   \u003c!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=0123456789abcdef --\u003e\n\nbody\n",
+      "err": false,
+      "skillName": "x",
+      "description": "d",
+      "body": "   \u003c!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=0123456789abcdef --\u003e\n\nbody"
+    }
+  ],
+  "render": [
+    {
+      "name": "plain",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "body",
+      "out": "---\nname: hadron-x\ndescription: d\n---\n\n\u003c!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=1de22ed9280cf7ff --\u003e\n\u003c!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. --\u003e\n\nbody\n"
+    },
+    {
+      "name": "description-ending-in-colon",
+      "why": "a plain scalar a hand check passes and a real parser rejects",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "use when:",
+      "content": "body",
+      "out": "---\nname: hadron-x\ndescription: 'use when:'\n---\n\n\u003c!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=d2351fcb0f7d84c0 --\u003e\n\u003c!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. --\u003e\n\nbody\n"
+    },
+    {
+      "name": "description-with-quotes",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "he said \"hi\"",
+      "content": "body",
+      "out": "---\nname: hadron-x\ndescription: he said \"hi\"\n---\n\n\u003c!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=51aaf4bf66cbbe0b --\u003e\n\u003c!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. --\u003e\n\nbody\n"
+    },
+    {
+      "name": "description-with-newline",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "a\nb",
+      "content": "body",
+      "out": "---\nname: hadron-x\ndescription: |-\n  a\n  b\n---\n\n\u003c!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=643bd756f362f599 --\u003e\n\u003c!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. --\u003e\n\nbody\n"
+    },
+    {
+      "name": "crlf-body",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "a\r\nb\r\n",
+      "out": "---\nname: hadron-x\ndescription: d\n---\n\n\u003c!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=f39b8b59bed08930 --\u003e\n\u003c!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. --\u003e\n\na\nb\n"
+    },
+    {
+      "name": "body-with-lookalike-header",
+      "why": "a quoted provenance line in the body stays in the body",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "text\n\u003c!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef --\u003e\nmore",
+      "out": "---\nname: hadron-x\ndescription: d\n---\n\n\u003c!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=304a9054b3c220f0 --\u003e\n\u003c!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. --\u003e\n\ntext\n\u003c!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef --\u003e\nmore\n"
+    }
+  ],
+  "renderParseRoundTrip": [
+    {
+      "name": "plain",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "body",
+      "out": "1de22ed9280cf7ff"
+    },
+    {
+      "name": "description-ending-in-colon",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "use when:",
+      "content": "body",
+      "out": "d2351fcb0f7d84c0"
+    },
+    {
+      "name": "description-with-quotes",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "he said \"hi\"",
+      "content": "body",
+      "out": "51aaf4bf66cbbe0b"
+    },
+    {
+      "name": "description-with-newline",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "a\nb",
+      "content": "body",
+      "out": "643bd756f362f599"
+    },
+    {
+      "name": "crlf-body",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "a\nb",
+      "out": "f39b8b59bed08930"
+    },
+    {
+      "name": "body-with-lookalike-header",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "skillName": "hadron-x",
+      "description": "d",
+      "content": "text\n\u003c!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef --\u003e\nmore",
+      "out": "304a9054b3c220f0"
+    }
+  ],
+  "sourceCommit": "973cd1f",
+  "validName": [
+    {
+      "name": "name:hadron-create-release-tag",
+      "in": "hadron-create-release-tag",
+      "valid": true
+    },
+    {
+      "name": "name:Hadron-Bad",
+      "in": "Hadron-Bad",
+      "valid": false
+    },
+    {
+      "name": "name:trailing-",
+      "in": "trailing-",
+      "valid": false
+    },
+    {
+      "name": "name:-leading",
+      "in": "-leading",
+      "valid": false
+    },
+    {
+      "name": "name:double--hyphen",
+      "in": "double--hyphen",
+      "valid": false
+    },
+    {
+      "name": "name:ok123",
+      "in": "ok123",
+      "valid": true
+    },
+    {
+      "name": "name:",
+      "in": "",
+      "valid": false
+    },
+    {
+      "name": "name:a",
+      "in": "a",
+      "valid": true
+    },
+    {
+      "name": "name:64-astral-chars",
+      "why": "grammar rejects it, but the LENGTH must not be what rejects it",
+      "in": "👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍",
+      "valid": false
+    },
+    {
+      "name": "name:65-ascii",
+      "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "name:64-ascii",
+      "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": true
+    }
+  ],
+  "validPrefix": [
+    {
+      "name": "prefix:hadron-",
+      "in": "hadron-",
+      "valid": true
+    },
+    {
+      "name": "prefix:mm-",
+      "in": "mm-",
+      "valid": true
+    },
+    {
+      "name": "prefix:h-",
+      "in": "h-",
+      "valid": true
+    },
+    {
+      "name": "prefix:nohyphen",
+      "in": "nohyphen",
+      "valid": false
+    },
+    {
+      "name": "prefix:-lead-",
+      "in": "-lead-",
+      "valid": false
+    },
+    {
+      "name": "prefix:H-",
+      "in": "H-",
+      "valid": false
+    },
+    {
+      "name": "prefix:h1-",
+      "in": "h1-",
+      "valid": true
+    },
+    {
+      "name": "prefix:1h-",
+      "in": "1h-",
+      "valid": false
+    }
+  ]
+}
