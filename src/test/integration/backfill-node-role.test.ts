@@ -136,6 +136,30 @@ describe('#1216 — what it must NOT stamp', () => {
     expect(await roleOf('hadronmemory.com:specs', 'cor:acl:999:01')).toBeNull();
   });
 
+  it('leaves a PREFIXED-but-invalid citation loc alone', async () => {
+    // @codex P2 / @copilot, PR #1222: the first regex anchored only the start,
+    // so these were "citation-shaped" and would have been governed — arbitrary
+    // nodes made uneditable by a prefix match. The anchored pattern selects the
+    // same 294 rows in production, so this closes a hazard without moving the
+    // set.
+    for (const loc of ['cor:acl:010draft', 'cor:acl:010:01:notes', 'cor:acl:010-not-a-citation']) {
+      await node(memIds['hadronmemory.com:specs'], loc);
+    }
+    await runMigration();
+    for (const loc of ['cor:acl:010draft', 'cor:acl:010:01:notes', 'cor:acl:010-not-a-citation']) {
+      expect(await roleOf('hadronmemory.com:specs', loc)).toBeNull();
+    }
+  });
+
+  it('DOES stamp the flow depth — five segments exist in the corpus', async () => {
+    // `cor:aut:030:01:01` is real, and exactly one node deep. A pattern that
+    // stopped at rule depth would have silently skipped it, which is why the
+    // depth distribution was measured rather than assumed.
+    await node(memIds['hadronmemory.com:specs'], 'cor:aut:030:01:01');
+    await runMigration();
+    expect(await roleOf('hadronmemory.com:specs', 'cor:aut:030:01:01')).toBe('spec');
+  });
+
   it('leaves ANOTHER ORG alone, even with identical locs', async () => {
     // micromentor.org is explicitly out of scope. Identical shape, different
     // org — so a scope keyed on loc alone would take it and this proves the
@@ -226,14 +250,36 @@ describe('#1216 — idempotency and pre-existing roles', () => {
   });
 });
 
-describe('#1216 — the post-condition fails loudly', () => {
-  it('raises if a governed node is also runnable', async () => {
+describe('#1216 — the pre-condition refuses before it writes', () => {
+  it('raises if an IN-SCOPE governed node is also runnable', async () => {
     // The guards cannot produce this state; something upstream could. The
-    // migration asserts it rather than shipping a node no door can edit.
+    // migration refuses rather than shipping a node no door can edit.
     await node(memIds['hadronmemory.com:specs'], 'cor:zzz:010:01', {
       role: 'review',
       isRunnable: true,
     });
     await expect(runMigration()).rejects.toThrow(/governed role AND isRunnable/);
+  });
+
+  it('WRITES NOTHING when it refuses — the check runs first', async () => {
+    // @codex P1: the assertion used to run last, in a file of three top-level
+    // statements relying on the runner to wrap them. What actually guarantees
+    // this is the single DO block — mutating the check back to the END reds
+    // NOTHING, because the block rolls its own UPDATEs back when it raises. So
+    // this test pins the ATOMICITY, not the ordering; the ordering is clarity.
+    await node(memIds['hadronmemory.com:specs'], 'cor:zzz:010:01', { role: 'review', isRunnable: true });
+    await node(memIds['hadronmemory.com:specs'], 'cor:acl:060:01');
+    await expect(runMigration()).rejects.toThrow();
+    expect(await roleOf('hadronmemory.com:specs', 'cor:acl:060:01')).toBeNull();
+  });
+
+  it('does NOT abort on an out-of-scope org\'s bad row', async () => {
+    // @copilot: a platform-wide scan made another customer's data an
+    // availability dependency of our deploy. micromentor.org is a corpus this
+    // migration will not touch, so a bad row there must not stop it.
+    await node(memIds['micromentor.org:specs'], 'cor:zzz:010:01', { role: 'review', isRunnable: true });
+    await node(memIds['hadronmemory.com:specs'], 'cor:acl:070:01');
+    await runMigration();
+    expect(await roleOf('hadronmemory.com:specs', 'cor:acl:070:01')).toBe('spec');
   });
 });
