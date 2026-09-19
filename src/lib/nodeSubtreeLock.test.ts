@@ -29,8 +29,17 @@ describe('ancestorLocs', () => {
  */
 function makeTxSpy() {
   const calls: Array<{ key1: unknown; key2: unknown }> = [];
+  // `acquireLockSet` acquires a whole set in ONE statement (arrays + unnest)
+  // rather than one statement per key, so the spy expands the array form back
+  // into per-key pairs. The ORDER inside the arrays is the acquisition order —
+  // the statement carries `ORDER BY` — so these assertions still observe
+  // exactly what they did when each key had its own round trip.
   const $executeRaw = vi.fn((_strings: TemplateStringsArray, key1: unknown, key2: unknown) => {
-    calls.push({ key1, key2 });
+    if (Array.isArray(key1) && Array.isArray(key2)) {
+      key1.forEach((m, i) => calls.push({ key1: m, key2: key2[i] }));
+    } else {
+      calls.push({ key1, key2 });
+    }
     return Promise.resolve(1);
   });
   // Spec 049 S4: every helper consults the protected-loc gate before locking.

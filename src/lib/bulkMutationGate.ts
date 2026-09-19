@@ -37,6 +37,7 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 import { lockMemoryForChannelChange } from './channels.js';
+import { acquireLockSet } from './nodeSubtreeLock.js';
 import { LocProtectedError, protectedLocsIn, protectedLocCovers, type ChannelReader } from './protectedLoc.js';
 import { GOVERNED_ROLES, governedKindsOf, RoleGovernedError } from './governedRole.js';
 
@@ -166,7 +167,7 @@ export async function assertMemoryBulkMutable(
  * merge is resumable by design.
  */
 export async function assertBatchMutable(
-  tx: ChannelReader & Pick<Prisma.TransactionClient, '$executeRaw'>,
+  tx: ChannelReader & Pick<Prisma.TransactionClient, '$executeRaw' | 'node'>,
   memoryIds: readonly string[],
   rows: readonly GatedRow[],
   op: string,
@@ -178,5 +179,35 @@ export async function assertBatchMutable(
   for (const memoryId of new Set(memoryIds)) {
     await assertNoProtectedReach(tx, memoryId, locs, op);
   }
-  assertNoGovernedRows(rows, 'update');
+
+  // The GOVERNED half needs the per-node keys, not the memory key (@copilot,
+  // round 2). The kind doors coordinate on `lockLocForWrite(memoryId, loc)` —
+  // a NODE key — so holding only `channel-host:<memory>` leaves a door free to
+  // promote one of these rows between the caller's snapshot and this write, and
+  // the check would pass on a stale `role`/`isRunnable`.
+  //
+  // Taking a key per row is only affordable because #1187 made acquisition
+  // BOUNDED and ORDERED: `acquireLockSet` sorts the whole set into the one
+  // global order and takes it in a single round trip, so a 250-row merge batch
+  // or an extracted subtree costs one statement and cannot invert against the
+  // per-node writers it is serializing against. The lock protocol is what makes
+  // this gate closable at all — which is why these two issues shipped together.
+  //
+  // Then RE-READ under those keys. The rows the caller passed were read before
+  // the locks; these are read after, on the fresh READ COMMITTED snapshot the
+  // grant produces, so a promotion that committed while we waited is visible.
+  await acquireLockSet(
+    tx as Prisma.TransactionClient,
+    rows.flatMap((r) => memoryIds.map((memoryId) => ({ memoryId, loc: r.loc }))),
+  );
+  const fresh = await tx.node.findMany({
+    where: {
+      memoryId: { in: [...new Set(memoryIds)] },
+      loc: { in: locs },
+      deletedAt: null,
+      OR: [{ role: { in: GOVERNED_ROLES as string[] } }, { isRunnable: true }],
+    },
+    select: { loc: true, role: true, isRunnable: true },
+  });
+  assertNoGovernedRows(fresh, 'update');
 }

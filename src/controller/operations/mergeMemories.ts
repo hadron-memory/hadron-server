@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { assertBatchMutable, assertMemoryBulkMutable } from '../../lib/bulkMutationGate.js';
+import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } from '../../lib/bulkMutationGate.js';
+import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -478,7 +479,20 @@ export async function mergeMemoryGraph(
 
   // === Final: soft-delete the now-empty source memory when asked. ===
   if (deleteSourceMem) {
-    await db.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
+    // Under the lock and re-checked (@copilot round 2). The per-batch gates
+    // release `channel-host:<source>` when their transactions end, so a Channel
+    // created between the last batch and this update would otherwise let a
+    // merge soft-delete a memory that now HOSTS one — the normal delete path
+    // locks and re-checks for exactly this reason, and this one did not.
+    await db.$transaction(async (tx) => {
+      // `'all'`, not the batch form with an empty row list — that would make
+      // the check vacuous, since an empty loc list overlaps nothing. Deleting
+      // the memory puts EVERY address in it out of reach, so any Channel at all
+      // refuses.
+      await lockMemoryForChannelChange(tx, sourceMemoryId);
+      await assertNoProtectedReach(tx, sourceMemoryId, 'all', 'delete');
+      await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
+    });
   }
 
   return { relocatedCount, foldedCount, edgesMovedCount, edgesDroppedCount };

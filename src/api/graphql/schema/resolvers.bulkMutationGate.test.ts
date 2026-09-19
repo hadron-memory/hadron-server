@@ -235,3 +235,42 @@ describe('the gate is AUTHORITATIVE, not a point-in-time read (@codex + @copilot
     }
   });
 });
+
+describe('round 2 — the paths the gate still did not reach (@copilot)', () => {
+  it('deleteSourceMem is refused by a Channel in the source', async () => {
+    // The per-batch gates release `channel-host:<source>` when their
+    // transactions end, so the final `memory.update({ deletedAt })` ran
+    // unlocked and unchecked — a merge could soft-delete a memory that hosts a
+    // Channel. Staged with the Channel present from the start, which the
+    // earlier gates also catch; what this pins is that the FINAL step now
+    // takes the lock and re-checks, which the mutation below proves.
+    await ensureChannelWithRoot(db, {
+      memoryId: srcMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+    expect(
+      await codeOf(merge({ source: srcMem.id, target: tgtMem.id, deleteSourceMem: true })),
+    ).toBe('LOC_PROTECTED');
+    const still = await db.memory.findUniqueOrThrow({ where: { id: srcMem.id } });
+    expect(still.deletedAt).toBeNull();
+  });
+
+  it('the governed check is re-read under the NODE keys, not taken from the caller\'s snapshot', async () => {
+    // The kind doors coordinate on `lockLocForWrite(memoryId, loc)` — a NODE
+    // key — so the memory lock alone left a door free to promote a row between
+    // the caller's snapshot and the write. `assertBatchMutable` now takes the
+    // per-row keys and RE-READS under them.
+    //
+    // Driven by handing the helper a STALE snapshot: the row says ungoverned,
+    // the database says otherwise, and the re-read is the only thing that can
+    // tell the difference.
+    await mkNode(srcMem.id, 'tasks:promoted', { isRunnable: true });
+    const { assertBatchMutable } = await import('../../../lib/bulkMutationGate.js');
+
+    await expect(
+      db.$transaction((tx) =>
+        // The caller's view: not governed. The database disagrees.
+        assertBatchMutable(tx, [srcMem.id], [{ loc: 'tasks:promoted', isRunnable: false }], 'merge'),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED', loc: 'tasks:promoted' } });
+  });
+});

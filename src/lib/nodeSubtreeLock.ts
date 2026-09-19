@@ -120,9 +120,21 @@ export async function acquireLockSet(tx: Prisma.TransactionClient, keys: LockKey
     unique.push(k);
   }
   unique.sort(compareLockKeys);
-  for (const k of unique) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${k.memoryId}), hashtext(${k.loc}))`;
-  }
+  if (unique.length === 0) return;
+  // ONE round trip for the whole set, in order. A per-key loop is N round
+  // trips, which is fine for an ancestor path and is not for a bulk caller:
+  // #1191's per-batch gate locks every row in a merge batch (250) or an
+  // extracted subtree. `WITH ORDINALITY` keeps the arrays' pairing, and the
+  // ORDER BY makes the acquisition sequence the sorted one rather than
+  // whatever order the planner feels like — which is the entire contract.
+  const memoryIds = unique.map((k) => k.memoryId);
+  const locs = unique.map((k) => k.loc);
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtext(m.v), hashtext(l.v))
+    FROM unnest(${memoryIds}::text[]) WITH ORDINALITY AS m(v, i)
+    JOIN unnest(${locs}::text[]) WITH ORDINALITY AS l(v, i) USING (i)
+    ORDER BY m.i
+  `;
 }
 
 /**
