@@ -1218,7 +1218,25 @@ export async function getAccessibleMemoryIds(
             { class: { in: ['personal', 'private'] as any }, userId: { not: ctx.userId ?? '__none__' } },
             // spec 047: a user-owned memory is STRICTLY private — a platform
             // admin does NOT see another user's user-owned rows either.
-            { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: ctx.userId ?? '__none__' } }] },
+            //
+            // NON-personal classes only (@copilot, PR #1215). The clause above
+            // is the authority for personal/private — `userId` — exactly as
+            // `canReadMemoryRecord` and MCP's `canReadMemory` both branch (the
+            // latter says so outright: "Personal/private user-owned rows are
+            // already handled by the block above"). Unrestricted, this arm
+            // excluded a personal row on its TENANT owner, so an admin who is
+            // its STRICT owner lost node enumeration for a memory the record
+            // gate and this PR's list both admit them to. Fails CLOSED, so it
+            // was an over-narrowing rather than a leak — but this function is
+            // the one the parity test holds the list to, and a divergence that
+            // only shows for the admin shape is how the next copy drifts.
+            {
+              AND: [
+                { class: { notIn: ['personal', 'private'] as any } },
+                { ownerUserId: { not: null } },
+                { ownerUserId: { not: ctx.userId ?? '__none__' } },
+              ],
+            },
           ],
         },
       },

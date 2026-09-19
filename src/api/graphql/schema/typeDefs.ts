@@ -712,22 +712,34 @@ export const typeDefs = `#graphql
     """
     sharedWithMe: Boolean
     """
-    #1179 — true restricts the list to the caller's OWN user-owned (org-less)
-    memories: organizationId IS NULL AND ownerUserId = the caller. For ALL
-    callers INCLUDING platform ADMIN/OWNER (owner scope is never an
-    admin-bypass surface), the same contract as AgentFilter.ownedByMe and
-    AppFilter.ownedByMe. Org-less by definition, so orgId is not consulted.
-    App-key callers (no user context) and impersonated sessions get an empty
-    page. Powers the portal's "My memories".
+    #1179 — true restricts the list to the caller's OWN ORG-LESS memories:
+    organizationId IS NULL AND the caller owns it. For ALL callers INCLUDING
+    platform ADMIN/OWNER (owner scope is never an admin-bypass surface), the
+    same intent as AgentFilter.ownedByMe and AppFilter.ownedByMe. Org-less by
+    definition, so orgId is not consulted. App-key callers (no user context)
+    and impersonated sessions get an empty page. Powers the portal's
+    "My memories".
 
-    Keyed on ownerUserId — the spec-047 user TENANT owner, which is
-    independent of class — NOT on userId (the personal/private strict owner)
-    and NOT on the class itself. A knowledge-class memory under a user root
-    (hrn:mem:holger:holgers-gear) is user-owned and IS in this slice; an
-    ORG-owned personal memory is not (it has an organizationId), which
-    matches what the portal's class-plus-client-side-repair query already
-    returned. The class pair (personal, private) was only ever a proxy for
-    ownership, correct while the two coincided (#1176).
+    "Owns it" is PER CLASS, because Memory has two independent owner columns
+    and the read gates already split on exactly this line (canReadMemoryRecord
+    and the MCP canReadMemory both branch on personal/private FIRST and admit
+    userId there, falling through to ownerUserId for every other class):
+
+      - personal / private → userId, the STRICT owner;
+      - every other class  → ownerUserId, the spec-047 user TENANT owner.
+
+    This is where the memory filter is NECESSARILY wider than its Agent and
+    App siblings, which have one owner column each and can say ownerUserId
+    alone. Keying memories on ownerUserId alone would hand a personal memory
+    to its tenant owner when the two columns differ — legal rows, since
+    nothing constrains them to agree — while memory(ref:) refuses that same
+    caller. Keying on the class pair alone was the ORIGINAL defect: it was
+    only ever a proxy for ownership, correct while the two coincided (#1176).
+
+    So a knowledge-class memory under a user root
+    (hrn:mem:holger:holgers-gear) is in this slice, and an ORG-owned personal
+    memory is not (it has an organizationId) — which matches what the
+    portal's class-plus-client-side-repair query already returned.
 
     Composes by AND like every other clause, so it only ever narrows:
     combined with visibility PUBLIC it is empty by construction (#758

@@ -334,6 +334,37 @@ describe('#1215 — a personal row whose two owner columns disagree', () => {
     // their own other rows in the same call.
     expect(ids(ownedByTenant)).toContain(f.userOwnedKnowledge);
   });
+
+  it('agrees for the STRICT owner even when they are a platform ADMIN', async () => {
+    // @copilot, PR #1215 — the test above used READER on every surface, so the
+    // admin branch of `getAccessibleMemoryIds` was outside a case that claims
+    // "every surface agrees". It is a SEPARATE predicate with its own copy of
+    // the tenant-owner exclusion, and that copy dropped this row on
+    // `ownerUserId` — denying node enumeration to the very caller the record
+    // gate admits. Fails closed, so it was an over-narrowing rather than a
+    // leak; it is still a divergence, and the shape a parity test exists to
+    // find. One fixture per PRINCIPAL SHAPE, not one per memory kind.
+    const strictAdmin = ctx({ userId: f.otherId, roles: ['ADMIN'] });
+    const row = await db.memory.findUniqueOrThrow({
+      where: { id: f.divergentPersonal },
+      select: {
+        id: true, class: true, userId: true, ownerUserId: true,
+        organizationId: true, appId: true, userMemoryOfAgentId: true,
+      },
+    });
+
+    expect(await canReadMemoryRecord(strictAdmin, row)).toBe(true);
+    expect((await getAccessibleMemoryIds(strictAdmin)) ?? []).toContain(row.id);
+
+    // And the admin who is only the TENANT owner is still refused by both —
+    // the fix must not have turned the exclusion off, only narrowed it.
+    const tenantAdmin = ctx({ userId: f.ownerId, roles: ['ADMIN'] });
+    expect(await canReadMemoryRecord(tenantAdmin, row)).toBe(false);
+    expect((await getAccessibleMemoryIds(tenantAdmin)) ?? []).not.toContain(row.id);
+    // …and an ALIGNED personal row still stays out of a foreign admin's set,
+    // which is the invariant #676 put that exclusion there for.
+    expect((await getAccessibleMemoryIds(strictAdmin)) ?? []).not.toContain(f.userOwnedPersonal);
+  });
 });
 
 // ---------------------------------------------------------------------------
