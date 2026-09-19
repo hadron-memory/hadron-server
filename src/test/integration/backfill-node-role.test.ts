@@ -89,6 +89,10 @@ beforeEach(async () => {
   await mem('hadronmemory.com:specs');
   await mem('hadronmemory.com:hadron-server');
   await mem('hadronmemory.com:dev');
+  await mem('hadronmemory.com:hadron-cli');
+  await mem('hadronmemory.com:hadron-portal');
+  // In the same ORG but NOT in the review scope — proves the list is a list.
+  await mem('hadronmemory.com:some-other-memory');
   // A DIFFERENT org's corpus, shaped identically — the scope boundary.
   await mem('micromentor.org:specs');
 });
@@ -106,6 +110,27 @@ describe('#1216 — what the migration stamps', () => {
     await node(memIds['hadronmemory.com:hadron-server'], 'review:narrow-catch-blocks');
     await runMigration();
     expect(await roleOf('hadronmemory.com:hadron-server', 'review:narrow-catch-blocks')).toBe('review');
+  });
+});
+
+describe('#1216 — the review scope is a LIST, and every entry is load-bearing', () => {
+  it('stamps in all four review memories, and only those', async () => {
+    // @copilot round 2: testing one review memory proves the MECHANISM and says
+    // nothing about the ARRAY's contents — a typo in one URN would be invisible.
+    // One fixture per entry, plus a same-org memory that is not in the list, so
+    // the scope is shown to be a list rather than "anything in hadronmemory.com".
+    const inScope = [
+      'hadronmemory.com:hadron-server',
+      'hadronmemory.com:hadron-cli',
+      'hadronmemory.com:hadron-portal',
+      'hadronmemory.com:dev',
+    ];
+    for (const urn of [...inScope, 'hadronmemory.com:some-other-memory']) {
+      await node(memIds[urn], 'review:some-check');
+    }
+    await runMigration();
+    for (const urn of inScope) expect(await roleOf(urn, 'review:some-check')).toBe('review');
+    expect(await roleOf('hadronmemory.com:some-other-memory', 'review:some-check')).toBeNull();
   });
 });
 
