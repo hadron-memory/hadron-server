@@ -148,6 +148,28 @@ function normalizeImportedAbstract(raw: unknown): string | null {
   return str;
 }
 
+/**
+ * #1218 — read the governed signals off parsed frontmatter.
+ *
+ * Selects the canonical `runnable` over the legacy `isRunnable` by KEY
+ * PRESENCE, never by `??` (@codex P2, PR #1221). `meta.runnable ?? meta.isRunnable`
+ * reads an explicit `runnable: null` — the documented way to clear the signal —
+ * as ABSENT, falls through to the legacy key, and when that is missing too
+ * omits the update entirely, so a stored `isRunnable: true` survives a file
+ * that explicitly asked to clear it. Nullish coalescing cannot express
+ * "present and deliberately null", which is precisely the case this codec has
+ * to carry.
+ */
+function governedSignalsFromMeta(meta: NodeYaml): Partial<{ role: string | null; isRunnable: boolean | null }> {
+  const runnable = 'runnable' in meta ? meta.runnable : 'isRunnable' in meta ? meta.isRunnable : undefined;
+  return governedSignalsFromMirror({
+    ...('role' in meta ? { role: meta.role } : {}),
+    ...(runnable !== undefined || 'runnable' in meta || 'isRunnable' in meta
+      ? { isRunnable: runnable ?? null }
+      : {}),
+  });
+}
+
 interface EdgeEntry {
   /** Either `target` or `id` identifies the target node. */
   target?: string;
@@ -258,7 +280,7 @@ async function loadFrontmatterNode(
       ownerRepo,
       // #1218 — spread, NOT `?? null`: an absent key must stay absent so the
       // sync update preserves the stored value. See the NodeYaml doc above.
-      ...governedSignalsFromMirror({ role: meta.role, isRunnable: meta.runnable ?? meta.isRunnable }),
+      ...governedSignalsFromMeta(meta),
     },
     edges,
   };
@@ -307,6 +329,12 @@ async function loadLegacyNode(
       contentHash: meta.contentHash ?? null,
       tags: meta.tags ?? [],
       ownerRepo,
+      // #1218 — the LEGACY layout round-trips the signals too (@copilot, PR
+      // #1221). `loadNodeFromFs` still accepts `.node/node.yaml`, so handling
+      // this only in the frontmatter loader would rebuild a legacy-layout
+      // memory ungoverned — the same defect, reachable through the older of
+      // the two formats. Same reader, same absent-means-preserve rule.
+      ...governedSignalsFromMeta(meta),
     },
     edges,
   };

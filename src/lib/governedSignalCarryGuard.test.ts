@@ -69,6 +69,18 @@ describe('#1218 — bulk node writers carry the governed signals by default', ()
     for (const known of KNOWN_CARRIERS) expect(found).toContain(known);
   });
 
+  it('CONTROL: a MENTION of the helper is not enough to pass', () => {
+    // The guard's predicate, exercised directly on a file that imports and
+    // names the helper without spreading it — the shape @copilot found the
+    // first version accepting. Run against strings rather than a planted file
+    // so the control cannot leave debris in src/.
+    const spread = /\.\.\.carryGovernedSignals\s*\(/;
+    expect(spread.test("import { carryGovernedSignals } from './governedSignals.js';")).toBe(false);
+    expect(spread.test('// carryGovernedSignals is handled elsewhere')).toBe(false);
+    expect(spread.test('const x = carryGovernedSignals(n);')).toBe(false);
+    expect(spread.test('...carryGovernedSignals(n),')).toBe(true);
+  });
+
   it('CONTROL: every exemption still names a real file', () => {
     const found = bulkNodeWriters();
     for (const { file } of UNGOVERNED_BULK_WRITERS) expect(found).toContain(file);
@@ -78,7 +90,14 @@ describe('#1218 — bulk node writers carry the governed signals by default', ()
     const exempt = new Set(UNGOVERNED_BULK_WRITERS.map((e) => e.file));
     const offenders = bulkNodeWriters().filter((rel) => {
       if (exempt.has(rel)) return false;
-      return !readFileSync(join(SRC, rel), 'utf-8').includes('carryGovernedSignals');
+      // SPREAD INTO A ROW, not merely mentioned (@copilot, PR #1221). Checking
+      // that the file CONTAINS the helper's name passes on an import left
+      // behind by a deleted call, on an unrelated second use, and on the word
+      // appearing in a comment — all while both columns are missing from the
+      // payload. The guard's own failure mode is the one it exists to catch,
+      // so it keys on the call being SPREAD (`...carryGovernedSignals(`),
+      // which is the only form that reaches a row literal.
+      return !/\.\.\.carryGovernedSignals\s*\(/.test(readFileSync(join(SRC, rel), 'utf-8'));
     });
     expect(
       offenders,

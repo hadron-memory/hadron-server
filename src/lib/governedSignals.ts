@@ -62,13 +62,32 @@ import { GOVERNED_KINDS } from './governedRole.js';
  */
 export const GOVERNED_SIGNAL_FIELDS = [
   ...new Set(GOVERNED_KINDS.map((e) => e.signal.field)),
-] as readonly ('role' | 'isRunnable')[];
+] as readonly GovernedSignalField[];
+
+/** Every column the register keys on, as a union taken FROM the register. */
+export type GovernedSignalField = (typeof GOVERNED_KINDS)[number]['signal']['field'];
 
 /** A node row's governed signals, as a copy operation sees them. */
 export interface GovernedSignals {
   role: string | null;
   isRunnable: boolean | null;
 }
+
+/**
+ * The derivation above is only worth having if the HELPERS move with it
+ * (@copilot, PR #1221 — and the finding is sharp: deriving the field list while
+ * the functions below hard-code two keys makes the promise "a fourth governed
+ * kind extends the carry automatically" FALSE, which is a claim outrunning its
+ * evidence in the one place that claims to prevent drift).
+ *
+ * This is that promise made structural: if a register entry ever keys on a
+ * column `GovernedSignals` does not declare, the next line stops compiling and
+ * names it. A test asserting the two agree would catch the same thing one run
+ * later; a type error catches it before the code exists.
+ */
+type UnhandledSignalField = Exclude<GovernedSignalField, keyof GovernedSignals>;
+const _everySignalFieldIsHandled: UnhandledSignalField extends never ? true : never = true;
+void _everySignalFieldIsHandled;
 
 /**
  * What an OWNING COPY (extract, clone) must carry from source row to new row.

@@ -38,9 +38,17 @@ export interface NodeForGit {
   /** Node-level structured JSON; exported for a faithful mirror. */
   data?: unknown;
   properties?: unknown;
-  /** #1218 — governed signals; importer-consumed, emitted only when set. */
-  role?: string | null;
-  isRunnable?: boolean | null;
+  /**
+   * #1218 — the governed signals. REQUIRED, not optional, and that is the
+   * mechanism rather than a style choice (@copilot, @codex P1 on PR #1221):
+   * optional properties let a producer omit them silently, which is exactly
+   * how the incremental mirror path kept emitting ungoverned files while the
+   * bulk path was wired. Required means a new `NodeForGit` producer fails to
+   * COMPILE until it decides, which is the opt-out-not-opt-in rule this change
+   * is about, enforced by the one thing that cannot forget.
+   */
+  role: string | null;
+  isRunnable: boolean | null;
   outgoingEdges: Array<{
     target: { id: string; loc?: string | null };
     name: string | null;
@@ -91,6 +99,12 @@ export function writeNodeFile(localPath: string, node: NodeForGit): void {
     seq: node.seq,
     data: node.data,
     properties: node.properties,
+    // #1218 — the incremental mirror path emits them too. Wiring only
+    // `pushMemoryToGit` left ordinary writes and moves producing files with no
+    // governed signals, so a memory restored from that repo lost governance
+    // through the path it is written by most often.
+    role: node.role,
+    isRunnable: node.isRunnable,
   }, node.outgoingEdges);
   preserveUnmanagedFrontmatter(frontmatter, mdPath);
 

@@ -1243,6 +1243,9 @@ export async function writeNodeCore(
           seq: finalNode.seq,
           data: finalNode.data,
           properties: finalNode.properties,
+          // #1218 — the mirror carries the governed signals.
+          role: finalNode.role ?? null,
+          isRunnable: finalNode.isRunnable ?? null,
           outgoingEdges: finalNode.outgoingEdges ?? [],
         }, input.ownerRepo ?? '', ctx.clientId, input.memoryId).catch((err) => {
           console.error('[writeNodeCore] git write error:', err);
@@ -2121,6 +2124,9 @@ export const nodeMutations = {
                 seq: fresh.seq,
                 data: fresh.data,
                 properties: fresh.properties,
+                // #1218 — the mirror carries the governed signals.
+                role: fresh.role ?? null,
+                isRunnable: fresh.isRunnable ?? null,
                 outgoingEdges: fresh.outgoingEdges ?? [],
               },
               p.ownerRepo,
@@ -3194,6 +3200,9 @@ export const nodeMutations = {
             seq: finalNode.seq,
             data: finalNode.data,
             properties: finalNode.properties,
+            // #1218 — the mirror carries the governed signals.
+            role: finalNode.role ?? null,
+            isRunnable: finalNode.isRunnable ?? null,
             outgoingEdges: finalNode.outgoingEdges ?? [],
           },
           (finalNode as { ownerRepo?: string | null }).ownerRepo ?? '',
