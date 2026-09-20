@@ -47,11 +47,30 @@ const RATE_LIMITED_BODY = { error: 'rate_limit_exceeded' };
  * send paths do not drift apart; the per-email budget is deliberately tighter,
  * since a human retrying a typo'd address changes the address.
  *
- * `skipFailedRequests` uncounts 4xx/5xx so validation 400s don't consume the
- * budget — only requests that actually reached Resend do. Same in-process
- * MemoryStore caveat as the OAuth limiters: counters are per-worker, which is
- * acceptable because the limit exists to stop abuse-shaped bursts rather than
- * to enforce an exact quota.
+ * Validation failures are excluded by {@link isUnsendableRequest}, evaluated
+ * BEFORE the handler — deliberately NOT by `skipFailedRequests`.
+ *
+ * `skipFailedRequests` infers "no mail was sent" from the HTTP response, and
+ * that inference is forgeable (Codex, PR #1238). express-rate-limit 8.5.2:
+ *
+ *   if (closePromise) { void closePromise.then(async () => {
+ *     if (!response.writableEnded) await decrementKey();
+ *   }); }
+ *
+ * A client that hangs up mid-request produces no response, so the counter is
+ * REFUNDED — while Node, which cannot cancel an already-running handler, goes
+ * on to deliver the mail. Sending and then aborting in a loop therefore costs
+ * an attacker nothing and bypasses both limiters completely; reproduced before
+ * this was changed, in the integration test.
+ *
+ * So these limiters count what they ADMITTED rather than what they managed to
+ * answer. The cost is that a Resend outage now consumes budget, which is the
+ * right side to err on: the alternative is a brake an attacker turns off by
+ * closing a socket.
+ *
+ * Same in-process MemoryStore caveat as the OAuth limiters: counters are
+ * per-worker, acceptable because the limit exists to stop abuse-shaped bursts
+ * rather than to enforce an exact quota.
  */
 export function buildEmailSendPerIpRateLimit() {
   return rateLimit({
@@ -59,9 +78,32 @@ export function buildEmailSendPerIpRateLimit() {
     limit: 10,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    skipFailedRequests: true,
+    skip: isUnsendableRequest,
     message: RATE_LIMITED_BODY,
   });
+}
+
+/**
+ * True for requests `POST /auth/email` will reject with 400 before attempting
+ * any send. Read off the PARSED BODY, so the verdict is settled before the
+ * handler runs and cannot be changed afterwards by how — or whether — the
+ * response completes.
+ *
+ * It mirrors the handler's own two preconditions. If those ever diverge the
+ * failure is a validation 400 that still costs budget, which is noisy but
+ * safe; the reverse (budget-free requests that send mail) is the one that must
+ * not happen, and it cannot here, because anything reaching the send has
+ * already been counted.
+ */
+function isUnsendableRequest(req: Request): boolean {
+  const body = req.body as
+    | { email?: unknown; clientState?: unknown; client_state?: unknown }
+    | undefined;
+  const email = body?.email;
+  const clientState = body?.clientState ?? body?.client_state;
+  const hasEmail = typeof email === 'string' && email.trim().length > 0;
+  const hasClientState = typeof clientState === 'string' && clientState.trim().length > 0;
+  return !hasEmail || !hasClientState;
 }
 
 /** Per-recipient companion to {@link buildEmailSendPerIpRateLimit}. */
@@ -71,7 +113,7 @@ export function buildEmailSendPerAddressRateLimit() {
     limit: 5,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    skipFailedRequests: true,
+    skip: isUnsendableRequest,
     message: RATE_LIMITED_BODY,
     keyGenerator: (req: Request) => {
       const email = (req.body as { email?: unknown } | undefined)?.email;

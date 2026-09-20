@@ -19,10 +19,9 @@
  * and spreading a single target across many source addresses is how an email
  * bomb is actually sent, which a per-IP limit cannot see.
  *
- * `sendMagicLink` is mocked because the real one calls Resend. That also makes
- * the budget observable at all: `skipFailedRequests` uncounts 4xx/5xx, so with
- * an unmocked Resend every request would 500, consume nothing, and the limiter
- * would look broken while working perfectly.
+ * `sendMagicLink` is mocked because the real one calls Resend — these cases
+ * assert how many sends were ADMITTED, which is only observable if the send
+ * itself is a no-op that always succeeds.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
@@ -142,10 +141,65 @@ describe('#560 — per-recipient throttling', () => {
 
   it('does not count a REFUSED request against the budget', async () => {
     const victim = uniqueEmail();
-    // Four 400s (no nonce) must not consume the send budget — skipFailedRequests.
+    // Four 400s (no nonce) must not consume the send budget. That exclusion is
+    // `isUnsendableRequest`, decided from the parsed body BEFORE the handler —
+    // not inferred afterwards from the response, which is what made the abort
+    // bypass above possible.
     for (let i = 0; i < 4; i++) expect(await send(victim, { clientState: null })).toBe(400);
     expect(await send(victim)).toBe(200);
     expect(sendMagicLinkMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe('#560 — an aborted connection must not refund the budget', () => {
+  it('cannot bypass the limit by hanging up while the mail is in flight', async () => {
+    // Codex P1 on PR #1238, confirmed in express-rate-limit 8.5.2's own source:
+    //
+    //   if (closePromise) { void closePromise.then(async () => {
+    //     if (!response.writableEnded) await decrementKey();  <-- refund
+    //   }); }
+    //
+    // `skipFailedRequests` infers "nothing happened" from the response, but a
+    // client that hangs up produces no response while Node keeps running the
+    // handler — so the mail is sent AND the counter is refunded. Inferring a
+    // side effect from an HTTP status is the actual bug; the limiter must count
+    // what it ADMITTED, not what it managed to answer.
+    const victim = uniqueEmail();
+    const ip = '198.51.100.20';
+
+    // Hold the send open so there is a window to abort inside.
+    sendMagicLinkMock.mockImplementation(
+      () => new Promise((resolve) => setTimeout(resolve, 150)),
+    );
+
+    for (let i = 0; i < 8; i++) {
+      const ac = new AbortController();
+      const inFlight = fetch(`${baseUrl}/auth/email`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
+        body: JSON.stringify({ email: victim, client_state: 'nonce-x' }),
+        signal: ac.signal,
+      }).catch(() => undefined); // the abort rejects; that is the point
+      await new Promise((r) => setTimeout(r, 25));
+      ac.abort();
+      await inFlight;
+    }
+
+    // Aborting does NOT prevent delivery — Node runs the handler to completion
+    // either way — so these sends really happened. Exactly the per-address
+    // budget gets through and the rest are refused: pre-fix this is 8, because
+    // every abort refunded its slot.
+    expect(
+      sendMagicLinkMock.mock.calls.length,
+      'aborted requests still send mail, but only within budget',
+    ).toBe(5);
+
+    // Give the close handlers time to run their refunds, if any.
+    await new Promise((r) => setTimeout(r, 300));
+
+    // The budget must be spent. Pre-fix this is 200: refunded to zero.
+    sendMagicLinkMock.mockResolvedValue(undefined);
+    expect(await send(victim, { ip })).toBe(429);
   });
 });
 
