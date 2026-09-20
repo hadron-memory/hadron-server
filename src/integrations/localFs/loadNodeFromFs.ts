@@ -5,6 +5,35 @@ import { parse } from 'yaml';
 import type { Node } from '../../index.d.js';
 import { NodeAbstractTooLongError } from '../../lib/entityRef/errors.js';
 import { computeContentHash } from '../../lib/contentHash.js';
+import { InvalidLocError, validateLoc } from '../../lib/validateLoc.js';
+
+/**
+ * A mirror file whose path cannot be a loc (#1224).
+ *
+ * Carries the file's frontmatter id because the caller needs it: a skipped
+ * file is absent from the loaded graph, and `syncGraphFromGithub`'s cleanup
+ * pass hard-deletes every git-owned row it did not upsert — so without the
+ * id, skipping a file would DELETE the node it used to be. Renaming a file
+ * to an invalid name would convert a move into data loss.
+ *
+ * Carries the `source` path too, because the id is not always enough: a file
+ * with no frontmatter id, or one whose id names no row in this memory, cannot
+ * be matched to the row it came from at all (its OLD loc is what would
+ * identify it, and a file renamed to an unusable name no longer tells us what
+ * that was). The sync refuses to run its destructive pass in that case, and
+ * the operator needs the file NAME to fix it — an id they cannot grep for is
+ * not an actionable report.
+ */
+export class InvalidNodeLocError extends Error {
+  constructor(
+    message: string,
+    readonly nodeId: string | undefined,
+    readonly source: string,
+  ) {
+    super(message);
+    this.name = 'InvalidNodeLocError';
+  }
+}
 
 interface NodeYaml {
   id: string;
@@ -246,7 +275,7 @@ async function loadFrontmatterNode(
 
   const meta = parse(fmMatch[1]) as NodeYaml & { nodes?: EdgeEntry[] };
   const content = fmMatch[2]?.trim() || null;
-  const loc = deriveLoc(mdPath, graphRoot, true);
+  const loc = deriveValidatedLoc(mdPath, graphRoot, true, meta.id);
 
   // Sidecar edges take precedence over frontmatter `nodes:` array
   const sidecarEdges = loadSidecarEdges(mdPath);
@@ -299,7 +328,11 @@ async function loadLegacyNode(
 
   const meta = parse(readFileSync(yamlPath, 'utf-8')) as NodeYaml & { nodes?: EdgeEntry[] };
   const content = existsSync(mdPath) ? readFileSync(mdPath, 'utf-8') : null;
-  const loc = deriveLoc(dirPath, graphRoot, false);
+  // The LEGACY layout derives its loc the same way and needs the same guard —
+  // handling only the frontmatter loader would leave the older of the two
+  // formats as the unguarded writer, which is this issue's own shape (#1221
+  // hit exactly that with the governed signals).
+  const loc = deriveValidatedLoc(dirPath, graphRoot, false, meta.id);
 
   const edges = (meta.nodes ?? [])
     .filter((e) => !!e.id)
@@ -338,6 +371,62 @@ async function loadLegacyNode(
     },
     edges,
   };
+}
+
+/**
+ * Derive a loc from a path and hold it to the SAME charset every API writer
+ * enforces (#1224).
+ *
+ * This is the mirror's only loc-derivation point — both layouts route through
+ * it — so validating here makes a new loader opt OUT rather than remember to
+ * opt in. That is the fix the issue asks for: the guard used to sit with the
+ * writers somebody enumerated, and the writer nobody enumerated did without.
+ *
+ * **The graph root is exempt, deliberately and measurably.** `deriveLoc` maps
+ * a repo's top-level `README.md` to `''`, and `validateLoc` rejects `''` as
+ * `empty` — so the empty loc is not a badly-named file, it is the mirror's
+ * root address, a shape the API's grammar cannot express. Measured on
+ * production before writing this (issue comment, 2026-09-20): of 10 live
+ * nodes whose loc `validateLoc` rejects, the classes are perfectly disjoint —
+ * 7 `empty` written by the mirror (the roots of `micromentor.org:mmdata`,
+ * `hadronmemory.com:core` and three `baragaun.com` memories) and 3
+ * `invalid-charset` that came through an API path years ago. Validating the
+ * root would refuse all five live roots, and a per-node skip is WORSE than a
+ * refusal here: sync is repo-wins and destructive, so a skipped root is a
+ * deleted root.
+ *
+ * So the charset half is a clean tightening — zero live rows violate it — and
+ * the root is a separate, open question: *does the graph root have an
+ * address?* Holger ruled 2026-09-20 to ship the charset now and answer the
+ * root separately (#1228). **This exemption is expected to be temporary; it
+ * goes when #1228 gives the root a real loc.** Do not widen it to mean "empty
+ * atoms are fine" — it is one whole loc, at the root, and nowhere else.
+ *
+ * @throws {InvalidNodeLocError} when the derived loc is not the root and not
+ *   a valid loc. `loadGraphFromFs` catches it per node, so one badly-named
+ *   file cannot stop a memory syncing.
+ */
+function deriveValidatedLoc(
+  path: string,
+  graphRoot: string,
+  isMdFile: boolean,
+  fileId: string | undefined,
+): string {
+  const loc = deriveLoc(path, graphRoot, isMdFile);
+  if (loc === '') return loc; // the graph root — see above
+  try {
+    validateLoc(loc);
+  } catch (err) {
+    if (err instanceof InvalidLocError) {
+      throw new InvalidNodeLocError(
+        `Path does not derive a valid loc: ${err.message} (${path})`,
+        fileId,
+        path,
+      );
+    }
+    throw err;
+  }
+  return loc;
 }
 
 /**

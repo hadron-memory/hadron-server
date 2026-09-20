@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'path';
-import { mkdirSync } from 'fs';
+import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
 import { splitGitArgv } from '../../test/gitArgv.js';
@@ -462,5 +462,134 @@ describe('move-aware identity', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(survivingId);
     expect(rows[0].name).toBe('updated');
+  });
+});
+
+/**
+ * #1224 — validating the mirror's derived loc means some files are skipped,
+ * and a skip meets a destructive cleanup pass. These pin the interaction
+ * rather than the validator (which `loadGraphFromFs.test.ts` covers).
+ */
+describe('a file whose path cannot be a loc (#1224)', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+
+  /** Write a frontmatter node at `<repoRoot>/<relPath>.md`. */
+  function writeMd(relPath: string, id: string, name: string): void {
+    const full = join(repoRoot(), `${relPath}.md`);
+    mkdirSync(join(full, '..'), { recursive: true });
+    writeFileSync(full, `---\nid: ${id}\nname: ${name}\n---\n# ${name}`, 'utf-8');
+  }
+
+  it('does not write a loc the API would refuse, and syncs the rest of the memory', async () => {
+    writeMd('ok', 'aaaa111100000000000000000000000001', 'ok');
+    writeMd('evil--> x', 'bbbb222200000000000000000000000002', 'bad');
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const locs = (await db.node.findMany({ where: { memoryId: dbGraphId } })).map((n) => n.loc);
+    expect(locs).toEqual(['ok']);
+  });
+
+  it('a rename INTO an invalid name fails to move the node — it does not delete it', async () => {
+    // The hazard this half exists for. The cleanup pass hard-deletes every
+    // git-owned row it did not upsert, so a skipped file would take its node
+    // with it: renaming `notes.md` to something unusable would destroy the
+    // node instead of failing to move it. Repo-wins decides what a node IS,
+    // not whether a file this loader cannot address is still a node.
+    const nodeId = 'cccc333300000000000000000000000003';
+    writeMd('notes', nodeId, 'notes');
+    await syncGraphFromGithub(makeGraph());
+    expect(await db.node.findUnique({ where: { id: nodeId } })).not.toBeNull();
+
+    // The rename: same frontmatter id, a path that cannot be a loc.
+    rmSync(join(repoRoot(), 'notes.md'));
+    writeMd('notes--> evil', nodeId, 'notes');
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const row = await db.node.findUnique({ where: { id: nodeId } });
+    expect(row).not.toBeNull();
+    expect(row!.loc).toBe('notes'); // still at its old, valid address
+  });
+
+  it('refuses a competing move rather than parking the occupant at a loc validateLoc rejects', async () => {
+    // @codex P2 on PR #1229. The move-collision branch parks an occupant at
+    // `<loc>~displaced-<id>` — a loc `validateLoc` REFUSES — and relies on the
+    // cleanup pass to collect it moments later. Protecting skipped rows broke
+    // that: the parked row survived, so this PR's own guard would have stored
+    // the invariant violation the PR exists to prevent, permanently.
+    const occupantId = 'aaaa000000000000000000000000000011';
+    const moverId = 'bbbb000000000000000000000000000012';
+    writeMd('a', occupantId, 'occupant');
+    writeMd('b', moverId, 'mover');
+    await syncGraphFromGithub(makeGraph());
+
+    // The occupant's file is renamed to something unusable, and in the SAME
+    // sync the mover's file takes the loc it just vacated.
+    rmSync(join(repoRoot(), 'a.md'));
+    rmSync(join(repoRoot(), 'b.md'));
+    writeMd('a--> evil', occupantId, 'occupant');
+    writeMd('a', moverId, 'mover');
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const rows = await db.node.findMany({ where: { memoryId: dbGraphId }, select: { id: true, loc: true } });
+    // Nothing is stored at an address the API would refuse — the assertion
+    // the whole finding turns on.
+    expect(rows.filter((r) => r.loc.includes('~'))).toEqual([]);
+    // Both rows survive, at their original valid addresses.
+    expect(rows.find((r) => r.id === occupantId)?.loc).toBe('a');
+    expect(rows.find((r) => r.id === moverId)?.loc).toBe('b');
+  });
+
+  it('suppresses the destructive cleanup when a skipped file names no row it can resolve', async () => {
+    // @copilot on PR #1229: the cleanup keys on the SURVIVING ROW id, and a
+    // file's frontmatter id is not always that id — an id-less file has none
+    // at all. Protecting the raw file id would read as a guarantee while
+    // protecting nothing, so an unresolvable skip fails CLOSED: the run does
+    // not delete rows it cannot vouch for.
+    const goneId = 'cccc000000000000000000000000000013';
+    writeMd('gone', goneId, 'gone');
+    await syncGraphFromGithub(makeGraph());
+    expect(await db.node.findUnique({ where: { id: goneId } })).not.toBeNull();
+
+    // `gone.md` really is deleted — normally its row would be cleaned up (the
+    // control test below proves it). But an ID-LESS file is skipped in the
+    // same run, so the cleanup cannot tell that row from this one.
+    rmSync(join(repoRoot(), 'gone.md'));
+    const full = join(repoRoot(), 'no-id--> evil.md');
+    writeFileSync(full, `---\nname: no id here\n---\n# x`, 'utf-8');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await syncGraphFromGithub(makeGraph());
+    // Read the calls BEFORE restoring: `mockRestore` clears them, so the
+    // assertion below would read an emptied instrument and match nothing.
+    const line = warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    warn.mockRestore();
+    expect(result.error).toBeUndefined();
+
+    expect(await db.node.findUnique({ where: { id: goneId } })).not.toBeNull();
+    // Named, and named by FILE — an operator cannot grep for a row id.
+    expect(line).toMatch(/cleanup SUPPRESSED/);
+    expect(line).toMatch(/no-id--> evil\.md/);
+  });
+
+  it('still deletes a row whose file is genuinely GONE', async () => {
+    // The control for the test above: sparing skipped rows must not spare
+    // every row, or "repo-wins" would stop meaning anything and the
+    // assertion above would pass against a cleanup pass that deletes nothing.
+    const nodeId = 'dddd444400000000000000000000000006';
+    writeMd('notes', nodeId, 'notes');
+    await syncGraphFromGithub(makeGraph());
+    expect(await db.node.findUnique({ where: { id: nodeId } })).not.toBeNull();
+
+    rmSync(join(repoRoot(), 'notes.md'));
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(await db.node.findUnique({ where: { id: nodeId } })).toBeNull();
   });
 });
