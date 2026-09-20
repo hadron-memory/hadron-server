@@ -33,7 +33,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { Express, Request, RequestHandler, Response } from 'express';
+import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
 import express, { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { doubleCsrf, type DoubleCsrfUtilities } from 'csrf-csrf';
@@ -1036,7 +1036,7 @@ const EMAIL_MAX_LENGTH = 320;
  * handoff code to one browser (session-fixation defense); it
  * authenticates nobody and throttles nothing. `POST /auth/email` now
  * carries its own per-IP and per-ADDRESS limiters
- * (`buildEmailSendPerIpRateLimit` / `buildEmailSendPerAddressRateLimit`
+ * (`buildEmailSendPerIpRateLimit` / `buildEmailRecipientRateLimit`
  * in auth/email.ts), and this comment no longer vouches for it.
  *
  * Same in-process MemoryStore caveat as the DCR limiters above
@@ -1132,34 +1132,77 @@ export function buildAuthorizeEmailCodeRateLimit() {
  * verify handler (GET /auth/email/verify, src/server.ts) recognizes
  * the Option-C `return_to` and completes sign-in on THIS origin.
  */
-function buildHandleAuthorizeEmailPost(csrf: DoubleCsrfUtilities) {
+/**
+ * Every no-send check for `POST /oauth/authorize/email`, as middleware that
+ * runs BEFORE the shared per-recipient limiter.
+ *
+ * Ordering is the fix, and it is the same one `POST /auth/email` uses
+ * (validateEmailSendRequest in auth/email.ts). @copilot on PR #1238: with the
+ * shared limiter ahead of these checks, a caller could POST a victim's address
+ * with a bad CSRF token — or an invalid `return_to`, or the demo address —
+ * and spend one of that victim's five RECIPIENT slots on a request that never
+ * called `sendMagicLink`. Because that budget is now shared with
+ * `/auth/email`, five such requests locked the victim out of BOTH send paths.
+ *
+ * My own cross-path fix created that, which is the lesson worth keeping:
+ * sharing a budget also shares every way of spending it, so a shared limiter
+ * has to sit behind every route's no-send checks, not just the one it was
+ * written for.
+ *
+ * Anything reaching the limiter after this WILL call `sendMagicLink`.
+ */
+interface AuthorizeEmailSend {
+  email: string;
+  returnTo: string;
+}
+
+function buildValidateAuthorizeEmailSend(csrf: DoubleCsrfUtilities) {
+  return function validateAuthorizeEmailSend(req: Request, res: Response, next: NextFunction): void {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+
+    const email = typeof body.email === 'string' ? body.email.trim() : '';
+    if (email.length === 0 || email.length > EMAIL_MAX_LENGTH) {
+      res.status(400).json({ error: 'Email is required' });
+      return;
+    }
+
+    const returnTo = body.return_to;
+    if (!isServerLocalPath(returnTo)) {
+      res.status(400).json({
+        error:
+          'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
+      });
+      return;
+    }
+
+    // App Review demo bypass: the configured demo address gets a
+    // code-entry page instead of an emailed link (see reviewDemoConfig).
+    // It sends NO mail, so it must terminate here rather than downstream of
+    // the recipient limiter — otherwise it spends a budget it never uses.
+    if (isReviewDemoEmail(email)) {
+      const csrfToken = csrf.generateCsrfToken(req, res);
+      res.type('html').send(
+        renderTemplate(REVIEW_CODE_TEMPLATE, { csrfToken, returnTo, email }),
+      );
+      return;
+    }
+
+    (req as Request & { authorizeEmailSend?: AuthorizeEmailSend }).authorizeEmailSend = {
+      email,
+      returnTo: returnTo as string,
+    };
+    next();
+  };
+}
+
+function buildHandleAuthorizeEmailPost(_csrf: DoubleCsrfUtilities) {
   return async function handleAuthorizeEmailPost(req: Request, res: Response): Promise<void> {
-  const body = (req.body ?? {}) as Record<string, unknown>;
-
-  const email = typeof body.email === 'string' ? body.email.trim() : '';
-  if (email.length === 0 || email.length > EMAIL_MAX_LENGTH) {
-    res.status(400).json({ error: 'Email is required' });
-    return;
-  }
-
-  const returnTo = body.return_to;
-  if (!isServerLocalPath(returnTo)) {
-    res.status(400).json({
-      error:
-        'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
-    });
-    return;
-  }
-
-  // App Review demo bypass: the configured demo address gets a
-  // code-entry page instead of an emailed link (see reviewDemoConfig).
-  if (isReviewDemoEmail(email)) {
-    const csrfToken = csrf.generateCsrfToken(req, res);
-    res.type('html').send(
-      renderTemplate(REVIEW_CODE_TEMPLATE, { csrfToken, returnTo, email }),
-    );
-    return;
-  }
+  // Validated by buildValidateAuthorizeEmailSend above, which also answered
+  // every no-send case. Reading its result rather than re-deriving it is the
+  // same discipline as /auth/email: one copy of the rule, so the limiter's
+  // admission set and the handler's send set cannot drift apart.
+  const { email, returnTo } = (req as Request & { authorizeEmailSend: AuthorizeEmailSend })
+    .authorizeEmailSend;
 
   try {
     // No `redirect` (that's the portal-handoff landing) and no
@@ -1629,12 +1672,14 @@ export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
     '/oauth/authorize/email',
     buildAuthorizeEmailRateLimit(),
     express.urlencoded({ extended: false }),
-    // AFTER the body parser, because this one keys on the recipient and the
-    // form fields do not exist before it. Shared instance with POST
-    // /auth/email, so one victim has one budget across both public send paths
-    // rather than one per path (@copilot, PR #1238).
-    ...(opts.emailRecipientRateLimit ? [opts.emailRecipientRateLimit] : []),
     csrf.doubleCsrfProtection,
+    // Every no-send check runs BEFORE the shared recipient limiter, so a
+    // request that will not send mail cannot spend a victim's budget — which
+    // matters more now that the budget is shared with POST /auth/email
+    // (@copilot, PR #1238). The limiter then keys on the recipient, which is
+    // why it must also sit after the body parser.
+    buildValidateAuthorizeEmailSend(csrf),
+    ...(opts.emailRecipientRateLimit ? [opts.emailRecipientRateLimit] : []),
     buildHandleAuthorizeEmailPost(csrf),
   );
 

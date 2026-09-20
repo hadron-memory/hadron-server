@@ -236,32 +236,42 @@ describe('#560 — the limiter and the handler share one predicate', () => {
   });
 });
 
-describe('#560 — one victim, one budget, across BOTH public send paths', () => {
-  it('spends the same recipient budget from /oauth/authorize/email', async () => {
-    // @copilot on PR #1238. `POST /oauth/authorize/email` reaches the same
-    // `sendMagicLink` behind only a per-IP brake, so with the recipient
-    // limiter on /auth/email alone an attacker alternates paths and doubles
-    // what one inbox receives. Fixed by sharing ONE limiter instance — two
-    // builds would carry two stores and hand out the cap twice, which looks
-    // identical in code review and is the bug.
-    //
-    // This asserts the SHARED STORE rather than the OAuth route's own
-    // behaviour: exhaust the budget here, then prove the other path is
-    // already refused. It is deliberately not a test of the OAuth form flow,
-    // which has CSRF of its own — a 429 arrives before any of that.
-    const victim = uniqueEmail();
-    for (let i = 0; i < 5; i++) expect(await send(victim)).toBe(200);
+// The cross-path case — spending this budget from /auth/email and finding
+// /oauth/authorize/email already refusing — lives in
+// 804-oauth-email-login.test.ts instead. Reaching that limiter requires a real
+// CSRF handshake (a token and cookie from the entry GET), and #804 already has
+// the helpers and the seeded OAuth client for it. Asserting it from here
+// without CSRF would only ever observe the 403, which proves nothing about the
+// budget.
 
-    const res = await fetch(`${baseUrl}/oauth/authorize/email`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/x-www-form-urlencoded',
-        'x-forwarded-for': uniqueIp(),
-      },
-      body: new URLSearchParams({ email: victim }).toString(),
-      signal: AbortSignal.timeout(10_000),
-    });
-    expect(res.status, 'the other send path sees the spent budget').toBe(429);
+describe('#560 — a refused OAuth request must not spend the shared budget', () => {
+  it('does not let a bad-CSRF POST lock a victim out of both send paths', async () => {
+    // @copilot on PR #1238, and it was MY cross-path fix that created it:
+    // sharing a budget also shares every way of spending it. With the shared
+    // limiter ahead of the OAuth route's no-send checks, a caller could POST a
+    // victim's address with no valid CSRF token, get the existing 403 without
+    // any mail being sent, and still burn one of that victim's five recipient
+    // slots — five of those locked them out of /auth/email too.
+    //
+    // Eight is deliberately more than the budget of five: if these were
+    // counted, the /auth/email send below would be refused.
+    const victim = uniqueEmail();
+    for (let i = 0; i < 8; i++) {
+      const res = await fetch(`${baseUrl}/oauth/authorize/email`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'x-forwarded-for': uniqueIp(),
+        },
+        body: new URLSearchParams({ email: victim, return_to: '/app' }).toString(),
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(res.status, 'no CSRF token, so no mail is sent').not.toBe(200);
+    }
+
+    // The victim can still receive their real sign-in email.
+    expect(await send(victim)).toBe(200);
+    expect(sendMagicLinkMock).toHaveBeenCalledOnce();
   });
 });
 
