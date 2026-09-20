@@ -180,6 +180,16 @@ describe('#1232 — findHashBlocks', () => {
     expect(blocks.map((b) => b.symbol)).toEqual(['Query.me', 'Mutation.recordUsage']);
   });
 
+  it('finds an INDENTED template terminator', () => {
+    // The real file's terminator is unindented, so an exact match worked; this
+    // pins the tolerance so a reformat cannot turn the whole gate into a hard
+    // failure for a cosmetic reason.
+    const blocks = findHashBlocks(
+      'export const typeDefs = `#graphql\n  type Query {\n    # A note.\n    me: User\n  }\n  `;',
+    );
+    expect(blocks[0].symbol).toBe('Query.me');
+  });
+
   it('throws rather than silently scanning nothing when the literal is not found', () => {
     // A scanner that returns [] on an unparseable file is a gate that passes
     // for the wrong reason — the failure mode this whole check exists to avoid.

@@ -124,7 +124,15 @@ function classify(lines, end) {
 /** Every `#` block that sits above a declaration, with the symbol it precedes. */
 export function findHashBlocks(source) {
   const lines = source.split('\n');
-  const end = lines.findIndex((l, i) => i > 0 && l === '`;');
+  // Trimmed, not exact. The terminator is unindented today (measured: line
+  // 8847 is byte-exactly '`;'), so an exact match works and the gate runs
+  // green in CI — a review round reported it as always-throwing, which the CI
+  // log disproves. But an exact match makes a future reformat a hard failure
+  // of the whole gate for a cosmetic reason, and tolerating indentation costs
+  // nothing. Throwing when it is genuinely absent stays deliberate: a scanner
+  // that returns [] on a file it cannot parse is a gate that passes for the
+  // wrong reason.
+  const end = lines.findIndex((l, i) => i > 0 && l.trim() === '`;');
   if (end < 0) throw new Error('typeDefs.ts: could not find the end of the SDL template literal.');
   const kind = classify(lines, end);
 

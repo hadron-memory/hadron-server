@@ -54,3 +54,9 @@ Mutation.deleteExchangeConnection — "Exchange integration", heads delete + tes
 # direction, and still got converted twice.
 App.aiProvider — "the three AI fields below", labels aiProvider / aiModel / hasAiApiKey
 Agent.aiProvider — "the four AI fields below", labels those three plus aiApiKeyPreview
+# Round 6 (@codex): three more group notes over a RUN of mutations. Each one
+# documents its siblings, which would otherwise stay empty while the first of
+# them looked authoritative. Worth splitting into per-mutation descriptions one
+# day — that is authoring, not conversion, so it is not this change's job.
+Mutation.createEdge — "Edge CRUD" + null-arg semantics; mostly documents updateEdge
+Mutation.createAgentSchedule — "Schedule CRUD is org-ADMIN-gated"; covers update + delete too

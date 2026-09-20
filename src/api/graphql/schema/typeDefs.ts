@@ -6711,21 +6711,23 @@ export const typeDefs = `#graphql
     """
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
 
-    """
-    Edge CRUD. Null-arg semantics (#263):
-    - condition/data: null on updateEdge CLEARS the stored value (the
-      edge-conditions contract — a null condition means 'always fires').
-    - priority: null is treated as UNSET (createEdge falls back to the
-      default 0; updateEdge keeps the stored value) — the column is a
-      non-nullable Int, so null is never a meaningful value for it.
-    Clients that serialize unset args as explicit nulls must omit them
-    instead, or they will clear stored conditions/data on update.
-    #322/#542: sourceRef/targetRef each accept an ID-shape PK (preferred —
-    immutable, so the edge survives a later move/rename) OR a fully-qualified
-    node URN. Resolved via resolveNodeRef. edgeRef (update/delete) likewise
-    accepts an edge PK or a fully-qualified edge URN, resolved via
-    resolveEdgeRef (#542 Tier 2).
-    """
+    # Edge CRUD — a GROUP note covering create/update/delete, which is why it
+    # is allow-listed rather than published on createEdge alone (#1232).
+    #
+    # Null-arg semantics (#263):
+    # - condition/data: null on updateEdge CLEARS the stored value (the
+    #   edge-conditions contract — a null condition means 'always fires').
+    # - priority: null is treated as UNSET (createEdge falls back to the
+    #   default 0; updateEdge keeps the stored value) — the column is a
+    #   non-nullable Int, so null is never a meaningful value for it.
+    # Clients that serialize unset args as explicit nulls must omit them
+    # instead, or they will clear stored conditions/data on update.
+    #
+    # #322/#542: sourceRef/targetRef each accept an ID-shape PK (preferred —
+    # immutable, so the edge survives a later move/rename) OR a fully-qualified
+    # node URN. Resolved via resolveNodeRef. edgeRef (update/delete) likewise
+    # accepts an edge PK or a fully-qualified edge URN, resolved via
+    # resolveEdgeRef (#542 Tier 2).
     createEdge(sourceRef: ID!, targetRef: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     updateEdge(edgeRef: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeRef: ID!): Boolean!
@@ -6759,10 +6761,8 @@ export const typeDefs = `#graphql
     """
     importNode(input: ImportNodeInput!): ImportNodeResult!
 
-    """
-    Spec 040 — headless runs. Schedule CRUD is org-ADMIN-gated; a schedule
-    fires the launch gate (cor:acl:050) per due tick and mints an AppRun.
-    """
+    # Spec 040 — headless runs. Schedule CRUD is org-ADMIN-gated; a schedule
+    # fires the launch gate (cor:acl:050) per due tick and mints an AppRun.
     createAgentSchedule(input: CreateAgentScheduleInput!): AgentSchedule!
     updateAgentSchedule(id: ID!, input: UpdateAgentScheduleInput!): AgentSchedule!
     deleteAgentSchedule(id: ID!): Boolean!
@@ -8745,9 +8745,11 @@ export const typeDefs = `#graphql
       agentId: ID @deprecated(reason: "Use agentRef (accepts id / URN).")
     ): AgentSubscription!
 
+    # Identity lifecycle — this mutation plus the session group below.
     """
-    App Key callers only: vouch for a user and manage sessions.
-    Identity lifecycle
+    App Key callers only: vouch for a user, creating (or returning) the User
+    this App knows by \`externalId\`. Managing that user's SESSIONS is the
+    startAgentSession / endAgentSession pair below, not this call.
     """
     createAppUser(externalId: String!, handle: String, name: String, email: String): User!
 
