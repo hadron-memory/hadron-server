@@ -43,6 +43,10 @@ import { GOVERNED_ROLES, governedKindsOf, RoleGovernedError } from './governedRo
 /**
  * The governed signals as they stand UNDER THE LOCK, keyed by loc (#1210).
  *
+ * **Single-memory only.** `loc` is unique within a memory, never globally, so
+ * this keying is only sound because the `carry` path refuses more than one
+ * memoryId — see the guard in `assertBatchMutable`.
+ *
  * Returned only on the `carry` path, and the reason it is returned rather than
  * merely checked is @codex's P1 on PR #1230: an owning operation must copy the
  * values that are true NOW, not the ones its transaction read before the gate
@@ -255,6 +259,21 @@ export async function assertBatchMutable(
   const governed = opts.governed ?? 'refuse';
 
   if (governed === 'carry') {
+    // Keyed by loc, so it is only unambiguous within ONE memory — `loc` is
+    // unique per memory (`@@unique([loc, memoryId])`), not globally, and a
+    // loc-only lookup across memories silently picks an arbitrary tenant's row
+    // (`findings:unscoped-loc-lookup-crosses-memories`). @copilot on PR #1230.
+    //
+    // Refused loudly rather than papered over with a composite key: the one
+    // carry caller extracts FROM a single memory, and a future multi-memory
+    // owning operation should design its keying deliberately instead of
+    // inheriting a collision from here. Unreachable today by construction —
+    // which is exactly when it is cheap to close.
+    if (new Set(memoryIds).size > 1) {
+      throw new Error(
+        `assertBatchMutable: { governed: 'carry' } takes exactly one memory (got ${new Set(memoryIds).size}) — a loc-keyed snapshot is ambiguous across memories.`,
+      );
+    }
     // Unfiltered, unlike the refuse path below: the carry needs the CURRENT
     // value of both signals for every row, not just the governed ones. A row
     // DEMOTED since the caller's snapshot is the mirror hazard — copying its

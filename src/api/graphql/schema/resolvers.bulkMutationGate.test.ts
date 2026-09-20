@@ -333,6 +333,24 @@ describe('round 2 — the paths the gate still did not reach (@copilot)', () => 
     expect(snapshot?.get('tasks:promoted')).toEqual({ role: 'review', isRunnable: null });
   });
 
+  it('the CARRY path REFUSES more than one memory — a loc-keyed snapshot is ambiguous (@copilot, #1230)', async () => {
+    // `loc` is unique within a memory, not globally, so a loc-keyed map built
+    // across two memories silently returns an arbitrary tenant's signals —
+    // `findings:unscoped-loc-lookup-crosses-memories`, one layer up. Not
+    // reachable today (extract passes one memory), which is when it is cheap.
+    const { assertBatchMutable } = await import('../../../lib/bulkMutationGate.js');
+    await mkNode(srcMem.id, 'shared:loc', { role: 'review' });
+    await mkNode(tgtMem.id, 'shared:loc');
+
+    await expect(
+      db.$transaction((tx) =>
+        assertBatchMutable(tx, [srcMem.id, tgtMem.id], [{ loc: 'shared:loc' }], 'copy', {
+          governed: 'carry',
+        }),
+      ),
+    ).rejects.toThrow(/exactly one memory/);
+  });
+
   it('the CARRY snapshot reports a DEMOTED row as ungoverned — preserve, never mint', async () => {
     // The mirror hazard, and the reason the carry read is unfiltered: if it
     // only selected governed rows, a row demoted since the caller's snapshot
