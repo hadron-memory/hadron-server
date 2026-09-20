@@ -29,6 +29,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash } from 'node:crypto';
+import { buildOAuthRouter } from '../../auth/oauth.js';
+import { buildEmailRecipientRateLimit } from '../../auth/email.js';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -152,7 +154,7 @@ async function startEmailEntryFlow(query?: string): Promise<{
 /** Submit POST /oauth/authorize/email as an anonymous browser form. */
 async function postAuthorizeEmail(
   fields: Record<string, string>,
-  opts: { csrfCookieValue?: string } = {},
+  opts: { csrfCookieValue?: string; ip?: string } = {},
 ): Promise<Response> {
   const csrfCookie = opts.csrfCookieValue ? `_hadron_csrf=${opts.csrfCookieValue}` : '';
   return fetch(`${baseUrl}/oauth/authorize/email`, {
@@ -161,6 +163,13 @@ async function postAuthorizeEmail(
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
       ...(csrfCookie ? { cookie: csrfCookie } : {}),
+      // #560: this route's PER-IP limiter is 10/15min and its counters are
+      // shared by every case in this file. A test that needs more than a
+      // couple of POSTs must vary the source address, or it exhausts that
+      // budget and every later assertion fails as a 429 about the wrong
+      // limiter — which is exactly what happened while writing the
+      // shared-budget cases below.
+      ...(opts.ip ? { 'x-forwarded-for': opts.ip } : {}),
     },
     body: new URLSearchParams(fields).toString(),
   });
@@ -553,5 +562,160 @@ describe('POST /oauth/authorize/email — App Review demo bypass', () => {
       body: new URLSearchParams({ return_to: returnTo, email: DEMO_EMAIL, code: DEMO_CODE }).toString(),
     });
     expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * #560 — one victim, one recipient budget, across BOTH public send paths.
+ *
+ * `POST /auth/email` and `POST /oauth/authorize/email` reach the same
+ * `sendMagicLink`. @copilot on PR #1238: with the per-recipient limiter mounted
+ * only on the first, an attacker alternates paths and delivers past the cap to
+ * one inbox — defeating exactly the protection the limiter documents.
+ *
+ * The fix is ONE limiter instance mounted on both routes. Two separately-built
+ * limiters would not do: each carries its own MemoryStore, so a single victim
+ * would receive the budget twice. That mistake looks identical in review, which
+ * is why it is pinned by a test rather than by a comment.
+ *
+ * It lives HERE rather than in 560-auth-email-rate-limit.test.ts because
+ * reaching the limiter on this route requires a genuine CSRF handshake — the
+ * token and cookie from the entry GET — and this file already has that
+ * machinery and the seeded OAuth client. Asserting it without CSRF would only
+ * ever observe the 403 that now correctly precedes the limiter, which proves
+ * nothing about the budget.
+ */
+describe('#560 — the recipient budget is shared across both send paths', () => {
+  it('spends /auth/email budget and finds /oauth/authorize/email already refusing', async () => {
+    const victim = `shared-budget-${Date.now()}@example.test`;
+
+    // Exhaust the per-recipient budget (5 / 15 min) on the OTHER path. Each
+    // send uses a distinct source address so the per-IP limiter (10 / 15 min)
+    // cannot be what refuses below — otherwise this would pass for the wrong
+    // reason and say nothing about sharing.
+    for (let i = 0; i < 5; i++) {
+      const res = await fetch(`${baseUrl}/auth/email`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': `203.0.113.${200 + i}`,
+        },
+        body: JSON.stringify({ email: victim, client_state: 'nonce-shared' }),
+      });
+      expect(res.status, 'the first five sends go through').toBe(200);
+    }
+
+    // Now a fully valid OAuth email-entry submission for the same victim:
+    // correct CSRF token and cookie, valid return_to, real address. The only
+    // thing that can refuse it is the shared recipient budget.
+    const { csrfToken, csrfCookieValue, returnTo } = await startEmailEntryFlow();
+    const res = await postAuthorizeEmail(
+      { _csrf: csrfToken, return_to: returnTo, email: victim },
+      { csrfCookieValue, ip: '198.51.100.200' },
+    );
+
+    expect(res.status, 'the other path sees the budget already spent').toBe(429);
+  });
+
+  it('leaves a DIFFERENT recipient unaffected on that path', async () => {
+    // The control. Without it, a limiter that refused every OAuth submission
+    // — or a shared store keyed on something constant — would satisfy the
+    // case above just as well.
+    const other = `unaffected-${Date.now()}@example.test`;
+    const { csrfToken, csrfCookieValue, returnTo } = await startEmailEntryFlow();
+    const res = await postAuthorizeEmail(
+      { _csrf: csrfToken, return_to: returnTo, email: other },
+      { csrfCookieValue, ip: '198.51.100.201' },
+    );
+    expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * #560 — a request that will not send mail must not spend a victim's budget.
+ *
+ * @copilot on PR #1238. Because the recipient budget is now SHARED with
+ * `POST /auth/email`, anything that spends it here also locks the victim out
+ * there. The fix is ordering: every no-send check runs before the limiter.
+ *
+ * These cases exist because the first attempt at covering this did not work.
+ * A CSRF-less POST is refused by `doubleCsrfProtection` before either the
+ * validator or the limiter runs, so it cannot distinguish their order — the
+ * mutation that swaps them stayed green. What discriminates is a request with
+ * a VALID CSRF token that is still rejected before the send: an invalid
+ * `return_to`, or the review-demo address, which renders a code page and mails
+ * nothing.
+ */
+describe('#560 — refused OAuth submissions do not spend the shared budget', () => {
+  it('an invalid return_to costs the victim nothing, even repeated past the cap', async () => {
+    const victim = `bad-return-to-${Date.now()}@example.test`;
+
+    // Eight is past the budget of five: if these were counted, the send below
+    // would be refused.
+    for (let i = 0; i < 8; i++) {
+      const { csrfToken, csrfCookieValue } = await startEmailEntryFlow();
+      const res = await postAuthorizeEmail(
+        { _csrf: csrfToken, return_to: 'https://evil.example/pwn', email: victim },
+        { csrfCookieValue, ip: `198.51.100.${100 + i}` },
+      );
+      expect(res.status, 'rejected before any send').toBe(400);
+    }
+
+    // The victim can still receive a real sign-in email on the other path.
+    const res = await fetch(`${baseUrl}/auth/email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '203.0.113.240' },
+      body: JSON.stringify({ email: victim, client_state: 'nonce-x' }),
+    });
+    expect(res.status, 'budget intact — the refusals were never counted').toBe(200);
+  });
+
+  // The review-demo address is the other no-send branch and sits in the SAME
+  // pre-limiter middleware, so the ordering above covers it. Not asserted
+  // separately here: its fixtures (enableBypass / createDemoUser) are scoped to
+  // the bypass describe block, and duplicating them to restate one ordering
+  // would add fixture surface without adding discrimination.
+});
+
+/**
+ * #560 — the recipient brake is present even when nobody injects one.
+ *
+ * @copilot on PR #1238: `emailRecipientRateLimit` is an option, and an option
+ * that defaults to OFF is a defence that goes missing without anyone editing
+ * the route. `buildOAuthRouter()` with no arguments — which
+ * 025-oauth-register.test.ts does — would have mounted this route with no
+ * per-recipient cap at all.
+ *
+ * This asserts the middleware STACK rather than a response, deliberately, and
+ * the first version of it did the opposite and proved nothing. Driving the
+ * route on a bare mount returns 403 at CSRF before the limiter is ever
+ * reached, so every status is a 403 whether the limiter is mounted or not —
+ * an assertion that cannot fail. Reaching it for real needs the full CSRF
+ * handshake, which is what the shared-budget cases above already cover on the
+ * properly-wired server.
+ *
+ * What is actually at risk here is the WIRING: a limiter silently absent from
+ * one mount. So that is what gets measured — with the injected instance and
+ * without it, the route must carry the same number of handlers.
+ */
+describe('#560 — an un-injected OAuth router still throttles by recipient', () => {
+  /** Handler count for POST /oauth/authorize/email in a built router. */
+  function emailRouteHandlerCount(router: ReturnType<typeof buildOAuthRouter>): number {
+    const layer = (router as unknown as {
+      stack: Array<{ route?: { path: string; stack: unknown[] } }>;
+    }).stack.find((l) => l.route?.path === '/oauth/authorize/email');
+    expect(layer, 'the email-entry route must exist in the router').toBeDefined();
+    return layer!.route!.stack.length;
+  }
+
+  it('mounts the same handler chain with and without an injected limiter', () => {
+    const injected = emailRouteHandlerCount(
+      buildOAuthRouter({ emailRecipientRateLimit: buildEmailRecipientRateLimit() }),
+    );
+    const bare = emailRouteHandlerCount(buildOAuthRouter());
+
+    // Before the fix this was injected = N, bare = N - 1: the limiter was
+    // spread in only when supplied, so an alternate mount lost it silently.
+    expect(bare, 'a bare mount must not drop a middleware').toBe(injected);
   });
 });

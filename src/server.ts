@@ -17,6 +17,9 @@ import {
   verifyJwt,
   sendMagicLink,
   verifyMagicLink,
+  buildEmailSendPerIpRateLimit,
+  buildEmailRecipientRateLimit,
+  validateEmailSendRequest,
   buildGoogleAuthUrl,
   exchangeGoogleCode,
   verifyGoogleIdToken,
@@ -804,45 +807,61 @@ export async function createServer(): Promise<Express> {
   // Claude Desktop silently bails when registration_endpoint is
   // absent from AS metadata, so advertising it (even if the URL
   // 404s until 2B lands) is what unblocks the OAuth dance discovery.
-  mountOAuthRoutes(app);
+  //
+  // #560: the per-recipient email limiter is built ONCE here and shared with
+  // BOTH public send paths — `POST /auth/email` below and
+  // `POST /oauth/authorize/email` inside the OAuth router. Sharing the
+  // instance is what makes the cap mean anything: two separately-built
+  // limiters carry two MemoryStores, so one victim would receive the budget
+  // twice and an attacker could simply alternate paths (@copilot, PR #1238).
+  const emailRecipientRateLimit = buildEmailRecipientRateLimit();
+  mountOAuthRoutes(app, { emailRecipientRateLimit });
 
   // ---------------------------------------------------------------------------
   // Email magic-link auth
   // ---------------------------------------------------------------------------
 
-  app.post('/auth/email', async (req, res) => {
-    const { email, redirect, clientState, client_state } = req.body as {
-      email?: string;
-      redirect?: string;
-      clientState?: string;
-      client_state?: string;
-    };
-    if (!email || typeof email !== 'string') {
-      res.status(400).json({ error: 'Email is required' });
-      return;
-    }
-    // #505: require the portal's request-time browser nonce so every email
-    // handoff code is bound (session-fixation defense). The portal supplies it
-    // via /auth/start/email; a direct caller without it would otherwise mint an
-    // unbound, transferable code that any browser could redeem. Accept either
-    // casing so a direct caller following the error message can't trip on it.
-    const effectiveClientState = clientState ?? client_state;
-    if (!effectiveClientState || typeof effectiveClientState !== 'string') {
-      res.status(400).json({
-        error: 'client_state is required — request the sign-in link through the portal.',
-      });
-      return;
-    }
-    const clientStateHash = crypto.createHash('sha256').update(effectiveClientState).digest('hex');
-    try {
-      await sendMagicLink(email.trim(), db, redirect, clientStateHash);
-      res.json({ ok: true });
-    } catch (err) {
-      console.error('Email auth error:', err);
-      Sentry.captureException(err);
-      res.status(500).json({ error: 'Failed to send verification email' });
-    }
-  });
+  // #560: both brakes run BEFORE the handler, so a throttled request never
+  // reaches Resend. Per-IP bounds one attacker; per-address bounds what one
+  // victim's inbox receives, which per-IP cannot do — spreading a single
+  // target across many source addresses is how an email bomb is actually sent.
+  app.post(
+    '/auth/email',
+    // Validate FIRST: the limiters must only ever count requests that will
+    // actually attempt a send. See validateEmailSendRequest for why this
+    // ordering is the fix rather than a style choice.
+    validateEmailSendRequest,
+    buildEmailSendPerIpRateLimit(),
+    emailRecipientRateLimit,
+    async (req, res) => {
+      const { redirect } = req.body as { redirect?: string };
+
+      // Already validated by `validateEmailSendRequest` above, which answered
+      // 400 for anything unsendable BEFORE the limiters counted it. The handler
+      // reads that result rather than re-deriving it: a second copy of the rule
+      // here is exactly what drifted from the first (@codex, PR #1238), where a
+      // whitespace-only `client_state` was skipped by both budgets and still
+      // sent mail.
+      //
+      // #505: the nonce binds every handoff code to one browser
+      // (session-fixation defense). The portal supplies it via
+      // /auth/start/email; a direct caller without it would otherwise mint an
+      // unbound, transferable code any browser could redeem.
+      const { emailSend } = req as typeof req & { emailSend: { email: string; clientState: string } };
+      const clientStateHash = crypto
+        .createHash('sha256')
+        .update(emailSend.clientState)
+        .digest('hex');
+      try {
+        await sendMagicLink(emailSend.email, db, redirect, clientStateHash);
+        res.json({ ok: true });
+      } catch (err) {
+        console.error('Email auth error:', err);
+        Sentry.captureException(err);
+        res.status(500).json({ error: 'Failed to send verification email' });
+      }
+    },
+  );
 
   app.get('/auth/email/verify', async (req, res) => {
     const { token, redirect: redirectParam, return_to: returnToRaw } = req.query as {
