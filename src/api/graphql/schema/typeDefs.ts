@@ -2541,8 +2541,16 @@ export const typeDefs = `#graphql
   }
 
   """
-  Decrypted AI config for an agent. Only returned to org admins — the
-  portal backend uses it to make LLM calls on behalf of the logged-in user.
+  Decrypted AI config for an agent — the portal backend uses it to make LLM
+  calls on behalf of the logged-in user.
+
+  Gated by requireOwnerOrOrgRole, which branches on the Agent's OWNERSHIP
+  CLASS: an org-owned Agent admits an ADMIN of that org (and a platform
+  admin), while a USER-owned one (ownerUserId set, organizationId null)
+  admits only its owner — strictly, with no org path and no admin bypass.
+  Published as "only returned to org admins" until #1232, which is the
+  org-owned half of the rule.
+
   036-ai-service-config: registry-backed (the Agent's config named
   'default'); prefer resolveAIConfig for new callers.
   """
