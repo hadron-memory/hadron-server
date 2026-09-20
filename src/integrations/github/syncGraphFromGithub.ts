@@ -503,13 +503,17 @@ export const syncGraphFromGithub = async (
 };
 
 async function gitSync(cloneUrl: string, localPath: string, readBranch?: string): Promise<void> {
+  // #1146: validated BEFORE the clone/pull split, because both arms reach git
+  // with this value — `checkout <branch>` on one side and `clone --branch
+  // <branch>` on the other. The first version of this guard sat inside the
+  // pull arm only, so a fresh clone bypassed it entirely (@copilot, PR #1247):
+  // a guard in one branch of an if/else is narrower than the claim it makes.
+  if (readBranch) validateGitBranch(readBranch, 'readBranch');
+
   if (existsSync(join(localPath, '.git'))) {
     // Update remote URL with fresh token before pulling
     await execGit(['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
     if (readBranch) {
-      // #1146: positional arg — a leading `-` would be read as an option.
-      // Re-validated here as well as at the mutations; see lib/gitRef.ts.
-      validateGitBranch(readBranch, 'readBranch');
       await execGit(['checkout', readBranch], { cwd: localPath });
     }
     await execGit(['pull', '--ff-only'], { cwd: localPath });

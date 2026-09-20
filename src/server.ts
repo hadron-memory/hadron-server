@@ -1422,7 +1422,10 @@ export async function createServer(): Promise<Express> {
             deletedAt: null,
             source: { not: null },
             OR: [
-              { source: { contains: fullName } },
+              // Insensitive to match `sourceNamesRepo` below — a
+              // case-sensitive LIKE in front of a case-insensitive comparison
+              // drops the rows it exists to find (@copilot, PR #1247).
+              { source: { contains: fullName, mode: 'insensitive' } },
             ],
           },
           include: { organization: true },

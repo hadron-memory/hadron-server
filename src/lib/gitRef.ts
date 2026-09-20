@@ -72,7 +72,14 @@ function branchNameProblem(value: string): string | null {
   if (value.length === 0) return 'must not be empty';
   // THE argument-injection rule. Everything else is hygiene.
   if (value.startsWith('-')) return 'must not begin with "-" (git would read it as an option)';
-  if (value.length > 255) return 'must be 255 characters or fewer';
+  // A REFSPEC control prefix, not an option (@codex, PR #1247). `git push
+  // origin +main` reads the `+` as the force-update marker and pushes local
+  // `main` — so a writeBranch of `+main` can FORCE-UPDATE the remote's main
+  // rather than pushing a branch of that name. git's own check-ref-format
+  // accepts it, which is why this rule has to be ours. The push sites also
+  // build an explicit `refs/heads/x:refs/heads/x` refspec; this is the
+  // boundary half of the same fix.
+  if (value.startsWith('+')) return 'must not begin with "+" (git would read it as a force-push marker)';
   if (value.startsWith('.') || value.includes('/.')) return 'must not begin a path segment with "."';
   if (value.endsWith('.')) return 'must not end with "."';
   if (value.endsWith('.lock') || value.includes('.lock/')) return 'must not end a path segment with ".lock"';

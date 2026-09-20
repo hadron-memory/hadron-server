@@ -81,7 +81,13 @@ export async function withMirrorCheckout(
     // predicate beside it. The filter stays as a cheap coarse narrowing; the
     // selection below is exact.
     const candidates = await db.memory.findMany({
-      where: { source: { contains: ownerRepo } },
+      // `mode: 'insensitive'` because `sourceNamesRepo` compares
+      // case-insensitively, as GitHub does — and Postgres `LIKE` does not
+      // (@copilot, PR #1247). A sensitive narrowing in front of an
+      // insensitive comparison silently excludes the rows the comparison was
+      // written to accept: a stored `github.com/Acme/Repo` would never be
+      // offered for a slug of `acme/repo`, and the exact match never runs.
+      where: { source: { contains: ownerRepo, mode: 'insensitive' } },
       include: { organization: true },
     });
     memory = candidates.find((m) => sourceNamesRepo(m.source, ownerRepo)) ?? null;
@@ -198,7 +204,12 @@ export async function withMirrorCheckout(
     try {
       // `-u` sets upstream tracking so the branch isn't left tracking-less —
       // the original root cause of the "branch already exists" failure.
-      await execGit(['push', '-u', 'origin', branch], { cwd: localPath });
+      // Explicit refspec — see pushMemoryToGit for why a bare name is parsed
+      // rather than used (@codex, PR #1247).
+      await execGit(
+        ['push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
+        { cwd: localPath },
+      );
       console.log(`${logPrefix} Pushed ${commitSubject} → ${memory.urn}@${branch}`);
     } finally {
       restoreRemote(localPath, memory.source);

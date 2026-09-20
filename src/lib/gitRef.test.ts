@@ -19,6 +19,12 @@ import { isValidGitBranch, validateGitBranch, GitRefError } from './gitRef.js';
 describe('isValidGitBranch — refuses', () => {
   it.each([
     ['the argument-injection case', '-orphan'],
+    // @codex P1 on PR #1247: not an option — a REFSPEC control prefix. `git
+    // push origin +main` reads `+` as the force-update marker and pushes
+    // local `main`, so a writeBranch of `+main` can force-update the remote's
+    // main. git's own check-ref-format ACCEPTS it, which is why the rule has
+    // to be ours.
+    ['a refspec force marker', '+main'],
     ['a long option', '--orphan'],
     ['a bare dash', '-'],
     ['empty', ''],
@@ -61,6 +67,18 @@ describe('isValidGitBranch — accepts', () => {
     ['digits', '2026'],
     ['the mirror default', 'hadron-updates'],
     ['the sync default', 'main'],
+    // @codex P2 on PR #1247. The first version of this validator capped
+    // length at 255, which git does not: a 301-character two-component ref is
+    // accepted by check-ref-format, checkout -b and push alike. The cap would
+    // have refused existing rows at create, update AND every point of use —
+    // breaking sync for a memory that had worked for months.
+    //
+    // It is the exact hazard the comment at the top of this file warns about,
+    // committed anyway: nothing complains about a rule that is too strict, so
+    // the over-refusal has to be written down as a case.
+    ['a long hierarchical ref', `${'a'.repeat(150)}/${'b'.repeat(150)}`],
+    // `+` is only special in first position, as `-` is.
+    ['a plus that is not leading', 'feature+extra'],
   ])('%s', (_label, value) => {
     expect(isValidGitBranch(value)).toBe(true);
   });
