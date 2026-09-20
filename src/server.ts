@@ -50,6 +50,7 @@ import {
   formatGraphQLError,
   isExpectedClientError,
 } from './api/graphql/formatError.js';
+import { safeEqual } from './lib/constantTime.js';
 import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
 import { controller } from './controller/controller.js';
@@ -1172,7 +1173,18 @@ export async function createServer(): Promise<Express> {
         .createHmac('sha256', secret)
         .update(JSON.stringify(req.body))
         .digest('hex')}`;
-      if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+      // #555: compare through `safeEqual`, which length-checks BEFORE calling
+      // `timingSafeEqual`. The bare call this replaces threw a RangeError on any
+      // header whose length differed from the expected 71 bytes — and since this
+      // handler is `async` and Express 4 does not forward async rejections to
+      // error middleware, that throw became an unhandled rejection and
+      // TERMINATED THE PROCESS. One unauthenticated `curl` was a full DoS.
+      //
+      // `safeEqual` is the shared helper in lib/constantTime.ts, whose own
+      // docstring already named this line as one of the private copies to
+      // consolidate. Reusing it is the point: a hardening change must not fork
+      // four ways.
+      if (!safeEqual(sig, expected)) {
         res.status(401).json({ error: 'Invalid signature' });
         return;
       }
