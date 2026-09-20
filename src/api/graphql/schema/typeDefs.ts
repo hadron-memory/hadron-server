@@ -2005,8 +2005,11 @@ export const typeDefs = `#graphql
   """
   017-chat-visibility-and-personal-memory: a chat is created in one
   of two tiers, chosen by the user at chat creation and immutable
-  thereafter. private chats live in the user's personal-class
-  memory; shared chats live in the App's app-class memory.
+  thereafter. shared chats live in the App's app-class memory.
+  private chats live in the user's personal-class memory, OR in a
+  knowledge-class one when the caller's org has no matching App
+  install — validateChatScopeInvariants accepts both, so a client
+  must not assume the memory class from the scope.
   """
   enum ChatScope {
     private
@@ -3068,10 +3071,16 @@ export const typeDefs = `#graphql
   }
 
   """
-  A connected email mailbox (identity record). Provider state lives in the
-  provider capability tool (hadrontool-ms-exchange, #396); mail operations
-  route through the tool. Mail ops are OWNER-ONLY (only userId may operate
-  the mailbox); list/delete stay org-ADMIN management operations.
+  A connected PROVIDER ACCOUNT (identity record) — despite the name, this
+  one type carries mailboxes, calendars and Drive accounts alike; the
+  provider field below says which, and each routes to its own capability
+  tool. Provider state lives in that tool, never here.
+
+  Operations are identity-scoped: the connection's OWNER may perform them,
+  and an App/headless caller may perform those covered by a live
+  ConnectionGrant whose scopes include the operation's (requireEmailConnection
+  enforces both branches, fail-closed for an unmapped operation). list and
+  delete stay org-ADMIN management operations.
   """
   type ExchangeConnection {
     id: ID!

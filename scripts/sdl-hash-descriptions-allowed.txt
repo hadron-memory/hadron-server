@@ -9,7 +9,10 @@
 #
 # Adding an entry is a judgement call being RECORDED. Before you add one, check
 # it is not simply a description that belongs on the symbol: the caller-facing
-# ones were not rare in the original sweep — 145 of 152 were real documentation.
+# ones are not rare. FINAL measured split for the #1232 sweep — 151 sites that
+# rendered empty, 133 converted, 18 kept here. (This said "145 of 152" until
+# review moved eleven sites into this file; a count written into the audit
+# record is itself something that rots, which is the joke of this whole issue.)
 
 # --- Section labels: correct prose about a GROUP, sitting above that group's
 # first declaration. Converting one would publish a section heading as a single
