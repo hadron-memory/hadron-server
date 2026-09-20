@@ -217,8 +217,18 @@ describe('#557 — refused deliveries are logged', () => {
   // describe body is evaluated — during collection, before any test runs — so
   // it accumulates refusals from every earlier case in the file. Clearing
   // afterwards leaves the first case in this block counting all of them.
-  beforeEach(() => warn.mockClear());
-  afterAll(() => warn.mockRestore());
+  beforeEach(() => {
+    warn.mockClear();
+    // Default OFF for the per-reason cases: the throttle is stateful across a
+    // whole booted server, so a case that asserts "this reason logged" would
+    // otherwise be silenced by whichever earlier case logged that reason
+    // first. The two throttle cases below set their own window.
+    process.env.WEBHOOK_REFUSAL_LOG_WINDOW_MS = '0';
+  });
+  afterAll(() => {
+    delete process.env.WEBHOOK_REFUSAL_LOG_WINDOW_MS;
+    warn.mockRestore();
+  });
 
   /** The refusal lines only — other warnings on the path are not ours to assert. */
   const refusals = () =>
@@ -263,6 +273,92 @@ describe('#557 — refused deliveries are logged', () => {
     // handler that refused everything — would satisfy all three cases above.
     expect(await deliverRaw(NON_ROUNDTRIPPING_RAW, sign(NON_ROUNDTRIPPING_RAW))).toBe(200);
     expect(refusals(), 'a successful delivery is not a refusal').toHaveLength(0);
+  });
+
+  const badSig = (c: string) => `sha256=${c.repeat(64)}`;
+  const floodInvalid = async (n: number, c = 'c') => {
+    for (let i = 0; i < n; i++) {
+      expect(await deliverRaw('{"zen":"flood"}', badSig(c))).toBe(401);
+    }
+  };
+
+  it('swallows a flood and reports how many it swallowed', async () => {
+    // @copilot on PR #1236: this route is unauthenticated, so logging every
+    // refusal hands an attacker an amplifier — fill the log, burn ingestion
+    // budget, bury the real failure under a million copies of itself.
+    //
+    // The window is opened deliberately first. The throttle is stateful for
+    // the life of the server, so a case that just floods asserts nothing about
+    // throttling: whichever earlier case logged this reason may already have
+    // opened the window, and the flood would show zero lines either way.
+    await floodInvalid(1);            // opens the window, logs
+    warn.mockClear();
+
+    process.env.WEBHOOK_REFUSAL_LOG_WINDOW_MS = '60000';
+    await floodInvalid(25);
+    expect(refusals(), '25 refusals, no new lines').toHaveLength(0);
+
+    // The count is what keeps the throttle honest — without it a quiet log is
+    // indistinguishable from an idle server, which is the exact ambiguity this
+    // logging exists to remove.
+    process.env.WEBHOOK_REFUSAL_LOG_WINDOW_MS = '0';
+    await floodInvalid(1);
+    expect(refusals()).toHaveLength(1);
+    expect(refusals()[0]).toContain('25 further');
+    expect(refusals()[0]).toContain('suppressed');
+  });
+
+  it('keeps each reason\'s counter separate', async () => {
+    // Keyed per reason on purpose. A single global counter would let an
+    // attacker hammering "Invalid signature" silence the fail-closed 503 an
+    // operator needs to see — reintroducing the original silence by other
+    // means. It would also mis-attribute the flood's count onto whichever
+    // reason happened to log next, which is what this measures.
+    await floodInvalid(1);
+    const missingSig = async () => {
+      const res = await fetch(`${baseUrl}/github/webhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-github-event': 'push' },
+        body: '{"zen":"other"}',
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(res.status).toBe(401);
+    };
+    await missingSig();               // opens the OTHER reason's window
+    warn.mockClear();
+
+    process.env.WEBHOOK_REFUSAL_LOG_WINDOW_MS = '60000';
+    await floodInvalid(20);           // 20 suppressed, all "Invalid signature"
+
+    process.env.WEBHOOK_REFUSAL_LOG_WINDOW_MS = '0';
+    await missingSig();
+
+    expect(refusals(), 'the other reason still gets its line').toHaveLength(1);
+    expect(refusals()[0]).toContain('Missing signature');
+    // The discriminator: a global counter would report the 20 here.
+    expect(refusals()[0], 'another reason\'s flood is not charged to this one')
+      .not.toContain('suppressed');
+  });
+
+  it('bounds and strips attacker-controlled header values', async () => {
+    // Both headers are caller-supplied on an unauthenticated route. A 64KB
+    // event name echoed into an aggregator is an amplifier of its own.
+    const res = await fetch(`${baseUrl}/github/webhook`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-github-event': 'A'.repeat(5000),
+        'x-github-delivery': 'id with spaces & punctuation!',
+      },
+      body: '{"zen":"headers"}',
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(res.status).toBe(401);
+
+    const line = refusals()[0];
+    expect(line.length, 'the whole line stays small').toBeLessThan(400);
+    expect(line).not.toContain('A'.repeat(200));
+    expect(line).toContain('id?with?spaces???punctuation?');
   });
 
   it('never puts the payload or the signature in the log', async () => {

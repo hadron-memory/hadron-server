@@ -1209,27 +1209,85 @@ export async function createServer(): Promise<Express> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Log every REFUSED webhook delivery.
+   * Log REFUSED webhook deliveries, throttled per reason.
    *
-   * Without this a refusal is completely silent: a 401 storm, or a
-   * fail-closed 503 after a deploy with no secret, produces no output at all,
-   * and the only place the failure is visible is GitHub's own delivery log —
-   * which nobody watches, and which an operator may not have access to.
-   * "No errors in the logs" was not evidence of anything here, because there
-   * were no log lines to be absent.
+   * Two opposing failure modes, and the first version only avoided one of
+   * them. Silence was the original problem: a 401 storm, or the fail-closed
+   * 503 after a deploy whose secret never reached the running process, emitted
+   * nothing at all, and "no errors in the logs" was not evidence because there
+   * were no lines to be absent.
    *
-   * Deliberately NOT logged: the payload, the signature header, and the
-   * expected digest. The reason and the event type are enough to tell a
-   * misconfiguration from an attack, and a comparison oracle in the log file
-   * is its own problem.
+   * But this endpoint is UNAUTHENTICATED, so logging every refusal hands an
+   * attacker an amplifier (@copilot, PR #1236): a sustained flood fills log
+   * storage, costs ingestion money, and buries the real failure among a
+   * million copies of itself. An unbounded log on an unauthenticated path is
+   * itself a denial-of-service vector.
+   *
+   * So: FIRST refusal of each reason logs immediately, then that reason goes
+   * quiet for a window and the next line reports how many were suppressed. One
+   * attacker hammering `Invalid signature` therefore costs one line a minute
+   * AND cannot hide a different reason appearing — a flood that silenced the
+   * 503 you needed to see would reintroduce the original bug by other means.
+   *
+   * The reason set is a fixed internal vocabulary, never caller input, so this
+   * map cannot grow without bound.
    */
-  const refuseWebhook = (req: express.Request, res: express.Response, status: number, reason: string) => {
-    const event = (req.headers['x-github-event'] as string | undefined) ?? 'unknown';
-    const delivery = (req.headers['x-github-delivery'] as string | undefined) ?? 'unknown';
-    console.warn(
-      `[webhook] REFUSED ${status} — ${reason} (event=${event} delivery=${delivery}). ` +
-        'No payload was processed.',
-    );
+  const refusalLogState = new Map<string, { windowStart: number; suppressed: number }>();
+
+  /**
+   * Throttle window, read per call so a test can drive both sides of the
+   * behaviour against one booted server: 0 makes every refusal log (which is
+   * what the per-reason cases assert), the default throttles.
+   * `WEBHOOK_REFUSAL_LOG_WINDOW_MS` is not expected to be set in a deployment.
+   */
+  const refusalLogWindowMs = (): number => {
+    const raw = process.env.WEBHOOK_REFUSAL_LOG_WINDOW_MS;
+    if (raw === undefined || raw.trim() === '') return 60_000;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60_000;
+  };
+
+  /**
+   * `x-github-event` and `x-github-delivery` are attacker-controlled on an
+   * unauthenticated route, so they are bounded and stripped to a conservative
+   * charset before reaching a log line. Node already rejects CR/LF in header
+   * values, so this is about length and legibility rather than log injection —
+   * but a 64KB header echoed into an aggregator is its own amplifier.
+   */
+  const safeHeader = (value: unknown): string => {
+    if (typeof value !== 'string' || value.length === 0) return 'unknown';
+    const cleaned = value.slice(0, 64).replace(/[^A-Za-z0-9._-]/g, '?');
+    return cleaned.length === 0 ? 'unknown' : cleaned;
+  };
+
+  const refuseWebhook = (
+    req: express.Request,
+    res: express.Response,
+    status: number,
+    reason: string,
+  ) => {
+    const now = Date.now();
+    const state = refusalLogState.get(reason) ?? { windowStart: 0, suppressed: 0 };
+
+    const windowMs = refusalLogWindowMs();
+    if (now - state.windowStart >= windowMs) {
+      const suppressed = state.suppressed;
+      refusalLogState.set(reason, { windowStart: now, suppressed: 0 });
+      const event = safeHeader(req.headers['x-github-event']);
+      const delivery = safeHeader(req.headers['x-github-delivery']);
+      console.warn(
+        `[webhook] REFUSED ${status} — ${reason} (event=${event} delivery=${delivery}). ` +
+          'No payload was processed.' +
+          (suppressed > 0
+            ? ` ${suppressed} further "${reason}" refusal(s) were suppressed in the previous ` +
+              `${windowMs / 1000}s.`
+            : ''),
+      );
+    } else {
+      state.suppressed += 1;
+      refusalLogState.set(reason, state);
+    }
+
     res.status(status).json({ error: reason });
   };
 
