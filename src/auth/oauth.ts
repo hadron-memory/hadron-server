@@ -33,7 +33,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { Express, Request, Response } from 'express';
+import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
 import express, { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { doubleCsrf, type DoubleCsrfUtilities } from 'csrf-csrf';
@@ -46,7 +46,12 @@ import {
   EMAIL_SENT_TEMPLATE,
   REVIEW_CODE_TEMPLATE,
 } from './email-entry.template.js';
-import { sendMagicLink, TOKEN_EXPIRY_MINUTES } from './email.js';
+import {
+  buildEmailRecipientRateLimit,
+  EMAIL_MAX_LENGTH,
+  sendMagicLink,
+  TOKEN_EXPIRY_MINUTES,
+} from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
 import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
 
@@ -1017,18 +1022,27 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
  * octets (64 local + '@' + 255 domain); anything longer is garbage and
  * would only bloat the EmailVerificationToken row / the Resend call.
  */
-const EMAIL_MAX_LENGTH = 320;
+
 
 /**
  * Per-IP limiter for the magic-link send triggered from the OAuth
- * email-entry page. The existing send path (POST /auth/email) is
- * portal-gated by the mandatory #505 `client_state` nonce; this
- * endpoint is reachable by anyone who can render the entry page, so it
- * needs its own brake against being used as an email bomb / Resend
- * quota drain. 10 sends / 15 min / IP comfortably covers a human
- * retrying a typo'd address. `skipFailedRequests` uncounts 4xx/5xx so
- * CSRF failures and validation 400s don't consume the send budget —
- * only requests that actually reached Resend do.
+ * email-entry page, against being used as an email bomb / Resend quota
+ * drain. 10 sends / 15 min / IP comfortably covers a human retrying a
+ * typo'd address. `skipFailedRequests` uncounts 4xx/5xx so CSRF
+ * failures and validation 400s don't consume the send budget — only
+ * requests that actually reached Resend do.
+ *
+ * AMENDED (#560): this used to say "the existing send path (POST
+ * /auth/email) is portal-gated by the mandatory #505 `client_state`
+ * nonce", offered as the reason that path needed no limiter of its own.
+ * That was wrong. The nonce is mandatory, but it is CALLER-SUPPLIED and
+ * only ever hashed and written onto the token row — nothing validates it
+ * against a pre-registered value, so any string satisfies it. It binds a
+ * handoff code to one browser (session-fixation defense); it
+ * authenticates nobody and throttles nothing. `POST /auth/email` now
+ * carries its own per-IP and per-ADDRESS limiters
+ * (`buildEmailSendPerIpRateLimit` / `buildEmailRecipientRateLimit`
+ * in auth/email.ts), and this comment no longer vouches for it.
  *
  * Same in-process MemoryStore caveat as the DCR limiters above
  * (per-worker counters in a multi-worker deploy — acceptable, the
@@ -1123,34 +1137,77 @@ export function buildAuthorizeEmailCodeRateLimit() {
  * verify handler (GET /auth/email/verify, src/server.ts) recognizes
  * the Option-C `return_to` and completes sign-in on THIS origin.
  */
-function buildHandleAuthorizeEmailPost(csrf: DoubleCsrfUtilities) {
+/**
+ * Every no-send check for `POST /oauth/authorize/email`, as middleware that
+ * runs BEFORE the shared per-recipient limiter.
+ *
+ * Ordering is the fix, and it is the same one `POST /auth/email` uses
+ * (validateEmailSendRequest in auth/email.ts). @copilot on PR #1238: with the
+ * shared limiter ahead of these checks, a caller could POST a victim's address
+ * with a bad CSRF token — or an invalid `return_to`, or the demo address —
+ * and spend one of that victim's five RECIPIENT slots on a request that never
+ * called `sendMagicLink`. Because that budget is now shared with
+ * `/auth/email`, five such requests locked the victim out of BOTH send paths.
+ *
+ * My own cross-path fix created that, which is the lesson worth keeping:
+ * sharing a budget also shares every way of spending it, so a shared limiter
+ * has to sit behind every route's no-send checks, not just the one it was
+ * written for.
+ *
+ * Anything reaching the limiter after this WILL call `sendMagicLink`.
+ */
+interface AuthorizeEmailSend {
+  email: string;
+  returnTo: string;
+}
+
+function buildValidateAuthorizeEmailSend(csrf: DoubleCsrfUtilities) {
+  return function validateAuthorizeEmailSend(req: Request, res: Response, next: NextFunction): void {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+
+    const email = typeof body.email === 'string' ? body.email.trim() : '';
+    if (email.length === 0 || email.length > EMAIL_MAX_LENGTH) {
+      res.status(400).json({ error: 'Email is required' });
+      return;
+    }
+
+    const returnTo = body.return_to;
+    if (!isServerLocalPath(returnTo)) {
+      res.status(400).json({
+        error:
+          'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
+      });
+      return;
+    }
+
+    // App Review demo bypass: the configured demo address gets a
+    // code-entry page instead of an emailed link (see reviewDemoConfig).
+    // It sends NO mail, so it must terminate here rather than downstream of
+    // the recipient limiter — otherwise it spends a budget it never uses.
+    if (isReviewDemoEmail(email)) {
+      const csrfToken = csrf.generateCsrfToken(req, res);
+      res.type('html').send(
+        renderTemplate(REVIEW_CODE_TEMPLATE, { csrfToken, returnTo, email }),
+      );
+      return;
+    }
+
+    (req as Request & { authorizeEmailSend?: AuthorizeEmailSend }).authorizeEmailSend = {
+      email,
+      returnTo: returnTo as string,
+    };
+    next();
+  };
+}
+
+function buildHandleAuthorizeEmailPost(_csrf: DoubleCsrfUtilities) {
   return async function handleAuthorizeEmailPost(req: Request, res: Response): Promise<void> {
-  const body = (req.body ?? {}) as Record<string, unknown>;
-
-  const email = typeof body.email === 'string' ? body.email.trim() : '';
-  if (email.length === 0 || email.length > EMAIL_MAX_LENGTH) {
-    res.status(400).json({ error: 'Email is required' });
-    return;
-  }
-
-  const returnTo = body.return_to;
-  if (!isServerLocalPath(returnTo)) {
-    res.status(400).json({
-      error:
-        'Invalid return_to: must be a server-local path (starts with / and not //, no protocol, no backslash, no control bytes).',
-    });
-    return;
-  }
-
-  // App Review demo bypass: the configured demo address gets a
-  // code-entry page instead of an emailed link (see reviewDemoConfig).
-  if (isReviewDemoEmail(email)) {
-    const csrfToken = csrf.generateCsrfToken(req, res);
-    res.type('html').send(
-      renderTemplate(REVIEW_CODE_TEMPLATE, { csrfToken, returnTo, email }),
-    );
-    return;
-  }
+  // Validated by buildValidateAuthorizeEmailSend above, which also answered
+  // every no-send case. Reading its result rather than re-deriving it is the
+  // same discipline as /auth/email: one copy of the rule, so the limiter's
+  // admission set and the handler's send set cannot drift apart.
+  const { email, returnTo } = (req as Request & { authorizeEmailSend: AuthorizeEmailSend })
+    .authorizeEmailSend;
 
   try {
     // No `redirect` (that's the portal-handoff landing) and no
@@ -1566,7 +1623,28 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
  *   - POST /oauth/authorize/email                     (#804, CSRF-protected + rate-limited)
  *   - POST /oauth/token                               (Phase 2D)
  */
-export function buildOAuthRouter(): Router {
+/**
+ * #560 / @copilot on PR #1238: the per-RECIPIENT email limiter is owned by
+ * server.ts and passed IN, rather than built here, so that this route and
+ * `POST /auth/email` share ONE instance and therefore one store. Two
+ * separately-built limiters would give a single victim the budget twice, which
+ * is the bug this is fixing rather than a detail of how it is wired.
+ *
+ * It is OPTIONAL but never absent. Omitting it builds a local limiter instead
+ * of mounting none — @copilot again, and the distinction is fail-safe versus
+ * fail-open: an alternate mount (`buildOAuthRouter()` with no options, as in
+ * 025-oauth-register.test.ts) would otherwise silently re-expose the
+ * email-bomb path, and an injectable defence that defaults to OFF is the kind
+ * that goes missing without anyone editing the route. The injected instance
+ * still wins, because sharing the store is what bounds a victim across both
+ * paths; a local one bounds this route alone, which is strictly better than
+ * nothing.
+ */
+export interface OAuthRouteOptions {
+  emailRecipientRateLimit?: RequestHandler;
+}
+
+export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
   const router = Router();
 
   router.get('/.well-known/oauth-protected-resource', handleProtectedResourceMetadata);
@@ -1610,6 +1688,13 @@ export function buildOAuthRouter(): Router {
     buildAuthorizeEmailRateLimit(),
     express.urlencoded({ extended: false }),
     csrf.doubleCsrfProtection,
+    // Every no-send check runs BEFORE the shared recipient limiter, so a
+    // request that will not send mail cannot spend a victim's budget — which
+    // matters more now that the budget is shared with POST /auth/email
+    // (@copilot, PR #1238). The limiter then keys on the recipient, which is
+    // why it must also sit after the body parser.
+    buildValidateAuthorizeEmailSend(csrf),
+    opts.emailRecipientRateLimit ?? buildEmailRecipientRateLimit(),
     buildHandleAuthorizeEmailPost(csrf),
   );
 
@@ -1640,6 +1725,6 @@ export function buildOAuthRouter(): Router {
  * Mount the OAuth Authorization Server's HTTP surface on the given
  * Express app. Called from `src/server.ts:createServer()`.
  */
-export function mountOAuthRoutes(app: Express): void {
-  app.use(buildOAuthRouter());
+export function mountOAuthRoutes(app: Express, opts: OAuthRouteOptions = {}): void {
+  app.use(buildOAuthRouter(opts));
 }

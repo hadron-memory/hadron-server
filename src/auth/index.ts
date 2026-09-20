@@ -6,7 +6,14 @@ export {
   checkOrgMembership,
   type GitHubUser,
 } from './github.js';
-export { sendMagicLink, verifyMagicLink } from './email.js';
+export {
+  sendMagicLink,
+  verifyMagicLink,
+  buildEmailSendPerIpRateLimit,
+  buildEmailRecipientRateLimit,
+  parseEmailSendRequest,
+  validateEmailSendRequest,
+} from './email.js';
 export {
   buildGoogleAuthUrl,
   exchangeGoogleCode,

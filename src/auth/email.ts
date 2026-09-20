@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 import { Resend } from 'resend';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import type { Request, Response, NextFunction } from 'express';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 
@@ -16,6 +18,278 @@ function getResend(): Resend {
     resend = new Resend(apiKey);
   }
   return resend;
+}
+
+const RATE_LIMITED_BODY = { error: 'rate_limit_exceeded' };
+
+/**
+ * Longest address accepted on ANY send path — the single declaration, imported
+ * by oauth.ts rather than duplicated there.
+ *
+ * It used to be declared in both files, and the first version of this change
+ * added the constant here while leaving the copy in oauth.ts intact
+ * (@copilot, PR #1245). That is worse than the duplication it replaced: the
+ * shared recipient limiter's admission and both handlers' validation all
+ * depend on these caps agreeing, so two sources of truth reintroduce exactly
+ * the cross-route drift the rest of this change exists to remove — while the
+ * new constant's presence suggests it had been fixed.
+ *
+ * There is no test pinning the two together, deliberately: there is one
+ * declaration now, so a test would compare a constant to itself.
+ */
+export const EMAIL_MAX_LENGTH = 320;
+
+/**
+ * THE validator for `POST /auth/email`. One function, used by both the route
+ * handler and the limiters' `skip`, because the two asking the same question
+ * differently is a bypass rather than an inconsistency.
+ *
+ * @codex found exactly that on PR #1238: the limiter treated a whitespace-only
+ * `client_state` as unsendable and skipped counting, while the handler checked
+ * only for a non-empty STRING and sent the mail anyway. `client_state: " "`
+ * therefore delivered mail at no cost against either budget — a bypass
+ * introduced by the previous round's bypass fix. Two predicates for one
+ * question will drift again, so there is now only one.
+ */
+export type EmailSendRequest =
+  | { ok: true; email: string; clientState: string }
+  | { ok: false; reason: 'email' | 'client_state' };
+
+export function parseEmailSendRequest(body: unknown): EmailSendRequest {
+  const b = body as { email?: unknown; clientState?: unknown; client_state?: unknown } | undefined;
+
+  const rawEmail = b?.email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+  if (email.length === 0 || email.length > EMAIL_MAX_LENGTH) return { ok: false, reason: 'email' };
+
+  // Accept either casing, as the handler always has.
+  const rawClientState = b?.clientState ?? b?.client_state;
+  if (typeof rawClientState !== 'string' || rawClientState.trim().length === 0) {
+    return { ok: false, reason: 'client_state' };
+  }
+
+  // Validated on the TRIMMED form, returned RAW — deliberately, and the two
+  // must not be conflated. The #505 binding hashes this value at send time and
+  // `redeemLoginCode` re-hashes the caller's copy at redemption
+  // (authHandoff.ts) WITHOUT trimming. Storing a hash of the trimmed form would
+  // therefore make a whitespace-padded nonce unredeemable — a silent auth
+  // regression to fix a validation gap. Trimming decides ACCEPTANCE; the bytes
+  // that get hashed are unchanged.
+  return { ok: true, email, clientState: rawClientState };
+}
+
+/**
+ * Collapse an address to the MAILBOX it actually delivers to, for rate-limit
+ * keying only.
+ *
+ * @codex P1 on PR #1245: `victim+1@gmail.com` and `victim+2@gmail.com` reach
+ * one inbox but hashed to independent keys, so an attacker rotating aliases
+ * and source IPs — precisely the distributed email-bomb this limiter exists to
+ * stop — got five sends per alias and the cap bounded nothing.
+ *
+ * Two normalizations, and the second is narrower than the first on purpose:
+ *
+ *  - SUBADDRESSING (`local+tag`) is stripped for every domain. RFC 5233
+ *    subaddressing is near-universal among providers that accept `+` at all.
+ *  - DOT-INSENSITIVITY is applied ONLY to Gmail (and its googlemail alias),
+ *    because it is a Gmail-specific rule. `user.name@corp.example` and
+ *    `username@corp.example` are two different people almost everywhere else.
+ *
+ * The trade-off, stated because it is real rather than theoretical: if some
+ * provider treats `+` as a literal character in a local part, two genuinely
+ * distinct mailboxes share one budget of 5 per 15 minutes. That is a mild,
+ * self-clearing inconvenience for a rare configuration, weighed against an
+ * unbounded email bomb aimed at a real person. If it ever bites, the fix is an
+ * allowlist of literal-plus domains, not abandoning the collapse.
+ *
+ * This affects the RATE-LIMIT KEY only. The address that gets mailed is always
+ * the one the caller supplied — nothing here rewrites a recipient.
+ */
+export function canonicalRecipient(email: string): string {
+  const trimmed = email.trim().toLowerCase();
+  const at = trimmed.lastIndexOf('@');
+  if (at <= 0 || at === trimmed.length - 1) return trimmed;
+
+  let local = trimmed.slice(0, at);
+  const domain = trimmed.slice(at + 1);
+
+  const plus = local.indexOf('+');
+  // A local part that is ENTIRELY a tag (`+tag@x`) must not collapse to the
+  // empty string — every such address would then share one key, which is its
+  // own denial of service.
+  if (plus > 0) local = local.slice(0, plus);
+
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    const undotted = local.replace(/\./g, '');
+    if (undotted.length > 0) local = undotted;
+    return `${local}@gmail.com`;
+  }
+
+  return `${local}@${domain}`;
+}
+
+/**
+ * The recipient rate-limit key. The address is HASHED rather than embedded
+ * verbatim (@copilot, PR #1238): it is caller-controlled, and the in-process
+ * MemoryStore holds every key it sees for the full window, inserting it BEFORE
+ * the handler validates anything. Distinct oversized strings would then pin
+ * attacker-chosen bytes in a worker's memory for 15 minutes. A digest is
+ * fixed-width, so the store's footprint is bounded by the number of distinct
+ * senders rather than by what they send.
+ */
+function recipientKey(email: string): string {
+  return `email:${crypto.createHash('sha256').update(canonicalRecipient(email)).digest('hex')}`;
+}
+
+/**
+ * #560: `POST /auth/email` calls Resend for any caller-supplied address. It had
+ * no brake, which makes it an email bomb aimed at arbitrary third parties, a
+ * Resend cost drain, and a signup-enumeration oracle.
+ *
+ * It is NOT gated by anything today, and the nearby claim that it is deserves
+ * correcting rather than inheriting: the #505 `client_state` nonce is
+ * mandatory, but it is caller-supplied and only ever hashed and stored on the
+ * token row — nothing validates it against a pre-registered value. Any string
+ * satisfies it. Its job is binding the handoff code to one browser
+ * (session-fixation defense), not authenticating the sender, so it stops
+ * nobody from driving this endpoint in a loop.
+ *
+ * TWO limiters, because they answer different threats and either alone leaves
+ * the other open:
+ *
+ *  - per-IP bounds how much damage one attacker does;
+ *  - per-EMAIL bounds how much mail one VICTIM receives, which a per-IP limit
+ *    cannot do — distributing the same target across many IPs is exactly how
+ *    an email bomb is actually sent.
+ *
+ * The per-IP cap is PER ROUTE and deliberately so; the per-recipient cap is
+ * SHARED across both send paths. That asymmetry is the design, not an
+ * oversight (@copilot raised it on PR #1238):
+ *
+ *  - `/oauth/authorize/email` keeps its own per-IP limiter
+ *    (`buildAuthorizeEmailRateLimit`, the same 10 / 15 min), so one source
+ *    address can get 10 through each route — 20 across both. A per-IP limit is
+ *    a burst brake on ONE attacker, and an attacker willing to alternate
+ *    routes is equally willing to use a second IP, which defeats any per-IP
+ *    number. It buys ordering and noise reduction, not a bound.
+ *  - The guarantee that actually protects a third party — how much mail one
+ *    VICTIM receives — is carried by the recipient limiter, and THAT one is a
+ *    single shared instance precisely because alternating routes must not
+ *    double it.
+ *
+ * Unifying the per-IP store is worth doing, but it means reworking
+ * `buildAuthorizeEmailRateLimit`, which #1239 already has to change for an
+ * unrelated abort-refund bypass. Doing both there beats doing half here.
+ *
+ * The per-email budget is tighter than the per-IP one because a human retrying
+ * a typo'd address changes the address.
+ *
+ * Neither limiter carries a `skip`, and neither uses `skipFailedRequests`.
+ * Validation happens ahead of them in {@link validateEmailSendRequest}, so by
+ * the time a request reaches here it is one that WILL attempt a send, and the
+ * only honest thing to do is count it.
+ *
+ * `skipFailedRequests` infers "no mail was sent" from the HTTP response, and
+ * that inference is forgeable (@codex, PR #1238). express-rate-limit 8.5.2:
+ *
+ *   if (closePromise) { void closePromise.then(async () => {
+ *     if (!response.writableEnded) await decrementKey();
+ *   }); }
+ *
+ * A client that hangs up mid-request produces no response, so the counter is
+ * REFUNDED — while Node, which cannot cancel an already-running handler, goes
+ * on to deliver the mail. Sending and then aborting in a loop therefore costs
+ * an attacker nothing and bypasses both limiters completely; reproduced before
+ * this was changed, in the integration test.
+ *
+ * So these limiters count what they ADMITTED rather than what they managed to
+ * answer. The cost is that a Resend outage now consumes budget, which is the
+ * right side to err on: the alternative is a brake an attacker turns off by
+ * closing a socket.
+ *
+ * Same in-process MemoryStore caveat as the OAuth limiters: counters are
+ * per-worker, acceptable because the limit exists to stop abuse-shaped bursts
+ * rather than to enforce an exact quota.
+ */
+export function buildEmailSendPerIpRateLimit() {
+  return rateLimit({
+    windowMs: 15 * 60_000,
+    limit: 10,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: RATE_LIMITED_BODY,
+  });
+}
+
+/**
+ * Validates `POST /auth/email` and answers 400 BEFORE either limiter runs.
+ *
+ * Ordering is the entire design. Teaching each limiter to re-ask "would this
+ * have been rejected?" is what produced @codex's round-2 P1 — two predicates
+ * for one question, drifting on whitespace. Rejecting first means the limiters
+ * only ever see requests that WILL attempt a send, so there is nothing to keep
+ * in sync: no `skip`, no inference, no second copy of the rule.
+ *
+ * It also removes a denial of service I had built in the other direction. With
+ * validation behind the recipient limiter, an attacker could spend a VICTIM's
+ * budget using requests that never sent anything — locking that person out of
+ * their own sign-in emails while delivering none. Invalid requests now cost
+ * nobody anything.
+ */
+export function validateEmailSendRequest(req: Request, res: Response, next: NextFunction): void {
+  const parsed = parseEmailSendRequest(req.body);
+  if (!parsed.ok) {
+    res.status(400).json(
+      parsed.reason === 'email'
+        ? { error: 'Email is required' }
+        : { error: 'client_state is required — request the sign-in link through the portal.' },
+    );
+    return;
+  }
+  (req as Request & { emailSend?: EmailSendRequest & { ok: true } }).emailSend = parsed;
+  next();
+}
+
+/**
+ * Per-RECIPIENT companion to {@link buildEmailSendPerIpRateLimit}, and the one
+ * that bounds what a VICTIM receives rather than what an attacker sends.
+ *
+ * ONE INSTANCE IS MOUNTED ON EVERY PUBLIC SEND PATH, and that is the whole
+ * point. @copilot on PR #1238: with the limiter on `POST /auth/email` alone,
+ * `POST /oauth/authorize/email` still reached the same `sendMagicLink` behind
+ * only a per-IP brake, so spreading requests across source addresses delivered
+ * well past the cap to one inbox — defeating precisely the protection this
+ * limiter is documented to provide. Two separately-built limiters would not fix
+ * it either: each would carry its own MemoryStore, so one victim would get the
+ * budget TWICE. They must share a store, which means sharing an instance.
+ *
+ * The `skip` here asks only whether a usable ADDRESS is present, because this
+ * limiter guards routes with different contracts — `/oauth/authorize/email`
+ * carries no `client_state` at all, and reusing the stricter per-route
+ * predicate would skip every request on that path and silently protect nothing.
+ */
+export function buildEmailRecipientRateLimit() {
+  return rateLimit({
+    windowMs: 15 * 60_000,
+    limit: 5,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    skip: (req: Request) => !hasUsableRecipient(req.body),
+    message: RATE_LIMITED_BODY,
+    keyGenerator: (req: Request) => {
+      const email = (req.body as { email?: unknown } | undefined)?.email;
+      if (typeof email === 'string' && email.trim()) return recipientKey(email);
+      // Unreachable while `skip` above holds; kept as the IPv6-safe fallback
+      // rather than a shared constant, so these could never collide on one key.
+      return ipKeyGenerator(req.ip ?? '');
+    },
+  });
+}
+
+/** A recipient this limiter can meaningfully key on, on ANY send path. */
+function hasUsableRecipient(body: unknown): boolean {
+  const email = (body as { email?: unknown } | undefined)?.email;
+  return typeof email === 'string' && email.trim().length > 0 && email.trim().length <= EMAIL_MAX_LENGTH;
 }
 
 export async function sendMagicLink(
