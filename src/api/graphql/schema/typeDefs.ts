@@ -991,11 +991,18 @@ export const typeDefs = `#graphql
     entries: [SkillPlanEntry!]!
     orphans: [SkillOrphan!]!
     """
-    How many DECLARING nodes were in scope. A plan over an empty corpus and a
-    plan the caller cannot see are otherwise the same empty list, and a client
-    that cannot tell them apart reports nothing-to-do for a corpus it was denied.
+    How many nodes carrying ANY declaration key were in scope. A plan over an
+    empty corpus and a plan the caller cannot see are otherwise the same empty
+    list, and a client that cannot tell them apart reports nothing-to-do for a
+    corpus it was denied.
     """
     scanned: Int!
+    """
+    How many of those were judged for THIS host — the number of entries. A node
+    declaring only another host is scanned and not judged, so the two differ by
+    design; the gap is a fact about the corpus, not a discrepancy.
+    """
+    judged: Int!
   }
 
   """

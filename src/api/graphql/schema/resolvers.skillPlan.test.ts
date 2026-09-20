@@ -315,6 +315,66 @@ describe('review round 1 — @codex', () => {
   });
 });
 
+describe('review round 2 — @copilot', () => {
+  it('HONOURS an explicit memory scope instead of widening to everything readable', async () => {
+    // `memoryAccessFilter` returns `{ memoryId: { in: … } }`, so spreading it
+    // beside the requested scope made the last key win and silently dropped
+    // the narrowing. A client running --prune against one memory would then
+    // receive entries for files it never meant to touch.
+    const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `sp-other-${t}` }, ctx());
+    await mkNode('tasks:in-scope', { properties: declaration() });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: other.id, loc: 'tasks:out-of-scope', name: 'out',
+        isRunnable: true, content: '# Other', properties: declaration({ name: 'other-skill' }),
+      },
+    });
+
+    // Both are readable by this caller — the control that makes the narrowing
+    // meaningful rather than an access check in disguise.
+    const everything = await plan({ intent: 'LINT' });
+    expect(everything.entries).toHaveLength(2);
+
+    const scoped = await plan({ intent: 'LINT', memories: [mem.id] });
+    expect(scoped.entries).toHaveLength(1);
+    expect(scoped.entries[0].urn).toContain('tasks:in-scope');
+  });
+
+  it('reports scanned and judged separately when a node declares only another host', async () => {
+    // Discovery matches any declaration KEY, so a node declaring only
+    // `codexSkill` is selected and produces no entry. One number could not be
+    // right for both.
+    await mkNode('tasks:declared', { properties: declaration() });
+    await mkNode('tasks:other-host', {
+      properties: { exports: { codexSkill: { name: 'x-y', description: 'd. Use when x.' } } },
+    });
+
+    const got = await plan({ intent: 'LINT' });
+
+    expect(got.scanned).toBe(2);
+    expect(got.judged).toBe(1);
+    expect(got.entries).toHaveLength(1);
+  });
+
+  it('refuses on loaded CONTENT bytes, for LINT too — not only on rendered bodies', async () => {
+    // LINT returns no body, so a response-side ceiling left it unbounded while
+    // the nodes were still decrypted, hashed and linted. The cost is paid at
+    // load, so the refusal belongs at load.
+    await mkNode('tasks:huge', { properties: declaration(), content: 'x'.repeat(1_100_000) });
+
+    await expect(plan({ intent: 'LINT' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
+  it('CONTROL: an ordinary corpus is nowhere near the ceiling', async () => {
+    // Or the case above would pass against a resolver that refused everything.
+    await mkNode('tasks:small', { properties: declaration() });
+    await expect(plan({ intent: 'LINT' })).resolves.toBeTruthy();
+  });
+});
+
 describe('the surface itself', () => {
   it('is a QUERY, not a mutation — status and lint cannot write by construction', () => {
     // The guarantee §3 asks for. A mutation that promises not to write is a

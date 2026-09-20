@@ -200,8 +200,14 @@ export const skillQueries = {
       where: {
         deletedAt: null,
         OR: DISCOVERY_OR,
-        ...(memoryIds ? { memoryId: { in: memoryIds } } : {}),
-        ...access,
+        // INTERSECTED, not spread (@copilot, PR #1240). `memoryAccessFilter`
+        // returns `{ memoryId: { in: … } }`, so spreading it beside the
+        // requested scope made the LAST key win and silently dropped the
+        // caller's narrowing: ask for memory A, get every memory you can read.
+        // Not a leak — the caller could read them anyway — but a plan wider
+        // than the one asked for, which a client running `--prune` against a
+        // single memory would act on for files it never meant to touch.
+        AND: [access, ...(memoryIds ? [{ memoryId: { in: memoryIds } }] : [])],
       } as never,
       select: {
         id: true,
@@ -222,6 +228,22 @@ export const skillQueries = {
       );
     }
     await decryptNodesBatch(ctx.db, declaredRows);
+
+    // The byte ceiling belongs HERE, not on the response (@copilot, PR #1240).
+    // Capping only the rendered bodies left LINT and STATUS with no byte limit
+    // at all — they return no body, and 500 arbitrarily large nodes are still
+    // decrypted, hashed and linted first. The cost is paid at load, so the
+    // refusal belongs at load, and it applies to every intent.
+    const loadedBytes = declaredRows.reduce(
+      (n, r) => n + (r.content ? Buffer.byteLength(r.content, 'utf8') : 0),
+      0,
+    );
+    if (loadedBytes > SKILL_PLAN_MAX_BODY_BYTES) {
+      throw new GraphQLError(
+        `skillPlan: the nodes in scope carry ${loadedBytes} bytes of content, over the ${SKILL_PLAN_MAX_BODY_BYTES}-byte ceiling. Narrow \`memories\`, or work in batches; this surface does not silently truncate.`,
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
 
     // #1177 / @codex P1 on PR #1240 — LOCKED ENCRYPTED CONTENT.
     //
@@ -375,17 +397,6 @@ export const skillQueries = {
       };
     });
 
-    const bodyBytes = entries.reduce(
-      (n, e) => n + (e.renderedBody ? Buffer.byteLength(e.renderedBody, 'utf8') : 0),
-      0,
-    );
-    if (bodyBytes > SKILL_PLAN_MAX_BODY_BYTES) {
-      throw new GraphQLError(
-        `skillPlan: the rendered bodies total ${bodyBytes} bytes, over the ${SKILL_PLAN_MAX_BODY_BYTES}-byte ceiling. Narrow \`memories\`, or export in batches; this surface does not silently truncate.`,
-        { extensions: { code: 'BAD_USER_INPUT' } },
-      );
-    }
-
     // ── Usage: one read per node whose CONTENT leaves the server (#1061) ──
     //
     // An EXPORT entry with a body hands the caller the node's full content,
@@ -416,8 +427,16 @@ export const skillQueries = {
       // a plan the caller cannot see are the same empty list, and a client
       // that cannot tell them apart reports "nothing to do" for a corpus it
       // was denied. `scanned` is what makes that distinguishable.
+      //
+      // TWO numbers, because one of them was quietly wrong (@copilot, PR
+      // #1240). Discovery selects any declaration KEY, so a node declaring
+      // only another host — or carrying `exports: {}` — is scanned and
+      // produces no entry and no finding. Reporting only `scanned` therefore
+      // overstated the population this plan judged. Reporting only `judged`
+      // would hide that the read saw more. Both, and the gap between them is
+      // a fact about the corpus rather than a discrepancy in the report.
       scanned: declaredRows.length,
-      declared: skillNodes.length,
+      judged: skillNodes.length,
     };
   },
 };
