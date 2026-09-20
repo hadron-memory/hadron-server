@@ -50,6 +50,7 @@ import {
   formatGraphQLError,
   isExpectedClientError,
 } from './api/graphql/formatError.js';
+import { safeEqual } from './lib/constantTime.js';
 import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
 import { controller } from './controller/controller.js';
@@ -93,6 +94,14 @@ import {
   isGoogleDriveConnectConfigured,
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
+
+/**
+ * #557: named once, because the raw-body capture in the body parser and the
+ * route that consumes it have to agree. Two string literals that must match,
+ * mounted a thousand lines apart, is how a signature check quietly stops being
+ * fed the bytes it verifies.
+ */
+const GITHUB_WEBHOOK_PATH = '/github/webhook';
 
 // Report only unexpected GraphQL faults to Sentry — caller mistakes must not
 // flood the issue stream.
@@ -165,6 +174,19 @@ export async function createServer(): Promise<Express> {
     app.set('trust proxy', true);
   }
 
+  // #557: a production deploy with no webhook secret refuses deliveries (the
+  // route answers 503), so say so at BOOT rather than letting the operator
+  // discover it from GitHub's delivery log. This warns instead of refusing to
+  // boot on purpose: webhooks are one feature, and taking the whole API down
+  // over them would trade a known-narrow exposure for a total outage.
+  if (process.env.NODE_ENV === 'production' && !process.env.GITHUB_WEBHOOK_SECRET) {
+    console.warn(
+      '[webhook] GITHUB_WEBHOOK_SECRET is not set — POST /github/webhook will refuse ' +
+        'every delivery with 503. Register it in Doppler to enable GitHub App ' +
+        'installation events and push-triggered memory syncs.',
+    );
+  }
+
   app.use(
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',
@@ -177,6 +199,32 @@ export async function createServer(): Promise<Express> {
   // keeps the default so oversized payloads can't tie up parsing there.
   const jsonParser = express.json();
   const jsonParserLarge = express.json({ limit: '25mb' });
+
+  // #557: `/github/webhook` must HMAC the bytes GitHub actually signed, so it
+  // gets its own parser that keeps the raw buffer as `req.rawBody`. Only that
+  // route does — a global capture would pin a second copy of every request
+  // body in memory until its response ended, to serve one endpoint.
+  //
+  // Mounted with `app.use(PATH, …)` so EXPRESS'S ROUTER decides what matches,
+  // rather than a hand-rolled comparison that has to re-implement the same
+  // rules. The first version of this compared `req.path === GITHUB_WEBHOOK_PATH`
+  // and @codex caught it on PR #1237: Express's default non-strict routing
+  // dispatches `/github/webhook/` to the handler while that equality is false,
+  // so a correctly signed delivery to the trailing-slash URL would capture no
+  // rawBody and be refused 400. Default routing is also case-INsensitive, so
+  // `/GitHub/Webhook` had the same problem — two divergences from one string
+  // compare, which is the argument for not writing the compare at all.
+  //
+  // This runs BEFORE the global parser below; body-parser sets `req._body`
+  // once it has read the stream, so the global one then skips this route.
+  app.use(
+    GITHUB_WEBHOOK_PATH,
+    express.json({
+      verify: (req, _res, buf) => {
+        (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
   app.use((req, res, next) => {
     if (req.path === '/graphql' || req.path.startsWith('/graphql/')) {
       jsonParserLarge(req, res, next);
@@ -1160,20 +1208,146 @@ export async function createServer(): Promise<Express> {
   // GitHub App webhook
   // ---------------------------------------------------------------------------
 
-  app.post('/github/webhook', async (req, res) => {
+  /**
+   * Log REFUSED webhook deliveries, throttled per reason.
+   *
+   * Two opposing failure modes, and the first version only avoided one of
+   * them. Silence was the original problem: a 401 storm, or the fail-closed
+   * 503 after a deploy whose secret never reached the running process, emitted
+   * nothing at all, and "no errors in the logs" was not evidence because there
+   * were no lines to be absent.
+   *
+   * But this endpoint is UNAUTHENTICATED, so logging every refusal hands an
+   * attacker an amplifier (@copilot, PR #1236): a sustained flood fills log
+   * storage, costs ingestion money, and buries the real failure among a
+   * million copies of itself. An unbounded log on an unauthenticated path is
+   * itself a denial-of-service vector.
+   *
+   * So: FIRST refusal of each reason logs immediately, then that reason goes
+   * quiet for a window and the next line reports how many were suppressed. One
+   * attacker hammering `Invalid signature` therefore costs one line a minute
+   * AND cannot hide a different reason appearing — a flood that silenced the
+   * 503 you needed to see would reintroduce the original bug by other means.
+   *
+   * The reason set is a fixed internal vocabulary, never caller input, so this
+   * map cannot grow without bound.
+   */
+  const refusalLogState = new Map<string, { windowStart: number; suppressed: number }>();
+
+  /**
+   * Throttle window, read per call so a test can drive both sides of the
+   * behaviour against one booted server: 0 makes every refusal log (which is
+   * what the per-reason cases assert), the default throttles.
+   * `WEBHOOK_REFUSAL_LOG_WINDOW_MS` is not expected to be set in a deployment.
+   */
+  const refusalLogWindowMs = (): number => {
+    const raw = process.env.WEBHOOK_REFUSAL_LOG_WINDOW_MS;
+    if (raw === undefined || raw.trim() === '') return 60_000;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60_000;
+  };
+
+  /**
+   * `x-github-event` and `x-github-delivery` are attacker-controlled on an
+   * unauthenticated route, so they are bounded and stripped to a conservative
+   * charset before reaching a log line. Node already rejects CR/LF in header
+   * values, so this is about length and legibility rather than log injection —
+   * but a 64KB header echoed into an aggregator is its own amplifier.
+   */
+  const safeHeader = (value: unknown): string => {
+    if (typeof value !== 'string' || value.length === 0) return 'unknown';
+    const cleaned = value.slice(0, 64).replace(/[^A-Za-z0-9._-]/g, '?');
+    return cleaned.length === 0 ? 'unknown' : cleaned;
+  };
+
+  const refuseWebhook = (
+    req: express.Request,
+    res: express.Response,
+    status: number,
+    reason: string,
+  ) => {
+    const now = Date.now();
+    const state = refusalLogState.get(reason) ?? { windowStart: 0, suppressed: 0 };
+
+    const windowMs = refusalLogWindowMs();
+    if (now - state.windowStart >= windowMs) {
+      const suppressed = state.suppressed;
+      refusalLogState.set(reason, { windowStart: now, suppressed: 0 });
+      const event = safeHeader(req.headers['x-github-event']);
+      const delivery = safeHeader(req.headers['x-github-delivery']);
+      console.warn(
+        `[webhook] REFUSED ${status} — ${reason} (event=${event} delivery=${delivery}). ` +
+          'No payload was processed.' +
+          (suppressed > 0
+            ? ` ${suppressed} further "${reason}" refusal(s) were suppressed in the previous ` +
+              `${windowMs / 1000}s.`
+            : ''),
+      );
+    } else {
+      state.suppressed += 1;
+      refusalLogState.set(reason, state);
+    }
+
+    res.status(status).json({ error: reason });
+  };
+
+  app.post(GITHUB_WEBHOOK_PATH, async (req, res) => {
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
-    if (secret) {
+    if (!secret) {
+      // #557, first half: verification used to be simply SKIPPED when the
+      // secret was unset, which left the route below reachable unauthenticated
+      // — forged `installation` events relink a GitHub App installation
+      // (`organization.updateMany`) and forged `push` events trigger
+      // `syncGraphFromGithub`. Outside production that stays permitted, because
+      // it is how the route is exercised locally; in production it now fails
+      // CLOSED. The boot warning above fires at the same time, so a
+      // misconfigured deploy is loud before the first delivery rather than
+      // after it.
+      if (process.env.NODE_ENV === 'production') {
+        refuseWebhook(req, res, 503, 'Webhook signature verification is not configured');
+        return;
+      }
+    } else {
       const sig = req.headers['x-hub-signature-256'] as string | undefined;
       if (!sig) {
-        res.status(401).json({ error: 'Missing signature' });
+        refuseWebhook(req, res, 401, 'Missing signature');
+        return;
+      }
+      // #557, second half: HMAC the bytes GitHub signed, not a re-serialization
+      // of the parsed body. `JSON.stringify(req.body)` does not round-trip:
+      // `\/` escapes are dropped, integer-like keys reorder to the front,
+      // integers beyond 2^53 lose precision and `1.0` becomes `1`. Whether a
+      // given delivery survived that depended on its CONTENT, which is worse
+      // than failing always — an intermittent signature failure reads as a
+      // flaky webhook and pressures an operator into unsetting the secret,
+      // straight into the unauthenticated path above.
+      //
+      // `rawBody` is captured by the express.json `verify` hook for this path.
+      // Its absence means the body never went through that parser, so there is
+      // nothing trustworthy to compare and the delivery is refused rather than
+      // silently falling back to the re-serialized form.
+      const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody;
+      if (!rawBody) {
+        refuseWebhook(req, res, 400, 'Missing request body');
         return;
       }
       const expected = `sha256=${crypto
         .createHmac('sha256', secret)
-        .update(JSON.stringify(req.body))
+        .update(rawBody)
         .digest('hex')}`;
-      if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
-        res.status(401).json({ error: 'Invalid signature' });
+      // #555: compare through `safeEqual`, which length-checks BEFORE calling
+      // `timingSafeEqual`. The bare call this replaces threw a RangeError on any
+      // header whose length differed from the expected 71 bytes — and since this
+      // handler is `async` and Express 4 does not forward async rejections to
+      // error middleware, that throw became an unhandled rejection and
+      // TERMINATED THE PROCESS. One unauthenticated `curl` was a full DoS.
+      //
+      // `safeEqual` is the shared helper in lib/constantTime.ts, whose own
+      // docstring already named this line as one of the private copies to
+      // consolidate. Reusing it is the point: a hardening change must not fork
+      // four ways.
+      if (!safeEqual(sig, expected)) {
+        refuseWebhook(req, res, 401, 'Invalid signature');
         return;
       }
     }
