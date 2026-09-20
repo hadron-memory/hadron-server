@@ -535,7 +535,6 @@ model Organization {
   /// chosen one; the CLI refuses to export from it rather than guess. A task
   /// in a user-owned memory has no org and takes the platform's `hadron-`.
   /// Holger's ruling on hadron-cli's skill-command plan D7 (2026-09-15).
-  skillPrefix                  String?   @unique @map("skill_prefix")
   /// GitHub App installation id. Used to mint ephemeral tokens
   /// (1-hour expiry) for memory git-sync against repos within this
   /// installation's scope.
