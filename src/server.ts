@@ -95,6 +95,14 @@ import {
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
 
+/**
+ * #557: named once, because the raw-body capture in the body parser and the
+ * route that consumes it have to agree. Two string literals that must match,
+ * mounted a thousand lines apart, is how a signature check quietly stops being
+ * fed the bytes it verifies.
+ */
+const GITHUB_WEBHOOK_PATH = '/github/webhook';
+
 // Report only unexpected GraphQL faults to Sentry — caller mistakes must not
 // flood the issue stream.
 //
@@ -166,6 +174,19 @@ export async function createServer(): Promise<Express> {
     app.set('trust proxy', true);
   }
 
+  // #557: a production deploy with no webhook secret refuses deliveries (the
+  // route answers 503), so say so at BOOT rather than letting the operator
+  // discover it from GitHub's delivery log. This warns instead of refusing to
+  // boot on purpose: webhooks are one feature, and taking the whole API down
+  // over them would trade a known-narrow exposure for a total outage.
+  if (process.env.NODE_ENV === 'production' && !process.env.GITHUB_WEBHOOK_SECRET) {
+    console.warn(
+      '[webhook] GITHUB_WEBHOOK_SECRET is not set — POST /github/webhook will refuse ' +
+        'every delivery with 503. Register it in Doppler to enable GitHub App ' +
+        'installation events and push-triggered memory syncs.',
+    );
+  }
+
   app.use(
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',
@@ -176,7 +197,17 @@ export async function createServer(): Promise<Express> {
   // full-page HTML clips from the Web Clipper with 413. Raise it for
   // /graphql only — every other JSON endpoint (auth, webhooks, usage, ...)
   // keeps the default so oversized payloads can't tie up parsing there.
-  const jsonParser = express.json();
+  //
+  // #557: `/github/webhook` must HMAC the bytes GitHub actually signed, so the
+  // parser hands that one route its raw buffer as `req.rawBody`. It is captured
+  // for that path ONLY — a global capture would pin a second copy of every
+  // request body in memory until its response ended, to serve one endpoint.
+  const captureRawBody = (req: express.Request, _res: express.Response, buf: Buffer) => {
+    if (req.path === GITHUB_WEBHOOK_PATH) {
+      (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+    }
+  };
+  const jsonParser = express.json({ verify: captureRawBody });
   const jsonParserLarge = express.json({ limit: '25mb' });
   app.use((req, res, next) => {
     if (req.path === '/graphql' || req.path.startsWith('/graphql/')) {
@@ -1161,17 +1192,49 @@ export async function createServer(): Promise<Express> {
   // GitHub App webhook
   // ---------------------------------------------------------------------------
 
-  app.post('/github/webhook', async (req, res) => {
+  app.post(GITHUB_WEBHOOK_PATH, async (req, res) => {
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
-    if (secret) {
+    if (!secret) {
+      // #557, first half: verification used to be simply SKIPPED when the
+      // secret was unset, which left the route below reachable unauthenticated
+      // — forged `installation` events relink a GitHub App installation
+      // (`organization.updateMany`) and forged `push` events trigger
+      // `syncGraphFromGithub`. Outside production that stays permitted, because
+      // it is how the route is exercised locally; in production it now fails
+      // CLOSED. The boot warning above fires at the same time, so a
+      // misconfigured deploy is loud before the first delivery rather than
+      // after it.
+      if (process.env.NODE_ENV === 'production') {
+        res.status(503).json({ error: 'Webhook signature verification is not configured' });
+        return;
+      }
+    } else {
       const sig = req.headers['x-hub-signature-256'] as string | undefined;
       if (!sig) {
         res.status(401).json({ error: 'Missing signature' });
         return;
       }
+      // #557, second half: HMAC the bytes GitHub signed, not a re-serialization
+      // of the parsed body. `JSON.stringify(req.body)` does not round-trip:
+      // `\/` escapes are dropped, integer-like keys reorder to the front,
+      // integers beyond 2^53 lose precision and `1.0` becomes `1`. Whether a
+      // given delivery survived that depended on its CONTENT, which is worse
+      // than failing always — an intermittent signature failure reads as a
+      // flaky webhook and pressures an operator into unsetting the secret,
+      // straight into the unauthenticated path above.
+      //
+      // `rawBody` is captured by the express.json `verify` hook for this path.
+      // Its absence means the body never went through that parser, so there is
+      // nothing trustworthy to compare and the delivery is refused rather than
+      // silently falling back to the re-serialized form.
+      const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody;
+      if (!rawBody) {
+        res.status(400).json({ error: 'Missing request body' });
+        return;
+      }
       const expected = `sha256=${crypto
         .createHmac('sha256', secret)
-        .update(JSON.stringify(req.body))
+        .update(rawBody)
         .digest('hex')}`;
       // #555: compare through `safeEqual`, which length-checks BEFORE calling
       // `timingSafeEqual`. The bare call this replaces threw a RangeError on any
