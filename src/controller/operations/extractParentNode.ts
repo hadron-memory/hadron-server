@@ -144,9 +144,18 @@ export async function extractParentNodeGraph(
       // waits behind this transaction.
       //
       // Unlike the merge this whole operation is ONE transaction, so holding
-      // the lock here covers every write it performs; `nodes` was read inside
-      // it a few lines above, so the governed check is on this transaction's
-      // own snapshot rather than a stale one.
+      // the lock here covers every write it performs.
+      //
+      // CORRECTED by #1210 (@copilot, PR #1230). This used to continue: "…
+      // `nodes` was read inside it a few lines above, so the governed check is
+      // on this transaction's own snapshot rather than a stale one." That
+      // safety property does NOT hold, and the fix directly below is what
+      // proves it: `nodes` is read BEFORE the gate takes the memory lock, and
+      // the governed-kind doors serialize per loc rather than on that key, so
+      // a promotion or demotion can commit in between. READ COMMITTED does not
+      // refresh the earlier read. That is precisely why `assertBatchMutable`
+      // re-reads the signals and hands them back for the carry to copy — a
+      // reader must not lean on this snapshot being current.
       const freshSignals = await assertBatchMutable(
         tx,
         [args.sourceMemoryId],
