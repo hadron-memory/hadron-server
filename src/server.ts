@@ -197,18 +197,34 @@ export async function createServer(): Promise<Express> {
   // full-page HTML clips from the Web Clipper with 413. Raise it for
   // /graphql only — every other JSON endpoint (auth, webhooks, usage, ...)
   // keeps the default so oversized payloads can't tie up parsing there.
-  //
-  // #557: `/github/webhook` must HMAC the bytes GitHub actually signed, so the
-  // parser hands that one route its raw buffer as `req.rawBody`. It is captured
-  // for that path ONLY — a global capture would pin a second copy of every
-  // request body in memory until its response ended, to serve one endpoint.
-  const captureRawBody = (req: express.Request, _res: express.Response, buf: Buffer) => {
-    if (req.path === GITHUB_WEBHOOK_PATH) {
-      (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
-    }
-  };
-  const jsonParser = express.json({ verify: captureRawBody });
+  const jsonParser = express.json();
   const jsonParserLarge = express.json({ limit: '25mb' });
+
+  // #557: `/github/webhook` must HMAC the bytes GitHub actually signed, so it
+  // gets its own parser that keeps the raw buffer as `req.rawBody`. Only that
+  // route does — a global capture would pin a second copy of every request
+  // body in memory until its response ended, to serve one endpoint.
+  //
+  // Mounted with `app.use(PATH, …)` so EXPRESS'S ROUTER decides what matches,
+  // rather than a hand-rolled comparison that has to re-implement the same
+  // rules. The first version of this compared `req.path === GITHUB_WEBHOOK_PATH`
+  // and @codex caught it on PR #1237: Express's default non-strict routing
+  // dispatches `/github/webhook/` to the handler while that equality is false,
+  // so a correctly signed delivery to the trailing-slash URL would capture no
+  // rawBody and be refused 400. Default routing is also case-INsensitive, so
+  // `/GitHub/Webhook` had the same problem — two divergences from one string
+  // compare, which is the argument for not writing the compare at all.
+  //
+  // This runs BEFORE the global parser below; body-parser sets `req._body`
+  // once it has read the stream, so the global one then skips this route.
+  app.use(
+    GITHUB_WEBHOOK_PATH,
+    express.json({
+      verify: (req, _res, buf) => {
+        (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
   app.use((req, res, next) => {
     if (req.path === '/graphql' || req.path.startsWith('/graphql/')) {
       jsonParserLarge(req, res, next);

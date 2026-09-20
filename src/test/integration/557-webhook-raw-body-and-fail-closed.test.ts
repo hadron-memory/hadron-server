@@ -78,9 +78,9 @@ afterAll(async () => {
  */
 const NON_ROUNDTRIPPING_RAW = String.raw`{"zen":"x","url":"https:\/\/github.com\/hadron-memory"}`;
 
-/** Post raw bytes with a caller-chosen signature. */
-async function deliverRaw(rawBody: string, signature: string): Promise<number> {
-  const res = await fetch(`${baseUrl}/github/webhook`, {
+/** Post raw bytes with a caller-chosen signature, optionally to a URL variant. */
+async function deliverRaw(rawBody: string, signature: string, path = '/github/webhook'): Promise<number> {
+  const res = await fetch(`${baseUrl}${path}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -118,6 +118,34 @@ describe('#557 — the HMAC covers the bytes GitHub signed', () => {
     const raw = '{"zen":"hello","id":5}';
     expect(JSON.stringify(JSON.parse(raw))).toBe(raw);
     expect(await deliverRaw(raw, sign(raw))).toBe(200);
+  });
+});
+
+describe('#557 — every URL the router accepts gets its raw body', () => {
+  // @codex on PR #1237. The raw-body capture originally tested
+  // `req.path === '/github/webhook'`, which is NARROWER than the set of URLs
+  // Express actually dispatches to the handler — so a correctly signed
+  // delivery to one of the others captured no rawBody and was refused 400.
+  // The capture is now mounted with `app.use(PATH, …)`, letting the router
+  // answer the question rather than a string compare re-deriving its rules.
+  //
+  // Both variants below are things an operator can paste into the GitHub App's
+  // webhook URL field without noticing, which is what makes this a real outage
+  // rather than a curiosity.
+  it.each([
+    ['trailing slash — non-strict routing', '/github/webhook/'],
+    ['mixed case — case-insensitive routing', '/GitHub/Webhook'],
+  ])('accepts a correctly signed delivery to %s', async (_label, path) => {
+    const raw = '{"zen":"routing"}';
+    expect(await deliverRaw(raw, sign(raw), path)).toBe(200);
+  });
+
+  it('still REFUSES a bad signature on those variants', async () => {
+    // The pair: the variants must reach the same verification, not bypass it.
+    // Without this, "accepts" above would also be satisfied by a route that
+    // skipped the signature check entirely.
+    const raw = '{"zen":"routing"}';
+    expect(await deliverRaw(raw, `sha256=${'a'.repeat(64)}`, '/github/webhook/')).toBe(401);
   });
 });
 
