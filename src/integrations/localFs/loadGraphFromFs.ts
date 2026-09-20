@@ -1,7 +1,7 @@
 import { readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import type { Node } from '../../index.d.js';
-import { loadNodeFromFs } from './loadNodeFromFs.js';
+import { InvalidNodeLocError, loadNodeFromFs } from './loadNodeFromFs.js';
 
 interface FsGraph {
   name: string;
@@ -37,9 +37,14 @@ export const loadGraphFromFs = async (
   graphPath: string,
   graphName: string,
   ownerRepo: string,
-): Promise<{ graph: FsGraph; edges: GraphEdge[] }> => {
+): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedNodeIds: string[] }> => {
   const nodes: Partial<Node>[] = [];
   const edges: GraphEdge[] = [];
+  // Frontmatter ids of files skipped for an unusable path (#1224). The caller
+  // must keep these rows ALIVE: sync is repo-wins, so a row absent from the
+  // loaded graph is hard-deleted, and a file renamed to an invalid name would
+  // otherwise destroy the node instead of failing to move it.
+  const skippedNodeIds: string[] = [];
 
   // Collect node sources: either directory paths (legacy) or .md file paths (frontmatter)
   const nodeSources: string[] = [];
@@ -96,6 +101,7 @@ export const loadGraphFromFs = async (
         });
       }
     } catch (err) {
+      if (err instanceof InvalidNodeLocError && err.nodeId) skippedNodeIds.push(err.nodeId);
       console.warn(`Failed to load node at ${source}:`, (err as Error).message);
     }
   }
@@ -107,5 +113,6 @@ export const loadGraphFromFs = async (
       nodes,
     },
     edges,
+    skippedNodeIds,
   };
 };

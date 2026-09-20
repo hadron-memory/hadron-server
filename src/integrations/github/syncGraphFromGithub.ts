@@ -131,7 +131,7 @@ export const syncGraphFromGithub = async (
     await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
 
     // 3. Load the graph from the filesystem
-    const { graph: fsGraph, edges } = await loadGraphFromFs(localPath, graphName, ownerRepo);
+    const { graph: fsGraph, edges, skippedNodeIds } = await loadGraphFromFs(localPath, graphName, ownerRepo);
 
     // 4. Upsert all nodes and edges into the database (transactional)
     let pendingEdgeCount = 0;
@@ -350,7 +350,14 @@ export const syncGraphFromGithub = async (
           where: {
             ownerRepo,
             memoryId: graph.id,
-            id: { notIn: [...upsertedIds, ...protectedRowIds] },
+            // `skippedNodeIds` joins the survivors for the same reason
+            // `protectedRowIds` does (#1224): a file skipped for an unusable
+            // path is absent from `fsGraph.nodes`, so `notIn: upsertedIds`
+            // would hard-delete the row it names. Repo-wins means "the repo
+            // decides what a node IS", not "a file this loader could not
+            // address stops being a node" — renaming a file to something
+            // that cannot be a loc must fail to move it, not destroy it.
+            id: { notIn: [...upsertedIds, ...protectedRowIds, ...skippedNodeIds] },
             ...(deletionFilter.notClauses.length
               ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
               : {}),
