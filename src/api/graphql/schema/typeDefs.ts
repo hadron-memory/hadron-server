@@ -1552,7 +1552,11 @@ export const typeDefs = `#graphql
     organizationId: String
     organization: Organization
     """
-    008-agent-installation: direct FK replaces the AppAgent join.
+    SOFT-DEPRECATED convenience read: the FIRST installed Agent. An App
+    installs MANY Agents through the \`AppAgent\` join (023-app-shape Phase 2b,
+    which DROPPED the direct FK that 008-agent-installation had introduced) —
+    see \`appAgents\` below for the real cardinality. Kept so single-Agent
+    clients keep working; do not build new multi-Agent logic on it.
     """
     agentId: ID
     agent: Agent
@@ -1594,10 +1598,8 @@ export const typeDefs = `#graphql
     description: String
     systemPrompt: String
     agentTools: [String!]!
-    """
-    036-ai-service-config: the three AI fields below are registry-backed
-    reads of the App's config named 'default' (legacy columns dropped).
-    """
+    # 036-ai-service-config: the three AI fields below are registry-backed
+    # reads of the App's config named 'default' (legacy columns dropped).
     aiProvider: String
     aiModel: String
     hasAiApiKey: Boolean!
@@ -2349,7 +2351,10 @@ export const typeDefs = `#graphql
     "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
     listedOnMarketplace: Boolean!
     """
-    005-agent-subscription: four-way memory typology
+    Which memory typology this row belongs to. See MemoryClass for the
+    members — deliberately not restated here, because the count is what
+    went stale: this said "four-way" from 005-agent-subscription until
+    #1232, long after \`group\` (023) and \`private\` made it six.
     """
     class: MemoryClass!
     """
@@ -2368,9 +2373,11 @@ export const typeDefs = `#graphql
     """
     acceptsUploads: Boolean!
     """
-    005-agent-subscription: User owner for personal-class memories.
-    Resolves to null for non-personal memories or when the caller is
-    not the memory owner / not ADMIN/OWNER of the memory's org.
+    The strict user owner, for BOTH \`personal\` and \`private\` classes —
+    the DB invariant is \`class IN ('personal','private') ⇔ user_id IS NOT
+    NULL\`, so a private memory has one too. Resolves to null for every
+    other class, and also when the caller is not the memory owner / not
+    ADMIN/OWNER of the memory's org.
     """
     userId: ID
     isEncrypted: Boolean!
@@ -2414,8 +2421,14 @@ export const typeDefs = `#graphql
     userMemoryOfAgentId: String
     anonymousExpiresAt: DateTime
     """
-    008-agent-installation: app pivot for app/personal-class memories.
-    Required when class IN ('app', 'personal'); NULL otherwise.
+    The App this memory is scoped to. REQUIRED for \`class='app'\`,
+    FORBIDDEN for \`class='system'\` (an agent's own definition is never
+    App-scoped), and OPTIONAL for \`knowledge\` / \`group\` / \`personal\` /
+    \`private\` — set when provisioned inside an App, NULL when the memory
+    is free-standing. Enforced by \`chk_memory_class_app_id\`. (034 relaxed
+    the personal case and #653 moved knowledge + group from forbidden to
+    optional; this said "required for app/personal, NULL otherwise" until
+    #1232.)
     """
     appId: ID
     app: App
@@ -2481,10 +2494,8 @@ export const typeDefs = `#graphql
     personaRole: String
     "Persona identity TEMPLATE ('You are {{name}}, ...'); {{name}}/{{role}} are bound at casting time (Worker.prompt returns the bound result)."
     personaPrompt: String
-    """
-    036-ai-service-config: the four AI fields below are registry-backed
-    reads of the Agent's config named 'default' (legacy columns dropped).
-    """
+    # 036-ai-service-config: the four AI fields below are registry-backed
+    # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
     aiModel: String
     hasAiApiKey: Boolean!
@@ -3069,7 +3080,11 @@ export const typeDefs = `#graphql
     mailboxEmail: String!
     displayName: String
     """
-    Email provider backing this connection ('ms-exchange' today).
+    Provider backing this connection. Dispatched per-connection through
+    the tool registry: \`ms-exchange\`, \`gmail\`, \`google-cal\`,
+    \`google-drive\`. (This said "'ms-exchange' today" until #1232 — true
+    when written, and three providers out of date by the time it was
+    published.)
     """
     provider: String!
     syncEnabled: Boolean!
@@ -6770,9 +6785,7 @@ export const typeDefs = `#graphql
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
     updateMyPolicy(policy: JSON): User!
 
-    """
-    Asset upload — v1 (spec 004)
-    """
+    # Asset upload — v1 (spec 004)
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!
     completeAssetUpload(input: CompleteAssetUploadInput!): Asset!
     setAgentAssetUploadEnabled(input: SetAgentAssetUploadEnabledInput!): App!
@@ -7367,9 +7380,7 @@ export const typeDefs = `#graphql
     """
     pushMemoryToGit(id: ID!): Boolean!
 
-    """
-    Exchange integration (connection created via OAuth at /auth/microsoft)
-    """
+    # Exchange integration (connection created via OAuth at /auth/microsoft)
     deleteExchangeConnection(id: ID!): Boolean!
     testExchangeConnection(id: ID!): Boolean!
 

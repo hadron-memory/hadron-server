@@ -42,3 +42,12 @@ MemoryClass — describes AgentSubscription (the user-side license), not this en
 # for all ~20 *Page types; publishing it on the first one alone documents
 # MemoriesPage and leaves its siblings empty while appearing to be deliberate.
 MemoriesPage — the { items, total } envelope contract, which is about every *Page type, not this one
+# Round 4 (@codex): two more group headings, both over a RUN of mutations.
+Mutation.beginAssetUpload — "Asset upload — v1 (spec 004)", heads the five v1 asset mutations
+Mutation.deleteExchangeConnection — "Exchange integration", heads delete + test and says nothing about deleting
+# Found by running the plural-over-singular tell as a SCRIPT over the sweep's
+# own output, rather than waiting for a fifth review round. Both say "the N AI
+# fields BELOW" — a group label that names its own plurality and its own
+# direction, and still got converted twice.
+App.aiProvider — "the three AI fields below", labels aiProvider / aiModel / hasAiApiKey
+Agent.aiProvider — "the four AI fields below", labels those three plus aiApiKeyPreview
