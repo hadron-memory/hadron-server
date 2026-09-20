@@ -23,9 +23,19 @@ function getResend(): Resend {
 const RATE_LIMITED_BODY = { error: 'rate_limit_exceeded' };
 
 /**
- * Longest address accepted on a send path. Matches `EMAIL_MAX_LENGTH` in
- * oauth.ts, whose handler already documents that its validation "must match
- * POST /auth/email exactly" — it did not, and this is half of making that true.
+ * Longest address accepted on ANY send path — the single declaration, imported
+ * by oauth.ts rather than duplicated there.
+ *
+ * It used to be declared in both files, and the first version of this change
+ * added the constant here while leaving the copy in oauth.ts intact
+ * (@copilot, PR #1245). That is worse than the duplication it replaced: the
+ * shared recipient limiter's admission and both handlers' validation all
+ * depend on these caps agreeing, so two sources of truth reintroduce exactly
+ * the cross-route drift the rest of this change exists to remove — while the
+ * new constant's presence suggests it had been fixed.
+ *
+ * There is no test pinning the two together, deliberately: there is one
+ * declaration now, so a test would compare a constant to itself.
  */
 export const EMAIL_MAX_LENGTH = 320;
 

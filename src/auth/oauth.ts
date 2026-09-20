@@ -46,7 +46,12 @@ import {
   EMAIL_SENT_TEMPLATE,
   REVIEW_CODE_TEMPLATE,
 } from './email-entry.template.js';
-import { buildEmailRecipientRateLimit, sendMagicLink, TOKEN_EXPIRY_MINUTES } from './email.js';
+import {
+  buildEmailRecipientRateLimit,
+  EMAIL_MAX_LENGTH,
+  sendMagicLink,
+  TOKEN_EXPIRY_MINUTES,
+} from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
 import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
 
@@ -1017,7 +1022,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
  * octets (64 local + '@' + 255 domain); anything longer is garbage and
  * would only bloat the EmailVerificationToken row / the Resend call.
  */
-const EMAIL_MAX_LENGTH = 320;
+
 
 /**
  * Per-IP limiter for the magic-link send triggered from the OAuth
