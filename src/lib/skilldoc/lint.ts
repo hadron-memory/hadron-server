@@ -1,10 +1,19 @@
 /**
  * #1177 §6 — the corpus lint rules, server-side.
  *
- * Thirteen rules over a node's declaration and body. They answer *is this node
+ * TWELVE rules over a node's declaration and body — eleven per node plus
+ * `skill-name-collision`, which is corpus-wide. They answer *is this node
  * exportable, and will the host do what its author expects* — judgment over
  * corpus inputs alone, with no file and no disk, which is what makes this half
  * of the split (A3) pure.
+ *
+ * §6 of the spec says "13 rules" and is counting one more:
+ * `skill-node-unavailable`, which is synthesized by the COMMAND layer for a
+ * ref it could not read. That one is not a judgment about a node — it is a
+ * report about a read that failed — so it cannot live in a pure function over
+ * a node it does not have. Said here rather than left as an off-by-one,
+ * because "thirteen" in this header would misstate what the port covers
+ * (@copilot, PR #1233).
  *
  * Ported from `internal/skilldoc`'s `Lint` / `LintCollisions`. The message text
  * is part of the port: an operator reading `hadron skill lint` and a portal
