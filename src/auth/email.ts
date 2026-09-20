@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { Resend } from 'resend';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
-import type { Request } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 
@@ -21,6 +21,69 @@ function getResend(): Resend {
 }
 
 const RATE_LIMITED_BODY = { error: 'rate_limit_exceeded' };
+
+/**
+ * Longest address accepted on a send path. Matches `EMAIL_MAX_LENGTH` in
+ * oauth.ts, whose handler already documents that its validation "must match
+ * POST /auth/email exactly" — it did not, and this is half of making that true.
+ */
+export const EMAIL_MAX_LENGTH = 320;
+
+/**
+ * THE validator for `POST /auth/email`. One function, used by both the route
+ * handler and the limiters' `skip`, because the two asking the same question
+ * differently is a bypass rather than an inconsistency.
+ *
+ * @codex found exactly that on PR #1238: the limiter treated a whitespace-only
+ * `client_state` as unsendable and skipped counting, while the handler checked
+ * only for a non-empty STRING and sent the mail anyway. `client_state: " "`
+ * therefore delivered mail at no cost against either budget — a bypass
+ * introduced by the previous round's bypass fix. Two predicates for one
+ * question will drift again, so there is now only one.
+ */
+export type EmailSendRequest =
+  | { ok: true; email: string; clientState: string }
+  | { ok: false; reason: 'email' | 'client_state' };
+
+export function parseEmailSendRequest(body: unknown): EmailSendRequest {
+  const b = body as { email?: unknown; clientState?: unknown; client_state?: unknown } | undefined;
+
+  const rawEmail = b?.email;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+  if (email.length === 0 || email.length > EMAIL_MAX_LENGTH) return { ok: false, reason: 'email' };
+
+  // Accept either casing, as the handler always has.
+  const rawClientState = b?.clientState ?? b?.client_state;
+  if (typeof rawClientState !== 'string' || rawClientState.trim().length === 0) {
+    return { ok: false, reason: 'client_state' };
+  }
+
+  // Validated on the TRIMMED form, returned RAW — deliberately, and the two
+  // must not be conflated. The #505 binding hashes this value at send time and
+  // `redeemLoginCode` re-hashes the caller's copy at redemption
+  // (authHandoff.ts) WITHOUT trimming. Storing a hash of the trimmed form would
+  // therefore make a whitespace-padded nonce unredeemable — a silent auth
+  // regression to fix a validation gap. Trimming decides ACCEPTANCE; the bytes
+  // that get hashed are unchanged.
+  return { ok: true, email, clientState: rawClientState };
+}
+
+/**
+ * The recipient key. The address is HASHED rather than embedded verbatim
+ * (@copilot, PR #1238): it is caller-controlled, and the in-process MemoryStore
+ * holds every key it sees for the full window, inserting it BEFORE the handler
+ * validates anything. Distinct oversized strings would then pin
+ * attacker-chosen bytes in a worker's memory for 15 minutes. A digest is
+ * fixed-width, so the store's footprint is bounded by the number of distinct
+ * senders rather than by what they send. The length cap in
+ * {@link parseEmailSendRequest} bounds it again on the way in.
+ *
+ * Case-folded first: `Victim@x` and `victim@x` are one mailbox, and a limiter
+ * that treats them as two budgets is bypassed by pressing shift.
+ */
+function recipientKey(email: string): string {
+  return `email:${crypto.createHash('sha256').update(email.trim().toLowerCase()).digest('hex')}`;
+}
 
 /**
  * #560: `POST /auth/email` calls Resend for any caller-supplied address. It had
@@ -47,11 +110,13 @@ const RATE_LIMITED_BODY = { error: 'rate_limit_exceeded' };
  * send paths do not drift apart; the per-email budget is deliberately tighter,
  * since a human retrying a typo'd address changes the address.
  *
- * Validation failures are excluded by {@link isUnsendableRequest}, evaluated
- * BEFORE the handler — deliberately NOT by `skipFailedRequests`.
+ * Neither limiter carries a `skip`, and neither uses `skipFailedRequests`.
+ * Validation happens ahead of them in {@link validateEmailSendRequest}, so by
+ * the time a request reaches here it is one that WILL attempt a send, and the
+ * only honest thing to do is count it.
  *
  * `skipFailedRequests` infers "no mail was sent" from the HTTP response, and
- * that inference is forgeable (Codex, PR #1238). express-rate-limit 8.5.2:
+ * that inference is forgeable (@codex, PR #1238). express-rate-limit 8.5.2:
  *
  *   if (closePromise) { void closePromise.then(async () => {
  *     if (!response.writableEnded) await decrementKey();
@@ -78,57 +143,79 @@ export function buildEmailSendPerIpRateLimit() {
     limit: 10,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    skip: isUnsendableRequest,
     message: RATE_LIMITED_BODY,
   });
 }
 
 /**
- * True for requests `POST /auth/email` will reject with 400 before attempting
- * any send. Read off the PARSED BODY, so the verdict is settled before the
- * handler runs and cannot be changed afterwards by how — or whether — the
- * response completes.
+ * Validates `POST /auth/email` and answers 400 BEFORE either limiter runs.
  *
- * It mirrors the handler's own two preconditions. If those ever diverge the
- * failure is a validation 400 that still costs budget, which is noisy but
- * safe; the reverse (budget-free requests that send mail) is the one that must
- * not happen, and it cannot here, because anything reaching the send has
- * already been counted.
+ * Ordering is the entire design. Teaching each limiter to re-ask "would this
+ * have been rejected?" is what produced @codex's round-2 P1 — two predicates
+ * for one question, drifting on whitespace. Rejecting first means the limiters
+ * only ever see requests that WILL attempt a send, so there is nothing to keep
+ * in sync: no `skip`, no inference, no second copy of the rule.
+ *
+ * It also removes a denial of service I had built in the other direction. With
+ * validation behind the recipient limiter, an attacker could spend a VICTIM's
+ * budget using requests that never sent anything — locking that person out of
+ * their own sign-in emails while delivering none. Invalid requests now cost
+ * nobody anything.
  */
-function isUnsendableRequest(req: Request): boolean {
-  const body = req.body as
-    | { email?: unknown; clientState?: unknown; client_state?: unknown }
-    | undefined;
-  const email = body?.email;
-  const clientState = body?.clientState ?? body?.client_state;
-  const hasEmail = typeof email === 'string' && email.trim().length > 0;
-  const hasClientState = typeof clientState === 'string' && clientState.trim().length > 0;
-  return !hasEmail || !hasClientState;
+export function validateEmailSendRequest(req: Request, res: Response, next: NextFunction): void {
+  const parsed = parseEmailSendRequest(req.body);
+  if (!parsed.ok) {
+    res.status(400).json(
+      parsed.reason === 'email'
+        ? { error: 'Email is required' }
+        : { error: 'client_state is required — request the sign-in link through the portal.' },
+    );
+    return;
+  }
+  (req as Request & { emailSend?: EmailSendRequest & { ok: true } }).emailSend = parsed;
+  next();
 }
 
-/** Per-recipient companion to {@link buildEmailSendPerIpRateLimit}. */
-export function buildEmailSendPerAddressRateLimit() {
+/**
+ * Per-RECIPIENT companion to {@link buildEmailSendPerIpRateLimit}, and the one
+ * that bounds what a VICTIM receives rather than what an attacker sends.
+ *
+ * ONE INSTANCE IS MOUNTED ON EVERY PUBLIC SEND PATH, and that is the whole
+ * point. @copilot on PR #1238: with the limiter on `POST /auth/email` alone,
+ * `POST /oauth/authorize/email` still reached the same `sendMagicLink` behind
+ * only a per-IP brake, so spreading requests across source addresses delivered
+ * well past the cap to one inbox — defeating precisely the protection this
+ * limiter is documented to provide. Two separately-built limiters would not fix
+ * it either: each would carry its own MemoryStore, so one victim would get the
+ * budget TWICE. They must share a store, which means sharing an instance.
+ *
+ * The `skip` here asks only whether a usable ADDRESS is present, because this
+ * limiter guards routes with different contracts — `/oauth/authorize/email`
+ * carries no `client_state` at all, and reusing the stricter per-route
+ * predicate would skip every request on that path and silently protect nothing.
+ */
+export function buildEmailRecipientRateLimit() {
   return rateLimit({
     windowMs: 15 * 60_000,
     limit: 5,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    skip: isUnsendableRequest,
+    skip: (req: Request) => !hasUsableRecipient(req.body),
     message: RATE_LIMITED_BODY,
     keyGenerator: (req: Request) => {
       const email = (req.body as { email?: unknown } | undefined)?.email;
-      // Case-folded so `Victim@x.com` and `victim@x.com` share one budget —
-      // they are the same mailbox, and a limiter that treats them as two is
-      // bypassed by changing the capitalization.
-      if (typeof email === 'string' && email.trim()) return `email:${email.trim().toLowerCase()}`;
-      // No usable address: fall back to the IP so these requests cannot all
-      // collide on one shared key and lock each other out. `ipKeyGenerator`
-      // is the library's own IPv6-safe normalizer — keying on a raw v6
-      // address would let an attacker walk their own /64 for a fresh budget
-      // per request.
+      if (typeof email === 'string' && email.trim()) return recipientKey(email);
+      // Unreachable while `skip` above holds; kept as the IPv6-safe fallback
+      // rather than a shared constant, so these could never collide on one key.
       return ipKeyGenerator(req.ip ?? '');
     },
   });
+}
+
+/** A recipient this limiter can meaningfully key on, on ANY send path. */
+function hasUsableRecipient(body: unknown): boolean {
+  const email = (body as { email?: unknown } | undefined)?.email;
+  return typeof email === 'string' && email.trim().length > 0 && email.trim().length <= EMAIL_MAX_LENGTH;
 }
 
 export async function sendMagicLink(

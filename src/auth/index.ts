@@ -10,7 +10,9 @@ export {
   sendMagicLink,
   verifyMagicLink,
   buildEmailSendPerIpRateLimit,
-  buildEmailSendPerAddressRateLimit,
+  buildEmailRecipientRateLimit,
+  parseEmailSendRequest,
+  validateEmailSendRequest,
 } from './email.js';
 export {
   buildGoogleAuthUrl,

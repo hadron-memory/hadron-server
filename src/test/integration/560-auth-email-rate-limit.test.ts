@@ -203,6 +203,57 @@ describe('#560 — an aborted connection must not refund the budget', () => {
   });
 });
 
+describe('#560 — the limiter and the handler share one predicate', () => {
+  it('does not send mail for a whitespace-only client_state', async () => {
+    // @codex P1, round 2 — a bypass introduced by round 1's bypass fix. The
+    // limiter's skip predicate trimmed `client_state` and treated "   " as
+    // unsendable (so neither budget counted it), while the handler checked
+    // only for a non-empty STRING and sent anyway. Free mail, unlimited.
+    //
+    // Both now go through `parseEmailSendRequest`. The rule that makes this
+    // safe by construction rather than by matching care: anything the limiters
+    // decline to COUNT, the handler must decline to SEND.
+    const victim = uniqueEmail();
+    const ip = '198.51.100.30';
+    for (let i = 0; i < 12; i++) {
+      expect(await send(victim, { clientState: '   ', ip })).toBe(400);
+    }
+    expect(sendMagicLinkMock, 'no mail, so no budget spent either').not.toHaveBeenCalled();
+
+    // And the budget really is intact — the 400s were not silently counted.
+    expect(await send(victim, { ip })).toBe(200);
+  });
+});
+
+describe('#560 — one victim, one budget, across BOTH public send paths', () => {
+  it('spends the same recipient budget from /oauth/authorize/email', async () => {
+    // @copilot on PR #1238. `POST /oauth/authorize/email` reaches the same
+    // `sendMagicLink` behind only a per-IP brake, so with the recipient
+    // limiter on /auth/email alone an attacker alternates paths and doubles
+    // what one inbox receives. Fixed by sharing ONE limiter instance — two
+    // builds would carry two stores and hand out the cap twice, which looks
+    // identical in code review and is the bug.
+    //
+    // This asserts the SHARED STORE rather than the OAuth route's own
+    // behaviour: exhaust the budget here, then prove the other path is
+    // already refused. It is deliberately not a test of the OAuth form flow,
+    // which has CSRF of its own — a 429 arrives before any of that.
+    const victim = uniqueEmail();
+    for (let i = 0; i < 5; i++) expect(await send(victim)).toBe(200);
+
+    const res = await fetch(`${baseUrl}/oauth/authorize/email`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-forwarded-for': uniqueIp(),
+      },
+      body: new URLSearchParams({ email: victim }).toString(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(res.status, 'the other send path sees the spent budget').toBe(429);
+  });
+});
+
 describe('#560 — per-IP throttling', () => {
   it('cuts one SOURCE off after 10 sends even though every address differs', async () => {
     // Every other case in this file varies the IP, which means the per-IP

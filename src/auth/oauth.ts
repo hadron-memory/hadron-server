@@ -33,7 +33,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { Express, Request, Response } from 'express';
+import type { Express, Request, RequestHandler, Response } from 'express';
 import express, { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { doubleCsrf, type DoubleCsrfUtilities } from 'csrf-csrf';
@@ -1575,7 +1575,18 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
  *   - POST /oauth/authorize/email                     (#804, CSRF-protected + rate-limited)
  *   - POST /oauth/token                               (Phase 2D)
  */
-export function buildOAuthRouter(): Router {
+/**
+ * #560 / @copilot on PR #1238: the per-RECIPIENT email limiter is owned by
+ * server.ts and passed IN, rather than built here, so that this route and
+ * `POST /auth/email` share ONE instance and therefore one store. Two
+ * separately-built limiters would give a single victim the budget twice, which
+ * is the bug this is fixing rather than a detail of how it is wired.
+ */
+export interface OAuthRouteOptions {
+  emailRecipientRateLimit?: RequestHandler;
+}
+
+export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
   const router = Router();
 
   router.get('/.well-known/oauth-protected-resource', handleProtectedResourceMetadata);
@@ -1618,6 +1629,11 @@ export function buildOAuthRouter(): Router {
     '/oauth/authorize/email',
     buildAuthorizeEmailRateLimit(),
     express.urlencoded({ extended: false }),
+    // AFTER the body parser, because this one keys on the recipient and the
+    // form fields do not exist before it. Shared instance with POST
+    // /auth/email, so one victim has one budget across both public send paths
+    // rather than one per path (@copilot, PR #1238).
+    ...(opts.emailRecipientRateLimit ? [opts.emailRecipientRateLimit] : []),
     csrf.doubleCsrfProtection,
     buildHandleAuthorizeEmailPost(csrf),
   );
@@ -1649,6 +1665,6 @@ export function buildOAuthRouter(): Router {
  * Mount the OAuth Authorization Server's HTTP surface on the given
  * Express app. Called from `src/server.ts:createServer()`.
  */
-export function mountOAuthRoutes(app: Express): void {
-  app.use(buildOAuthRouter());
+export function mountOAuthRoutes(app: Express, opts: OAuthRouteOptions = {}): void {
+  app.use(buildOAuthRouter(opts));
 }
