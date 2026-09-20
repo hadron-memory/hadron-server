@@ -1208,6 +1208,31 @@ export async function createServer(): Promise<Express> {
   // GitHub App webhook
   // ---------------------------------------------------------------------------
 
+  /**
+   * Log every REFUSED webhook delivery.
+   *
+   * Without this a refusal is completely silent: a 401 storm, or a
+   * fail-closed 503 after a deploy with no secret, produces no output at all,
+   * and the only place the failure is visible is GitHub's own delivery log —
+   * which nobody watches, and which an operator may not have access to.
+   * "No errors in the logs" was not evidence of anything here, because there
+   * were no log lines to be absent.
+   *
+   * Deliberately NOT logged: the payload, the signature header, and the
+   * expected digest. The reason and the event type are enough to tell a
+   * misconfiguration from an attack, and a comparison oracle in the log file
+   * is its own problem.
+   */
+  const refuseWebhook = (req: express.Request, res: express.Response, status: number, reason: string) => {
+    const event = (req.headers['x-github-event'] as string | undefined) ?? 'unknown';
+    const delivery = (req.headers['x-github-delivery'] as string | undefined) ?? 'unknown';
+    console.warn(
+      `[webhook] REFUSED ${status} — ${reason} (event=${event} delivery=${delivery}). ` +
+        'No payload was processed.',
+    );
+    res.status(status).json({ error: reason });
+  };
+
   app.post(GITHUB_WEBHOOK_PATH, async (req, res) => {
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
     if (!secret) {
@@ -1221,13 +1246,13 @@ export async function createServer(): Promise<Express> {
       // misconfigured deploy is loud before the first delivery rather than
       // after it.
       if (process.env.NODE_ENV === 'production') {
-        res.status(503).json({ error: 'Webhook signature verification is not configured' });
+        refuseWebhook(req, res, 503, 'Webhook signature verification is not configured');
         return;
       }
     } else {
       const sig = req.headers['x-hub-signature-256'] as string | undefined;
       if (!sig) {
-        res.status(401).json({ error: 'Missing signature' });
+        refuseWebhook(req, res, 401, 'Missing signature');
         return;
       }
       // #557, second half: HMAC the bytes GitHub signed, not a re-serialization
@@ -1245,7 +1270,7 @@ export async function createServer(): Promise<Express> {
       // silently falling back to the re-serialized form.
       const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody;
       if (!rawBody) {
-        res.status(400).json({ error: 'Missing request body' });
+        refuseWebhook(req, res, 400, 'Missing request body');
         return;
       }
       const expected = `sha256=${crypto
@@ -1264,7 +1289,7 @@ export async function createServer(): Promise<Express> {
       // consolidate. Reusing it is the point: a hardening change must not fork
       // four ways.
       if (!safeEqual(sig, expected)) {
-        res.status(401).json({ error: 'Invalid signature' });
+        refuseWebhook(req, res, 401, 'Invalid signature');
         return;
       }
     }

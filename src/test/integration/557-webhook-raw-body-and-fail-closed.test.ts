@@ -29,7 +29,7 @@
  * refused everything would pass the second.
  */
 
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import crypto from 'node:crypto';
@@ -190,5 +190,90 @@ describe('#557 — an unconfigured secret fails closed in production', () => {
       signal: AbortSignal.timeout(10_000),
     });
     expect(res.status).toBe(401);
+  });
+});
+
+/**
+ * #557 — every refusal is visible in the logs.
+ *
+ * Added after the operator-facing consequence became concrete: with the
+ * fail-closed 503 shipping, a production deploy whose secret had not reached
+ * the running process would refuse EVERY delivery and say nothing at all. The
+ * only record would be GitHub's own delivery log.
+ *
+ * That silence already misled us once. I handed over
+ * `docker logs | grep GITHUB_WEBHOOK_SECRET` as a way to confirm the running
+ * process had the secret — against a build where that log line did not exist,
+ * so it returned nothing whether or not the secret was set. A check that
+ * cannot fail, given to an operator as evidence.
+ *
+ * Each case below drives a real refusal and asserts a warning was emitted, so
+ * "no output" becomes meaningful rather than ambiguous.
+ */
+describe('#557 — refused deliveries are logged', () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+  // Cleared BEFORE each case, not after. The spy is installed when this
+  // describe body is evaluated — during collection, before any test runs — so
+  // it accumulates refusals from every earlier case in the file. Clearing
+  // afterwards leaves the first case in this block counting all of them.
+  beforeEach(() => warn.mockClear());
+  afterAll(() => warn.mockRestore());
+
+  /** The refusal lines only — other warnings on the path are not ours to assert. */
+  const refusals = () =>
+    warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('[webhook] REFUSED'));
+
+  it('logs a missing signature', async () => {
+    const res = await fetch(`${baseUrl}/github/webhook`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-github-event': 'push' },
+      body: '{"zen":"log-case"}',
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(res.status).toBe(401);
+    expect(refusals(), 'one line naming the reason').toHaveLength(1);
+    expect(refusals()[0]).toContain('Missing signature');
+  });
+
+  it('logs an invalid signature, and names the event', async () => {
+    expect(await deliverRaw('{"zen":"log-case"}', `sha256=${'a'.repeat(64)}`)).toBe(401);
+    expect(refusals()).toHaveLength(1);
+    expect(refusals()[0]).toContain('Invalid signature');
+    // The event type is what distinguishes a misconfigured push sync from
+    // someone probing the endpoint.
+    expect(refusals()[0]).toContain('event=push');
+  });
+
+  it('logs the fail-closed 503 when production has no secret', async () => {
+    delete process.env.GITHUB_WEBHOOK_SECRET;
+    process.env.NODE_ENV = 'production';
+    await fetch(`${baseUrl}/github/webhook`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-github-event': 'push' },
+      body: JSON.stringify({ zen: 'forged' }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    expect(refusals()).toHaveLength(1);
+    expect(refusals()[0]).toContain('not configured');
+  });
+
+  it('does NOT log for an accepted delivery', async () => {
+    // The control. Without it, a helper that logged unconditionally — or a
+    // handler that refused everything — would satisfy all three cases above.
+    expect(await deliverRaw(NON_ROUNDTRIPPING_RAW, sign(NON_ROUNDTRIPPING_RAW))).toBe(200);
+    expect(refusals(), 'a successful delivery is not a refusal').toHaveLength(0);
+  });
+
+  it('never puts the payload or the signature in the log', async () => {
+    // A log line is a durable artifact in someone else's aggregator. The
+    // expected digest especially must not appear: printed next to a refusal,
+    // it is a comparison oracle for the next attempt.
+    const secretish = 'zen-marker-do-not-log';
+    await deliverRaw(`{"zen":"${secretish}"}`, `sha256=${'b'.repeat(64)}`);
+    const line = refusals()[0];
+    expect(line).not.toContain(secretish);
+    expect(line).not.toContain('b'.repeat(64));
+    expect(line).not.toContain('sha256=');
   });
 });
