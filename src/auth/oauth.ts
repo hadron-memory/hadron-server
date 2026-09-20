@@ -46,7 +46,7 @@ import {
   EMAIL_SENT_TEMPLATE,
   REVIEW_CODE_TEMPLATE,
 } from './email-entry.template.js';
-import { sendMagicLink, TOKEN_EXPIRY_MINUTES } from './email.js';
+import { buildEmailRecipientRateLimit, sendMagicLink, TOKEN_EXPIRY_MINUTES } from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
 import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
 
@@ -1624,6 +1624,16 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
  * `POST /auth/email` share ONE instance and therefore one store. Two
  * separately-built limiters would give a single victim the budget twice, which
  * is the bug this is fixing rather than a detail of how it is wired.
+ *
+ * It is OPTIONAL but never absent. Omitting it builds a local limiter instead
+ * of mounting none — @copilot again, and the distinction is fail-safe versus
+ * fail-open: an alternate mount (`buildOAuthRouter()` with no options, as in
+ * 025-oauth-register.test.ts) would otherwise silently re-expose the
+ * email-bomb path, and an injectable defence that defaults to OFF is the kind
+ * that goes missing without anyone editing the route. The injected instance
+ * still wins, because sharing the store is what bounds a victim across both
+ * paths; a local one bounds this route alone, which is strictly better than
+ * nothing.
  */
 export interface OAuthRouteOptions {
   emailRecipientRateLimit?: RequestHandler;
@@ -1679,7 +1689,7 @@ export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
     // (@copilot, PR #1238). The limiter then keys on the recipient, which is
     // why it must also sit after the body parser.
     buildValidateAuthorizeEmailSend(csrf),
-    ...(opts.emailRecipientRateLimit ? [opts.emailRecipientRateLimit] : []),
+    opts.emailRecipientRateLimit ?? buildEmailRecipientRateLimit(),
     buildHandleAuthorizeEmailPost(csrf),
   );
 

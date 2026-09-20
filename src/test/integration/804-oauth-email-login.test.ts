@@ -29,6 +29,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash } from 'node:crypto';
+import { buildOAuthRouter } from '../../auth/oauth.js';
+import { buildEmailRecipientRateLimit } from '../../auth/email.js';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -673,4 +675,47 @@ describe('#560 — refused OAuth submissions do not spend the shared budget', ()
   // separately here: its fixtures (enableBypass / createDemoUser) are scoped to
   // the bypass describe block, and duplicating them to restate one ordering
   // would add fixture surface without adding discrimination.
+});
+
+/**
+ * #560 — the recipient brake is present even when nobody injects one.
+ *
+ * @copilot on PR #1238: `emailRecipientRateLimit` is an option, and an option
+ * that defaults to OFF is a defence that goes missing without anyone editing
+ * the route. `buildOAuthRouter()` with no arguments — which
+ * 025-oauth-register.test.ts does — would have mounted this route with no
+ * per-recipient cap at all.
+ *
+ * This asserts the middleware STACK rather than a response, deliberately, and
+ * the first version of it did the opposite and proved nothing. Driving the
+ * route on a bare mount returns 403 at CSRF before the limiter is ever
+ * reached, so every status is a 403 whether the limiter is mounted or not —
+ * an assertion that cannot fail. Reaching it for real needs the full CSRF
+ * handshake, which is what the shared-budget cases above already cover on the
+ * properly-wired server.
+ *
+ * What is actually at risk here is the WIRING: a limiter silently absent from
+ * one mount. So that is what gets measured — with the injected instance and
+ * without it, the route must carry the same number of handlers.
+ */
+describe('#560 — an un-injected OAuth router still throttles by recipient', () => {
+  /** Handler count for POST /oauth/authorize/email in a built router. */
+  function emailRouteHandlerCount(router: ReturnType<typeof buildOAuthRouter>): number {
+    const layer = (router as unknown as {
+      stack: Array<{ route?: { path: string; stack: unknown[] } }>;
+    }).stack.find((l) => l.route?.path === '/oauth/authorize/email');
+    expect(layer, 'the email-entry route must exist in the router').toBeDefined();
+    return layer!.route!.stack.length;
+  }
+
+  it('mounts the same handler chain with and without an injected limiter', () => {
+    const injected = emailRouteHandlerCount(
+      buildOAuthRouter({ emailRecipientRateLimit: buildEmailRecipientRateLimit() }),
+    );
+    const bare = emailRouteHandlerCount(buildOAuthRouter());
+
+    // Before the fix this was injected = N, bare = N - 1: the limiter was
+    // spread in only when supplied, so an alternate mount lost it silently.
+    expect(bare, 'a bare mount must not drop a middleware').toBe(injected);
+  });
 });
