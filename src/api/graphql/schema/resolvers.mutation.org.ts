@@ -304,24 +304,12 @@ export const orgMutations = {
         urn,
         listedOnMarketplace,
         policy,
-        skillPrefix,
-      }: { id: string; name?: string; urn?: string; listedOnMarketplace?: boolean; policy?: unknown; skillPrefix?: string | null },
+      }: { id: string; name?: string; urn?: string; listedOnMarketplace?: boolean; policy?: unknown },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveOrgRef(ctx.db, id);
       await requireOrgRole(ctx, resolvedId, 'ADMIN');
-
-      // The skill-export prefix (hadron-cli skill plan D7, Holger 2026-09-15):
-      // the stored value IS the literal prefix, trailing hyphen included, so
-      // a client concatenates and never re-derives. Explicit null clears;
-      // omitted preserves. Uniqueness is the DB's (`organizations_skill_prefix_key`).
-      if (skillPrefix !== undefined && skillPrefix !== null && !/^[a-z][a-z0-9]*-$/.test(skillPrefix)) {
-        throw new GraphQLError(
-          `skillPrefix must be lowercase [a-z][a-z0-9]* followed by a trailing hyphen (e.g. "mm-"); got "${skillPrefix}".`,
-          { extensions: { code: 'BAD_USER_INPUT' } },
-        );
-      }
 
       // #510: the org-layer action-policy link (cor:acl:040:02). Explicit
       // null clears the link (= no restriction); omitted preserves.
@@ -349,25 +337,6 @@ export const orgMutations = {
         // change) rather than letting Prisma attempt a NULL write (Copilot #688).
         ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
         ...(policy !== undefined ? { policy: policy as never } : {}),
-        ...(skillPrefix !== undefined ? { skillPrefix } : {}),
-      };
-
-      // The prefix unique is the one P2002 this mutation can hit besides the
-      // URN's; name it, so a client can tell "taken" from "malformed".
-      const rethrowSkillPrefixTaken = (e: unknown): never => {
-        if (
-          e instanceof Prisma.PrismaClientKnownRequestError &&
-          e.code === 'P2002' &&
-          // Prisma reports the target as field names (`skillPrefix`) for a
-          // mapped column, as the index name for some engines — match either
-          // spelling (Copilot on PR #1164).
-          /skill_?prefix/i.test(String((e.meta as { target?: unknown } | null)?.target ?? ''))
-        ) {
-          throw new GraphQLError(`skillPrefix "${skillPrefix}" is already used by another organization.`, {
-            extensions: { code: 'SKILL_PREFIX_TAKEN' },
-          });
-        }
-        throw e;
       };
 
       // Fast path: no URN change requested → a plain update.
@@ -377,8 +346,7 @@ export const orgMutations = {
             where: { id: resolvedId },
             data,
             include: ORG_INCLUDE,
-          })
-          .catch(rethrowSkillPrefixTaken);
+          });
       }
 
       // The org URN is denormalized into the `urn` column of every Memory,
@@ -428,7 +396,6 @@ export const orgMutations = {
           }
           return updated;
         })
-        .catch(rethrowSkillPrefixTaken)
         .catch(rethrowRootNameTaken);
     },
 

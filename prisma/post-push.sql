@@ -386,13 +386,6 @@ $$;
 CREATE INDEX IF NOT EXISTS nodes_properties_gin ON nodes USING gin (properties jsonb_path_ops);
 CREATE INDEX IF NOT EXISTS nodes_data_gin ON nodes USING gin (data jsonb_path_ops);
 
--- Organization.skillPrefix (PR #1164): the platform's own org exports skills
--- as `hadron-` from the first run. The migration backfills deployed DBs; a
--- db-push-managed dev/test DB never runs migrations, so the same idempotent
--- update lives here (Codex on PR #1164).
-UPDATE organizations SET skill_prefix = 'hadron-'
-  WHERE urn = 'hadronmemory.com' AND skill_prefix IS NULL;
-
 -- Spec 049 Phase 5 — the register's S1 CHECKs and partial uniques (Prisma
 -- cannot express either). Synced with the 20260915220000_register_entries
 -- migration.

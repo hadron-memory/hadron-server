@@ -1,0 +1,21 @@
+-- Drop Organization.skillPrefix — retired by D12 (Holger, 2026-09-19).
+--
+-- The column existed so an exported skill's NAME could be DERIVED as
+-- <prefix> + the task's loc. D12 stores the name whole instead, at
+-- properties.exports.<host>.name, so nothing derives and nothing reads this.
+--
+-- Safe to drop rather than deprecate:
+--   * No server code reads it — the GraphQL field and the updateOrganization
+--     argument go in the same change, and nothing else referenced the column.
+--   * The only client that ever read it was `hadron skill`, whose projections
+--     are removed in hadron-cli's D12 change; an older CLI selecting the field
+--     gets a validation error naming it, which is the honest failure.
+--   * It fed a DERIVATION, so it was never user-visible content: no authored
+--     value is lost. The single populated row was 'hadron-' on hadronmemory.com,
+--     which is now a literal inside each node's stored name.
+--
+-- The unique index goes with the column (Postgres drops a dependent index
+-- automatically, but naming it keeps the intent readable and makes a partial
+-- apply on an older schema fail loudly rather than silently leave the index).
+DROP INDEX IF EXISTS "organizations_skill_prefix_key";
+ALTER TABLE "organizations" DROP COLUMN IF EXISTS "skill_prefix";

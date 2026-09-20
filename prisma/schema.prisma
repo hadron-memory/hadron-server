@@ -527,15 +527,6 @@ model Organization {
   /// non-member discoverability (cor:acl:080:02). (Spec 048 dropped the former
   /// `isVisible` listing flag with the auto-personal org — every org now lists.)
   listedOnMarketplace          Boolean   @default(false) @map("listed_on_marketplace")
-  /// The literal prefix a task node in this org's memories is exported to disk
-  /// with as a Claude skill (`hadron-`, `mm-`): stored, not derived — no rule
-  /// maps `hadronmemory.com` to `hadron`. Validated `^[a-z][a-z0-9]*-$`,
-  /// unique across orgs (two orgs exporting `mm-review-changes` onto one
-  /// engineer's disk is the collision this prevents). NULL = the org has not
-  /// chosen one; the CLI refuses to export from it rather than guess. A task
-  /// in a user-owned memory has no org and takes the platform's `hadron-`.
-  /// Holger's ruling on hadron-cli's skill-command plan D7 (2026-09-15).
-  skillPrefix                  String?   @unique @map("skill_prefix")
   /// GitHub App installation id. Used to mint ephemeral tokens
   /// (1-hour expiry) for memory git-sync against repos within this
   /// installation's scope.

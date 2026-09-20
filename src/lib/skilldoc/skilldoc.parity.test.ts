@@ -32,7 +32,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { parse as parseYaml } from 'yaml';
 import { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
-import { deriveName, validName, validPrefix } from './derive.js';
+import { validName } from './name.js';
 import { hash } from './hash.js';
 import { render, SkillRenderError } from './render.js';
 import { isNodeUrn, parseFile, SkillFileParseError } from './parse.js';
@@ -41,9 +41,7 @@ interface Fixtures {
   sourceCommit: string;
   normalizeDescription: { name: string; in: string; out: string }[];
   normalizeBody: { name: string; in: string; out: string }[];
-  deriveName: { name: string; prefix: string; loc: string; out: string }[];
   validName: { name: string; in: string; valid: boolean }[];
-  validPrefix: { name: string; in: string; valid: boolean }[];
   hash: {
     name: string; source: string; skillName: string; description: string; content: string; out: string;
   }[];
@@ -68,8 +66,8 @@ function loadFixtures(): Fixtures {
   const raw = readFileSync(path, 'utf8');
   const f = JSON.parse(raw) as Fixtures;
   const sections: (keyof Fixtures)[] = [
-    'normalizeDescription', 'normalizeBody', 'deriveName',
-    'validName', 'validPrefix', 'hash', 'render', 'parseFile',
+    'normalizeDescription', 'normalizeBody',
+    'validName', 'hash', 'render', 'parseFile',
     'isNodeUrn', 'renderParseRoundTrip',
   ];
   for (const s of sections) {
@@ -153,14 +151,8 @@ describe('#1177 A2 — hash is byte-exact against Go', () => {
 });
 
 describe('#1177 — derivation and the grammars', () => {
-  it.each(F.deriveName.map((c) => [c.name, c] as const))('deriveName %s', (_n, c) => {
-    expect(deriveName(c.prefix, c.loc)).toBe(c.out);
-  });
   it.each(F.validName.map((c) => [c.name, c] as const))('validName %s', (_n, c) => {
     expect(validName(c.in)).toBe(c.valid);
-  });
-  it.each(F.validPrefix.map((c) => [c.name, c] as const))('validPrefix %s', (_n, c) => {
-    expect(validPrefix(c.in)).toBe(c.valid);
   });
 });
 
