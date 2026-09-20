@@ -9,6 +9,23 @@ interface FsGraph {
   nodes: Partial<Node>[];
 }
 
+/**
+ * A file the loader could not address (#1224) — its path does not derive a
+ * valid loc.
+ *
+ * `nodeId` is the file's FRONTMATTER id and may be absent (an id-less file is
+ * accepted by this loader) or name a row in another memory. The caller must
+ * therefore RESOLVE it against this memory rather than trust it, and treat an
+ * unresolvable entry as "a row I cannot vouch for" — see the deletion pass in
+ * `syncGraphFromGithub`.
+ */
+export interface SkippedFile {
+  /** Absolute path of the file, for an operator who has to go rename it. */
+  source: string;
+  /** The file's frontmatter id, if it carried one. */
+  nodeId?: string;
+}
+
 export interface GraphEdge {
   sourceId: string;
   /** Source node's loc — used to derive the edge loc at sync-write time. */
@@ -37,14 +54,19 @@ export const loadGraphFromFs = async (
   graphPath: string,
   graphName: string,
   ownerRepo: string,
-): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedNodeIds: string[] }> => {
+): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedInvalidLoc: SkippedFile[] }> => {
   const nodes: Partial<Node>[] = [];
   const edges: GraphEdge[] = [];
-  // Frontmatter ids of files skipped for an unusable path (#1224). The caller
-  // must keep these rows ALIVE: sync is repo-wins, so a row absent from the
-  // loaded graph is hard-deleted, and a file renamed to an invalid name would
-  // otherwise destroy the node instead of failing to move it.
-  const skippedNodeIds: string[] = [];
+  // Files skipped for an unusable path (#1224). The caller must keep the rows
+  // they name ALIVE: sync is repo-wins, so a row absent from the loaded graph
+  // is hard-deleted, and a file renamed to an invalid name would otherwise
+  // destroy the node instead of failing to move it.
+  //
+  // Scoped to THIS failure class on purpose. Every other load failure (broken
+  // YAML, an unreadable file) keeps its pre-existing behaviour — the row is
+  // cleaned up — because widening that here would change how a class of
+  // failures this PR is not about behaves, silently.
+  const skippedInvalidLoc: SkippedFile[] = [];
 
   // Collect node sources: either directory paths (legacy) or .md file paths (frontmatter)
   const nodeSources: string[] = [];
@@ -101,7 +123,11 @@ export const loadGraphFromFs = async (
         });
       }
     } catch (err) {
-      if (err instanceof InvalidNodeLocError && err.nodeId) skippedNodeIds.push(err.nodeId);
+      if (err instanceof InvalidNodeLocError) {
+        // Recorded even WITHOUT an id: an id-less skip is the case the caller
+        // most needs to hear about, because it is the one it cannot protect.
+        skippedInvalidLoc.push({ source: err.source, ...(err.nodeId ? { nodeId: err.nodeId } : {}) });
+      }
       console.warn(`Failed to load node at ${source}:`, (err as Error).message);
     }
   }
@@ -113,6 +139,6 @@ export const loadGraphFromFs = async (
       nodes,
     },
     edges,
-    skippedNodeIds,
+    skippedInvalidLoc,
   };
 };

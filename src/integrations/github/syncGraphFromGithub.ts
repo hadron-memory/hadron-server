@@ -131,7 +131,7 @@ export const syncGraphFromGithub = async (
     await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
 
     // 3. Load the graph from the filesystem
-    const { graph: fsGraph, edges, skippedNodeIds } = await loadGraphFromFs(localPath, graphName, ownerRepo);
+    const { graph: fsGraph, edges, skippedInvalidLoc } = await loadGraphFromFs(localPath, graphName, ownerRepo);
 
     // 4. Upsert all nodes and edges into the database (transactional)
     let pendingEdgeCount = 0;
@@ -169,6 +169,33 @@ export const syncGraphFromGithub = async (
           .map((n) => n.loc)
           .filter((l): l is string => typeof l === 'string' && l !== '' && !isProtected(l)),
       );
+      // #1224 — files whose path cannot be a loc, resolved to the rows they
+      // name. @copilot on PR #1229: the cleanup pass keys on the SURVIVING
+      // ROW id, and a file's frontmatter id is not that id — the loc-keyed
+      // upsert below keeps an existing row's id, a foreign or duplicate id is
+      // replaced with a fresh one, and an id-less file has none. Protecting
+      // the raw file id would therefore protect nothing while reading as a
+      // guarantee, which is the mistake the comment on `rowId` two hundred
+      // lines below already warns about.
+      //
+      // So: resolve, and count what cannot be resolved. An unresolvable skip
+      // is a row we cannot vouch for, and the destructive pass is suppressed
+      // for the whole run rather than deleting it — there is no way back from
+      // a hard delete, and a stale row that lingers until someone fixes a
+      // filename is the recoverable direction.
+      const skippedRowIds = new Set<string>();
+      const unprotectableSkips: string[] = [];
+      for (const skipped of skippedInvalidLoc) {
+        const row = skipped.nodeId
+          ? await tx.node.findUnique({
+              where: { id: skipped.nodeId },
+              select: { id: true, memoryId: true },
+            })
+          : null;
+        if (row && row.memoryId === graph.id) skippedRowIds.add(row.id);
+        else unprotectableSkips.push(skipped.source);
+      }
+
       const upsertedIds: string[] = [];
       // Rows the cleanup pass below must leave alone: a protected file's row
       // is not upserted, and `notIn: upsertedIds` would otherwise hard-delete
@@ -264,6 +291,25 @@ export const syncGraphFromGithub = async (
               where: { loc_memoryId: { loc, memoryId: graph.id } },
               select: { id: true },
             });
+            if (occupant && skippedRowIds.has(occupant.id)) {
+              // #1224 / @codex P2 on PR #1229 — the occupant's OWN file was
+              // renamed to something unusable this run, so it is not moving
+              // out of the way and it is not being deleted either. Parking it
+              // would store `<loc>~displaced-<id>`, a loc `validateLoc`
+              // REFUSES (`~`) — permanently, since the row is now protected
+              // from the cleanup that used to collect it. This guard would
+              // have persisted the exact invariant violation the PR exists to
+              // stop, introduced BY the guard.
+              //
+              // So refuse the competing move instead, per @codex's own first
+              // remedy: both rows keep valid addresses, and the move lands on
+              // the next sync once the bad filename is fixed.
+              console.warn(
+                `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.id} is held by a file whose path is not a valid loc`,
+              );
+              protectedRowIds.push(byId.id);
+              continue;
+            }
             if (occupant && occupant.id !== byId.id) {
               await tx.node.update({
                 where: { id: occupant.id },
@@ -345,19 +391,30 @@ export const syncGraphFromGithub = async (
       // matches nothing, so the NOT excluded nothing and this cleanup deleted
       // the very rows the declaration exists to preserve.
       const deletionFilter = protectedDeletionFilter(protectedLocs);
-      {
+      if (unprotectableSkips.length > 0) {
+        // Fail CLOSED (@copilot's second remedy). At least one file was
+        // skipped for an unusable path and names no row we can identify in
+        // this memory — its old loc is what would identify it, and a file
+        // renamed to an unusable name no longer tells us what that was. The
+        // cleanup cannot distinguish that row from a genuinely deleted one,
+        // so it does not run: pruning is deferrable, a hard delete is not.
+        // The upserts above still applied, so content still syncs.
+        console.warn(
+          `[syncGraphFromGithub] "${graphName}": destructive cleanup SUPPRESSED — ${unprotectableSkips.length} file(s) have a path that is not a valid loc and carry no id naming a row in this memory: ${unprotectableSkips.join(', ')}`,
+        );
+      } else {
         await tx.node.deleteMany({
           where: {
             ownerRepo,
             memoryId: graph.id,
-            // `skippedNodeIds` joins the survivors for the same reason
+            // `skippedRowIds` joins the survivors for the same reason
             // `protectedRowIds` does (#1224): a file skipped for an unusable
             // path is absent from `fsGraph.nodes`, so `notIn: upsertedIds`
             // would hard-delete the row it names. Repo-wins means "the repo
             // decides what a node IS", not "a file this loader could not
             // address stops being a node" — renaming a file to something
             // that cannot be a loc must fail to move it, not destroy it.
-            id: { notIn: [...upsertedIds, ...protectedRowIds, ...skippedNodeIds] },
+            id: { notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds] },
             ...(deletionFilter.notClauses.length
               ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
               : {}),

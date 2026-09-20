@@ -196,12 +196,12 @@ describe('a path that cannot be a loc (#1224)', () => {
   it('returns the skipped file\'s frontmatter id, so the cleanup pass can spare its row', async () => {
     writeMd('evil--> x', { id: 'bad-file-id', name: 'bad' });
 
-    const { skippedNodeIds } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
+    const { skippedInvalidLoc } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
 
     // Without this the row is hard-deleted by `notIn: upsertedIds`, so a
     // rename to an invalid name would destroy the node rather than fail to
     // move it. The id is the only handle the caller has on that row.
-    expect(skippedNodeIds).toEqual(['bad-file-id']);
+    expect(skippedInvalidLoc.map((s) => s.nodeId)).toEqual(['bad-file-id']);
   });
 
   it('reports no skipped ids when every path is usable', async () => {
@@ -209,10 +209,10 @@ describe('a path that cannot be a loc (#1224)', () => {
     // assertion above proves nothing about the skip having happened.
     writeMd('ok', { id: 'keep-me', name: 'ok' });
 
-    const { graph, skippedNodeIds } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
+    const { graph, skippedInvalidLoc } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
 
     expect(graph.nodes).toHaveLength(1);
-    expect(skippedNodeIds).toEqual([]);
+    expect(skippedInvalidLoc).toEqual([]);
   });
 
   it('still loads the GRAPH ROOT, whose loc is empty by design', async () => {
@@ -223,10 +223,10 @@ describe('a path that cannot be a loc (#1224)', () => {
     writeMd('README', { id: 'root-id', name: 'Hadron Graph' });
     writeMd('server', { id: 'child-id', name: 'server' });
 
-    const { graph, skippedNodeIds } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
+    const { graph, skippedInvalidLoc } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
 
     expect(graph.nodes.map((n) => n.loc).sort()).toEqual(['', 'server']);
-    expect(skippedNodeIds).toEqual([]);
+    expect(skippedInvalidLoc).toEqual([]);
   });
 
   it('accepts a colon in a filename when the atoms it makes are valid', async () => {
@@ -236,10 +236,10 @@ describe('a path that cannot be a loc (#1224)', () => {
     // above would not notice.
     writeMd('review:sort-imports', { id: 'nested-ok', name: 'ok' });
 
-    const { graph, skippedNodeIds } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
+    const { graph, skippedInvalidLoc } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
 
     expect(graph.nodes.map((n) => n.loc)).toEqual(['review:sort-imports']);
-    expect(skippedNodeIds).toEqual([]);
+    expect(skippedInvalidLoc).toEqual([]);
   });
 
   it('exempts the root ONLY — a nested README keeps its directory loc', async () => {
@@ -249,10 +249,10 @@ describe('a path that cannot be a loc (#1224)', () => {
     writeMd(join('server', 'README'), { id: 'nested-id', name: 'server' });
     writeMd(join('evil--> dir', 'README'), { id: 'bad-dir-id', name: 'bad' });
 
-    const { graph, skippedNodeIds } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
+    const { graph, skippedInvalidLoc } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
 
     expect(graph.nodes.map((n) => n.loc)).toEqual(['server']);
-    expect(skippedNodeIds).toEqual(['bad-dir-id']);
+    expect(skippedInvalidLoc.map((s) => s.nodeId)).toEqual(['bad-dir-id']);
   });
 
   it('guards the LEGACY layout too, not just frontmatter files', async () => {

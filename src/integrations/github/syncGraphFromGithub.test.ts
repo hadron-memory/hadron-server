@@ -514,6 +514,69 @@ describe('a file whose path cannot be a loc (#1224)', () => {
     expect(row!.loc).toBe('notes'); // still at its old, valid address
   });
 
+  it('refuses a competing move rather than parking the occupant at a loc validateLoc rejects', async () => {
+    // @codex P2 on PR #1229. The move-collision branch parks an occupant at
+    // `<loc>~displaced-<id>` — a loc `validateLoc` REFUSES — and relies on the
+    // cleanup pass to collect it moments later. Protecting skipped rows broke
+    // that: the parked row survived, so this PR's own guard would have stored
+    // the invariant violation the PR exists to prevent, permanently.
+    const occupantId = 'aaaa000000000000000000000000000011';
+    const moverId = 'bbbb000000000000000000000000000012';
+    writeMd('a', occupantId, 'occupant');
+    writeMd('b', moverId, 'mover');
+    await syncGraphFromGithub(makeGraph());
+
+    // The occupant's file is renamed to something unusable, and in the SAME
+    // sync the mover's file takes the loc it just vacated.
+    rmSync(join(repoRoot(), 'a.md'));
+    rmSync(join(repoRoot(), 'b.md'));
+    writeMd('a--> evil', occupantId, 'occupant');
+    writeMd('a', moverId, 'mover');
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const rows = await db.node.findMany({ where: { memoryId: dbGraphId }, select: { id: true, loc: true } });
+    // Nothing is stored at an address the API would refuse — the assertion
+    // the whole finding turns on.
+    expect(rows.filter((r) => r.loc.includes('~'))).toEqual([]);
+    // Both rows survive, at their original valid addresses.
+    expect(rows.find((r) => r.id === occupantId)?.loc).toBe('a');
+    expect(rows.find((r) => r.id === moverId)?.loc).toBe('b');
+  });
+
+  it('suppresses the destructive cleanup when a skipped file names no row it can resolve', async () => {
+    // @copilot on PR #1229: the cleanup keys on the SURVIVING ROW id, and a
+    // file's frontmatter id is not always that id — an id-less file has none
+    // at all. Protecting the raw file id would read as a guarantee while
+    // protecting nothing, so an unresolvable skip fails CLOSED: the run does
+    // not delete rows it cannot vouch for.
+    const goneId = 'cccc000000000000000000000000000013';
+    writeMd('gone', goneId, 'gone');
+    await syncGraphFromGithub(makeGraph());
+    expect(await db.node.findUnique({ where: { id: goneId } })).not.toBeNull();
+
+    // `gone.md` really is deleted — normally its row would be cleaned up (the
+    // control test below proves it). But an ID-LESS file is skipped in the
+    // same run, so the cleanup cannot tell that row from this one.
+    rmSync(join(repoRoot(), 'gone.md'));
+    const full = join(repoRoot(), 'no-id--> evil.md');
+    writeFileSync(full, `---\nname: no id here\n---\n# x`, 'utf-8');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await syncGraphFromGithub(makeGraph());
+    // Read the calls BEFORE restoring: `mockRestore` clears them, so the
+    // assertion below would read an emptied instrument and match nothing.
+    const line = warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    warn.mockRestore();
+    expect(result.error).toBeUndefined();
+
+    expect(await db.node.findUnique({ where: { id: goneId } })).not.toBeNull();
+    // Named, and named by FILE — an operator cannot grep for a row id.
+    expect(line).toMatch(/cleanup SUPPRESSED/);
+    expect(line).toMatch(/no-id--> evil\.md/);
+  });
+
   it('still deletes a row whose file is genuinely GONE', async () => {
     // The control for the test above: sparing skipped rows must not spare
     // every row, or "repo-wins" would stop meaning anything and the

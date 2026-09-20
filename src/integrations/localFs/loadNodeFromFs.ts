@@ -15,11 +15,20 @@ import { InvalidLocError, validateLoc } from '../../lib/validateLoc.js';
  * pass hard-deletes every git-owned row it did not upsert — so without the
  * id, skipping a file would DELETE the node it used to be. Renaming a file
  * to an invalid name would convert a move into data loss.
+ *
+ * Carries the `source` path too, because the id is not always enough: a file
+ * with no frontmatter id, or one whose id names no row in this memory, cannot
+ * be matched to the row it came from at all (its OLD loc is what would
+ * identify it, and a file renamed to an unusable name no longer tells us what
+ * that was). The sync refuses to run its destructive pass in that case, and
+ * the operator needs the file NAME to fix it — an id they cannot grep for is
+ * not an actionable report.
  */
 export class InvalidNodeLocError extends Error {
   constructor(
     message: string,
     readonly nodeId: string | undefined,
+    readonly source: string,
   ) {
     super(message);
     this.name = 'InvalidNodeLocError';
@@ -412,6 +421,7 @@ function deriveValidatedLoc(
       throw new InvalidNodeLocError(
         `Path does not derive a valid loc: ${err.message} (${path})`,
         fileId,
+        path,
       );
     }
     throw err;
