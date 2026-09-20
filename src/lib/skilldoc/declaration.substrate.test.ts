@@ -19,6 +19,8 @@
 import { describe, it, expect } from 'vitest';
 import { classifyDeclaration, declaredSkill, malformedDeclarationPaths } from './declaration.js';
 import { lintCollisions, lintNode, type SkillNode } from './lint.js';
+import { render, SkillRenderError } from './render.js';
+import { parseFile } from './parse.js';
 
 const node = (properties: unknown): SkillNode => ({
   urn: 'hrn:node:acme.com:mem:tasks:x',
@@ -164,6 +166,63 @@ describe('collision reporting is stable under corpus read order (@codex P2, #123
     ]);
     // The message's `others` list is the half a name-only sort left moving.
     expect(forward[0].message).toContain('hrn:node:b.com:m:two, hrn:node:c.com:m:three');
+  });
+});
+
+describe('the provenance header: read and write must accept the same thing', () => {
+  it('REFUSES to read back a header the write path would not have written — id', () => {
+    // @copilot, PR #1234. `render` never writes an id that could close the
+    // comment, so `parseFile` must not accept one: a hand-edited
+    // `id=a-->` ends the comment early, the host shows the remainder as body,
+    // and the parser would still call the line ours.
+    //
+    // §4a's WRITE side is deliberately not in this PR (it requires the hash to
+    // include the id, which diverges from the Go reference until hadron-cli
+    // follows — see the PR body), so this is built by hand rather than by
+    // `render`.
+    const urn = 'hrn:node:acme.com:mem:tasks:x';
+    const h = 'a'.repeat(16);
+    const ours = `---\nname: n\ndescription: d\n---\n\n<!-- hadron-skill source=${urn} id=node-1 hash=${h} -->\n\nbody\n`;
+    const tampered = ours.replace('id=node-1', 'id=a-->');
+
+    expect(parseFile(ours).id).toBe('node-1');
+    expect(parseFile(ours).source).toBe(urn);
+    // …and the tampered line stops being ours, which is what makes the file
+    // read as foreign rather than as a clean export of that node.
+    expect(parseFile(tampered).id).toBe('');
+    expect(parseFile(tampered).source).toBe('');
+  });
+
+  it('REFUSES to read back a header the write path would not have written — source', () => {
+    // The same asymmetry one field over, and the one my first fix missed:
+    // `isNodeUrn` checks STRUCTURE, not the charset `render` enforces, so
+    // `source=hrn:node:a.com:m:evil-->` parsed as ours. Fixing the instance
+    // and not the class is how a ban-list stays one report behind.
+    const h = 'a'.repeat(16);
+    const bad = `---\nname: n\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:evil--> hash=${h} -->\n\nbody\n`;
+    expect(parseFile(bad).source).toBe('');
+  });
+
+  it('the LEGACY header path gets the same charset, not just the machine one', () => {
+    // Two header generations, one rule. Guarding only the machine line would
+    // leave the older shape as the way in — the writer nobody enumerated,
+    // which is #1224's sentence.
+    const legacy = `---\nname: n\ndescription: d\n---\n\n<!-- Generated from hrn:node:a.com:m:evil--> -->\n\nbody\n`;
+    expect(parseFile(legacy).source).toBe('');
+    const clean = `---\nname: n\ndescription: d\n---\n\n<!-- Generated from hrn:node:a.com:m:ok -->\n\nbody\n`;
+    expect(parseFile(clean).source).toBe('hrn:node:a.com:m:ok');
+  });
+
+  it('a header with NO id is still ours — a pre-§4a file is not foreign', () => {
+    // Absent and invalid are different: absent means an older header
+    // generation (class `unhashed`, action rewrite); invalid means edited.
+    const out = render('n', 'hrn:node:acme.com:mem:tasks:x', 'd', 'body');
+    expect(parseFile(out).id).toBe('');
+    expect(parseFile(out).source).toBe('hrn:node:acme.com:mem:tasks:x');
+  });
+
+  it('CONTROL: render still refuses an unsafe SOURCE, so both paths agree', () => {
+    expect(() => render('n', 'hrn:node:a.com:m:evil-->', 'd', 'body')).toThrow(SkillRenderError);
   });
 });
 

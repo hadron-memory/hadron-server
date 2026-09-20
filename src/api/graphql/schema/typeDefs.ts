@@ -908,6 +908,103 @@ export const typeDefs = `#graphql
     degraded: [String!]!
   }
 
+  """What the caller intends to do with the plan. It decides the ACTION, never the class."""
+  enum SkillPlanIntent {
+    """Corpus judgment only: findings, no files consulted, no bodies returned."""
+    LINT
+    """Classes and findings for files the client found. Never returns a body."""
+    STATUS
+    """Classes, findings, and the rendered body for anything the client should write."""
+    EXPORT
+  }
+
+  """What the client saw of ONE file on disk. The server never reads the caller's disk."""
+  input SkillFileFactsInput {
+    """The directory the skill occupies — compared against the node's stored name."""
+    dirName: String!
+    """The id value from the provenance header; omit on a header generation that predates it."""
+    nodeId: String
+    """The source URN from the provenance header."""
+    sourceUrn: String
+    """The hash value from the header; omit for a legacy header that carries none."""
+    headerHash: String
+    """The hash the client computed over the file itself."""
+    fileHash: String
+    """True when the file exists and could not be parsed."""
+    parseFailed: Boolean
+    """True when the file carries frontmatter keys the renderer never writes."""
+    hasExtraFrontmatter: Boolean
+  }
+
+  input SkillPlanInput {
+    intent: SkillPlanIntent!
+    """Memory refs to scan. Omitted means every memory the caller can read."""
+    memories: [String!]
+    """Target host. Only claudeSkill has a renderer today (D10)."""
+    host: String
+    """What the client found on disk. Empty for lint, which touches no disk."""
+    files: [SkillFileFactsInput!]
+  }
+
+  """One lint result, carrying the node and memory so a renderer never looks them back up."""
+  type SkillFinding {
+    urn: String!
+    memory: String!
+    rule: String!
+    """Either error or warning — the same vocabulary spec lint renders."""
+    severity: String!
+    message: String!
+  }
+
+  type SkillPlanEntry {
+    urn: String!
+    nodeId: String!
+    """The stored skill name (D12 retired derivation)."""
+    name: String!
+    """
+    One of: current, stale, locally-edited, renamed, never-exported, orphaned,
+    unhashed, collision, unavailable, disabled. Null when the file could not be
+    parsed — a parse failure is reported as a FAILURE, not as a class.
+    """
+    class: String
+    """True when the file exists and does not parse. Reported identically by status and export."""
+    parseFailure: Boolean!
+    """For the renamed class: the directory the file currently occupies."""
+    movedFrom: String
+    findings: [SkillFinding!]!
+    """
+    Present only for EXPORT, only for a class whose action writes, and only
+    when the node has no error findings — so a client cannot write a file the
+    server already judged broken.
+    """
+    renderedBody: String
+  }
+
+  """A file that paired with no declared node. Never removed without an explicit prune."""
+  type SkillOrphan {
+    dirName: String!
+    sourceUrn: String
+    nodeId: String
+  }
+
+  type SkillPlan {
+    entries: [SkillPlanEntry!]!
+    orphans: [SkillOrphan!]!
+    """
+    How many nodes carrying ANY declaration key were in scope. A plan over an
+    empty corpus and a plan the caller cannot see are otherwise the same empty
+    list, and a client that cannot tell them apart reports nothing-to-do for a
+    corpus it was denied.
+    """
+    scanned: Int!
+    """
+    How many of those were judged for THIS host — the number of entries. A node
+    declaring only another host is scanned and not judged, so the two differ by
+    design; the gap is a fact about the corpus, not a discrepancy.
+    """
+    judged: Int!
+  }
+
   """
   Spec cor:api:040 — result envelope for the batch node read (nodeBatch).
   'nodes' is the authorized, existing subset (input order for a ref set, loc
@@ -4521,8 +4618,20 @@ export const typeDefs = `#graphql
 
   "#772 — the kinds of widget placeable on a user's /app/dashboard grid."
   enum DashboardWidgetType {
+    """
+    { memoryCount } — how many memories the caller OWNS: the
+    memories(filter: { ownedByMe: true }) slice, not everything they can read
+    (#1231). Stated here because the population is the contract: a client that
+    has to guess it writes its own count, and then the two disagree.
+    """
     MEMORY_STATS
+    """
+    { agentCount } — how many agents the caller OWNS: the
+    agents(filter: { ownedByMe: true }) slice (#1231). Owner-scoped for every
+    caller, platform admins included.
+    """
     AGENT_STATS
+    "{ windowDays, buckets } — the caller's usage activity over a rolling window."
     USAGE_ACTIVITY
   }
 
@@ -4810,6 +4919,25 @@ export const typeDefs = `#graphql
     would re-introduce the N+1 it eliminates.
     """
     nodeBatch(refs: [ID!], memory: ID, locPrefix: String): NodeBatchResult!
+
+    """
+    #1177 section 3 — the SKILL SEAM: the server judges, the client does I/O.
+
+    One surface serving skill lint, skill status and skill export. The client
+    sends what it can see of each file on disk; the server returns a drift
+    CLASS and the lint findings per declared node, plus the rendered body for
+    anything the client is to write.
+
+    A QUERY, not a mutation, and that is the contract. Nothing here writes to a
+    node — publishing is one-way, and the only writer in the feature is the
+    client's own filesystem. So status and lint cannot write by construction
+    rather than by promise.
+
+    The client cannot name a drift class: the vocabulary is the server's, so it
+    cannot drift between clients. A node failing lint is never given a rendered
+    body, so a client cannot write a file the server judged broken.
+    """
+    skillPlan(input: SkillPlanInput!): SkillPlan!
 
     """
     DEPRECATED: use usageEvents(loc: <loc>). Carried for source-compat;

@@ -34,6 +34,45 @@ const MACHINE_KV = /(\w+)=(\S+)/g;
 const LEGACY_RE = /^<!--\s*Generated from\s+(\S+)\s*-->$/;
 const HASH_RE = /^[0-9a-f]{16}$/;
 
+/**
+ * The charset a node id may carry in the provenance header (#1177 §4a).
+ *
+ * Defined HERE and imported by `render`, so the write path and the read path
+ * cannot disagree about it (@copilot, PR #1234). Two copies would be two
+ * predicates, and the asymmetry is the whole defect: a header `render` refuses
+ * to write but `parseFile` accepts is a file that reads as ours while the host
+ * shows injected text — `id=a-->` closes the comment early, so everything
+ * after it is visible body, and this parser would still call the line a valid
+ * machine header.
+ *
+ * Exported because `render` needs the identical rule, not a similar one.
+ */
+export const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * The charset a `source` URN may carry in the provenance header.
+ *
+ * The same allow-list `render` enforces on the write side (#1223). It lives
+ * here with `SAFE_ID_RE` for the same reason: **read and write must accept the
+ * same thing, or a hand-edited header is one this parser calls ours while the
+ * host renders half of it as body.**
+ *
+ * `isNodeUrn` is not enough on its own — it checks STRUCTURE (the `hrn:node:`
+ * shape and its segment count), not the characters. A loc containing `-->` is
+ * structurally a URN, and #1224 established that such a loc is reachable: git
+ * sync derives one from a file path and (before that fix) validated nothing.
+ *
+ * A DELIBERATE DIVERGENCE from the Go reference, which checks `isNodeURN` and
+ * no charset — the same divergence `render` already took, now made symmetric
+ * rather than left half-applied (@copilot, PR #1234).
+ *
+ * ONE definition, imported by `render`, for the reason this file already gives
+ * for `SAFE_ID_RE`: two copies are two predicates. Round 2 of that same review
+ * left a second copy in `render` — the drift I had just argued against, in the
+ * commit that argued it.
+ */
+export const SAFE_SOURCE_RE = /^[A-Za-z0-9._:-]+$/;
+
 /** What a skill file yields: the keys a host reads, its provenance, its body. */
 export interface SkillFile {
   name: string;
@@ -42,6 +81,23 @@ export interface SkillFile {
   source: string;
   /** '' for a legacy (pre-#580) header, which carries a source and no hash. */
   hash: string;
+  /**
+   * The source node's stable ID, or '' on a header generation that predates it
+   * (#1177 §4a).
+   *
+   * Pairing a file to a node by URN alone does not survive a `loc` rename: the
+   * URN is COMPUTED from the loc, while `moveNode` keeps the node's id — so a
+   * renamed node pairs as `orphaned` plus `never-exported`, and the user is
+   * left with two directories carrying near-identical trigger text, both
+   * firing. The id is what makes a move read as `renamed`.
+   *
+   * READ-ONLY here. Nothing writes this key yet: §4a also requires the id to
+   * be a HASH input, which the Go reference does not do, so writing one
+   * without hashing it would let a hand-edited id re-point a file at another
+   * node while the file still read as untouched. The write side and the hash
+   * change land together, with hadron-cli, as #1235.
+   */
+  id: string;
   body: string;
   /**
    * Every frontmatter key other than name/description. `render` writes none, so
@@ -74,28 +130,41 @@ export function isNodeUrn(tok: string): boolean {
   return parts.every((p) => p.length > 0);
 }
 
-function machineHeader(line: string): { source: string; hash: string } | null {
+function machineHeader(line: string): { source: string; hash: string; id: string } | null {
   const m = MACHINE_RE.exec(line);
   if (!m) return null;
   let source = '';
   let h = '';
+  let id = '';
   for (const kv of m[1]!.matchAll(MACHINE_KV)) {
     if (kv[1] === 'source') source = kv[2]!;
     else if (kv[1] === 'hash') h = kv[2]!;
+    else if (kv[1] === 'id') id = kv[2]!;
   }
   // Extra keys are allowed so a later host can add its own, but a line missing
   // either of ours — or carrying a source that is not a node URN, or a hash
   // that is not exactly 16 hex — is a comment that merely looks like one.
-  if (!isNodeUrn(source) || !HASH_RE.test(h)) return null;
-  return { source, hash: h };
+  if (!isNodeUrn(source) || !SAFE_SOURCE_RE.test(source) || !HASH_RE.test(h)) return null;
+  // An ABSENT id is fine — a header generation that predates it is still ours,
+  // and it classifies `unhashed`, whose action is "rewrite" (§4a: widen the
+  // existing class rather than invent one). A PRESENT id that could not have
+  // been written by `render` is a different thing entirely: the line has been
+  // hand-edited, and an id like `a-->` closes the comment so the remainder is
+  // agent-visible text. Read and write share one allow-list, so the parser
+  // cannot accept a header the renderer forbids.
+  if (id !== '' && !SAFE_ID_RE.test(id)) return null;
+  return { source, hash: h, id };
 }
 
 function legacyHeader(line: string): string | null {
+  // The charset applies here too: the legacy generation is still a one-line
+  // comment, and a source that closes it early is no more acceptable for
+  // carrying an older header shape.
   const m = LEGACY_RE.exec(line);
   if (!m) return null;
   // The token must LOOK like a node URN: `<!-- Generated from a template -->`
   // is a body.
-  return isNodeUrn(m[1]!) ? m[1]! : null;
+  return isNodeUrn(m[1]!) && SAFE_SOURCE_RE.test(m[1]!) ? m[1]! : null;
 }
 
 /**
@@ -150,7 +219,7 @@ export function parseFile(data: string): SkillFile {
     throw new SkillFileParseError('frontmatter is not a mapping');
   }
 
-  const file: SkillFile = { name: '', description: '', source: '', hash: '', body: '' };
+  const file: SkillFile = { name: '', description: '', source: '', hash: '', id: '', body: '' };
   for (const [k, v] of Object.entries(all as Record<string, unknown>)) {
     if (k === 'name' || k === 'description') {
       if (typeof v !== 'string') {
@@ -181,6 +250,7 @@ export function parseFile(data: string): SkillFile {
     if (mh) {
       file.source = mh.source;
       file.hash = mh.hash;
+      file.id = mh.id;
       break;
     }
     const lh = legacyHeader(line);

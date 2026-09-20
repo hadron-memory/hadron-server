@@ -9,8 +9,9 @@
  * stored at `properties.exports.<host>.name`, so this package validates a name
  * rather than composing one.
  *
- * Ported so far: the codec (§7 steps 1-2) and the corpus lint (§6). `Classify`
- * and the seam are the remainder and are tracked on #1177.
+ * Ported so far: the codec (§7 steps 1-2), the corpus lint (§6) and the drift
+ * classes (§5). The SEAM — a GraphQL surface over these — is the remainder and
+ * is tracked on #1177.
  */
 
 export { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
@@ -30,4 +31,12 @@ export {
   storedName,
   type Declaration,
 } from './declaration.js';
+export {
+  classifySkill,
+  pairFileToNode,
+  type Classification,
+  type DriftClass,
+  type FileFacts,
+  type NodeFacts,
+} from './classify.js';
 export { lintCollisions, lintNode, type Finding, type Severity, type SkillNode } from './lint.js';
