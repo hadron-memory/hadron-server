@@ -65,6 +65,11 @@ export const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
  * A DELIBERATE DIVERGENCE from the Go reference, which checks `isNodeURN` and
  * no charset — the same divergence `render` already took, now made symmetric
  * rather than left half-applied (@copilot, PR #1234).
+ *
+ * ONE definition, imported by `render`, for the reason this file already gives
+ * for `SAFE_ID_RE`: two copies are two predicates. Round 2 of that same review
+ * left a second copy in `render` — the drift I had just argued against, in the
+ * commit that argued it.
  */
 export const SAFE_SOURCE_RE = /^[A-Za-z0-9._:-]+$/;
 
