@@ -172,25 +172,51 @@ describe('#1218 — clone is an owning operation', () => {
 });
 
 describe('#1210 — extract, and what #1211 already did to it', () => {
-  it('STATE: extract REFUSES a governed subtree on main (so #1210 is not reachable through it)', async () => {
-    // Recorded as a measurement, not endorsed as a requirement. #1191 gave
-    // extract `assertBatchMutable`, which calls `assertNoGovernedRows` — so the
-    // copy that #1210 says loses `role` never happens. #1218 rules that an
-    // owning operation must not be refused, which makes converting this
-    // refusal into a carry a DECISION rather than a field addition, and it is
-    // flagged rather than taken unilaterally.
+  it('extract CARRIES a governed subtree — the refusal inverted on @Holger\'s ruling', async () => {
+    // INVERTED, deliberately, and kept rather than deleted — which is what
+    // labelling it "STATE" bought. It used to read:
+    //
+    //   "STATE: extract REFUSES a governed subtree on main (so #1210 is not
+    //    reachable through it)"
+    //
+    // recorded as a measurement rather than endorsed as a requirement, because
+    // #1191 gave extract `assertBatchMutable` and converting that refusal into
+    // a carry was a DECISION, not a field addition. @Holger ruled it on
+    // 2026-09-19 (#1218): extract is an owning operation, a preserving copy
+    // neither mints nor clears governance, so the refusal becomes a carry.
     const parent = await mkNode(srcMem.id, 'parent');
     await mkNode(srcMem.id, 'parent:child', { role: 'review' });
+    await mkNode(srcMem.id, 'parent:runner', { isRunnable: true });
+    await mkNode(srcMem.id, 'parent:plain');
     const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
-    const code = await codeOf(
-      resolvers.Mutation.extractParentNodeToMemory(
-        {},
-        { parentRef: parent.id, targetUrn: `${org.urn}::gs-x-${t}`, move: false } as never,
-        ctx(),
-      ),
+    const res = await resolvers.Mutation.extractParentNodeToMemory(
+      {},
+      { parentRef: parent.id, targetUrn: `${org.urn}::gs-x-${t}`, move: false } as never,
+      ctx(),
     );
-    expect(code).toBe('ROLE_GOVERNED');
+
+    // Extract REBASES onto a new root loc, so the copied rows are keyed by the
+    // rebased loc's last atom — take the memory from the mutation's own return
+    // rather than looking it up by the source loc.
+    const rows = await db.node.findMany({
+      where: { memoryId: (res as { id: string }).id, deletedAt: null },
+      select: { loc: true, role: true, isRunnable: true },
+    });
+    const byTail = Object.fromEntries(rows.map((r) => [r.loc.split(':').pop()!, r]));
+
+    // Preserved, both signals.
+    expect(byTail['child']?.role).toBe('review');
+    expect(byTail['runner']?.isRunnable).toBe(true);
+    // PRESERVE, NEVER MINT — the other half of the ruling. An extract that
+    // could ADD governance would be a way to mint a governed node outside its
+    // door, so the ungoverned sibling must come through ungoverned.
+    expect(byTail['plain']?.role).toBeNull();
+    expect(byTail['plain']?.isRunnable).not.toBe(true);
   });
+
+  // The scoping control — MERGE must still refuse — lives with the other merge
+  // fixtures in `resolvers.bulkMutationGate.test.ts` ("refuses when either side
+  // holds a GOVERNED node"), rather than being a second copy here.
 
   it('CONTROL: an UNGOVERNED subtree extracts, and the carry does not stamp it', async () => {
     // The control matters here for the usual reason: a gate that refused

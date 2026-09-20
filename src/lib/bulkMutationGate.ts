@@ -170,6 +170,29 @@ export async function assertBatchMutable(
   memoryIds: readonly string[],
   rows: readonly GatedRow[],
   op: string,
+  opts: {
+    /**
+     * What this operation does when the batch contains a GOVERNED row (#1210).
+     *
+     * - `'refuse'` (default) — the generic surface may not touch a node that
+     *   carries a kind's marker. This is the conservative answer and stays the
+     *   default deliberately: a copying operation added later gets it without
+     *   asking, and being refused is the recoverable direction. Merge holds
+     *   this.
+     * - `'carry'` — an OWNING operation (#1218): it duplicates an
+     *   already-approved node rather than authoring a new one, so it carries
+     *   the signals across instead of being refused for doing so. Extract
+     *   holds this, on @Holger's ruling of 2026-09-19.
+     *
+     * Note what this option does NOT do: it never makes a row governed. The
+     * carry is `governedSignals.ts`'s job and it PRESERVES — this flag only
+     * decides whether the presence of a marker stops the operation.
+     *
+     * The PROTECTED-loc half above is unaffected either way. A Channel's
+     * address is a reservation, not a kind marker, and no ruling touched it.
+     */
+    governed?: 'refuse' | 'carry';
+  } = {},
 ): Promise<void> {
   for (const memoryId of [...new Set(memoryIds)].sort()) {
     await lockMemoryForChannelChange(tx as Prisma.TransactionClient, memoryId);
@@ -198,6 +221,14 @@ export async function assertBatchMutable(
   // commits between this read and the batch's write. That is filed rather than
   // papered over, and closing it properly means giving the governed writers a
   // BOUNDED shared serialization point instead of a key per row.
+  //
+  // An OWNING operation skips this half entirely (#1210). The re-read exists
+  // to catch a promotion that committed after the caller's snapshot — a
+  // question only worth asking when the answer could refuse. It is skipped
+  // rather than run-and-ignored so an owning extract does not pay a query per
+  // batch for a verdict it discards.
+  if (opts.governed === 'carry') return;
+
   const fresh = await tx.node.findMany({
     where: {
       memoryId: { in: [...new Set(memoryIds)] },
