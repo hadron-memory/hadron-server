@@ -82,6 +82,20 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/**
+ * Go's `sort.Strings` order — UTF-8 BYTES, not JavaScript's UTF-16 code units
+ * (@copilot, PR #1233).
+ *
+ * The two disagree, and oppositely: an astral character encodes to a surrogate
+ * pair starting 0xD800, so it sorts BEFORE U+E000 under UTF-16 and AFTER it
+ * under UTF-8. Host keys are arbitrary strings out of a JSON column and every
+ * one of them is shape-checked, so the malformed list is exactly where an
+ * exotic key shows up — the one place this order is observable.
+ */
+function compareUtf8(a: string, b: string): number {
+  return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+}
+
 /** Own-property presence — `in` would find inherited members. */
 function own(obj: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(obj, key);
@@ -160,7 +174,11 @@ export function classifyDeclaration(properties: unknown): {
       // insertion order for string keys, which is a property of how the row
       // was written rather than of the node — an unsorted list would make a
       // `--strict` gate nondeterministic across two reads of the same data.
-      for (const host of Object.keys(raw).sort()) {
+      //
+      // By UTF-8 bytes, matching Go: the default `.sort()` compares UTF-16
+      // code units and orders an astral key against U+E000 the other way
+      // round. A fixture generated from Go pins this.
+      for (const host of Object.keys(raw).sort(compareUtf8)) {
         const path = `${EXPORTS_KEY}.${host}`;
         const entry = raw[host];
         if (!isPlainObject(entry)) {

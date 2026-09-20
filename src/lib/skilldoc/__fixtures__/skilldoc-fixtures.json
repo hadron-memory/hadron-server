@@ -1447,6 +1447,91 @@
       "findings": []
     },
     {
+      "name": "a padded name does not collide with the trimmed one",
+      "nodes": [
+        {
+          "urn": "hrn:node:a.com:m:one",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": " x-y "
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:b.com:m:two",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": "x-y"
+              }
+            }
+          }
+        }
+      ],
+      "findings": []
+    },
+    {
+      "name": "two identically padded names DO collide",
+      "nodes": [
+        {
+          "urn": "hrn:node:a.com:m:one",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": " x-y "
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:b.com:m:two",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": " x-y "
+              }
+            }
+          }
+        }
+      ],
+      "findings": [
+        {
+          "urn": "hrn:node:a.com:m:one",
+          "rule": "skill-name-collision",
+          "severity": "error",
+          "message": "stores skill name \" x-y \", and so does hrn:node:b.com:m:two — one name, one skill directory; rename one or supersede the fork"
+        },
+        {
+          "urn": "hrn:node:b.com:m:two",
+          "rule": "skill-name-collision",
+          "severity": "error",
+          "message": "stores skill name \" x-y \", and so does hrn:node:a.com:m:one — one name, one skill directory; rename one or supersede the fork"
+        }
+      ]
+    },
+    {
       "name": "nameless nodes never collide",
       "nodes": [
         {
@@ -1705,6 +1790,27 @@
       "malformed": [
         "exports.alpha",
         "exports.zebra"
+      ]
+    },
+    {
+      "name": "host keys ordered by UTF-8 bytes, not UTF-16 units",
+      "properties": {
+        "exports": {
+          "alpha": "no",
+          "": "no",
+          "𐀀": "no"
+        }
+      },
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": [
+        "exports.alpha",
+        "exports.",
+        "exports.𐀀"
       ]
     },
     {

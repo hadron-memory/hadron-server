@@ -208,11 +208,17 @@ export function lintCollisions(nodes: readonly SkillNode[]): Finding[] {
   for (const node of nodes) {
     const declaration = declaredSkill(node.properties);
     if (declaration === null) continue;
-    const name = storedName(declaration);
-    if (name === '') continue;
-    const group = byName.get(name) ?? [];
+    // Grouped by the RAW stored name, with the trim used ONLY to decide
+    // whether there is a name at all (@copilot, PR #1233). Grouping by the
+    // trimmed value would make `" x-y "` collide with `"x-y"` — which the
+    // reference treats as two distinct names — and would report a collision
+    // under a name neither author wrote. Two identically padded names still
+    // collide, and the message names them as stored, padding included, so the
+    // author can see what to fix.
+    if (storedName(declaration) === '') continue;
+    const group = byName.get(declaration.name) ?? [];
     group.push(node);
-    byName.set(name, group);
+    byName.set(declaration.name, group);
   }
 
   const out: Finding[] = [];
