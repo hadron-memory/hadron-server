@@ -147,7 +147,7 @@ export async function extractParentNodeGraph(
       // the lock here covers every write it performs; `nodes` was read inside
       // it a few lines above, so the governed check is on this transaction's
       // own snapshot rather than a stale one.
-      await assertBatchMutable(
+      const freshSignals = await assertBatchMutable(
         tx,
         [args.sourceMemoryId],
         nodes,
@@ -266,7 +266,16 @@ export async function extractParentNodeGraph(
         // copied `isRunnable` and not `role`, so an extracted review or spec
         // arrived UNGOVERNED while an extracted task did not. Preserves, never
         // mints. See `governedSignals.ts`.
-        ...carryGovernedSignals(n),
+        //
+        // From the GATE's snapshot, not from `n` (@codex P1, PR #1230). `nodes`
+        // was read before the gate took the memory lock, and the kind doors do
+        // not serialize against that lock — so a promotion committed in between
+        // leaves `n` stale, and copying it would produce an ungoverned duplicate
+        // of a node that IS governed. With `move: true` the source is then
+        // soft-deleted, so the ungoverned copy is all that survives. Falling
+        // back to `n` keeps the copy correct if a row vanished from the
+        // re-read.
+        ...carryGovernedSignals(freshSignals?.get(n.loc) ?? n),
         llmModel: n.llmModel,
         aiAgent: n.aiAgent,
         tokens: n.tokens,

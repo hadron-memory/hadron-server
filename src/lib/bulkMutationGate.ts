@@ -40,6 +40,22 @@ import { lockMemoryForChannelChange } from './channels.js';
 import { LocProtectedError, protectedLocsIn, protectedLocCovers, type ChannelReader } from './protectedLoc.js';
 import { GOVERNED_ROLES, governedKindsOf, RoleGovernedError } from './governedRole.js';
 
+/**
+ * The governed signals as they stand UNDER THE LOCK, keyed by loc (#1210).
+ *
+ * Returned only on the `carry` path, and the reason it is returned rather than
+ * merely checked is @codex's P1 on PR #1230: an owning operation must copy the
+ * values that are true NOW, not the ones its transaction read before the gate
+ * ran. Absent from the map = no live row at that loc.
+ *
+ * It does NOT close the window entirely. The kind doors lock per loc, not on
+ * the memory key this gate holds, so a promotion committing between this read
+ * and the caller's write is still possible — the same residual window the
+ * refuse path already documents, and #1213's bounded serialization point is
+ * what closes it for both.
+ */
+export type GovernedSnapshot = ReadonlyMap<string, { role: string | null; isRunnable: boolean | null }>;
+
 /** The columns this gate reads off a node. */
 export interface GatedRow {
   loc: string;
@@ -193,7 +209,7 @@ export async function assertBatchMutable(
      */
     governed?: 'refuse' | 'carry';
   } = {},
-): Promise<void> {
+): Promise<GovernedSnapshot | undefined> {
   for (const memoryId of [...new Set(memoryIds)].sort()) {
     await lockMemoryForChannelChange(tx as Prisma.TransactionClient, memoryId);
   }
@@ -222,12 +238,34 @@ export async function assertBatchMutable(
   // papered over, and closing it properly means giving the governed writers a
   // BOUNDED shared serialization point instead of a key per row.
   //
-  // An OWNING operation skips this half entirely (#1210). The re-read exists
-  // to catch a promotion that committed after the caller's snapshot — a
-  // question only worth asking when the answer could refuse. It is skipped
-  // rather than run-and-ignored so an owning extract does not pay a query per
-  // batch for a verdict it discards.
-  if (opts.governed === 'carry') return;
+  // An owning operation does not REFUSE — but it must not skip the read
+  // either (@codex P1 on PR #1230, and the finding is right). The caller's
+  // `rows` were read earlier in its transaction; the kind doors coordinate on
+  // `lockLocForWrite(memoryId, loc)`, which does not conflict with the memory
+  // key held above, and READ COMMITTED does not refresh that earlier snapshot.
+  // So a door that commits in between leaves the caller holding STALE signals
+  // — and a carry built from them copies `role: null` off a node that is now
+  // governed. With `move: true` the now-governed source is then soft-deleted,
+  // leaving only an ungoverned copy the generic surface may edit: governance
+  // laundering, introduced by the carry that exists to prevent it.
+  //
+  // So the read happens either way. What differs is the verdict: REFUSE turns
+  // a governed row into an error, CARRY hands the fresh values back for the
+  // caller to copy.
+  const governed = opts.governed ?? 'refuse';
+
+  if (governed === 'carry') {
+    // Unfiltered, unlike the refuse path below: the carry needs the CURRENT
+    // value of both signals for every row, not just the governed ones. A row
+    // DEMOTED since the caller's snapshot is the mirror hazard — copying its
+    // stale marker would mint governance the source no longer carries, which
+    // is the half of the ruling that says preserve, never mint.
+    const fresh = await tx.node.findMany({
+      where: { memoryId: { in: [...new Set(memoryIds)] }, loc: { in: locs }, deletedAt: null },
+      select: { loc: true, role: true, isRunnable: true },
+    });
+    return new Map(fresh.map((r) => [r.loc, { role: r.role, isRunnable: r.isRunnable }]));
+  }
 
   const fresh = await tx.node.findMany({
     where: {
@@ -239,4 +277,5 @@ export async function assertBatchMutable(
     select: { loc: true, role: true, isRunnable: true },
   });
   assertNoGovernedRows(fresh, 'update');
+  return undefined;
 }

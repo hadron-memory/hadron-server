@@ -306,4 +306,51 @@ describe('round 2 — the paths the gate still did not reach (@copilot)', () => 
       ),
     ).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED', loc: 'tasks:promoted' } });
   });
+
+  it('the CARRY path re-reads too, and hands back the fresh signals (@codex P1, #1230)', async () => {
+    // An owning operation does not refuse — but skipping the read would make
+    // it copy the caller's STALE snapshot. The kind doors lock per loc, not on
+    // the memory key this gate holds, so a promotion can commit in between;
+    // copying `role: null` off a node that is now governed produces an
+    // ungoverned duplicate, and with `move: true` the governed source is then
+    // soft-deleted and the laundered copy is all that survives.
+    //
+    // Driven the same way as the refuse case above: hand the helper a row that
+    // says ungoverned while the database says otherwise.
+    await mkNode(srcMem.id, 'tasks:promoted', { role: 'review' });
+    const { assertBatchMutable } = await import('../../../lib/bulkMutationGate.js');
+
+    const snapshot = await db.$transaction((tx) =>
+      assertBatchMutable(
+        tx,
+        [srcMem.id],
+        [{ loc: 'tasks:promoted', role: null, isRunnable: false }],
+        'copy',
+        { governed: 'carry' },
+      ),
+    );
+
+    expect(snapshot?.get('tasks:promoted')).toEqual({ role: 'review', isRunnable: null });
+  });
+
+  it('the CARRY snapshot reports a DEMOTED row as ungoverned — preserve, never mint', async () => {
+    // The mirror hazard, and the reason the carry read is unfiltered: if it
+    // only selected governed rows, a row demoted since the caller's snapshot
+    // would be absent from the map, the caller would fall back to its stale
+    // row, and the copy would MINT a marker the source no longer carries.
+    await mkNode(srcMem.id, 'was:governed');
+    const { assertBatchMutable } = await import('../../../lib/bulkMutationGate.js');
+
+    const snapshot = await db.$transaction((tx) =>
+      assertBatchMutable(
+        tx,
+        [srcMem.id],
+        [{ loc: 'was:governed', role: 'review', isRunnable: true }],
+        'copy',
+        { governed: 'carry' },
+      ),
+    );
+
+    expect(snapshot?.get('was:governed')).toEqual({ role: null, isRunnable: null });
+  });
 });
