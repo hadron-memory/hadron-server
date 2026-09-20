@@ -94,3 +94,9 @@ jobs:
 
       - name: SDL descriptions agree with the code they enumerate (#1103)
         run: pnpm check:sdl-enums
+
+      # A `#` comment is DISCARDED by graphql-markdown, so a contract written
+      # as one is invisible in the published reference while looking, in the
+      # source, exactly like documentation (#1232).
+      - name: No `#` comments above undocumented symbols (#1232)
+        run: pnpm check:sdl-hash-docs

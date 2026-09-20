@@ -1,0 +1,23 @@
+# Deliberate `#` comments above a symbol with no """description""" (#1232).
+#
+# Everything here renders EMPTY in the published GraphQL reference, and that is
+# the intended outcome for these entries — the comment is not about the symbol
+# underneath it. See scripts/check-sdl-hash-descriptions.mjs for the rule.
+#
+# Format: <Symbol> — <why it must stay a comment>
+# Symbol is `Type` or `Type.field`, so the entry survives edits above it.
+#
+# Adding an entry is a judgement call being RECORDED. Before you add one, check
+# it is not simply a description that belongs on the symbol: the caller-facing
+# ones were not rare in the original sweep — 145 of 152 were real documentation.
+
+# --- Section labels: correct prose about a GROUP, sitting above that group's
+# first declaration. Converting one would publish a section heading as a single
+# symbol's documentation, which reads as deliberate and is worse than empty.
+AppRunStatus — "── Spec 040 — headless agent runs ──", labels the run-surface section
+ChatStartResult — "── Chat types ──", labels the chat-types section
+AssetScanStatus — the Assets section overview (the Asset entity, its URN grammar); about the section, not this enum
+App.createUserPermission — "App-original fields", labels the run of fields below it
+Mutation.updateMyProfile — "User management", labels the user-mutation group
+Mutation.createOrganization — "Organization management", labels the org-mutation group
+Mutation.joinWaitingList — "Public mutations (no auth required)", labels the public-mutation group

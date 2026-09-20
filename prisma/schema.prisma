@@ -1097,13 +1097,23 @@ model Node {
   /// Spec 032 — fingerprint of `content` value at the time `abstract`
   /// was authored. SHA-256 of plaintext content truncated to 8 hex
   /// chars (same width as `contentHash`, different domain). At read
-  /// time, compared against `computeContentHash(node.content)` (via
-  /// `src/lib/contentHash.ts`) to detect staleness; when the two
-  /// values differ AND `abstractOriginHash` is non-null, the abstract
-  /// may not reflect current content. Surfaced by `hadron_get_node`'s
-  /// `Source: abstract-stale` marker, `hadron_validate`'s `[stale-abstract]`
-  /// warning, and the upcoming RAG layer. System-managed: never
-  /// settable via GraphQL `NodeInput`.
+  /// time, compared against `computeContentHash(node.content)` to
+  /// detect staleness: the abstract may not reflect current content
+  /// when the two differ, OR when this is NULL on a node that has
+  /// both an abstract and content (#1128 — an abstract written before
+  /// the body existed was never fingerprinted, so it has never been
+  /// checked against it; that reads as unverified, not as verified).
+  /// NULL is a clean state only when the node has no abstract, or no
+  /// content for the abstract to describe. Surfaced by
+  /// `hadron_get_node`'s `Source: abstract-stale` marker and
+  /// `hadron_validate`'s `[stale-abstract]` warning. System-managed:
+  /// never settable via GraphQL `NodeInput`.
+  ///
+  /// Until #1232 this said staleness required the value to be
+  /// NON-NULL — the pre-#1128 rule, which #1128 deliberately removed
+  /// along with the validator's own `!= null` guard. The published
+  /// Data Model reference is generated from this comment, so it
+  /// contradicted the GraphQL reference for the whole gap.
   abstractOriginHash String?   @map("abstract_origin_hash")
   // ─── 033-rag-vector-retrieval: durable embedding-queue markers ───
   /// Set when this node needs (re-)embedding; cleared on success. The single
@@ -1444,8 +1454,10 @@ model Session {
   /// only ones stamped for idleness, which is why the liveness derivation
   /// still drops `updatedAt` on an auto-expired row (the reap overwrote it).
   /// Always written together with `endedAt` and to the same instant, so
-  /// "ended" stays the single predicate `endedAt IS NULL` and this column
-  /// records only HOW it ended.
+  /// "ended" stays the single predicate `endedAt IS NOT NULL` and this
+  /// column records only HOW it ended. (#1232 — this read `IS NULL`,
+  /// which is the predicate for a session that has NOT ended, and it
+  /// said so in the published Data Model reference.)
   autoExpiredAt   DateTime?   @map("auto_expired_at")
   createdAt       DateTime    @default(now()) @map("created_at")
   createdBy       String?     @map("created_by")
