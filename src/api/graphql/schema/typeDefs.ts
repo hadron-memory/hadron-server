@@ -4618,8 +4618,20 @@ export const typeDefs = `#graphql
 
   "#772 — the kinds of widget placeable on a user's /app/dashboard grid."
   enum DashboardWidgetType {
+    """
+    { memoryCount } — how many memories the caller OWNS: the
+    memories(filter: { ownedByMe: true }) slice, not everything they can read
+    (#1231). Stated here because the population is the contract: a client that
+    has to guess it writes its own count, and then the two disagree.
+    """
     MEMORY_STATS
+    """
+    { agentCount } — how many agents the caller OWNS: the
+    agents(filter: { ownedByMe: true }) slice (#1231). Owner-scoped for every
+    caller, platform admins included.
+    """
     AGENT_STATS
+    "{ windowDays, buckets } — the caller's usage activity over a rolling window."
     USAGE_ACTIVITY
   }
 
