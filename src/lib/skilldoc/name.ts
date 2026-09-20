@@ -7,9 +7,10 @@
  * survives from the derivation era is the VALIDATION, now applied to the value
  * the author wrote rather than to one this code composed.
  *
- * Note what can no longer be checked, because it is the cost D12 accepts: with
- * no prefix source, a name's PREFIX is unverifiable — `hadon-foo` is a valid
- * skill name. Shape is checkable here; correctness is a human convention.
+ * Note what can no longer be checked, because it is the cost D12 accepts: with no
+ * prefix source, a name's PREFIX is unverifiable — **a typo in it passes every
+ * rule.** `hadon-foo` is a valid skill name, and that misspelling is deliberate:
+ * it IS the example. Shape is checkable here; correctness is a human convention.
  */
 
 import { runeCount } from './normalize.js';
