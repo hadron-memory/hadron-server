@@ -21,6 +21,7 @@ import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 import { ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
+import { validateGitBranch } from '../../lib/gitRef.js';
 
 function decryptToken(ciphertext: string): string {
   const key = process.env.HADRON_ENCRYPTION_KEY;
@@ -506,6 +507,9 @@ async function gitSync(cloneUrl: string, localPath: string, readBranch?: string)
     // Update remote URL with fresh token before pulling
     await execGit(['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
     if (readBranch) {
+      // #1146: positional arg — a leading `-` would be read as an option.
+      // Re-validated here as well as at the mutations; see lib/gitRef.ts.
+      validateGitBranch(readBranch, 'readBranch');
       await execGit(['checkout', readBranch], { cwd: localPath });
     }
     await execGit(['pull', '--ff-only'], { cwd: localPath });

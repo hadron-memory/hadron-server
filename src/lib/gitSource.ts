@@ -91,3 +91,56 @@ export function validateMemorySource(source: string | null | undefined): void {
     );
   }
 }
+
+/**
+ * The `owner/repo` a source names, lower-cased, or `null` if it names none
+ * (#1145).
+ *
+ * Exists because the mirror and webhook paths resolved *which Memory* a repo
+ * belongs to with `source: { contains: ownerRepo }`. Prisma's `contains`
+ * compiles to `LIKE '%' || value || '%'`, and `_` and `%` are legal in a GitHub
+ * repository name — `_` is a single-character wildcard and underscores in repo
+ * names are ordinary, not exotic. So `acme/my_repo` also matched a stored
+ * source of `acme/myXrepo`, selecting a DIFFERENT TENANT'S memory with no
+ * ownership predicate anywhere beside it.
+ *
+ * Escaping the wildcards would fix the symptom. Comparing exactly removes the
+ * question: a repo slug is an identity, and identity is not a substring match.
+ * The `contains` filter stays in the query as a cheap narrowing — it may still
+ * over-match, which is harmless — and this decides the final selection.
+ *
+ * Reuses the same two regexes `validateMemorySource` accepts, so the set of
+ * sources that parse here is exactly the set that may be stored; a source this
+ * returns `null` for is one no caller could have written since #561.
+ */
+export function parseSourceSlug(source: string | null | undefined): string | null {
+  if (source == null) return null;
+  const match = HTTPS_SOURCE_RE.exec(source) ?? SSH_SOURCE_RE.exec(source);
+  const owner = match?.[1];
+  const repo = match?.[2];
+  if (!owner || !repo || isDotSegment(owner) || isDotSegment(repo)) return null;
+  // The segment class contains `.`, so a greedy match swallows a `.git`
+  // suffix whole and the regex's own optional `(?:\.git)?` group matches
+  // empty — `…/repo.git` yields a repo of `repo.git`. Strip it here rather
+  // than tightening the shared regex, which `validateMemorySource` depends on.
+  // GitHub does not permit a repository actually named `*.git`, so this cannot
+  // shorten a real name.
+  const bare = repo.toLowerCase().replace(/\.git$/, '');
+  if (bare.length === 0) return null;
+  return `${owner.toLowerCase()}/${bare}`;
+}
+
+/**
+ * True when `source` names exactly `ownerRepo`.
+ *
+ * Case-insensitive because GitHub treats owner and repository names that way,
+ * and a webhook payload's `full_name` may differ in case from the stored URL.
+ */
+export function sourceNamesRepo(
+  source: string | null | undefined,
+  ownerRepo: string | null | undefined,
+): boolean {
+  if (!ownerRepo) return false;
+  const slug = parseSourceSlug(source);
+  return slug !== null && slug === ownerRepo.trim().toLowerCase();
+}

@@ -15,6 +15,7 @@ import {
   nodeFilePath,
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
+import { validateGitBranch } from '../../lib/gitRef.js';
 
 function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
   const slug = memoryUrn.includes(':') ? memoryUrn.split(':').slice(1).join(':') : memoryUrn;
@@ -72,6 +73,10 @@ export async function pushMemoryToGit(
   // gitBranch.ts for why the old "pull --ff-only; on failure checkout -b" logic
   // mis-fired on a non-default write branch.
   const branch = memory.writeBranch ?? 'main';
+  // #1146: positional argument to `git push -u origin <branch>` (and to
+  // checkout via prepareWriteBranch). Re-validated here as well as at the
+  // mutations; see lib/gitRef.ts for why `--` is not the fix.
+  validateGitBranch(branch, 'writeBranch');
   try {
     const cloneUrl = token ? toHttpsUrl(memory.source, token) : memory.source;
 

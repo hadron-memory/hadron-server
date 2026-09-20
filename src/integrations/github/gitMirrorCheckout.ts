@@ -23,7 +23,8 @@ import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch } from './gitBranch.js';
 import { execGit } from './execGit.js';
-import { validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
+import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
+import { validateGitBranch } from '../../lib/gitRef.js';
 
 /** The prepared checkout handed to a mutate callback. */
 export interface MirrorRepo {
@@ -73,10 +74,17 @@ export async function withMirrorCheckout(
     : null;
 
   if (!memory && ownerRepo) {
-    memory = await db.memory.findFirst({
+    // #1145: `contains` narrows, it does not IDENTIFY. Prisma compiles it to
+    // LIKE '%…%', and `_` and `%` are legal in a GitHub repo name — `_` being a
+    // single-character wildcard, so `acme/my_repo` also matched a stored
+    // `acme/myXrepo`, picking another tenant's memory with no ownership
+    // predicate beside it. The filter stays as a cheap coarse narrowing; the
+    // selection below is exact.
+    const candidates = await db.memory.findMany({
       where: { source: { contains: ownerRepo } },
       include: { organization: true },
     });
+    memory = candidates.find((m) => sourceNamesRepo(m.source, ownerRepo)) ?? null;
   }
 
   if (!memory) {
@@ -113,6 +121,18 @@ export async function withMirrorCheckout(
   // 2. Resolve the branch name.
   const rawBranch = memory.writeBranch ?? 'hadron-updates';
   const branch = rawBranch.replace('{client}', clientId ?? 'unknown');
+  // #1146: validate the SUBSTITUTED result, not the template. `branch` reaches
+  // `git checkout` and `git push` as a positional argument, and `clientId` is
+  // caller-supplied — a `writeBranch` of exactly `{client}` makes the whole
+  // branch name the client's to choose, leading `-` included. Neither the
+  // mutation guard nor a check on `rawBranch` would see that, because the
+  // dangerous value does not exist until this line.
+  try {
+    validateGitBranch(branch, 'writeBranch');
+  } catch (e) {
+    console.warn(`${logPrefix} Refusing branch "${branch}" for ${memory.urn}: ${String(e)}`);
+    return 'skipped';
+  }
 
   // 3. Get the installation token.
   let token: string | null = null;
