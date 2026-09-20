@@ -118,12 +118,20 @@ export async function extractParentNodeGraph(
       //
       // BOTH dispositions are gated, not just `move`. #1191 names the move —
       // it soft-deletes the source subtree, so it is a delete in everything but
-      // name, and it relocates a Channel's address out from under its row. But
-      // the COPY needs it too, and for a reason the issue does not have: the
-      // copied rows carry `isRunnable`, so extracting a subtree containing a
-      // task node MINTS a governed task node in a brand-new memory through a
-      // generic surface, with no task door anywhere in the call. That is the
-      // "a create is not always a create" shape from #1203's nine bypasses.
+      // name, and it relocates a Channel's address out from under its row. The
+      // COPY needs the PROTECTED-loc half too: a copy into a fresh memory can
+      // still reach a Channel's reserved address in the SOURCE, which is what
+      // this gate reads.
+      //
+      // AMENDED by #1210 (2026-09-19). This paragraph used to continue: "...and
+      // the copied rows carry `isRunnable`, so extracting a subtree containing
+      // a task node MINTS a governed task node in a brand-new memory through a
+      // generic surface" — the argument for refusing governed rows here. That
+      // is the reading @Holger's owning-operation ruling overturns: a
+      // preserving copy duplicates an approved node rather than authoring one.
+      // The governed half is now `{ governed: 'carry' }` below, with the full
+      // reasoning at the call. The minting hazard the old text named is still
+      // real and still handled — by the carry PRESERVING rather than deriving.
       //
       // In memory, over rows already loaded — no extra query, and no
       // `startsWith` on a caller-supplied loc (which compiles to an unescaped
@@ -136,14 +144,52 @@ export async function extractParentNodeGraph(
       // waits behind this transaction.
       //
       // Unlike the merge this whole operation is ONE transaction, so holding
-      // the lock here covers every write it performs; `nodes` was read inside
-      // it a few lines above, so the governed check is on this transaction's
-      // own snapshot rather than a stale one.
-      await assertBatchMutable(
+      // the lock here covers every write it performs.
+      //
+      // CORRECTED by #1210 (@copilot, PR #1230). This used to continue: "…
+      // `nodes` was read inside it a few lines above, so the governed check is
+      // on this transaction's own snapshot rather than a stale one." That
+      // safety property does NOT hold, and the fix directly below is what
+      // proves it: `nodes` is read BEFORE the gate takes the memory lock, and
+      // the governed-kind doors serialize per loc rather than on that key, so
+      // a promotion or demotion can commit in between. READ COMMITTED does not
+      // refresh the earlier read. That is precisely why `assertBatchMutable`
+      // re-reads the signals and hands them back for the carry to copy — a
+      // reader must not lean on this snapshot being current.
+      const freshSignals = await assertBatchMutable(
         tx,
         [args.sourceMemoryId],
         nodes,
         args.move ? 'move' : 'copy',
+        // #1210 — extract is an OWNING OPERATION and no longer refuses a
+        // governed subtree. @Holger ruled this on 2026-09-19 (#1218), and the
+        // reason belongs HERE rather than in the issue, because what is being
+        // removed is a deliberate refusal that #1191 added five hours before
+        // #1218 was filed:
+        //
+        //   A PRESERVING COPY NEITHER MINTS NOR CLEARS GOVERNANCE. The copy
+        //   arrives governed exactly as the source was — nothing gains
+        //   protection it lacked, nothing loses protection it had. That is the
+        //   same reasoning that makes revision-restore safe, and it is why
+        //   extract carries the signals (`carryGovernedSignals` below) rather
+        //   than being refused for carrying them.
+        //
+        // The paragraph above this call used to justify the refusal with "the
+        // copied rows carry `isRunnable`, so extracting a subtree containing a
+        // task MINTS a governed task through a generic surface". That reading
+        // is what the ruling overturns: duplicating an approved node is not
+        // authoring one. The minting hazard it names is real and is addressed
+        // where it belongs — the carry PRESERVES and never derives, so extract
+        // cannot add a marker the source lacked.
+        //
+        // NOT loosened: the protected-loc half above still refuses (a
+        // Channel's address is a reservation, not a kind marker), and MERGE
+        // keeps the refusal — it was never in the ruling.
+        //
+        // This does NOT close #1202. A governed node extracted into a memory
+        // the caller owns is still clearable through the kind's door, because
+        // the door refuses the wrong TOOL and never the wrong PRINCIPAL.
+        { governed: 'carry' },
       );
 
       // Rebase a source loc onto the new root: parentLoc → rootLoc,
@@ -229,7 +275,16 @@ export async function extractParentNodeGraph(
         // copied `isRunnable` and not `role`, so an extracted review or spec
         // arrived UNGOVERNED while an extracted task did not. Preserves, never
         // mints. See `governedSignals.ts`.
-        ...carryGovernedSignals(n),
+        //
+        // From the GATE's snapshot, not from `n` (@codex P1, PR #1230). `nodes`
+        // was read before the gate took the memory lock, and the kind doors do
+        // not serialize against that lock — so a promotion committed in between
+        // leaves `n` stale, and copying it would produce an ungoverned duplicate
+        // of a node that IS governed. With `move: true` the source is then
+        // soft-deleted, so the ungoverned copy is all that survives. Falling
+        // back to `n` keeps the copy correct if a row vanished from the
+        // re-read.
+        ...carryGovernedSignals(freshSignals?.get(n.loc) ?? n),
         llmModel: n.llmModel,
         aiAgent: n.aiAgent,
         tokens: n.tokens,

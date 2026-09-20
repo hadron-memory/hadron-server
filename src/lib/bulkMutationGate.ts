@@ -40,6 +40,26 @@ import { lockMemoryForChannelChange } from './channels.js';
 import { LocProtectedError, protectedLocsIn, protectedLocCovers, type ChannelReader } from './protectedLoc.js';
 import { GOVERNED_ROLES, governedKindsOf, RoleGovernedError } from './governedRole.js';
 
+/**
+ * The governed signals as they stand UNDER THE LOCK, keyed by loc (#1210).
+ *
+ * **Single-memory only.** `loc` is unique within a memory, never globally, so
+ * this keying is only sound because the `carry` path refuses more than one
+ * memoryId — see the guard in `assertBatchMutable`.
+ *
+ * Returned only on the `carry` path, and the reason it is returned rather than
+ * merely checked is @codex's P1 on PR #1230: an owning operation must copy the
+ * values that are true NOW, not the ones its transaction read before the gate
+ * ran. Absent from the map = no live row at that loc.
+ *
+ * It does NOT close the window entirely. The kind doors lock per loc, not on
+ * the memory key this gate holds, so a promotion committing between this read
+ * and the caller's write is still possible — the same residual window the
+ * refuse path already documents, and #1213's bounded serialization point is
+ * what closes it for both.
+ */
+export type GovernedSnapshot = ReadonlyMap<string, { role: string | null; isRunnable: boolean | null }>;
+
 /** The columns this gate reads off a node. */
 export interface GatedRow {
   loc: string;
@@ -170,7 +190,30 @@ export async function assertBatchMutable(
   memoryIds: readonly string[],
   rows: readonly GatedRow[],
   op: string,
-): Promise<void> {
+  opts: {
+    /**
+     * What this operation does when the batch contains a GOVERNED row (#1210).
+     *
+     * - `'refuse'` (default) — the generic surface may not touch a node that
+     *   carries a kind's marker. This is the conservative answer and stays the
+     *   default deliberately: a copying operation added later gets it without
+     *   asking, and being refused is the recoverable direction. Merge holds
+     *   this.
+     * - `'carry'` — an OWNING operation (#1218): it duplicates an
+     *   already-approved node rather than authoring a new one, so it carries
+     *   the signals across instead of being refused for doing so. Extract
+     *   holds this, on @Holger's ruling of 2026-09-19.
+     *
+     * Note what this option does NOT do: it never makes a row governed. The
+     * carry is `governedSignals.ts`'s job and it PRESERVES — this flag only
+     * decides whether the presence of a marker stops the operation.
+     *
+     * The PROTECTED-loc half above is unaffected either way. A Channel's
+     * address is a reservation, not a kind marker, and no ruling touched it.
+     */
+    governed?: 'refuse' | 'carry';
+  } = {},
+): Promise<GovernedSnapshot | undefined> {
   for (const memoryId of [...new Set(memoryIds)].sort()) {
     await lockMemoryForChannelChange(tx as Prisma.TransactionClient, memoryId);
   }
@@ -198,6 +241,51 @@ export async function assertBatchMutable(
   // commits between this read and the batch's write. That is filed rather than
   // papered over, and closing it properly means giving the governed writers a
   // BOUNDED shared serialization point instead of a key per row.
+  //
+  // An owning operation does not REFUSE — but it must not skip the read
+  // either (@codex P1 on PR #1230, and the finding is right). The caller's
+  // `rows` were read earlier in its transaction; the kind doors coordinate on
+  // `lockLocForWrite(memoryId, loc)`, which does not conflict with the memory
+  // key held above, and READ COMMITTED does not refresh that earlier snapshot.
+  // So a door that commits in between leaves the caller holding STALE signals
+  // — and a carry built from them copies `role: null` off a node that is now
+  // governed. With `move: true` the now-governed source is then soft-deleted,
+  // leaving only an ungoverned copy the generic surface may edit: governance
+  // laundering, introduced by the carry that exists to prevent it.
+  //
+  // So the read happens either way. What differs is the verdict: REFUSE turns
+  // a governed row into an error, CARRY hands the fresh values back for the
+  // caller to copy.
+  const governed = opts.governed ?? 'refuse';
+
+  if (governed === 'carry') {
+    // Keyed by loc, so it is only unambiguous within ONE memory — `loc` is
+    // unique per memory (`@@unique([loc, memoryId])`), not globally, and a
+    // loc-only lookup across memories silently picks an arbitrary tenant's row
+    // (`findings:unscoped-loc-lookup-crosses-memories`). @copilot on PR #1230.
+    //
+    // Refused loudly rather than papered over with a composite key: the one
+    // carry caller extracts FROM a single memory, and a future multi-memory
+    // owning operation should design its keying deliberately instead of
+    // inheriting a collision from here. Unreachable today by construction —
+    // which is exactly when it is cheap to close.
+    if (new Set(memoryIds).size > 1) {
+      throw new Error(
+        `assertBatchMutable: { governed: 'carry' } takes exactly one memory (got ${new Set(memoryIds).size}) — a loc-keyed snapshot is ambiguous across memories.`,
+      );
+    }
+    // Unfiltered, unlike the refuse path below: the carry needs the CURRENT
+    // value of both signals for every row, not just the governed ones. A row
+    // DEMOTED since the caller's snapshot is the mirror hazard — copying its
+    // stale marker would mint governance the source no longer carries, which
+    // is the half of the ruling that says preserve, never mint.
+    const fresh = await tx.node.findMany({
+      where: { memoryId: { in: [...new Set(memoryIds)] }, loc: { in: locs }, deletedAt: null },
+      select: { loc: true, role: true, isRunnable: true },
+    });
+    return new Map(fresh.map((r) => [r.loc, { role: r.role, isRunnable: r.isRunnable }]));
+  }
+
   const fresh = await tx.node.findMany({
     where: {
       memoryId: { in: [...new Set(memoryIds)] },
@@ -208,4 +296,5 @@ export async function assertBatchMutable(
     select: { loc: true, role: true, isRunnable: true },
   });
   assertNoGovernedRows(fresh, 'update');
+  return undefined;
 }

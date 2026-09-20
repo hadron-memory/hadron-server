@@ -101,6 +101,11 @@ describe('mergeMemories consults both gates (#1191)', () => {
   });
 
   it('refuses when either side holds a GOVERNED node', async () => {
+    // Since #1210 this is ALSO the scoping control on that change: extract and
+    // merge share `assertBatchMutable`, so loosening it for the owning
+    // operation could silently loosen the one that was never in the ruling.
+    // #1218 named extract, clone and git sync. It did not name merge, and a
+    // merge folds nodes into a memory rather than duplicating an approved one.
     const review = await mkNode(srcMem.id, 'review:x', { role: 'review' });
     expect(await codeOf(merge({ source: srcMem.id, target: tgtMem.id }))).toBe('ROLE_GOVERNED');
 
@@ -149,15 +154,27 @@ describe('extractParentNodeToMemory consults both gates (#1191)', () => {
     expect(await codeOf(extract(parent.id, target(), true))).toBe('LOC_PROTECTED');
   });
 
-  it('refuses a COPY that would MINT a governed task in the new memory', async () => {
-    // #1191 names only `move: true`. The COPY needs the gate for a different
-    // reason: the copied rows carry `isRunnable`, so extracting a subtree with
-    // a task node produces a governed task node in a brand-new memory through
-    // a generic surface — "a create is not always a create".
+  it('PERMITS a copy carrying a governed task — inverted by #1210', async () => {
+    // AMENDED, not replaced. This read:
+    //
+    //   "refuses a COPY that would MINT a governed task in the new memory —
+    //    the copied rows carry `isRunnable`, so extracting a subtree with a
+    //    task node produces a governed task node in a brand-new memory
+    //    through a generic surface — a create is not always a create."
+    //
+    // @Holger ruled against that reading on 2026-09-19 (#1218/#1210): extract
+    // is an OWNING operation, and a preserving copy duplicates an approved
+    // node rather than authoring one, so it neither mints nor clears. The
+    // minting hazard the old text named is still real — it is answered by the
+    // carry PRESERVING (see the sibling assertion below and
+    // `governedSignalCarry.test.ts`), not by refusing the operation.
+    //
+    // The PROTECTED-loc half of this gate is untouched: the Channel tests
+    // above and below still refuse, which is what keeps this inversion narrow.
     const parent = await mkNode(srcMem.id, 'topic');
     await mkNode(srcMem.id, 'topic:runme', { isRunnable: true });
     await mkNode(srcMem.id, 'keep');
-    expect(await codeOf(extract(parent.id, target(), false))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(extract(parent.id, target(), false))).toBe('OK');
   });
 
   it('a Channel OUTSIDE the extracted subtree does not refuse it', async () => {
@@ -288,5 +305,70 @@ describe('round 2 — the paths the gate still did not reach (@copilot)', () => 
         assertBatchMutable(tx, [srcMem.id], [{ loc: 'tasks:promoted', isRunnable: false }], 'merge'),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED', loc: 'tasks:promoted' } });
+  });
+
+  it('the CARRY path re-reads too, and hands back the fresh signals (@codex P1, #1230)', async () => {
+    // An owning operation does not refuse — but skipping the read would make
+    // it copy the caller's STALE snapshot. The kind doors lock per loc, not on
+    // the memory key this gate holds, so a promotion can commit in between;
+    // copying `role: null` off a node that is now governed produces an
+    // ungoverned duplicate, and with `move: true` the governed source is then
+    // soft-deleted and the laundered copy is all that survives.
+    //
+    // Driven the same way as the refuse case above: hand the helper a row that
+    // says ungoverned while the database says otherwise.
+    await mkNode(srcMem.id, 'tasks:promoted', { role: 'review' });
+    const { assertBatchMutable } = await import('../../../lib/bulkMutationGate.js');
+
+    const snapshot = await db.$transaction((tx) =>
+      assertBatchMutable(
+        tx,
+        [srcMem.id],
+        [{ loc: 'tasks:promoted', role: null, isRunnable: false }],
+        'copy',
+        { governed: 'carry' },
+      ),
+    );
+
+    expect(snapshot?.get('tasks:promoted')).toEqual({ role: 'review', isRunnable: null });
+  });
+
+  it('the CARRY path REFUSES more than one memory — a loc-keyed snapshot is ambiguous (@copilot, #1230)', async () => {
+    // `loc` is unique within a memory, not globally, so a loc-keyed map built
+    // across two memories silently returns an arbitrary tenant's signals —
+    // `findings:unscoped-loc-lookup-crosses-memories`, one layer up. Not
+    // reachable today (extract passes one memory), which is when it is cheap.
+    const { assertBatchMutable } = await import('../../../lib/bulkMutationGate.js');
+    await mkNode(srcMem.id, 'shared:loc', { role: 'review' });
+    await mkNode(tgtMem.id, 'shared:loc');
+
+    await expect(
+      db.$transaction((tx) =>
+        assertBatchMutable(tx, [srcMem.id, tgtMem.id], [{ loc: 'shared:loc' }], 'copy', {
+          governed: 'carry',
+        }),
+      ),
+    ).rejects.toThrow(/exactly one memory/);
+  });
+
+  it('the CARRY snapshot reports a DEMOTED row as ungoverned — preserve, never mint', async () => {
+    // The mirror hazard, and the reason the carry read is unfiltered: if it
+    // only selected governed rows, a row demoted since the caller's snapshot
+    // would be absent from the map, the caller would fall back to its stale
+    // row, and the copy would MINT a marker the source no longer carries.
+    await mkNode(srcMem.id, 'was:governed');
+    const { assertBatchMutable } = await import('../../../lib/bulkMutationGate.js');
+
+    const snapshot = await db.$transaction((tx) =>
+      assertBatchMutable(
+        tx,
+        [srcMem.id],
+        [{ loc: 'was:governed', role: 'review', isRunnable: true }],
+        'copy',
+        { governed: 'carry' },
+      ),
+    );
+
+    expect(snapshot?.get('was:governed')).toEqual({ role: null, isRunnable: null });
   });
 });
