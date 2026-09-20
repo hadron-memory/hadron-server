@@ -275,8 +275,8 @@ describe('#560 — a refused OAuth request must not spend the shared budget', ()
   });
 });
 
-describe('#560 — per-IP throttling', () => {
-  it('cuts one SOURCE off after 10 sends even though every address differs', async () => {
+describe('#560 — per-IP throttling (scoped to THIS route by design)', () => {
+  it('cuts one SOURCE off after 10 sends to this route, even though every address differs', async () => {
     // Every other case in this file varies the IP, which means the per-IP
     // limiter is exercised by none of them. Mounted-but-unasserted is the
     // failure shape this suite exists to avoid, so it is pinned here on its
