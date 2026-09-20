@@ -17,6 +17,8 @@ import {
   verifyJwt,
   sendMagicLink,
   verifyMagicLink,
+  buildEmailSendPerIpRateLimit,
+  buildEmailSendPerAddressRateLimit,
   buildGoogleAuthUrl,
   exchangeGoogleCode,
   verifyGoogleIdToken,
@@ -810,7 +812,11 @@ export async function createServer(): Promise<Express> {
   // Email magic-link auth
   // ---------------------------------------------------------------------------
 
-  app.post('/auth/email', async (req, res) => {
+  // #560: both brakes run BEFORE the handler, so a throttled request never
+  // reaches Resend. Per-IP bounds one attacker; per-address bounds what one
+  // victim's inbox receives, which per-IP cannot do — spreading a single
+  // target across many source addresses is how an email bomb is actually sent.
+  app.post('/auth/email', buildEmailSendPerIpRateLimit(), buildEmailSendPerAddressRateLimit(), async (req, res) => {
     const { email, redirect, clientState, client_state } = req.body as {
       email?: string;
       redirect?: string;

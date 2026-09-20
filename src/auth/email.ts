@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 import { Resend } from 'resend';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import type { Request } from 'express';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 
@@ -16,6 +18,75 @@ function getResend(): Resend {
     resend = new Resend(apiKey);
   }
   return resend;
+}
+
+const RATE_LIMITED_BODY = { error: 'rate_limit_exceeded' };
+
+/**
+ * #560: `POST /auth/email` calls Resend for any caller-supplied address. It had
+ * no brake, which makes it an email bomb aimed at arbitrary third parties, a
+ * Resend cost drain, and a signup-enumeration oracle.
+ *
+ * It is NOT gated by anything today, and the nearby claim that it is deserves
+ * correcting rather than inheriting: the #505 `client_state` nonce is
+ * mandatory, but it is caller-supplied and only ever hashed and stored on the
+ * token row — nothing validates it against a pre-registered value. Any string
+ * satisfies it. Its job is binding the handoff code to one browser
+ * (session-fixation defense), not authenticating the sender, so it stops
+ * nobody from driving this endpoint in a loop.
+ *
+ * TWO limiters, because they answer different threats and either alone leaves
+ * the other open:
+ *
+ *  - per-IP bounds how much damage one attacker does;
+ *  - per-EMAIL bounds how much mail one VICTIM receives, which a per-IP limit
+ *    cannot do — distributing the same target across many IPs is exactly how
+ *    an email bomb is actually sent.
+ *
+ * Numbers match `buildAuthorizeEmailRateLimit` (10 / 15 min / IP) so the two
+ * send paths do not drift apart; the per-email budget is deliberately tighter,
+ * since a human retrying a typo'd address changes the address.
+ *
+ * `skipFailedRequests` uncounts 4xx/5xx so validation 400s don't consume the
+ * budget — only requests that actually reached Resend do. Same in-process
+ * MemoryStore caveat as the OAuth limiters: counters are per-worker, which is
+ * acceptable because the limit exists to stop abuse-shaped bursts rather than
+ * to enforce an exact quota.
+ */
+export function buildEmailSendPerIpRateLimit() {
+  return rateLimit({
+    windowMs: 15 * 60_000,
+    limit: 10,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    skipFailedRequests: true,
+    message: RATE_LIMITED_BODY,
+  });
+}
+
+/** Per-recipient companion to {@link buildEmailSendPerIpRateLimit}. */
+export function buildEmailSendPerAddressRateLimit() {
+  return rateLimit({
+    windowMs: 15 * 60_000,
+    limit: 5,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    skipFailedRequests: true,
+    message: RATE_LIMITED_BODY,
+    keyGenerator: (req: Request) => {
+      const email = (req.body as { email?: unknown } | undefined)?.email;
+      // Case-folded so `Victim@x.com` and `victim@x.com` share one budget —
+      // they are the same mailbox, and a limiter that treats them as two is
+      // bypassed by changing the capitalization.
+      if (typeof email === 'string' && email.trim()) return `email:${email.trim().toLowerCase()}`;
+      // No usable address: fall back to the IP so these requests cannot all
+      // collide on one shared key and lock each other out. `ipKeyGenerator`
+      // is the library's own IPv6-safe normalizer — keying on a raw v6
+      // address would let an attacker walk their own /64 for a fresh budget
+      // per request.
+      return ipKeyGenerator(req.ip ?? '');
+    },
+  });
 }
 
 export async function sendMagicLink(

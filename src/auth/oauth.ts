@@ -1021,14 +1021,23 @@ const EMAIL_MAX_LENGTH = 320;
 
 /**
  * Per-IP limiter for the magic-link send triggered from the OAuth
- * email-entry page. The existing send path (POST /auth/email) is
- * portal-gated by the mandatory #505 `client_state` nonce; this
- * endpoint is reachable by anyone who can render the entry page, so it
- * needs its own brake against being used as an email bomb / Resend
- * quota drain. 10 sends / 15 min / IP comfortably covers a human
- * retrying a typo'd address. `skipFailedRequests` uncounts 4xx/5xx so
- * CSRF failures and validation 400s don't consume the send budget —
- * only requests that actually reached Resend do.
+ * email-entry page, against being used as an email bomb / Resend quota
+ * drain. 10 sends / 15 min / IP comfortably covers a human retrying a
+ * typo'd address. `skipFailedRequests` uncounts 4xx/5xx so CSRF
+ * failures and validation 400s don't consume the send budget — only
+ * requests that actually reached Resend do.
+ *
+ * AMENDED (#560): this used to say "the existing send path (POST
+ * /auth/email) is portal-gated by the mandatory #505 `client_state`
+ * nonce", offered as the reason that path needed no limiter of its own.
+ * That was wrong. The nonce is mandatory, but it is CALLER-SUPPLIED and
+ * only ever hashed and written onto the token row — nothing validates it
+ * against a pre-registered value, so any string satisfies it. It binds a
+ * handoff code to one browser (session-fixation defense); it
+ * authenticates nobody and throttles nothing. `POST /auth/email` now
+ * carries its own per-IP and per-ADDRESS limiters
+ * (`buildEmailSendPerIpRateLimit` / `buildEmailSendPerAddressRateLimit`
+ * in auth/email.ts), and this comment no longer vouches for it.
  *
  * Same in-process MemoryStore caveat as the DCR limiters above
  * (per-worker counters in a multi-worker deploy — acceptable, the
