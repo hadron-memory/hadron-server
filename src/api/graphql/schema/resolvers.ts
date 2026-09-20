@@ -17,6 +17,7 @@ import { dateTimeScalar } from './dateTimeScalar.js';
 import { typeResolvers } from './resolvers.types.js';
 
 import { nodeQueries } from './resolvers.query.node.js';
+import { skillQueries } from './resolvers.query.skill.js';
 import { edgeQueries } from './resolvers.query.edge.js';
 import { assetQueries } from './resolvers.query.asset.js';
 import { memoryQueries } from './resolvers.query.memory.js';
@@ -80,6 +81,7 @@ export const resolvers = {
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent },
   Query: {
     ...nodeQueries,
+    ...skillQueries,
     ...objectQueries,
     ...edgeQueries,
     ...assetQueries,
