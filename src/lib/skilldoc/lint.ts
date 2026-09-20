@@ -219,7 +219,22 @@ export function lintCollisions(nodes: readonly SkillNode[]): Finding[] {
   // Sorted for a deterministic report — a Map iterates in insertion order,
   // which is the order the caller happened to read the corpus in.
   for (const name of [...byName.keys()].sort()) {
-    const group = byName.get(name)!;
+    // Sorted WITHIN the group too (@codex P2, PR #1233). Sorting only the
+    // names leaves both the finding order and each message's `others` list
+    // following corpus read order, so two equivalent reads of one corpus
+    // produce different output — which a `--strict` gate turns into a
+    // nondeterministic verdict and a portal turns into a diff that is not a
+    // change.
+    //
+    // A DELIBERATE DIVERGENCE FROM THE REFERENCE, and the only one in this
+    // file: Go iterates `byName[name]` in append order and has the same
+    // defect. It is reported to hadron-cli rather than fixed there — not my
+    // repo — and noted here so a future reader comparing the two does not
+    // "restore parity" by removing this line. The parity fixtures agree
+    // either way (their inputs are already URN-ordered); the divergence is
+    // only observable on an input Go's own suite does not contain, which is
+    // precisely why it survived there.
+    const group = [...byName.get(name)!].sort((a, b) => (a.urn < b.urn ? -1 : a.urn > b.urn ? 1 : 0));
     if (group.length < 2) continue;
     for (const node of group) {
       const others = group.filter((o) => o.urn !== node.urn).map((o) => o.urn);

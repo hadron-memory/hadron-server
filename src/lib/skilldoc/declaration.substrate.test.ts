@@ -18,7 +18,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { classifyDeclaration, declaredSkill, malformedDeclarationPaths } from './declaration.js';
-import { lintNode, type SkillNode } from './lint.js';
+import { lintCollisions, lintNode, type SkillNode } from './lint.js';
 
 const node = (properties: unknown): SkillNode => ({
   urn: 'hrn:node:acme.com:mem:tasks:x',
@@ -123,6 +123,47 @@ describe('lines that are PROVABLY redundant rather than untested', () => {
     // above would hold for a predicate that is constant.
     expect(bodies.some((b) => FRONTMATTER_RE.test(b))).toBe(true);
     expect(bodies.some((b) => !FRONTMATTER_RE.test(b))).toBe(true);
+  });
+});
+
+describe('collision reporting is stable under corpus read order (@codex P2, #1233)', () => {
+  it('emits the same findings, in the same order, for a permuted input', () => {
+    // The corpus query returns nodes in whatever order it returns them. Sorting
+    // only the NAMES left the findings — and each message's `others` list —
+    // following that order, so two equivalent reads disagreed. A `--strict`
+    // gate reading that is nondeterministic; a portal rendering it shows a diff
+    // that is not a change.
+    //
+    // This is the one place this port deliberately diverges from Go, which has
+    // the same defect. Not comparable against the fixtures by construction,
+    // which is why it lives here.
+    const mk = (urn: string): SkillNode => ({
+      urn,
+      loc: 'tasks:x',
+      memoryUrn: 'hrn:mem:acme.com:mem',
+      isRunnable: true,
+      content: '# body',
+      properties: { exports: { claudeSkill: { name: 'shared-name', description: 'd. Use when x.' } } },
+    });
+    const a = mk('hrn:node:a.com:m:one');
+    const b = mk('hrn:node:b.com:m:two');
+    const c = mk('hrn:node:c.com:m:three');
+
+    const forward = lintCollisions([a, b, c]);
+    const reversed = lintCollisions([c, b, a]);
+    const shuffled = lintCollisions([b, c, a]);
+
+    expect(forward).toEqual(reversed);
+    expect(forward).toEqual(shuffled);
+    // …and the report is non-empty, or three empty arrays would satisfy it.
+    expect(forward).toHaveLength(3);
+    expect(forward.map((f) => f.urn)).toEqual([
+      'hrn:node:a.com:m:one',
+      'hrn:node:b.com:m:two',
+      'hrn:node:c.com:m:three',
+    ]);
+    // The message's `others` list is the half a name-only sort left moving.
+    expect(forward[0].message).toContain('hrn:node:b.com:m:two, hrn:node:c.com:m:three');
   });
 });
 
