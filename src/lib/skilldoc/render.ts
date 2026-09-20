@@ -68,6 +68,10 @@ export class SkillRenderError extends Error {}
  */
 const SAFE_SOURCE_RE = /^[A-Za-z0-9._:-]+$/;
 
+/** The charset a node id may carry into the header — ULIDs and cuids are
+ *  alphanumeric, and nothing else may reach a one-line comment. */
+const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
+
 /**
  * Compose the skill file.
  *
@@ -95,13 +99,55 @@ const SAFE_SOURCE_RE = /^[A-Za-z0-9._:-]+$/;
  * instruction into a loud error. The broader gap — git sync writing unvalidated
  * locs, which is not a skills problem — is reported separately.
  */
-export function render(name: string, source: string, description: string, content: string): string {
+export function render(
+  name: string,
+  source: string,
+  description: string,
+  content: string,
+  /**
+   * The source node's stable ID, written into the header as `id=` (#1177 §4a).
+   *
+   * REQUIRED rather than optional, and `''` is the explicit "omit it" — a
+   * caller must decide. An optional parameter here would be a gate a caller
+   * can forget: the id is what makes a later `loc` rename read as `renamed`
+   * instead of `orphaned` + `never-exported`, and the cost of omitting it is
+   * paid by whoever renames the node months later, not by the caller who
+   * omitted it.
+   *
+   * `''` reproduces the pre-§4a header exactly, which is what the Go reference
+   * writes — so the parity fixtures pass `''` and stay byte-comparable.
+   *
+   * NOT a hash input. The hash must remain recomputable from the file alone,
+   * and adding a value the file carries only in its header would not change
+   * that — but `source` already covers provenance, and including the id would
+   * make every existing file's hash change for a field that decides pairing
+   * rather than content.
+   */
+  nodeId: string,
+): string {
   // BOTH: the charset a one-line comment can carry, AND the shape the parser
   // will accept back (@copilot round 4). Charset alone still let `render` write
   // a header `parseFile` refuses as not-ours — the file would orphan itself and
   // a re-export would write a second copy beside it. Render and parse are
   // inverses or they are not; this is the half that makes that true in the
   // write direction.
+  // The id lands in the SAME one-line comment as the source, so it gets the
+  // same treatment (#1223's finding, applied to the field §4a adds rather than
+  // rediscovered later): an ALLOW-LIST of what an id may contain, not a
+  // ban-list of what it may not. A ban-list is only ever as complete as the
+  // last report — the first version of the source guard refused `-->` and left
+  // a newline doing the identical thing one character over.
+  //
+  // Node ids are ULIDs or cuids today, so nothing in the corpus violates this.
+  // That is the argument for the guard, not against it: #1224 exists because a
+  // writer nobody enumerated minted a loc no API caller could.
+  if (nodeId !== '' && !SAFE_ID_RE.test(nodeId)) {
+    throw new SkillRenderError(
+      `skill source node id contains characters that cannot be written into a ` +
+        `one-line provenance comment; the remainder of the header would become ` +
+        `agent-visible instructions: ${JSON.stringify(nodeId)}`,
+    );
+  }
   if (!SAFE_SOURCE_RE.test(source) || !isNodeUrn(source)) {
     throw new SkillRenderError(
       `skill source URN contains characters that cannot be written into a one-line ` +
@@ -119,7 +165,7 @@ export function render(name: string, source: string, description: string, conten
     '---\n' +
     fm +
     '\n---\n\n' +
-    `<!-- hadron-skill source=${source} hash=${h} -->\n` +
+    `<!-- hadron-skill source=${source}${nodeId === '' ? '' : ` id=${nodeId}`} hash=${h} -->\n` +
     HUMAN_LINE +
     '\n\n' +
     c +

@@ -42,6 +42,20 @@ export interface SkillFile {
   source: string;
   /** '' for a legacy (pre-#580) header, which carries a source and no hash. */
   hash: string;
+  /**
+   * The source node's stable ID, or '' on a header generation that predates it
+   * (#1177 §4a).
+   *
+   * Pairing a file to a node by URN alone does not survive a `loc` rename: the
+   * URN is COMPUTED from the loc, while `moveNode` keeps the node's id — so a
+   * renamed node pairs as `orphaned` plus `never-exported`, and the user is
+   * left with two directories carrying near-identical trigger text, both
+   * firing. The id is what makes a move read as `renamed`.
+   *
+   * Deliberately NOT a hash input: the hash must stay recomputable from the
+   * file alone, and `source` already covers provenance there.
+   */
+  id: string;
   body: string;
   /**
    * Every frontmatter key other than name/description. `render` writes none, so
@@ -74,20 +88,26 @@ export function isNodeUrn(tok: string): boolean {
   return parts.every((p) => p.length > 0);
 }
 
-function machineHeader(line: string): { source: string; hash: string } | null {
+function machineHeader(line: string): { source: string; hash: string; id: string } | null {
   const m = MACHINE_RE.exec(line);
   if (!m) return null;
   let source = '';
   let h = '';
+  let id = '';
   for (const kv of m[1]!.matchAll(MACHINE_KV)) {
     if (kv[1] === 'source') source = kv[2]!;
     else if (kv[1] === 'hash') h = kv[2]!;
+    else if (kv[1] === 'id') id = kv[2]!;
   }
   // Extra keys are allowed so a later host can add its own, but a line missing
   // either of ours — or carrying a source that is not a node URN, or a hash
   // that is not exactly 16 hex — is a comment that merely looks like one.
   if (!isNodeUrn(source) || !HASH_RE.test(h)) return null;
-  return { source, hash: h };
+  // `id` is NOT part of that validity test. A header generation that predates
+  // it is still ours — it classifies `unhashed`, whose action is "rewrite",
+  // which is how the id arrives (§4a: widen the existing class rather than
+  // invent a tenth).
+  return { source, hash: h, id };
 }
 
 function legacyHeader(line: string): string | null {
@@ -150,7 +170,7 @@ export function parseFile(data: string): SkillFile {
     throw new SkillFileParseError('frontmatter is not a mapping');
   }
 
-  const file: SkillFile = { name: '', description: '', source: '', hash: '', body: '' };
+  const file: SkillFile = { name: '', description: '', source: '', hash: '', id: '', body: '' };
   for (const [k, v] of Object.entries(all as Record<string, unknown>)) {
     if (k === 'name' || k === 'description') {
       if (typeof v !== 'string') {
@@ -181,6 +201,7 @@ export function parseFile(data: string): SkillFile {
     if (mh) {
       file.source = mh.source;
       file.hash = mh.hash;
+      file.id = mh.id;
       break;
     }
     const lh = legacyHeader(line);

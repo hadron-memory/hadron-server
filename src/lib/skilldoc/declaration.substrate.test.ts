@@ -19,6 +19,8 @@
 import { describe, it, expect } from 'vitest';
 import { classifyDeclaration, declaredSkill, malformedDeclarationPaths } from './declaration.js';
 import { lintCollisions, lintNode, type SkillNode } from './lint.js';
+import { render, SkillRenderError } from './render.js';
+import { parseFile } from './parse.js';
 
 const node = (properties: unknown): SkillNode => ({
   urn: 'hrn:node:acme.com:mem:tasks:x',
@@ -164,6 +166,64 @@ describe('collision reporting is stable under corpus read order (@codex P2, #123
     ]);
     // The message's `others` list is the half a name-only sort left moving.
     expect(forward[0].message).toContain('hrn:node:b.com:m:two, hrn:node:c.com:m:three');
+  });
+});
+
+describe('the §4a id reaches the same one-line comment the source does', () => {
+  it('refuses an id that would terminate the provenance comment', () => {
+    // #1223 closed this for `source`; §4a adds a SECOND value to the same
+    // line, so the guard has to arrive with it rather than be rediscovered.
+    // Found by mutation: removing the guard reds nothing until this exists.
+    const urn = 'hrn:node:acme.com:mem:tasks:x';
+    for (const bad of ['a--> evil', 'a b', 'a\nb', 'a>b', '-->']) {
+      expect(() => render('n', urn, 'd', 'body', bad), bad).toThrow(SkillRenderError);
+    }
+  });
+
+  it('accepts the id shapes the platform actually mints, and writes them', () => {
+    // The control: a guard that refused everything would satisfy the case
+    // above. ULIDs and cuids are what `generateId` produces.
+    const urn = 'hrn:node:acme.com:mem:tasks:x';
+    for (const good of ['01a0bd36a0cd726aa3b68fb4ddf709c6', 'cme_abc-123', 'node-1']) {
+      const out = render('n', urn, 'd', 'body', good);
+      expect(out, good).toContain(` id=${good} `);
+    }
+  });
+
+  it('omits the key entirely for the empty id, reproducing the pre-§4a header', () => {
+    // What keeps the parity fixtures byte-comparable against Go, which writes
+    // no id at all.
+    const out = render('n', 'hrn:node:acme.com:mem:tasks:x', 'd', 'body', '');
+    expect(out).not.toContain(' id=');
+    expect(out).toMatch(/<!-- hadron-skill source=\S+ hash=[0-9a-f]{16} -->/);
+  });
+
+  it('the id does NOT change the hash', () => {
+    // §4a is explicit: the hash must stay recomputable from the file alone,
+    // and the id decides PAIRING rather than content. If it fed the hash,
+    // every existing file would read as stale the moment ids started being
+    // written.
+    const urn = 'hrn:node:acme.com:mem:tasks:x';
+    const withId = render('n', urn, 'd', 'body', 'node-1');
+    const without = render('n', urn, 'd', 'body', '');
+    const hashOf = (s: string): string => /hash=([0-9a-f]{16})/.exec(s)![1]!;
+    expect(hashOf(withId)).toBe(hashOf(without));
+  });
+
+  it('round-trips: what render writes with an id, parseFile reads back', () => {
+    const urn = 'hrn:node:acme.com:mem:tasks:x';
+    const out = render('n', urn, 'd', 'body', 'node-1');
+    const back = parseFile(out);
+    expect(back.id).toBe('node-1');
+    expect(back.source).toBe(urn);
+    expect(back.body).toBe('body');
+  });
+
+  it('reads a header with no id as an empty id rather than refusing it', () => {
+    // A pre-§4a file is still OURS — it classifies `unhashed`/`current`, not
+    // foreign. Widening the existing class is §4a's instruction.
+    const out = render('n', 'hrn:node:acme.com:mem:tasks:x', 'd', 'body', '');
+    expect(parseFile(out).id).toBe('');
   });
 });
 
