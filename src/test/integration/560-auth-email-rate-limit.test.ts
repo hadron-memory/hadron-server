@@ -141,11 +141,22 @@ describe('#560 — per-recipient throttling', () => {
 
   it('does not count a REFUSED request against the budget', async () => {
     const victim = uniqueEmail();
-    // Four 400s (no nonce) must not consume the send budget. That exclusion is
-    // `isUnsendableRequest`, decided from the parsed body BEFORE the handler —
-    // not inferred afterwards from the response, which is what made the abort
-    // bypass above possible.
-    for (let i = 0; i < 4; i++) expect(await send(victim, { clientState: null })).toBe(400);
+
+    // MORE than the per-address budget, and the count is the whole test.
+    // @copilot on PR #1238 caught the first version using FOUR: four refused
+    // requests consume only four of five slots even if the exclusion is
+    // broken, so the valid request answers 200 either way and the assertion
+    // can never fail. It is the shape this suite exists to catch, in this
+    // suite, written by me.
+    //
+    // At six, a counting regression exhausts the budget and the valid request
+    // becomes 429 — so the 200 below now means something.
+    const REFUSALS = 6;
+    expect(REFUSALS, 'must exceed the per-address budget to be discriminating').toBeGreaterThan(5);
+    for (let i = 0; i < REFUSALS; i++) {
+      expect(await send(victim, { clientState: null })).toBe(400);
+    }
+
     expect(await send(victim)).toBe(200);
     expect(sendMagicLinkMock).toHaveBeenCalledOnce();
   });
