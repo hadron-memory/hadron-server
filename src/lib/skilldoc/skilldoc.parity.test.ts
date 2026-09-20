@@ -36,6 +36,8 @@ import { validName } from './name.js';
 import { hash } from './hash.js';
 import { render, SkillRenderError } from './render.js';
 import { isNodeUrn, parseFile, SkillFileParseError } from './parse.js';
+import { lintCollisions, lintNode, type SkillNode } from './lint.js';
+import { classifyDeclaration } from './declaration.js';
 
 interface Fixtures {
   sourceCommit: string;
@@ -58,6 +60,30 @@ interface Fixtures {
   renderParseRoundTrip: {
     name: string; source: string; skillName: string; description: string; content: string; out: string;
   }[];
+  /** #1177 §6 — the corpus lint, generated at `lintSourceCommit` (later than
+   *  the sections above; see the fixture file's $comment). */
+  lintSourceCommit: string;
+  lint: {
+    name: string;
+    node: { urn: string; loc: string; memoryUrn: string; isRunnable: boolean; content: string; properties: unknown };
+    findings: { rule: string; severity: string; message: string }[];
+  }[];
+  lintCollisions: {
+    name: string;
+    nodes: { urn: string; loc: string; memoryUrn: string; isRunnable: boolean; content: string; properties: unknown }[];
+    findings: { urn: string; rule: string; severity: string; message: string }[];
+  }[];
+  /** The declaration READER — precedence and enable-defaults-off are contract
+   *  facts no lint finding reflects, so they are pinned directly. */
+  declared: {
+    name: string;
+    properties: unknown;
+    declared: {
+      found: boolean; key?: string; host?: string; description?: string;
+      name?: string; nameSet: boolean; enable: boolean; enableSet: boolean;
+    };
+    malformed: string[];
+  }[];
 }
 
 /** Loads the fixtures, refusing an empty or absent set rather than yielding []. */
@@ -68,7 +94,7 @@ function loadFixtures(): Fixtures {
   const sections: (keyof Fixtures)[] = [
     'normalizeDescription', 'normalizeBody',
     'validName', 'hash', 'render', 'parseFile',
-    'isNodeUrn', 'renderParseRoundTrip',
+    'isNodeUrn', 'renderParseRoundTrip', 'lint', 'lintCollisions', 'declared',
   ];
   for (const s of sections) {
     const v = f[s];
@@ -90,6 +116,18 @@ describe('#1177 A2 — the fixture set itself', () => {
     expect(F.normalizeDescription.length).toBeGreaterThan(5);
     expect(F.hash.length).toBeGreaterThan(5);
     expect(F.parseFile.length).toBeGreaterThan(3);
+    expect(F.lintSourceCommit).toBeTruthy();
+    expect(F.lint.length).toBeGreaterThan(20);
+    expect(F.lintCollisions.length).toBeGreaterThan(2);
+    // A lint suite whose fixtures all expect ZERO findings would pass against
+    // a lint that returns nothing — the shape of a gate that cannot fail.
+    expect(F.lint.flatMap((c) => c.findings).length).toBeGreaterThan(15);
+    expect(F.lintCollisions.flatMap((c) => c.findings).length).toBeGreaterThan(3);
+    expect(F.declared.length).toBeGreaterThan(8);
+    // Both answers present, or a reader that always/never finds a declaration
+    // would satisfy the section.
+    expect(F.declared.some((c) => c.declared.found)).toBe(true);
+    expect(F.declared.some((c) => !c.declared.found)).toBe(true);
   });
 
   it('carries the two code points a naive port gets wrong, in BOTH directions', () => {
@@ -338,5 +376,77 @@ describe('#1177 — parseFile agrees with Go', () => {
     const got = parseFile(c.input);
     expect(got.source).toBeTruthy();
     expect(got.hash).toBe('');
+  });
+});
+
+describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', () => {
+  // The MESSAGE is compared, not only the rule name. Two clients of one corpus
+  // — `hadron skill lint` and this surface — must tell an author the same
+  // thing about the same node; a reworded rule is a divergence a rule-name
+  // comparison cannot see.
+  it.each(F.lint.map((c) => [c.name, c] as const))('lint: %s', (_n, c) => {
+    const got = lintNode(c.node as SkillNode).map((f) => ({
+      rule: f.rule, severity: f.severity, message: f.message,
+    }));
+    expect(got).toEqual(c.findings);
+  });
+
+  it.each(F.lintCollisions.map((c) => [c.name, c] as const))('collisions: %s', (_n, c) => {
+    const got = lintCollisions(c.nodes as SkillNode[]).map((f) => ({
+      urn: f.urn, rule: f.rule, severity: f.severity, message: f.message,
+    }));
+    expect(got).toEqual(c.findings);
+  });
+
+  it('the fixture set exercises every rule this port can emit', () => {
+    // Otherwise a rule could be unreachable, or misspelled, and every fixture
+    // would still pass — the parity equivalent of a guard nobody proved fails.
+    const emitted = new Set([
+      ...F.lint.flatMap((c) => c.findings.map((f) => f.rule)),
+      ...F.lintCollisions.flatMap((c) => c.findings.map((f) => f.rule)),
+    ]);
+    expect([...emitted].sort()).toEqual([
+      'skill-content-empty',
+      'skill-content-has-frontmatter',
+      'skill-content-has-template',
+      'skill-declaration-malformed',
+      'skill-description-missing',
+      'skill-description-no-trigger',
+      'skill-description-too-long',
+      'skill-legacy-key',
+      'skill-name-collision',
+      'skill-name-invalid',
+      'skill-name-missing',
+      'skill-not-runnable',
+    ]);
+  });
+});
+
+describe('#1177 D12 — the declaration reader agrees with Go', () => {
+  it.each(F.declared.map((c) => [c.name, c] as const))('declared: %s', (_n, c) => {
+    const { declaration, malformed } = classifyDeclaration(c.properties);
+    expect(malformed).toEqual(c.malformed);
+    if (!c.declared.found) {
+      expect(declaration).toBeNull();
+      return;
+    }
+    expect(declaration).not.toBeNull();
+    expect({
+      key: declaration!.key,
+      host: declaration!.host,
+      description: declaration!.description,
+      name: declaration!.name,
+      nameSet: declaration!.nameSet,
+      enable: declaration!.enable,
+      enableSet: declaration!.enableSet,
+    }).toEqual({
+      key: c.declared.key ?? '',
+      host: c.declared.host ?? '',
+      description: c.declared.description ?? '',
+      name: c.declared.name ?? '',
+      nameSet: c.declared.nameSet,
+      enable: c.declared.enable,
+      enableSet: c.declared.enableSet,
+    });
   });
 });

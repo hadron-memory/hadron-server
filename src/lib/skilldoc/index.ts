@@ -9,8 +9,8 @@
  * stored at `properties.exports.<host>.name`, so this package validates a name
  * rather than composing one.
  *
- * Ported so far (§7 steps 1-2). `lint`, `Classify` and the seam are the
- * remainder and are tracked on #1177.
+ * Ported so far: the codec (§7 steps 1-2) and the corpus lint (§6). `Classify`
+ * and the seam are the remainder and are tracked on #1177.
  */
 
 export { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
@@ -18,3 +18,16 @@ export { MAX_DESCRIPTION_LEN, MAX_NAME_LEN, validName } from './name.js';
 export { hash } from './hash.js';
 export { HUMAN_LINE, LEGACY_HUMAN_LINE, render, SkillRenderError } from './render.js';
 export { isNodeUrn, parseFile, SkillFileParseError, type SkillFile } from './parse.js';
+export {
+  classifyDeclaration,
+  declaredSkill,
+  EXPORTS_KEY,
+  HOST_CLAUDE_SKILL,
+  isEnabled,
+  legacyAliasPaths,
+  LEGACY_TOP_LEVEL_KEYS,
+  malformedDeclarationPaths,
+  storedName,
+  type Declaration,
+} from './declaration.js';
+export { lintCollisions, lintNode, type Finding, type Severity, type SkillNode } from './lint.js';

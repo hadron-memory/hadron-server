@@ -1,5 +1,5 @@
 {
-  "$comment": "GENERATED from hadron-cli internal/skilldoc at 973cd1f by the #1177 fixture generator. Language-neutral: the Go and TypeScript suites both load this file, so a port that diverges reds rather than passing its own restatement of itself. Regenerate rather than hand-edit.  D12 (2026-09-19) retired name derivation and the org prefix, so the deriveName and validPrefix sections were removed; validName survives and now validates a STORED name.",
+  "$comment": "GENERATED from hadron-cli internal/skilldoc at 973cd1f by the #1177 fixture generator. Language-neutral: the Go and TypeScript suites both load this file, so a port that diverges reds rather than passing its own restatement of itself. Regenerate rather than hand-edit.  D12 (2026-09-19) retired name derivation and the org prefix, so the deriveName and validPrefix sections were removed; validName survives and now validates a STORED name.  The `lint` and `lintCollisions` sections were generated later, at 1a8036b (recorded separately as lintSourceCommit): the earlier sections predate D12, and regenerating them wholesale would have mixed a re-measurement into a port. Both commits are on main; neither section has been hand-edited.",
   "hash": [
     {
       "name": "plain",
@@ -521,6 +521,1216 @@
       "name": "name:64-ascii",
       "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "valid": true
+    }
+  ],
+  "lint": [
+    {
+      "name": "clean",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Do the thing. Use when you must do the thing.",
+              "enable": true,
+              "name": "hadron-do-thing"
+            }
+          }
+        }
+      },
+      "findings": []
+    },
+    {
+      "name": "not declared at all",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "other": 1
+        }
+      },
+      "findings": []
+    },
+    {
+      "name": "no properties",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": null
+      },
+      "findings": []
+    },
+    {
+      "name": "legacy top-level skill key",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "skill": {
+            "description": "Do the thing. Use when you must do the thing.",
+            "enable": true,
+            "name": "hadron-do-thing"
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-legacy-key",
+          "severity": "warning",
+          "message": "declared under properties.skill — move it to properties.exports.claudeSkill (D12: an object keyed by host, carrying {name, description, enable}); the old key is read as an alias only"
+        }
+      ]
+    },
+    {
+      "name": "legacy claudeSkill key",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "claudeSkill": {
+            "description": "Do the thing. Use when you must do the thing.",
+            "enable": true,
+            "name": "hadron-do-thing"
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-legacy-key",
+          "severity": "warning",
+          "message": "declared under properties.claudeSkill — move it to properties.exports.claudeSkill (D12: an object keyed by host, carrying {name, description, enable}); the old key is read as an alias only"
+        }
+      ]
+    },
+    {
+      "name": "migrated with a stray alias",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Do the thing. Use when you must do the thing.",
+              "enable": true,
+              "name": "hadron-do-thing"
+            }
+          },
+          "skill": {
+            "description": "Do the thing. Use when you must do the thing.",
+            "enable": true,
+            "name": "hadron-do-thing"
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-legacy-key",
+          "severity": "warning",
+          "message": "properties.skill is still present beside properties.exports.claudeSkill — remove the retired key; the export reads only the new shape"
+        }
+      ]
+    },
+    {
+      "name": "exports is a string",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": "yes"
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-declaration-malformed",
+          "severity": "error",
+          "message": "properties.exports is present but has the wrong shape — a declaration is {\"description\": \"…\"} with string fields; fix it or remove the key"
+        }
+      ]
+    },
+    {
+      "name": "exports is an ARRAY",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": []
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-declaration-malformed",
+          "severity": "error",
+          "message": "properties.exports is present but has the wrong shape — a declaration is {\"description\": \"…\"} with string fields; fix it or remove the key"
+        }
+      ]
+    },
+    {
+      "name": "host entry is not an object",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": true
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-declaration-malformed",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill is present but has the wrong shape — a declaration is {\"description\": \"…\"} with string fields; fix it or remove the key"
+        }
+      ]
+    },
+    {
+      "name": "host entry is an ARRAY",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": []
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-declaration-malformed",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill is present but has the wrong shape — a declaration is {\"description\": \"…\"} with string fields; fix it or remove the key"
+        }
+      ]
+    },
+    {
+      "name": "non-string description",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": 42,
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-declaration-malformed",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill.description is present but has the wrong shape — a declaration is {\"description\": \"…\"} with string fields; fix it or remove the key"
+        },
+        {
+          "rule": "skill-description-missing",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill.description is missing or empty — it is the trigger text the host matches against; the node cannot be exported without it"
+        }
+      ]
+    },
+    {
+      "name": "non-bool enable",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "d. Use when x.",
+              "enable": "yes",
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-declaration-malformed",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill.enable is present but has the wrong shape — a declaration is {\"description\": \"…\"} with string fields; fix it or remove the key"
+        }
+      ]
+    },
+    {
+      "name": "description missing",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-description-missing",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill.description is missing or empty — it is the trigger text the host matches against; the node cannot be exported without it"
+        }
+      ]
+    },
+    {
+      "name": "description whitespace only",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "   ",
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-description-missing",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill.description is missing or empty — it is the trigger text the host matches against; the node cannot be exported without it"
+        }
+      ]
+    },
+    {
+      "name": "description too long",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij Use when x.",
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-description-too-long",
+          "severity": "error",
+          "message": "description is 1112 characters; the host caps it at 1024 and TRUNCATES the rest in the skill listing, so trigger phrases past the cut never fire — shorten by 88"
+        }
+      ]
+    },
+    {
+      "name": "description without trigger",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Does a thing.",
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-description-no-trigger",
+          "severity": "warning",
+          "message": "description never says when to use the skill (\"Use when …\") — the host matches descriptions against what the user says, and one with no trigger phrasing rarely fires"
+        }
+      ]
+    },
+    {
+      "name": "trigger: use when",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Does a thing. Use when you need it.",
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": []
+    },
+    {
+      "name": "trigger: use IT when",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Does a thing. Use it when you need it.",
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": []
+    },
+    {
+      "name": "trigger: use THIS when",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Does a thing. Use this when you need it.",
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": []
+    },
+    {
+      "name": "trigger: USE WHEN uppercase",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Does a thing. USE WHEN you need it.",
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": []
+    },
+    {
+      "name": "trigger: usewhen is not a trigger",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Does a thing. Usewhen you need it.",
+              "name": "x-y"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-description-no-trigger",
+          "severity": "warning",
+          "message": "description never says when to use the skill (\"Use when …\") — the host matches descriptions against what the user says, and one with no trigger phrasing rarely fires"
+        }
+      ]
+    },
+    {
+      "name": "name missing",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "d. Use when x."
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-name-missing",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill.name is missing or empty — since D12 the name is stored rather than derived, so there is nothing to fall back to; it is the skill's directory name and the host's identifier"
+        }
+      ]
+    },
+    {
+      "name": "name empty string",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "d. Use when x.",
+              "name": ""
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-name-missing",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill.name is missing or empty — since D12 the name is stored rather than derived, so there is nothing to fall back to; it is the skill's directory name and the host's identifier"
+        }
+      ]
+    },
+    {
+      "name": "name whitespace only",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "d. Use when x.",
+              "name": "   "
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-name-missing",
+          "severity": "error",
+          "message": "properties.exports.claudeSkill.name is missing or empty — since D12 the name is stored rather than derived, so there is nothing to fall back to; it is the skill's directory name and the host's identifier"
+        }
+      ]
+    },
+    {
+      "name": "name invalid shape",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "d. Use when x.",
+              "name": "Not_Kebab"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-name-invalid",
+          "severity": "error",
+          "message": "skill name \"Not_Kebab\" is not a valid skill name (kebab-case, ≤64 chars) — it is stored at properties.exports.claudeSkill.name, so that is what to change"
+        }
+      ]
+    },
+    {
+      "name": "not runnable",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": false,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Do the thing. Use when you must do the thing.",
+              "enable": true,
+              "name": "hadron-do-thing"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-not-runnable",
+          "severity": "error",
+          "message": "node declares a skill but isRunnable is not true — a skill is a runnable task; set it (`hadron node update <urn> --runnable`) or drop the declaration"
+        }
+      ]
+    },
+    {
+      "name": "content empty",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Do the thing. Use when you must do the thing.",
+              "enable": true,
+              "name": "hadron-do-thing"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-content-empty",
+          "severity": "error",
+          "message": "node has no content — the body IS the skill; nothing to export"
+        }
+      ]
+    },
+    {
+      "name": "content whitespace",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "   \n  ",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Do the thing. Use when you must do the thing.",
+              "enable": true,
+              "name": "hadron-do-thing"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-content-empty",
+          "severity": "error",
+          "message": "node has no content — the body IS the skill; nothing to export"
+        }
+      ]
+    },
+    {
+      "name": "content has frontmatter",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "---\ntitle: x\n---\nbody",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Do the thing. Use when you must do the thing.",
+              "enable": true,
+              "name": "hadron-do-thing"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-content-has-frontmatter",
+          "severity": "error",
+          "message": "content starts with a `---` frontmatter block — the node body is the skill BODY; frontmatter is composed at export from the declaration and would be doubled"
+        }
+      ]
+    },
+    {
+      "name": "content opens with a horizontal rule",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "---\n\nnot frontmatter",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Do the thing. Use when you must do the thing.",
+              "enable": true,
+              "name": "hadron-do-thing"
+            }
+          }
+        }
+      },
+      "findings": []
+    },
+    {
+      "name": "content has a template",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "Hello {{name}}",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "Do the thing. Use when you must do the thing.",
+              "enable": true,
+              "name": "hadron-do-thing"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-content-has-template",
+          "severity": "warning",
+          "message": "content contains a {{…}} placeholder — export is verbatim, so it ships as literal text; keep it only if the skill is meant to carry a template"
+        }
+      ]
+    },
+    {
+      "name": "enable false still linted",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "d. Use when x.",
+              "enable": false,
+              "name": "Bad_Name"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-name-invalid",
+          "severity": "error",
+          "message": "skill name \"Bad_Name\" is not a valid skill name (kebab-case, ≤64 chars) — it is stored at properties.exports.claudeSkill.name, so that is what to change"
+        }
+      ]
+    },
+    {
+      "name": "unicode name over cap",
+      "node": {
+        "urn": "hrn:node:acme.com:mem:tasks:x",
+        "loc": "tasks:x",
+        "memoryUrn": "hrn:mem:acme.com:mem",
+        "isRunnable": true,
+        "content": "# Do the thing\n\nSteps.",
+        "properties": {
+          "exports": {
+            "claudeSkill": {
+              "description": "d. Use when x.",
+              "name": "a-👍"
+            }
+          }
+        }
+      },
+      "findings": [
+        {
+          "rule": "skill-name-invalid",
+          "severity": "error",
+          "message": "skill name \"a-👍\" is not a valid skill name (kebab-case, ≤64 chars) — it is stored at properties.exports.claudeSkill.name, so that is what to change"
+        }
+      ]
+    }
+  ],
+  "lintCollisions": [
+    {
+      "name": "two nodes one name",
+      "nodes": [
+        {
+          "urn": "hrn:node:a.com:m:one",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": "same-name"
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:b.com:m:two",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": "same-name"
+              }
+            }
+          }
+        }
+      ],
+      "findings": [
+        {
+          "urn": "hrn:node:a.com:m:one",
+          "rule": "skill-name-collision",
+          "severity": "error",
+          "message": "stores skill name \"same-name\", and so does hrn:node:b.com:m:two — one name, one skill directory; rename one or supersede the fork"
+        },
+        {
+          "urn": "hrn:node:b.com:m:two",
+          "rule": "skill-name-collision",
+          "severity": "error",
+          "message": "stores skill name \"same-name\", and so does hrn:node:a.com:m:one — one name, one skill directory; rename one or supersede the fork"
+        }
+      ]
+    },
+    {
+      "name": "three nodes one name",
+      "nodes": [
+        {
+          "urn": "hrn:node:a.com:m:one",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": "dup"
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:b.com:m:two",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": "dup"
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:c.com:m:three",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": "dup"
+              }
+            }
+          }
+        }
+      ],
+      "findings": [
+        {
+          "urn": "hrn:node:a.com:m:one",
+          "rule": "skill-name-collision",
+          "severity": "error",
+          "message": "stores skill name \"dup\", and so does hrn:node:b.com:m:two, hrn:node:c.com:m:three — one name, one skill directory; rename one or supersede the fork"
+        },
+        {
+          "urn": "hrn:node:b.com:m:two",
+          "rule": "skill-name-collision",
+          "severity": "error",
+          "message": "stores skill name \"dup\", and so does hrn:node:a.com:m:one, hrn:node:c.com:m:three — one name, one skill directory; rename one or supersede the fork"
+        },
+        {
+          "urn": "hrn:node:c.com:m:three",
+          "rule": "skill-name-collision",
+          "severity": "error",
+          "message": "stores skill name \"dup\", and so does hrn:node:a.com:m:one, hrn:node:b.com:m:two — one name, one skill directory; rename one or supersede the fork"
+        }
+      ]
+    },
+    {
+      "name": "distinct names",
+      "nodes": [
+        {
+          "urn": "hrn:node:a.com:m:one",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": "alpha"
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:b.com:m:two",
+          "loc": "tasks:x",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x.",
+                "name": "beta"
+              }
+            }
+          }
+        }
+      ],
+      "findings": []
+    },
+    {
+      "name": "nameless nodes never collide",
+      "nodes": [
+        {
+          "urn": "hrn:node:a.com:m:one",
+          "loc": "",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x."
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:b.com:m:two",
+          "loc": "",
+          "memoryUrn": "hrn:mem:acme.com:mem",
+          "isRunnable": true,
+          "content": "# Do the thing\n\nSteps.",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "description": "d. Use when x."
+              }
+            }
+          }
+        }
+      ],
+      "findings": []
+    }
+  ],
+  "lintSourceCommit": "1a8036b",
+  "declared": [
+    {
+      "name": "absent",
+      "properties": {},
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "enable omitted defaults OFF",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "name": "x-y",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "enable true",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "enable": true,
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "name": "x-y",
+        "nameSet": true,
+        "enable": true,
+        "enableSet": true
+      },
+      "malformed": []
+    },
+    {
+      "name": "enable false is set and off",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "enable": false,
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "name": "x-y",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": true
+      },
+      "malformed": []
+    },
+    {
+      "name": "name present but empty is SET",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "name": ""
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "name absent is not set",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "exports wins over legacy skill",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "new",
+            "name": "new-one"
+          }
+        },
+        "skill": {
+          "description": "old",
+          "name": "old-one"
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "new",
+        "name": "new-one",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "legacy skill wins over legacy claudeSkill",
+      "properties": {
+        "claudeSkill": {
+          "description": "b",
+          "name": "claude-key"
+        },
+        "skill": {
+          "description": "a",
+          "name": "skill-key"
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "skill",
+        "host": "claudeSkill",
+        "description": "a",
+        "name": "skill-key",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "a non-claude host alone is not a declaration",
+      "properties": {
+        "exports": {
+          "codexSkill": {
+            "description": "d",
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "a non-claude host is shape-checked",
+      "properties": {
+        "exports": {
+          "codexSkill": "nope"
+        }
+      },
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": [
+        "exports.codexSkill"
+      ]
+    },
+    {
+      "name": "two malformed hosts sort",
+      "properties": {
+        "exports": {
+          "alpha": "no",
+          "zebra": "no"
+        }
+      },
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": [
+        "exports.alpha",
+        "exports.zebra"
+      ]
+    },
+    {
+      "name": "malformed beside a valid declaration",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "enable": 1,
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "name": "x-y",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": [
+        "exports.claudeSkill.enable"
+      ]
     }
   ]
 }
