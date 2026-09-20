@@ -39,12 +39,15 @@
  * protect.
  */
 import { GraphQLError } from 'graphql';
+import { BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { getAccessibleMemoryIds, memoryAccessFilter } from './resolvers.helpers.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { isCiphertext } from '../../../lib/crypto.js';
+import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import {
   classifyDeclaration,
   classifySkill,
@@ -113,6 +116,23 @@ const DECLARATION_KEYS = [EXPORTS_KEY, ...LEGACY_TOP_LEVEL_KEYS];
 const DISCOVERY_OR = DECLARATION_KEYS.map((key) => ({
   properties: { path: [key], not: Prisma.DbNull },
 }));
+
+/**
+ * Aggregate ceiling on the rendered bodies one plan may return (@codex P2, PR
+ * #1240).
+ *
+ * The count cap alone bounds nothing that matters: node content has no
+ * storage-size limit, so 500 declared nodes with large bodies is a
+ * multi-hundred-megabyte response the process has to decrypt, render and
+ * serialize. `nodeBatch` already refuses on bytes (`BATCH_READ_MAX_BYTES`);
+ * this is the same ceiling for the same reason.
+ *
+ * LOUD, not truncating — the same posture as the count cap and for the same
+ * reason: a silently short plan tells a client its corpus is smaller than it
+ * is, and `--prune` acting on that answer deletes files for the nodes the
+ * read dropped.
+ */
+const SKILL_PLAN_MAX_BODY_BYTES = BATCH_READ_MAX_BYTES;
 
 /** Classes whose §5 action writes a file. */
 const WRITES_A_FILE = new Set(['never-exported', 'stale', 'unhashed', 'renamed']);
@@ -203,6 +223,25 @@ export const skillQueries = {
     }
     await decryptNodesBatch(ctx.db, declaredRows);
 
+    // #1177 / @codex P1 on PR #1240 — LOCKED ENCRYPTED CONTENT.
+    //
+    // `decryptNodesBatch` leaves a node's content as CIPHERTEXT rather than
+    // throwing when its encrypted memory has no active session key, so
+    // callers can return partial results. Hashing, linting or rendering that
+    // blob produces confident nonsense: the lint rules read an `enc:v1…`
+    // string as an ordinary body, and an EXPORT plan would hand the client a
+    // rendered file containing it — overwriting a perfectly good local skill
+    // with ciphertext.
+    //
+    // §5 already has the class for "listed but unreadable": `unavailable`.
+    // A locked memory is the same shape as the visibility gap it was written
+    // for, so it reuses it rather than minting a tenth — and `unavailable`
+    // outranks every other class, which is exactly right here: nothing below
+    // it is knowable.
+    const lockedIds = new Set(
+      declaredRows.filter((r) => isCiphertext(r.content)).map((r) => r.id),
+    );
+
     const skillNodes = declaredRows
       .map((r) => ({
         // NEVER hand-built. `${memory.urn}:${loc}` looks right and is wrong for
@@ -230,7 +269,13 @@ export const skillQueries = {
 
     // ── Lint: per node, plus the corpus-wide collision rule ──────────────
     const findingsByUrn = new Map<string, Finding[]>();
-    for (const n of skillNodes) findingsByUrn.set(n.urn, lintNode(n));
+    for (const n of skillNodes) {
+      // No findings for a locked node. Every rule would be judging ciphertext
+      // — `skill-content-empty` false, `skill-content-has-template` false —
+      // and a finding asserting something about a body nobody could read is
+      // worse than silence.
+      findingsByUrn.set(n.urn, lockedIds.has(n._id) ? [] : lintNode(n));
+    }
     for (const f of lintCollisions(skillNodes)) {
       findingsByUrn.get(f.urn)?.push(f);
     }
@@ -249,13 +294,19 @@ export const skillQueries = {
         declaration,
         nodeHash: hash(n.urn, name, declaration?.description ?? '', n.content),
         collides: collidingUrns.has(n.urn),
+        unavailable: lockedIds.has((n as SkillNode & { _id: string })._id),
         _id: (n as SkillNode & { _id: string })._id,
       };
     });
 
     const fileFor = new Map<string, FileFacts>();
-    const pairedFiles = new Set<FileFacts>();
-    for (const f of files) {
+    /** Directory names that paired with a node AND were selected for it. */
+    const selectedDirs = new Set<string>();
+    // Sorted so the selection is a property of the DATA rather than of the
+    // order the client happened to walk its disk in — the same reason the
+    // collision report sorts within a group.
+    const sortedFiles = [...files].sort((a, b) => (a.dirName < b.dirName ? -1 : a.dirName > b.dirName ? 1 : 0));
+    for (const f of sortedFiles) {
       const facts: FileFacts = {
         dirName: f.dirName,
         headerHash: f.headerHash ?? '',
@@ -266,10 +317,22 @@ export const skillQueries = {
         ...(f.hasExtraFrontmatter ? { hasExtraFrontmatter: true } : {}),
       };
       const paired = pairFileToNode(facts, nodeFacts);
-      if (paired) {
-        fileFor.set(paired.urn, facts);
-        pairedFiles.add(facts);
-      }
+      if (!paired) continue;
+      // TWO DIRECTORIES FOR ONE NODE (@codex P2, PR #1240). The naive `set`
+      // overwrote, so the node was classified against whichever file happened
+      // to come last and the other was silently marked paired — leaving a
+      // stale copy live on disk with nothing, ever, telling `--prune` about
+      // it. That is the duplicate-directory outcome §4a exists to prevent,
+      // arriving through a different door.
+      //
+      // One node keeps ONE directory: the first by name wins, and every other
+      // claimant is reported as an orphan — a file this plan will not
+      // maintain, which is what an orphan IS operationally and what `--prune`
+      // acts on. The class table does not name this case; reported to @Eli
+      // rather than invented as a tenth class.
+      if (fileFor.has(paired.urn)) continue;
+      fileFor.set(paired.urn, facts);
+      selectedDirs.add(f.dirName);
     }
 
     const entries = nodeFacts.map((nf) => {
@@ -312,9 +375,34 @@ export const skillQueries = {
       };
     });
 
+    const bodyBytes = entries.reduce(
+      (n, e) => n + (e.renderedBody ? Buffer.byteLength(e.renderedBody, 'utf8') : 0),
+      0,
+    );
+    if (bodyBytes > SKILL_PLAN_MAX_BODY_BYTES) {
+      throw new GraphQLError(
+        `skillPlan: the rendered bodies total ${bodyBytes} bytes, over the ${SKILL_PLAN_MAX_BODY_BYTES}-byte ceiling. Narrow \`memories\`, or export in batches; this surface does not silently truncate.`,
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
+
+    // ── Usage: one read per node whose CONTENT leaves the server (#1061) ──
+    //
+    // An EXPORT entry with a body hands the caller the node's full content,
+    // which is exactly what that contract counts. Recorded only for entries
+    // that actually carry one — a plan that returned no body returned no
+    // content, and an event naming a node nobody read is the inverse defect.
+    const returnedContent = entries
+      .filter((e) => e.renderedBody !== null)
+      .map((e) => declaredRows.find((r) => r.id === e.nodeId))
+      .filter((r): r is NonNullable<typeof r> => r != null);
+    if (returnedContent.length > 0) {
+      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(returnedContent), ctx);
+    }
+
     // ── Orphans: files that paired with nothing ──────────────────────────
     const orphans = files
-      .filter((f) => ![...pairedFiles].some((p) => p.dirName === f.dirName))
+      .filter((f) => !selectedDirs.has(f.dirName))
       .map((f) => ({
         dirName: f.dirName,
         sourceUrn: f.sourceUrn ?? null,

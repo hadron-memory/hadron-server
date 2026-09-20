@@ -219,6 +219,87 @@ describe('classes and bodies', () => {
   });
 });
 
+describe('review round 1 — @codex', () => {
+  it('P1: a LOCKED encrypted node is unavailable, never hashed, linted or rendered', async () => {
+    // `decryptNodesBatch` leaves ciphertext rather than throwing when a
+    // readable encrypted memory has no session key. Hashing or rendering that
+    // blob would hand an EXPORT client a file containing `enc:v1…` — which
+    // overwrites a perfectly good local skill with ciphertext.
+    await mkNode('tasks:locked', {
+      properties: declaration(),
+      content: 'enc:v1:AAAA:BBBB:CCCC',
+    });
+
+    const got = await plan({ intent: 'EXPORT', files: [] });
+
+    expect(got.entries[0].class).toBe('unavailable');
+    expect(got.entries[0].renderedBody).toBeNull();
+    // No findings either: every rule would be judging ciphertext, and a
+    // finding about a body nobody could read is worse than silence.
+    expect(got.entries[0].findings).toEqual([]);
+  });
+
+  it('CONTROL: the same node with readable content is judged normally', async () => {
+    // Without this, the case above would pass against a resolver that called
+    // everything unavailable.
+    await mkNode('tasks:plain-content', { properties: declaration() });
+    const got = await plan({ intent: 'EXPORT', files: [] });
+    expect(got.entries[0].class).toBe('never-exported');
+    expect(got.entries[0].renderedBody).toContain('# Body');
+  });
+
+  it('P2: two directories claiming one node — one is kept, the other is an orphan', async () => {
+    await mkNode('tasks:declared', { properties: declaration() });
+    const urn = (await plan({ intent: 'LINT' })).entries[0].urn as string;
+    const h = 'a'.repeat(16);
+
+    const got = await plan({
+      intent: 'STATUS',
+      files: [
+        { dirName: 'zz-old-copy', sourceUrn: urn, headerHash: h, fileHash: h },
+        { dirName: 'my-skill', sourceUrn: urn, headerHash: h, fileHash: h },
+      ],
+    });
+
+    // One entry, classified against ONE file…
+    expect(got.entries).toHaveLength(1);
+    // …and the loser is reported, so `--prune` can act on it. Without this
+    // the stale copy stays live on disk with nothing ever naming it.
+    expect(got.orphans.map((o: { dirName: string }) => o.dirName)).toEqual(['zz-old-copy']);
+  });
+
+  it('P2: the selection is stable under the order the client walked its disk', async () => {
+    await mkNode('tasks:declared', { properties: declaration() });
+    const urn = (await plan({ intent: 'LINT' })).entries[0].urn as string;
+    const h = 'a'.repeat(16);
+    const files = [
+      { dirName: 'zz-old-copy', sourceUrn: urn, headerHash: h, fileHash: h },
+      { dirName: 'my-skill', sourceUrn: urn, headerHash: h, fileHash: h },
+    ];
+
+    const forward = await plan({ intent: 'STATUS', files });
+    const reversed = await plan({ intent: 'STATUS', files: [...files].reverse() });
+
+    expect(forward.orphans).toEqual(reversed.orphans);
+    expect(forward.entries[0].class).toBe(reversed.entries[0].class);
+  });
+
+  it('P2: records one read per node whose CONTENT is returned (#1061)', async () => {
+    const node = await mkNode('tasks:declared', { properties: declaration() });
+
+    await plan({ intent: 'EXPORT', files: [] });
+    const afterExport = await db.usageEvent.count({ where: { nodeId: node.id, type: 'read' } });
+
+    // …and a plan that returns NO body records nothing: an event naming a node
+    // nobody read is the inverse defect.
+    await plan({ intent: 'STATUS', files: [] });
+    const afterStatus = await db.usageEvent.count({ where: { nodeId: node.id, type: 'read' } });
+
+    expect(afterExport).toBe(1);
+    expect(afterStatus).toBe(1);
+  });
+});
+
 describe('the surface itself', () => {
   it('is a QUERY, not a mutation — status and lint cannot write by construction', () => {
     // The guarantee §3 asks for. A mutation that promises not to write is a
