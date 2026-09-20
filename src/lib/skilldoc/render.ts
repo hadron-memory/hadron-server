@@ -36,7 +36,7 @@
 
 import { stringify } from 'yaml';
 import { hash } from './hash.js';
-import { isNodeUrn } from './parse.js';
+import { isNodeUrn, SAFE_ID_RE } from './parse.js';
 import { normalizeBody, normalizeDescription } from './normalize.js';
 
 /** The human note a generated file carries. Prose — nothing parses it. */
@@ -67,10 +67,6 @@ export class SkillRenderError extends Error {}
  * orphans itself.
  */
 const SAFE_SOURCE_RE = /^[A-Za-z0-9._:-]+$/;
-
-/** The charset a node id may carry into the header — ULIDs and cuids are
- *  alphanumeric, and nothing else may reach a one-line comment. */
-const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 /**
  * Compose the skill file.

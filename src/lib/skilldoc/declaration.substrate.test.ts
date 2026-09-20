@@ -219,6 +219,23 @@ describe('the §4a id reaches the same one-line comment the source does', () => 
     expect(back.body).toBe('body');
   });
 
+  it('REFUSES to read back an id the write path would not have written', () => {
+    // @copilot, PR #1234: the read path accepted any non-whitespace id, so a
+    // hand-edited `id=a-->` closed the comment early — the host shows the
+    // remainder as body text while this parser still calls the line a valid
+    // machine header. Render and parse are inverses or they are not.
+    const urn = 'hrn:node:acme.com:mem:tasks:x';
+    const good = render('n', urn, 'd', 'body', 'node-1');
+    const tampered = good.replace('id=node-1', 'id=a-->');
+    // The header stops being OURS, which is what makes the file read as
+    // unhashed/foreign rather than as a valid export of that node.
+    expect(parseFile(tampered).id).toBe('');
+    expect(parseFile(tampered).source).toBe('');
+    // CONTROL: the same assertion on the untampered file finds the header.
+    expect(parseFile(good).id).toBe('node-1');
+    expect(parseFile(good).source).toBe(urn);
+  });
+
   it('reads a header with no id as an empty id rather than refusing it', () => {
     // A pre-§4a file is still OURS — it classifies `unhashed`/`current`, not
     // foreign. Widening the existing class is §4a's instruction.
