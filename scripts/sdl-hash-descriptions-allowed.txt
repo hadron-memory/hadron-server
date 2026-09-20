@@ -37,3 +37,8 @@ Memory.vectorIndexEnabled — "per-memory vector-index config", labels vectorInd
 # which is neither this enum nor adjacent to it. Reverting keeps it out of the
 # published reference; re-homing it belongs to whoever owns that type.
 MemoryClass — describes AgentSubscription (the user-side license), not this enum
+# Round 3 (@codex): the same plural-over-singular tell, applied to the tell's
+# own author. "EVERY entity's paginated list query…" is the envelope contract
+# for all ~20 *Page types; publishing it on the first one alone documents
+# MemoriesPage and leaves its siblings empty while appearing to be deliberate.
+MemoriesPage — the { items, total } envelope contract, which is about every *Page type, not this one

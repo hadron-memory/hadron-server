@@ -304,12 +304,11 @@ export const typeDefs = `#graphql
   }
 
   # ── Uniform find-many envelopes (#473) ────────────────────────────────
-  """
-  Every entity's paginated list query returns the same { items, total }
-  shape so a client can drive one generic pager for all of them. total is
-  the exact full count for the query's scope+filter; limit defaults to 50
-  (capped 200) and limit: 0 returns just the total (the cheap count).
-  """
+  #
+  # Every entity's paginated list query returns the same { items, total }
+  # shape so a client can drive one generic pager for all of them. total is
+  # the exact full count for the query's scope+filter; limit defaults to 50
+  # (capped 200) and limit: 0 returns just the total (the cheap count).
 
   type MemoriesPage {
     items: [Memory!]!
