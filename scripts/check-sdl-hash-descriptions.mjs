@@ -72,6 +72,14 @@ const TYPE_DECL = /^\s*(?:extend\s+)?(type|input|enum|interface|union|scalar)\s+
 const FIELD_DECL = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(.*)?:\s*\[?[A-Za-z_]/;
 /** A field whose argument list opens on this line and closes on a later one. */
 const FIELD_MULTILINE = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*$/;
+/**
+ * An enum VALUE — a bare name with no colon, so it matches neither of the
+ * above. Without this the block resolves to no symbol and is dropped SILENTLY,
+ * which lets the gate pass exactly the invisible documentation it exists to
+ * reject (@codex, PR #1244). Zero such sites exist today, which is the only
+ * reason this was not already a live miss — the gate's job is the next one.
+ */
+const ENUM_VALUE = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/;
 
 /**
  * Classify every line of the SDL template literal, tracking `"""` state.
@@ -124,16 +132,23 @@ export function findHashBlocks(source) {
   // renders. Without this the symbol is wrong in the error message and, worse,
   // an allow-list entry keyed on it would be a key for a thing that is not there.
   const enclosing = new Array(end).fill(null);
+  const enclosingKind = new Array(end).fill(null);
   const inArgsOf = new Array(end).fill(null);
   let current = null;
+  let currentKind = null;
   let depth = 0;
   let argField = null;
   let parens = 0;
   for (let i = 1; i < end; i++) {
-    if (kind[i] !== 'code') { enclosing[i] = current; inArgsOf[i] = argField; continue; }
+    if (kind[i] !== 'code') {
+      enclosing[i] = current; enclosingKind[i] = currentKind; inArgsOf[i] = argField; continue;
+    }
     const m = TYPE_DECL.exec(lines[i]);
-    if (m && lines[i].includes('{')) { current = m[2]; depth = 1; enclosing[i] = null; continue; }
+    if (m && lines[i].includes('{')) {
+      current = m[2]; currentKind = m[1]; depth = 1; enclosing[i] = null; continue;
+    }
     enclosing[i] = current;
+    enclosingKind[i] = currentKind;
     inArgsOf[i] = argField;
     if (parens === 0) {
       const opener = FIELD_MULTILINE.exec(lines[i]);
@@ -146,7 +161,7 @@ export function findHashBlocks(source) {
     if (parens === 0 && !FIELD_MULTILINE.test(lines[i])) argField = null;
     if (depth > 0) {
       for (const ch of lines[i]) { if (ch === '{') depth++; else if (ch === '}') depth--; }
-      if (depth <= 0) { current = null; depth = 0; }
+      if (depth <= 0) { current = null; currentKind = null; depth = 0; }
     }
   }
 
@@ -195,6 +210,10 @@ export function findHashBlocks(source) {
         // An argument: `Mutation.castWorker(name:)`.
         symbol = `${enclosing[j] ?? '?'}.${inArgsOf[j]}(${f[1]}:)`;
       } else if (f) symbol = enclosing[j] ? `${enclosing[j]}.${f[1]}` : f[1];
+      else if (enclosingKind[j] === 'enum') {
+        const v = ENUM_VALUE.exec(next);
+        if (v) symbol = `${enclosing[j]}.${v[1]}`;
+      }
     }
     if (symbol || documented) {
       blocks.push({ line: from + 1, symbol, documented, text: text.join('\n') });

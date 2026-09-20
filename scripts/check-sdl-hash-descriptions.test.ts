@@ -96,6 +96,37 @@ describe('#1232 — findHashBlocks', () => {
     expect(blocks[0].symbol).toBe('Mutation.castWorker(name:)');
   });
 
+  it('reports a `#` comment above an enum VALUE (@codex, PR #1244)', () => {
+    // An enum value is a bare name with no colon, so it matches neither the
+    // type nor the field pattern. Before this it resolved to no symbol and the
+    // block was dropped SILENTLY — the gate passing exactly the invisible
+    // documentation it exists to reject. No such site exists in typeDefs.ts
+    // today, which is the only reason it was not already a live miss.
+    const blocks = findHashBlocks(
+      sdl(`  enum MemoryVisibility {
+    PUBLIC
+    # Only the owning organization's members can read it.
+    ORGANIZATION
+  }`),
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ symbol: 'MemoryVisibility.ORGANIZATION', documented: false });
+  });
+
+  it('does not mistake a field for an enum value once the enum block closes', () => {
+    const blocks = findHashBlocks(
+      sdl(`  enum Role {
+    OWNER
+  }
+
+  type Query {
+    # A note on a field, after an enum.
+    me: User
+  }`),
+    );
+    expect(blocks[0].symbol).toBe('Query.me');
+  });
+
   it('names a type declaration by its type name', () => {
     const blocks = findHashBlocks(
       sdl(`  # Uniform paginated list shape.

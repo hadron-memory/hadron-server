@@ -1448,8 +1448,8 @@ export const typeDefs = `#graphql
     abstract: String
     content: String
     tags: [String!]!
-    # ── #620: full curated-subset snapshot fields. Null on LEGACY rows
     """
+    #620: full curated-subset snapshot fields. Null on LEGACY rows
     captured before the columns existed (nodeType doubles as the legacy
     sentinel — it is non-null on every post-#620 snapshot).
     """
