@@ -79,20 +79,66 @@ export function parseEmailSendRequest(body: unknown): EmailSendRequest {
 }
 
 /**
- * The recipient key. The address is HASHED rather than embedded verbatim
- * (@copilot, PR #1238): it is caller-controlled, and the in-process MemoryStore
- * holds every key it sees for the full window, inserting it BEFORE the handler
- * validates anything. Distinct oversized strings would then pin
+ * Collapse an address to the MAILBOX it actually delivers to, for rate-limit
+ * keying only.
+ *
+ * @codex P1 on PR #1245: `victim+1@gmail.com` and `victim+2@gmail.com` reach
+ * one inbox but hashed to independent keys, so an attacker rotating aliases
+ * and source IPs — precisely the distributed email-bomb this limiter exists to
+ * stop — got five sends per alias and the cap bounded nothing.
+ *
+ * Two normalizations, and the second is narrower than the first on purpose:
+ *
+ *  - SUBADDRESSING (`local+tag`) is stripped for every domain. RFC 5233
+ *    subaddressing is near-universal among providers that accept `+` at all.
+ *  - DOT-INSENSITIVITY is applied ONLY to Gmail (and its googlemail alias),
+ *    because it is a Gmail-specific rule. `user.name@corp.example` and
+ *    `username@corp.example` are two different people almost everywhere else.
+ *
+ * The trade-off, stated because it is real rather than theoretical: if some
+ * provider treats `+` as a literal character in a local part, two genuinely
+ * distinct mailboxes share one budget of 5 per 15 minutes. That is a mild,
+ * self-clearing inconvenience for a rare configuration, weighed against an
+ * unbounded email bomb aimed at a real person. If it ever bites, the fix is an
+ * allowlist of literal-plus domains, not abandoning the collapse.
+ *
+ * This affects the RATE-LIMIT KEY only. The address that gets mailed is always
+ * the one the caller supplied — nothing here rewrites a recipient.
+ */
+export function canonicalRecipient(email: string): string {
+  const trimmed = email.trim().toLowerCase();
+  const at = trimmed.lastIndexOf('@');
+  if (at <= 0 || at === trimmed.length - 1) return trimmed;
+
+  let local = trimmed.slice(0, at);
+  const domain = trimmed.slice(at + 1);
+
+  const plus = local.indexOf('+');
+  // A local part that is ENTIRELY a tag (`+tag@x`) must not collapse to the
+  // empty string — every such address would then share one key, which is its
+  // own denial of service.
+  if (plus > 0) local = local.slice(0, plus);
+
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    const undotted = local.replace(/\./g, '');
+    if (undotted.length > 0) local = undotted;
+    return `${local}@gmail.com`;
+  }
+
+  return `${local}@${domain}`;
+}
+
+/**
+ * The recipient rate-limit key. The address is HASHED rather than embedded
+ * verbatim (@copilot, PR #1238): it is caller-controlled, and the in-process
+ * MemoryStore holds every key it sees for the full window, inserting it BEFORE
+ * the handler validates anything. Distinct oversized strings would then pin
  * attacker-chosen bytes in a worker's memory for 15 minutes. A digest is
  * fixed-width, so the store's footprint is bounded by the number of distinct
- * senders rather than by what they send. The length cap in
- * {@link parseEmailSendRequest} bounds it again on the way in.
- *
- * Case-folded first: `Victim@x` and `victim@x` are one mailbox, and a limiter
- * that treats them as two budgets is bypassed by pressing shift.
+ * senders rather than by what they send.
  */
 function recipientKey(email: string): string {
-  return `email:${crypto.createHash('sha256').update(email.trim().toLowerCase()).digest('hex')}`;
+  return `email:${crypto.createHash('sha256').update(canonicalRecipient(email)).digest('hex')}`;
 }
 
 /**

@@ -162,6 +162,39 @@ describe('#560 — per-recipient throttling', () => {
   });
 });
 
+describe('#560 — mailbox aliases share one budget', () => {
+  it('cannot get a fresh budget by rotating +tags', async () => {
+    // @codex P1 on PR #1245. This is THE scenario the recipient cap exists
+    // for: an attacker with many source IPs aiming at one inbox. Rotating
+    // `victim+1`, `victim+2`, … produced an independent budget per alias, so
+    // the cap bounded nothing at all while appearing to work perfectly.
+    const base = uniqueEmail();
+    const [local, domain] = base.split('@');
+
+    // Five sends spread across five DIFFERENT aliases and five different
+    // source IPs — so neither the per-address key as it used to be, nor the
+    // per-IP limiter, can be what refuses the sixth.
+    for (let i = 0; i < 5; i++) {
+      expect(await send(`${local}+tag${i}@${domain}`)).toBe(200);
+    }
+
+    // A sixth alias, and the bare address itself: one inbox, one budget.
+    expect(await send(`${local}+tag5@${domain}`), 'another alias is the same mailbox').toBe(429);
+    expect(await send(base), 'and so is the undecorated address').toBe(429);
+    expect(sendMagicLinkMock).toHaveBeenCalledTimes(5);
+  });
+
+  it('still leaves a genuinely different recipient alone', async () => {
+    // The control. Collapsing too aggressively merges two real people onto
+    // one budget, which is a denial of service in the other direction — so
+    // "everything is 429 now" must not be how the case above passes.
+    const victim = uniqueEmail();
+    const [local, domain] = victim.split('@');
+    for (let i = 0; i < 6; i++) await send(`${local}+t${i}@${domain}`);
+    expect(await send(uniqueEmail())).toBe(200);
+  });
+});
+
 describe('#560 — an aborted connection must not refund the budget', () => {
   it('cannot bypass the limit by hanging up while the mail is in flight', async () => {
     // Codex P1 on PR #1238, confirmed in express-rate-limit 8.5.2's own source:
