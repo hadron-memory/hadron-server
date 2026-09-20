@@ -39,22 +39,33 @@ interface ProviderToolConfig {
   tokenEnv: string;
 }
 
-/**
- * The providers an ExchangeConnection can dispatch to. Exported so
- * `check:sdl-enums` can watch it (#1232): the SDL description of
- * `ExchangeConnection.provider` said "'ms-exchange' today" for three providers
- * longer than that was true, and a published half-enumeration is the one shape
- * of staleness a script CAN catch. Keys are distinctive (hyphenated, never
- * ordinary English), which is that gate's admission criterion.
- */
-export const EMAIL_PROVIDER_KEYS = ['ms-exchange', 'gmail', 'google-cal', 'google-drive'] as const;
-
 const PROVIDER_TOOLS: Record<string, ProviderToolConfig> = {
   'ms-exchange': { urlEnv: 'MS_EXCHANGE_TOOL_URL', tokenEnv: 'MS_EXCHANGE_TOOL_TOKEN' },
   gmail: { urlEnv: 'GMAIL_TOOL_URL', tokenEnv: 'GMAIL_TOOL_TOKEN' },
   'google-cal': { urlEnv: 'GOOGLE_CAL_TOOL_URL', tokenEnv: 'GOOGLE_CAL_TOOL_TOKEN' },
   'google-drive': { urlEnv: 'GOOGLE_DRIVE_TOOL_URL', tokenEnv: 'GOOGLE_DRIVE_TOOL_TOKEN' },
 };
+
+/**
+ * The providers an ExchangeConnection can dispatch to — DERIVED from
+ * `PROVIDER_TOOLS`, never transcribed.
+ *
+ * Exported so `check:sdl-enums` can watch it (#1232): the SDL description of
+ * `ExchangeConnection.provider` said "'ms-exchange' today" for three providers
+ * longer than that was true, and a published half-enumeration is the one shape
+ * of staleness a script CAN catch. The keys are distinctive (hyphenated, never
+ * ordinary English words), which is that gate's admission criterion.
+ *
+ * The first version of this was a hand-written array beside the registry
+ * (@codex, PR #1244) — a SECOND list, so adding a provider through the
+ * documented extension point would have left the watcher unchanged and the
+ * gate would have kept accepting a description that omitted it. Exactly the
+ * drift it exists to catch, and exactly what check-sdl-enumerations.mjs's own
+ * docstring warns about: "a registry entry that duplicated the members would
+ * BE the bug it prevents". Deriving it means a new provider fails the gate the
+ * same day, with nothing here to remember.
+ */
+export const EMAIL_PROVIDER_KEYS = Object.keys(PROVIDER_TOOLS);
 
 /** Resolve a provider's tool base URL + token; typed error when unknown/unconfigured. */
 function toolFor(provider: string): { baseUrl: string; token?: string } {
