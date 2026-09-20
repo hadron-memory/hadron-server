@@ -50,6 +50,7 @@ import { parse, visit } from 'graphql';
 import { pathToFileURL } from 'node:url';
 import { typeDefs } from '../src/api/graphql/schema/typeDefs.js';
 import { CONNECTION_GRANT_SCOPES } from '../src/lib/emailOperationScopes.js';
+import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
 
 /**
  * The sets this gate watches.
@@ -81,6 +82,24 @@ const WATCHED_SETS = [
     name: 'CONNECTION_GRANT_SCOPES',
     source: 'src/lib/emailOperationScopes.ts',
     members: CONNECTION_GRANT_SCOPES,
+  },
+  {
+    // #1232. Added because a published description got this wrong for three
+    // providers: `ExchangeConnection.provider` said "'ms-exchange' today" long
+    // after gmail, google-cal and google-drive were dispatching. Admissible by
+    // this file's own criterion — the keys are hyphenated identifiers, never
+    // ordinary English words about the schema.
+    //
+    // Scope note, so nobody reads more into this than it does: this pins ONE
+    // of the eight stale claims #1232 found. The others — a count ("four-way
+    // memory typology"), a dropped FK, an over-narrow auth rule — have no
+    // second list for a script to read, and `MemoryClass` itself is
+    // INADMISSIBLE here (its members are `app` / `personal` / `private` /
+    // `group`, ordinary words that would produce exactly the false positives
+    // this registry is curated to avoid).
+    name: 'EMAIL_PROVIDER_KEYS',
+    source: 'src/lib/emailClient.ts',
+    members: EMAIL_PROVIDER_KEYS,
   },
 ];
 

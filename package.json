@@ -32,7 +32,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "check:urn-alias": "node scripts/check-urn-rename-aliased.mjs",
-    "check:sdl-enums": "tsx scripts/check-sdl-enumerations.mjs"
+    "check:sdl-enums": "tsx scripts/check-sdl-enumerations.mjs",
+    "check:sdl-hash-docs": "node scripts/check-sdl-hash-descriptions.mjs"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^5.0.10",
