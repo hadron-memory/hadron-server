@@ -39,6 +39,16 @@ interface ProviderToolConfig {
   tokenEnv: string;
 }
 
+/**
+ * The providers an ExchangeConnection can dispatch to. Exported so
+ * `check:sdl-enums` can watch it (#1232): the SDL description of
+ * `ExchangeConnection.provider` said "'ms-exchange' today" for three providers
+ * longer than that was true, and a published half-enumeration is the one shape
+ * of staleness a script CAN catch. Keys are distinctive (hyphenated, never
+ * ordinary English), which is that gate's admission criterion.
+ */
+export const EMAIL_PROVIDER_KEYS = ['ms-exchange', 'gmail', 'google-cal', 'google-drive'] as const;
+
 const PROVIDER_TOOLS: Record<string, ProviderToolConfig> = {
   'ms-exchange': { urlEnv: 'MS_EXCHANGE_TOOL_URL', tokenEnv: 'MS_EXCHANGE_TOOL_TOKEN' },
   gmail: { urlEnv: 'GMAIL_TOOL_URL', tokenEnv: 'GMAIL_TOOL_TOKEN' },
