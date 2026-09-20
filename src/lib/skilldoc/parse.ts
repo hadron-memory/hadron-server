@@ -49,6 +49,25 @@ const HASH_RE = /^[0-9a-f]{16}$/;
  */
 export const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 
+/**
+ * The charset a `source` URN may carry in the provenance header.
+ *
+ * The same allow-list `render` enforces on the write side (#1223). It lives
+ * here with `SAFE_ID_RE` for the same reason: **read and write must accept the
+ * same thing, or a hand-edited header is one this parser calls ours while the
+ * host renders half of it as body.**
+ *
+ * `isNodeUrn` is not enough on its own — it checks STRUCTURE (the `hrn:node:`
+ * shape and its segment count), not the characters. A loc containing `-->` is
+ * structurally a URN, and #1224 established that such a loc is reachable: git
+ * sync derives one from a file path and (before that fix) validated nothing.
+ *
+ * A DELIBERATE DIVERGENCE from the Go reference, which checks `isNodeURN` and
+ * no charset — the same divergence `render` already took, now made symmetric
+ * rather than left half-applied (@copilot, PR #1234).
+ */
+export const SAFE_SOURCE_RE = /^[A-Za-z0-9._:-]+$/;
+
 /** What a skill file yields: the keys a host reads, its provenance, its body. */
 export interface SkillFile {
   name: string;
@@ -67,8 +86,11 @@ export interface SkillFile {
    * left with two directories carrying near-identical trigger text, both
    * firing. The id is what makes a move read as `renamed`.
    *
-   * Deliberately NOT a hash input: the hash must stay recomputable from the
-   * file alone, and `source` already covers provenance there.
+   * READ-ONLY here. Nothing writes this key yet: §4a also requires the id to
+   * be a HASH input, which the Go reference does not do, so writing one
+   * without hashing it would let a hand-edited id re-point a file at another
+   * node while the file still read as untouched. The write side and the hash
+   * change land together, with hadron-cli, as #1235.
    */
   id: string;
   body: string;
@@ -117,7 +139,7 @@ function machineHeader(line: string): { source: string; hash: string; id: string
   // Extra keys are allowed so a later host can add its own, but a line missing
   // either of ours — or carrying a source that is not a node URN, or a hash
   // that is not exactly 16 hex — is a comment that merely looks like one.
-  if (!isNodeUrn(source) || !HASH_RE.test(h)) return null;
+  if (!isNodeUrn(source) || !SAFE_SOURCE_RE.test(source) || !HASH_RE.test(h)) return null;
   // An ABSENT id is fine — a header generation that predates it is still ours,
   // and it classifies `unhashed`, whose action is "rewrite" (§4a: widen the
   // existing class rather than invent one). A PRESENT id that could not have
@@ -130,11 +152,14 @@ function machineHeader(line: string): { source: string; hash: string; id: string
 }
 
 function legacyHeader(line: string): string | null {
+  // The charset applies here too: the legacy generation is still a one-line
+  // comment, and a source that closes it early is no more acceptable for
+  // carrying an older header shape.
   const m = LEGACY_RE.exec(line);
   if (!m) return null;
   // The token must LOOK like a node URN: `<!-- Generated from a template -->`
   // is a body.
-  return isNodeUrn(m[1]!) ? m[1]! : null;
+  return isNodeUrn(m[1]!) && SAFE_SOURCE_RE.test(m[1]!) ? m[1]! : null;
 }
 
 /**

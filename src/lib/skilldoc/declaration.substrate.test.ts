@@ -169,78 +169,60 @@ describe('collision reporting is stable under corpus read order (@codex P2, #123
   });
 });
 
-describe('the §4a id reaches the same one-line comment the source does', () => {
-  it('refuses an id that would terminate the provenance comment', () => {
-    // #1223 closed this for `source`; §4a adds a SECOND value to the same
-    // line, so the guard has to arrive with it rather than be rediscovered.
-    // Found by mutation: removing the guard reds nothing until this exists.
+describe('the provenance header: read and write must accept the same thing', () => {
+  it('REFUSES to read back a header the write path would not have written — id', () => {
+    // @copilot, PR #1234. `render` never writes an id that could close the
+    // comment, so `parseFile` must not accept one: a hand-edited
+    // `id=a-->` ends the comment early, the host shows the remainder as body,
+    // and the parser would still call the line ours.
+    //
+    // §4a's WRITE side is deliberately not in this PR (it requires the hash to
+    // include the id, which diverges from the Go reference until hadron-cli
+    // follows — see the PR body), so this is built by hand rather than by
+    // `render`.
     const urn = 'hrn:node:acme.com:mem:tasks:x';
-    for (const bad of ['a--> evil', 'a b', 'a\nb', 'a>b', '-->']) {
-      expect(() => render('n', urn, 'd', 'body', bad), bad).toThrow(SkillRenderError);
-    }
-  });
+    const h = 'a'.repeat(16);
+    const ours = `---\nname: n\ndescription: d\n---\n\n<!-- hadron-skill source=${urn} id=node-1 hash=${h} -->\n\nbody\n`;
+    const tampered = ours.replace('id=node-1', 'id=a-->');
 
-  it('accepts the id shapes the platform actually mints, and writes them', () => {
-    // The control: a guard that refused everything would satisfy the case
-    // above. ULIDs and cuids are what `generateId` produces.
-    const urn = 'hrn:node:acme.com:mem:tasks:x';
-    for (const good of ['01a0bd36a0cd726aa3b68fb4ddf709c6', 'cme_abc-123', 'node-1']) {
-      const out = render('n', urn, 'd', 'body', good);
-      expect(out, good).toContain(` id=${good} `);
-    }
-  });
-
-  it('omits the key entirely for the empty id, reproducing the pre-§4a header', () => {
-    // What keeps the parity fixtures byte-comparable against Go, which writes
-    // no id at all.
-    const out = render('n', 'hrn:node:acme.com:mem:tasks:x', 'd', 'body', '');
-    expect(out).not.toContain(' id=');
-    expect(out).toMatch(/<!-- hadron-skill source=\S+ hash=[0-9a-f]{16} -->/);
-  });
-
-  it('the id does NOT change the hash', () => {
-    // §4a is explicit: the hash must stay recomputable from the file alone,
-    // and the id decides PAIRING rather than content. If it fed the hash,
-    // every existing file would read as stale the moment ids started being
-    // written.
-    const urn = 'hrn:node:acme.com:mem:tasks:x';
-    const withId = render('n', urn, 'd', 'body', 'node-1');
-    const without = render('n', urn, 'd', 'body', '');
-    const hashOf = (s: string): string => /hash=([0-9a-f]{16})/.exec(s)![1]!;
-    expect(hashOf(withId)).toBe(hashOf(without));
-  });
-
-  it('round-trips: what render writes with an id, parseFile reads back', () => {
-    const urn = 'hrn:node:acme.com:mem:tasks:x';
-    const out = render('n', urn, 'd', 'body', 'node-1');
-    const back = parseFile(out);
-    expect(back.id).toBe('node-1');
-    expect(back.source).toBe(urn);
-    expect(back.body).toBe('body');
-  });
-
-  it('REFUSES to read back an id the write path would not have written', () => {
-    // @copilot, PR #1234: the read path accepted any non-whitespace id, so a
-    // hand-edited `id=a-->` closed the comment early — the host shows the
-    // remainder as body text while this parser still calls the line a valid
-    // machine header. Render and parse are inverses or they are not.
-    const urn = 'hrn:node:acme.com:mem:tasks:x';
-    const good = render('n', urn, 'd', 'body', 'node-1');
-    const tampered = good.replace('id=node-1', 'id=a-->');
-    // The header stops being OURS, which is what makes the file read as
-    // unhashed/foreign rather than as a valid export of that node.
+    expect(parseFile(ours).id).toBe('node-1');
+    expect(parseFile(ours).source).toBe(urn);
+    // …and the tampered line stops being ours, which is what makes the file
+    // read as foreign rather than as a clean export of that node.
     expect(parseFile(tampered).id).toBe('');
     expect(parseFile(tampered).source).toBe('');
-    // CONTROL: the same assertion on the untampered file finds the header.
-    expect(parseFile(good).id).toBe('node-1');
-    expect(parseFile(good).source).toBe(urn);
   });
 
-  it('reads a header with no id as an empty id rather than refusing it', () => {
-    // A pre-§4a file is still OURS — it classifies `unhashed`/`current`, not
-    // foreign. Widening the existing class is §4a's instruction.
-    const out = render('n', 'hrn:node:acme.com:mem:tasks:x', 'd', 'body', '');
+  it('REFUSES to read back a header the write path would not have written — source', () => {
+    // The same asymmetry one field over, and the one my first fix missed:
+    // `isNodeUrn` checks STRUCTURE, not the charset `render` enforces, so
+    // `source=hrn:node:a.com:m:evil-->` parsed as ours. Fixing the instance
+    // and not the class is how a ban-list stays one report behind.
+    const h = 'a'.repeat(16);
+    const bad = `---\nname: n\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:evil--> hash=${h} -->\n\nbody\n`;
+    expect(parseFile(bad).source).toBe('');
+  });
+
+  it('the LEGACY header path gets the same charset, not just the machine one', () => {
+    // Two header generations, one rule. Guarding only the machine line would
+    // leave the older shape as the way in — the writer nobody enumerated,
+    // which is #1224's sentence.
+    const legacy = `---\nname: n\ndescription: d\n---\n\n<!-- Generated from hrn:node:a.com:m:evil--> -->\n\nbody\n`;
+    expect(parseFile(legacy).source).toBe('');
+    const clean = `---\nname: n\ndescription: d\n---\n\n<!-- Generated from hrn:node:a.com:m:ok -->\n\nbody\n`;
+    expect(parseFile(clean).source).toBe('hrn:node:a.com:m:ok');
+  });
+
+  it('a header with NO id is still ours — a pre-§4a file is not foreign', () => {
+    // Absent and invalid are different: absent means an older header
+    // generation (class `unhashed`, action rewrite); invalid means edited.
+    const out = render('n', 'hrn:node:acme.com:mem:tasks:x', 'd', 'body');
     expect(parseFile(out).id).toBe('');
+    expect(parseFile(out).source).toBe('hrn:node:acme.com:mem:tasks:x');
+  });
+
+  it('CONTROL: render still refuses an unsafe SOURCE, so both paths agree', () => {
+    expect(() => render('n', 'hrn:node:a.com:m:evil-->', 'd', 'body')).toThrow(SkillRenderError);
   });
 });
 
