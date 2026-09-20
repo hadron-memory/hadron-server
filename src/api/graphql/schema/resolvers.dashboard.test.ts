@@ -7,8 +7,14 @@
  * foreign/unknown/repeated ids create instead of capturing; rows omitted from
  * the input are deleted; dashboardWidgets reads it back; the selection is
  * strictly user-scoped (a non-user caller has none, a stranger can't see it);
- * dashboardWidgetData returns one data payload per activated TYPE, with
- * memory-stats' memoryCount matching the caller's memories() total.
+ * dashboardWidgetData returns one data payload per activated TYPE, with the
+ * memory-stats / agent-stats counts matching the caller's OWNED slice.
+ *
+ * #1231: that last clause used to read "matching the caller's memories()
+ * total", which was the defect written down as an expectation — the tile is
+ * about what the caller OWNS, and an unfiltered total is what they can READ.
+ * The claim lived in three places (the provider's comment, this docblock, and
+ * a test name) and all three agreed with each other and not with the product.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -218,8 +224,12 @@ describe('user scoping', () => {
 });
 
 describe('dashboardWidgetData — combined data', () => {
-  it('returns memory-stats data whose memoryCount matches the caller memories() total', async () => {
-    // Two non-system memories the user can access (org member + org-owned).
+  it('memoryCount is the OWNED slice, not everything the caller can read (#1231)', async () => {
+    // The specimen shape from #1231: a readable set strictly larger than the
+    // owned set. Two org-owned memories the caller can read as a member, and
+    // ONE they actually own. A fixture where the two sets coincide cannot tell
+    // the fix from the defect — which is why the pre-#1231 version of this
+    // test passed against an unfiltered count.
     const org = await db.organization.create({
       data: { id: generateId(), name: 'dw-org', urn: `dw-org-${generateId().slice(-8)}` },
     });
@@ -238,15 +248,41 @@ describe('dashboardWidgetData — combined data', () => {
         },
       });
     }
+    await db.memory.create({
+      data: {
+        id: generateId(),
+        ownerUserId: user.id,
+        urn: `dw-owned-${generateId().slice(-8)}`,
+        name: 'dw-mem-own',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+      },
+    });
     await M.setDashboardWidgets(null, { widgets: [w()] }, ctx(user.id));
 
     const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
     expect(data).toHaveLength(1);
-    expect(data[0]).toMatchObject({ type: 'MEMORY_STATS', data: { memoryCount: 2 } });
+    expect(data[0]).toMatchObject({ type: 'MEMORY_STATS', data: { memoryCount: 1 } });
+
+    // Both halves, because either alone can hold while the tile is wrong. The
+    // tile must equal the list it stands above...
+    const owned = await Q.memories(null, { filter: { ownedByMe: true }, limit: 0 }, ctx(user.id));
+    expect(data[0].data.memoryCount).toBe(owned.total);
+    // ...and the unfiltered count must genuinely differ here, or the fixture
+    // is not exercising the defect and the assertion above proves nothing.
+    const readable = await Q.memories(null, { limit: 0 }, ctx(user.id));
+    expect(readable.total).toBe(3);
   });
 
-  it('returns agent-stats data whose agentCount matches the caller agents() total', async () => {
-    // Two user-owned (org-less) agents the caller has.
+  it('agentCount is the OWNED slice, not every agent in the caller’s orgs (#1231)', async () => {
+    // Same shape on the agent side: two the caller owns, one their member org
+    // owns. The unfiltered `agents()` default view folds the org's in.
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'dw-ag-org', urn: `dw-ag-org-${generateId().slice(-8)}` },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: user.id, role: 'READER' },
+    });
     for (const n of ['dw-agent-a', 'dw-agent-b']) {
       await db.agent.create({
         data: {
@@ -257,11 +293,62 @@ describe('dashboardWidgetData — combined data', () => {
         },
       });
     }
+    await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `dw-org-agent-${generateId().slice(-8)}`,
+        name: 'dw-agent-org',
+      },
+    });
     await M.setDashboardWidgets(null, { widgets: [w({ type: 'AGENT_STATS' })] }, ctx(user.id));
 
     const data = await Q.dashboardWidgetData(null, {}, ctx(user.id));
     expect(data).toHaveLength(1);
     expect(data[0]).toMatchObject({ type: 'AGENT_STATS', data: { agentCount: 2 } });
+
+    const owned = await Q.agents(null, { filter: { ownedByMe: true }, limit: 0 }, ctx(user.id));
+    expect(data[0].data.agentCount).toBe(owned.total);
+    const readable = await Q.agents(null, { limit: 0 }, ctx(user.id));
+    expect(readable.total).toBe(3);
+  });
+
+  it('a platform admin’s agentCount stays their OWN, not every agent on the platform (#1231)', async () => {
+    // The worst instance of the defect, and the one a member-org fixture can
+    // never show: `agents()` gives an unscoped ADMIN every live org-owned
+    // agent, so the tile rendered a platform-wide count under a personal
+    // heading. `filter.ownedByMe` is deliberately not an admin-bypass surface
+    // (#782), so the tile reads the same for an admin as for anyone else.
+    const foreign = await db.organization.create({
+      data: { id: generateId(), name: 'dw-foreign', urn: `dw-foreign-${generateId().slice(-8)}` },
+    });
+    for (const n of ['dw-foreign-a', 'dw-foreign-b']) {
+      await db.agent.create({
+        data: {
+          id: generateId(),
+          organizationId: foreign.id,
+          urn: `dw-foreign-agent-${generateId().slice(-8)}`,
+          name: n,
+        },
+      });
+    }
+    await db.agent.create({
+      data: {
+        id: generateId(),
+        ownerUserId: user.id,
+        urn: `dw-admin-own-${generateId().slice(-8)}`,
+        name: 'dw-agent-admin-own',
+      },
+    });
+    const adminCtx: Context = { db, userId: user.id, roles: ['ADMIN'] };
+    await M.setDashboardWidgets(null, { widgets: [w({ type: 'AGENT_STATS' })] }, adminCtx);
+
+    const data = await Q.dashboardWidgetData(null, {}, adminCtx);
+    expect(data[0]).toMatchObject({ type: 'AGENT_STATS', data: { agentCount: 1 } });
+    // The positive control: unfiltered, this admin reaches the foreign org's
+    // agents. Without it, `1` could just mean the fixture built nothing.
+    const readable = await Q.agents(null, { limit: 0 }, adminCtx);
+    expect(readable.total).toBe(3);
   });
 
   it('emits one entry per PLACEMENT, keyed by row id, in position order (#797)', async () => {

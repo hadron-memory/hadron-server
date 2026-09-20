@@ -131,20 +131,48 @@ const WIDGET_DATA_PROVIDERS = new Map<
   [
     'MEMORY_STATS',
     async (ctx) => {
-      // Reuse the uniform `memories()` list resolver (limit:0 => count-only page,
-      // no rows fetched) so `memoryCount` matches the portal's memory list exactly
-      // — one scoping code path, no drift. Config-independent (a stat tile).
-      const { total } = await memoryQueries.memories(null, { limit: 0 }, ctx);
+      // The caller's OWN memories — `filter.ownedByMe` (#1179), the same slice
+      // the portal's "My memories" list asks for, which is what this tile's
+      // "Create new" action adds to (/app/memories/new creates an org-less,
+      // user-owned memory). Reuses the uniform `memories()` list resolver
+      // (limit:0 => count-only page, no rows fetched), so the scoping lives in
+      // ONE place. Config-independent (a stat tile).
+      //
+      // #1231: the filter is the whole point, and it was missing. An unfiltered
+      // `memories()` counts every memory the caller can READ — their member
+      // orgs' collections included — so the tile read 87 above a list of 4.
+      // The comment here used to assert the match while the argument list
+      // decided otherwise, which is what kept it invisible: a reader checking
+      // the scope met a sentence claiming the property instead of the call that
+      // sets it. Reusing a resolver only shares the scoping it is ASKED for.
+      const { total } = await memoryQueries.memories(
+        null,
+        { filter: { ownedByMe: true }, limit: 0 },
+        ctx,
+      );
       return { memoryCount: total };
     },
   ],
   [
     'AGENT_STATS',
     async (ctx) => {
-      // Same shape as MEMORY_STATS: the uniform `agents()` resolver's default
-      // (no orgId) view counts the caller's member-org agents PLUS their own
-      // user-owned agents, so `agentCount` matches the portal's agent list.
-      const { total } = await agentQueries.agents(null, { limit: 0 }, ctx);
+      // Same slice, same reason (#1231): `agents(filter.ownedByMe)` (#782) is
+      // the caller's own user-owned agents — what /app/agents lists and what
+      // this tile's "Create new" action adds to.
+      //
+      // The unfiltered call this replaced was wrong in two steps rather than
+      // one. Its default view folds in every member org's agents, so the tile
+      // over-counted for any org member; and `agents()` gives a platform
+      // ADMIN/OWNER an unscoped view of every live org-owned agent, so for an
+      // admin the number was PLATFORM-WIDE — a count of other tenants' agents,
+      // rendered under a personal "N agents" heading. `ownedByMe` is never an
+      // admin-bypass surface (#782), so the tile now reads the same way for
+      // every caller.
+      const { total } = await agentQueries.agents(
+        null,
+        { filter: { ownedByMe: true }, limit: 0 },
+        ctx,
+      );
       return { agentCount: total };
     },
   ],
