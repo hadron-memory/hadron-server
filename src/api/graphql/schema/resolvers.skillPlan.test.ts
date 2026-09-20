@@ -287,16 +287,31 @@ describe('review round 1 — @codex', () => {
   it('P2: records one read per node whose CONTENT is returned (#1061)', async () => {
     const node = await mkNode('tasks:declared', { properties: declaration() });
 
+    // POLLED, not counted once. `recordNodeUsage` is fire-and-forget by
+    // contract, so a bare count after the call is testing scheduler luck —
+    // which is exactly how this assertion passed locally and failed in CI on
+    // its first run. `resolvers.usageRecording.test.ts` says so in its own
+    // helper's comment; I wrote the count first and read the comment after.
+    const readCount = async (): Promise<number> =>
+      db.usageEvent.count({ where: { nodeId: node.id, type: 'read' } });
+    const waitFor = async (want: number): Promise<number> => {
+      for (let i = 0; i < 50; i++) {
+        const n = await readCount();
+        if (n >= want) return n;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return readCount();
+    };
+
     await plan({ intent: 'EXPORT', files: [] });
-    const afterExport = await db.usageEvent.count({ where: { nodeId: node.id, type: 'read' } });
+    expect(await waitFor(1)).toBe(1);
 
     // …and a plan that returns NO body records nothing: an event naming a node
-    // nobody read is the inverse defect.
+    // nobody read is the inverse defect. A negative needs a bounded wait
+    // rather than an immediate read — otherwise it passes by being fast.
     await plan({ intent: 'STATUS', files: [] });
-    const afterStatus = await db.usageEvent.count({ where: { nodeId: node.id, type: 'read' } });
-
-    expect(afterExport).toBe(1);
-    expect(afterStatus).toBe(1);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await readCount()).toBe(1);
   });
 });
 
