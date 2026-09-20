@@ -49,8 +49,15 @@ on:
       # #1087: all of src/, not just the schema dir — $queryRaw lives
       # wherever its query does.
       - 'src/**.ts'
-      - 'scripts/check-graphql-sdl.mjs'
-      - 'scripts/check-sdl-enumerations.mjs'
+      # #1232: a GLOB, not a hand-kept list of the three scripts this job runs.
+      # The enumerated form silently excluded the #1232 scanner, its allow-list
+      # and its test, so a PR editing only the gate would not have run the gate
+      # (@copilot, PR #1244). A list that must be extended by hand to keep a
+      # check honest will eventually not be — the next script added here would
+      # have inherited the same hole.
+      - 'scripts/check-*.mjs'
+      - 'scripts/check-*.test.ts'
+      - 'scripts/sdl-hash-descriptions-allowed.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -58,8 +65,9 @@ on:
     branches: [main]
     paths:
       - 'src/**.ts'
-      - 'scripts/check-graphql-sdl.mjs'
-      - 'scripts/check-sdl-enumerations.mjs'
+      - 'scripts/check-*.mjs'
+      - 'scripts/check-*.test.ts'
+      - 'scripts/sdl-hash-descriptions-allowed.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'

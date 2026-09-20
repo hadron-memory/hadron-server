@@ -113,6 +113,18 @@ describe('#1232 — findHashBlocks', () => {
     expect(blocks[0]).toMatchObject({ symbol: 'MemoryVisibility.ORGANIZATION', documented: false });
   });
 
+  it('recognizes an enum value that carries a directive (@codex, PR #1244)', () => {
+    // `OLD @deprecated(...)` is exactly the enum value most likely to carry a
+    // note, so an end-anchored name would reopen the hole for the worst case.
+    const blocks = findHashBlocks(
+      sdl(`  enum Role {
+    # Superseded by CONTRIBUTOR.
+    EDITOR @deprecated(reason: "Use CONTRIBUTOR")
+  }`),
+    );
+    expect(blocks[0].symbol).toBe('Role.EDITOR');
+  });
+
   it('does not mistake a field for an enum value once the enum block closes', () => {
     const blocks = findHashBlocks(
       sdl(`  enum Role {

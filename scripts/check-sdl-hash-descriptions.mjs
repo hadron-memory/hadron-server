@@ -78,8 +78,13 @@ const FIELD_MULTILINE = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*$/;
  * which lets the gate pass exactly the invisible documentation it exists to
  * reject (@codex, PR #1244). Zero such sites exist today, which is the only
  * reason this was not already a live miss — the gate's job is the next one.
+ *
+ * The optional trailing group accepts a DIRECTIVE, so a documented
+ * `OLD @deprecated(reason: "Use NEW")` is still recognized (@codex, second
+ * round). An end-anchored name would have reopened the identical hole for
+ * precisely the enum values most likely to carry a note.
  */
-const ENUM_VALUE = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/;
+const ENUM_VALUE = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:@\w[^\n]*)?$/;
 
 /**
  * Classify every line of the SDL template literal, tracking `"""` state.

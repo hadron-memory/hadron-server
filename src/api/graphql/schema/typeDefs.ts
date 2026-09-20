@@ -1306,9 +1306,7 @@ export const typeDefs = `#graphql
     model: String
     tokensIn: Int
     tokensOut: Int
-    """
-    046-usage-metering: billing attribution + cost snapshot.
-    """
+    # 046-usage-metering: billing attribution + cost snapshot.
     userId: String
     organizationId: String
     provider: String
@@ -1922,9 +1920,7 @@ export const typeDefs = `#graphql
     updatedAt: DateTime
   }
 
-  """
-  008-agent-installation: the Agent declarative knobs.
-  """
+  # 008-agent-installation: the Agent declarative knobs.
   enum AppMemoryKind {
     shared
     user
@@ -1977,12 +1973,10 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
   }
 
-  """
-  005-agent-subscription: User-side license expressing "this user is
-  authorized to use this agent." Auto-provisioned on first user-attributed
-  contact (server-side, not via a public mutation in v1); revocable by an
-  ADMIN/OWNER of the Agent's owning org.
-  """
+  # 005-agent-subscription: User-side license expressing "this user is
+  # authorized to use this agent." Auto-provisioned on first user-attributed
+  # contact (server-side, not via a public mutation in v1); revocable by an
+  # ADMIN/OWNER of the Agent's owning org.
   enum MemoryClass {
     system
     app
@@ -2300,7 +2294,6 @@ export const typeDefs = `#graphql
   }
 
   """
-  A Hadron memory (git repo + branch settings).
   033-rag-vector-retrieval: what a memory's vector index is built from.
   """
   enum EmbeddingSource {
@@ -2309,6 +2302,9 @@ export const typeDefs = `#graphql
     both
   }
 
+  """
+  A Hadron memory (git repo + branch settings).
+  """
   type Memory {
     id: ID!
     organizationId: String
@@ -2379,9 +2375,7 @@ export const typeDefs = `#graphql
     """
     userId: ID
     isEncrypted: Boolean!
-    """
-    033-rag-vector-retrieval: per-memory vector-index config.
-    """
+    # 033-rag-vector-retrieval: per-memory vector-index config.
     vectorIndexEnabled: Boolean!
     embeddingSource: EmbeddingSource!
     """
@@ -2498,16 +2492,12 @@ export const typeDefs = `#graphql
     aiApiKeyPreview: String
     properties: JSON
     memoryItems: [AgentMemoryItem!]!
-    """
-    008-agent-installation: declarative knobs.
-    """
+    # 008-agent-installation: declarative knobs.
     memoryProvisioning: MemoryProvisioning!
     installationPolicy: InstallationPolicy!
     "Spec 049 Phase 5 — the defaults this Agent's install-created register row is made with."
     registerDefaults: RegisterDefaults!
-    """
-    008-agent-installation: dependency edges and installations.
-    """
+    # 008-agent-installation: dependency edges and installations.
     imports: [AgentImport!]!
     importedBy: [AgentImport!]!
     """

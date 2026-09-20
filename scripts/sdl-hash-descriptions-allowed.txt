@@ -21,3 +21,19 @@ App.createUserPermission — "App-original fields", labels the run of fields bel
 Mutation.updateMyProfile — "User management", labels the user-mutation group
 Mutation.createOrganization — "Organization management", labels the org-mutation group
 Mutation.joinWaitingList — "Public mutations (no auth required)", labels the public-mutation group
+
+# --- Found in review of the #1232 sweep itself (@copilot / @codex, PR #1244).
+# Same shape as the block above — a label for a RUN of declarations — but
+# without box drawing to make it obvious, which is exactly why the first pass
+# converted them. The tell is that the note is plural where the symbol is
+# singular ("knobs", "edges and installations", "fields"): it is describing the
+# group, and the declaration underneath it is just the one that came first.
+AppMemoryKind — "the Agent declarative knobs", labels the MemoryProvisioning / InstallationPolicy pair below it
+Agent.memoryProvisioning — "declarative knobs" (plural), labels memoryProvisioning + installationPolicy
+Agent.imports — "dependency edges and installations", labels imports / importedBy / apps
+UsageEvent.userId — "billing attribution + cost snapshot", labels the whole 046-metering run of fields
+Memory.vectorIndexEnabled — "per-memory vector-index config", labels vectorIndexEnabled + embeddingSource
+# An orphan rather than a section label: this text describes AgentSubscription,
+# which is neither this enum nor adjacent to it. Reverting keeps it out of the
+# published reference; re-homing it belongs to whoever owns that type.
+MemoryClass — describes AgentSubscription (the user-side license), not this enum
