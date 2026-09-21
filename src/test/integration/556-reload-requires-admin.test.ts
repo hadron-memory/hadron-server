@@ -174,3 +174,55 @@ describe('#556 — the route is rate limited', () => {
     expect(startupMock).toHaveBeenCalledTimes(10);
   });
 });
+
+describe('#556 — reload is single-flight', () => {
+  it('refuses a concurrent reload instead of starting a second sync', async () => {
+    // @copilot on PR #1250. The rate limiter caps admission RATE, not
+    // concurrency: ten requests sent AT ONCE all pass a 10/min budget and
+    // start ten full syncs, each iterating every memory and awaiting GitHub.
+    // Worse than load — concurrent startup() runs write the same local git
+    // checkouts.
+    let release!: () => void;
+    startupMock.mockImplementation(
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+
+    const ip = '203.0.113.150';
+    const fire = () =>
+      fetch(`${baseUrl}/reload`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': ip,
+          Authorization: `Bearer ${adminJwt}`,
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+
+    // First one takes the flag and blocks inside startup().
+    const first = fire();
+    await new Promise((r) => setTimeout(r, 120));
+
+    // Four more while it is still running.
+    const rest = await Promise.all([fire(), fire(), fire(), fire()]);
+    expect(rest.map((r) => r.status), 'all refused while one runs').toEqual([409, 409, 409, 409]);
+
+    // The assertion that makes this about SYNCS rather than status codes: a
+    // 409 that still called startup() would have done the damage anyway.
+    expect(startupMock, 'exactly one sync was started').toHaveBeenCalledOnce();
+
+    release();
+    expect((await first).status).toBe(200);
+  });
+
+  it('releases the flag after a sync FAILS, not just after it succeeds', async () => {
+    // The `finally` half. Without it one failed sync wedges the endpoint until
+    // the process restarts — a self-inflicted outage inside the code written
+    // to prevent one, and invisible until the day a sync throws.
+    startupMock.mockRejectedValueOnce(new Error('sync blew up'));
+    expect(await reload(adminJwt)).toBe(500);
+
+    startupMock.mockResolvedValue(undefined);
+    expect(await reload(adminJwt), 'the endpoint still works afterwards').toBe(200);
+  });
+});

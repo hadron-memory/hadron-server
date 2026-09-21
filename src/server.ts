@@ -1259,6 +1259,24 @@ export async function createServer(): Promise<Express> {
   // than dead code — which is why this authenticates rather than deleting it
   // the way #825 deleted `POST /usage`. A CI job can carry a token; an
   // anonymous internet cannot.
+  /**
+   * #556 — reload is SINGLE-FLIGHT (@copilot, PR #1250).
+   *
+   * The rate limiter caps admission RATE, not concurrency: ten requests sent
+   * at once all pass a 10/min budget and start ten full syncs, each iterating
+   * every memory and awaiting GitHub. That is the resource exhaustion this
+   * endpoint was gated to prevent, arriving through the front door — and worse
+   * than load, because concurrent `startup()` runs write the same local git
+   * checkouts.
+   *
+   * A second caller is REFUSED (409) rather than joined to the running sync.
+   * Joining would be friendlier and wrong: a CI job calling this after a push
+   * wants ITS commit synced, and a sync that began before that push does not
+   * include it. A 409 says "not done, try again"; a coalesced 200 would say
+   * "done" about work that never saw the caller's change.
+   */
+  let reloadInFlight = false;
+
   app.post('/reload', reloadRateLimit, async (req, res) => {
     // Authentication runs INSIDE the try (@codex, PR #1250). `resolveAuthContext`
     // does DB lookups on the App-key and user-API-key paths, so a pool blip
@@ -1299,7 +1317,22 @@ export async function createServer(): Promise<Express> {
         return;
       }
 
-      await controller.startup();
+      // Checked AFTER authorization, so an anonymous caller cannot learn
+      // whether a sync is running.
+      if (reloadInFlight) {
+        res.status(409).json({ error: 'A reload is already running' });
+        return;
+      }
+
+      reloadInFlight = true;
+      try {
+        await controller.startup();
+      } finally {
+        // `finally`, not the happy path: a sync that throws must still release
+        // the flag, or one failure wedges the endpoint until the process
+        // restarts — a self-inflicted outage in the code meant to prevent one.
+        reloadInFlight = false;
+      }
       res.json({ ok: true });
     } catch (err) {
       console.error('Reload error:', err);
