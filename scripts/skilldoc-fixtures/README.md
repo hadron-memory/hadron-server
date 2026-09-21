@@ -32,6 +32,16 @@ mkdir -p /tmp/cli/cmd/genfix && cp scripts/skilldoc-fixtures/genfix.go /tmp/cli/
 #    Do not skip this: the $comment is the only provenance the file carries.
 ```
 
+## It is idempotent, and that was not free
+
+Running it twice on its own output produces a byte-identical file. The first
+version did not: it APPENDED the added cases unconditionally, so step 3 above —
+"regenerate from the current fixture" — would have duplicated them on every
+run (measured: 13 → 16 → 19 hash cases). The tests kept passing, because
+duplicate case names simply run twice, so the file would have grown silently
+for as long as anyone followed this README (@codex, PR #1249). Cases are
+upserted by `Name` now; if you add one, give it a name and do not append.
+
 ## Two couplings that are easy to break
 
 - **`render` and `renderParseRoundTrip` are NAME-ALIGNED.** The round-trip test

@@ -176,10 +176,11 @@ describe('the provenance header: read and write must accept the same thing', () 
     // `id=a-->` ends the comment early, the host shows the remainder as body,
     // and the parser would still call the line ours.
     //
-    // §4a's WRITE side is deliberately not in this PR (it requires the hash to
-    // include the id, which diverges from the Go reference until hadron-cli
-    // follows — see the PR body), so this is built by hand rather than by
-    // `render`.
+    // Built by hand rather than by `render` on purpose, and it stays that way
+    // now that #1235 shipped the write side: `render` REFUSES an id carrying
+    // `-->` (that is the guard under test), so it cannot produce the tampered
+    // specimen this case needs. A fixture the writer would reject is exactly
+    // what a parser hardening test has to construct itself.
     const urn = 'hrn:node:acme.com:mem:tasks:x';
     const h = 'a'.repeat(16);
     const ours = `---\nname: n\ndescription: d\n---\n\n<!-- hadron-skill source=${urn} id=node-1 hash=${h} -->\n\nbody\n`;

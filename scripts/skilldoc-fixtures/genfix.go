@@ -22,6 +22,29 @@ type hashCase struct {
 	Out         string `json:"out"`
 }
 
+// upsert replaces a case with the same Name, or appends when absent. A blind
+// append makes the generator NON-IDEMPOTENT: the README tells the next person
+// to regenerate FROM the current fixture, so a second run would duplicate every
+// added case and a third would triple it. The tests keep passing — duplicate
+// names simply run twice — so the file grows silently, which is the failure
+// mode this whole repo has been collecting all week (@codex, PR #1249).
+func upsert(cases []hashCase, add ...hashCase) []hashCase {
+	for _, a := range add {
+		replaced := false
+		for i := range cases {
+			if cases[i].Name == a.Name {
+				cases[i] = a
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cases = append(cases, a)
+		}
+	}
+	return cases
+}
+
 func main() {
 	raw, err := os.ReadFile(os.Args[1])
 	if err != nil {
@@ -66,7 +89,7 @@ func main() {
 			extra[i].Out = skilldoc.Hash(extra[i].ID, extra[i].Source, extra[i].SkillName,
 				extra[i].Description, extra[i].Content)
 		}
-		cases = append(cases, extra...)
+		cases = upsert(cases, extra...)
 		b, _ := json.Marshal(cases)
 		doc[section] = b
 	}
@@ -76,7 +99,7 @@ func main() {
 	if err := json.Unmarshal(doc["renderParseRoundTrip"], &rt); err != nil {
 		panic(err)
 	}
-	rt = append(rt, hashCase{
+	rt = upsert(rt, hashCase{
 		Name: "with-id", ID: "01a0099f949d76a9baf3a16527485475",
 		Source: "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
 		SkillName: "hadron-example", Description: "Use when example.",
@@ -110,7 +133,7 @@ func main() {
 	// Kept name-aligned with renderParseRoundTrip: that section's test looks its
 	// inputs up in THIS one by case name, so a case present in only one of the
 	// two is an undefined lookup rather than a missing assertion.
-	rcases = append(rcases, hashCase{
+	rcases = upsert(rcases, hashCase{
 		Name: "with-id", ID: "01a0099f949d76a9baf3a16527485475",
 		Source: "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
 		SkillName: "hadron-example", Description: "Use when example.",

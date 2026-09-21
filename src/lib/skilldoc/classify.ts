@@ -174,9 +174,10 @@ export function classifySkill(node: NodeFacts, file: FileFacts | null): Classifi
  * between memories after its export.
  *
  * Pairing is by **id first** (§4a), falling back to the URN for a header
- * generation that predates the id — which today is every file, since nothing
- * writes the key yet (#1235 carries the write side and the hash change it
- * requires). That fallback is what makes a `loc` rename
+ * generation that predates the id. #1235 shipped the write side and the hash
+ * change it required, so files gain the key as installations re-export; until
+ * `hadron skill export` ships (hadron-cli#621) the fallback is still what
+ * every file takes. That fallback is what makes a `loc` rename
  * read as `renamed` rather than as an orphan plus a fresh export — two
  * directories carrying near-identical trigger text, both firing.
  */
