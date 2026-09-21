@@ -51,10 +51,16 @@ upserted by `Name` now; if you add one, give it a name and do not append.
 ## It preserves fields it has never heard of
 
 Cases are decoded as `map[string]any`, not into a Go struct. A closed struct
-silently drops anything it does not declare — which cost **29 `why`
-explanations** on the first attempt, including the five on `hash` cases that
-record why each exists ("Go trims NEL, JS does not — the hash diverges if
-ported naively"). No test reads `why`, so nothing failed (@codex, PR #1249).
+silently drops anything it does not declare — which cost **seven `why`
+explanations** on the first attempt (the fixture's total went 32 → 25): five
+from `hash` and two from `render`, each the one-line reason that case exists
+("Go trims NEL, JS does not — the hash diverges if ported naively"). No test
+reads `why`, so nothing failed (@codex, PR #1249).
+
+The loss was first reported as **29**, which was a count of DIFF LINES — inflated
+by the reformat — in the same breath as a warning that a diff-line count is not
+a measurement. Seven is the measured number. Counting the instrument's output
+instead of the thing is the mistake this file keeps being about.
 
 ## Two couplings that are easy to break
 

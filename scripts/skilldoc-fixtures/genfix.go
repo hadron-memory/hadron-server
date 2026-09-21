@@ -9,10 +9,11 @@
 //
 // The first version decoded each case into a closed Go struct and marshaled it
 // back. Anything the struct did not declare was SILENTLY DROPPED — which cost
-// 29 `why` explanations across the file, including five on hash cases, each of
-// them the one-line reason that case exists ("Go trims NEL, JS does not — the
-// hash diverges if ported naively"). No test reads `why`, so nothing failed
-// (@codex, PR #1249).
+// seven `why` explanations (the file's total went 32 → 25): five on hash cases
+// and two on render, each the one-line reason that case exists ("Go trims NEL,
+// JS does not — the hash diverges if ported naively"). No test reads `why`, so
+// nothing failed (@codex, PR #1249). Reported as 29 at first, which was a
+// diff-line count rather than a measurement.
 //
 // Using map[string]any means a field this program has never heard of survives
 // regeneration. Only the keys it actually computes are written.

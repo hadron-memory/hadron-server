@@ -13,9 +13,14 @@
  * pairing the file with a node it was never rendered from; and the id is
  * included so re-pointing a file at another node cannot read as untouched.
  *
- * Every input is present in the file itself — the id as the header's `id=`
- * key — which is what lets a reader recompute this from the file alone and
- * detect a hand edit without the server.
+ * Every input is recoverable from the file itself, which is what lets a reader
+ * recompute this from the file alone and detect a hand edit without the server.
+ * "Recoverable" rather than "present", because the id is the one input that can
+ * be recovered from an ABSENCE: `render` omits `id=` entirely when the id is
+ * empty (a blank value would make the header unparseable), and a header with no
+ * `id=` therefore means the empty string — which is what gets hashed. An
+ * implementer who expects every valid header to carry the key will mis-handle
+ * exactly the files written before §4a (@codex, PR #1249).
  * That property is the whole reason the normalization has to be byte-faithful
  * (`normalize.ts`), and it is the property @Eli's §8 asks whether to keep.
  *
