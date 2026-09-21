@@ -314,7 +314,16 @@ export const skillQueries = {
         id: (n as SkillNode & { _id: string })._id,
         urn: n.urn,
         declaration,
-        nodeHash: hash(n.urn, name, declaration?.description ?? '', n.content),
+        // #1235 §4a: the node's id leads the hash, so a file re-pointed at a
+        // different node by a header edit reads as locally-edited rather than
+        // as stale-and-overwritable.
+        nodeHash: hash(
+          (n as SkillNode & { _id: string })._id,
+          n.urn,
+          name,
+          declaration?.description ?? '',
+          n.content,
+        ),
         collides: collidingUrns.has(n.urn),
         unavailable: lockedIds.has((n as SkillNode & { _id: string })._id),
         _id: (n as SkillNode & { _id: string })._id,
@@ -379,7 +388,13 @@ export const skillQueries = {
         // whose URN trips that is reported as a finding-free entry with no
         // body rather than failing the whole plan for its neighbours.
         try {
-          renderedBody = render(name, nf.urn, nf.declaration?.description ?? '', findContent(skillNodes, nf.urn));
+          renderedBody = render(
+            nf.id,
+            name,
+            nf.urn,
+            nf.declaration?.description ?? '',
+            findContent(skillNodes, nf.urn),
+          );
         } catch {
           renderedBody = null;
         }

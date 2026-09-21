@@ -1,90 +1,392 @@
 {
-  "$comment": "GENERATED from hadron-cli internal/skilldoc at 973cd1f by the #1177 fixture generator. Language-neutral: the Go and TypeScript suites both load this file, so a port that diverges reds rather than passing its own restatement of itself. Regenerate rather than hand-edit.  D12 (2026-09-19) retired name derivation and the org prefix, so the deriveName and validPrefix sections were removed; validName survives and now validates a STORED name.  The `lint` and `lintCollisions` sections were generated later, at 1a8036b (recorded separately as lintSourceCommit): the earlier sections predate D12, and regenerating them wholesale would have mixed a re-measurement into a port. Both commits are on main; neither section has been hand-edited.",
+  "$comment": "GENERATED from hadron-cli internal/skilldoc by the #1177 fixture generator (scripts/skilldoc-fixtures/). The hash / render / renderParseRoundTrip sections were REGENERATED at 1d8ca46 for #1235 (§4a: the node id leads the hash), which changed EVERY digest in them — an empty id contributes the empty string rather than being skipped, so pre-§4a inputs move too. render and renderParseRoundTrip are kept NAME-ALIGNED because the round-trip test looks its inputs up in render by case name, and renderParseRoundTrip records what Go READ BACK (post-NormalizeBody). Sections not listed still date from 973cd1f. Language-neutral: the Go and TypeScript suites both load this file, so a port that diverges reds rather than passing its own restatement of itself. Regenerate rather than hand-edit.  D12 (2026-09-19) retired name derivation and the org prefix, so the deriveName and validPrefix sections were removed; validName survives and now validates a STORED name.  The `lint` and `lintCollisions` sections were generated later, at 1a8036b (recorded separately as lintSourceCommit): the earlier sections predate D12, and regenerating them wholesale would have mixed a re-measurement into a port. Both commits are on main; neither section has been hand-edited.",
+  "declared": [
+    {
+      "name": "absent",
+      "properties": {},
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "enable omitted defaults OFF",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "name": "x-y",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "enable true",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "enable": true,
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "name": "x-y",
+        "nameSet": true,
+        "enable": true,
+        "enableSet": true
+      },
+      "malformed": []
+    },
+    {
+      "name": "enable false is set and off",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "enable": false,
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "name": "x-y",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": true
+      },
+      "malformed": []
+    },
+    {
+      "name": "name present but empty is SET",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "name": ""
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "name absent is not set",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "exports wins over legacy skill",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "new",
+            "name": "new-one"
+          }
+        },
+        "skill": {
+          "description": "old",
+          "name": "old-one"
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "new",
+        "name": "new-one",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "legacy skill wins over legacy claudeSkill",
+      "properties": {
+        "claudeSkill": {
+          "description": "b",
+          "name": "claude-key"
+        },
+        "skill": {
+          "description": "a",
+          "name": "skill-key"
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "skill",
+        "host": "claudeSkill",
+        "description": "a",
+        "name": "skill-key",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "a non-claude host alone is not a declaration",
+      "properties": {
+        "exports": {
+          "codexSkill": {
+            "description": "d",
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": []
+    },
+    {
+      "name": "a non-claude host is shape-checked",
+      "properties": {
+        "exports": {
+          "codexSkill": "nope"
+        }
+      },
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": [
+        "exports.codexSkill"
+      ]
+    },
+    {
+      "name": "two malformed hosts sort",
+      "properties": {
+        "exports": {
+          "alpha": "no",
+          "zebra": "no"
+        }
+      },
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": [
+        "exports.alpha",
+        "exports.zebra"
+      ]
+    },
+    {
+      "name": "host keys ordered by UTF-8 bytes, not UTF-16 units",
+      "properties": {
+        "exports": {
+          "alpha": "no",
+          "": "no",
+          "𐀀": "no"
+        }
+      },
+      "declared": {
+        "found": false,
+        "nameSet": false,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": [
+        "exports.alpha",
+        "exports.",
+        "exports.𐀀"
+      ]
+    },
+    {
+      "name": "malformed beside a valid declaration",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "description": "d",
+            "enable": 1,
+            "name": "x-y"
+          }
+        }
+      },
+      "declared": {
+        "found": true,
+        "key": "exports.claudeSkill",
+        "host": "claudeSkill",
+        "description": "d",
+        "name": "x-y",
+        "nameSet": true,
+        "enable": false,
+        "enableSet": false
+      },
+      "malformed": [
+        "exports.claudeSkill.enable"
+      ]
+    }
+  ],
   "hash": [
     {
+      "content": "body",
+      "description": "d",
       "name": "plain",
-      "source": "hrn:node:a.com:m:tasks:x",
+      "out": "eec380811138812e",
       "skillName": "hadron-x",
-      "description": "d",
-      "content": "body",
-      "out": "1de22ed9280cf7ff"
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "description-is-normalized-first",
-      "why": "a padded description must hash as its trimmed form",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "  d  ",
-      "content": "body",
-      "out": "1de22ed9280cf7ff"
+      "name": "description-is-normalized-first",
+      "out": "eec380811138812e",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "a padded description must hash as its trimmed form"
     },
     {
-      "name": "body-is-normalized-first",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
       "content": "\n\nbody\n\n",
-      "out": "1de22ed9280cf7ff"
+      "description": "d",
+      "name": "body-is-normalized-first",
+      "out": "eec380811138812e",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "crlf-body-equals-lf-body",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
       "content": "a\r\nb",
-      "out": "f39b8b59bed08930"
+      "description": "d",
+      "name": "crlf-body-equals-lf-body",
+      "out": "3e984f47cdab5dcf",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
+      "content": "body",
+      "description": "d",
       "name": "source-is-in-the-hash",
-      "why": "a hand-edited provenance line naming another node must read as a local edit",
+      "out": "ac2e64a5609bf0fa",
+      "skillName": "hadron-x",
       "source": "hrn:node:a.com:m:tasks:OTHER",
-      "skillName": "hadron-x",
-      "description": "d",
-      "content": "body",
-      "out": "ef93fe0669419c93"
+      "why": "a hand-edited provenance line naming another node must read as a local edit"
     },
     {
+      "content": "e",
+      "description": "d",
       "name": "nul-separated-boundary",
-      "why": "a boundary shift must not collide",
-      "source": "ab",
+      "out": "29383733cfdc7dbe",
       "skillName": "c",
-      "description": "d",
-      "content": "e",
-      "out": "1685b5a766e6b31c"
+      "source": "ab",
+      "why": "a boundary shift must not collide"
     },
     {
+      "content": "e",
+      "description": "d",
       "name": "nul-separated-boundary-shifted",
-      "source": "a",
+      "out": "1e61f33023736f7f",
       "skillName": "bc",
-      "description": "d",
-      "content": "e",
-      "out": "70801242d460cdb1"
+      "source": "a"
     },
     {
-      "name": "astral-description",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "trigger 👍 now",
-      "content": "body",
-      "out": "370a32773ddb57cf"
+      "name": "astral-description",
+      "out": "b487ea803fb911a4",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "nel-in-description",
-      "why": "Go trims NEL, JS does not — the hash diverges if ported naively",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "d",
-      "content": "body",
-      "out": "1de22ed9280cf7ff"
+      "name": "nel-in-description",
+      "out": "eec380811138812e",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "Go trims NEL, JS does not — the hash diverges if ported naively"
     },
     {
-      "name": "zwnbsp-in-description",
-      "why": "JS trims ZWNBSP, Go does not — diverges the other way",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "﻿d﻿",
       "content": "body",
-      "out": "8eee487e6a395806"
+      "description": "﻿d﻿",
+      "name": "zwnbsp-in-description",
+      "out": "95c1ea0321bdacfa",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "JS trims ZWNBSP, Go does not — diverges the other way"
+    },
+    {
+      "content": "# Example\n\nBody text.\n",
+      "description": "Use when example.",
+      "id": "01a0099f949d76a9baf3a16527485475",
+      "name": "with-id",
+      "out": "3fc4ef3150dc27d5",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "the published cross-repo vector — hadron-cli#650"
+    },
+    {
+      "content": "# Example\n\nBody text.\n",
+      "description": "Use when example.",
+      "id": "",
+      "name": "empty-id-is-hashed-not-skipped",
+      "out": "283c6ac5b51c3cd7",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "an absent id contributes the empty string, not nothing — one shape, no branch"
+    },
+    {
+      "content": "body",
+      "description": "d",
+      "id": "01a0000000000000000000000000000f",
+      "name": "id-differs-same-everything-else",
+      "out": "07f9e2230bb4f1e4",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "the whole point of §4a: the id alone must move the digest"
     }
   ],
   "isNodeUrn": [
@@ -156,371 +458,6 @@
       "name": "empty-root",
       "in": "hrn:node::m:x",
       "valid": false
-    }
-  ],
-  "normalizeBody": [
-    {
-      "name": "crlf-folded",
-      "in": "a\r\nb",
-      "out": "a\nb"
-    },
-    {
-      "name": "lone-cr-preserved",
-      "why": "the CRLF fold must not become a general newline normalization",
-      "in": "a\rb",
-      "out": "a\rb"
-    },
-    {
-      "name": "surrounding-newlines-trimmed",
-      "in": "\n\na\n\n",
-      "out": "a"
-    },
-    {
-      "name": "spaces-not-trimmed",
-      "why": "body trims ONLY newlines, unlike the description",
-      "in": "  a  ",
-      "out": "  a  "
-    },
-    {
-      "name": "inner-blank-lines-kept",
-      "in": "a\n\n\nb",
-      "out": "a\n\n\nb"
-    },
-    {
-      "name": "body-untouched-by-NBSP",
-      "why": "NormalizeBody trims only \\n, so every space code point survives it",
-      "in": " \na\n ",
-      "out": " \na\n "
-    },
-    {
-      "name": "body-untouched-by-LS",
-      "why": "NormalizeBody trims only \\n, so every space code point survives it",
-      "in": " \na\n ",
-      "out": " \na\n "
-    },
-    {
-      "name": "body-untouched-by-PS",
-      "why": "NormalizeBody trims only \\n, so every space code point survives it",
-      "in": " \na\n ",
-      "out": " \na\n "
-    },
-    {
-      "name": "body-untouched-by-VT",
-      "why": "NormalizeBody trims only \\n, so every space code point survives it",
-      "in": "\u000b\na\n\u000b",
-      "out": "\u000b\na\n\u000b"
-    },
-    {
-      "name": "body-untouched-by-NEL",
-      "why": "NormalizeBody trims only \\n, so every space code point survives it",
-      "in": "\na\n",
-      "out": "\na\n"
-    },
-    {
-      "name": "body-untouched-by-ZWNBSP",
-      "why": "NormalizeBody trims only \\n, so every space code point survives it",
-      "in": "﻿\na\n﻿",
-      "out": "﻿\na\n﻿"
-    }
-  ],
-  "normalizeDescription": [
-    {
-      "name": "plain",
-      "in": "  hello  ",
-      "out": "hello"
-    },
-    {
-      "name": "empty",
-      "in": "",
-      "out": ""
-    },
-    {
-      "name": "all-space",
-      "in": "   ",
-      "out": ""
-    },
-    {
-      "name": "inner-space-kept",
-      "in": " a  b ",
-      "out": "a  b"
-    },
-    {
-      "name": "trim-PS",
-      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
-      "in": " x ",
-      "out": "x"
-    },
-    {
-      "name": "trim-VT",
-      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
-      "in": "\u000bx\u000b",
-      "out": "x"
-    },
-    {
-      "name": "trim-NEL",
-      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
-      "in": "x",
-      "out": "x"
-    },
-    {
-      "name": "trim-ZWNBSP",
-      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
-      "in": "﻿x﻿",
-      "out": "﻿x﻿"
-    },
-    {
-      "name": "trim-NBSP",
-      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
-      "in": " x ",
-      "out": "x"
-    },
-    {
-      "name": "trim-LS",
-      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
-      "in": " x ",
-      "out": "x"
-    }
-  ],
-  "parseFile": [
-    {
-      "name": "no-frontmatter",
-      "input": "just a body\n",
-      "err": true
-    },
-    {
-      "name": "foreign-skill-no-header",
-      "why": "somebody else's skill: parses, Source empty, left alone",
-      "input": "---\nname: other\ndescription: d\n---\n\nbody\n",
-      "err": false,
-      "skillName": "other",
-      "description": "d",
-      "body": "body"
-    },
-    {
-      "name": "legacy-header-is-unhashed",
-      "why": "all 20 files on disk are this shape",
-      "input": "---\nname: x\ndescription: d\n---\n\n<!-- Generated from hrn:node:a.com:m:tasks:x -->\n<!-- Edit the source node and re-export; do not edit this file directly. -->\n\nbody\n",
-      "err": false,
-      "skillName": "x",
-      "description": "d",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "body": "body"
-    },
-    {
-      "name": "extra-frontmatter-key-is-a-local-edit",
-      "input": "---\nname: x\ndescription: d\nallowed-tools: Bash\n---\n\nbody\n",
-      "err": false,
-      "skillName": "x",
-      "description": "d",
-      "body": "body",
-      "extra": {
-        "allowed-tools": "Bash"
-      }
-    },
-    {
-      "name": "non-string-name-refused",
-      "why": "yaml would coerce 123 to \"123\" and the hash would not be the host's view",
-      "input": "---\nname: 123\ndescription: d\n---\n\nbody\n",
-      "err": true
-    },
-    {
-      "name": "generated-from-a-template-is-a-body",
-      "why": "the token must LOOK like a node URN",
-      "input": "---\nname: x\ndescription: d\n---\n\n<!-- Generated from a template -->\n\nbody\n",
-      "err": false,
-      "skillName": "x",
-      "description": "d",
-      "body": "<!-- Generated from a template -->\n\nbody"
-    },
-    {
-      "name": "proto-frontmatter-key-is-extra",
-      "why": "Go maps have no prototype; a JS object literal would swallow this key and under-report a local edit",
-      "input": "---\nname: x\ndescription: d\n__proto__: polluted\n---\n\nbody\n",
-      "err": false,
-      "skillName": "x",
-      "description": "d",
-      "body": "body",
-      "extra": {
-        "__proto__": "polluted"
-      }
-    },
-    {
-      "name": "indented-lookalike-is-body",
-      "input": "---\nname: x\ndescription: d\n---\n\n   <!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=0123456789abcdef -->\n\nbody\n",
-      "err": false,
-      "skillName": "x",
-      "description": "d",
-      "body": "   <!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=0123456789abcdef -->\n\nbody"
-    },
-    {
-      "name": "space-bearing-source-urn-does-not-round-trip",
-      "why": "isNodeURN accepts it; the header grammar cannot carry it. Shared by both implementations.",
-      "input": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:a b hash=16351801c0334ea0 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
-      "err": false,
-      "skillName": "hadron-x",
-      "description": "d",
-      "body": "<!-- hadron-skill source=hrn:node:a.com:m:a b hash=16351801c0334ea0 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody"
-    }
-  ],
-  "render": [
-    {
-      "name": "plain",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
-      "content": "body",
-      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=1de22ed9280cf7ff -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n"
-    },
-    {
-      "name": "description-ending-in-colon",
-      "why": "a plain scalar a hand check passes and a real parser rejects",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "use when:",
-      "content": "body",
-      "out": "---\nname: hadron-x\ndescription: 'use when:'\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=d2351fcb0f7d84c0 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n"
-    },
-    {
-      "name": "description-with-quotes",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "he said \"hi\"",
-      "content": "body",
-      "out": "---\nname: hadron-x\ndescription: he said \"hi\"\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=51aaf4bf66cbbe0b -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n"
-    },
-    {
-      "name": "description-with-newline",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "a\nb",
-      "content": "body",
-      "out": "---\nname: hadron-x\ndescription: |-\n  a\n  b\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=643bd756f362f599 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n"
-    },
-    {
-      "name": "crlf-body",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
-      "content": "a\r\nb\r\n",
-      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=f39b8b59bed08930 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\na\nb\n"
-    },
-    {
-      "name": "body-with-lookalike-header",
-      "why": "a quoted provenance line in the body stays in the body",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
-      "content": "text\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore",
-      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=304a9054b3c220f0 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\ntext\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore\n"
-    }
-  ],
-  "renderParseRoundTrip": [
-    {
-      "name": "plain",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
-      "content": "body",
-      "out": "1de22ed9280cf7ff"
-    },
-    {
-      "name": "description-ending-in-colon",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "use when:",
-      "content": "body",
-      "out": "d2351fcb0f7d84c0"
-    },
-    {
-      "name": "description-with-quotes",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "he said \"hi\"",
-      "content": "body",
-      "out": "51aaf4bf66cbbe0b"
-    },
-    {
-      "name": "description-with-newline",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "a\nb",
-      "content": "body",
-      "out": "643bd756f362f599"
-    },
-    {
-      "name": "crlf-body",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
-      "content": "a\nb",
-      "out": "f39b8b59bed08930"
-    },
-    {
-      "name": "body-with-lookalike-header",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
-      "content": "text\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore",
-      "out": "304a9054b3c220f0"
-    }
-  ],
-  "sourceCommit": "973cd1f",
-  "validName": [
-    {
-      "name": "name:hadron-create-release-tag",
-      "in": "hadron-create-release-tag",
-      "valid": true
-    },
-    {
-      "name": "name:Hadron-Bad",
-      "in": "Hadron-Bad",
-      "valid": false
-    },
-    {
-      "name": "name:trailing-",
-      "in": "trailing-",
-      "valid": false
-    },
-    {
-      "name": "name:-leading",
-      "in": "-leading",
-      "valid": false
-    },
-    {
-      "name": "name:double--hyphen",
-      "in": "double--hyphen",
-      "valid": false
-    },
-    {
-      "name": "name:ok123",
-      "in": "ok123",
-      "valid": true
-    },
-    {
-      "name": "name:",
-      "in": "",
-      "valid": false
-    },
-    {
-      "name": "name:a",
-      "in": "a",
-      "valid": true
-    },
-    {
-      "name": "name:64-astral-chars",
-      "why": "grammar rejects it, but the LENGTH must not be what rejects it",
-      "in": "👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍",
-      "valid": false
-    },
-    {
-      "name": "name:65-ascii",
-      "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "valid": false
-    },
-    {
-      "name": "name:64-ascii",
-      "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "valid": true
     }
   ],
   "lint": [
@@ -1567,276 +1504,415 @@
     }
   ],
   "lintSourceCommit": "1a8036b",
-  "declared": [
+  "normalizeBody": [
     {
-      "name": "absent",
-      "properties": {},
-      "declared": {
-        "found": false,
-        "nameSet": false,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": []
+      "name": "crlf-folded",
+      "in": "a\r\nb",
+      "out": "a\nb"
     },
     {
-      "name": "enable omitted defaults OFF",
-      "properties": {
-        "exports": {
-          "claudeSkill": {
-            "description": "d",
-            "name": "x-y"
-          }
-        }
-      },
-      "declared": {
-        "found": true,
-        "key": "exports.claudeSkill",
-        "host": "claudeSkill",
-        "description": "d",
-        "name": "x-y",
-        "nameSet": true,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": []
+      "name": "lone-cr-preserved",
+      "why": "the CRLF fold must not become a general newline normalization",
+      "in": "a\rb",
+      "out": "a\rb"
     },
     {
-      "name": "enable true",
-      "properties": {
-        "exports": {
-          "claudeSkill": {
-            "description": "d",
-            "enable": true,
-            "name": "x-y"
-          }
-        }
-      },
-      "declared": {
-        "found": true,
-        "key": "exports.claudeSkill",
-        "host": "claudeSkill",
-        "description": "d",
-        "name": "x-y",
-        "nameSet": true,
-        "enable": true,
-        "enableSet": true
-      },
-      "malformed": []
+      "name": "surrounding-newlines-trimmed",
+      "in": "\n\na\n\n",
+      "out": "a"
     },
     {
-      "name": "enable false is set and off",
-      "properties": {
-        "exports": {
-          "claudeSkill": {
-            "description": "d",
-            "enable": false,
-            "name": "x-y"
-          }
-        }
-      },
-      "declared": {
-        "found": true,
-        "key": "exports.claudeSkill",
-        "host": "claudeSkill",
-        "description": "d",
-        "name": "x-y",
-        "nameSet": true,
-        "enable": false,
-        "enableSet": true
-      },
-      "malformed": []
+      "name": "spaces-not-trimmed",
+      "why": "body trims ONLY newlines, unlike the description",
+      "in": "  a  ",
+      "out": "  a  "
     },
     {
-      "name": "name present but empty is SET",
-      "properties": {
-        "exports": {
-          "claudeSkill": {
-            "description": "d",
-            "name": ""
-          }
-        }
-      },
-      "declared": {
-        "found": true,
-        "key": "exports.claudeSkill",
-        "host": "claudeSkill",
-        "description": "d",
-        "nameSet": true,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": []
+      "name": "inner-blank-lines-kept",
+      "in": "a\n\n\nb",
+      "out": "a\n\n\nb"
     },
     {
-      "name": "name absent is not set",
-      "properties": {
-        "exports": {
-          "claudeSkill": {
-            "description": "d"
-          }
-        }
-      },
-      "declared": {
-        "found": true,
-        "key": "exports.claudeSkill",
-        "host": "claudeSkill",
-        "description": "d",
-        "nameSet": false,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": []
+      "name": "body-untouched-by-NBSP",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": " \na\n ",
+      "out": " \na\n "
     },
     {
-      "name": "exports wins over legacy skill",
-      "properties": {
-        "exports": {
-          "claudeSkill": {
-            "description": "new",
-            "name": "new-one"
-          }
-        },
-        "skill": {
-          "description": "old",
-          "name": "old-one"
-        }
-      },
-      "declared": {
-        "found": true,
-        "key": "exports.claudeSkill",
-        "host": "claudeSkill",
-        "description": "new",
-        "name": "new-one",
-        "nameSet": true,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": []
+      "name": "body-untouched-by-LS",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": " \na\n ",
+      "out": " \na\n "
     },
     {
-      "name": "legacy skill wins over legacy claudeSkill",
-      "properties": {
-        "claudeSkill": {
-          "description": "b",
-          "name": "claude-key"
-        },
-        "skill": {
-          "description": "a",
-          "name": "skill-key"
-        }
-      },
-      "declared": {
-        "found": true,
-        "key": "skill",
-        "host": "claudeSkill",
-        "description": "a",
-        "name": "skill-key",
-        "nameSet": true,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": []
+      "name": "body-untouched-by-PS",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": " \na\n ",
+      "out": " \na\n "
     },
     {
-      "name": "a non-claude host alone is not a declaration",
-      "properties": {
-        "exports": {
-          "codexSkill": {
-            "description": "d",
-            "name": "x-y"
-          }
-        }
-      },
-      "declared": {
-        "found": false,
-        "nameSet": false,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": []
+      "name": "body-untouched-by-VT",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "\u000b\na\n\u000b",
+      "out": "\u000b\na\n\u000b"
     },
     {
-      "name": "a non-claude host is shape-checked",
-      "properties": {
-        "exports": {
-          "codexSkill": "nope"
-        }
-      },
-      "declared": {
-        "found": false,
-        "nameSet": false,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": [
-        "exports.codexSkill"
-      ]
+      "name": "body-untouched-by-NEL",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "\na\n",
+      "out": "\na\n"
     },
     {
-      "name": "two malformed hosts sort",
-      "properties": {
-        "exports": {
-          "alpha": "no",
-          "zebra": "no"
-        }
-      },
-      "declared": {
-        "found": false,
-        "nameSet": false,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": [
-        "exports.alpha",
-        "exports.zebra"
-      ]
+      "name": "body-untouched-by-ZWNBSP",
+      "why": "NormalizeBody trims only \\n, so every space code point survives it",
+      "in": "﻿\na\n﻿",
+      "out": "﻿\na\n﻿"
+    }
+  ],
+  "normalizeDescription": [
+    {
+      "name": "plain",
+      "in": "  hello  ",
+      "out": "hello"
     },
     {
-      "name": "host keys ordered by UTF-8 bytes, not UTF-16 units",
-      "properties": {
-        "exports": {
-          "alpha": "no",
-          "": "no",
-          "𐀀": "no"
-        }
-      },
-      "declared": {
-        "found": false,
-        "nameSet": false,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": [
-        "exports.alpha",
-        "exports.",
-        "exports.𐀀"
-      ]
+      "name": "empty",
+      "in": "",
+      "out": ""
     },
     {
-      "name": "malformed beside a valid declaration",
-      "properties": {
-        "exports": {
-          "claudeSkill": {
-            "description": "d",
-            "enable": 1,
-            "name": "x-y"
-          }
-        }
-      },
-      "declared": {
-        "found": true,
-        "key": "exports.claudeSkill",
-        "host": "claudeSkill",
-        "description": "d",
-        "name": "x-y",
-        "nameSet": true,
-        "enable": false,
-        "enableSet": false
-      },
-      "malformed": [
-        "exports.claudeSkill.enable"
-      ]
+      "name": "all-space",
+      "in": "   ",
+      "out": ""
+    },
+    {
+      "name": "inner-space-kept",
+      "in": " a  b ",
+      "out": "a  b"
+    },
+    {
+      "name": "trim-PS",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": " x ",
+      "out": "x"
+    },
+    {
+      "name": "trim-VT",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "\u000bx\u000b",
+      "out": "x"
+    },
+    {
+      "name": "trim-NEL",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "x",
+      "out": "x"
+    },
+    {
+      "name": "trim-ZWNBSP",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": "﻿x﻿",
+      "out": "﻿x﻿"
+    },
+    {
+      "name": "trim-NBSP",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": " x ",
+      "out": "x"
+    },
+    {
+      "name": "trim-LS",
+      "why": "Go unicode.IsSpace vs JS WhiteSpace differ on NEL and ZWNBSP, in OPPOSITE directions",
+      "in": " x ",
+      "out": "x"
+    }
+  ],
+  "parseFile": [
+    {
+      "name": "no-frontmatter",
+      "input": "just a body\n",
+      "err": true
+    },
+    {
+      "name": "foreign-skill-no-header",
+      "why": "somebody else's skill: parses, Source empty, left alone",
+      "input": "---\nname: other\ndescription: d\n---\n\nbody\n",
+      "err": false,
+      "skillName": "other",
+      "description": "d",
+      "body": "body"
+    },
+    {
+      "name": "legacy-header-is-unhashed",
+      "why": "all 20 files on disk are this shape",
+      "input": "---\nname: x\ndescription: d\n---\n\n<!-- Generated from hrn:node:a.com:m:tasks:x -->\n<!-- Edit the source node and re-export; do not edit this file directly. -->\n\nbody\n",
+      "err": false,
+      "skillName": "x",
+      "description": "d",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "body": "body"
+    },
+    {
+      "name": "extra-frontmatter-key-is-a-local-edit",
+      "input": "---\nname: x\ndescription: d\nallowed-tools: Bash\n---\n\nbody\n",
+      "err": false,
+      "skillName": "x",
+      "description": "d",
+      "body": "body",
+      "extra": {
+        "allowed-tools": "Bash"
+      }
+    },
+    {
+      "name": "non-string-name-refused",
+      "why": "yaml would coerce 123 to \"123\" and the hash would not be the host's view",
+      "input": "---\nname: 123\ndescription: d\n---\n\nbody\n",
+      "err": true
+    },
+    {
+      "name": "generated-from-a-template-is-a-body",
+      "why": "the token must LOOK like a node URN",
+      "input": "---\nname: x\ndescription: d\n---\n\n<!-- Generated from a template -->\n\nbody\n",
+      "err": false,
+      "skillName": "x",
+      "description": "d",
+      "body": "<!-- Generated from a template -->\n\nbody"
+    },
+    {
+      "name": "proto-frontmatter-key-is-extra",
+      "why": "Go maps have no prototype; a JS object literal would swallow this key and under-report a local edit",
+      "input": "---\nname: x\ndescription: d\n__proto__: polluted\n---\n\nbody\n",
+      "err": false,
+      "skillName": "x",
+      "description": "d",
+      "body": "body",
+      "extra": {
+        "__proto__": "polluted"
+      }
+    },
+    {
+      "name": "indented-lookalike-is-body",
+      "input": "---\nname: x\ndescription: d\n---\n\n   <!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=0123456789abcdef -->\n\nbody\n",
+      "err": false,
+      "skillName": "x",
+      "description": "d",
+      "body": "   <!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=0123456789abcdef -->\n\nbody"
+    },
+    {
+      "name": "space-bearing-source-urn-does-not-round-trip",
+      "why": "isNodeURN accepts it; the header grammar cannot carry it. Shared by both implementations.",
+      "input": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:a b hash=16351801c0334ea0 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
+      "err": false,
+      "skillName": "hadron-x",
+      "description": "d",
+      "body": "<!-- hadron-skill source=hrn:node:a.com:m:a b hash=16351801c0334ea0 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody"
+    }
+  ],
+  "render": [
+    {
+      "content": "body",
+      "description": "d",
+      "name": "plain",
+      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=eec380811138812e -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "body",
+      "description": "use when:",
+      "name": "description-ending-in-colon",
+      "out": "---\nname: hadron-x\ndescription: 'use when:'\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=460ef01e71652cd1 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "a plain scalar a hand check passes and a real parser rejects"
+    },
+    {
+      "content": "body",
+      "description": "he said \"hi\"",
+      "name": "description-with-quotes",
+      "out": "---\nname: hadron-x\ndescription: he said \"hi\"\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=e6a7e983b96375a9 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "body",
+      "description": "a\nb",
+      "name": "description-with-newline",
+      "out": "---\nname: hadron-x\ndescription: |-\n  a\n  b\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=e1ffe8e55d2adfb4 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "a\r\nb\r\n",
+      "description": "d",
+      "name": "crlf-body",
+      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=3e984f47cdab5dcf -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\na\nb\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "text\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore",
+      "description": "d",
+      "name": "body-with-lookalike-header",
+      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=b3415e8ac8e0d653 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\ntext\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "a quoted provenance line in the body stays in the body"
+    },
+    {
+      "content": "# Example\n\nBody text.\n",
+      "description": "Use when example.",
+      "id": "01a0099f949d76a9baf3a16527485475",
+      "name": "with-id",
+      "out": "---\nname: hadron-example\ndescription: Use when example.\n---\n\n<!-- hadron-skill id=01a0099f949d76a9baf3a16527485475 source=hrn:node:hadronmemory.com:hadron-cli:tasks:example hash=3fc4ef3150dc27d5 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\n# Example\n\nBody text.\n",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "the published cross-repo vector — hadron-cli#650"
+    },
+    {
+      "content": "# Example\n\nBody text.\n",
+      "description": "Use when example.",
+      "id": "",
+      "name": "empty-id-is-hashed-not-skipped",
+      "out": "---\nname: hadron-example\ndescription: Use when example.\n---\n\n<!-- hadron-skill source=hrn:node:hadronmemory.com:hadron-cli:tasks:example hash=283c6ac5b51c3cd7 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\n# Example\n\nBody text.\n",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "an absent id contributes the empty string, not nothing — one shape, no branch"
+    }
+  ],
+  "renderParseRoundTrip": [
+    {
+      "content": "body",
+      "description": "d",
+      "id": "",
+      "name": "plain",
+      "out": "eec380811138812e",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "body",
+      "description": "use when:",
+      "id": "",
+      "name": "description-ending-in-colon",
+      "out": "460ef01e71652cd1",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "body",
+      "description": "he said \"hi\"",
+      "id": "",
+      "name": "description-with-quotes",
+      "out": "e6a7e983b96375a9",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "body",
+      "description": "a\nb",
+      "id": "",
+      "name": "description-with-newline",
+      "out": "e1ffe8e55d2adfb4",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "a\nb",
+      "description": "d",
+      "id": "",
+      "name": "crlf-body",
+      "out": "3e984f47cdab5dcf",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "text\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore",
+      "description": "d",
+      "id": "",
+      "name": "body-with-lookalike-header",
+      "out": "b3415e8ac8e0d653",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "# Example\n\nBody text.",
+      "description": "Use when example.",
+      "id": "01a0099f949d76a9baf3a16527485475",
+      "name": "with-id",
+      "out": "3fc4ef3150dc27d5",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "the published cross-repo vector — hadron-cli#650"
+    },
+    {
+      "content": "# Example\n\nBody text.",
+      "description": "Use when example.",
+      "id": "",
+      "name": "empty-id-is-hashed-not-skipped",
+      "out": "283c6ac5b51c3cd7",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "an absent id contributes the empty string, not nothing — one shape, no branch"
+    }
+  ],
+  "sourceCommit": "1d8ca46",
+  "validName": [
+    {
+      "name": "name:hadron-create-release-tag",
+      "in": "hadron-create-release-tag",
+      "valid": true
+    },
+    {
+      "name": "name:Hadron-Bad",
+      "in": "Hadron-Bad",
+      "valid": false
+    },
+    {
+      "name": "name:trailing-",
+      "in": "trailing-",
+      "valid": false
+    },
+    {
+      "name": "name:-leading",
+      "in": "-leading",
+      "valid": false
+    },
+    {
+      "name": "name:double--hyphen",
+      "in": "double--hyphen",
+      "valid": false
+    },
+    {
+      "name": "name:ok123",
+      "in": "ok123",
+      "valid": true
+    },
+    {
+      "name": "name:",
+      "in": "",
+      "valid": false
+    },
+    {
+      "name": "name:a",
+      "in": "a",
+      "valid": true
+    },
+    {
+      "name": "name:64-astral-chars",
+      "why": "grammar rejects it, but the LENGTH must not be what rejects it",
+      "in": "👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍👍",
+      "valid": false
+    },
+    {
+      "name": "name:65-ascii",
+      "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "name:64-ascii",
+      "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": true
     }
   ]
 }

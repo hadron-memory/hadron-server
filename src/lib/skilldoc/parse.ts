@@ -91,11 +91,16 @@ export interface SkillFile {
    * left with two directories carrying near-identical trigger text, both
    * firing. The id is what makes a move read as `renamed`.
    *
-   * READ-ONLY here. Nothing writes this key yet: §4a also requires the id to
-   * be a HASH input, which the Go reference does not do, so writing one
-   * without hashing it would let a hand-edited id re-point a file at another
-   * node while the file still read as untouched. The write side and the hash
-   * change land together, with hadron-cli, as #1235.
+   * Both sides exist as of #1235: `render` writes this key and `hash` takes
+   * the id as its FIRST input, matching hadron-cli (cli#650). It was read-only
+   * for one release on purpose — writing an id without hashing it would let a
+   * hand-edited id re-point a file at another node while the file still read
+   * as untouched, so the write side had to wait for the Go reference to take
+   * the hash change too.
+   *
+   * Still ABSENT from files on disk until `hadron skill export` ships
+   * (hadron-cli#621) and an installation re-exports; a header without it stays
+   * valid and pairs by URN.
    */
   id: string;
   body: string;
