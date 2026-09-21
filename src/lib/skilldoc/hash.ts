@@ -40,10 +40,25 @@ import { normalizeBody, normalizeDescription } from './normalize.js';
  *
  * An EMPTY id hashes as the empty string; it is NOT skipped. That is the
  * convention half of a cross-repo contract, and it is the kind two implementers
- * each decide reasonably and differently: skipping would make every pre-§4a
- * file mismatch at once, at the moment the rollout is supposed to be quiet.
- * A file with no id stays self-consistent, which is what lets `id=` arrive by
- * ordinary re-export rather than by a migration.
+ * each decide reasonably and differently — so it is pinned rather than left to
+ * taste. The reason is uniformity: the function has ONE shape with no branch,
+ * so there is no "does an absent id count?" question for a second
+ * implementation to answer differently and no way to be half-right.
+ *
+ * It is explicitly NOT a legacy-compatibility mechanism, and an earlier draft
+ * of this comment claimed it was — that a pre-§4a file "stays self-consistent".
+ * It does not: prefixing `"" + NUL` changes the digest, so a file written
+ * before §4a does not recompute to its own stored header hash and would
+ * classify `locally-edited` (@copilot and @codex both caught this on PR #1249,
+ * independently, and the measurement is `4b02a08bb1efbaad` vs
+ * `283c6ac5b51c3cd7` over identical inputs).
+ *
+ * That consequence is real and is RULED IRRELEVANT rather than unnoticed:
+ * already-exported skill files are not a factor (@Holger, 2026-09-21), which
+ * is comfortable to rely on today for a concrete reason — `hadron skill export`,
+ * the only thing that writes a `hash=` header, has not shipped (hadron-cli#621
+ * is open), so no such file exists anywhere. The rule is kept for the
+ * uniformity above; the legacy argument for it was simply wrong.
  *
  * Pinned against the Go reference by `skilldoc.idHash.parity.test.ts` using the
  * vectors @Jonas published with hadron-cli#650, so the two halves are known to

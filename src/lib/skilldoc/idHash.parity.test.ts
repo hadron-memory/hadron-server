@@ -48,9 +48,16 @@ describe('#1235 §4a — the published cross-repo vectors', () => {
   });
 
   it('reproduces hash(empty id) = 283c6ac5b51c3cd7 — empty is HASHED, not skipped', () => {
-    // The convention half. Skipping an empty id would make every pre-§4a file
-    // mismatch at once, at exactly the moment the rollout is meant to be
-    // quiet — and two implementers each decide this reasonably and differently.
+    // The convention half, pinned because two implementers decide it
+    // reasonably and differently. The rule is uniformity — one shape, no
+    // branch, nothing for a second implementation to answer differently.
+    //
+    // It does NOT preserve pre-§4a digests; an earlier version of this comment
+    // said it did. Prefixing `"" + NUL` moves the digest, so a legacy file
+    // would classify `locally-edited` (@copilot / @codex, PR #1249). Ruled a
+    // non-factor: already-exported skill files do not matter (@Holger), and
+    // none carrying a `hash=` header exist anyway while hadron-cli#621 — the
+    // only writer of one — is unshipped.
     expect(hash('', V.source, V.name, V.description, V.content)).toBe('283c6ac5b51c3cd7');
   });
 

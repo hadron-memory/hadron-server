@@ -118,8 +118,12 @@ export function render(
   // convention half (@Jonas, hadron-cli#650). The header grammar is
   // `\w+=\S+`, so `id= ` makes the whole line unparseable, which demotes a
   // file we generated to "somebody else's skill" and reports `locally-edited`
-  // on a file nobody edited. Empty still HASHES as the empty string, so an
-  // id-less file stays self-consistent and gains its id by ordinary re-export.
+  // on a file nobody edited.
+  //
+  // Note the asymmetry, which is deliberate: an empty id is omitted from the
+  // HEADER but still hashed as the empty string (see hash.ts). Omission is
+  // about the line staying parseable; the hash rule is about the two
+  // implementations having one shape to agree on.
   const idKey = id === '' ? '' : `id=${id} `;
   return (
     '---\n' +
