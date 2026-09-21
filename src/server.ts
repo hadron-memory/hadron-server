@@ -4,6 +4,7 @@ import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo
 import { expressMiddleware } from '@apollo/server/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import express, { type Express } from 'express';
 import { decodeJwt } from 'jose';
 import { db } from './integrations/db/client.js';
@@ -1188,6 +1189,44 @@ export async function createServer(): Promise<Express> {
   // the metering chokepoint (`recordLlmUsage`) covering token-bearing spend.
   // An unauthenticated write endpoint with no callers is pure attack surface.
 
+  /**
+   * #556 — `POST /sessions/:id/outcome` requires a credential.
+   *
+   * It was reachable with none, so possession of a session id was enough to
+   * overwrite a session's `outcome`, `outcomeRef` and arbitrary `outcomeMeta`
+   * — and ids travel in the `x-hadron-session` header, in logs and in client
+   * state, which makes "knows the id" a weak boundary.
+   *
+   * ## This RESTORES the design rather than reversing it
+   *
+   * The 2026-02-21 usage-data design is often quoted as "Hadron doesn't care
+   * who sends it", which reads as deliberately open. That sentence is a lossy
+   * summary. The design document it summarizes specifies:
+   *
+   *     POST /sessions/:sessionId/outcome
+   *     Authorization: Bearer <api-key>
+   *
+   *     "The server doesn't care who sent it — it just stamps the session. The
+   *      API key is still required (it's the access control layer), but the
+   *      role is only `contributor` or higher. Any machine client with a valid
+   *      key can report outcomes for any session. That keeps edge devices and
+   *      CRM webhooks on equal footing."
+   *
+   * So "doesn't care who" means WHICH AUTHENTICATED CLIENT, not "no
+   * credential". Two decisions had been collapsed into one sentence, and the
+   * credential half was never implemented — the route has had no auth since
+   * its first commit (6c3cfd1, the same day as the design).
+   *
+   * ## What is deliberately NOT here
+   *
+   * No per-session ownership check. The design rejects it in as many words —
+   * "any machine client ... can report outcomes for any session ... keeps edge
+   * devices and CRM webhooks on equal footing" — because the reporter is
+   * typically a THIRD system (a CRM, a feedback form store) that has no
+   * relationship to the session beyond holding its id. #556 asks for tenancy
+   * scoping here; that is a product change to a deliberate decision, raised
+   * with the project lead rather than made in a security pass.
+   */
   app.post('/sessions/:id/outcome', async (req, res) => {
     const { id } = req.params;
     const { outcome, outcomeRef, outcomeMeta } = req.body ?? {};
@@ -1198,6 +1237,32 @@ export async function createServer(): Promise<Express> {
       return;
     }
     try {
+      // Inside the try: `resolveAuthContext` does DB lookups, and in Express 4
+      // a rejection above the try is an unhandled rejection rather than a
+      // response (the #555 class).
+      const auth = await resolveAuthContext(req, db);
+
+      // An App key IS the machine credential this endpoint was designed for —
+      // "any machine client with a valid key" — so it qualifies on its own.
+      // A human principal is held to the documented CONTRIBUTOR-or-higher bar,
+      // read from the current user row rather than the token's claim (#1251:
+      // `resolveJwt` returns the roles that were true when the token was
+      // signed).
+      let mayReport = !!auth.appId;
+      if (!mayReport && auth.userId && !auth.impersonation) {
+        const user = await db.user.findFirst({
+          where: { id: auth.userId, deletedAt: null },
+          select: { roles: true },
+        });
+        mayReport = !!user?.roles.some((r) =>
+          r === 'CONTRIBUTOR' || r === 'ADMIN' || r === 'OWNER',
+        );
+      }
+      if (!mayReport) {
+        res.status(401).json({ error: 'A contributor-or-higher credential is required' });
+        return;
+      }
+
       await db.session.update({
         where: { id },
         data: {
@@ -1209,13 +1274,123 @@ export async function createServer(): Promise<Express> {
       res.json({ ok: true });
     } catch (err) {
       console.error('Outcome report error:', err);
-      res.status(404).json({ error: 'Session not found' });
+      // Distinguish "no such session" from "something else went wrong".
+      // This catch used to answer 404 for EVERY failure, which was survivable
+      // while the only statement inside it was the update — but the auth
+      // lookups now live in here too, and reporting a connection-pool blip as
+      // "Session not found" would send the caller chasing a session id that is
+      // perfectly fine. P2025 is Prisma's record-not-found.
+      const code = (err as { code?: string } | null)?.code;
+      if (code === 'P2025') {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+      Sentry.captureException(err);
+      res.status(500).json({ error: 'Failed to record outcome' });
     }
   });
 
-  app.post('/reload', async (_req, res) => {
+  /**
+   * #556 — a brake on `POST /reload`. Defined here rather than in a shared
+   * limiter module because it guards exactly one route and nothing else, the
+   * same way the OAuth limiters sit beside theirs.
+   *
+   * Counted regardless of outcome, unlike the email send limiters: a 403 flood
+   * is exactly what probing for an admin token looks like, and it should cost
+   * the prober something. Ten a minute is far above the documented use (a CI
+   * job after a push) and far below a loop.
+   *
+   * IN-PROCESS STORE, so the budget is per worker rather than per deployment
+   * (@copilot, PR #1250 — the same caveat the OAuth limiters carry). Today
+   * that is a distinction without a difference: the container runs ONE node
+   * process (`Dockerfile` CMD is a single `pnpm tsx src/index.ts`), so
+   * per-worker and per-deployment are the same number. It stops being true
+   * the moment anything runs this behind pm2 or more than one replica, and
+   * this limiter guards a more expensive operation than the others — so if
+   * that day comes, this is the one that needs a shared store first.
+   */
+  const reloadRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 10,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'rate_limit_exceeded' },
+  });
+
+  // #556: `POST /reload` re-runs `controller.startup()` — a full graph sync of
+  // every memory with a source, against the DB and against GitHub. It was
+  // reachable with NO credential, so anyone who could reach the server could
+  // hold it in a startup loop: DB churn, connection and CPU exhaustion, and
+  // outbound git traffic, all unauthenticated and all free.
+  //
+  // Now platform ADMIN/OWNER only. There is no global auth guard on this file
+  // — `resolveAuthContext` is invoked by the GraphQL context builder, so every
+  // REST route added here is unauthenticated BY DEFAULT rather than by
+  // decision, which is the structural half of #556 and is not fixed by this
+  // commit.
+  //
+  // Checked for callers before gating, across 49 sibling repos and every CI
+  // workflow: none. The README and hadronmem-core describe it as a CI
+  // trigger ("called by CI after a push"), so it is documented surface rather
+  // than dead code — which is why this authenticates rather than deleting it
+  // the way #825 deleted `POST /usage`. A CI job can carry a token; an
+  // anonymous internet cannot.
+  app.post('/reload', reloadRateLimit, async (req, res) => {
+    // Authentication runs INSIDE the try (@codex, PR #1250). `resolveAuthContext`
+    // does DB lookups on the App-key and user-API-key paths, so a pool blip
+    // rejects this await — and in Express 4 an async handler's rejection is not
+    // forwarded to error middleware, which leaves the request hanging and
+    // raises an unhandled rejection. That is the #555 class of defect, fixed
+    // this week, reintroduced by putting an await above the try.
     try {
-      await controller.startup();
+      const auth = await resolveAuthContext(req, db);
+
+      // Roles come from the CURRENT user row, not from the token's claim
+      // (@copilot, PR #1250). `resolveJwt` returns `payload.roles` — the roles
+      // that were true when the JWT was signed — and its liveness check
+      // selects only `id`. So a user demoted out of ADMIN keeps administering
+      // until their token expires, which is JWT_EXPIRY (7d by default) of
+      // continued access to a full graph sync. Re-reading costs one indexed
+      // lookup on a route that is about to do far more than that.
+      //
+      // An IMPERSONATION session is refused outright rather than having its
+      // roles checked: it carries the TARGET user's identity with `roles: []`,
+      // and an admin acting as someone else should not be re-sync'ing the
+      // fleet through that seat.
+      let isPlatformAdmin = false;
+      if (auth.userId && !auth.impersonation) {
+        const user = await db.user.findFirst({
+          where: { id: auth.userId, deletedAt: null },
+          select: { roles: true },
+        });
+        isPlatformAdmin =
+          !!user?.roles.includes('ADMIN') || !!user?.roles.includes('OWNER');
+      }
+
+      if (!isPlatformAdmin) {
+        // 404 rather than 403 for an ANONYMOUS caller would hide the route,
+        // but it is documented in the README, so hiding it buys nothing and
+        // costs a confusing error for the operator meant to use it.
+        res.status(403).json({ error: 'Platform admin required' });
+        return;
+      }
+
+      // #556: single-flight lives on the OPERATION (controller/startup.ts),
+      // not here. A guard in this handler covered reloads and nothing else,
+      // while `src/index.ts` calls `startup()` directly at boot — so a CI
+      // trigger arriving during the initial sync, which is the likeliest
+      // moment for one, started a second sync over the same checkouts
+      // (@codex, PR #1250).
+      //
+      // 409 rather than joining the running sync: a CI job calling this after
+      // a push wants ITS commit synced, and a sync that began before that push
+      // does not include it. A coalesced 200 would report "done" about work
+      // that never saw the caller's change.
+      const outcome = await controller.startup();
+      if (outcome === 'skipped') {
+        res.status(409).json({ error: 'A sync is already running' });
+        return;
+      }
       res.json({ ok: true });
     } catch (err) {
       console.error('Reload error:', err);

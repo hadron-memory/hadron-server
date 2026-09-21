@@ -292,6 +292,7 @@ function hasUsableRecipient(body: unknown): boolean {
   return typeof email === 'string' && email.trim().length > 0 && email.trim().length <= EMAIL_MAX_LENGTH;
 }
 
+
 export async function sendMagicLink(
   email: string,
   db: PrismaClient,

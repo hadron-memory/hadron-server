@@ -166,7 +166,7 @@ The `/github/webhook` endpoint receives GitHub App events. Payloads are verified
 
 ### Graph sync flow
 
-On startup (and via `POST /reload`), the controller syncs all graphs that have a `sourceUrl`:
+On startup (and via `POST /reload`, which requires a platform ADMIN/OWNER bearer token since #556), the controller syncs all graphs that have a `sourceUrl`:
 
 1. Obtains an installation token for the graph's organization
 2. Clones (or pulls) the repo into `GRAPHS_PATH/<namespace>`
@@ -209,7 +209,8 @@ and adds the graph to their default bundle).
 |----------|------|-------------|
 | `GET /health` | — | Health check |
 | `POST /graphql` | Bearer | GraphQL API (Apollo) |
-| `POST /reload` | — | Re-sync all graphs from GitHub |
+| `POST /reload` | Bearer (platform ADMIN/OWNER) | Re-sync all graphs from GitHub. Rate limited to 10/min per source address (#556) |
+| `POST /sessions/:id/outcome` | Bearer (CONTRIBUTOR+ or App key) | Report a session outcome 0.0–1.0 (#556) |
 | `GET /auth/github` | — | Start GitHub OAuth flow |
 | `GET /auth/github/callback` | — | OAuth callback |
 | `GET /auth/google` | — | Start Google OIDC login flow |
