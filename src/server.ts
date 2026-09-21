@@ -1189,6 +1189,44 @@ export async function createServer(): Promise<Express> {
   // the metering chokepoint (`recordLlmUsage`) covering token-bearing spend.
   // An unauthenticated write endpoint with no callers is pure attack surface.
 
+  /**
+   * #556 — `POST /sessions/:id/outcome` requires a credential.
+   *
+   * It was reachable with none, so possession of a session id was enough to
+   * overwrite a session's `outcome`, `outcomeRef` and arbitrary `outcomeMeta`
+   * — and ids travel in the `x-hadron-session` header, in logs and in client
+   * state, which makes "knows the id" a weak boundary.
+   *
+   * ## This RESTORES the design rather than reversing it
+   *
+   * The 2026-02-21 usage-data design is often quoted as "Hadron doesn't care
+   * who sends it", which reads as deliberately open. That sentence is a lossy
+   * summary. The design document it summarizes specifies:
+   *
+   *     POST /sessions/:sessionId/outcome
+   *     Authorization: Bearer <api-key>
+   *
+   *     "The server doesn't care who sent it — it just stamps the session. The
+   *      API key is still required (it's the access control layer), but the
+   *      role is only `contributor` or higher. Any machine client with a valid
+   *      key can report outcomes for any session. That keeps edge devices and
+   *      CRM webhooks on equal footing."
+   *
+   * So "doesn't care who" means WHICH AUTHENTICATED CLIENT, not "no
+   * credential". Two decisions had been collapsed into one sentence, and the
+   * credential half was never implemented — the route has had no auth since
+   * its first commit (6c3cfd1, the same day as the design).
+   *
+   * ## What is deliberately NOT here
+   *
+   * No per-session ownership check. The design rejects it in as many words —
+   * "any machine client ... can report outcomes for any session ... keeps edge
+   * devices and CRM webhooks on equal footing" — because the reporter is
+   * typically a THIRD system (a CRM, a feedback form store) that has no
+   * relationship to the session beyond holding its id. #556 asks for tenancy
+   * scoping here; that is a product change to a deliberate decision, raised
+   * with the project lead rather than made in a security pass.
+   */
   app.post('/sessions/:id/outcome', async (req, res) => {
     const { id } = req.params;
     const { outcome, outcomeRef, outcomeMeta } = req.body ?? {};
@@ -1199,6 +1237,32 @@ export async function createServer(): Promise<Express> {
       return;
     }
     try {
+      // Inside the try: `resolveAuthContext` does DB lookups, and in Express 4
+      // a rejection above the try is an unhandled rejection rather than a
+      // response (the #555 class).
+      const auth = await resolveAuthContext(req, db);
+
+      // An App key IS the machine credential this endpoint was designed for —
+      // "any machine client with a valid key" — so it qualifies on its own.
+      // A human principal is held to the documented CONTRIBUTOR-or-higher bar,
+      // read from the current user row rather than the token's claim (#1251:
+      // `resolveJwt` returns the roles that were true when the token was
+      // signed).
+      let mayReport = !!auth.appId;
+      if (!mayReport && auth.userId && !auth.impersonation) {
+        const user = await db.user.findFirst({
+          where: { id: auth.userId, deletedAt: null },
+          select: { roles: true },
+        });
+        mayReport = !!user?.roles.some((r) =>
+          r === 'CONTRIBUTOR' || r === 'ADMIN' || r === 'OWNER',
+        );
+      }
+      if (!mayReport) {
+        res.status(401).json({ error: 'A contributor-or-higher credential is required' });
+        return;
+      }
+
       await db.session.update({
         where: { id },
         data: {
@@ -1210,7 +1274,19 @@ export async function createServer(): Promise<Express> {
       res.json({ ok: true });
     } catch (err) {
       console.error('Outcome report error:', err);
-      res.status(404).json({ error: 'Session not found' });
+      // Distinguish "no such session" from "something else went wrong".
+      // This catch used to answer 404 for EVERY failure, which was survivable
+      // while the only statement inside it was the update — but the auth
+      // lookups now live in here too, and reporting a connection-pool blip as
+      // "Session not found" would send the caller chasing a session id that is
+      // perfectly fine. P2025 is Prisma's record-not-found.
+      const code = (err as { code?: string } | null)?.code;
+      if (code === 'P2025') {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+      Sentry.captureException(err);
+      res.status(500).json({ error: 'Failed to record outcome' });
     }
   });
 
