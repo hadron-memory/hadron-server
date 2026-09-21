@@ -8,7 +8,8 @@
  * It is not. `/oauth/token` mints a plain `hdr_user_*` key through the same
  * `mintUserApiKey` as a portal PAT, and `resolveUserApiKey` resolves it to the
  * full user with no scope constraint. Approving grants the client everything
- * the user can do, through every interface, until revoked.
+ * the user can do, through every interface — and the client can mint further
+ * keys of its own, which revoking this one does not touch.
  *
  * ## Why this fixes the DISCLOSURE and not the grant
  *
@@ -53,9 +54,23 @@ describe('#559 — the consent screen does not imply a scope limit', () => {
     expect(CONSENT_TEMPLATE).toMatch(/do\s*<strong>not<\/strong>\s*\n?\s*limit the token/);
   });
 
-  it('tells the user the grant is revocable', () => {
-    // An accurate warning that leaves the reader with no action is just alarm.
-    expect(CONSENT_TEMPLATE).toContain('revoke');
+  it('does not promise that revoking this token ends the access', () => {
+    // @codex P1 on PR #1252, and the irony is the point: the first version of
+    // this warning — written to remove a false reassurance — contained one.
+    //
+    // An approved client can call `createUserApiKey` with this very token
+    // (the resolver needs only `ctx.userId`, which an OAuth token supplies).
+    // The derived key is recorded as `issuedVia: 'portal'` with NO parent
+    // linkage, so revoking the OAuth key leaves it fully active and
+    // indistinguishable from one the user made themselves. "Until you revoke
+    // it" was false in exactly the hostile case the warning exists for.
+    expect(CONSENT_TEMPLATE).not.toContain('until you revoke it');
+    expect(CONSENT_TEMPLATE).not.toContain('revoke this access at any time');
+  });
+
+  it('warns that the token can mint further keys, and that revocation does not cascade', () => {
+    expect(CONSENT_TEMPLATE).toContain('create further API keys of its own');
+    expect(CONSENT_TEMPLATE).toMatch(/Revoking this token does\s*<strong>not<\/strong>/);
   });
 });
 
