@@ -4,6 +4,7 @@ import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo
 import { expressMiddleware } from '@apollo/server/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import express, { type Express } from 'express';
 import { decodeJwt } from 'jose';
 import { db } from './integrations/db/client.js';
@@ -1213,7 +1214,53 @@ export async function createServer(): Promise<Express> {
     }
   });
 
-  app.post('/reload', async (_req, res) => {
+  /**
+   * #556 — a brake on `POST /reload`. Defined here rather than in a shared
+   * limiter module because it guards exactly one route and nothing else, the
+   * same way the OAuth limiters sit beside theirs.
+   *
+   * Counted regardless of outcome, unlike the email send limiters: a 403 flood
+   * is exactly what probing for an admin token looks like, and it should cost
+   * the prober something. Ten a minute is far above the documented use (a CI
+   * job after a push) and far below a loop.
+   */
+  const reloadRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 10,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'rate_limit_exceeded' },
+  });
+
+  // #556: `POST /reload` re-runs `controller.startup()` — a full graph sync of
+  // every memory with a source, against the DB and against GitHub. It was
+  // reachable with NO credential, so anyone who could reach the server could
+  // hold it in a startup loop: DB churn, connection and CPU exhaustion, and
+  // outbound git traffic, all unauthenticated and all free.
+  //
+  // Now platform ADMIN/OWNER only. There is no global auth guard on this file
+  // — `resolveAuthContext` is invoked by the GraphQL context builder, so every
+  // REST route added here is unauthenticated BY DEFAULT rather than by
+  // decision, which is the structural half of #556 and is not fixed by this
+  // commit.
+  //
+  // Checked for callers before gating, across 49 sibling repos and every CI
+  // workflow: none. The README and hadronmem-core describe it as a CI
+  // trigger ("called by CI after a push"), so it is documented surface rather
+  // than dead code — which is why this authenticates rather than deleting it
+  // the way #825 deleted `POST /usage`. A CI job can carry a token; an
+  // anonymous internet cannot.
+  app.post('/reload', reloadRateLimit, async (req, res) => {
+    const auth = await resolveAuthContext(req, db);
+    const isPlatformAdmin =
+      !!auth.roles?.includes('ADMIN') || !!auth.roles?.includes('OWNER');
+    if (!isPlatformAdmin) {
+      // 404 rather than 403 for an ANONYMOUS caller would be nicer still, but
+      // the route is documented in the README, so hiding it buys nothing and
+      // costs a confusing error for the operator who is meant to use it.
+      res.status(403).json({ error: 'Platform admin required' });
+      return;
+    }
     try {
       await controller.startup();
       res.json({ ok: true });
