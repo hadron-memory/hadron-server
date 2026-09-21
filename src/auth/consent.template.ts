@@ -45,6 +45,13 @@ export const CONSENT_TEMPLATE = `<!doctype html>
       --code-bg: #f0f0f0;
       --deny-border: #ccc;
       --deny-hover: #f0f0f0;
+      /* #559 — the honest-grant notice. A matched PAIR like every other colour
+         here (#318): the block sets a background, so it must pin its own text
+         colour or a forced-dark pass recolours the inherited text against an
+         untouched light panel. */
+      --warn-bg: #fff4e5;
+      --warn-border: #e0a252;
+      --warn-text: #4a3208;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -55,6 +62,9 @@ export const CONSENT_TEMPLATE = `<!doctype html>
         --code-bg: #333;
         --deny-border: #555;
         --deny-hover: #333;
+        --warn-bg: #3a2c14;
+        --warn-border: #8a6524;
+        --warn-text: #f2ddba;
       }
     }
     body {
@@ -62,6 +72,24 @@ export const CONSENT_TEMPLATE = `<!doctype html>
       margin: 0; padding: 2rem 1rem;
       background: var(--bg); color: var(--text);
       display: flex; justify-content: center;
+    }
+
+    /* #559 — states what approval actually grants. Styled to be READ rather
+       than skimmed past: a consent screen that understates the grant is worse
+       than one with no detail at all, because it earns trust it has not
+       verified. */
+    .warn {
+      background: var(--warn-bg);
+      color: var(--warn-text);
+      border: 1px solid var(--warn-border);
+      border-radius: 6px;
+      padding: 0.75rem 0.9rem;
+      margin: 1rem 0 0.5rem;
+    }
+    .warn-sub {
+      color: var(--text);
+      font-size: 0.9em;
+      margin: 0 0 1rem;
     }
     main {
       max-width: 480px; width: 100%;
@@ -94,7 +122,13 @@ export const CONSENT_TEMPLATE = `<!doctype html>
       <li>Scope: <code>{{scope}}</code></li>
       <li>Resource: <code>{{resource}}</code></li>
     </ul>
-    <p>If you approve, the application will be issued an authorization code that it can exchange for an access token to act on your behalf at the resource above.</p>
+    <p>If you approve, the application will be issued an authorization code that it can exchange for an access token to act on your behalf.</p>
+    <p class="warn"><strong>This token has the same access you do.</strong> The scope and
+    resource above describe what {{clientName}} asked for — they do <strong>not</strong>
+    limit the token. It can read and change everything in your Hadron account, through
+    every interface, until you revoke it.</p>
+    <p class="warn-sub">Approve only applications you trust with your whole account. You
+    can revoke this access at any time from your account settings.</p>
     <form method="post" action="/oauth/authorize" autocomplete="off">
       <input type="hidden" name="_csrf"                 value="{{csrfToken}}">
       <input type="hidden" name="client_id"             value="{{clientId}}">
