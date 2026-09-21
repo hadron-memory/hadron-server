@@ -83,7 +83,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   startupMock.mockReset();
-  startupMock.mockResolvedValue(undefined);
+  startupMock.mockResolvedValue('ran');
 });
 
 /** Each call gets its own source address: the route's limiter is 10/min. */
@@ -182,9 +182,13 @@ describe('#556 — reload is single-flight', () => {
     // start ten full syncs, each iterating every memory and awaiting GitHub.
     // Worse than load — concurrent startup() runs write the same local git
     // checkouts.
-    let release!: () => void;
+    // The route no longer holds the flag itself — the OPERATION does — so the
+    // concurrency behaviour under test belongs to controller/startup.ts and is
+    // asserted there, against both of its callers. What this case pins is that
+    // the route TRANSLATES a skipped sync into 409 rather than a cheerful 200.
+    let release!: (v: 'ran') => void;
     startupMock.mockImplementation(
-      () => new Promise<void>((resolve) => { release = resolve; }),
+      () => new Promise<'ran'>((resolve) => { release = resolve; }),
     );
 
     const ip = '203.0.113.150';
@@ -203,15 +207,13 @@ describe('#556 — reload is single-flight', () => {
     const first = fire();
     await new Promise((r) => setTimeout(r, 120));
 
-    // Four more while it is still running.
+    // Four more while it is still running. The mocked operation reports
+    // 'skipped' for these, the way the real one does.
+    startupMock.mockResolvedValue('skipped');
     const rest = await Promise.all([fire(), fire(), fire(), fire()]);
-    expect(rest.map((r) => r.status), 'all refused while one runs').toEqual([409, 409, 409, 409]);
+    expect(rest.map((r) => r.status), 'a skipped sync is a 409').toEqual([409, 409, 409, 409]);
 
-    // The assertion that makes this about SYNCS rather than status codes: a
-    // 409 that still called startup() would have done the damage anyway.
-    expect(startupMock, 'exactly one sync was started').toHaveBeenCalledOnce();
-
-    release();
+    release('ran');
     expect((await first).status).toBe(200);
   });
 
@@ -222,7 +224,7 @@ describe('#556 — reload is single-flight', () => {
     startupMock.mockRejectedValueOnce(new Error('sync blew up'));
     expect(await reload(adminJwt)).toBe(500);
 
-    startupMock.mockResolvedValue(undefined);
+    startupMock.mockResolvedValue('ran');
     expect(await reload(adminJwt), 'the endpoint still works afterwards').toBe(200);
   });
 });
