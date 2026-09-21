@@ -15,6 +15,7 @@ import {
   nodeFilePath,
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
+import { validateGitBranch } from '../../lib/gitRef.js';
 
 function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
   const slug = memoryUrn.includes(':') ? memoryUrn.split(':').slice(1).join(':') : memoryUrn;
@@ -73,6 +74,17 @@ export async function pushMemoryToGit(
   // mis-fired on a non-default write branch.
   const branch = memory.writeBranch ?? 'main';
   try {
+    // #1146: BOTH branch columns reach git from this function — `writeBranch`
+    // via push and prepareWriteBranch, `readBranch` via `clone --branch` on
+    // the fresh-clone path below. The first version validated only
+    // `writeBranch`, and did it OUTSIDE this try (@copilot, PR #1247): the
+    // read branch reached git unchecked, and a refusal escaped as an uncaught
+    // rejection instead of the `{ nodeCount, error? }` result this function
+    // documents. Inside the try, a refusal is reported like every other
+    // failure here.
+    validateGitBranch(branch, 'writeBranch');
+    validateGitBranch(memory.readBranch, 'readBranch');
+
     const cloneUrl = token ? toHttpsUrl(memory.source, token) : memory.source;
 
     if (existsSync(join(localPath, '.git'))) {
@@ -207,7 +219,16 @@ export async function pushMemoryToGit(
     try {
       // `-u` sets upstream tracking so the branch isn't left tracking-less —
       // the original root cause of the "branch already exists" failure.
-      await execGit(['push', '-u', 'origin', branch], { cwd: localPath });
+      // An explicit refspec rather than a bare name: as a bare `<refspec>`
+      // operand git reads leading `+` as the force marker and `:` as a
+      // src:dst separator, so the branch name would be parsed rather than
+      // used (@codex, PR #1247). Both characters are refused by
+      // validateGitBranch as well; this removes the class rather than the
+      // instance.
+      await execGit(
+        ['push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
+        { cwd: localPath },
+      );
       console.log(`[pushMemoryToGit] Pushed ${nodes.length} nodes → ${memory.urn}@${branch}`);
     } finally {
       restoreRemote(localPath, memory.source);

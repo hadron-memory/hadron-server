@@ -1,4 +1,5 @@
 import { execGit } from './execGit.js';
+import { validateGitBranch } from '../../lib/gitRef.js';
 
 /** True if `ref` resolves in the repo at `cwd`. */
 async function refExists(cwd: string, ref: string): Promise<boolean> {
@@ -65,6 +66,14 @@ export async function prepareWriteBranch(
   branch: string,
   baseBranch?: string,
 ): Promise<void> {
+  // #1146: this value reaches `git checkout` as a POSITIONAL argument, so a
+  // leading `-` is read as an option rather than a ref. Validated at the
+  // mutations too; re-validated here because a row that arrived by migration,
+  // restore or a direct DB write never passed through them — the same
+  // division of labour as `validateMemorySource`, and for the same reason.
+  validateGitBranch(branch, 'writeBranch');
+  if (baseBranch !== undefined) validateGitBranch(baseBranch, 'baseBranch');
+
   const localExists = await refExists(localPath, `refs/heads/${branch}`);
   const originExists = await refExists(localPath, `refs/remotes/origin/${branch}`);
 

@@ -23,7 +23,8 @@ import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch } from './gitBranch.js';
 import { execGit } from './execGit.js';
-import { validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
+import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
+import { validateGitBranch } from '../../lib/gitRef.js';
 
 /** The prepared checkout handed to a mutate callback. */
 export interface MirrorRepo {
@@ -73,10 +74,23 @@ export async function withMirrorCheckout(
     : null;
 
   if (!memory && ownerRepo) {
-    memory = await db.memory.findFirst({
-      where: { source: { contains: ownerRepo } },
+    // #1145: `contains` narrows, it does not IDENTIFY. Prisma compiles it to
+    // LIKE '%…%', and `_` and `%` are legal in a GitHub repo name — `_` being a
+    // single-character wildcard, so `acme/my_repo` also matched a stored
+    // `acme/myXrepo`, picking another tenant's memory with no ownership
+    // predicate beside it. The filter stays as a cheap coarse narrowing; the
+    // selection below is exact.
+    const candidates = await db.memory.findMany({
+      // `mode: 'insensitive'` because `sourceNamesRepo` compares
+      // case-insensitively, as GitHub does — and Postgres `LIKE` does not
+      // (@copilot, PR #1247). A sensitive narrowing in front of an
+      // insensitive comparison silently excludes the rows the comparison was
+      // written to accept: a stored `github.com/Acme/Repo` would never be
+      // offered for a slug of `acme/repo`, and the exact match never runs.
+      where: { source: { contains: ownerRepo, mode: 'insensitive' } },
       include: { organization: true },
     });
+    memory = candidates.find((m) => sourceNamesRepo(m.source, ownerRepo)) ?? null;
   }
 
   if (!memory) {
@@ -113,6 +127,18 @@ export async function withMirrorCheckout(
   // 2. Resolve the branch name.
   const rawBranch = memory.writeBranch ?? 'hadron-updates';
   const branch = rawBranch.replace('{client}', clientId ?? 'unknown');
+  // #1146: validate the SUBSTITUTED result, not the template. `branch` reaches
+  // `git checkout` and `git push` as a positional argument, and `clientId` is
+  // caller-supplied — a `writeBranch` of exactly `{client}` makes the whole
+  // branch name the client's to choose, leading `-` included. Neither the
+  // mutation guard nor a check on `rawBranch` would see that, because the
+  // dangerous value does not exist until this line.
+  try {
+    validateGitBranch(branch, 'writeBranch');
+  } catch (e) {
+    console.warn(`${logPrefix} Refusing branch "${branch}" for ${memory.urn}: ${String(e)}`);
+    return 'skipped';
+  }
 
   // 3. Get the installation token.
   let token: string | null = null;
@@ -178,7 +204,12 @@ export async function withMirrorCheckout(
     try {
       // `-u` sets upstream tracking so the branch isn't left tracking-less —
       // the original root cause of the "branch already exists" failure.
-      await execGit(['push', '-u', 'origin', branch], { cwd: localPath });
+      // Explicit refspec — see pushMemoryToGit for why a bare name is parsed
+      // rather than used (@codex, PR #1247).
+      await execGit(
+        ['push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
+        { cwd: localPath },
+      );
       console.log(`${logPrefix} Pushed ${commitSubject} → ${memory.urn}@${branch}`);
     } finally {
       restoreRemote(localPath, memory.source);

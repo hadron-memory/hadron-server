@@ -84,6 +84,7 @@ import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
 import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js';
+import { validateGitBranch, GitRefError } from '../../../lib/gitRef.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { recordNodeUsage } from '../../../lib/usageRecorder.js';
 import { createNode } from '../../../controller/operations/createNode.js';
@@ -136,6 +137,36 @@ function assertValidMemorySource(source: string | null | undefined): void {
   } catch (e) {
     if (e instanceof GitSourceError) {
       throw new GraphQLError(e.message, { extensions: { code: 'INVALID_MEMORY_SOURCE' } });
+    }
+    throw e;
+  }
+}
+
+/**
+ * #1146 — `readBranch` / `writeBranch` reach `git` as POSITIONAL ARGUMENTS, so
+ * a value beginning with `-` is read as an OPTION rather than as a ref. Not
+ * shell injection (execGit uses no shell); argument injection, which is why it
+ * survived #561's transport pass.
+ *
+ * Every caller-reachable write to either column passes through here, for the
+ * same reason `assertValidMemorySource` exists: a third write path added later
+ * should be a missing call rather than a subtly different regex. The columns
+ * are ALSO validated at each point of use, because a row that arrived by
+ * migration, restore or direct DB write never saw this.
+ *
+ * Surfaced as `INVALID_GIT_BRANCH` so a client can branch on it instead of
+ * matching prose.
+ */
+function assertValidBranches(input: {
+  readBranch?: string | null;
+  writeBranch?: string | null;
+}): void {
+  try {
+    validateGitBranch(input.readBranch, 'readBranch');
+    validateGitBranch(input.writeBranch, 'writeBranch');
+  } catch (e) {
+    if (e instanceof GitRefError) {
+      throw new GraphQLError(e.message, { extensions: { code: 'INVALID_GIT_BRANCH' } });
     }
     throw e;
   }
@@ -391,6 +422,7 @@ export const memoryMutations = {
       // #561 — `source` is a git remote URL, so it selects a transport. Refuse
       // anything that is not a GitHub repository before it is persisted.
       assertValidMemorySource(source);
+      assertValidBranches({ readBranch, writeBranch });
 
       // 023-app-shape US4 + 034-memory-class-access: user-creatable classes are
       // `knowledge` (default), `group`, and the owner-owned `personal`/`private`
@@ -673,6 +705,7 @@ export const memoryMutations = {
       // An omitted `source` leaves the column untouched and is not re-validated;
       // an explicit null clears it (DB-only mode).
       assertValidMemorySource(source);
+      assertValidBranches({ readBranch, writeBranch });
       // If transferring to a new org, require ADMIN on the target org too
       if (newOrgId && newOrgId !== memory.organizationId) {
         await requireOrgRole(ctx, newOrgId, 'ADMIN');

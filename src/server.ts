@@ -54,6 +54,7 @@ import {
   isExpectedClientError,
 } from './api/graphql/formatError.js';
 import { safeEqual } from './lib/constantTime.js';
+import { sourceNamesRepo } from './lib/gitSource.js';
 import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
 import { controller } from './controller/controller.js';
@@ -1409,17 +1410,27 @@ export async function createServer(): Promise<Express> {
       const defaultBranch = repository?.default_branch ?? 'main';
       if (ref === `refs/heads/${defaultBranch}` && repository?.full_name) {
         const fullName = repository.full_name as string;
-        // Match memories whose source URL contains the repo's full_name (e.g. "org/repo")
-        const memories = await db.memory.findMany({
+        // #1145: `contains` is a cheap NARROWING, not an identity match. Prisma
+        // compiles it to LIKE '%…%', and `_` and `%` are legal in a GitHub repo
+        // name — `_` being a single-character wildcard, so a push to
+        // `acme/my_repo` also selected a memory whose source was
+        // `acme/myXrepo`: another tenant's repo, synced on our say-so, with no
+        // ownership predicate anywhere beside it. The exact filter below
+        // decides which rows are actually ours.
+        const candidates = await db.memory.findMany({
           where: {
             deletedAt: null,
             source: { not: null },
             OR: [
-              { source: { contains: fullName } },
+              // Insensitive to match `sourceNamesRepo` below — a
+              // case-sensitive LIKE in front of a case-insensitive comparison
+              // drops the rows it exists to find (@copilot, PR #1247).
+              { source: { contains: fullName, mode: 'insensitive' } },
             ],
           },
           include: { organization: true },
         });
+        const memories = candidates.filter((m) => sourceNamesRepo(m.source, fullName));
         for (const memory of memories) {
           // Skip if the memory tracks a specific branch that doesn't match
           if (memory.readBranch && ref !== `refs/heads/${memory.readBranch}`) continue;
