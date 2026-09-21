@@ -38,6 +38,7 @@ let server: Server;
 let baseUrl: string;
 let adminJwt: string;
 let memberJwt: string;
+let staleAdminJwt: string;
 
 beforeAll(async () => {
   await cleanDb(db);
@@ -65,6 +66,10 @@ beforeAll(async () => {
     data: { organizationId: org.id, userId: member.id, role: 'READER' },
   });
   memberJwt = await signJwt({ sub: member.id, roles: [] });
+
+  // A token that CLAIMS admin for a user who is not one — the shape a demoted
+  // admin's outstanding token has.
+  staleAdminJwt = await signJwt({ sub: member.id, roles: ['ADMIN'] });
 
   const app = await createServer();
   server = createHttpServer(app);
@@ -114,6 +119,23 @@ describe('#556 — POST /reload is not anonymous', () => {
     // merely required *a* token would satisfy the two above — and anyone can
     // get a token.
     expect(await reload(memberJwt)).toBe(403);
+    expect(startupMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('#556 — the claim in the token is not the authority', () => {
+  it('refuses a token that claims ADMIN for a user who is not one', async () => {
+    // @copilot on PR #1250. `resolveJwt` returns `payload.roles` — the roles
+    // that were true when the token was SIGNED — and its liveness check
+    // selects only `id`. So a user demoted out of ADMIN kept administering
+    // until their token expired: JWT_EXPIRY, 7 days by default, of continued
+    // access to a full graph sync.
+    //
+    // This is the case that discriminates. Every other refusal here passes
+    // just as well against the cached claim, because the admin fixture is an
+    // admin in BOTH the token and the row — so without this one, the fix is
+    // unasserted.
+    expect(await reload(staleAdminJwt)).toBe(403);
     expect(startupMock).not.toHaveBeenCalled();
   });
 });

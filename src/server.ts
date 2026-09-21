@@ -1223,6 +1223,15 @@ export async function createServer(): Promise<Express> {
    * is exactly what probing for an admin token looks like, and it should cost
    * the prober something. Ten a minute is far above the documented use (a CI
    * job after a push) and far below a loop.
+   *
+   * IN-PROCESS STORE, so the budget is per worker rather than per deployment
+   * (@copilot, PR #1250 — the same caveat the OAuth limiters carry). Today
+   * that is a distinction without a difference: the container runs ONE node
+   * process (`Dockerfile` CMD is a single `pnpm tsx src/index.ts`), so
+   * per-worker and per-deployment are the same number. It stops being true
+   * the moment anything runs this behind pm2 or more than one replica, and
+   * this limiter guards a more expensive operation than the others — so if
+   * that day comes, this is the one that needs a shared store first.
    */
   const reloadRateLimit = rateLimit({
     windowMs: 60_000,
@@ -1251,17 +1260,45 @@ export async function createServer(): Promise<Express> {
   // the way #825 deleted `POST /usage`. A CI job can carry a token; an
   // anonymous internet cannot.
   app.post('/reload', reloadRateLimit, async (req, res) => {
-    const auth = await resolveAuthContext(req, db);
-    const isPlatformAdmin =
-      !!auth.roles?.includes('ADMIN') || !!auth.roles?.includes('OWNER');
-    if (!isPlatformAdmin) {
-      // 404 rather than 403 for an ANONYMOUS caller would be nicer still, but
-      // the route is documented in the README, so hiding it buys nothing and
-      // costs a confusing error for the operator who is meant to use it.
-      res.status(403).json({ error: 'Platform admin required' });
-      return;
-    }
+    // Authentication runs INSIDE the try (@codex, PR #1250). `resolveAuthContext`
+    // does DB lookups on the App-key and user-API-key paths, so a pool blip
+    // rejects this await — and in Express 4 an async handler's rejection is not
+    // forwarded to error middleware, which leaves the request hanging and
+    // raises an unhandled rejection. That is the #555 class of defect, fixed
+    // this week, reintroduced by putting an await above the try.
     try {
+      const auth = await resolveAuthContext(req, db);
+
+      // Roles come from the CURRENT user row, not from the token's claim
+      // (@copilot, PR #1250). `resolveJwt` returns `payload.roles` — the roles
+      // that were true when the JWT was signed — and its liveness check
+      // selects only `id`. So a user demoted out of ADMIN keeps administering
+      // until their token expires, which is JWT_EXPIRY (7d by default) of
+      // continued access to a full graph sync. Re-reading costs one indexed
+      // lookup on a route that is about to do far more than that.
+      //
+      // An IMPERSONATION session is refused outright rather than having its
+      // roles checked: it carries the TARGET user's identity with `roles: []`,
+      // and an admin acting as someone else should not be re-sync'ing the
+      // fleet through that seat.
+      let isPlatformAdmin = false;
+      if (auth.userId && !auth.impersonation) {
+        const user = await db.user.findFirst({
+          where: { id: auth.userId, deletedAt: null },
+          select: { roles: true },
+        });
+        isPlatformAdmin =
+          !!user?.roles.includes('ADMIN') || !!user?.roles.includes('OWNER');
+      }
+
+      if (!isPlatformAdmin) {
+        // 404 rather than 403 for an ANONYMOUS caller would hide the route,
+        // but it is documented in the README, so hiding it buys nothing and
+        // costs a confusing error for the operator meant to use it.
+        res.status(403).json({ error: 'Platform admin required' });
+        return;
+      }
+
       await controller.startup();
       res.json({ ok: true });
     } catch (err) {
