@@ -16,20 +16,26 @@ was the one it forbade. `genfix.go` is that program, committed.
 # 1. A git ARCHIVE at a named commit — never a colleague's working checkout.
 #    Their tree moves while you measure, and a `-dirty` build is not a version.
 #    (dev:findings:a-tool-on-path-can-be-a-colleagues-working-build)
+#
+#    rm -rf, NOT bare `mkdir -p`: extracting a second commit over a surviving
+#    tree leaves behind every file the new archive does not contain, so you
+#    build a mixture of two revisions and call it one (@codex, PR #1249).
 COMMIT=1d8ca46
-mkdir -p /tmp/cli && gh api repos/hadron-memory/hadron-cli/tarball/$COMMIT \
-  | tar xz -C /tmp/cli --strip-components=1
+rm -rf /tmp/cli && mkdir -p /tmp/cli
+gh api repos/hadron-memory/hadron-cli/tarball/$COMMIT | tar xz -C /tmp/cli --strip-components=1
 
 # 2. The generator must live INSIDE the module — it imports internal/skilldoc.
 mkdir -p /tmp/cli/cmd/genfix && cp scripts/skilldoc-fixtures/genfix.go /tmp/cli/cmd/genfix/main.go
 (cd /tmp/cli && go build ./cmd/genfix)
 
-# 3. Regenerate IN PLACE from the current fixture (it preserves case names and
-#    the sections §4a does not touch).
-/tmp/cli/genfix src/lib/skilldoc/__fixtures__/skilldoc-fixtures.json > /tmp/new.json
+# 3. Regenerate from the current fixture. The COMMIT is an argument, so
+#    `sourceCommit` records the revision you actually built from rather than
+#    whatever the program was last edited to say.
+/tmp/cli/genfix src/lib/skilldoc/__fixtures__/skilldoc-fixtures.json "$COMMIT" > /tmp/new.json
 
-# 4. Update the $comment to say which commit and which sections, then install.
-#    Do not skip this: the $comment is the only provenance the file carries.
+# 4. Update the $comment to say which sections moved, then install.
+#    Do not skip this: $comment and sourceCommit are the only provenance the
+#    file carries, and a wrong one is worse than none.
 ```
 
 ## It is idempotent, and that was not free
@@ -41,6 +47,14 @@ run (measured: 13 → 16 → 19 hash cases). The tests kept passing, because
 duplicate case names simply run twice, so the file would have grown silently
 for as long as anyone followed this README (@codex, PR #1249). Cases are
 upserted by `Name` now; if you add one, give it a name and do not append.
+
+## It preserves fields it has never heard of
+
+Cases are decoded as `map[string]any`, not into a Go struct. A closed struct
+silently drops anything it does not declare — which cost **29 `why`
+explanations** on the first attempt, including the five on `hash` cases that
+record why each exists ("Go trims NEL, JS does not — the hash diverges if
+ported naively"). No test reads `why`, so nothing failed (@codex, PR #1249).
 
 ## Two couplings that are easy to break
 

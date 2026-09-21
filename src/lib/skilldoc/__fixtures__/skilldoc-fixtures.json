@@ -1,5 +1,5 @@
 {
-  "$comment": "GENERATED from hadron-cli internal/skilldoc by the #1177 fixture generator. The hash / render / renderParseRoundTrip sections were REGENERATED at 1d8ca46 for #1235 (§4a: the node id leads the hash), which changed EVERY digest in them — an empty id hashes as the empty string rather than being skipped, so pre-§4a inputs move too. The id-bearing cases added there are the ones the old fixture could not express, and render + renderParseRoundTrip are kept NAME-ALIGNED because the round-trip test looks its inputs up in render by case name. renderParseRoundTrip records what Go READ BACK off its own rendered file, so its content is post-NormalizeBody. Sections not listed still date from 973cd1f and are untouched by §4a. Language-neutral: the Go and TypeScript suites both load this file, so a port that diverges reds rather than passing its own restatement of itself. Regenerate rather than hand-edit.  D12 (2026-09-19) retired name derivation and the org prefix, so the deriveName and validPrefix sections were removed; validName survives and now validates a STORED name.  The `lint` and `lintCollisions` sections were generated later, at 1a8036b (recorded separately as lintSourceCommit): the earlier sections predate D12, and regenerating them wholesale would have mixed a re-measurement into a port. Both commits are on main; neither section has been hand-edited.",
+  "$comment": "GENERATED from hadron-cli internal/skilldoc by the #1177 fixture generator (scripts/skilldoc-fixtures/). The hash / render / renderParseRoundTrip sections were REGENERATED at 1d8ca46 for #1235 (§4a: the node id leads the hash), which changed EVERY digest in them — an empty id contributes the empty string rather than being skipped, so pre-§4a inputs move too. render and renderParseRoundTrip are kept NAME-ALIGNED because the round-trip test looks its inputs up in render by case name, and renderParseRoundTrip records what Go READ BACK (post-NormalizeBody). Sections not listed still date from 973cd1f. Language-neutral: the Go and TypeScript suites both load this file, so a port that diverges reds rather than passing its own restatement of itself. Regenerate rather than hand-edit.  D12 (2026-09-19) retired name derivation and the org prefix, so the deriveName and validPrefix sections were removed; validName survives and now validates a STORED name.  The `lint` and `lintCollisions` sections were generated later, at 1a8036b (recorded separately as lintSourceCommit): the earlier sections predate D12, and regenerating them wholesale would have mixed a re-measurement into a port. Both commits are on main; neither section has been hand-edited.",
   "declared": [
     {
       "name": "absent",
@@ -274,121 +274,119 @@
   ],
   "hash": [
     {
+      "content": "body",
+      "description": "d",
       "name": "plain",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
+      "out": "eec380811138812e",
       "skillName": "hadron-x",
-      "description": "d",
-      "content": "body",
-      "out": "eec380811138812e"
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "description-is-normalized-first",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "  d  ",
-      "content": "body",
-      "out": "eec380811138812e"
+      "name": "description-is-normalized-first",
+      "out": "eec380811138812e",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "a padded description must hash as its trimmed form"
     },
     {
-      "name": "body-is-normalized-first",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
       "content": "\n\nbody\n\n",
-      "out": "eec380811138812e"
+      "description": "d",
+      "name": "body-is-normalized-first",
+      "out": "eec380811138812e",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "crlf-body-equals-lf-body",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
       "content": "a\r\nb",
-      "out": "3e984f47cdab5dcf"
+      "description": "d",
+      "name": "crlf-body-equals-lf-body",
+      "out": "3e984f47cdab5dcf",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
+      "content": "body",
+      "description": "d",
       "name": "source-is-in-the-hash",
-      "id": "",
+      "out": "ac2e64a5609bf0fa",
+      "skillName": "hadron-x",
       "source": "hrn:node:a.com:m:tasks:OTHER",
-      "skillName": "hadron-x",
-      "description": "d",
-      "content": "body",
-      "out": "ac2e64a5609bf0fa"
+      "why": "a hand-edited provenance line naming another node must read as a local edit"
     },
     {
+      "content": "e",
+      "description": "d",
       "name": "nul-separated-boundary",
-      "id": "",
-      "source": "ab",
+      "out": "29383733cfdc7dbe",
       "skillName": "c",
-      "description": "d",
-      "content": "e",
-      "out": "29383733cfdc7dbe"
+      "source": "ab",
+      "why": "a boundary shift must not collide"
     },
     {
+      "content": "e",
+      "description": "d",
       "name": "nul-separated-boundary-shifted",
-      "id": "",
-      "source": "a",
+      "out": "1e61f33023736f7f",
       "skillName": "bc",
-      "description": "d",
-      "content": "e",
-      "out": "1e61f33023736f7f"
+      "source": "a"
     },
     {
-      "name": "astral-description",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "trigger 👍 now",
-      "content": "body",
-      "out": "b487ea803fb911a4"
+      "name": "astral-description",
+      "out": "b487ea803fb911a4",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "nel-in-description",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "d",
-      "content": "body",
-      "out": "eec380811138812e"
+      "name": "nel-in-description",
+      "out": "eec380811138812e",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "Go trims NEL, JS does not — the hash diverges if ported naively"
     },
     {
-      "name": "zwnbsp-in-description",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "﻿d﻿",
-      "content": "body",
-      "out": "95c1ea0321bdacfa"
-    },
-    {
-      "name": "with-id",
-      "id": "01a0099f949d76a9baf3a16527485475",
-      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
-      "skillName": "hadron-example",
-      "description": "Use when example.",
-      "content": "# Example\n\nBody text.\n",
-      "out": "3fc4ef3150dc27d5"
-    },
-    {
-      "name": "empty-id-is-hashed-not-skipped",
-      "id": "",
-      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
-      "skillName": "hadron-example",
-      "description": "Use when example.",
-      "content": "# Example\n\nBody text.\n",
-      "out": "283c6ac5b51c3cd7"
-    },
-    {
-      "name": "id-differs-same-everything-else",
-      "id": "01a0000000000000000000000000000f",
-      "source": "hrn:node:a.com:m:tasks:x",
+      "name": "zwnbsp-in-description",
+      "out": "95c1ea0321bdacfa",
       "skillName": "hadron-x",
-      "description": "d",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "JS trims ZWNBSP, Go does not — diverges the other way"
+    },
+    {
+      "content": "# Example\n\nBody text.\n",
+      "description": "Use when example.",
+      "id": "01a0099f949d76a9baf3a16527485475",
+      "name": "with-id",
+      "out": "3fc4ef3150dc27d5",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "the published cross-repo vector — hadron-cli#650"
+    },
+    {
+      "content": "# Example\n\nBody text.\n",
+      "description": "Use when example.",
+      "id": "",
+      "name": "empty-id-is-hashed-not-skipped",
+      "out": "283c6ac5b51c3cd7",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "an absent id contributes the empty string, not nothing — one shape, no branch"
+    },
+    {
       "content": "body",
-      "out": "07f9e2230bb4f1e4"
+      "description": "d",
+      "id": "01a0000000000000000000000000000f",
+      "name": "id-differs-same-everything-else",
+      "out": "07f9e2230bb4f1e4",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "the whole point of §4a: the id alone must move the digest"
     }
   ],
   "isNodeUrn": [
@@ -1712,150 +1710,150 @@
   ],
   "render": [
     {
+      "content": "body",
+      "description": "d",
       "name": "plain",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
+      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=eec380811138812e -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
       "skillName": "hadron-x",
-      "description": "d",
-      "content": "body",
-      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=eec380811138812e -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n"
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "description-ending-in-colon",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "use when:",
-      "content": "body",
-      "out": "---\nname: hadron-x\ndescription: 'use when:'\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=460ef01e71652cd1 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n"
+      "name": "description-ending-in-colon",
+      "out": "---\nname: hadron-x\ndescription: 'use when:'\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=460ef01e71652cd1 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "a plain scalar a hand check passes and a real parser rejects"
     },
     {
-      "name": "description-with-quotes",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "he said \"hi\"",
-      "content": "body",
-      "out": "---\nname: hadron-x\ndescription: he said \"hi\"\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=e6a7e983b96375a9 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n"
+      "name": "description-with-quotes",
+      "out": "---\nname: hadron-x\ndescription: he said \"hi\"\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=e6a7e983b96375a9 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "description-with-newline",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "a\nb",
-      "content": "body",
-      "out": "---\nname: hadron-x\ndescription: |-\n  a\n  b\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=e1ffe8e55d2adfb4 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n"
+      "name": "description-with-newline",
+      "out": "---\nname: hadron-x\ndescription: |-\n  a\n  b\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=e1ffe8e55d2adfb4 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\nbody\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "crlf-body",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
       "content": "a\r\nb\r\n",
-      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=3e984f47cdab5dcf -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\na\nb\n"
-    },
-    {
-      "name": "body-with-lookalike-header",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
       "description": "d",
+      "name": "crlf-body",
+      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=3e984f47cdab5dcf -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\na\nb\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
       "content": "text\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore",
-      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=b3415e8ac8e0d653 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\ntext\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore\n"
+      "description": "d",
+      "name": "body-with-lookalike-header",
+      "out": "---\nname: hadron-x\ndescription: d\n---\n\n<!-- hadron-skill source=hrn:node:a.com:m:tasks:x hash=b3415e8ac8e0d653 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\ntext\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore\n",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x",
+      "why": "a quoted provenance line in the body stays in the body"
     },
     {
-      "name": "with-id",
+      "content": "# Example\n\nBody text.\n",
+      "description": "Use when example.",
       "id": "01a0099f949d76a9baf3a16527485475",
-      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "name": "with-id",
+      "out": "---\nname: hadron-example\ndescription: Use when example.\n---\n\n<!-- hadron-skill id=01a0099f949d76a9baf3a16527485475 source=hrn:node:hadronmemory.com:hadron-cli:tasks:example hash=3fc4ef3150dc27d5 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\n# Example\n\nBody text.\n",
       "skillName": "hadron-example",
-      "description": "Use when example.",
-      "content": "# Example\n\nBody text.\n",
-      "out": "---\nname: hadron-example\ndescription: Use when example.\n---\n\n<!-- hadron-skill id=01a0099f949d76a9baf3a16527485475 source=hrn:node:hadronmemory.com:hadron-cli:tasks:example hash=3fc4ef3150dc27d5 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\n# Example\n\nBody text.\n"
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "the published cross-repo vector — hadron-cli#650"
     },
     {
-      "name": "empty-id-is-hashed-not-skipped",
-      "id": "",
-      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
-      "skillName": "hadron-example",
-      "description": "Use when example.",
       "content": "# Example\n\nBody text.\n",
-      "out": "---\nname: hadron-example\ndescription: Use when example.\n---\n\n<!-- hadron-skill source=hrn:node:hadronmemory.com:hadron-cli:tasks:example hash=283c6ac5b51c3cd7 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\n# Example\n\nBody text.\n"
+      "description": "Use when example.",
+      "id": "",
+      "name": "empty-id-is-hashed-not-skipped",
+      "out": "---\nname: hadron-example\ndescription: Use when example.\n---\n\n<!-- hadron-skill source=hrn:node:hadronmemory.com:hadron-cli:tasks:example hash=283c6ac5b51c3cd7 -->\n<!-- Generated by `hadron skill export`. Edit the source node and re-export; do not edit this file. -->\n\n# Example\n\nBody text.\n",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "an absent id contributes the empty string, not nothing — one shape, no branch"
     }
   ],
   "renderParseRoundTrip": [
     {
+      "content": "body",
+      "description": "d",
+      "id": "",
       "name": "plain",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
+      "out": "eec380811138812e",
       "skillName": "hadron-x",
-      "description": "d",
-      "content": "body",
-      "out": "eec380811138812e"
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "description-ending-in-colon",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "use when:",
-      "content": "body",
-      "out": "460ef01e71652cd1"
+      "id": "",
+      "name": "description-ending-in-colon",
+      "out": "460ef01e71652cd1",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "description-with-quotes",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "he said \"hi\"",
-      "content": "body",
-      "out": "e6a7e983b96375a9"
+      "id": "",
+      "name": "description-with-quotes",
+      "out": "e6a7e983b96375a9",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "description-with-newline",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
+      "content": "body",
       "description": "a\nb",
-      "content": "body",
-      "out": "e1ffe8e55d2adfb4"
+      "id": "",
+      "name": "description-with-newline",
+      "out": "e1ffe8e55d2adfb4",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
     },
     {
-      "name": "crlf-body",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
-      "description": "d",
       "content": "a\nb",
-      "out": "3e984f47cdab5dcf"
-    },
-    {
-      "name": "body-with-lookalike-header",
-      "id": "",
-      "source": "hrn:node:a.com:m:tasks:x",
-      "skillName": "hadron-x",
       "description": "d",
-      "content": "text\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore",
-      "out": "b3415e8ac8e0d653"
-    },
-    {
-      "name": "with-id",
-      "id": "01a0099f949d76a9baf3a16527485475",
-      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
-      "skillName": "hadron-example",
-      "description": "Use when example.",
-      "content": "# Example\n\nBody text.",
-      "out": "3fc4ef3150dc27d5"
-    },
-    {
-      "name": "empty-id-is-hashed-not-skipped",
       "id": "",
-      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
-      "skillName": "hadron-example",
-      "description": "Use when example.",
+      "name": "crlf-body",
+      "out": "3e984f47cdab5dcf",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
+      "content": "text\n<!-- hadron-skill source=hrn:node:a.com:m:other hash=0123456789abcdef -->\nmore",
+      "description": "d",
+      "id": "",
+      "name": "body-with-lookalike-header",
+      "out": "b3415e8ac8e0d653",
+      "skillName": "hadron-x",
+      "source": "hrn:node:a.com:m:tasks:x"
+    },
+    {
       "content": "# Example\n\nBody text.",
-      "out": "283c6ac5b51c3cd7"
+      "description": "Use when example.",
+      "id": "01a0099f949d76a9baf3a16527485475",
+      "name": "with-id",
+      "out": "3fc4ef3150dc27d5",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "the published cross-repo vector — hadron-cli#650"
+    },
+    {
+      "content": "# Example\n\nBody text.",
+      "description": "Use when example.",
+      "id": "",
+      "name": "empty-id-is-hashed-not-skipped",
+      "out": "283c6ac5b51c3cd7",
+      "skillName": "hadron-example",
+      "source": "hrn:node:hadronmemory.com:hadron-cli:tasks:example",
+      "why": "an absent id contributes the empty string, not nothing — one shape, no branch"
     }
   ],
   "sourceCommit": "1d8ca46",
