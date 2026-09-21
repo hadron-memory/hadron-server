@@ -1,17 +1,21 @@
 /**
  * #1177 — the provenance fingerprint a generated skill file records.
  *
- * The first 16 hex characters of SHA-256 over the four inputs the file is made
- * from — source URN, name, description, body — NUL-separated so a boundary
- * shift cannot collide (`"ab"+"c"` and `"a"+"bc"` must differ).
+ * The first 16 hex characters of SHA-256 over the FIVE inputs the file is made
+ * from — node id, source URN, name, description, body, in that order — NUL-
+ * separated so a boundary shift cannot collide (`"ab"+"c"` and `"a"+"bc"` must
+ * differ). It was four until #1235 added the id at the front (§4a); this
+ * paragraph said four for one commit after that stopped being true (@codex).
  *
  * Deliberately NOT a content-only hash: the description is the TRIGGER, so an
- * edit to it must read as stale; and the source is included so a hand-edited
+ * edit to it must read as stale; the source is included so a hand-edited
  * provenance line naming a different node reads as a local edit rather than
- * pairing the file with a node it was never rendered from.
+ * pairing the file with a node it was never rendered from; and the id is
+ * included so re-pointing a file at another node cannot read as untouched.
  *
- * Every input is present in the file itself, which is what lets a reader
- * recompute this from the file alone and detect a hand edit without the server.
+ * Every input is present in the file itself — the id as the header's `id=`
+ * key — which is what lets a reader recompute this from the file alone and
+ * detect a hand edit without the server.
  * That property is the whole reason the normalization has to be byte-faithful
  * (`normalize.ts`), and it is the property @Eli's §8 asks whether to keep.
  *
