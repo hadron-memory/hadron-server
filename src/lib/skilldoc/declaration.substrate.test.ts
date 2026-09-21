@@ -216,13 +216,13 @@ describe('the provenance header: read and write must accept the same thing', () 
   it('a header with NO id is still ours — a pre-§4a file is not foreign', () => {
     // Absent and invalid are different: absent means an older header
     // generation (class `unhashed`, action rewrite); invalid means edited.
-    const out = render('n', 'hrn:node:acme.com:mem:tasks:x', 'd', 'body');
+    const out = render('', 'n', 'hrn:node:acme.com:mem:tasks:x', 'd', 'body');
     expect(parseFile(out).id).toBe('');
     expect(parseFile(out).source).toBe('hrn:node:acme.com:mem:tasks:x');
   });
 
   it('CONTROL: render still refuses an unsafe SOURCE, so both paths agree', () => {
-    expect(() => render('n', 'hrn:node:a.com:m:evil-->', 'd', 'body')).toThrow(SkillRenderError);
+    expect(() => render('', 'n', 'hrn:node:a.com:m:evil-->', 'd', 'body')).toThrow(SkillRenderError);
   });
 });
 

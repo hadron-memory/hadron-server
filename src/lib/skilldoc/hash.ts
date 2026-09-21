@@ -29,12 +29,39 @@
 import { createHash } from 'crypto';
 import { normalizeBody, normalizeDescription } from './normalize.js';
 
-/** The provenance fingerprint. 16 hex chars — half a SHA-256, as the Go side writes. */
-export function hash(source: string, name: string, description: string, content: string): string {
+/**
+ * The provenance fingerprint. 16 hex chars — half a SHA-256, as the Go side writes.
+ *
+ * `id` is FIRST and is part of the hash (#1235 / §4a, reversed onto this shape
+ * by @codex on cli#624 and @copilot independently on #1234). Left out, editing
+ * ONLY the header id keeps `hash(file) === headerHash`, so the file reads as
+ * untouched while pairing to a DIFFERENT node — `stale` rather than
+ * `locally-edited`, and therefore overwritten despite A1.
+ *
+ * An EMPTY id hashes as the empty string; it is NOT skipped. That is the
+ * convention half of a cross-repo contract, and it is the kind two implementers
+ * each decide reasonably and differently: skipping would make every pre-§4a
+ * file mismatch at once, at the moment the rollout is supposed to be quiet.
+ * A file with no id stays self-consistent, which is what lets `id=` arrive by
+ * ordinary re-export rather than by a migration.
+ *
+ * Pinned against the Go reference by `skilldoc.idHash.parity.test.ts` using the
+ * vectors @Jonas published with hadron-cli#650, so the two halves are known to
+ * agree BEFORE the fixture-driven A2 gate runs — a disagreement then surfaces
+ * as one mismatched constant rather than as a parity failure nobody can
+ * localise.
+ */
+export function hash(
+  id: string,
+  source: string,
+  name: string,
+  description: string,
+  content: string,
+): string {
   const d = normalizeDescription(description);
   const c = normalizeBody(content);
   return createHash('sha256')
-    .update(`${source}\0${name}\0${d}\0${c}`, 'utf8')
+    .update(`${id}\0${source}\0${name}\0${d}\0${c}`, 'utf8')
     .digest('hex')
     .slice(0, 16);
 }

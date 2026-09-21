@@ -36,7 +36,7 @@
 
 import { stringify } from 'yaml';
 import { hash } from './hash.js';
-import { isNodeUrn, SAFE_SOURCE_RE } from './parse.js';
+import { isNodeUrn, SAFE_ID_RE, SAFE_SOURCE_RE } from './parse.js';
 import { normalizeBody, normalizeDescription } from './normalize.js';
 
 /** The human note a generated file carries. Prose — nothing parses it. */
@@ -77,7 +77,13 @@ export class SkillRenderError extends Error {}
  * instruction into a loud error. The broader gap — git sync writing unvalidated
  * locs, which is not a skills problem — is reported separately.
  */
-export function render(name: string, source: string, description: string, content: string): string {
+export function render(
+  id: string,
+  name: string,
+  source: string,
+  description: string,
+  content: string,
+): string {
   // BOTH: the charset a one-line comment can carry, AND the shape the parser
   // will accept back (@copilot round 4). Charset alone still let `render` write
   // a header `parseFile` refuses as not-ours — the file would orphan itself and
@@ -91,17 +97,35 @@ export function render(name: string, source: string, description: string, conten
         `instructions: ${JSON.stringify(source)}`,
     );
   }
+  // #1235 §4a — the same charset the PARSER enforces, imported rather than
+  // restated, for the reason the source check above gives: `id=a-->` closes the
+  // comment early and everything after it becomes agent-visible body. A header
+  // `render` writes but `parseFile` refuses is a file that orphans itself.
+  if (id !== '' && !SAFE_ID_RE.test(id)) {
+    throw new SkillRenderError(
+      `skill node id contains characters that cannot be written into a one-line ` +
+        `provenance comment; the remainder of the header would become agent-visible ` +
+        `instructions: ${JSON.stringify(id)}`,
+    );
+  }
   const d = normalizeDescription(description);
   const c = normalizeBody(content);
   // Two keys, in this order. `stringify` ends with a newline; the framing below
   // supplies its own, so it is trimmed rather than doubled.
   const fm = stringify({ name, description: d }).replace(/\n+$/, '');
-  const h = hash(source, name, d, c);
+  const h = hash(id, source, name, d, c);
+  // `id=` is OMITTED when empty, NEVER written blank — the cross-repo
+  // convention half (@Jonas, hadron-cli#650). The header grammar is
+  // `\w+=\S+`, so `id= ` makes the whole line unparseable, which demotes a
+  // file we generated to "somebody else's skill" and reports `locally-edited`
+  // on a file nobody edited. Empty still HASHES as the empty string, so an
+  // id-less file stays self-consistent and gains its id by ordinary re-export.
+  const idKey = id === '' ? '' : `id=${id} `;
   return (
     '---\n' +
     fm +
     '\n---\n\n' +
-    `<!-- hadron-skill source=${source} hash=${h} -->\n` +
+    `<!-- hadron-skill ${idKey}source=${source} hash=${h} -->\n` +
     HUMAN_LINE +
     '\n\n' +
     c +
