@@ -5747,6 +5747,10 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         // Keep the dead-Channel cleanup verdict stable through the delete.
         // Channel resurrection takes this same key before any loc key.
         await lockMemoryForChannelChange(tx, memory.id);
+        // lockNodeForDelete acquires the loc lock and then re-runs the
+        // protected-loc gate on a fresh snapshot. While this memory lock is
+        // held, a reuse that already won is visible and a later reuse cannot
+        // invalidate the verdict.
         await lockNodeForDelete(tx, memory.id, loc);
         // A stable node id can move while this request waits on the old loc.
         // Abort instead of deleting that id at its new address/memory.

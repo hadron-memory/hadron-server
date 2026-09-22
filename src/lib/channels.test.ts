@@ -28,6 +28,7 @@ import { appendChatMessage } from './chatRoot.js';
 import { encryptNodeFields, getMemoryEncryptionInfo } from './nodeCrypto.js';
 import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
+import { createTestableMcpServer } from '../mcp/server.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -351,6 +352,61 @@ describe('protection (S4)', () => {
       await M.createChannelMessage({}, { channelRef: channel.id, body: 'fresh transcript' }, ctx(admin.id));
       const page = await Q.channelMessages(null, { channelRef: channel.id }, ctx(admin.id));
       expect(page.items.map((m: { body: string }) => m.body)).toEqual(['fresh transcript']);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
+  it.each(['GraphQL', 'MCP'] as const)('%s refuses stale orphan cleanup when Channel reuse wins the memory lock (#1226)', async (surface) => {
+    const current = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const first = current.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
+    await M.createChannelMessage({}, { channelRef: first.id, body: 'old transcript' }, ctx(admin.id));
+    const messages = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { memoryId: appMem.id, loc: 'chats:team:messages' } },
+    });
+    await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const lockHeld = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const mayRelease = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, appMem.id);
+      signalHeld();
+      await mayRelease;
+    }, { timeout: 20_000 });
+
+    await lockHeld;
+    // Queue reuse before stale cleanup. The delete's initial gate observes the
+    // dead Channel, then its transaction waits behind reuse on the memory key.
+    // Its authoritative under-lock gate must observe the fresh incarnation.
+    const recreating = ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+    await waitForChannelMemoryLockWaiter(appMem.id);
+    const deleting = surface === 'GraphQL'
+      ? M.deleteNode({}, { nodeRef: messages.id, recursive: true }, ctx(admin.id))
+      : createTestableMcpServer({
+          userId: admin.id,
+          roles: ['ADMIN'],
+          clientId: `user:${admin.id}`,
+        }).callToolText('hadron_delete_node', {
+          urn: `hrn:node:${appMem.urn}:${messages.loc}`,
+          recursive: true,
+        });
+    try {
+      await waitForChannelMemoryLockWaiter(appMem.id, 10_000, 2);
+      signalRelease();
+      await holder;
+      const { channel } = await recreating;
+      await expect(deleting).rejects.toMatchObject({
+        extensions: { code: 'LOC_PROTECTED', channelLive: true },
+      });
+
+      await M.createChannelMessage({}, { channelRef: channel.id, body: 'fresh transcript' }, ctx(admin.id));
+      const page = await Q.channelMessages(null, { channelRef: channel.id }, ctx(admin.id));
+      expect(page.items.map((m: { body: string }) => m.body).slice(-1)).toEqual(['fresh transcript']);
     } finally {
       signalRelease();
       await holder.catch(() => undefined);

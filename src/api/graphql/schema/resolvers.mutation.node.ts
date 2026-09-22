@@ -2289,6 +2289,10 @@ export const nodeMutations = {
           // authoritative re-check must serialize with Channel resurrection.
           // Memory-before-loc matches ensureChannelWithRoot's global order.
           await lockMemoryForChannelChange(tx, memoryId);
+          // This helper acquires the loc lock AND runs assertLocWritable on a
+          // fresh snapshot. Keep that re-check under the memory lock: if reuse
+          // won while this request waited, the now-live Channel refuses the
+          // stale cleanup before any descendant is touched.
           await lockNodeForDelete(tx, memoryId, node.loc);
           // The target may have moved while this delete waited. The loc lock
           // above protects the address we authorized, not the stable id; do
