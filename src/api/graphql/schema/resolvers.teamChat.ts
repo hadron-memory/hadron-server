@@ -15,9 +15,8 @@
 // Storage shape (D-2026-08-07-001/-004, kept field-compatible with the #921
 // storage rework so it can absorb this surface without a data migration):
 //   - chat root: nodeType `chat`, storage keys (`messageCount`,
-//     `lastMessageAt`) top-level in `data`; `data.scope: 'shared'` is stamped
-//     for compatibility with today's chat-scope invariants and retires with
-//     D-2026-08-10-005.
+//     `lastMessageAt`) top-level in `data`; there is no root-level audience
+//     marker because access derives from the host memory.
 //   - message: body in `Node.content`, envelope in `Node.data`, nodeType
 //     `chat-message`, ordering key in `Node.seq` (allocated atomically by
 //     `chatRoot.appendChatMessage` — #919; a hand-rolled node write here IS
@@ -36,7 +35,6 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
-import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
@@ -61,9 +59,10 @@ import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
-import { DEFAULT_CHANNEL_NAME, ensureChannelRow } from '../../../lib/channels.js';
+import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
+import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
 // listing and the shared chat-loc gate both have to exclude `chats:team`, and
@@ -165,6 +164,7 @@ async function requireTeamChatAccess(
 }
 
 type ChatRootRow = { id: string; memoryId: string; loc: string };
+type ChannelIncarnation = { id: string; value: number };
 
 /**
  * Find the team chat root among the App's app-class memories. Memory-scoped
@@ -218,7 +218,10 @@ async function locateTeamChatRoot(ctx: Context, app: AppRow): Promise<ChatRootRo
  * installed Agent needs no marker to be unambiguous — a single-agent team App
  * without role definitions can still chat.
  */
-async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow> {
+async function bootstrapTeamChat(
+  ctx: Context,
+  app: AppRow,
+): Promise<{ root: ChatRootRow; incarnation: ChannelIncarnation }> {
   let teamAgent: { id: string; name: string; urn: string };
   try {
     teamAgent = await locateTeamAgent(ctx, app.id, null);
@@ -247,126 +250,22 @@ async function bootstrapTeamChat(ctx: Context, app: AppRow): Promise<ChatRootRow
     db: ctx.db,
   });
 
-  const memEncInfo = await getMemoryEncryptionInfo(ctx.db, memoryId);
-  // Storage keys top-level (D-2026-08-10-004 — no engine state here);
-  // `scope: 'shared'` for compatibility with the live chat-scope invariant
-  // (`shared ⇔ app`, spec 017) until D-2026-08-10-005 drops the marker.
-  const rootFields = translateSessionExpired(memEncInfo, () =>
-    encryptNodeFields(
-      {
-        content: null,
-        data: { scope: 'shared', messageCount: 0, createdAt: new Date().toISOString() },
-      },
-      memEncInfo,
-    ),
-  );
-  try {
-    await ctx.db.$transaction(async (tx) => {
-      // #664/#752: create under the ancestor-path lock so a concurrent
-      // non-recursive delete of `chats` can't orphan the subtree.
-      await lockAncestorsForCreateMany(tx, memoryId, [TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC], { owns: 'channel' });
-      // Each of the three nodes is create-OR-RESTORE: a soft-deleted row
-      // still occupies `@@unique([loc, memoryId])`, so a plain create would
-      // P2002 forever and the canonical loc would be permanently bricked
-      // (Copilot on PR #941). Restoring the root preserves its data, so
-      // `messageCount` — and therefore seq uniqueness — survives the
-      // delete/restore cycle (old messages stay deleted).
-      const restoreOrCreate = async (
-        loc: string,
-        create: () => Promise<{ id: string }>,
-        accept: (row: { nodeType: string }) => boolean = () => true,
-      ): Promise<string> => {
-        const existing = await tx.node.findUnique({
-          where: { loc_memoryId: { loc, memoryId } },
-          select: { id: true, deletedAt: true, nodeType: true },
-        });
-        if (existing) {
-          if (!accept(existing)) {
-            throw new GraphQLError(
-              `"${loc}" is occupied by a ${existing.nodeType} node; the team chat adopts only a chat root. Move or delete it first.`,
-              { extensions: { code: 'LOC_OCCUPIED', loc, nodeType: existing.nodeType } },
-            );
-          }
-          if (existing.deletedAt) {
-            await tx.node.update({
-              where: { id: existing.id },
-              data: { deletedAt: null, deletedBy: null },
-            });
-          }
-          return existing.id;
-        }
-        return (await create()).id;
-      };
-      await restoreOrCreate('chats', () =>
-        tx.node.create({
-          data: { id: generateId(), memoryId, loc: 'chats', name: 'chats', nodeType: 'record' },
-        }),
-      );
-      const rootId = await restoreOrCreate(TEAM_CHAT_LOC, () =>
-        tx.node.create({
-          data: {
-            id: generateId(),
-            memoryId,
-            loc: TEAM_CHAT_LOC,
-            name: 'Team chat',
-            nodeType: 'chat',
-            description: `Team chat — ${app.name}`,
-            data: (rootFields.data ?? null) as InputJsonValue,
-            // Provenance, never a gate (cor:acl:030:01).
-            createdBy: ctx.userId ?? null,
-          },
-        }),
-        // A chat root (live or tombstoned) is adopted; anything else live is a squatter (LOC_OCCUPIED).
-        (row) => row.nodeType === 'chat',
-      );
-      await restoreOrCreate(TEAM_CHAT_MESSAGES_LOC, () =>
-        tx.node.create({
-          data: {
-            id: generateId(),
-            memoryId,
-            loc: TEAM_CHAT_MESSAGES_LOC,
-            name: 'messages',
-            nodeType: 'record',
-            createdBy: ctx.userId ?? null,
-          },
-        }),
-      );
-      // Spec 049 Phase 4: the row is minted in the SAME transaction as the
-      // root, under the lock — the root is never live without its protection
-      // (Copilot on PR #1165). The lock serializes the first-post race, so
-      // ensureChannelRow's P2002 branch cannot fire inside this transaction.
-      await ensureChannelRow(tx, {
-        rootId,
-        memoryId,
-        loc: TEAM_CHAT_LOC,
-        name: DEFAULT_CHANNEL_NAME,
-        description: `Team chat — ${app.name}`,
-        createdBy: ctx.userId ?? null,
-        asDefaultOfAppId: app.id,
-      });
-    });
-  } catch (e) {
-    // Concurrent first post won the bootstrap race — use its rows.
-    const isUniqueViolation =
-      typeof e === 'object' && e !== null && (e as { code?: string }).code === 'P2002';
-    if (!isUniqueViolation) throw e;
-  }
-  const root = await locateTeamChatRoot(ctx, app);
-  if (!root) throw new Error(`Team chat bootstrap failed for App ${app.id}`);
-  // Spec 049 Phase 4: the root is a Channel from its first moment — the row is
-  // what reserves and protects the address (D-2026-09-13-006). Idempotent for
-  // the transaction above; load-bearing for the concurrent-winner path, whose
-  // root may predate Channels.
-  await ensureChannelRow(ctx.db, {
-    rootId: root.id,
-    memoryId: root.memoryId,
-    loc: root.loc,
+  // ONE creation core. The old bootstrap reimplemented create-or-restore and
+  // missed #1226's clean-incarnation reset, so the default team-chat path
+  // resurrected the transcript even after createChannel had been fixed.
+  const { channel, rootId } = await ensureChannelWithRoot(ctx.db, {
+    memoryId,
+    loc: TEAM_CHAT_LOC,
     name: DEFAULT_CHANNEL_NAME,
     description: `Team chat — ${app.name}`,
     createdBy: ctx.userId ?? null,
     asDefaultOfAppId: app.id,
+    hostLabel: app.name,
   });
-  return root;
+  return {
+    root: { id: rootId, memoryId, loc: TEAM_CHAT_LOC },
+    incarnation: { id: channel.id, value: channel.incarnation },
+  };
 }
 
 /**
@@ -653,7 +552,7 @@ async function resolveMentionTokens(
 // to no App. Narrowing the type is the census: every consumer that assumed an
 // App had to answer for it at the compiler rather than at runtime
 // (hadron-portal's `review:narrowing-a-fetch-narrows-its-type`, same lesson).
-type ChannelTarget = { channelId: string; app: AppRow | null; root: ChatRootRow };
+type ChannelTarget = { channelId: string; app: AppRow | null; root: ChatRootRow; incarnation: ChannelIncarnation };
 
 const channelNotFound = (ref: string): GraphQLError =>
   new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'CHANNEL_NOT_FOUND', channelRef: ref } });
@@ -776,6 +675,7 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
       memoryId: true,
       loc: true,
       chatRootNodeId: true,
+      incarnation: true,
       memory: {
         select: {
           appId: true,
@@ -857,7 +757,12 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   // a `personal` memory without every AppMember of some App reading it.
   if (!(await hostMemoryReadable(ctx, channel.memoryId, app))) throw channelNotFound(ref);
   if (mode === 'post') await requireChannelPostAccess(ctx, app, channel.memoryId);
-  return { channelId: channel.id, app, root: { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc } };
+  return {
+    channelId: channel.id,
+    app,
+    root: { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc },
+    incarnation: { id: channel.id, value: channel.incarnation },
+  };
 }
 
 function assertBody(body: unknown): asserts body is string {
@@ -890,6 +795,7 @@ async function postToChannelRoot(
   // answer item J's "is this Worker of THIS App?" — see `resolveSessionAuthor`.
   app: AppRow | null,
   root: ChatRootRow,
+  incarnation: ChannelIncarnation,
   args: { body: string; replyToSeq: number | null; sessionRef: string | null },
 ): Promise<TeamChatMessageOut> {
   const { body, replyToSeq, sessionRef } = args;
@@ -934,8 +840,17 @@ async function postToChannelRoot(
     // resolving the target and acquiring it is seen here — a message is
     // never appended under a tombstoned Channel, and its watermark never
     // advanced.
-    const live = await tx.channel.findFirst({ where: { chatRootNodeId: root.id, deletedAt: null }, select: { id: true } });
-    if (!live) throw channelNotFound(root.loc);
+    const live = await tx.channel.findFirst({
+      where: { chatRootNodeId: root.id, deletedAt: null },
+      select: { id: true, incarnation: true },
+    });
+    if (
+      !live ||
+      live.id !== incarnation.id ||
+      live.incarnation !== incarnation.value
+    ) {
+      throw channelNotFound(root.loc);
+    }
     // replyToSeq is validated INSIDE the allocating transaction, under the
     // chat lock, so the target can't be soft-deleted out from under us and
     // a reply can never cite its own (still-uncommitted) seq.
@@ -947,7 +862,7 @@ async function postToChannelRoot(
         // (D-2026-08-10-003) — a reply must cite a canonical message.
         where: {
           memoryId: root.memoryId,
-          loc: { startsWith: `${messagesLoc}:` },
+          loc: { startsWith: escapePrismaLikePattern(`${messagesLoc}:`) },
           nodeType: 'chat-message',
           seq: replyToSeq,
           deletedAt: null,
@@ -1049,7 +964,7 @@ async function readChannelRoot(
   const skip = Math.max(0, offset ?? 0);
   const where: Prisma.NodeWhereInput = {
     memoryId: root.memoryId,
-    loc: { startsWith: `${root.loc}:messages:` },
+    loc: { startsWith: escapePrismaLikePattern(`${root.loc}:messages:`) },
     // Only canonical messages (Copilot on PR #941): the generic write
     // surface stays open (D-2026-08-10-003), so off-road nodes under the
     // prefix must not surface as fabricated transcript entries.
@@ -1181,22 +1096,31 @@ export const teamChatMutations = {
     await requireTeamChatAccess(ctx, app, 'post');
 
     const located = await locateTeamChatRoot(ctx, app);
-    const root = located ?? (await bootstrapTeamChat(ctx, app));
-    // Backfill-on-touch (spec 049 §7.1): a root that predates the Channel table
-    // gets its row on the next post, so the address is protected from then on
-    // even before the one-shot backfill has run.
+    // Every existing root passes through the SAME locked creation/reuse core
+    // before posting. Besides backfill-on-touch for a pre-Channel root, this
+    // closes the locate→delete race: if deleteChannel tombstones the root after
+    // locateTeamChatRoot's live read, the core re-reads it under the Channel
+    // memory/path locks and performs the full clean-incarnation reset. Calling
+    // ensureChannelRow directly here could resurrect only the Channel row,
+    // leaving the root tombstoned and the old transcript exposed.
+    let root: ChatRootRow;
+    let incarnation: ChannelIncarnation;
     if (located) {
-      await ensureChannelRow(ctx.db, {
-        rootId: root.id,
-        memoryId: root.memoryId,
-        loc: root.loc,
+      const { channel, rootId } = await ensureChannelWithRoot(ctx.db, {
+        memoryId: located.memoryId,
+        loc: located.loc,
         name: DEFAULT_CHANNEL_NAME,
         description: `Team chat — ${app.name}`,
         createdBy: ctx.userId ?? null,
         asDefaultOfAppId: app.id,
+        hostLabel: app.name,
       });
+      root = { ...located, id: rootId };
+      incarnation = { id: channel.id, value: channel.incarnation };
+    } else {
+      ({ root, incarnation } = await bootstrapTeamChat(ctx, app));
     }
-    return postToChannelRoot(ctx, app, root, { body, replyToSeq: replyToSeq ?? null, sessionRef: sessionRef ?? null });
+    return postToChannelRoot(ctx, app, root, incarnation, { body, replyToSeq: replyToSeq ?? null, sessionRef: sessionRef ?? null });
   },
 
   /**
@@ -1224,7 +1148,7 @@ export const teamChatMutations = {
         extensions: { code: 'APP_UNINSTALLED', appId: target.app.id },
       });
     }
-    return postToChannelRoot(ctx, target.app, target.root, { body, replyToSeq: replyToSeq ?? null, sessionRef: sessionRef ?? null });
+    return postToChannelRoot(ctx, target.app, target.root, target.incarnation, { body, replyToSeq: replyToSeq ?? null, sessionRef: sessionRef ?? null });
   },
 };
 

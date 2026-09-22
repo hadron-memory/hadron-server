@@ -177,7 +177,7 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
       sourceNodeId: source.id,
       sourceLoc: source.loc,
       sourceMemoryId: source.memoryId,
-      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, name: 'a', loc: null, description: null, isRunnable: null }],
+      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, targetMemoryId: memory.id, name: 'a', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
     // Replace with a different one.
@@ -185,7 +185,7 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
       sourceNodeId: source.id,
       sourceLoc: source.loc,
       sourceMemoryId: source.memoryId,
-      resolved: [{ targetNodeId: nested.id, targetLoc: nested.loc, name: 'cites', loc: null, description: null, isRunnable: null }],
+      resolved: [{ targetNodeId: nested.id, targetLoc: nested.loc, targetMemoryId: memory.id, name: 'cites', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
     const edges = await db.edge.findMany({ where: { sourceId: source.id } });
@@ -199,7 +199,7 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
       sourceNodeId: source.id,
       sourceLoc: source.loc,
       sourceMemoryId: source.memoryId,
-      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, name: 'a', loc: null, description: null, isRunnable: null }],
+      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, targetMemoryId: memory.id, name: 'a', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
     await replaceOutgoingEdges({
@@ -220,7 +220,7 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
       sourceNodeId: source.id,
       sourceLoc: source.loc,
       sourceMemoryId: source.memoryId,
-      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, name: 'seed', loc: null, description: null, isRunnable: null }],
+      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, targetMemoryId: memory.id, name: 'seed', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
     // Force a per-memory `loc` unique collision by passing two rows that
@@ -234,19 +234,14 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
       data: { id: generateId(), memoryId: memory.id, loc: 'ghost', name: 'ghost' },
     });
     await db.node.delete({ where: { id: ghost.id } });
-    let threw = false;
-    try {
-      await replaceOutgoingEdges({
-        sourceNodeId: source.id,
-        sourceLoc: source.loc,
-        sourceMemoryId: source.memoryId,
-        resolved: [{ targetNodeId: ghost.id, targetLoc: 'ghost', name: 'will-fk-error', loc: null, description: null, isRunnable: null }],
-        createdBy: admin.id,
-      });
-    } catch {
-      threw = true;
-    }
-    expect(threw).toBe(true);
+    const error = await replaceOutgoingEdges({
+      sourceNodeId: source.id,
+      sourceLoc: source.loc,
+      sourceMemoryId: source.memoryId,
+      resolved: [{ targetNodeId: ghost.id, targetLoc: 'ghost', targetMemoryId: memory.id, name: 'will-fk-error', loc: null, description: null, isRunnable: null }],
+      createdBy: admin.id,
+    });
+    expect(error).toBe(`Edge target not found: "${ghost.id}"`);
     // Atomicity: the failed createMany must have rolled back the
     // deleteMany, leaving the original `seed` edge intact.
     const edges = await db.edge.findMany({ where: { sourceId: source.id } });

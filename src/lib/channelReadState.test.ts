@@ -150,6 +150,38 @@ describe('read-state', () => {
     expect((await renderAttentionSection(db, run1)).text).toContain('1 new mention of you since seq 2 (channel is at 3)');
   });
 
+  it('a cleanly reused Channel has no phantom attention and its next message clears old cursors (#1226)', async () => {
+    await post('old one');
+    await post('old two');
+    // An existing attendee trails the old watermark. Keeping Channel.lastSeq=2
+    // after removing both messages would report phantom attention; restarting
+    // message seq at 1 would let this cursor hide a future message.
+    await advanceReadState(db, { agentId: agent.id, appId: app.id }, channel.id, 1);
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+    await ensureChannelWithRoot(db, {
+      memoryId: appMem.id,
+      loc: channel.loc,
+      name: 'team',
+      createdBy: admin.id,
+      asDefaultOfAppId: app.id,
+    });
+
+    const run = await mintAppRun(db, {
+      organizationId: org.id,
+      appId: app.id,
+      agentId: agent.id,
+      userId: admin.id,
+      triggerKind: 'MANUAL',
+      entryNodeUrn: entry,
+      publish: false,
+    });
+    expect((await renderAttentionSection(db, run)).text).toContain('nothing new');
+
+    const fresh = await post('fresh');
+    expect(fresh.seq).toBe(3);
+    expect((await renderAttentionSection(db, run)).text).toContain('new since seq 1 (channel is at 3)');
+  });
+
   it('GraphQL: the read follows the briefing gate; the write admits only the attendee\'s driver', async () => {
     await post('one');
     expect(await Q.channelReadState({}, { attendeeRef: worker.id, channelRef: channel.id }, ctx(admin.id))).toMatchObject({ lastSeenSeq: 0, attendeeUrn: `hrn:worker:${org.urn}:team:iris` });

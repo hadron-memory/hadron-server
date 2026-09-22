@@ -6,6 +6,11 @@ import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../
 import { splitGitArgv } from '../../test/gitArgv.js';
 import { GIT_TRANSPORT_GUARD } from './execGit.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
+import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/channels.js';
+import { generateId } from '../../lib/id.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
+import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
+import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -114,6 +119,57 @@ async function gitCalls(): Promise<{ guarded: boolean; args: string[] }[]> {
   const { execFile } = await import('child_process');
   const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
   return execFileMock.mock.calls.map((c: any[]) => splitGitArgv(c[1] as string[]));
+}
+
+async function waitForChannelMemoryLockWaiters(
+  memoryId: string,
+  minimumWaiters: number,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const key = `channel-host:${memoryId}`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT count(*)::bigint AS count
+      FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND classid = (((hashtext(${key})::bigint >> 32) & 4294967295))::oid
+        AND objid = ((hashtext(${key})::bigint & 4294967295))::oid
+        AND objsubid = 1
+    `;
+    if (Number(count) >= minimumWaiters) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${minimumWaiters} Channel memory-lock waiter(s) on ${memoryId}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForLockWaiters(
+  locktype: 'advisory' | 'transactionid',
+  minimumWaiters: number,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT count(*)::bigint AS count
+      FROM pg_locks
+      WHERE locktype = ${locktype}
+        AND NOT granted
+        AND (
+          locktype = 'transactionid'
+          OR database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        )
+    `;
+    if (Number(count) >= minimumWaiters) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${minimumWaiters} ${locktype} waiter(s)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 describe('syncGraphFromGithub', () => {
@@ -340,6 +396,113 @@ describe('syncGraphFromGithub', () => {
     expect(edges).toHaveLength(1);
     expect(edges[0].name).toBe('depends on');
   });
+
+  it('does not promote a soft-deleted PendingEdge when its target is synced', async () => {
+    const { graph: sourceMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'cancelled-pending-source-org',
+      graphName: 'cancelled/pending-source',
+    });
+    const source = await db.node.create({
+      data: { id: generateId(), memoryId: sourceMemory.id, loc: 'source', name: 'source' },
+    });
+    const targetId = 'abab000000000000000000000000000000';
+    const cancelledAt = new Date();
+    const pending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId,
+        name: 'cancelled',
+        deletedAt: cancelledAt,
+      },
+    });
+    const targetDir = join(mockSources, 'test-org', 'test/repo', 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeNodeFiles(targetDir, { id: targetId, name: 'target' });
+
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.findUniqueOrThrow({ where: { id: pending.id } })).toMatchObject({
+      deletedAt: cancelledAt,
+    });
+    expect(await db.edge.count({ where: { sourceId: source.id, targetId } })).toBe(0);
+  });
+
+  it('reconciles the foreign source memory when target sync promotes its PendingEdge', async () => {
+    const { graph: sourceMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'foreign-pending-source-org',
+      graphName: 'foreign/pending-source',
+    });
+    const source = await db.node.create({
+      data: { id: generateId(), memoryId: sourceMemory.id, loc: 'source', name: 'source' },
+    });
+    const targetId = 'eeee000000000000000000000000000000';
+    const pending = await db.pendingEdge.create({
+      data: { id: generateId(), sourceId: source.id, targetId, name: 'cross-memory' },
+    });
+    await db.memory.update({
+      where: { id: sourceMemory.id },
+      data: { pendingEdgeCount: 1 },
+    });
+
+    const targetDir = join(mockSources, 'test-org', 'test/repo', 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeNodeFiles(targetDir, { id: targetId, name: 'target' });
+
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+    expect(await db.edge.findFirst({
+      where: { memoryId: sourceMemory.id, sourceId: source.id, targetId, deletedAt: null },
+    })).not.toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: sourceMemory.id } })).pendingEdgeCount).toBe(0);
+  });
+
+  it('retains a PendingEdge when its derived loc is occupied by another relationship', async () => {
+    const { graph: sourceMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'foreign-pending-collision-org',
+      graphName: 'foreign/pending-collision',
+    });
+    const source = await db.node.create({
+      data: { id: generateId(), memoryId: sourceMemory.id, loc: 'source', name: 'source' },
+    });
+    const otherTarget = await db.node.create({
+      data: { id: generateId(), memoryId: sourceMemory.id, loc: 'target', name: 'other target' },
+    });
+    const targetId = 'ffff000000000000000000000000000000';
+    const edgeLoc = deriveEdgeLoc(source.loc, 'cross-memory', 'target');
+    const occupied = await db.edge.create({
+      data: {
+        id: generateId(),
+        memoryId: sourceMemory.id,
+        sourceId: source.id,
+        targetId: otherTarget.id,
+        loc: edgeLoc,
+        name: 'cross-memory',
+      },
+    });
+    const pending = await db.pendingEdge.create({
+      data: { id: generateId(), sourceId: source.id, targetId, name: 'cross-memory' },
+    });
+    await db.memory.update({
+      where: { id: sourceMemory.id },
+      data: { pendingEdgeCount: 1 },
+    });
+
+    const targetDir = join(mockSources, 'test-org', 'test/repo', 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeNodeFiles(targetDir, { id: targetId, name: 'target' });
+
+    await expect(syncGraphFromGithub(makeGraph())).resolves.toMatchObject({
+      error: expect.stringContaining('already occupied'),
+    });
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
+    expect(await db.edge.findUniqueOrThrow({ where: { id: occupied.id } })).toMatchObject({
+      sourceId: source.id,
+      targetId: otherTarget.id,
+      deletedAt: null,
+    });
+    expect(await db.node.findUnique({ where: { id: targetId } })).toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: sourceMemory.id } })).pendingEdgeCount).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -462,6 +625,282 @@ describe('move-aware identity', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(survivingId);
     expect(rows[0].name).toBe('updated');
+  });
+});
+
+describe('Channel-protected mirror cleanup (#1226)', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+
+  it('locks a cross-memory edge target through Channel reuse before inserting', async () => {
+    const { graph: targetMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'edge-target-org',
+      graphName: 'edge/target',
+    });
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: targetMemory.id,
+      loc: 'chats:edge-race',
+      name: 'edge-race',
+      createdBy: null,
+    });
+    const oldMessage = await db.node.create({
+      data: {
+        id: 'eeee999900000000000000000000000009',
+        memoryId: targetMemory.id,
+        loc: 'chats:edge-race:messages:0001',
+        name: 'old message',
+      },
+    });
+    const deletedAt = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt } }),
+    ]);
+
+    const sourceDir = join(repoRoot(), 'source');
+    mkdirSync(sourceDir, { recursive: true });
+    writeNodeFiles(sourceDir, {
+      name: 'source',
+      nodes: [{ id: oldMessage.id, rel: 'points to old transcript' }],
+    });
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, targetMemory.id);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const reusing = ensureChannelWithRoot(db, {
+      memoryId: targetMemory.id,
+      loc: 'chats:edge-race',
+      name: 'edge-race',
+      createdBy: null,
+    });
+    try {
+      await waitForChannelMemoryLockWaiters(targetMemory.id, 1);
+      const syncing = syncGraphFromGithub(makeGraph());
+      await waitForChannelMemoryLockWaiters(targetMemory.id, 2);
+      signalRelease();
+      await holder;
+      await reusing;
+      const result = await syncing;
+      expect(result.error).toBeUndefined();
+      expect(await db.edge.count({ where: { targetId: oldMessage.id, deletedAt: null } })).toBe(0);
+      expect(await db.pendingEdge.count({ where: { targetId: oldMessage.id } })).toBe(1);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
+  it('retries preflight when a cross-memory target becomes live after the lock set was collected', async () => {
+    const { graph: targetMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'late-edge-target-org',
+      graphName: 'late/edge-target',
+    });
+    const targetId = 'ffff999900000000000000000000000009';
+    const sourceDir = join(repoRoot(), 'late-source');
+    mkdirSync(sourceDir, { recursive: true });
+    writeNodeFiles(sourceDir, {
+      name: 'late source',
+      nodes: [{ id: targetId, rel: 'points to late target' }],
+    });
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, dbGraphId);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const syncing = syncGraphFromGithub(makeGraph());
+    try {
+      // The first preflight saw no target and is now waiting to enter its
+      // transaction with only dbGraphId in the endpoint-memory set.
+      await waitForChannelMemoryLockWaiters(dbGraphId, 1);
+      await db.node.create({
+        data: {
+          id: targetId,
+          memoryId: targetMemory.id,
+          loc: 'targets:late',
+          name: 'late target',
+        },
+      });
+      signalRelease();
+      await holder;
+
+      const result = await syncing;
+      expect(result.error).toBeUndefined();
+      expect(await db.edge.count({ where: { targetId, deletedAt: null } })).toBe(1);
+      expect(await db.pendingEdge.count({ where: { targetId } })).toBe(0);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
+  it('holds the source path through edge insertion so a cross-memory move carries the new edge', async () => {
+    const { graph: targetMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'source-move-target-org',
+      graphName: 'source/move-target',
+    });
+    const { graph: movedMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'source-move-destination-org',
+      graphName: 'source/move-destination',
+    });
+    const sourceId = 'eeee888800000000000000000000000008';
+    const source = await db.node.create({
+      data: { id: sourceId, memoryId: dbGraphId, loc: 'source', name: 'source' },
+    });
+    const target = await db.node.create({
+      data: {
+        id: 'ffff888800000000000000000000000008',
+        memoryId: targetMemory.id,
+        loc: 'target',
+        name: 'target',
+      },
+    });
+    const sourceDir = join(repoRoot(), 'source');
+    mkdirSync(sourceDir, { recursive: true });
+    writeNodeFiles(sourceDir, {
+      id: source.id,
+      name: 'source',
+      nodes: [{ id: target.id, rel: 'cross-memory target' }],
+    });
+
+    let releaseTarget!: () => void;
+    let targetHeld!: () => void;
+    const targetReady = new Promise<void>((resolve) => { targetHeld = resolve; });
+    const targetRelease = new Promise<void>((resolve) => { releaseTarget = resolve; });
+    const targetHolder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${target.id} FOR UPDATE`;
+      targetHeld();
+      await targetRelease;
+    }, { timeout: 20_000 });
+
+    await targetReady;
+    const syncing = syncGraphFromGithub(makeGraph());
+    try {
+      // The edge insert has reached the target FK and is blocked while the
+      // sync transaction still holds the source's complete path lock.
+      await waitForLockWaiters('transactionid', 1);
+      const moving = db.$transaction(async (tx) => {
+        await acquireLockSet(tx, [
+          ...ancestorLocs('moved:source').map((loc) => ({ memoryId: movedMemory.id, loc })),
+          ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),
+          { memoryId: source.memoryId, loc: source.loc },
+        ]);
+        await lockAncestorsForCreate(tx, movedMemory.id, 'moved:source');
+        return moveNodeSubtree(tx, {
+          source,
+          destMemoryId: movedMemory.id,
+          destLoc: 'moved:source',
+          editor: { info: 'sync-source-race-test' },
+        });
+      }, { timeout: 20_000 });
+
+      // Mutation-test of the source-path fix: without the exact path lock the
+      // move completes here and snapshots no edge; the later insert is stranded
+      // in dbGraphId with a source that now belongs to movedMemory.
+      await waitForLockWaiters('advisory', 1);
+      releaseTarget();
+      await targetHolder;
+
+      expect((await syncing).error).toBeUndefined();
+      await moving;
+      expect(await db.node.findUniqueOrThrow({ where: { id: source.id } })).toMatchObject({
+        memoryId: movedMemory.id,
+        loc: 'moved:source',
+      });
+      expect(await db.edge.findFirstOrThrow({
+        where: { sourceId: source.id, targetId: target.id, deletedAt: null },
+      })).toMatchObject({ memoryId: movedMemory.id });
+    } finally {
+      releaseTarget();
+      await targetHolder.catch(() => undefined);
+    }
+  }, 20_000);
+
+  it('keeps a skipped file that still exists under a dead Channel and deletes only the true orphan', async () => {
+    const keptId = 'aaaa999900000000000000000000000001';
+    const goneId = 'bbbb999900000000000000000000000002';
+    const keptDir = join(repoRoot(), 'chats', 'dead', 'messages', 'kept');
+    const goneDir = join(repoRoot(), 'chats', 'dead', 'messages', 'gone');
+    mkdirSync(keptDir, { recursive: true });
+    mkdirSync(goneDir, { recursive: true });
+    writeNodeFiles(keptDir, { id: keptId, name: 'kept' });
+    writeNodeFiles(goneDir, { id: goneId, name: 'gone' });
+    await syncGraphFromGithub(makeGraph());
+
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: dbGraphId,
+      loc: 'chats:dead',
+      name: 'dead',
+      createdBy: null,
+    });
+    const now = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt: now } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt: now } }),
+    ]);
+    rmSync(goneDir, { recursive: true });
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(result.skippedProtected).toContain('chats:dead:messages:kept');
+    expect(await db.node.findUnique({ where: { id: keptId } })).not.toBeNull();
+    expect(await db.node.findUnique({ where: { id: goneId } })).toBeNull();
+  });
+
+  it('does not cascade a cross-memory edge while pruning an orphan below a dead Channel', async () => {
+    const orphanId = 'cccc999900000000000000000000000003';
+    const orphanDir = join(repoRoot(), 'chats', 'dead-edge', 'messages', 'orphan');
+    mkdirSync(orphanDir, { recursive: true });
+    writeNodeFiles(orphanDir, { id: orphanId, name: 'orphan' });
+    await syncGraphFromGithub(makeGraph());
+
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: dbGraphId,
+      loc: 'chats:dead-edge',
+      name: 'dead-edge',
+      createdBy: null,
+    });
+    const now = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt: now } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt: now } }),
+    ]);
+    const { graph: otherMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'cleanup-edge-other-org',
+      graphName: 'cleanup/edge-other',
+    });
+    const external = await db.node.create({
+      data: { id: generateId(), memoryId: otherMemory.id, loc: 'external', name: 'external' },
+    });
+    const edge = await db.edge.create({
+      data: {
+        id: generateId(),
+        memoryId: dbGraphId,
+        sourceId: orphanId,
+        targetId: external.id,
+        loc: 'chats:dead-edge:messages:orphan:rel:external',
+        name: 'rel',
+      },
+    });
+    rmSync(orphanDir, { recursive: true });
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toMatch(/bridge nodes selected for hard-delete/i);
+    expect(await db.node.findUnique({ where: { id: orphanId } })).not.toBeNull();
+    expect(await db.edge.findUnique({ where: { id: edge.id } })).not.toBeNull();
   });
 });
 

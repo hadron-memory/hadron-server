@@ -67,6 +67,7 @@ import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
+import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
@@ -1787,6 +1788,16 @@ export async function createServer(): Promise<Express> {
   // nothing else.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_SESSION_REAPER !== 'true') {
     startSessionReaperLoop(db);
+  }
+
+  // PendingEdge rows retargeted to stable node ids are durable retry work.
+  // The inline timer is only a latency optimization; this sweep recovers the
+  // relationship after a restart or transient promotion failure.
+  if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.DISABLE_PENDING_EDGE_SWEEP !== 'true'
+  ) {
+    startPendingEdgePromotionSweepLoop(db);
   }
 
   // #1114 — the session-key cache's TTL sweep, on its OWN timer.

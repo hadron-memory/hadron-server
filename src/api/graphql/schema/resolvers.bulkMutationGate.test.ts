@@ -285,6 +285,22 @@ describe('round 2 — the paths the gate still did not reach (@copilot)', () => 
     expect((await db.memory.findUniqueOrThrow({ where: { id: srcMem.id } })).deletedAt).toBeNull();
   });
 
+  it('the final soft-delete gate releases a TOMBSTONED Channel but not a live one (#1226)', async () => {
+    const { channel } = await ensureChannelWithRoot(db, {
+      memoryId: srcMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+    const { assertNoProtectedReach } = await import('../../../lib/bulkMutationGate.js');
+
+    await expect(
+      db.$transaction((tx) => assertNoProtectedReach(tx, srcMem.id, 'all', 'delete')),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+
+    await (resolvers.Mutation as any).deleteChannel({}, { ref: channel.id }, ctx());
+    await expect(
+      db.$transaction((tx) => assertNoProtectedReach(tx, srcMem.id, 'all', 'delete')),
+    ).resolves.toBeUndefined();
+  });
+
   it('the governed check RE-READS rather than trusting the caller\'s snapshot', async () => {
     // Round 2: the caller's rows are read before this gate runs, so trusting
     // them lets a promotion that already committed slip through. Driven by

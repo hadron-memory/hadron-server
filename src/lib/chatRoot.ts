@@ -42,6 +42,7 @@
  * REPEATABLE READ / SERIALIZABLE snapshot would not give.
  */
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { maxMessageSeqAtLiteralLocPrefix } from './literalLocPrefix.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 import {
   decryptNodeFields,
@@ -57,8 +58,6 @@ import { lockPathForCreateUnder } from './nodeSubtreeLock.js';
  * `:messages:` prefix and carries a seq, but is not a message and must not
  * enter the counter.
  */
-const MESSAGE_NODE_TYPES: string[] = ['chat-message', 'record'];
-
 /** The chat-root node a write is serialized against. */
 export interface ChatRootRef {
   id: string;
@@ -179,16 +178,8 @@ async function highWaterSeq(
   chatData: Record<string, unknown>,
 ): Promise<number> {
   const counter = (chatData.messageCount as number) ?? 0;
-  const top = await tx.node.aggregate({
-    where: {
-      memoryId: chat.memoryId,
-      loc: { startsWith: `${chat.loc}:messages:` },
-      nodeType: { in: MESSAGE_NODE_TYPES },
-      seq: { not: null },
-    },
-    _max: { seq: true },
-  });
-  return Math.max(counter, top._max?.seq ?? 0);
+  const top = await maxMessageSeqAtLiteralLocPrefix(tx, chat.memoryId, `${chat.loc}:messages:`);
+  return Math.max(counter, top);
 }
 
 /**

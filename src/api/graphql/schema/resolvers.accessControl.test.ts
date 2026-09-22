@@ -513,6 +513,39 @@ describe('Mutation.replaceSubtree access control', () => {
     });
     expect(created.tags).toEqual(['alpha', 'beta']);
   });
+
+  it('refuses bulk hard-delete when it would cascade an edge from another memory', async () => {
+    const source = await createDbNode(db, {
+      memoryId: graphA.id,
+      loc: 'chats.dead.messages.orphan',
+      ownerRepo: 'org-a/repo',
+    });
+    const target = await createDbNode(db, {
+      memoryId: graphB.id,
+      loc: 'external.target',
+      ownerRepo: 'org-b/repo',
+    });
+    const edge = await db.edge.create({
+      data: {
+        memoryId: graphA.id,
+        sourceId: source.id,
+        targetId: target.id,
+        loc: 'chats.dead.messages.orphan:rel:external.target',
+        name: 'rel',
+      },
+    });
+
+    await expect(
+      resolvers.Mutation.replaceSubtree(
+        null,
+        { ownerRepo: 'org-a/repo', memoryId: graphA.id, nodes: [], edges: [] },
+        ctx({ appId: appContributor.id }),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'CROSS_MEMORY_EDGES', count: 1 } });
+
+    expect(await db.node.findUnique({ where: { id: source.id } })).not.toBeNull();
+    expect(await db.edge.findUnique({ where: { id: edge.id } })).not.toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

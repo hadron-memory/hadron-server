@@ -798,8 +798,8 @@ model Memory {
   syncStatus           SyncStatus        @default(PENDING) @map("sync_status")
   /// Error message from the last failed sync.
   syncError            String?           @map("sync_error")
-  /// Number of unresolved PendingEdge records (denormalized for
-  /// dashboard display).
+  /// Number of live unresolved PendingEdge records whose live source is in
+  /// this memory (a derived projection, denormalized for dashboard display).
   pendingEdgeCount     Int               @default(0) @map("pending_edge_count")
   // 006-asset-upload-redesign (2026-05-01): per-memory upload acceptance
   // flag. Default true at the column level; system-class memories must
@@ -4209,6 +4209,11 @@ enum ChannelKind {
 /// two jobs. `lastSeq − lastSeenSeq` is a watermark delta, never a message
 /// count (gaps and the known prod duplicate are preserved).
 ///
+/// Reusing a soft-deleted Channel address tombstones its old transcript and
+/// resets these Channel watermarks to the empty state, but preserves the root
+/// allocator history. The first new post therefore resumes above the old seq
+/// maximum, which prevents a retained read cursor from hiding that message.
+///
 /// The audience is the HOST MEMORY's (`cor:acl:030:01`): a Channel has no
 /// access layer of its own. Participation, reads and posts follow the memory.
 /// Soft-deleted in step with its root; the protection holds while either exists.
@@ -4223,6 +4228,10 @@ model Channel {
   chatRootNodeId String      @unique @map("chat_root_node_id")
   lastSeq        Int         @default(0) @map("last_seq")
   lastMessageAt  DateTime?   @map("last_message_at")
+  /// Monotonic identity of the live occupancy at this reserved address.
+  /// Incremented when a tombstoned Channel is reused so requests resolved
+  /// against the previous incarnation cannot post to or delete the new one.
+  incarnation    Int         @default(1)
   createdAt      DateTime    @default(now()) @map("created_at")
   createdBy      String?     @map("created_by")
   updatedAt      DateTime?   @updatedAt @map("updated_at")

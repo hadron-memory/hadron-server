@@ -41,7 +41,7 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 import { generateId } from './id.js';
 import { ancestorLocs, lockAncestorsForCreateMany } from './nodeSubtreeLock.js';
-import { getMemoryEncryptionInfo, encryptNodeFields } from './nodeCrypto.js';
+import { getMemoryEncryptionInfo, decryptNodeFields, encryptNodeFields, type MemoryEncryptionInfo } from './nodeCrypto.js';
 import { locsOverlap } from './protectedLoc.js';
 import { ensureInstallRegisterRows } from './registerInstall.js';
 import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
@@ -56,7 +56,23 @@ export interface ChannelRow {
   name: string;
   chatRootNodeId: string;
   lastSeq: number;
+  incarnation: number;
   deletedAt: Date | null;
+}
+
+/** Preserve the public typed-error contract across every crypto step. */
+function translateSessionExpired<T>(memoryId: string, fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith('SESSION_EXPIRED')) {
+      throw new GraphQLError(
+        `SESSION_EXPIRED: memory ${memoryId} is encrypted but no active session key is available.`,
+        { extensions: { code: 'SESSION_EXPIRED', memoryId } },
+      );
+    }
+    throw e;
+  }
 }
 
 /**
@@ -93,9 +109,11 @@ export async function assertNoChannelOverlap(
 /**
  * Give an EXISTING chat root its Channel row (create-or-restore, idempotent),
  * and make it the App's default when the App has none. Used by the creation
- * core (inside its transaction, under the lock), by the team-chat paths for a
- * root that predates Channels, and by the backfill; `lastSeq` is left to the
- * caller (the backfill seeds it, the allocator maintains it).
+ * core (inside its transaction, under the lock) and by the one-shot backfill;
+ * the team-chat path deliberately routes even a pre-Channel root through the
+ * creation core so a stale live-root lookup cannot revive only this row.
+ * `lastSeq` is left to the caller (the backfill seeds it, the allocator
+ * maintains it).
  *
  * Outside a lock two first posts can race to the row: the loser's P2002 is
  * absorbed and the winner's row used. Inside a transaction that P2002 would
@@ -113,6 +131,8 @@ export async function ensureChannelRow(
     createdBy: string | null;
     asDefaultOfAppId?: string | null;
     lastSeq?: number;
+    /** Reusing a tombstoned address starts a new, empty Channel incarnation. */
+    resetForReuse?: boolean;
   },
 ): Promise<ChannelRow> {
   let row = await db.channel.findUnique({ where: { chatRootNodeId: args.rootId } });
@@ -136,10 +156,22 @@ export async function ensureChannelRow(
       if ((e as { code?: string }).code !== 'P2002') throw e;
       row = await db.channel.findUniqueOrThrow({ where: { chatRootNodeId: args.rootId } });
     }
-  } else if (row.deletedAt) {
-    // The root was restored (the team chat's revive-not-recreate rule): the
-    // row follows it, keeping its lastSeq so the watermark survives the cycle.
-    row = await db.channel.update({ where: { id: row.id }, data: { deletedAt: null, deletedBy: null } });
+  } else if (row.deletedAt || args.resetForReuse) {
+    // The root was restored. Its allocator counter stays on the root so the
+    // next message never reuses an old seq, but the Channel watermark describes
+    // the NEW incarnation: empty until a fresh message lands. Existing read
+    // cursors may therefore stay where they are without producing phantom
+    // attention now or hiding the next message (#1226).
+    row = await db.channel.update({
+      where: { id: row.id },
+      data: {
+        deletedAt: null,
+        deletedBy: null,
+        ...(args.resetForReuse
+          ? { lastSeq: 0, lastMessageAt: null, incarnation: { increment: 1 } }
+          : {}),
+      },
+    });
   }
   if (args.asDefaultOfAppId) {
     const set = await db.app.updateMany({
@@ -151,6 +183,90 @@ export async function ensureChannelRow(
     if (set.count > 0) await ensureInstallRegisterRows(db, args.asDefaultOfAppId, { createdBy: args.createdBy });
   }
   return row;
+}
+
+/**
+ * Start a tombstoned Channel address as a clean incarnation (#1226).
+ *
+ * The root's `messageCount` is allocator history and survives, so a seq is
+ * never reused. The old transcript and `lastMessageAt` are incarnation state
+ * and do not survive. The descendant tombstone is one parameterized set write:
+ * `starts_with` is literal (`_` / `%` are not wildcards) and keeps the filter
+ * in Postgres instead of transferring every live loc to JavaScript.
+ */
+async function resetReusedChannel(
+  tx: Prisma.TransactionClient,
+  args: {
+    memoryId: string;
+    rootId: string;
+    messagesLoc: string;
+    deletedBy: string | null;
+    memEncInfo: MemoryEncryptionInfo;
+  },
+): Promise<void> {
+  const now = new Date();
+  const root = await tx.node.findUniqueOrThrow({
+    where: { id: args.rootId },
+    select: { abstract: true, content: true, data: true },
+  });
+  const encrypted = translateSessionExpired(args.memoryId, () => {
+    const plain = decryptNodeFields(root, args.memEncInfo);
+    const rootData = { ...((plain.data as Record<string, unknown> | null) ?? {}) };
+    delete rootData.lastMessageAt;
+    // Pre-#1196 team-chat roots stamped this retired audience marker. Reuse is
+    // the canonical migration point: a new Channel derives access solely from
+    // its host memory and must not inherit the legacy assertion.
+    delete rootData.scope;
+    return encryptNodeFields({ abstract: null, content: null, data: rootData }, args.memEncInfo);
+  });
+
+  await tx.node.update({
+    where: { id: args.rootId },
+    data: {
+      abstract: encrypted.abstract ?? null,
+      abstractOriginHash: null,
+      content: encrypted.content ?? null,
+      contentHash: null,
+      data: (encrypted.data ?? null) as InputJsonValue,
+      embeddingPendingAt: null,
+      embeddingFailedAt: null,
+      embeddingAttempts: 0,
+      embeddingError: null,
+      tokens: null,
+      updatedBy: args.deletedBy,
+    },
+  });
+  // A live root is eligible for vector search again. Old abstract/chunk rows
+  // can retain the previous incarnation's plaintext in `chunk_text`, so they
+  // must leave atomically with the payload reset.
+  await tx.nodeEmbedding.deleteMany({ where: { nodeId: args.rootId } });
+  // Reply edges are first-class rows with their own liveness. Tombstoning
+  // only the endpoint nodes is insufficient: edge reads can still resolve
+  // deleted endpoints by stable id and expose the old message payload.
+  await tx.$executeRaw`
+    UPDATE edges AS e
+    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
+    WHERE e.deleted_at IS NULL
+      AND (
+        e.source_id IN (
+          SELECT id FROM nodes
+          WHERE memory_id = ${args.memoryId}
+            AND starts_with(loc, ${`${args.messagesLoc}:`})
+        )
+        OR e.target_id IN (
+          SELECT id FROM nodes
+          WHERE memory_id = ${args.memoryId}
+            AND starts_with(loc, ${`${args.messagesLoc}:`})
+        )
+      )
+  `;
+  await tx.$executeRaw`
+    UPDATE nodes
+    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
+    WHERE memory_id = ${args.memoryId}
+      AND deleted_at IS NULL
+      AND starts_with(loc, ${`${args.messagesLoc}:`})
+  `;
 }
 
 /**
@@ -191,18 +307,12 @@ export async function ensureChannelWithRoot(
   // merely derivable but MEANINGLESS — it is neither of the marker's two
   // values. Nothing on the Channel path read it; `nodeSubtreeMove` did, and
   // now keys on `nodeType: 'chat'` instead (see its header).
-  let rootFields: { content: string | null; data: unknown };
-  try {
-    rootFields = encryptNodeFields(
+  const rootFields = translateSessionExpired(args.memoryId, () =>
+    encryptNodeFields(
       { content: null, data: { messageCount: 0, createdAt: new Date().toISOString() } },
       memEncInfo,
-    );
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith('SESSION_EXPIRED')) {
-      throw new GraphQLError(e.message, { extensions: { code: 'SESSION_EXPIRED', memoryId: args.memoryId } });
-    }
-    throw e;
-  }
+    ),
+  );
   const messagesLoc = `${args.loc}:messages`;
   return db.$transaction(async (tx) => {
     // The Channel OWNS this address: it passes the gate every generic writer is
@@ -247,6 +357,14 @@ export async function ensureChannelWithRoot(
         }),
       );
     }
+    // #1226 — was the root a TOMBSTONE before this call? A resurrection means
+    // the address is being REUSED, and everything under it is the previous
+    // Channel's transcript.
+    const priorRoot = await tx.node.findUnique({
+      where: { loc_memoryId: { loc: args.loc, memoryId: args.memoryId } },
+      select: { deletedAt: true },
+    });
+    const reusingDeadAddress = priorRoot?.deletedAt != null;
     const rootId = await restoreOrCreate(
       args.loc,
       () =>
@@ -275,7 +393,40 @@ export async function ensureChannelWithRoot(
         select: { id: true },
       }),
     );
-    const channel = await ensureChannelRow(tx, { ...args, rootId });
+    // #1226 — a Channel created at a tombstoned address starts CLEAN.
+    //
+    // `@@unique([loc, memoryId])` carries no `deletedAt`, so a tombstone holds
+    // the loc and `restoreOrCreate` above MUST resurrect rather than insert —
+    // the schema forces it. Resurrecting the root lifts the transitive hide
+    // that `cor:dmo:010:04` relies on ("removing a parent transitively hides
+    // its children"), and the previous Channel's messages — never tombstoned
+    // by `deleteChannel` — become visible again under a new Channel.
+    //
+    // @Jonas measured that: four messages read back after a delete (#1226).
+    // The address is the ONLY thing the new Channel shares with the old one,
+    // and re-creating at a known address is an ordinary thing to do, so the
+    // inheritance is a confidentiality edge and not just a surprise.
+    //
+    // Tombstoning the old messages restores the hide the resurrection lifted.
+    // This mirrors an App's `uninstalledAt` reinstall (same spec): the address
+    // is vacated and reused, the prior record retained rather than adopted.
+    //
+    // The root's allocator history (`messageCount`) is deliberately retained,
+    // while the Channel's current-transcript watermarks (`lastSeq` and
+    // `lastMessageAt`) are reset. The empty incarnation therefore has no
+    // phantom attention, but its first post receives seq N+1. Any read cursor
+    // retained from the previous incarnation is below that fresh seq and
+    // cannot hide the new message as already read.
+    if (reusingDeadAddress) {
+      await resetReusedChannel(tx, {
+        memoryId: args.memoryId,
+        rootId,
+        messagesLoc,
+        deletedBy: args.createdBy ?? null,
+        memEncInfo,
+      });
+    }
+    const channel = await ensureChannelRow(tx, { ...args, rootId, resetForReuse: reusingDeadAddress });
     return { channel, rootId };
   });
 }

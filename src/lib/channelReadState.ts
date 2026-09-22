@@ -26,6 +26,7 @@ import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.
 import { generateId } from './id.js';
 import { mentionTokenOf } from './mentionToken.js';
 import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegister.js';
+import { escapePrismaLikePattern } from './literalLocPrefix.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -147,7 +148,7 @@ export async function renderAttentionSection(
         ? await db.node.count({
             where: {
               memoryId: c.memoryId,
-              loc: { startsWith: `${c.loc}:messages:` },
+              loc: { startsWith: escapePrismaLikePattern(`${c.loc}:messages:`) },
               nodeType: { in: MESSAGE_NODE_TYPES },
               deletedAt: null,
               seq: { gt: seen, lte: c.lastSeq },

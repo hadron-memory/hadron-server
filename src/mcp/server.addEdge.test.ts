@@ -25,6 +25,7 @@ import { addEdge } from './server.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { lockMemoryForChannelChange } from '../lib/channels.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -47,6 +48,26 @@ function adminAuth(): AuthContext {
   // ADMIN role bypasses the per-memory access map in canRead/canWrite,
   // so any memory in the fixture is reachable by this caller.
   return { userId: admin.id, roles: ['ADMIN'], clientId: `user:${admin.id}` };
+}
+
+async function waitForChannelMemoryLockWaiter(memoryId: string, timeoutMs = 10_000): Promise<void> {
+  const key = `channel-host:${memoryId}`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT count(*)::bigint AS count
+      FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND classid = (((hashtext(${key})::bigint >> 32) & 4294967295))::oid
+        AND objid = ((hashtext(${key})::bigint & 4294967295))::oid
+        AND objsubid = 1
+    `;
+    if (Number(count) > 0) return;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for Channel memory-lock waiter on ${memoryId}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 beforeEach(async () => {
@@ -105,6 +126,42 @@ describe('addEdge — happy path', () => {
     expect(result.sourceUrn).toMatch(/^hrn:node:addedge-org:addedge-mem:review:db-type-agnostic$/);
     expect(result.targetUrn).toMatch(/^hrn:node:addedge-org:addedge-mem:models$/);
   });
+
+  it('rechecks endpoint liveness after waiting on the Channel reuse lock (#1226)', async () => {
+    let release!: () => void;
+    let held!: () => void;
+    const mayRelease = new Promise<void>((resolve) => { release = resolve; });
+    const lockHeld = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, memory.id);
+      held();
+      await mayRelease;
+    }, { timeout: 20_000 });
+
+    await lockHeld;
+    const adding = addEdge({
+      sourceUrn: source.id,
+      targetUrn: topLevel.id,
+      name: 'stale-target',
+      auth: adminAuth(),
+    });
+    try {
+      await waitForChannelMemoryLockWaiter(memory.id);
+      await db.node.update({
+        where: { id: topLevel.id },
+        data: { deletedAt: new Date(), deletedBy: admin.id },
+      });
+      release();
+      await holder;
+      await expect(adding).resolves.toEqual({
+        error: `Edge target not found: "${topLevel.id}"`,
+      });
+      expect(await db.edge.count({ where: { targetId: topLevel.id, deletedAt: null } })).toBe(0);
+    } finally {
+      release();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
 });
 
 describe('addEdge — non-destructive + idempotent', () => {

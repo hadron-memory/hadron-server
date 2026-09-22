@@ -32,13 +32,14 @@
  *   pnpm tsx src/jobs/backfillChannels.ts [--apply]
  */
 
-import type { PrismaClient } from '../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { locateTeamAgent } from '../api/graphql/schema/resolvers.worker.js';
-import { DEFAULT_CHANNEL_NAME, ensureChannelRow, ensureChannelWithRoot } from '../lib/channels.js';
+import { DEFAULT_CHANNEL_NAME, ensureChannelRow, ensureChannelWithRoot, lockMemoryForChannelChange } from '../lib/channels.js';
 import { ensureInstallRegisterRows } from '../lib/registerInstall.js';
 import { TEAM_CHAT_LOC } from '../lib/teamChatLoc.js';
+import { escapePrismaLikePattern, maxMessageSeqAtLiteralLocPrefix } from '../lib/literalLocPrefix.js';
 
 /** The message nodeTypes the allocator counts — mirrors chatRoot.ts. */
 const MESSAGE_NODE_TYPES = ['chat-message', 'record'];
@@ -63,22 +64,14 @@ export interface BackfillReport {
 
 /** The allocator's high-water mark for one root, computed the way it computes it. */
 async function highWater(
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   root: { memoryId: string; loc: string; data: unknown },
 ): Promise<{ lastSeq: number; encrypted: boolean }> {
   const data = root.data && typeof root.data === 'object' && !Array.isArray(root.data) ? (root.data as Record<string, unknown>) : {};
   const encrypted = '__enc' in data;
   const counter = !encrypted && typeof data.messageCount === 'number' ? data.messageCount : 0;
-  const top = await db.node.aggregate({
-    where: {
-      memoryId: root.memoryId,
-      loc: { startsWith: `${root.loc}:messages:` },
-      nodeType: { in: MESSAGE_NODE_TYPES },
-      seq: { not: null },
-    },
-    _max: { seq: true },
-  });
-  return { lastSeq: Math.max(counter, top._max?.seq ?? 0), encrypted };
+  const top = await maxMessageSeqAtLiteralLocPrefix(db, root.memoryId, `${root.loc}:messages:`);
+  return { lastSeq: Math.max(counter, top), encrypted };
 }
 
 /**
@@ -137,38 +130,90 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
   });
   report.rootsSeen = roots.length;
   for (const root of roots) {
-    const { lastSeq, encrypted } = await highWater(db, root);
-    if (encrypted) report.encryptedRoots += 1;
-    const lastMessage = await db.node.findFirst({
-      where: { memoryId: root.memoryId, loc: { startsWith: `${root.loc}:messages:` }, nodeType: { in: MESSAGE_NODE_TYPES }, deletedAt: null },
-      orderBy: { createdAt: 'desc' },
-      select: { createdAt: true },
-    });
-    const existing = await db.channel.findUnique({ where: { chatRootNodeId: root.id } });
-    if (!existing) {
-      report.rowsCreated += 1;
-      if (root.deletedAt) report.rowsTombstoned += 1;
-      if (opts.apply) {
-        const row = await ensureChannelRow(db, {
-          rootId: root.id,
-          memoryId: root.memoryId,
-          loc: root.loc,
-          name: DEFAULT_CHANNEL_NAME,
-          description: root.memory.app ? `Team chat — ${root.memory.app.name}` : null,
-          createdBy: root.createdBy ?? null,
-          lastSeq,
-        });
-        await db.channel.update({
-          where: { id: row.id },
-          data: { lastMessageAt: lastMessage?.createdAt ?? null, ...(root.deletedAt ? { deletedAt: root.deletedAt } : {}) },
-        });
+    const inspect = async (scope: PrismaClient | Prisma.TransactionClient, fresh: typeof root) => {
+      const { lastSeq, encrypted } = await highWater(scope, fresh);
+      const lastMessage = await scope.node.findFirst({
+        where: {
+          memoryId: fresh.memoryId,
+          loc: { startsWith: escapePrismaLikePattern(`${fresh.loc}:messages:`) },
+          nodeType: { in: MESSAGE_NODE_TYPES },
+          deletedAt: null,
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      });
+      const existing = await scope.channel.findUnique({ where: { chatRootNodeId: fresh.id } });
+      return { lastSeq, encrypted, lastMessage, existing };
+    };
+
+    if (!opts.apply) {
+      const state = await inspect(db, root);
+      if (state.encrypted) report.encryptedRoots += 1;
+      if (!state.existing) {
+        report.rowsCreated += 1;
+        if (root.deletedAt) report.rowsTombstoned += 1;
+      } else if (state.existing.incarnation === 1 && state.existing.lastSeq < state.lastSeq) {
+        report.rowsRaised += 1;
       }
-    } else if (existing.lastSeq < lastSeq) {
-      report.rowsRaised += 1;
-      // Conditional so a post that landed since the read is never regressed
-      // (Copilot on PR #1165).
-      if (opts.apply) await db.channel.updateMany({ where: { id: existing.id, lastSeq: { lt: lastSeq } }, data: { lastSeq } });
+      continue;
     }
+
+    const outcome = await db.$transaction(async (tx) => {
+      // Creation/reuse and backfill share this lock. All root state and the
+      // transcript watermark are re-read after the grant, so an old snapshot
+      // cannot tombstone or regress a newly reused Channel incarnation.
+      await lockMemoryForChannelChange(tx, root.memoryId);
+      const fresh = await tx.node.findUnique({
+        where: { id: root.id },
+        select: {
+          id: true,
+          memoryId: true,
+          loc: true,
+          data: true,
+          deletedAt: true,
+          createdBy: true,
+          memory: { select: { appId: true, app: { select: { name: true } } } },
+        },
+      });
+      if (!fresh || fresh.memoryId !== root.memoryId || fresh.loc !== TEAM_CHAT_LOC) return null;
+      const state = await inspect(tx, fresh);
+      if (!state.existing) {
+        const row = await ensureChannelRow(tx, {
+          rootId: fresh.id,
+          memoryId: fresh.memoryId,
+          loc: fresh.loc,
+          name: DEFAULT_CHANNEL_NAME,
+          description: fresh.memory.app ? `Team chat — ${fresh.memory.app.name}` : null,
+          createdBy: fresh.createdBy ?? null,
+          lastSeq: state.lastSeq,
+        });
+        await tx.channel.update({
+          where: { id: row.id },
+          data: {
+            lastMessageAt: state.lastMessage?.createdAt ?? null,
+            ...(fresh.deletedAt ? { deletedAt: fresh.deletedAt } : {}),
+          },
+        });
+        return { encrypted: state.encrypted, created: true, tombstoned: !!fresh.deletedAt, raised: false };
+      }
+      // Incarnation > 1 means clean reuse deliberately reset the live
+      // transcript watermark to zero while retaining allocator history. The
+      // one-shot legacy repair must not turn that history back into phantom
+      // attention for the new room.
+      if (state.existing.incarnation === 1 && state.existing.lastSeq < state.lastSeq) {
+        await tx.channel.updateMany({
+          where: { id: state.existing.id, lastSeq: { lt: state.lastSeq } },
+          data: { lastSeq: state.lastSeq },
+        });
+        return { encrypted: state.encrypted, created: false, tombstoned: false, raised: true };
+      }
+      return { encrypted: state.encrypted, created: false, tombstoned: false, raised: false };
+    });
+    if (!outcome) continue;
+    if (outcome.encrypted) report.encryptedRoots += 1;
+    if (outcome.created) report.rowsCreated += 1;
+    if (outcome.tombstoned) report.rowsTombstoned += 1;
+    if (outcome.raised) report.rowsRaised += 1;
   }
 
   // 2. Every App's default: the oldest LIVE root among its app-class memories;
