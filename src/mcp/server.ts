@@ -647,6 +647,141 @@ class InlineEdgeEndpointError extends Error {}
 class PendingEdgePromotionPreflightStale extends Error {}
 
 const MAX_PENDING_EDGE_PROMOTION_RETRIES = 3;
+const INITIAL_PENDING_EDGE_RETRY_DELAY_MS = 100;
+const MAX_PENDING_EDGE_RETRY_DELAY_MS = 5_000;
+
+async function retargetPendingEdgeToStableId(
+  pendingId: string,
+  targetNodeId: string,
+): Promise<string | null> {
+  return db.$transaction(async (tx) => {
+    const pending = await tx.pendingEdge.findUnique({ where: { id: pendingId } });
+    if (!pending) return null;
+
+    const duplicate = await tx.pendingEdge.findUnique({
+      where: {
+        sourceId_targetId: { sourceId: pending.sourceId, targetId: targetNodeId },
+      },
+    });
+    if (duplicate && duplicate.id !== pending.id) {
+      await tx.pendingEdge.delete({ where: { id: pending.id } });
+      return duplicate.id;
+    }
+
+    await tx.pendingEdge.update({
+      where: { id: pending.id },
+      data: { targetId: targetNodeId },
+    });
+    return pending.id;
+  });
+}
+
+async function promotePendingEdgeForTarget(
+  pendingId: string,
+  targetNodeId: string,
+  retryDelayMs = INITIAL_PENDING_EDGE_RETRY_DELAY_MS,
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    const p = await db.pendingEdge.findUnique({ where: { id: pendingId } });
+    if (!p) return;
+
+    const [pSource, pTarget] = await Promise.all([
+      db.node.findUnique({
+        where: { id: p.sourceId },
+        select: { id: true, loc: true, memoryId: true, deletedAt: true },
+      }),
+      db.node.findUnique({
+        where: { id: targetNodeId },
+        select: { id: true, loc: true, memoryId: true, deletedAt: true },
+      }),
+    ]);
+    if (!pSource || pSource.deletedAt || !pTarget || pTarget.deletedAt) {
+      await db.pendingEdge.deleteMany({ where: { id: p.id } });
+      return;
+    }
+
+    try {
+      await db.$transaction(async (tx) => {
+        const lockedMemoryIds = new Set([pSource.memoryId, pTarget.memoryId]);
+        await lockEdgeEndpointMemories(tx, [...lockedMemoryIds]);
+        await acquireLockSet(tx, [
+          ...ancestorLocs(pSource.loc).map((loc) => ({ memoryId: pSource.memoryId, loc })),
+          { memoryId: pSource.memoryId, loc: pSource.loc },
+          ...ancestorLocs(pTarget.loc).map((loc) => ({ memoryId: pTarget.memoryId, loc })),
+          { memoryId: pTarget.memoryId, loc: pTarget.loc },
+        ]);
+
+        const currentRows = await tx.node.findMany({
+          where: { id: { in: [pSource.id, pTarget.id] }, deletedAt: null },
+          select: { id: true, loc: true, memoryId: true },
+        });
+        const currentById = new Map(currentRows.map((row) => [row.id, row]));
+        const currentSource = currentById.get(pSource.id);
+        const currentTarget = currentById.get(pTarget.id);
+
+        // A move changes loc and may change memory while preserving the
+        // endpoint's stable id. Do not confuse that with deletion and discard
+        // the relationship. Abort and rerun preflight so both the endpoint's
+        // current memory and complete ancestor-path key set joins the lock set.
+        // The ancestors are load-bearing: moving a parent rebases the endpoint
+        // without taking its old exact-loc key. Once the snapshots match, these
+        // path locks prevent either an exact or ancestor move between
+        // revalidation and insertion.
+        if (
+          (currentSource &&
+            (currentSource.memoryId !== pSource.memoryId || currentSource.loc !== pSource.loc)) ||
+          (currentTarget &&
+            (currentTarget.memoryId !== pTarget.memoryId || currentTarget.loc !== pTarget.loc))
+        ) {
+          throw new PendingEdgePromotionPreflightStale();
+        }
+
+        if (currentSource && currentTarget) {
+          const pEdgeLoc = p.loc ?? deriveEdgeLoc(currentSource.loc, p.name, currentTarget.loc);
+          await tx.edge.upsert({
+            where: { loc_memoryId: { loc: pEdgeLoc, memoryId: currentSource.memoryId } },
+            create: {
+              id: generateId(),
+              memoryId: currentSource.memoryId,
+              sourceId: currentSource.id,
+              targetId: currentTarget.id,
+              loc: pEdgeLoc,
+              name: p.name,
+            },
+            update: {},
+          });
+        }
+        await tx.pendingEdge.deleteMany({ where: { id: p.id } });
+      });
+      return;
+    } catch (error) {
+      if (error instanceof PendingEdgePromotionPreflightStale) {
+        if (attempt < MAX_PENDING_EDGE_PROMOTION_RETRIES) continue;
+
+        // The node upsert committed before this best-effort promotion pass.
+        // Preserve that success, but also make the deferred work reachable:
+        // loc-keyed PendingEdges will never see this target created again.
+        // Re-key to the stable target id, then enqueue a backoff retry. A later
+        // Git sync can now discover the same row by id if the process exits.
+        const stablePendingId = await retargetPendingEdgeToStableId(p.id, targetNodeId);
+        if (stablePendingId) {
+          const timer = setTimeout(() => {
+            void promotePendingEdgeForTarget(
+              stablePendingId,
+              targetNodeId,
+              Math.min(retryDelayMs * 2, MAX_PENDING_EDGE_RETRY_DELAY_MS),
+            ).catch((retryError) => {
+              console.error('[pending-edge-promotion] deferred retry failed', retryError);
+            });
+          }, retryDelayMs);
+          timer.unref();
+        }
+        return;
+      }
+      throw error;
+    }
+  }
+}
 
 async function lockOutgoingEdgeMemories(
   tx: Prisma.TransactionClient,
@@ -4722,91 +4857,9 @@ export function createMcpServerInstance(
       // source loc + name + this newly-arrived target's loc).
       const pendingByLoc = await db.pendingEdge.findMany({ where: { targetId: loc } });
       const pendingById = await db.pendingEdge.findMany({ where: { targetId: upserted.id } });
-      for (const p of [...pendingByLoc, ...pendingById]) {
-        for (let attempt = 0; ; attempt++) {
-          const [pSource, pTarget] = await Promise.all([
-            db.node.findUnique({
-              where: { id: p.sourceId },
-              select: { id: true, loc: true, memoryId: true, deletedAt: true },
-            }),
-            db.node.findUnique({
-              where: { id: upserted.id },
-              select: { id: true, loc: true, memoryId: true, deletedAt: true },
-            }),
-          ]);
-          if (!pSource || pSource.deletedAt || !pTarget || pTarget.deletedAt) {
-            await db.pendingEdge.deleteMany({ where: { id: p.id } });
-            break;
-          }
-
-          try {
-            await db.$transaction(async (tx) => {
-              const lockedMemoryIds = new Set([pSource.memoryId, pTarget.memoryId]);
-              await lockEdgeEndpointMemories(tx, [...lockedMemoryIds]);
-              await acquireLockSet(tx, [
-                ...ancestorLocs(pSource.loc).map((loc) => ({ memoryId: pSource.memoryId, loc })),
-                { memoryId: pSource.memoryId, loc: pSource.loc },
-                ...ancestorLocs(pTarget.loc).map((loc) => ({ memoryId: pTarget.memoryId, loc })),
-                { memoryId: pTarget.memoryId, loc: pTarget.loc },
-              ]);
-
-              const currentRows = await tx.node.findMany({
-                where: { id: { in: [pSource.id, pTarget.id] }, deletedAt: null },
-                select: { id: true, loc: true, memoryId: true },
-              });
-              const currentById = new Map(currentRows.map((row) => [row.id, row]));
-              const currentSource = currentById.get(pSource.id);
-              const currentTarget = currentById.get(pTarget.id);
-
-              // A move changes loc and may change memory while preserving the
-              // endpoint's stable id. Do not confuse that with deletion and
-              // discard the relationship. Abort and rerun preflight so both
-              // the endpoint's current memory and complete ancestor-path key
-              // set joins the lock set. The ancestors are load-bearing: moving
-              // a parent rebases the endpoint without taking its old exact-loc
-              // key. Once the snapshots match, these path locks prevent either
-              // an exact or ancestor move between revalidation and insertion.
-              if (
-                (currentSource &&
-                  (currentSource.memoryId !== pSource.memoryId || currentSource.loc !== pSource.loc)) ||
-                (currentTarget &&
-                  (currentTarget.memoryId !== pTarget.memoryId || currentTarget.loc !== pTarget.loc))
-              ) {
-                throw new PendingEdgePromotionPreflightStale();
-              }
-
-              if (currentSource && currentTarget) {
-                const pEdgeLoc = p.loc ?? deriveEdgeLoc(currentSource.loc, p.name, currentTarget.loc);
-                await tx.edge.upsert({
-                  where: { loc_memoryId: { loc: pEdgeLoc, memoryId: currentSource.memoryId } },
-                  create: {
-                    id: generateId(),
-                    memoryId: currentSource.memoryId,
-                    sourceId: currentSource.id,
-                    targetId: currentTarget.id,
-                    loc: pEdgeLoc,
-                    name: p.name,
-                  },
-                  update: {},
-                });
-              }
-              await tx.pendingEdge.deleteMany({ where: { id: p.id } });
-            });
-            break;
-          } catch (error) {
-            if (error instanceof PendingEdgePromotionPreflightStale) {
-              if (attempt < MAX_PENDING_EDGE_PROMOTION_RETRIES) continue;
-              // The node upsert committed before this best-effort promotion
-              // pass began. Exhausting the bounded retry budget must not turn
-              // that successful create into a reported failure (whose retry
-              // then says "already exists"). The throwing transaction rolled
-              // back without deleting the PendingEdge, so leave it available
-              // for a later promotion pass and return the saved node.
-              break;
-            }
-            throw error;
-          }
-        }
+      const pendingIds = new Set([...pendingByLoc, ...pendingById].map((pending) => pending.id));
+      for (const pendingId of pendingIds) {
+        await promotePendingEdgeForTarget(pendingId, upserted.id);
       }
 
       // Record usage event (#796 memoryId + 046 FR-001 attribution, as in

@@ -453,10 +453,30 @@ describe('the hazard #835 exists to remove', () => {
       await b2.done;
 
       expect(await creating).toMatch(/Node saved/);
-      expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
+      const target = await db.node.findUniqueOrThrow({
+        where: { loc_memoryId: { memoryId: memId, loc: 'future-retry-target' } },
+      });
+      expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toMatchObject({
+        targetId: target.id,
+      });
       expect(await db.edge.count({
         where: { sourceId: source.id, name: 'waits-for-later', deletedAt: null },
       })).toBe(0);
+
+      // Let the queued pass acquire A3. The stable-id retarget makes this work
+      // reachable after the one create call that could resolve the old loc key.
+      for (const holder of holders) holder.release();
+      await Promise.all(holders.map((holder) => holder.done));
+      const deadline = Date.now() + 5_000;
+      while (await db.pendingEdge.findUnique({ where: { id: pending.id } })) {
+        if (Date.now() > deadline) throw new Error('timed out waiting for deferred promotion');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const promoted = await db.edge.findFirstOrThrow({
+        where: { sourceId: source.id, targetId: target.id, name: 'waits-for-later', deletedAt: null },
+      });
+      expect(promoted.memoryId).toBe(memId);
+      expect(promoted.loc).toMatch(/^bounce-a3:review:item:waits-for-later:/);
     } finally {
       for (const holder of holders) holder.release();
       await Promise.all(holders.map((holder) => holder.done.catch(() => undefined)));
