@@ -331,6 +331,57 @@ describe('the hazard #835 exists to remove', () => {
     }
   }, 20_000);
 
+  it('revalidates a tombstoned target after a queued resurrection wins the memory lock', async () => {
+    const target = await node('resurrected-stable-target', 'resurrected stable target');
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    const pending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId: target.id,
+        name: 'survives-resurrection',
+      },
+    });
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, memId);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const resurrecting = call('hadron_create_node', {
+      urn: `${memUrn.replace(':', '::')}::${target.loc}`,
+      name: 'resurrected stable target',
+    });
+    try {
+      await waitForChannelMemoryLockWaiters(memId, 1);
+      const sweeping = runPendingEdgePromotionSweep(db);
+      await waitForChannelMemoryLockWaiters(memId, 2);
+      signalRelease();
+      await holder;
+
+      expect(await resurrecting).toMatch(/Node saved/);
+      await sweeping;
+      expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+      expect(await db.edge.findFirst({
+        where: {
+          sourceId: source.id,
+          targetId: target.id,
+          name: 'survives-resurrection',
+          deletedAt: null,
+        },
+      })).not.toBeNull();
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
   it('locks endpoint ancestors and retries promotion after an ancestor move', async () => {
     const { organizationId } = await db.memory.findUniqueOrThrow({
       where: { id: memId },

@@ -142,10 +142,41 @@ export async function promotePendingEdgeForTarget(
       }),
     ]);
     if (!pSource || pSource.deletedAt || !pTarget || pTarget.deletedAt) {
-      await db.$transaction(async (tx) => {
-        await lockEdgeEndpointMemories(tx, [sourceMemoryId]);
-        await consumePendingEdge(tx, p, sourceMemoryId);
+      const settled = await db.$transaction(async (tx) => {
+        const endpointSnapshots = [pSource, pTarget].filter(
+          (row): row is NonNullable<typeof row> => row != null,
+        );
+        await lockEdgeEndpointMemories(tx, [
+          sourceMemoryId,
+          ...endpointSnapshots.map((row) => row.memoryId),
+        ]);
+        await acquireLockSet(tx, endpointSnapshots.flatMap((row) => [
+          ...ancestorLocs(row.loc).map((loc) => ({ memoryId: row.memoryId, loc })),
+          { memoryId: row.memoryId, loc: row.loc },
+        ]));
+
+        const currentPending = await tx.pendingEdge.findUnique({ where: { id: p.id } });
+        if (
+          !currentPending ||
+          currentPending.deletedAt ||
+          currentPending.sourceId !== p.sourceId ||
+          currentPending.targetId !== p.targetId ||
+          currentPending.loc !== p.loc ||
+          currentPending.name !== p.name
+        ) {
+          await reconcilePendingEdgeCount(tx, sourceMemoryId);
+          return true;
+        }
+
+        const liveEndpoints = await tx.node.count({
+          where: { id: { in: [p.sourceId, targetNodeId] }, deletedAt: null },
+        });
+        if (liveEndpoints === 2) return false;
+
+        await consumePendingEdge(tx, currentPending, sourceMemoryId);
+        return true;
       });
+      if (!settled) continue;
       return;
     }
 

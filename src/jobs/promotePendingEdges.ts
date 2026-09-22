@@ -52,6 +52,14 @@ export async function runPendingEdgePromotionSweep(
     } catch (error) {
       outcome.failed += 1;
       console.error(`[pending-edge-promotion] sweep failed for ${candidate.id}`, error);
+      // Retained failures must move behind unexamined work; otherwise the same
+      // oldest full batch can starve every newer resolvable row forever.
+      await db.pendingEdge.updateMany({
+        where: { id: candidate.id, deletedAt: null },
+        data: { updatedAt: new Date() },
+      }).catch((rotationError) => {
+        console.error(`[pending-edge-promotion] failed to rotate ${candidate.id}`, rotationError);
+      });
     }
   }
   // A source hard-delete cascades its PendingEdges before this sweep can see

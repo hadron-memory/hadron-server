@@ -139,7 +139,7 @@ describe('durable PendingEdge promotion sweep', () => {
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(0);
   });
 
-  it('retains pending work when another cross-memory edge occupies its derived loc', async () => {
+  it('retains and rotates a loc collision so newer work is not starved', async () => {
     const { source, target, pending } = await seedStablePending();
     const { graph: otherMemory } = await createDbOrgAndGraph(db, {
       orgName: `pending-collision-${Date.now()}`,
@@ -157,8 +157,26 @@ describe('durable PendingEdge promotion sweep', () => {
         name: 'durable',
       },
     });
+    const nextSource = await createDbNode(db, { memoryId, loc: 'next-source' });
+    const nextTarget = await createDbNode(db, { memoryId, loc: 'next-target' });
+    const nextPending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: nextSource.id,
+        targetId: nextTarget.id,
+        name: 'next',
+      },
+    });
+    await db.memory.update({
+      where: { id: memoryId },
+      data: { pendingEdgeCount: { increment: 1 } },
+    });
+    await db.pendingEdge.update({
+      where: { id: pending.id },
+      data: { updatedAt: new Date(0) },
+    });
 
-    await expect(runPendingEdgePromotionSweep(db)).resolves.toEqual({
+    await expect(runPendingEdgePromotionSweep(db, 1)).resolves.toEqual({
       promoted: 0,
       failed: 1,
       examined: 1,
@@ -172,6 +190,17 @@ describe('durable PendingEdge promotion sweep', () => {
     expect(await db.edge.count({
       where: { sourceId: source.id, targetId: target.id, name: 'durable', deletedAt: null },
     })).toBe(0);
+    expect(await db.pendingEdge.findUnique({ where: { id: nextPending.id } })).not.toBeNull();
+
+    await expect(runPendingEdgePromotionSweep(db, 1)).resolves.toEqual({
+      promoted: 1,
+      failed: 0,
+      examined: 1,
+    });
+    expect(await db.pendingEdge.findUnique({ where: { id: nextPending.id } })).toBeNull();
+    expect(await db.edge.findFirst({
+      where: { sourceId: nextSource.id, targetId: nextTarget.id, name: 'next', deletedAt: null },
+    })).not.toBeNull();
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(1);
   });
 
