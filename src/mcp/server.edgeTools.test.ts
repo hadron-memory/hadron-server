@@ -18,6 +18,7 @@ import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../lib/channels.js';
 import { acquireLockSet } from '../lib/nodeSubtreeLock.js';
+import { runPendingEdgePromotionSweep } from '../jobs/promotePendingEdges.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -277,6 +278,53 @@ describe('the hazard #835 exists to remove', () => {
       expect(await creating).toMatch(/Node saved/);
       expect(await db.edge.count({ where: { sourceId: oldMessage.id, deletedAt: null } })).toBe(0);
       expect(await db.pendingEdge.count({ where: { sourceId: oldMessage.id } })).toBe(0);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
+  it('does not recreate a PendingEdge removed by a source edges update while promotion waits', async () => {
+    const target = await node('future-stable-target', 'future stable target');
+    const pending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId: target.id,
+        name: 'removed-while-waiting',
+      },
+    });
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, memId);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const clearing = call('hadron_update_node', {
+      urn: `${memUrn.replace(':', '::')}::${source.loc}`,
+      edges: [],
+    });
+    try {
+      // Queue the explicit source update first, then let the durable sweep
+      // snapshot the still-present PendingEdge and queue behind it.
+      await waitForChannelMemoryLockWaiters(memId, 1);
+      const sweeping = runPendingEdgePromotionSweep(db);
+      await waitForChannelMemoryLockWaiters(memId, 2);
+      signalRelease();
+      await holder;
+
+      expect(await clearing).toMatch(/Node updated/);
+      await sweeping;
+      expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+      expect(await db.edge.count({
+        where: { sourceId: source.id, targetId: target.id, name: 'removed-while-waiting' },
+      })).toBe(0);
     } finally {
       signalRelease();
       await holder.catch(() => undefined);

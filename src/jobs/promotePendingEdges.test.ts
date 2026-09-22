@@ -36,6 +36,10 @@ async function seedStablePending() {
       name: 'durable',
     },
   });
+  await db.memory.update({
+    where: { id: memoryId },
+    data: { pendingEdgeCount: { increment: 1 } },
+  });
   return { source, target, pending };
 }
 
@@ -52,6 +56,7 @@ describe('durable PendingEdge promotion sweep', () => {
     expect(await db.edge.findFirst({
       where: { sourceId: source.id, targetId: target.id, name: 'durable', deletedAt: null },
     })).not.toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(0);
   });
 
   it('leaves loc-keyed forward references parked until their target is created', async () => {

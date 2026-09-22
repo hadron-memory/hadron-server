@@ -79,7 +79,7 @@ export async function promotePendingEdgeForTarget(
     }
 
     try {
-      await db.$transaction(async (tx) => {
+      const consumed = await db.$transaction(async (tx) => {
         await lockEdgeEndpointMemories(tx, [pSource.memoryId, pTarget.memoryId]);
         await acquireLockSet(tx, [
           ...ancestorLocs(pSource.loc).map((loc) => ({ memoryId: pSource.memoryId, loc })),
@@ -87,6 +87,22 @@ export async function promotePendingEdgeForTarget(
           ...ancestorLocs(pTarget.loc).map((loc) => ({ memoryId: pTarget.memoryId, loc })),
           { memoryId: pTarget.memoryId, loc: pTarget.loc },
         ]);
+
+        // The PendingEdge is part of the authoritative snapshot too. An
+        // inline source update can deliberately remove it while this promoter
+        // waits on the source-memory key (for example edges: []). Never
+        // recreate that relationship from the stale outer `p` snapshot.
+        const currentPending = await tx.pendingEdge.findUnique({ where: { id: p.id } });
+        if (
+          !currentPending ||
+          currentPending.deletedAt ||
+          currentPending.sourceId !== p.sourceId ||
+          currentPending.targetId !== p.targetId ||
+          currentPending.loc !== p.loc ||
+          currentPending.name !== p.name
+        ) {
+          return false;
+        }
 
         const currentRows = await tx.node.findMany({
           where: { id: { in: [pSource.id, pTarget.id] }, deletedAt: null },
@@ -106,7 +122,11 @@ export async function promotePendingEdgeForTarget(
         }
 
         if (currentSource && currentTarget) {
-          const pEdgeLoc = p.loc ?? deriveEdgeLoc(currentSource.loc, p.name, currentTarget.loc);
+          const pEdgeLoc = currentPending.loc ?? deriveEdgeLoc(
+            currentSource.loc,
+            currentPending.name,
+            currentTarget.loc,
+          );
           await tx.edge.upsert({
             where: { loc_memoryId: { loc: pEdgeLoc, memoryId: currentSource.memoryId } },
             create: {
@@ -115,13 +135,32 @@ export async function promotePendingEdgeForTarget(
               sourceId: currentSource.id,
               targetId: currentTarget.id,
               loc: pEdgeLoc,
-              name: p.name,
+              name: currentPending.name,
             },
             update: {},
           });
         }
-        await tx.pendingEdge.deleteMany({ where: { id: p.id } });
+        const deleted = await tx.pendingEdge.deleteMany({
+          where: {
+            id: currentPending.id,
+            sourceId: currentPending.sourceId,
+            targetId: currentPending.targetId,
+            deletedAt: null,
+          },
+        });
+        if (deleted.count === 1) {
+          // Git sync maintains this denormalized source-memory count. MCP and
+          // hand-authored legacy rows may not have credited it, so clamp at
+          // zero while decrementing atomically with promotion.
+          await tx.$executeRaw`
+            UPDATE memories
+            SET pending_edge_count = GREATEST(pending_edge_count - 1, 0)
+            WHERE id = ${pSource.memoryId}
+          `;
+        }
+        return deleted.count === 1;
       });
+      if (!consumed) return;
       return;
     } catch (error) {
       if (error instanceof PendingEdgePromotionPreflightStale) {
