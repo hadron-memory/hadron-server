@@ -187,7 +187,8 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     const start = flat(srv().toolDescription('hadron_start_session'));
     const end = flat(srv().toolDescription('hadron_end_session'));
 
-    expect(start).toContain('stops blocking a bind');
+    expect(start).toMatch(/remains untouched past its idle window.*stops blocking a bind/);
+    expect(start).toMatch(/most recent activity is outside its idle window/);
     expect(start).toMatch(/human-held name stays held until explicit release/);
     expect(end).toMatch(/while open and recently active inside its idle window/);
     expect(end).toMatch(/session block falls away/);
