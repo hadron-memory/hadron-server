@@ -167,8 +167,21 @@ const CHANNEL_BACKED_OPS = new Set(['write', 'create', 'create under']);
  */
 const CLEANUP_OPS = new Set(['delete', 'delete under']);
 
-/** The remedy sentence — what a refused caller should use INSTEAD, when anything can. */
-function protectedRemedy(op: string): string {
+/**
+ * The remedy sentence — what a refused caller should use INSTEAD, when anything can.
+ *
+ * `live` matters, and getting it wrong is the defect #1226 was filed for.
+ * `createTeamChatMessage` / `hadron_team_chat_post` resolve only LIVE Channels,
+ * so offering them for a TOMBSTONED one names an operation the caller cannot
+ * reach — the original complaint, which survived the op carve-out because a
+ * dead Channel still refuses `create` (@copilot, PR #1257). A dead address has
+ * no owning operation at all; what it has is a reservation, and the only thing
+ * a caller can do about it is recreate the Channel.
+ */
+function protectedRemedy(op: string, live: boolean): string {
+  if (!live) {
+    return `The Channel is DELETED, so none of its operations can be reached — the address stays reserved so it cannot be occupied and then restored over. Recreate the Channel (createChannel) to write here, or delete what it orphaned.`;
+  }
   return CHANNEL_BACKED_OPS.has(op)
     ? `Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
     : `There is no operation that may ${op} here — the Channel's own operation posts messages, so this operation has no bypass.`;
@@ -182,7 +195,7 @@ export class LocProtectedError extends GraphQLError {
     public readonly op: string,
   ) {
     super(
-      `"${loc}" is protected: it is the address of Channel "${channel.name}" (${channel.loc}), which only its own operations may ${op}. ${protectedRemedy(op)}`,
+      `"${loc}" is protected: it is the address of ${channel.live ? '' : 'the DELETED '}Channel "${channel.name}" (${channel.loc})${channel.live ? ', which only its own operations may ' + op : ''}. ${protectedRemedy(op, channel.live)}`,
       {
         extensions: {
           code: 'LOC_PROTECTED',
@@ -191,6 +204,10 @@ export class LocProtectedError extends GraphQLError {
           channelLoc: channel.channelId ? channel.loc : undefined,
           channelId: channel.channelId ?? undefined,
           owner: channel.owner,
+          // #1226 — so a client distinguishes "reserved by a dead Channel" from
+          // "owned by a live one" WITHOUT parsing the message
+          // (`conventions:the-error-code-is-the-contract-the-prose-is-not`).
+          channelLive: channel.live,
           op,
         },
       },
@@ -275,7 +292,14 @@ function ancestorsOf(loc: string): string[] {
 export function protectedDeletionFilter(protectedLocs: ProtectedLoc[]): {
   notClauses: Array<{ loc: string } | { loc: { startsWith: string } } | { loc: { in: string[] } }>;
 } {
-  const notClauses = protectedLocs.flatMap((p) => {
+  // #1226 — this is a DELETION filter, so the tombstone carve-out applies here
+  // exactly as it does in `assertLocWritable`. Without it, cleanup through git
+  // sync or `replaceSubtree` stayed blocked while the single-loc path allowed
+  // it: the same rule enforced differently by two callers of the same module,
+  // which is what its header warns about in the other direction (@codex, PR
+  // #1257). Filtering HERE rather than at the two call sites is the point —
+  // `ask this function, do not rebuild it`.
+  const notClauses = protectedLocs.filter((p) => p.live).flatMap((p) => {
     const ancestors = ancestorsOf(p.loc);
     return [
       { loc: p.loc },

@@ -311,10 +311,29 @@ export async function ensureChannelWithRoot(
     // message. `ensureChannelRow` keeps `Channel.lastSeq` for the same reason
     // and says so, which is why this does not fight it.
     if (reusingDeadAddress) {
-      await tx.node.updateMany({
-        where: { memoryId: args.memoryId, loc: { startsWith: `${messagesLoc}:` }, deletedAt: null },
-        data: { deletedAt: new Date(), deletedBy: args.createdBy ?? null },
+      // NOT a `startsWith`. Prisma compiles it to an UNESCAPED `LIKE`, and `_`
+      // is both a single-character wildcard and a legal loc character
+      // (`findings:prisma-string-filters-are-unescaped-like`) — so reusing
+      // `chats_foo` would have matched and tombstoned message nodes under an
+      // unrelated `chatsXfoo:messages:` in the same memory. Data loss, in the
+      // fix for a data-visibility bug (@copilot, PR #1257).
+      //
+      // The house pattern instead (`assertNoChannelOverlap`, `bulkMutationGate`):
+      // narrow on an INDEXED column, then compare parsed locs in memory and
+      // delete by exact id. Memory-wide is affordable here — this path runs only
+      // when an address is REUSED, and it selects two columns.
+      const prefix = `${messagesLoc}:`;
+      const candidates = await tx.node.findMany({
+        where: { memoryId: args.memoryId, deletedAt: null },
+        select: { id: true, loc: true },
       });
+      const stale = candidates.filter((n) => n.loc.startsWith(prefix)).map((n) => n.id);
+      if (stale.length > 0) {
+        await tx.node.updateMany({
+          where: { id: { in: stale } },
+          data: { deletedAt: new Date(), deletedBy: args.createdBy ?? null },
+        });
+      }
     }
     const channel = await ensureChannelRow(tx, { ...args, rootId });
     return { channel, rootId };

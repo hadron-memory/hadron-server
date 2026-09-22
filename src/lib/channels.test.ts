@@ -214,6 +214,37 @@ describe('protection (S4)', () => {
     expect(after.items.map((m: { body: string }) => m.body)).toEqual(['fresh']);
   });
 
+  it("a dead Channel's refusal does not name an operation that cannot be reached (#1226)", async () => {
+    // The issue's third requirement, and it survived the op carve-out: a dead
+    // Channel still refuses `create`, and the old remedy offered
+    // createTeamChatMessage / hadron_team_chat_post — which resolve only LIVE
+    // Channels (@copilot, PR #1257).
+    const ch = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const target = ch.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
+    await M.deleteChannel({}, { ref: target.id }, ctx(admin.id));
+
+    const err = await M.createNode(
+      {}, { input: { memoryId: appMem.urn, loc: 'chats:team:messages:9999', name: 'squat' } }, ctx(admin.id),
+    ).catch((e: unknown) => e as { message: string; extensions: Record<string, unknown> });
+
+    expect(err.extensions).toMatchObject({ code: 'LOC_PROTECTED', channelLive: false });
+    // Names the reservation and a REACHABLE remedy...
+    expect(err.message).toContain('DELETED');
+    expect(err.message).toContain('createChannel');
+    // ...and not the operations of a Channel that is gone.
+    expect(err.message).not.toContain('createTeamChatMessage');
+    expect(err.message).not.toContain('hadron_team_chat_post');
+  });
+
+  it("a LIVE Channel's refusal still names its own posting operation (#1226 control)", async () => {
+    const err = await M.createNode(
+      {}, { input: { memoryId: appMem.urn, loc: 'chats:team:messages:0009', name: 'm' } }, ctx(admin.id),
+    ).catch((e: unknown) => e as { message: string; extensions: Record<string, unknown> });
+    expect(err.extensions).toMatchObject({ code: 'LOC_PROTECTED', channelLive: true });
+    expect(err.message).toContain('createTeamChatMessage');
+    expect(err.message).not.toContain('DELETED');
+  });
+
   it('the lock helpers gate, and the Channel owner passes with ownedByOperation', async () => {
     await db.$transaction(async (tx) => {
       await expect(lockAncestorsForCreate(tx, appMem.id, 'chats:team:messages:0002')).rejects.toBeInstanceOf(LocProtectedError);
