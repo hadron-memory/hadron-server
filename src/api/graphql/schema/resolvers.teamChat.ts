@@ -59,7 +59,7 @@ import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
-import { DEFAULT_CHANNEL_NAME, ensureChannelRow, ensureChannelWithRoot } from '../../../lib/channels.js';
+import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 
@@ -1072,20 +1072,27 @@ export const teamChatMutations = {
     await requireTeamChatAccess(ctx, app, 'post');
 
     const located = await locateTeamChatRoot(ctx, app);
-    const root = located ?? (await bootstrapTeamChat(ctx, app));
-    // Backfill-on-touch (spec 049 §7.1): a root that predates the Channel table
-    // gets its row on the next post, so the address is protected from then on
-    // even before the one-shot backfill has run.
+    // Every existing root passes through the SAME locked creation/reuse core
+    // before posting. Besides backfill-on-touch for a pre-Channel root, this
+    // closes the locate→delete race: if deleteChannel tombstones the root after
+    // locateTeamChatRoot's live read, the core re-reads it under the Channel
+    // memory/path locks and performs the full clean-incarnation reset. Calling
+    // ensureChannelRow directly here could resurrect only the Channel row,
+    // leaving the root tombstoned and the old transcript exposed.
+    let root: ChatRootRow;
     if (located) {
-      await ensureChannelRow(ctx.db, {
-        rootId: root.id,
-        memoryId: root.memoryId,
-        loc: root.loc,
+      const { rootId } = await ensureChannelWithRoot(ctx.db, {
+        memoryId: located.memoryId,
+        loc: located.loc,
         name: DEFAULT_CHANNEL_NAME,
         description: `Team chat — ${app.name}`,
         createdBy: ctx.userId ?? null,
         asDefaultOfAppId: app.id,
+        hostLabel: app.name,
       });
+      root = { ...located, id: rootId };
+    } else {
+      root = await bootstrapTeamChat(ctx, app);
     }
     return postToChannelRoot(ctx, app, root, { body, replyToSeq: replyToSeq ?? null, sessionRef: sessionRef ?? null });
   },

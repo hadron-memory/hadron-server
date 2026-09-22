@@ -274,6 +274,48 @@ describe('protection (S4)', () => {
     expect(page.items.map((m: { body: string }) => m.body)).toEqual(['fresh room']);
   });
 
+  it('a stale live-root lookup cannot bypass clean reuse after concurrent deleteChannel (#1226)', async () => {
+    const current = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const first = current.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
+    await M.createTeamChatMessage({}, { appRef: app.urn, body: 'old secret' }, ctx(admin.id));
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const lockHeld = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const mayRelease = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, appMem.id);
+      signalHeld();
+      await mayRelease;
+    }, { timeout: 20_000 });
+
+    await lockHeld;
+    // locateTeamChatRoot sees the live root, then the canonical creation core
+    // queues on this held memory key. That barrier makes the stale-read window
+    // deterministic rather than hoping deleteChannel wins a scheduler race.
+    const posting = M.createTeamChatMessage(
+      {}, { appRef: app.urn, body: 'fresh room' }, ctx(admin.id),
+    );
+    try {
+      await waitForChannelMemoryLockWaiter(appMem.id);
+      await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
+      signalRelease();
+      await holder;
+      const fresh = await posting;
+      expect(fresh.seq).toBeGreaterThan(1);
+
+      const reborn = await db.channel.findUniqueOrThrow({ where: { id: first.id } });
+      const root = await db.node.findUniqueOrThrow({ where: { id: reborn.chatRootNodeId } });
+      expect(root.deletedAt).toBeNull();
+      const page = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
+      expect(page.items.map((m: { body: string }) => m.body)).toEqual(['fresh room']);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+      await posting.catch(() => undefined);
+    }
+  });
+
   it('serializes orphan cleanup before reuse so it cannot delete the fresh incarnation (#1226)', async () => {
     const current = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
     const first = current.items.find((c: { loc: string }) => c.loc === 'chats:team')!;

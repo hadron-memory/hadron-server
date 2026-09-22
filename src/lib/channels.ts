@@ -108,9 +108,11 @@ export async function assertNoChannelOverlap(
 /**
  * Give an EXISTING chat root its Channel row (create-or-restore, idempotent),
  * and make it the App's default when the App has none. Used by the creation
- * core (inside its transaction, under the lock), by the team-chat paths for a
- * root that predates Channels, and by the backfill; `lastSeq` is left to the
- * caller (the backfill seeds it, the allocator maintains it).
+ * core (inside its transaction, under the lock) and by the one-shot backfill;
+ * the team-chat path deliberately routes even a pre-Channel root through the
+ * creation core so a stale live-root lookup cannot revive only this row.
+ * `lastSeq` is left to the caller (the backfill seeds it, the allocator
+ * maintains it).
  *
  * Outside a lock two first posts can race to the row: the loser's P2002 is
  * absorbed and the winner's row used. Inside a transaction that P2002 would
