@@ -56,6 +56,7 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
+import { lockMemoryForChannelChange } from '../lib/channels.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
@@ -5677,6 +5678,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { ok: true; descendantCount: number };
 
       const result: DeleteResult = await db.$transaction(async (tx) => {
+        // Keep the dead-Channel cleanup verdict stable through the delete.
+        // Channel resurrection takes this same key before any loc key.
+        await lockMemoryForChannelChange(tx, memory.id);
         await lockNodeForDelete(tx, memory.id, loc);
         // Descendants by URN hierarchy: loc startsWith node.loc + ':'.
         // Soft-delete refuses based on LIVE descendants; hard-delete

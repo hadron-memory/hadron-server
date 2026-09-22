@@ -2214,6 +2214,10 @@ export const nodeMutations = {
         // delete case). READ COMMITTED (the default) is required so the count
         // runs on a fresh snapshot taken after the lock is granted.
         await ctx.db.$transaction(async (tx) => {
+          // A dead Channel releases strict descendants for cleanup, so this
+          // authoritative re-check must serialize with Channel resurrection.
+          // Memory-before-loc matches ensureChannelWithRoot's global order.
+          await lockMemoryForChannelChange(tx, memoryId);
           await lockNodeForDelete(tx, memoryId, node.loc);
           const useSubtree = !!recursive;
           if (!useSubtree) {

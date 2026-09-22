@@ -205,6 +205,10 @@ async function resetReusedChannel(
     const plain = decryptNodeFields({ data: root.data }, args.memEncInfo);
     const rootData = { ...((plain.data as Record<string, unknown> | null) ?? {}) };
     delete rootData.lastMessageAt;
+    // Pre-#1196 team-chat roots stamped this retired audience marker. Reuse is
+    // the canonical migration point: a new Channel derives access solely from
+    // its host memory and must not inherit the legacy assertion.
+    delete rootData.scope;
     return encryptNodeFields({ content: null, data: rootData }, args.memEncInfo);
   });
 

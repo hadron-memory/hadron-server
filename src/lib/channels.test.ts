@@ -20,7 +20,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { ensureChannelWithRoot } from './channels.js';
+import { ensureChannelWithRoot, lockMemoryForChannelChange } from './channels.js';
 import { assertLocWritable, LocProtectedError, partitionProtected } from './protectedLoc.js';
 import { lockAncestorsForCreate, lockLocForWrite } from './nodeSubtreeLock.js';
 import { backfillChannels } from '../jobs/backfillChannels.js';
@@ -38,6 +38,27 @@ let appMem: { id: string; urn: string };
 let knowledge: { id: string; urn: string };
 
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] }) as Context;
+
+/** Deterministic barrier: wait until this memory-scoped advisory key has a waiter. */
+async function waitForChannelMemoryLockWaiter(memoryId: string, timeoutMs = 10_000): Promise<void> {
+  const key = `channel-host:${memoryId}`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT count(*)::bigint AS count
+      FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND classid = (((hashtext(${key})::bigint >> 32) & 4294967295))::oid
+        AND objid = ((hashtext(${key})::bigint & 4294967295))::oid
+        AND objsubid = 1
+    `;
+    if (Number(count) > 0) return;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for Channel memory-lock waiter on ${memoryId}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -191,6 +212,14 @@ describe('protection (S4)', () => {
     const first = before.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
     await M.createChannelMessage({}, { channelRef: first.id, body: 'secret one' }, ctx(admin.id));
     await M.createChannelMessage({}, { channelRef: first.id, body: 'secret two' }, ctx(admin.id));
+    // A pre-#1196 team-chat root can still carry this retired marker. Reuse is
+    // a new incarnation, so it must not inherit a stale audience assertion.
+    const oldChannel = await db.channel.findUniqueOrThrow({ where: { id: first.id } });
+    const oldRoot = await db.node.findUniqueOrThrow({ where: { id: oldChannel.chatRootNodeId } });
+    await db.node.update({
+      where: { id: oldRoot.id },
+      data: { data: { ...(oldRoot.data as Record<string, unknown>), scope: 'shared' } },
+    });
     await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
 
     // Recreate at the SAME address. The schema forces a resurrection —
@@ -208,6 +237,7 @@ describe('protection (S4)', () => {
     expect(emptyState.lastMessageAt).toBeNull();
     const cleanRoot = await db.node.findUniqueOrThrow({ where: { id: reborn.chatRootNodeId } });
     expect((cleanRoot.data as Record<string, unknown>).lastMessageAt).toBeUndefined();
+    expect((cleanRoot.data as Record<string, unknown>).scope).toBeUndefined();
 
     // The ALLOCATOR counter deliberately does NOT restart, even though the
     // live Channel watermark above does. Existing cursors then see an empty
@@ -230,6 +260,50 @@ describe('protection (S4)', () => {
     const reborn = await db.channel.findUniqueOrThrow({ where: { id: first.id } });
     const page = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
     expect(page.items.map((m: { body: string }) => m.body)).toEqual(['fresh room']);
+  });
+
+  it('serializes orphan cleanup before reuse so it cannot delete the fresh incarnation (#1226)', async () => {
+    const current = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const first = current.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
+    await M.createChannelMessage({}, { channelRef: first.id, body: 'old transcript' }, ctx(admin.id));
+    const messages = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { memoryId: appMem.id, loc: 'chats:team:messages' } },
+    });
+    await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const lockHeld = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const mayRelease = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, appMem.id);
+      signalHeld();
+      await mayRelease;
+    }, { timeout: 20_000 });
+
+    await lockHeld;
+    // Queue cleanup first. The pg_locks barrier proves it has reached the
+    // shared memory key; a sleep could pass without exercising the race.
+    const deleting = M.deleteNode(
+      {}, { nodeRef: messages.id, recursive: true }, ctx(admin.id),
+    );
+    try {
+      await waitForChannelMemoryLockWaiter(appMem.id);
+      const recreating = ensureChannelWithRoot(db, {
+        memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+      });
+      signalRelease();
+      await holder;
+      await deleting;
+      const { channel } = await recreating;
+
+      await M.createChannelMessage({}, { channelRef: channel.id, body: 'fresh transcript' }, ctx(admin.id));
+      const page = await Q.channelMessages(null, { channelRef: channel.id }, ctx(admin.id));
+      expect(page.items.map((m: { body: string }) => m.body)).toEqual(['fresh transcript']);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
   });
 
   it('reuse treats underscores literally while tombstoning the old transcript (#1226)', async () => {
