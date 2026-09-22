@@ -188,6 +188,24 @@ function deadReservationCovers(entry: ProtectedLoc, loc: string): boolean {
 }
 
 /**
+ * THE predicate — does `entry` protect `loc` against `op`? Use this, never
+ * `protectedLocCovers` plus a liveness test of your own.
+ *
+ * It exists because #1226's tombstone rule had to be applied in THREE gates and
+ * I shipped it in one, then two (@codex and @copilot, PR #1257, three rounds).
+ * That is the same defect this module's header already warns about from the
+ * other side — "the check lives in TWO places, deliberately" — and the answer
+ * is the answer `protectedDeletionFilter` already gives: ask this function, do
+ * not rebuild it. A fourth gate gets the rule for free; one that reimplements
+ * it gets the rule of its author's memory.
+ */
+export function protectedCoversForOp(entry: ProtectedLoc, loc: string, op: string): boolean {
+  return CLEANUP_OPS.has(op) && !entry.live
+    ? deadReservationCovers(entry, loc)
+    : protectedLocCovers(entry, loc);
+}
+
+/**
  * The remedy sentence — what a refused caller should use INSTEAD, when anything can.
  *
  * `live` matters, and getting it wrong is the defect #1226 was filed for.
@@ -261,11 +279,8 @@ export async function assertLocWritable(
   // but it still reserves its own address and the path to it, because a hard
   // delete of the root cascades the Channel row away (see
   // `deadReservationCovers`).
-  const cleanup = CLEANUP_OPS.has(op);
   for (const loc of list) {
-    const hit = protectedLocs.find((p) =>
-      cleanup && !p.live ? deadReservationCovers(p, loc) : protectedLocCovers(p, loc),
-    );
+    const hit = protectedLocs.find((p) => protectedCoversForOp(p, loc, op));
     if (hit) throw new LocProtectedError(loc, hit, op);
   }
 }

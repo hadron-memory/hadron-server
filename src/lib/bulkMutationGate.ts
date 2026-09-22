@@ -37,7 +37,7 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 import { lockMemoryForChannelChange } from './channels.js';
-import { LocProtectedError, protectedLocsIn, protectedLocCovers, type ChannelReader } from './protectedLoc.js';
+import { LocProtectedError, protectedLocsIn, protectedCoversForOp, type ChannelReader } from './protectedLoc.js';
 import { GOVERNED_ROLES, governedKindsOf, RoleGovernedError } from './governedRole.js';
 
 /**
@@ -122,7 +122,12 @@ export async function assertNoProtectedReach(
     throw new LocProtectedError(entries[0].loc, entries[0], op);
   }
   for (const entry of entries) {
-    const hit = locs.find((loc) => protectedLocCovers(entry, loc));
+    // #1226 via the SHARED predicate: a dead Channel releases its orphaned
+    // descendants and still reserves its own address and the path to it. This
+    // was the third gate to need the rule and the one I missed twice
+    // (@copilot, PR #1257) — routed through `protectedCoversForOp` rather than
+    // given a fourth private copy of the liveness test.
+    const hit = locs.find((loc) => protectedCoversForOp(entry, loc, op));
     // Name the offending LOC, not just the Channel: a caller extracting a large
     // subtree has no other way to tell which of its nodes refused it (#1099).
     if (hit !== undefined) throw new LocProtectedError(hit, entry, op);

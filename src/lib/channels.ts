@@ -322,6 +322,24 @@ export async function ensureChannelWithRoot(
       // narrow on an INDEXED column, then compare parsed locs in memory and
       // delete by exact id. Memory-wide is affordable here — this path runs only
       // when an address is REUSED, and it selects two columns.
+      // NOT `startsWith`: Prisma compiles it to an unescaped `LIKE`, and `_` is
+      // both a wildcard and a legal loc character, so reusing `chats_foo` would
+      // have tombstoned nodes under an unrelated `chatsXfoo:messages:`
+      // (`findings:prisma-string-filters-are-unescaped-like`, @copilot).
+      //
+      // NOT a `gte`/`lt` range either, which I tried next: Postgres compares
+      // text by the database COLLATION, not by byte order, so a `:`/`;` bound
+      // does not reliably contain the subtree. It silently matched nothing and
+      // the reuse test caught it.
+      //
+      // So: narrow on the INDEXED column, compare parsed locs in memory, delete
+      // by exact id — the house pattern (`assertNoChannelOverlap`,
+      // `bulkMutationGate`, `chatLoc`). @copilot is right that this is an
+      // unbounded transfer in a large memory; it is accepted rather than
+      // missed, because this path runs ONLY when a deleted address is reused,
+      // selects two columns, and the alternatives are a wildcard hazard and a
+      // collation hazard respectively. If it ever matters, the fix is a raw
+      // `LIKE … ESCAPE`, not a return to either of those.
       const prefix = `${messagesLoc}:`;
       const candidates = await tx.node.findMany({
         where: { memoryId: args.memoryId, deletedAt: null },
