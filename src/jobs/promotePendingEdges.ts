@@ -9,7 +9,10 @@
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { db as defaultDb } from '../integrations/db/client.js';
-import { promotePendingEdgeForTarget } from '../lib/pendingEdgePromotion.js';
+import {
+  promotePendingEdgeForTarget,
+  reconcileAllPendingEdgeCounts,
+} from '../lib/pendingEdgePromotion.js';
 
 export interface PendingEdgePromotionSweepOutcome {
   promoted: number;
@@ -26,7 +29,6 @@ export async function runPendingEdgePromotionSweep(
     FROM pending_edges p
     JOIN nodes n ON n.id = p.target_id
     WHERE p.deleted_at IS NULL
-      AND n.deleted_at IS NULL
     ORDER BY p.updated_at ASC NULLS FIRST, p.id ASC
     LIMIT ${batchSize}
   `;
@@ -52,6 +54,10 @@ export async function runPendingEdgePromotionSweep(
       console.error(`[pending-edge-promotion] sweep failed for ${candidate.id}`, error);
     }
   }
+  // A source hard-delete cascades its PendingEdges before this sweep can see
+  // them. Reconcile from the authoritative live rows so those lost links, plus
+  // legacy/MCP rows that were never incrementally credited, self-heal too.
+  await reconcileAllPendingEdgeCounts(db);
   return outcome;
 }
 

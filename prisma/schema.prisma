@@ -798,8 +798,8 @@ model Memory {
   syncStatus           SyncStatus        @default(PENDING) @map("sync_status")
   /// Error message from the last failed sync.
   syncError            String?           @map("sync_error")
-  /// Number of unresolved PendingEdge records (denormalized for
-  /// dashboard display).
+  /// Number of live unresolved PendingEdge records whose live source is in
+  /// this memory (a derived projection, denormalized for dashboard display).
   pendingEdgeCount     Int               @default(0) @map("pending_edge_count")
   // 006-asset-upload-redesign (2026-05-01): per-memory upload acceptance
   // flag. Default true at the column level; system-class memories must

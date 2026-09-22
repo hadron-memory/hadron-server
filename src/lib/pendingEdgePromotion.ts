@@ -11,6 +11,48 @@ const MAX_PENDING_EDGE_PROMOTION_RETRIES = 3;
 const INITIAL_PENDING_EDGE_RETRY_DELAY_MS = 100;
 const MAX_PENDING_EDGE_RETRY_DELAY_MS = 5_000;
 
+/** Recompute the dashboard count from the live queue rows it describes. */
+export async function reconcilePendingEdgeCount(
+  db: PrismaClient | Prisma.TransactionClient,
+  memoryId: string,
+): Promise<void> {
+  await db.$executeRaw`
+    UPDATE memories AS m
+    SET pending_edge_count = (
+      SELECT COUNT(*)::integer
+      FROM pending_edges AS p
+      JOIN nodes AS s ON s.id = p.source_id
+      WHERE p.deleted_at IS NULL
+        AND s.deleted_at IS NULL
+        AND s.memory_id = m.id
+    )
+    WHERE m.id = ${memoryId}
+  `;
+}
+
+/** Periodic repair also covers queue rows removed by an FK cascade. */
+export async function reconcileAllPendingEdgeCounts(db: PrismaClient): Promise<void> {
+  await db.$executeRaw`
+    UPDATE memories AS m
+    SET pending_edge_count = (
+      SELECT COUNT(*)::integer
+      FROM pending_edges AS p
+      JOIN nodes AS s ON s.id = p.source_id
+      WHERE p.deleted_at IS NULL
+        AND s.deleted_at IS NULL
+        AND s.memory_id = m.id
+    )
+    WHERE m.pending_edge_count IS DISTINCT FROM (
+      SELECT COUNT(*)::integer
+      FROM pending_edges AS p
+      JOIN nodes AS s ON s.id = p.source_id
+      WHERE p.deleted_at IS NULL
+        AND s.deleted_at IS NULL
+        AND s.memory_id = m.id
+    )
+  `;
+}
+
 async function consumePendingEdge(
   tx: Prisma.TransactionClient,
   pending: Pick<PendingEdge, 'id' | 'sourceId' | 'targetId'>,
@@ -24,16 +66,10 @@ async function consumePendingEdge(
       deletedAt: null,
     },
   });
-  if (deleted.count === 1) {
-    // Git sync maintains this denormalized source-memory count. MCP and
-    // hand-authored legacy rows may not have credited it, so clamp at zero
-    // while settling the queue row in the same transaction.
-    await tx.$executeRaw`
-      UPDATE memories
-      SET pending_edge_count = GREATEST(pending_edge_count - 1, 0)
-      WHERE id = ${sourceMemoryId}
-    `;
-  }
+  // The queue predates this counter and some writers never credited their
+  // rows. Recompute instead of decrementing: a clamp prevents negatives but
+  // can still steal another live row's credit.
+  await reconcilePendingEdgeCount(tx, sourceMemoryId);
   return deleted.count === 1;
 }
 
@@ -87,8 +123,12 @@ export async function promotePendingEdgeForTarget(
   const retryDelayMs = opts.retryDelayMs ?? INITIAL_PENDING_EDGE_RETRY_DELAY_MS;
 
   for (let attempt = 0; ; attempt++) {
-    const p = await db.pendingEdge.findUnique({ where: { id: pendingId } });
+    const p = await db.pendingEdge.findUnique({
+      where: { id: pendingId },
+      include: { source: { select: { memoryId: true } } },
+    });
     if (!p) return;
+    const sourceMemoryId = p.source.memoryId;
 
     const [pSource, pTarget] = await Promise.all([
       db.node.findUnique({
@@ -101,13 +141,10 @@ export async function promotePendingEdgeForTarget(
       }),
     ]);
     if (!pSource || pSource.deletedAt || !pTarget || pTarget.deletedAt) {
-      if (!pSource) {
-        // The source FK cascades PendingEdge deletion. If it vanished between
-        // reads, there is no source memory left whose counter we can settle.
-        await db.pendingEdge.deleteMany({ where: { id: p.id } });
-        return;
-      }
-      await db.$transaction((tx) => consumePendingEdge(tx, p, pSource.memoryId));
+      await db.$transaction(async (tx) => {
+        await lockEdgeEndpointMemories(tx, [sourceMemoryId]);
+        await consumePendingEdge(tx, p, sourceMemoryId);
+      });
       return;
     }
 
@@ -185,7 +222,7 @@ export async function promotePendingEdgeForTarget(
           db,
           p.id,
           targetNodeId,
-          pSource.memoryId,
+          sourceMemoryId,
         );
         if (stablePendingId && opts.scheduleFastRetry !== false) {
           const timer = setTimeout(() => {

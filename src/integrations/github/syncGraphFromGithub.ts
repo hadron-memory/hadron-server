@@ -24,6 +24,7 @@ import type { Prisma } from '../../generated/prisma/index.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
+import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 
 function decryptToken(ciphertext: string): string {
   const key = process.env.HADRON_ENCRYPTION_KEY;
@@ -141,7 +142,6 @@ export const syncGraphFromGithub = async (
     const { graph: fsGraph, edges, skippedInvalidLoc } = await loadGraphFromFs(localPath, graphName, ownerRepo);
 
     // 4. Upsert all nodes and edges into the database (transactional)
-    let pendingEdgeCount = 0;
     // Spec 033 T029 — defer embedding enqueue until after the transaction
     // commits. The plaintext was loaded from the filesystem by
     // loadNodeFromFs (FR-013 reconcile already ran), so it's safe to use
@@ -619,9 +619,9 @@ export const syncGraphFromGithub = async (
             create: { id: generateId(), sourceId: edgeSourceId, targetId: edgeTargetId, name: edge.name },
             update: { name: edge.name },
           });
-          pendingEdgeCount++;
         }
         }
+        await reconcilePendingEdgeCount(tx, graph.id);
       });
     } catch (error) {
       if (
@@ -640,7 +640,7 @@ export const syncGraphFromGithub = async (
     // 5. Record sync time and status
     await db.memory.update({
       where: { id: graph.id },
-      data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null, pendingEdgeCount },
+      data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null },
     }).catch(() => {});
 
     // 6. Spec 033 T029 — enqueue embedding for each upserted node now that

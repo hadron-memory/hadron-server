@@ -89,6 +89,55 @@ describe('durable PendingEdge promotion sweep', () => {
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(0);
   });
 
+  it('selects a tombstoned stable target so its queued work is consumed', async () => {
+    const { target, pending } = await seedStablePending();
+    await db.node.update({
+      where: { id: target.id },
+      data: { deletedAt: new Date() },
+    });
+
+    await expect(runPendingEdgePromotionSweep(db)).resolves.toEqual({
+      promoted: 1,
+      failed: 0,
+      examined: 1,
+    });
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(0);
+  });
+
+  it('recomputes instead of stealing another pending row credit', async () => {
+    const { source, target, pending } = await seedStablePending();
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    const parked = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId: 'still-unresolved',
+        name: 'parked',
+      },
+    });
+
+    await runPendingEdgePromotionSweep(db);
+
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+    expect(await db.pendingEdge.findUnique({ where: { id: parked.id } })).not.toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(1);
+  });
+
+  it('repairs the count after a hard source delete cascades the queue row', async () => {
+    const { source, pending } = await seedStablePending();
+    await db.node.delete({ where: { id: source.id } });
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(1);
+
+    await expect(runPendingEdgePromotionSweep(db)).resolves.toEqual({
+      promoted: 0,
+      failed: 0,
+      examined: 0,
+    });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(0);
+  });
+
   it('fires on its own schedule so restart recovery is an active path', async () => {
     const { source, target, pending } = await seedStablePending();
     loop = startPendingEdgePromotionSweepLoop(db, 10_000, 5);
