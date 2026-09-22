@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbNode, createDbOrgAndGraph } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
+import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import {
   runPendingEdgePromotionSweep,
   startPendingEdgePromotionSweepLoop,
@@ -136,6 +137,42 @@ describe('durable PendingEdge promotion sweep', () => {
       examined: 0,
     });
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(0);
+  });
+
+  it('retains pending work when another cross-memory edge occupies its derived loc', async () => {
+    const { source, target, pending } = await seedStablePending();
+    const { graph: otherMemory } = await createDbOrgAndGraph(db, {
+      orgName: `pending-collision-${Date.now()}`,
+      graphName: 'pending/collision',
+    });
+    const otherTarget = await createDbNode(db, { memoryId: otherMemory.id, loc: target.loc });
+    const occupiedLoc = deriveEdgeLoc(source.loc, 'durable', otherTarget.loc);
+    const occupied = await db.edge.create({
+      data: {
+        id: generateId(),
+        memoryId,
+        sourceId: source.id,
+        targetId: otherTarget.id,
+        loc: occupiedLoc,
+        name: 'durable',
+      },
+    });
+
+    await expect(runPendingEdgePromotionSweep(db)).resolves.toEqual({
+      promoted: 0,
+      failed: 1,
+      examined: 1,
+    });
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
+    expect(await db.edge.findUniqueOrThrow({ where: { id: occupied.id } })).toMatchObject({
+      sourceId: source.id,
+      targetId: otherTarget.id,
+      deletedAt: null,
+    });
+    expect(await db.edge.count({
+      where: { sourceId: source.id, targetId: target.id, name: 'durable', deletedAt: null },
+    })).toBe(0);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(1);
   });
 
   it('fires on its own schedule so restart recovery is an active path', async () => {

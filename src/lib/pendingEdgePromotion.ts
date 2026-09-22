@@ -6,6 +6,7 @@ import { generateId } from './id.js';
 import { acquireLockSet, ancestorLocs } from './nodeSubtreeLock.js';
 
 class PendingEdgePromotionPreflightStale extends Error {}
+class PendingEdgePromotionLocCollision extends Error {}
 
 const MAX_PENDING_EDGE_PROMOTION_RETRIES = 3;
 const INITIAL_PENDING_EDGE_RETRY_DELAY_MS = 100;
@@ -197,7 +198,7 @@ export async function promotePendingEdgeForTarget(
             currentPending.name,
             currentTarget.loc,
           );
-          await tx.edge.upsert({
+          const promotedEdge = await tx.edge.upsert({
             where: { loc_memoryId: { loc: pEdgeLoc, memoryId: currentSource.memoryId } },
             create: {
               id: generateId(),
@@ -209,6 +210,16 @@ export async function promotePendingEdgeForTarget(
             },
             update: {},
           });
+          if (
+            promotedEdge.deletedAt ||
+            promotedEdge.sourceId !== currentSource.id ||
+            promotedEdge.targetId !== currentTarget.id ||
+            promotedEdge.name !== currentPending.name
+          ) {
+            throw new PendingEdgePromotionLocCollision(
+              `Pending edge ${currentPending.id} cannot promote: edge loc ${pEdgeLoc} is already occupied`,
+            );
+          }
         }
         return consumePendingEdge(tx, currentPending, pSource.memoryId);
       });
