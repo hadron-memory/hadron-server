@@ -245,6 +245,42 @@ describe('protection (S4)', () => {
     expect(err.message).not.toContain('DELETED');
   });
 
+  it('a tombstoned Channel still reserves its ROOT and ancestors against delete (#1226 P1)', async () => {
+    // @codex P1 on PR #1257. `Channel.chatRoot` is `onDelete: Cascade`, so a
+    // HARD delete of the tombstoned root physically removes the node, cascades
+    // the Channel row away, and takes the reservation with it — after which a
+    // generic writer can occupy the address. The carve-out releases the
+    // orphaned SUBTREE; it must not release the root or the path to it.
+    const ch = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const target = ch.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
+    await M.createChannelMessage({}, { channelRef: target.id, body: 'x' }, ctx(admin.id));
+    const rootId = (await db.node.findFirstOrThrow({
+      where: { memoryId: appMem.id, loc: 'chats:team' }, select: { id: true },
+    })).id;
+    await M.deleteChannel({}, { ref: target.id }, ctx(admin.id));
+
+    // The ROOT itself stays reserved, soft or hard.
+    await expect(
+      M.deleteNode({}, { nodeRef: rootId }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+    await expect(
+      M.deleteNode({}, { nodeRef: rootId, hard: true }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+
+    // And so does an ANCESTOR — deleting `chats` would take the root with it.
+    const ancestorId = (await db.node.findFirstOrThrow({
+      where: { memoryId: appMem.id, loc: 'chats' }, select: { id: true },
+    })).id;
+    await expect(
+      M.deleteNode({}, { nodeRef: ancestorId, hard: true }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+
+    // The reservation survived, so the address cannot be occupied.
+    await expect(
+      M.createNode({}, { input: { memoryId: appMem.urn, loc: 'chats:team', name: 'squat' } }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+  });
+
   it('the lock helpers gate, and the Channel owner passes with ownedByOperation', async () => {
     await db.$transaction(async (tx) => {
       await expect(lockAncestorsForCreate(tx, appMem.id, 'chats:team:messages:0002')).rejects.toBeInstanceOf(LocProtectedError);

@@ -168,6 +168,26 @@ const CHANNEL_BACKED_OPS = new Set(['write', 'create', 'create under']);
 const CLEANUP_OPS = new Set(['delete', 'delete under']);
 
 /**
+ * Does a TOMBSTONED Channel's reservation still cover `loc` for a cleanup op?
+ *
+ * Only STRICT DESCENDANTS are released — never the reserved root itself, and
+ * never an ancestor of it. @codex, PR #1257, P1: `Channel.chatRoot` is
+ * `onDelete: Cascade`, so a `deleteNode(hard: true)` on the tombstoned root (or
+ * a recursive hard delete of an ancestor) physically removes the node, cascades
+ * the CHANNEL ROW away, and takes the reservation with it — after which a
+ * generic writer can occupy the former Channel address.
+ *
+ * That is the exact property the carve-out promises to preserve, defeated
+ * through the one delete that is not a soft delete. The orphaned subtree is
+ * what needs removing; the root is what needs keeping.
+ */
+function deadReservationCovers(entry: ProtectedLoc, loc: string): boolean {
+  // `loc` is the entry itself, or an ancestor of it (deleting `chats` would
+  // take `chats:team` with it). A strict descendant is released.
+  return loc === entry.loc || entry.loc.startsWith(`${loc}:`);
+}
+
+/**
  * The remedy sentence — what a refused caller should use INSTEAD, when anything can.
  *
  * `live` matters, and getting it wrong is the defect #1226 was filed for.
@@ -237,11 +257,15 @@ export async function assertLocWritable(
   const all = await protectedLocsIn(db, memoryId);
   const protectedLocs = owns ? all.filter((p) => p.source !== owns) : all;
   if (protectedLocs.length === 0) return;
-  // #1226: a tombstoned Channel does not block cleanup of what it orphaned.
-  const relevant = CLEANUP_OPS.has(op) ? protectedLocs.filter((p) => p.live) : protectedLocs;
-  if (relevant.length === 0) return;
+  // #1226: a tombstoned Channel does not block cleanup of what it ORPHANED —
+  // but it still reserves its own address and the path to it, because a hard
+  // delete of the root cascades the Channel row away (see
+  // `deadReservationCovers`).
+  const cleanup = CLEANUP_OPS.has(op);
   for (const loc of list) {
-    const hit = relevant.find((p) => protectedLocCovers(p, loc));
+    const hit = protectedLocs.find((p) =>
+      cleanup && !p.live ? deadReservationCovers(p, loc) : protectedLocCovers(p, loc),
+    );
     if (hit) throw new LocProtectedError(loc, hit, op);
   }
 }
@@ -299,8 +323,14 @@ export function protectedDeletionFilter(protectedLocs: ProtectedLoc[]): {
   // which is what its header warns about in the other direction (@codex, PR
   // #1257). Filtering HERE rather than at the two call sites is the point —
   // `ask this function, do not rebuild it`.
-  const notClauses = protectedLocs.filter((p) => p.live).flatMap((p) => {
+  const notClauses = protectedLocs.flatMap((p) => {
     const ancestors = ancestorsOf(p.loc);
+    // A DEAD Channel releases only its orphaned DESCENDANTS: the reserved root
+    // and the path to it stay excluded, or a bulk hard delete cascades the
+    // Channel row away and frees the address (@codex, PR #1257, P1).
+    if (!p.live) {
+      return [{ loc: p.loc }, ...(ancestors.length ? [{ loc: { in: ancestors } }] : [])];
+    }
     return [
       { loc: p.loc },
       { loc: { startsWith: `${p.loc}:` } },
