@@ -35,10 +35,33 @@ export async function lockLiveEdgeEndpointSet(
   tx: Prisma.TransactionClient,
   endpoints: readonly EdgeEndpointSnapshot[],
 ): Promise<Map<string, EdgeEndpointSnapshot>> {
-  for (const memoryId of [...new Set(endpoints.map((endpoint) => endpoint.memoryId))].sort()) {
+  await lockEdgeEndpointMemories(tx, endpoints.map((endpoint) => endpoint.memoryId));
+  return liveEdgeEndpointSet(tx, endpoints);
+}
+
+/**
+ * Acquire the Channel-reuse keys for a complete edge-endpoint memory set.
+ *
+ * Inline node writes call this before taking any loc lock or changing the
+ * source node, then revalidate with `liveEdgeEndpointSet` after the source
+ * write but before replacing its edges. Splitting those two phases lets the
+ * source mutation and edge replacement share one transaction without trying
+ * to validate a source row that a create has not inserted yet.
+ */
+export async function lockEdgeEndpointMemories(
+  tx: Prisma.TransactionClient,
+  memoryIds: readonly string[],
+): Promise<void> {
+  for (const memoryId of [...new Set(memoryIds)].sort()) {
     await lockMemoryForChannelChange(tx, memoryId);
   }
+}
 
+/** Revalidate endpoint identity and liveness while the caller holds its memory keys. */
+export async function liveEdgeEndpointSet(
+  tx: Prisma.TransactionClient,
+  endpoints: readonly EdgeEndpointSnapshot[],
+): Promise<Map<string, EdgeEndpointSnapshot>> {
   const rows = await tx.node.findMany({
     where: { id: { in: [...new Set(endpoints.map((endpoint) => endpoint.id))] }, deletedAt: null },
     select: { id: true, loc: true, memoryId: true },

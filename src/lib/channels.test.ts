@@ -406,6 +406,60 @@ describe('protection (S4)', () => {
     }
   }, 20_000);
 
+  it('rolls back a GraphQL inline node update when reuse invalidates its edge target (#1226)', async () => {
+    const { channel } = await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:inline-edge-race', name: 'inline-edge-race', createdBy: admin.id,
+    });
+    const oldMessage = await M.createChannelMessage(
+      {}, { channelRef: channel.id, body: 'old transcript' }, ctx(admin.id),
+    );
+    const source = await db.node.create({
+      data: { id: generateId(), memoryId: appMem.id, loc: 'inline-edge-source', name: 'source' },
+    });
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, appMem.id);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const reusing = ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:inline-edge-race', name: 'inline-edge-race', createdBy: admin.id,
+    });
+    try {
+      await waitForChannelMemoryLockWaiter(appMem.id);
+      const updating = M.updateNode(
+        {},
+        {
+          input: {
+            id: source.id,
+            content: 'must roll back with the rejected edge set',
+            edges: [{ targetId: oldMessage.nodeId, name: 'stale-target' }],
+          },
+        },
+        ctx(admin.id),
+      );
+      await waitForChannelMemoryLockWaiter(appMem.id, 10_000, 2);
+      signalRelease();
+      await holder;
+      await reusing;
+
+      await expect(updating).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+      expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).content).toBeNull();
+      expect(await db.nodeRevision.count({ where: { nodeId: source.id } })).toBe(0);
+      expect(await db.edge.count({ where: { targetId: oldMessage.nodeId, deletedAt: null } })).toBe(0);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
   it('reuse treats underscores literally while tombstoning the old transcript (#1226)', async () => {
     const { channel } = await ensureChannelWithRoot(db, {
       memoryId: appMem.id, loc: 'chats_team', name: 'underscored', createdBy: admin.id,

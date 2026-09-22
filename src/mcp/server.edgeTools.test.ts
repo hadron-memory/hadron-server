@@ -16,6 +16,7 @@ import { generateId } from '../lib/id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
+import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../lib/channels.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -41,6 +42,32 @@ const node = (loc: string, name: string) =>
   db.node.create({
     data: { id: generateId(), memoryId: memId, loc, name, ownerRepo: 'test/repo', tags: [] },
   });
+
+async function waitForChannelMemoryLockWaiters(
+  memoryId: string,
+  minimumWaiters: number,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const key = `channel-host:${memoryId}`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT count(*)::bigint AS count
+      FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND classid = (((hashtext(${key})::bigint >> 32) & 4294967295))::oid
+        AND objid = ((hashtext(${key})::bigint & 4294967295))::oid
+        AND objsubid = 1
+    `;
+    if (Number(count) >= minimumWaiters) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${minimumWaiters} Channel memory-lock waiter(s) on ${memoryId}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -85,6 +112,133 @@ describe('the hazard #835 exists to remove', () => {
     // ...and nothing in the response says so.
     expect(out).not.toMatch(/deleted|removed|dropped/i);
   });
+
+  it('rolls back the inline node update when Channel reuse invalidates an edge target', async () => {
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: memId,
+      loc: 'chats:inline-edge-race',
+      name: 'inline-edge-race',
+      createdBy: adminId,
+    });
+    const oldMessage = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: memId,
+        loc: 'chats:inline-edge-race:messages:0001',
+        name: 'old message',
+      },
+    });
+    const deletedAt = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt } }),
+    ]);
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, memId);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const reusing = ensureChannelWithRoot(db, {
+      memoryId: memId,
+      loc: 'chats:inline-edge-race',
+      name: 'inline-edge-race',
+      createdBy: adminId,
+    });
+    try {
+      await waitForChannelMemoryLockWaiters(memId, 1);
+      const updating = call('hadron_update_node', {
+        urn: `${memUrn.replace(':', '::')}::${source.loc}`,
+        content: 'must roll back with the rejected edge set',
+        edges: [{ targetUrn: oldMessage.id, name: 'stale-target' }],
+      });
+      await waitForChannelMemoryLockWaiters(memId, 2);
+      signalRelease();
+      await holder;
+      await reusing;
+
+      const out = await updating;
+      expect(out).toContain(`Edge target not found: "${oldMessage.id}"`);
+      expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).content).toBeNull();
+      expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(3);
+      expect(await db.edge.count({ where: { targetId: oldMessage.id, deletedAt: null } })).toBe(0);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
+  it('serializes PendingEdge promotion with reuse and drops a tombstoned source', async () => {
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: memId,
+      loc: 'chats:pending-edge-race',
+      name: 'pending-edge-race',
+      createdBy: adminId,
+    });
+    const oldMessage = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: memId,
+        loc: 'chats:pending-edge-race:messages:0001',
+        name: 'old message',
+      },
+    });
+    await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: oldMessage.id,
+        targetId: 'future-target',
+        name: 'stale-pending',
+      },
+    });
+    const deletedAt = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt } }),
+    ]);
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, memId);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const reusing = ensureChannelWithRoot(db, {
+      memoryId: memId,
+      loc: 'chats:pending-edge-race',
+      name: 'pending-edge-race',
+      createdBy: adminId,
+    });
+    try {
+      await waitForChannelMemoryLockWaiters(memId, 1);
+      const creating = call('hadron_create_node', {
+        urn: `${memUrn.replace(':', '::')}::future-target`,
+        name: 'future target',
+      });
+      await waitForChannelMemoryLockWaiters(memId, 2);
+      signalRelease();
+      await holder;
+      await reusing;
+
+      expect(await creating).toMatch(/Node saved/);
+      expect(await db.edge.count({ where: { sourceId: oldMessage.id, deletedAt: null } })).toBe(0);
+      expect(await db.pendingEdge.count({ where: { sourceId: oldMessage.id } })).toBe(0);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
 });
 
 describe('hadron_update_edge — the single-edge intent (#835)', () => {

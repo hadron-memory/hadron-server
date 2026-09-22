@@ -41,12 +41,16 @@ function decryptToken(ciphertext: string): string {
 // sync is org-scoped, so the sync fn returns early when it's null.
 export type MemoryWithOrg = Memory & { organization: Organization | null };
 
+class EdgeEndpointPreflightStale extends Error {}
+const MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES = 3;
+
 /**
  * Sync a memory from GitHub: clone/pull the repo, load nodes from filesystem,
  * and upsert them into the database.
  */
 export const syncGraphFromGithub = async (
   graph: MemoryWithOrg,
+  edgeEndpointPreflightAttempt = 0,
 ): Promise<{
   error?: string;
   nodeCount?: number;
@@ -205,7 +209,8 @@ export const syncGraphFromGithub = async (
     ])].sort();
     const edgeEndpointMemoryIdSet = new Set(edgeEndpointMemoryIds);
 
-    await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
+    try {
+      await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // Hold every endpoint memory key in one stable order for the ENTIRE
       // snapshot-to-cleanup/edge-write interval. This includes graph.id, so it
       // preserves the cleanup-vs-resurrection serialization added earlier.
@@ -439,7 +444,12 @@ export const syncGraphFromGithub = async (
             where: { id: p.sourceId, deletedAt: null },
             select: { loc: true, memoryId: true },
           });
-          if (pSrc && edgeEndpointMemoryIdSet.has(pSrc.memoryId)) {
+          if (pSrc && !edgeEndpointMemoryIdSet.has(pSrc.memoryId)) {
+            throw new EdgeEndpointPreflightStale(
+              `PendingEdge source ${p.sourceId} became live in unlocked memory ${pSrc.memoryId}`,
+            );
+          }
+          if (pSrc) {
             const pLoc = p.loc ?? deriveEdgeLoc(pSrc.loc, p.name, loc);
             await tx.edge.upsert({
               where: { loc_memoryId: { loc: pLoc, memoryId: pSrc.memoryId } },
@@ -507,7 +517,12 @@ export const syncGraphFromGithub = async (
           where: { id: edgeTargetId, deletedAt: null },
           select: { id: true, loc: true, memoryId: true },
         });
-        if (targetExists && edgeEndpointMemoryIdSet.has(targetExists.memoryId)) {
+        if (targetExists && !edgeEndpointMemoryIdSet.has(targetExists.memoryId)) {
+          throw new EdgeEndpointPreflightStale(
+            `Edge target ${edgeTargetId} became live in unlocked memory ${targetExists.memoryId}`,
+          );
+        }
+        if (targetExists) {
           // Spec 037: the edge's identity is its loc within the source's
           // memory (= graph.id here; the source came from this repo). Derive
           // it deterministically so re-syncs are idempotent.
@@ -539,8 +554,21 @@ export const syncGraphFromGithub = async (
           });
           pendingEdgeCount++;
         }
+        }
+      });
+    } catch (error) {
+      if (
+        error instanceof EdgeEndpointPreflightStale &&
+        edgeEndpointPreflightAttempt < MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES
+      ) {
+        // A live cross-memory endpoint appeared after preflight. Treating it as
+        // absent would strand a resolvable PendingEdge after the target sync's
+        // promotion pass already ran. Abort this transaction and rerun the
+        // whole preflight so the new endpoint memory joins the stable lock set.
+        return syncGraphFromGithub(graph, edgeEndpointPreflightAttempt + 1);
       }
-    });
+      throw error;
+    }
 
     // 5. Record sync time and status
     await db.memory.update({

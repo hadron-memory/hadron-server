@@ -52,7 +52,11 @@ import {
 } from '../../../lib/validateLoc.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
-import { lockLiveEdgeEndpoints } from '../../../lib/edgeEndpointLock.js';
+import {
+  liveEdgeEndpointSet,
+  lockEdgeEndpointMemories,
+  lockLiveEdgeEndpoints,
+} from '../../../lib/edgeEndpointLock.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
@@ -462,6 +466,7 @@ export async function writeNodeCore(
       let resolvedEdges: Array<{
         targetNodeId: string;
         targetLoc: string;
+        targetMemoryId: string;
         name: string | null;
         loc: string | null;
         description: string | null;
@@ -519,6 +524,7 @@ export async function writeNodeCore(
             resolvedEdges.push({
               targetNodeId,
               targetLoc: tgt.loc,
+              targetMemoryId: tgt.memoryId,
               name: e.name ?? null,
               loc: e.loc ?? null,
               description: e.description ?? null,
@@ -559,23 +565,28 @@ export async function writeNodeCore(
       // claim-to-write window is caught there.
       let claimedRevNo: number | undefined;
       if (mode === 'update' && opts?.guardRevSeq !== undefined && existing) {
-        const claimed = await ctx.db.node.updateMany({
-          where: { id: existing.id, revSeq: opts.guardRevSeq },
-          data: { revSeq: { increment: 1 } },
-        });
-        if (claimed.count === 0) {
-          throw new GraphQLError(
-            `Node at loc "${input.loc}" changed since it was read — re-read and retry.`,
-            {
-              extensions: {
-                code: 'NODE_WRITE_CONFLICT',
-                loc: input.loc,
-                memoryId: input.memoryId,
-              },
-            },
-          );
-        }
         claimedRevNo = opts.guardRevSeq + 1;
+        // Inline edge writes claim inside the same endpoint-locked transaction
+        // as the source mutation and edge replacement. Otherwise a vanished
+        // target could roll back the visible edit while leaving revSeq bumped.
+        if (resolvedEdges === null) {
+          const claimed = await ctx.db.node.updateMany({
+            where: { id: existing.id, revSeq: opts.guardRevSeq },
+            data: { revSeq: { increment: 1 } },
+          });
+          if (claimed.count === 0) {
+            throw new GraphQLError(
+              `Node at loc "${input.loc}" changed since it was read — re-read and retry.`,
+              {
+                extensions: {
+                  code: 'NODE_WRITE_CONFLICT',
+                  loc: input.loc,
+                  memoryId: input.memoryId,
+                },
+              },
+            );
+          }
+        }
       }
 
       // The fields this write will change, in the shape diffNodeChanges wants.
@@ -606,15 +617,18 @@ export async function writeNodeCore(
       // smaller defect (a failed write can leave an orphan revision, since the
       // snapshot does not commit with it). Out of scope here and filed
       // separately rather than restructured inside a concurrency fix.
-      if (existing && mode === 'update') {
-        await createNodeRevision(ctx.db, {
+      const updateRevisionData = existing && mode === 'update'
+        ? {
           ...buildNodeRevisionSnapshot(existing, editorFromAuth(ctx), {
             revLabel: input.reason,
             changes: diffNodeChanges(existing, suppliedForDiff),
           }),
           // #989: a guarded update already claimed its number atomically.
           ...(claimedRevNo !== undefined ? { revNo: claimedRevNo } : {}),
-        });
+        }
+        : null;
+      if (updateRevisionData && resolvedEdges === null) {
+        await createNodeRevision(ctx.db, updateRevisionData);
       }
 
       // Tags partial-update semantics (hadron-cli#37). A create always
@@ -757,6 +771,68 @@ export async function writeNodeCore(
         outgoingEdges: { include: { target: true } },
         incomingEdges: { include: { source: true } },
       };
+
+      // Inline edge replacement is part of the node mutation, not a follow-up
+      // write. Acquire the complete endpoint-memory set BEFORE any loc lock or
+      // source mutation, then revalidate and replace inside that same
+      // transaction. If Channel reuse wins first, the endpoint refusal rolls
+      // back the node write too; if this write wins, reuse waits until both the
+      // source and its outgoing edge set commit together.
+      const inlineEdgeTargets = resolvedEdges?.map((edge) => ({
+        id: edge.targetNodeId,
+        loc: edge.targetLoc,
+        memoryId: edge.targetMemoryId,
+      })) ?? [];
+      async function lockInlineEdgeMemories(tx: Prisma.TransactionClient): Promise<void> {
+        if (resolvedEdges === null) return;
+        await lockEdgeEndpointMemories(tx, [
+          input.memoryId,
+          ...inlineEdgeTargets.map((target) => target.memoryId),
+        ]);
+      }
+      async function replaceInlineEdges<T extends { id: string; loc: string; memoryId: string }>(
+        tx: Prisma.TransactionClient,
+        writtenNode: T,
+      ): Promise<T> {
+        if (resolvedEdges === null) return writtenNode;
+        const sourceSnapshot = {
+          id: writtenNode.id,
+          loc: writtenNode.loc,
+          memoryId: writtenNode.memoryId,
+        };
+        const live = await liveEdgeEndpointSet(tx, [sourceSnapshot, ...inlineEdgeTargets]);
+        if (!live.has(sourceSnapshot.id)) {
+          throw new GraphQLError(`Source node not found: "${writtenNode.id}"`, {
+            extensions: { code: 'NODE_NOT_FOUND' },
+          });
+        }
+        const missing = resolvedEdges.find((edge) => !live.has(edge.targetNodeId));
+        if (missing) {
+          throw new GraphQLError(`Edge target not found: "${missing.targetNodeId}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: missing.targetNodeId },
+          });
+        }
+
+        await tx.edge.deleteMany({ where: { sourceId: writtenNode.id } });
+        await tx.pendingEdge.deleteMany({ where: { sourceId: writtenNode.id } });
+        if (resolvedEdges.length > 0) {
+          await tx.edge.createMany({
+            data: resolvedEdges.map((edge) => ({
+              memoryId: writtenNode.memoryId,
+              sourceId: writtenNode.id,
+              targetId: edge.targetNodeId,
+              loc: edge.loc ?? deriveEdgeLoc(writtenNode.loc, edge.name, edge.targetLoc),
+              name: edge.name,
+              description: edge.description,
+              isRunnable: edge.isRunnable,
+              createdBy,
+            })),
+            skipDuplicates: true,
+          });
+        }
+        const refreshed = await tx.node.findUniqueOrThrow({ where: { id: writtenNode.id }, include });
+        return refreshed as unknown as T;
+      }
 
       /**
        * Re-read the update target UNDER THE ADDRESS LOCK and refuse if the world
@@ -937,15 +1013,32 @@ export async function writeNodeCore(
           // be created, or the node moved under one, in between; Copilot on
           // PR #1165).
           const guarded = await ctx.db.$transaction(async (tx) => {
+            await lockInlineEdgeMemories(tx);
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
               op: mode === 'update' ? 'update' : 'create',
             });
             await assertTargetStillWritable(tx);
-            return tx.node.updateMany({
+            if (resolvedEdges !== null) {
+              const claimed = await tx.node.updateMany({
+                where: { id: existing!.id, revSeq: opts!.guardRevSeq },
+                data: { revSeq: { increment: 1 } },
+              });
+              if (claimed.count === 0) return { count: 0, node: null };
+              await createNodeRevision(tx, updateRevisionData!);
+            }
+            const result = await tx.node.updateMany({
               where: guardWhere,
               data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
             });
+            if (result.count === 0) return { count: 0, node: null };
+            const updated = await tx.node.findUniqueOrThrow({
+              where: opts?.targetNodeId
+                ? { id: opts.targetNodeId }
+                : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
+              include,
+            });
+            return { count: result.count, node: await replaceInlineEdges(tx, updated) };
           });
           if (guarded.count === 0) {
             throw new GraphQLError(
@@ -959,12 +1052,7 @@ export async function writeNodeCore(
               },
             );
           }
-          node = await ctx.db.node.findUniqueOrThrow({
-            where: opts?.targetNodeId
-              ? { id: opts.targetNodeId }
-              : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-            include,
-          });
+          node = guarded.node!;
         } else if (mode === 'update') {
           // Same lock-then-gate discipline as the guarded branch above, and the
           // same reason for the extra `where` terms: the re-check is not atomic
@@ -974,12 +1062,16 @@ export async function writeNodeCore(
           // them; a no-match raises P2025, which the catch below maps to the
           // typed NODE_NOT_FOUND.
           node = await ctx.db.$transaction(async (tx) => {
+            await lockInlineEdgeMemories(tx);
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
               op: mode === 'update' ? 'update' : 'create',
             });
             await assertTargetStillWritable(tx);
-            return tx.node.update({
+            if (updateRevisionData && resolvedEdges !== null) {
+              await createNodeRevision(tx, updateRevisionData);
+            }
+            const updated = await tx.node.update({
               where: opts?.targetNodeId
                 ? {
                     id: opts.targetNodeId,
@@ -994,6 +1086,7 @@ export async function writeNodeCore(
               data: updatePayload,
               include,
             });
+            return replaceInlineEdges(tx, updated);
           });
         } else {
           // Create/upsert. A new node placed into a subtree must be serialized
@@ -1032,6 +1125,7 @@ export async function writeNodeCore(
           // under the transaction — a root-level Channel address was
           // otherwise overwritable here (Copilot on PR #1165, round 2).
           node = await ctx.db.$transaction(async (tx) => {
+            await lockInlineEdgeMemories(tx);
             await lockAncestorsForCreate(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
             });
@@ -1126,7 +1220,7 @@ export async function writeNodeCore(
             // both worlds" #543 exists to prevent, reachable again through the
             // window this transaction was added to close. The MCP path already
             // overrides the same way (src/mcp/server.ts).
-            return tx.node.upsert({
+            const upserted = await tx.node.upsert({
               ...upsertArgs,
               update: {
                 ...upsertArgs.update,
@@ -1139,6 +1233,7 @@ export async function writeNodeCore(
                   : {}),
               } as Prisma.NodeUncheckedUpdateInput,
             });
+            return replaceInlineEdges(tx, upserted);
           });
         }
       } catch (e) {
@@ -1186,38 +1281,7 @@ export async function writeNodeCore(
         decryptNodeFields(node, memEncInfo);
       }
 
-      let finalNode = node;
-      if (resolvedEdges !== null) {
-        // Replace the source's outgoing edges with the resolved set.
-        // skipDuplicates: true defends against a duplicate (loc, memoryId)
-        // inside the input array itself (e.g. two edges that derive the
-        // same loc). Spec 037: each edge carries memoryId (= source's
-        // memory) and a loc (author-supplied or derived).
-        await ctx.db.edge.deleteMany({ where: { sourceId: node.id } });
-        await ctx.db.pendingEdge.deleteMany({ where: { sourceId: node.id } });
-        if (resolvedEdges.length > 0) {
-          await ctx.db.edge.createMany({
-            data: resolvedEdges.map((e) => ({
-              memoryId: node.memoryId,
-              sourceId: node.id,
-              targetId: e.targetNodeId,
-              loc: e.loc ?? deriveEdgeLoc(node.loc, e.name, e.targetLoc),
-              name: e.name,
-              description: e.description,
-              isRunnable: e.isRunnable,
-              createdBy,
-            })),
-            skipDuplicates: true,
-          });
-        }
-        finalNode = (await ctx.db.node.findUnique({
-          where: { id: node.id },
-          include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
-        }))!;
-        if (memEncInfo.isEncrypted) {
-          decryptNodeFields(finalNode, memEncInfo);
-        }
-      }
+      const finalNode = node;
 
       // Event pivot: the write core announces the fact; subscribers (git
       // mirror, embedding wake, whatever comes next) act on it. Encrypted

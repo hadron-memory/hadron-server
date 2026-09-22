@@ -50,7 +50,11 @@ import { normalizeObjectType } from '../lib/enforceNodeSchema.js';
 import type { MemorySchema } from '../lib/memorySchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
-import { lockLiveEdgeEndpoints } from '../lib/edgeEndpointLock.js';
+import {
+  liveEdgeEndpointSet,
+  lockEdgeEndpointMemories,
+  lockLiveEdgeEndpoints,
+} from '../lib/edgeEndpointLock.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -355,6 +359,8 @@ export type ResolvedEdge = {
   targetNodeId: string;
   /** Target node's loc — used to derive the edge loc when none is authored. */
   targetLoc: string;
+  /** Target memory participates in the Channel-reuse lock set. */
+  targetMemoryId: string;
   name: string | null;
   /** Author-supplied loc, or null to derive from endpoints + name at write. */
   loc: string | null;
@@ -414,6 +420,7 @@ export async function resolveEdgeRefs(
       resolved.push({
         targetNodeId,
         targetLoc: tgt.loc,
+        targetMemoryId: tgt.memoryId,
         name: edge.name ?? null,
         loc: edge.loc ?? null,
         description: edge.description ?? null,
@@ -616,8 +623,9 @@ export async function addEdge(args: {
  * single `$transaction` so we never observe a state where the
  * existing edges are gone but the new ones are missing.
  *
- * Caller must have already validated targets via `resolveEdgeRefs` —
- * this function performs only writes. Each row gets an explicit
+ * Caller must have already validated targets via `resolveEdgeRefs`. The
+ * endpoint snapshots are revalidated under the Channel-reuse memory keys
+ * before replacement. Each row gets an explicit
  * UUIDv7 from `generateId()` because the Prisma client extension at
  * `src/integrations/db/client.ts` only auto-injects IDs on `create`
  * and `upsert`, not on `createMany`.
@@ -628,27 +636,70 @@ export async function replaceOutgoingEdges(args: {
   sourceMemoryId: string;
   resolved: ResolvedEdge[];
   createdBy: string | null;
-}): Promise<void> {
-  await db.$transaction(async (tx) => {
-    await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId } });
-    await tx.pendingEdge.deleteMany({ where: { sourceId: args.sourceNodeId } });
-    if (args.resolved.length > 0) {
-      await tx.edge.createMany({
-        data: args.resolved.map((e) => ({
-          id: generateId(),
-          memoryId: args.sourceMemoryId,
-          sourceId: args.sourceNodeId,
-          targetId: e.targetNodeId,
-          loc: e.loc ?? deriveEdgeLoc(args.sourceLoc, e.name, e.targetLoc),
-          name: e.name,
-          description: e.description,
-          isRunnable: e.isRunnable,
-          createdBy: args.createdBy,
-        })),
-        skipDuplicates: true,
-      });
-    }
+}): Promise<string | null> {
+  return db.$transaction(async (tx) => {
+    await lockOutgoingEdgeMemories(tx, args.sourceMemoryId, args.resolved);
+    return replaceOutgoingEdgesInTransaction(tx, args);
   });
+}
+
+class InlineEdgeEndpointError extends Error {}
+
+async function lockOutgoingEdgeMemories(
+  tx: Prisma.TransactionClient,
+  sourceMemoryId: string,
+  resolved: readonly ResolvedEdge[],
+): Promise<void> {
+  await lockEdgeEndpointMemories(tx, [
+    sourceMemoryId,
+    ...resolved.map((edge) => edge.targetMemoryId),
+  ]);
+}
+
+async function replaceOutgoingEdgesInTransaction(
+  tx: Prisma.TransactionClient,
+  args: {
+    sourceNodeId: string;
+    sourceLoc: string;
+    sourceMemoryId: string;
+    resolved: ResolvedEdge[];
+    createdBy: string | null;
+  },
+): Promise<string | null> {
+  const source = {
+    id: args.sourceNodeId,
+    loc: args.sourceLoc,
+    memoryId: args.sourceMemoryId,
+  };
+  const targets = args.resolved.map((edge) => ({
+    id: edge.targetNodeId,
+    loc: edge.targetLoc,
+    memoryId: edge.targetMemoryId,
+  }));
+  const live = await liveEdgeEndpointSet(tx, [source, ...targets]);
+  if (!live.has(source.id)) return `Source node not found: "${source.id}".`;
+  const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
+  if (missing) return `Edge target not found: "${missing.targetNodeId}"`;
+
+  await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId } });
+  await tx.pendingEdge.deleteMany({ where: { sourceId: args.sourceNodeId } });
+  if (args.resolved.length > 0) {
+    await tx.edge.createMany({
+      data: args.resolved.map((e) => ({
+        id: generateId(),
+        memoryId: args.sourceMemoryId,
+        sourceId: args.sourceNodeId,
+        targetId: e.targetNodeId,
+        loc: e.loc ?? deriveEdgeLoc(args.sourceLoc, e.name, e.targetLoc),
+        name: e.name,
+        description: e.description,
+        isRunnable: e.isRunnable,
+        createdBy: args.createdBy,
+      })),
+      skipDuplicates: true,
+    });
+  }
+  return null;
 }
 
 /**
@@ -4607,6 +4658,9 @@ export function createMcpServerInstance(
       let upserted;
       try {
         upserted = await db.$transaction(async (tx) => {
+          if (resolvedEdges !== null) {
+            await lockOutgoingEdgeMemories(tx, memoryId, resolvedEdges);
+          }
           await lockAncestorsForCreate(tx, memoryId, loc); // no-op at a root-level loc
           await lockLocForWrite(tx, memoryId, loc);
 
@@ -4629,7 +4683,7 @@ export function createMcpServerInstance(
           if (authoritative && !authoritative.deletedAt) throw LIVE_LOC_CONFLICT;
 
           const pre = await snapshotOverwrittenNode(tx);
-          return tx.node.upsert({
+          const written = await tx.node.upsert({
             ...upsertArgs,
             // Resurrect (#543) on the authoritative row, not the stale probe: a
             // tombstone that appeared after it would otherwise stay flagged
@@ -4639,22 +4693,24 @@ export function createMcpServerInstance(
               ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
             } as any,
           });
+          if (resolvedEdges !== null) {
+            const edgeError = await replaceOutgoingEdgesInTransaction(tx, {
+              sourceNodeId: written.id,
+              sourceLoc: written.loc,
+              sourceMemoryId: written.memoryId,
+              resolved: resolvedEdges,
+              createdBy: auth.clientId ?? null,
+            });
+            if (edgeError) throw new InlineEdgeEndpointError(edgeError);
+          }
+          return written;
         });
       } catch (e) {
         if (e === LIVE_LOC_CONFLICT) {
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
+        if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
         throw e;
-      }
-
-      if (resolvedEdges !== null) {
-        await replaceOutgoingEdges({
-          sourceNodeId: upserted.id,
-          sourceLoc: loc,
-          sourceMemoryId: memoryId,
-          resolved: resolvedEdges,
-          createdBy: auth.clientId ?? null,
-        });
       }
 
       // Resolve any PendingEdges waiting for this node (by ID or loc).
@@ -4668,22 +4724,33 @@ export function createMcpServerInstance(
           where: { id: p.sourceId },
           select: { loc: true, memoryId: true },
         });
-        if (pSource) {
-          const pEdgeLoc = p.loc ?? deriveEdgeLoc(pSource.loc, p.name, upserted.loc);
-          await db.edge.upsert({
-            where: { loc_memoryId: { loc: pEdgeLoc, memoryId: pSource.memoryId } },
-            create: {
-              id: generateId(),
-              memoryId: pSource.memoryId,
-              sourceId: p.sourceId,
-              targetId: upserted.id,
-              loc: pEdgeLoc,
-              name: p.name,
-            },
-            update: {},
-          });
+        if (!pSource) {
+          await db.pendingEdge.delete({ where: { id: p.id } });
+          continue;
         }
-        await db.pendingEdge.delete({ where: { id: p.id } });
+        await db.$transaction(async (tx) => {
+          const locked = await lockLiveEdgeEndpoints(
+            tx,
+            { id: p.sourceId, loc: pSource.loc, memoryId: pSource.memoryId },
+            { id: upserted.id, loc: upserted.loc, memoryId: upserted.memoryId },
+          );
+          if (locked.source && locked.target) {
+            const pEdgeLoc = p.loc ?? deriveEdgeLoc(locked.source.loc, p.name, locked.target.loc);
+            await tx.edge.upsert({
+              where: { loc_memoryId: { loc: pEdgeLoc, memoryId: locked.source.memoryId } },
+              create: {
+                id: generateId(),
+                memoryId: locked.source.memoryId,
+                sourceId: locked.source.id,
+                targetId: locked.target.id,
+                loc: pEdgeLoc,
+                name: p.name,
+              },
+              update: {},
+            });
+          }
+          await tx.pendingEdge.delete({ where: { id: p.id } });
+        });
       }
 
       // Record usage event (#796 memoryId + 046 FR-001 attribution, as in
@@ -4963,29 +5030,32 @@ export function createMcpServerInstance(
       // records the fields this update supplies with a different value.
       // Written HERE (not before the decrypt) so `abstractOriginHash` can be
       // part of that delta — see the preAtRest comment above.
-      await createNodeRevision(db, {
+      const revisionData = {
         id: generateId(),
         ...buildNodeRevisionSnapshot(preAtRest, editorFromAuth(auth), {
-            revLabel: reason,
-            changes: diffNodeChanges(preAtRest, {
-              name,
-              nodeType,
-              objectType,
-              isRunnable,
-              role,
-              description,
-              abstract: normalizedAbstract,
-              content,
-              abstractOriginHash: nextAbstractOriginHash,
-              seq,
-              tags,
-              properties,
-              data: nodeData,
-              llmModel,
-              aiAgent,
-            }),
+          revLabel: reason,
+          changes: diffNodeChanges(preAtRest, {
+            name,
+            nodeType,
+            objectType,
+            isRunnable,
+            role,
+            description,
+            abstract: normalizedAbstract,
+            content,
+            abstractOriginHash: nextAbstractOriginHash,
+            seq,
+            tags,
+            properties,
+            data: nodeData,
+            llmModel,
+            aiAgent,
           }),
-      }).catch(() => {});
+        }),
+      };
+      if (resolvedEdges === null) {
+        await createNodeRevision(db, revisionData).catch(() => {});
+      }
 
       // Build partial update — only fields that were provided
       const data: Record<string, unknown> = {};
@@ -5023,29 +5093,38 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
-      if (Object.keys(data).length > 0) {
+      if (Object.keys(data).length > 0 || resolvedEdges !== null) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
         try {
           await db.$transaction(async (tx) => {
+            if (resolvedEdges !== null) {
+              await lockOutgoingEdgeMemories(tx, existing.memoryId, resolvedEdges);
+            }
             await lockLocForWrite(tx, memory.id, loc);
-            await tx.node.update({ where: { id: existing.id }, data });
+            if (resolvedEdges !== null) {
+              await createNodeRevision(tx, revisionData);
+            }
+            const updated = Object.keys(data).length > 0
+              ? await tx.node.update({ where: { id: existing.id }, data })
+              : existing;
+            if (resolvedEdges !== null) {
+              const edgeError = await replaceOutgoingEdgesInTransaction(tx, {
+                sourceNodeId: updated.id,
+                sourceLoc: updated.loc,
+                sourceMemoryId: updated.memoryId,
+                resolved: resolvedEdges,
+                createdBy: auth.clientId ?? null,
+              });
+              if (edgeError) throw new InlineEdgeEndpointError(edgeError);
+            }
           });
         } catch (e) {
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+          if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           throw e;
         }
-      }
-
-      if (resolvedEdges !== null) {
-        await replaceOutgoingEdges({
-          sourceNodeId: existing.id,
-          sourceLoc: existing.loc,
-          sourceMemoryId: existing.memoryId,
-          resolved: resolvedEdges,
-          createdBy: auth.clientId ?? null,
-        });
       }
 
       // Record usage event (#796 memoryId + 046 FR-001 attribution, as in

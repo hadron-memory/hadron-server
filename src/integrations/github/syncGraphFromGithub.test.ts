@@ -561,6 +561,56 @@ describe('Channel-protected mirror cleanup (#1226)', () => {
     }
   }, 20_000);
 
+  it('retries preflight when a cross-memory target becomes live after the lock set was collected', async () => {
+    const { graph: targetMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'late-edge-target-org',
+      graphName: 'late/edge-target',
+    });
+    const targetId = 'ffff999900000000000000000000000009';
+    const sourceDir = join(repoRoot(), 'late-source');
+    mkdirSync(sourceDir, { recursive: true });
+    writeNodeFiles(sourceDir, {
+      name: 'late source',
+      nodes: [{ id: targetId, rel: 'points to late target' }],
+    });
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, dbGraphId);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const syncing = syncGraphFromGithub(makeGraph());
+    try {
+      // The first preflight saw no target and is now waiting to enter its
+      // transaction with only dbGraphId in the endpoint-memory set.
+      await waitForChannelMemoryLockWaiters(dbGraphId, 1);
+      await db.node.create({
+        data: {
+          id: targetId,
+          memoryId: targetMemory.id,
+          loc: 'targets:late',
+          name: 'late target',
+        },
+      });
+      signalRelease();
+      await holder;
+
+      const result = await syncing;
+      expect(result.error).toBeUndefined();
+      expect(await db.edge.count({ where: { targetId, deletedAt: null } })).toBe(1);
+      expect(await db.pendingEdge.count({ where: { targetId } })).toBe(0);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
   it('keeps a skipped file that still exists under a dead Channel and deletes only the true orphan', async () => {
     const keptId = 'aaaa999900000000000000000000000001';
     const goneId = 'bbbb999900000000000000000000000002';
