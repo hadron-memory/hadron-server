@@ -50,7 +50,7 @@ import { normalizeObjectType } from '../lib/enforceNodeSchema.js';
 import type { MemorySchema } from '../lib/memorySchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
-import { lockLiveEdgeEndpoints, lockLiveEdgeEndpointSet } from '../lib/edgeEndpointLock.js';
+import { lockLiveEdgeEndpoints } from '../lib/edgeEndpointLock.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -355,8 +355,6 @@ export type ResolvedEdge = {
   targetNodeId: string;
   /** Target node's loc — used to derive the edge loc when none is authored. */
   targetLoc: string;
-  /** Target memory participates in the Channel-reuse lock set. */
-  targetMemoryId: string;
   name: string | null;
   /** Author-supplied loc, or null to derive from endpoints + name at write. */
   loc: string | null;
@@ -416,7 +414,6 @@ export async function resolveEdgeRefs(
       resolved.push({
         targetNodeId,
         targetLoc: tgt.loc,
-        targetMemoryId: tgt.memoryId,
         name: edge.name ?? null,
         loc: edge.loc ?? null,
         description: edge.description ?? null,
@@ -619,9 +616,8 @@ export async function addEdge(args: {
  * single `$transaction` so we never observe a state where the
  * existing edges are gone but the new ones are missing.
  *
- * Caller must have already validated targets via `resolveEdgeRefs`. The
- * function then locks every endpoint memory and revalidates the resolved
- * identities before replacing anything. Each row gets an explicit
+ * Caller must have already validated targets via `resolveEdgeRefs` —
+ * this function performs only writes. Each row gets an explicit
  * UUIDv7 from `generateId()` because the Prisma client extension at
  * `src/integrations/db/client.ts` only auto-injects IDs on `create`
  * and `upsert`, not on `createMany`.
@@ -632,25 +628,8 @@ export async function replaceOutgoingEdges(args: {
   sourceMemoryId: string;
   resolved: ResolvedEdge[];
   createdBy: string | null;
-}): Promise<string | null> {
-  return db.$transaction(async (tx) => {
-    const source = {
-      id: args.sourceNodeId,
-      loc: args.sourceLoc,
-      memoryId: args.sourceMemoryId,
-    };
-    const live = await lockLiveEdgeEndpointSet(tx, [
-      source,
-      ...args.resolved.map((edge) => ({
-        id: edge.targetNodeId,
-        loc: edge.targetLoc,
-        memoryId: edge.targetMemoryId,
-      })),
-    ]);
-    if (!live.has(source.id)) return `Source node not found: "${source.id}".`;
-    const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
-    if (missing) return `Edge target not found: "${missing.targetNodeId}"`;
-
+}): Promise<void> {
+  await db.$transaction(async (tx) => {
     await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId } });
     await tx.pendingEdge.deleteMany({ where: { sourceId: args.sourceNodeId } });
     if (args.resolved.length > 0) {
@@ -669,7 +648,6 @@ export async function replaceOutgoingEdges(args: {
         skipDuplicates: true,
       });
     }
-    return null;
   });
 }
 
@@ -4670,14 +4648,13 @@ export function createMcpServerInstance(
       }
 
       if (resolvedEdges !== null) {
-        const edgeWriteError = await replaceOutgoingEdges({
+        await replaceOutgoingEdges({
           sourceNodeId: upserted.id,
           sourceLoc: loc,
           sourceMemoryId: memoryId,
           resolved: resolvedEdges,
           createdBy: auth.clientId ?? null,
         });
-        if (edgeWriteError) return textResult(edgeWriteError);
       }
 
       // Resolve any PendingEdges waiting for this node (by ID or loc).
@@ -5062,14 +5039,13 @@ export function createMcpServerInstance(
       }
 
       if (resolvedEdges !== null) {
-        const edgeWriteError = await replaceOutgoingEdges({
+        await replaceOutgoingEdges({
           sourceNodeId: existing.id,
           sourceLoc: existing.loc,
           sourceMemoryId: existing.memoryId,
           resolved: resolvedEdges,
           createdBy: auth.clientId ?? null,
         });
-        if (edgeWriteError) return textResult(edgeWriteError);
       }
 
       // Record usage event (#796 memoryId + 046 FR-001 attribution, as in

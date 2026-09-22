@@ -6,7 +6,7 @@ import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../
 import { splitGitArgv } from '../../test/gitArgv.js';
 import { GIT_TRANSPORT_GUARD } from './execGit.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
-import { ensureChannelWithRoot } from '../../lib/channels.js';
+import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/channels.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -115,6 +115,32 @@ async function gitCalls(): Promise<{ guarded: boolean; args: string[] }[]> {
   const { execFile } = await import('child_process');
   const execFileMock = execFile as unknown as ReturnType<typeof vi.fn>;
   return execFileMock.mock.calls.map((c: any[]) => splitGitArgv(c[1] as string[]));
+}
+
+async function waitForChannelMemoryLockWaiters(
+  memoryId: string,
+  minimumWaiters: number,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const key = `channel-host:${memoryId}`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT count(*)::bigint AS count
+      FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND classid = (((hashtext(${key})::bigint >> 32) & 4294967295))::oid
+        AND objid = ((hashtext(${key})::bigint & 4294967295))::oid
+        AND objsubid = 1
+    `;
+    if (Number(count) >= minimumWaiters) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${minimumWaiters} Channel memory-lock waiter(s) on ${memoryId}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 describe('syncGraphFromGithub', () => {
@@ -468,6 +494,72 @@ describe('move-aware identity', () => {
 
 describe('Channel-protected mirror cleanup (#1226)', () => {
   const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+
+  it('locks a cross-memory edge target through Channel reuse before inserting', async () => {
+    const { graph: targetMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'edge-target-org',
+      graphName: 'edge/target',
+    });
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: targetMemory.id,
+      loc: 'chats:edge-race',
+      name: 'edge-race',
+      createdBy: null,
+    });
+    const oldMessage = await db.node.create({
+      data: {
+        id: 'eeee999900000000000000000000000009',
+        memoryId: targetMemory.id,
+        loc: 'chats:edge-race:messages:0001',
+        name: 'old message',
+      },
+    });
+    const deletedAt = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt } }),
+    ]);
+
+    const sourceDir = join(repoRoot(), 'source');
+    mkdirSync(sourceDir, { recursive: true });
+    writeNodeFiles(sourceDir, {
+      name: 'source',
+      nodes: [{ id: oldMessage.id, rel: 'points to old transcript' }],
+    });
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, targetMemory.id);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const reusing = ensureChannelWithRoot(db, {
+      memoryId: targetMemory.id,
+      loc: 'chats:edge-race',
+      name: 'edge-race',
+      createdBy: null,
+    });
+    try {
+      await waitForChannelMemoryLockWaiters(targetMemory.id, 1);
+      const syncing = syncGraphFromGithub(makeGraph());
+      await waitForChannelMemoryLockWaiters(targetMemory.id, 2);
+      signalRelease();
+      await holder;
+      await reusing;
+      const result = await syncing;
+      expect(result.error).toBeUndefined();
+      expect(await db.edge.count({ where: { targetId: oldMessage.id, deletedAt: null } })).toBe(0);
+      expect(await db.pendingEdge.count({ where: { targetId: oldMessage.id } })).toBe(1);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
 
   it('keeps a skipped file that still exists under a dead Channel and deletes only the true orphan', async () => {
     const keptId = 'aaaa999900000000000000000000000001';

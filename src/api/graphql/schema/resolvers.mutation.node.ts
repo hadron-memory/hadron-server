@@ -52,7 +52,7 @@ import {
 } from '../../../lib/validateLoc.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
-import { lockLiveEdgeEndpoints, lockLiveEdgeEndpointSet } from '../../../lib/edgeEndpointLock.js';
+import { lockLiveEdgeEndpoints } from '../../../lib/edgeEndpointLock.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
@@ -462,7 +462,6 @@ export async function writeNodeCore(
       let resolvedEdges: Array<{
         targetNodeId: string;
         targetLoc: string;
-        targetMemoryId: string;
         name: string | null;
         loc: string | null;
         description: string | null;
@@ -520,7 +519,6 @@ export async function writeNodeCore(
             resolvedEdges.push({
               targetNodeId,
               targetLoc: tgt.loc,
-              targetMemoryId: tgt.memoryId,
               name: e.name ?? null,
               loc: e.loc ?? null,
               description: e.description ?? null,
@@ -1190,52 +1188,32 @@ export async function writeNodeCore(
 
       let finalNode = node;
       if (resolvedEdges !== null) {
-        finalNode = await ctx.db.$transaction(async (tx) => {
-          const sourceSnapshot = { id: node.id, loc: node.loc, memoryId: node.memoryId };
-          const live = await lockLiveEdgeEndpointSet(tx, [
-            sourceSnapshot,
-            ...resolvedEdges.map((edge) => ({
-              id: edge.targetNodeId,
-              loc: edge.targetLoc,
-              memoryId: edge.targetMemoryId,
+        // Replace the source's outgoing edges with the resolved set.
+        // skipDuplicates: true defends against a duplicate (loc, memoryId)
+        // inside the input array itself (e.g. two edges that derive the
+        // same loc). Spec 037: each edge carries memoryId (= source's
+        // memory) and a loc (author-supplied or derived).
+        await ctx.db.edge.deleteMany({ where: { sourceId: node.id } });
+        await ctx.db.pendingEdge.deleteMany({ where: { sourceId: node.id } });
+        if (resolvedEdges.length > 0) {
+          await ctx.db.edge.createMany({
+            data: resolvedEdges.map((e) => ({
+              memoryId: node.memoryId,
+              sourceId: node.id,
+              targetId: e.targetNodeId,
+              loc: e.loc ?? deriveEdgeLoc(node.loc, e.name, e.targetLoc),
+              name: e.name,
+              description: e.description,
+              isRunnable: e.isRunnable,
+              createdBy,
             })),
-          ]);
-          if (!live.has(sourceSnapshot.id)) {
-            throw new GraphQLError(`Source node not found: "${node.id}"`, {
-              extensions: { code: 'NODE_NOT_FOUND' },
-            });
-          }
-          const missing = resolvedEdges.find((edge) => !live.has(edge.targetNodeId));
-          if (missing) {
-            throw new GraphQLError(`Edge target not found: "${missing.targetNodeId}"`, {
-              extensions: { code: 'NODE_NOT_FOUND', ref: missing.targetNodeId },
-            });
-          }
-
-          // Replace the source's outgoing edges with the resolved set while
-          // holding every endpoint memory's Channel-reuse key.
-          await tx.edge.deleteMany({ where: { sourceId: node.id } });
-          await tx.pendingEdge.deleteMany({ where: { sourceId: node.id } });
-          if (resolvedEdges.length > 0) {
-            await tx.edge.createMany({
-              data: resolvedEdges.map((e) => ({
-                memoryId: node.memoryId,
-                sourceId: node.id,
-                targetId: e.targetNodeId,
-                loc: e.loc ?? deriveEdgeLoc(node.loc, e.name, e.targetLoc),
-                name: e.name,
-                description: e.description,
-                isRunnable: e.isRunnable,
-                createdBy,
-              })),
-              skipDuplicates: true,
-            });
-          }
-          return tx.node.findUniqueOrThrow({
-            where: { id: node.id },
-            include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+            skipDuplicates: true,
           });
-        });
+        }
+        finalNode = (await ctx.db.node.findUnique({
+          where: { id: node.id },
+          include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+        }))!;
         if (memEncInfo.isEncrypted) {
           decryptNodeFields(finalNode, memEncInfo);
         }

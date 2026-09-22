@@ -152,12 +152,66 @@ export const syncGraphFromGithub = async (
     // and can be returned to the caller.
     const writtenNodes: { id: string; loc: string; memoryId: string }[] = [];
     const skippedProtected: string[] = [];
+
+    // #1226 / PR #1257 — collect every memory whose node may become an edge
+    // endpoint in this transaction BEFORE taking any Channel-memory key. Git
+    // edges may target another memory, and incoming PendingEdges may originate
+    // in another memory; locking only graph.id lets either writer land after a
+    // concurrent Channel reuse has swept the old transcript's edges.
+    //
+    // The preflight deliberately over-approximates. A file-id remap can turn a
+    // raw external id into this graph's own row, and an existing loc row can
+    // survive with an id different from the file's frontmatter. Extra memory
+    // locks cost one advisory round trip; a missed endpoint memory reopens a
+    // deleted-message disclosure.
+    const candidateLocs = fsGraph.nodes
+      .map((node) => node.loc)
+      .filter((loc): loc is string => typeof loc === 'string' && loc !== '');
+    const rawTargetIds = [...new Set(edges.map((edge) => edge.targetId))];
+    const [rawTargets, existingGraphRows] = await Promise.all([
+      rawTargetIds.length
+        ? db.node.findMany({
+            where: { id: { in: rawTargetIds } },
+            select: { memoryId: true },
+          })
+        : [],
+      candidateLocs.length
+        ? db.node.findMany({
+            where: { memoryId: graph.id, loc: { in: candidateLocs } },
+            select: { id: true },
+          })
+        : [],
+    ]);
+    const incomingTargetIds = [...new Set([
+      ...fsGraph.nodes.flatMap((node) => node.id ? [node.id] : []),
+      ...existingGraphRows.map((row) => row.id),
+    ])];
+    const incomingPending = incomingTargetIds.length
+      ? await db.pendingEdge.findMany({
+          where: { targetId: { in: incomingTargetIds } },
+          select: { sourceId: true },
+        })
+      : [];
+    const pendingSources = incomingPending.length
+      ? await db.node.findMany({
+          where: { id: { in: [...new Set(incomingPending.map((edge) => edge.sourceId))] } },
+          select: { memoryId: true },
+        })
+      : [];
+    const edgeEndpointMemoryIds = [...new Set([
+      graph.id,
+      ...rawTargets.map((node) => node.memoryId),
+      ...pendingSources.map((node) => node.memoryId),
+    ])].sort();
+    const edgeEndpointMemoryIdSet = new Set(edgeEndpointMemoryIds);
+
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
-      // Hold the same memory key as Channel create/restore for the ENTIRE
-      // snapshot-to-cleanup interval. Without it, a sync could observe a dead
-      // Channel, release its descendants in the deletion filter, and consume
-      // that stale verdict after another transaction resurrected the Channel.
-      await lockMemoryForChannelChange(tx, graph.id);
+      // Hold every endpoint memory key in one stable order for the ENTIRE
+      // snapshot-to-cleanup/edge-write interval. This includes graph.id, so it
+      // preserves the cleanup-vs-resurrection serialization added earlier.
+      for (const memoryId of edgeEndpointMemoryIds) {
+        await lockMemoryForChannelChange(tx, memoryId);
+      }
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
       // synced loc (deduped, root→leaf) up front so a concurrent non-recursive
@@ -382,10 +436,10 @@ export const syncGraphFromGithub = async (
         const pending = await tx.pendingEdge.findMany({ where: { targetId: rowId } });
         for (const p of pending) {
           const pSrc = await tx.node.findUnique({
-            where: { id: p.sourceId },
+            where: { id: p.sourceId, deletedAt: null },
             select: { loc: true, memoryId: true },
           });
-          if (pSrc) {
+          if (pSrc && edgeEndpointMemoryIdSet.has(pSrc.memoryId)) {
             const pLoc = p.loc ?? deriveEdgeLoc(pSrc.loc, p.name, loc);
             await tx.edge.upsert({
               where: { loc_memoryId: { loc: pLoc, memoryId: pSrc.memoryId } },
@@ -399,8 +453,8 @@ export const syncGraphFromGithub = async (
               },
               update: {},
             });
+            await tx.pendingEdge.delete({ where: { id: p.id } });
           }
-          await tx.pendingEdge.delete({ where: { id: p.id } });
         }
       }
 
@@ -450,10 +504,10 @@ export const syncGraphFromGithub = async (
         const edgeSourceId = locToRowId.get(edge.sourceLoc) ?? edge.sourceId;
         const edgeTargetId = fileIdToRowId.get(edge.targetId) ?? edge.targetId;
         const targetExists = await tx.node.findUnique({
-          where: { id: edgeTargetId },
-          select: { id: true, loc: true },
+          where: { id: edgeTargetId, deletedAt: null },
+          select: { id: true, loc: true, memoryId: true },
         });
-        if (targetExists) {
+        if (targetExists && edgeEndpointMemoryIdSet.has(targetExists.memoryId)) {
           // Spec 037: the edge's identity is its loc within the source's
           // memory (= graph.id here; the source came from this repo). Derive
           // it deterministically so re-syncs are idempotent.
