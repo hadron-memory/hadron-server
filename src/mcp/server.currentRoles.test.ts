@@ -9,6 +9,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { db } from '../integrations/db/client.js';
@@ -281,6 +282,47 @@ describe('#1251 — existing MCP sessions refresh platform roles', () => {
       error: { code: -32001, message: 'Session not found' },
       id: null,
     });
+  });
+
+  it('does not let an old close callback erase a same-ID replacement transport', async () => {
+    const { token } = await createUserAndToken();
+    const sessionId = await initializeSession(token);
+    vi.spyOn(db.user, 'findFirst').mockResolvedValueOnce(null as never);
+    const originalClose = StreamableHTTPServerTransport.prototype.close;
+    let markCloseStarted!: () => void;
+    const closeStarted = new Promise<void>((resolve) => {
+      markCloseStarted = resolve;
+    });
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    vi.spyOn(StreamableHTTPServerTransport.prototype, 'close').mockImplementationOnce(
+      async function (this: StreamableHTTPServerTransport) {
+        markCloseStarted();
+        await closeGate;
+        await originalClose.call(this);
+      },
+    );
+
+    // The first POST observes a missing live user, unregisters the old
+    // transport, and pauses while closing it.
+    const invalidating = mcpFetch(token, listToolsBody(28), sessionId);
+    await closeStarted;
+
+    // A reconnect may legally reuse the presented session ID while that old
+    // close is pending. The user's real row is still live, so initialization
+    // succeeds after the one-shot missing-user result above.
+    const replacement = await mcpFetch(token, initializeBody, sessionId);
+    expect(replacement.status).toBe(200);
+    expect(replacement.headers.get('mcp-session-id')).toBe(sessionId);
+
+    releaseClose();
+    expect((await invalidating).status).toBe(401);
+
+    // The old instance's delayed onclose must not delete the replacement.
+    const afterOldClose = await mcpFetch(token, listToolsBody(29), sessionId);
+    expect(afterOldClose.status).toBe(200);
   });
 
   it('serializes role refresh and dispatch for concurrent requests on one session', async () => {

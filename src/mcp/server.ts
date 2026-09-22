@@ -8576,6 +8576,23 @@ function respondMcpSessionNotFound(res: Response): void {
 }
 
 /**
+ * Remove state owned by one concrete transport. Session IDs can be reused by
+ * a reconnecting initialize request while an older transport is still closing;
+ * cleanup from the old instance must never erase that replacement's state.
+ */
+function unregisterMcpTransport(
+  sessionId: string,
+  transport: StreamableHTTPServerTransport,
+): boolean {
+  const registered = transports.get(sessionId);
+  if (registered && registered.transport !== transport) return false;
+  transports.delete(sessionId);
+  activeAppByMcpSession.delete(sessionId);
+  sessionKeyCache.evict(`mcp:${sessionId}`);
+  return true;
+}
+
+/**
  * Handle MCP requests on the Express /mcp endpoint.
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
@@ -8641,9 +8658,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
         // Account deletion revokes self-contained JWTs per request. Apply the
         // same liveness contract to an already-open MCP transport: zero roles
         // is a valid ordinary user, while a missing live user is no principal.
-        transports.delete(sessionId);
-        activeAppByMcpSession.delete(sessionId);
-        sessionKeyCache.evict(`mcp:${sessionId}`);
+        unregisterMcpTransport(sessionId, active.transport);
         await active.transport.close();
         res.status(401).json({ error: 'Authentication required' });
         return;
@@ -8856,11 +8871,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
   transport.onclose = () => {
     const sid = transport.sessionId;
-    if (sid) {
-      transports.delete(sid);
-      activeAppByMcpSession.delete(sid); // spec 026 — clear per-session active App
-      sessionKeyCache.evict(`mcp:${sid}`); // spec 041 — drop unlock keys with the session
-    }
+    if (sid) unregisterMcpTransport(sid, transport);
   };
 
   await mcpServer.connect(transport);
@@ -8886,8 +8897,9 @@ export async function handleMcpDelete(req: Request, res: Response): Promise<void
 
   const { transport } = transports.get(sessionId)!;
   await transport.close();
-  transports.delete(sessionId);
-  activeAppByMcpSession.delete(sessionId); // spec 026 — DELETE path also clears
-  sessionKeyCache.evict(`mcp:${sessionId}`); // spec 041 — DELETE drops unlock keys too
+  // close() normally triggers onclose first. Keep this fallback for SDK paths
+  // that do not, but make it identity-aware in case a same-ID replacement was
+  // registered between onclose and close() settling.
+  unregisterMcpTransport(sessionId, transport);
   res.status(200).json({ ok: true });
 }
