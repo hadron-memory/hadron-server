@@ -59,6 +59,21 @@ export interface ChannelRow {
   deletedAt: Date | null;
 }
 
+/** Preserve the public typed-error contract across every crypto step. */
+function translateSessionExpired<T>(memoryId: string, fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith('SESSION_EXPIRED')) {
+      throw new GraphQLError(
+        `SESSION_EXPIRED: memory ${memoryId} is encrypted but no active session key is available.`,
+        { extensions: { code: 'SESSION_EXPIRED', memoryId } },
+      );
+    }
+    throw e;
+  }
+}
+
 /**
  * The memory-level advisory lock Channel creation and `deleteMemory` share,
  * so "is this memory live?" / "does this memory host a Channel?" cannot be
@@ -186,10 +201,12 @@ async function resetReusedChannel(
 ): Promise<void> {
   const now = new Date();
   const root = await tx.node.findUniqueOrThrow({ where: { id: args.rootId }, select: { data: true } });
-  const plain = decryptNodeFields({ data: root.data }, args.memEncInfo);
-  const rootData = { ...((plain.data as Record<string, unknown> | null) ?? {}) };
-  delete rootData.lastMessageAt;
-  const encrypted = encryptNodeFields({ content: null, data: rootData }, args.memEncInfo);
+  const encrypted = translateSessionExpired(args.memoryId, () => {
+    const plain = decryptNodeFields({ data: root.data }, args.memEncInfo);
+    const rootData = { ...((plain.data as Record<string, unknown> | null) ?? {}) };
+    delete rootData.lastMessageAt;
+    return encryptNodeFields({ content: null, data: rootData }, args.memEncInfo);
+  });
 
   await tx.node.update({
     where: { id: args.rootId },
@@ -245,18 +262,12 @@ export async function ensureChannelWithRoot(
   // merely derivable but MEANINGLESS — it is neither of the marker's two
   // values. Nothing on the Channel path read it; `nodeSubtreeMove` did, and
   // now keys on `nodeType: 'chat'` instead (see its header).
-  let rootFields: { content: string | null; data: unknown };
-  try {
-    rootFields = encryptNodeFields(
+  const rootFields = translateSessionExpired(args.memoryId, () =>
+    encryptNodeFields(
       { content: null, data: { messageCount: 0, createdAt: new Date().toISOString() } },
       memEncInfo,
-    );
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith('SESSION_EXPIRED')) {
-      throw new GraphQLError(e.message, { extensions: { code: 'SESSION_EXPIRED', memoryId: args.memoryId } });
-    }
-    throw e;
-  }
+    ),
+  );
   const messagesLoc = `${args.loc}:messages`;
   return db.$transaction(async (tx) => {
     // The Channel OWNS this address: it passes the gate every generic writer is
