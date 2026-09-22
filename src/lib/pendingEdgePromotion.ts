@@ -107,8 +107,18 @@ export async function retargetPendingEdgeToStableId(
       },
     });
     if (duplicate && duplicate.id !== pending.id) {
-      await consumePendingEdge(tx, pending, sourceMemoryId);
-      return duplicate.id;
+      if (!duplicate.deletedAt) {
+        await consumePendingEdge(tx, pending, sourceMemoryId);
+        return duplicate.id;
+      }
+      // The unique key includes tombstones, so a cancelled retry row can
+      // otherwise block fresh durable work forever. Remove only the stale
+      // duplicate we observed; if it changed concurrently, leave both rows to
+      // the winning writer rather than consuming the current live work.
+      const removedStaleDuplicate = await tx.pendingEdge.deleteMany({
+        where: { id: duplicate.id, deletedAt: duplicate.deletedAt },
+      });
+      if (removedStaleDuplicate.count !== 1) return null;
     }
 
     const retargeted = await tx.pendingEdge.updateMany({

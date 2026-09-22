@@ -397,6 +397,36 @@ describe('syncGraphFromGithub', () => {
     expect(edges[0].name).toBe('depends on');
   });
 
+  it('does not promote a soft-deleted PendingEdge when its target is synced', async () => {
+    const { graph: sourceMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'cancelled-pending-source-org',
+      graphName: 'cancelled/pending-source',
+    });
+    const source = await db.node.create({
+      data: { id: generateId(), memoryId: sourceMemory.id, loc: 'source', name: 'source' },
+    });
+    const targetId = 'abab000000000000000000000000000000';
+    const cancelledAt = new Date();
+    const pending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId,
+        name: 'cancelled',
+        deletedAt: cancelledAt,
+      },
+    });
+    const targetDir = join(mockSources, 'test-org', 'test/repo', 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeNodeFiles(targetDir, { id: targetId, name: 'target' });
+
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.findUniqueOrThrow({ where: { id: pending.id } })).toMatchObject({
+      deletedAt: cancelledAt,
+    });
+    expect(await db.edge.count({ where: { sourceId: source.id, targetId } })).toBe(0);
+  });
+
   it('reconciles the foreign source memory when target sync promotes its PendingEdge', async () => {
     const { graph: sourceMemory } = await createDbOrgAndGraph(db, {
       orgName: 'foreign-pending-source-org',

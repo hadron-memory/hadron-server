@@ -484,7 +484,9 @@ export const syncGraphFromGithub = async (
         // Spec 037: the promoted Edge lives in its SOURCE node's memory (which
         // may differ from this repo's memory for cross-repo edges); derive its
         // loc from the source loc + name + this node's (target) loc.
-        const pending = await tx.pendingEdge.findMany({ where: { targetId: rowId } });
+        const pending = await tx.pendingEdge.findMany({
+          where: { targetId: rowId, deletedAt: null },
+        });
         for (const p of pending) {
           const pSrc = await tx.node.findUnique({
             where: { id: p.sourceId, deletedAt: null },

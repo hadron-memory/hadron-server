@@ -27,12 +27,12 @@ export async function runPendingEdgePromotionSweep(
   batchSize = 100,
 ): Promise<PendingEdgePromotionSweepOutcome> {
   const candidates = await db.$queryRaw<Array<{ id: string; targetId: string }>>`
-    SELECT p.id, n.id AS "targetId"
-    FROM pending_edges p
-    JOIN nodes n
-      ON n.id = substring(
+    SELECT
+      p.id,
+      substring(
         p.target_id FROM char_length(${PENDING_EDGE_STABLE_TARGET_PREFIX}) + 1
-      )
+      ) AS "targetId"
+    FROM pending_edges p
     WHERE p.deleted_at IS NULL
       AND starts_with(p.target_id, ${PENDING_EDGE_STABLE_TARGET_PREFIX})
     ORDER BY p.updated_at ASC NULLS FIRST, p.id ASC

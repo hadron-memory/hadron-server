@@ -128,6 +128,41 @@ describe('durable PendingEdge promotion sweep', () => {
     });
   });
 
+  it('replaces a soft-deleted stable duplicate instead of losing current work', async () => {
+    const source = await createDbNode(db, { memoryId, loc: 'source' });
+    const target = await createDbNode(db, { memoryId, loc: 'target' });
+    const pending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId: 'target-loc',
+        name: 'fresh-work',
+      },
+    });
+    const staleDuplicate = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId: pendingEdgeStableTargetKey(target.id),
+        name: 'cancelled-work',
+        deletedAt: new Date(),
+      },
+    });
+
+    await expect(retargetPendingEdgeToStableId(
+      db,
+      pending.id,
+      'target-loc',
+      target.id,
+      memoryId,
+    )).resolves.toBe(pending.id);
+    expect(await db.pendingEdge.findUnique({ where: { id: staleDuplicate.id } })).toBeNull();
+    expect(await db.pendingEdge.findUniqueOrThrow({ where: { id: pending.id } })).toMatchObject({
+      targetId: pendingEdgeStableTargetKey(target.id),
+      deletedAt: null,
+    });
+  });
+
   it('settles the source-memory count when a dead source makes the work terminal', async () => {
     const { source, pending } = await seedStablePending();
     await db.node.update({
@@ -150,6 +185,19 @@ describe('durable PendingEdge promotion sweep', () => {
       where: { id: target.id },
       data: { deletedAt: new Date() },
     });
+
+    await expect(runPendingEdgePromotionSweep(db)).resolves.toEqual({
+      promoted: 1,
+      failed: 0,
+      examined: 1,
+    });
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(0);
+  });
+
+  it('selects stable work whose target was hard-deleted so it can settle', async () => {
+    const { target, pending } = await seedStablePending();
+    await db.node.delete({ where: { id: target.id } });
 
     await expect(runPendingEdgePromotionSweep(db)).resolves.toEqual({
       promoted: 1,
