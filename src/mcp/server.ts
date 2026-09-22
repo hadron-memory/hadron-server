@@ -4744,7 +4744,9 @@ export function createMcpServerInstance(
               const lockedMemoryIds = new Set([pSource.memoryId, pTarget.memoryId]);
               await lockEdgeEndpointMemories(tx, [...lockedMemoryIds]);
               await acquireLockSet(tx, [
+                ...ancestorLocs(pSource.loc).map((loc) => ({ memoryId: pSource.memoryId, loc })),
                 { memoryId: pSource.memoryId, loc: pSource.loc },
+                ...ancestorLocs(pTarget.loc).map((loc) => ({ memoryId: pTarget.memoryId, loc })),
                 { memoryId: pTarget.memoryId, loc: pTarget.loc },
               ]);
 
@@ -4759,9 +4761,11 @@ export function createMcpServerInstance(
               // A move changes loc and may change memory while preserving the
               // endpoint's stable id. Do not confuse that with deletion and
               // discard the relationship. Abort and rerun preflight so both
-              // the endpoint's current memory key and current loc key join the
-              // lock set; once they match, the loc locks also prevent another
-              // move between this revalidation and insertion.
+              // the endpoint's current memory and complete ancestor-path key
+              // set joins the lock set. The ancestors are load-bearing: moving
+              // a parent rebases the endpoint without taking its old exact-loc
+              // key. Once the snapshots match, these path locks prevent either
+              // an exact or ancestor move between revalidation and insertion.
               if (
                 (currentSource &&
                   (currentSource.memoryId !== pSource.memoryId || currentSource.loc !== pSource.loc)) ||

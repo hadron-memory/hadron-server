@@ -69,6 +69,31 @@ async function waitForChannelMemoryLockWaiters(
   }
 }
 
+async function waitForLockWaiters(
+  lockType: 'advisory' | 'transactionid',
+  minimumWaiters: number,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT count(*)::bigint AS count
+      FROM pg_locks
+      WHERE locktype = ${lockType}
+        AND NOT granted
+        AND (
+          locktype = 'transactionid'
+          OR database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        )
+    `;
+    if (Number(count) >= minimumWaiters) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${minimumWaiters} ${lockType} lock waiter(s)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 beforeEach(async () => {
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'emcp-org', urn: 'emcp-org' } });
@@ -240,7 +265,7 @@ describe('the hazard #835 exists to remove', () => {
     }
   }, 20_000);
 
-  it('retries PendingEdge promotion when the source moves after preflight', async () => {
+  it('locks endpoint ancestors and retries promotion after an ancestor move', async () => {
     const { organizationId } = await db.memory.findUniqueOrThrow({
       where: { id: memId },
       select: { organizationId: true },
@@ -259,40 +284,76 @@ describe('the hazard #835 exists to remove', () => {
       },
     });
 
-    let signalHeld!: () => void;
-    let signalRelease!: () => void;
-    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
-    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
-    const holder = db.$transaction(async (tx) => {
-      await lockMemoryForChannelChange(tx, memId);
-      signalHeld();
-      await release;
+    const blockingEdge = await db.edge.findFirstOrThrow({
+      where: { sourceId: source.id, deletedAt: null },
+    });
+    let signalEdgeHeld!: () => void;
+    let signalEdgeRelease!: () => void;
+    const edgeHeld = new Promise<void>((resolve) => { signalEdgeHeld = resolve; });
+    const edgeRelease = new Promise<void>((resolve) => { signalEdgeRelease = resolve; });
+    const edgeHolder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM edges WHERE id = ${blockingEdge.id} FOR UPDATE`;
+      signalEdgeHeld();
+      await edgeRelease;
     }, { timeout: 20_000 });
 
-    await held;
+    let signalMemoryHeld!: () => void;
+    let signalMemoryRelease!: () => void;
+    const memoryHeld = new Promise<void>((resolve) => { signalMemoryHeld = resolve; });
+    const memoryRelease = new Promise<void>((resolve) => { signalMemoryRelease = resolve; });
+    const memoryHolder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, memId);
+      signalMemoryHeld();
+      await memoryRelease;
+    }, { timeout: 20_000 });
+
+    await Promise.all([edgeHeld, memoryHeld]);
     const creating = call('hadron_create_node', {
       urn: `${memUrn.replace(':', '::')}::future-moved-target`,
       name: 'future moved target',
     });
     try {
       await waitForChannelMemoryLockWaiters(memId, 1);
-      await db.node.update({
-        where: { id: source.id },
-        data: { memoryId: movedMemory.id, loc: 'moved:review:item' },
-      });
-      signalRelease();
-      await holder;
 
+      // Move the SOURCE'S ANCESTOR, not the endpoint itself. The move holds
+      // `review`, rebases `review:item`, snapshots its outgoing edges, then
+      // blocks on the pre-existing edge row. Exact-loc-only promotion could
+      // now insert from the old snapshot and escape the move's edge carry-over.
+      const moving = call('hadron_move_node', {
+        urn: `urn:node:${memUrn}:review`,
+        targetUrn: `urn:node:${movedMemory.urn}:moved:review`,
+      });
+      await waitForLockWaiters('transactionid', 1);
+
+      signalMemoryRelease();
+      await memoryHolder;
+      // The promotion must now wait on the ancestor key held by the move. This
+      // assertion mutation-tests the fix: exact endpoint locks produce no
+      // advisory waiter and the test times out here.
+      await waitForLockWaiters('advisory', 1);
+
+      signalEdgeRelease();
+      await edgeHolder;
+
+      expect(await moving).toMatch(/Moved/);
       expect(await creating).toMatch(/Node saved/);
       expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+      expect(await db.node.findUniqueOrThrow({ where: { id: source.id } })).toMatchObject({
+        memoryId: movedMemory.id,
+        loc: 'moved:review:item',
+      });
       const promoted = await db.edge.findFirstOrThrow({
         where: { sourceId: source.id, name: 'survives-move', deletedAt: null },
       });
       expect(promoted.memoryId).toBe(movedMemory.id);
       expect(promoted.loc).toMatch(/^moved:review:item:survives-move:/);
     } finally {
-      signalRelease();
-      await holder.catch(() => undefined);
+      signalMemoryRelease();
+      signalEdgeRelease();
+      await Promise.all([
+        memoryHolder.catch(() => undefined),
+        edgeHolder.catch(() => undefined),
+      ]);
     }
   }, 20_000);
 });
