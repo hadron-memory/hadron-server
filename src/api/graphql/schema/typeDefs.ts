@@ -1206,8 +1206,13 @@ export const typeDefs = `#graphql
     isRunnable: Boolean
     """
     JSONLogic gating expression. Null = always fires. Validated against
-    the v1 operator subset and the five variable scopes (memory.*,
-    chat.*, agent.*, message.data.*, now()/today()).
+    the v1 operator subset and the FOUR variable scopes — memory.*, chat.*,
+    agent.*, message.data.* (VALID_SCOPE_PREFIXES; anything else is
+    UNKNOWN_SCOPE). The time builtins now() and today() are a SEPARATE
+    constant, not a fifth scope: they are whole references rather than
+    prefixes, and the evaluator pre-resolves them from the request clock.
+    Until #1246 this said "five variable scopes" and listed the builtins as
+    one of them — a count and a category error in one sentence.
     See hadron-docs/docs/reference/edge-conditions.md.
     """
     condition: JSON

@@ -51,6 +51,7 @@ import { pathToFileURL } from 'node:url';
 import { typeDefs } from '../src/api/graphql/schema/typeDefs.js';
 import { CONNECTION_GRANT_SCOPES } from '../src/lib/emailOperationScopes.js';
 import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
+import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
 
 /**
  * The sets this gate watches.
@@ -100,6 +101,27 @@ const WATCHED_SETS = [
     name: 'EMAIL_PROVIDER_KEYS',
     source: 'src/lib/emailClient.ts',
     members: EMAIL_PROVIDER_KEYS,
+  },
+  {
+    // #1246. `Edge.condition` enumerated these and got it wrong in two ways at
+    // once: it said "the FIVE variable scopes" over a set of four, and folded
+    // the time builtins in as the fifth — a count error and a category error in
+    // one sentence. They are separate constants with separate rejection paths
+    // (UNKNOWN_SCOPE applies to prefixes; a builtin is a whole reference).
+    //
+    // Admissible by this file's criterion: every member carries a trailing dot
+    // or parens, so none can occur as an ordinary English word in prose about
+    // the schema. Watched as TWO sets rather than one for the same reason the
+    // description was wrong — merging them here would encode the conflation
+    // this entry exists to catch.
+    name: 'VALID_SCOPE_PREFIXES',
+    source: 'src/lib/edge-conditions/operators.ts',
+    members: VALID_SCOPE_PREFIXES,
+  },
+  {
+    name: 'VALID_BUILTINS',
+    source: 'src/lib/edge-conditions/operators.ts',
+    members: VALID_BUILTINS,
   },
 ];
 
