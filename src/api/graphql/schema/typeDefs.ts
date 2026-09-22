@@ -519,6 +519,14 @@ export const typeDefs = `#graphql
   There is no app-class precondition. This said there was until #1248 — the
   rule was retired by #1196 and the description outlived it, so every client
   mirroring this SDL published a refusal that cannot fire.
+
+  **Creating at a DELETED Channel's address starts CLEAN** (#1226). The address
+  stays reserved by the tombstone, so a create here adopts it rather than
+  inserting beside it — and the previous Channel's messages are tombstoned so
+  the new room is empty. The seq counter is deliberately NOT reset: read
+  watermarks key on seq, so restarting would make an attendee treat the new
+  room's first messages as already read. Expect a gap in the numbering, never
+  an inherited transcript.
   """
   input CreateChannelInput {
     memoryRef: ID!

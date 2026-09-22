@@ -130,6 +130,90 @@ describe('protection (S4)', () => {
     expect(ok.loc).toBe('chats-notes');
   });
 
+  it('a TOMBSTONED Channel still reserves its address against create, but no longer blocks DELETE (#1226)', async () => {
+    // @Jonas measured the defect end-to-end: `deleteChannel` reports success,
+    // the message subtree survives, and `node rm` on the survivors is refused
+    // by a gate naming "the Channel's own operations" — operations of a Channel
+    // that is gone. 7 nodes, later 14, that nothing could remove.
+    //
+    // Two halves, and they must not be conflated. RESERVATION is a claim about
+    // who may PUT something at the address and must survive the tombstone (the
+    // module header's original reason). CLEANUP is about removing what is
+    // already there, and refusing it left the gate with no exit.
+    const ch = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const target = ch.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
+    // Posted through the Channel's OWN operation — the only writer of this
+    // address, which is the whole reason the generic surface is gated.
+    await M.createChannelMessage({}, { channelRef: target.id, body: 'hello' }, ctx(admin.id));
+    await M.deleteChannel({}, { ref: target.id }, ctx(admin.id));
+
+    // RESERVED: a generic create at or under the address is still refused, so a
+    // dead team chat cannot be occupied and then "restored" over.
+    await expect(
+      M.createNode({}, { input: { memoryId: appMem.urn, loc: 'chats:team:messages:9999', name: 'squat' } }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+
+    // CLEANABLE: the orphaned subtree can now be deleted. Before #1226 this
+    // threw LOC_PROTECTED and there was no operation that could.
+    const orphan = await db.node.findFirst({
+      where: { memoryId: appMem.id, loc: { startsWith: 'chats:team:messages:' }, deletedAt: null },
+      select: { id: true },
+    });
+    expect(orphan).not.toBeNull();
+    await expect(
+      M.deleteNode({}, { nodeRef: orphan!.id }, ctx(admin.id)),
+    ).resolves.toBeTruthy();
+  });
+
+  it('a LIVE Channel still refuses delete — the carve-out is by liveness, not a hole (#1226)', async () => {
+    // The positive control for the test above: without this, "delete is
+    // permitted" could mean the gate stopped covering delete entirely.
+    const live = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const liveCh = live.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
+    await M.createChannelMessage({}, { channelRef: liveCh.id, body: 'hi' }, ctx(admin.id));
+    const msg = await db.node.findFirst({
+      where: { memoryId: appMem.id, loc: { startsWith: 'chats:team:messages:' }, deletedAt: null },
+      select: { id: true },
+    });
+    expect(msg).not.toBeNull();
+    await expect(
+      M.deleteNode({}, { nodeRef: msg!.id }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+  });
+
+  it('recreating a Channel at a tombstoned address starts CLEAN, not with the old transcript (#1226)', async () => {
+    // @Jonas measured the defect: delete, recreate at the same address, and
+    // all four previous messages read back with `lastSeq` continuing. The
+    // address is the only thing the two Channels share, and re-creating at a
+    // known address is ordinary — so inheriting is a confidentiality edge,
+    // not merely a surprise.
+    const before = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const first = before.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
+    await M.createChannelMessage({}, { channelRef: first.id, body: 'secret one' }, ctx(admin.id));
+    await M.createChannelMessage({}, { channelRef: first.id, body: 'secret two' }, ctx(admin.id));
+    await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
+
+    // Recreate at the SAME address. The schema forces a resurrection —
+    // `@@unique([loc, memoryId])` has no `deletedAt`, so the tombstone holds
+    // the loc and no second node can be inserted there.
+    const { channel: reborn } = await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+
+    const msgs = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
+    expect(msgs.items).toHaveLength(0);
+
+    // The seq COUNTER deliberately does NOT restart. `ChannelReadState`
+    // watermarks key on seq, so restarting at 1 would make an attendee whose
+    // watermark sits at 2 treat the new room's first two messages as already
+    // read — silent unread LOSS. A gap in the numbering is cosmetic; a lost
+    // message is not. Pinned so nobody "tidies" it into a reset.
+    const posted = await M.createChannelMessage({}, { channelRef: reborn.id, body: 'fresh' }, ctx(admin.id));
+    expect(posted.seq).toBeGreaterThan(2);
+    const after = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
+    expect(after.items.map((m: { body: string }) => m.body)).toEqual(['fresh']);
+  });
+
   it('the lock helpers gate, and the Channel owner passes with ownedByOperation', async () => {
     await db.$transaction(async (tx) => {
       await expect(lockAncestorsForCreate(tx, appMem.id, 'chats:team:messages:0002')).rejects.toBeInstanceOf(LocProtectedError);

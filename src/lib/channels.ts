@@ -247,6 +247,14 @@ export async function ensureChannelWithRoot(
         }),
       );
     }
+    // #1226 — was the root a TOMBSTONE before this call? A resurrection means
+    // the address is being REUSED, and everything under it is the previous
+    // Channel's transcript.
+    const priorRoot = await tx.node.findUnique({
+      where: { loc_memoryId: { loc: args.loc, memoryId: args.memoryId } },
+      select: { deletedAt: true },
+    });
+    const reusingDeadAddress = priorRoot?.deletedAt != null;
     const rootId = await restoreOrCreate(
       args.loc,
       () =>
@@ -275,6 +283,39 @@ export async function ensureChannelWithRoot(
         select: { id: true },
       }),
     );
+    // #1226 — a Channel created at a tombstoned address starts CLEAN.
+    //
+    // `@@unique([loc, memoryId])` carries no `deletedAt`, so a tombstone holds
+    // the loc and `restoreOrCreate` above MUST resurrect rather than insert —
+    // the schema forces it. Resurrecting the root lifts the transitive hide
+    // that `cor:dmo:010:04` relies on ("removing a parent transitively hides
+    // its children"), and the previous Channel's messages — never tombstoned
+    // by `deleteChannel` — become visible again under a new Channel, with
+    // `messageCount` continuing so `seq` does not restart.
+    //
+    // @Jonas measured that: four messages read back after a delete (#1226).
+    // The address is the ONLY thing the new Channel shares with the old one,
+    // and re-creating at a known address is an ordinary thing to do, so the
+    // inheritance is a confidentiality edge and not just a surprise.
+    //
+    // Tombstoning the old messages restores the hide the resurrection lifted.
+    // This mirrors an App's `uninstalledAt` reinstall (same spec): the address
+    // is vacated and reused, the prior record retained rather than adopted.
+    //
+    // The seq COUNTER is deliberately NOT reset, and that is not laziness.
+    // `ChannelReadState` watermarks key on seq, so restarting at 1 would make
+    // an attendee whose watermark sits at 2 treat the new room's first two
+    // messages as already read — silent unread-message LOSS. Keeping the
+    // counter costs a cosmetic gap in the numbering (the new room's first
+    // message is seq N+1 with nothing at 1..N); losing a message costs a
+    // message. `ensureChannelRow` keeps `Channel.lastSeq` for the same reason
+    // and says so, which is why this does not fight it.
+    if (reusingDeadAddress) {
+      await tx.node.updateMany({
+        where: { memoryId: args.memoryId, loc: { startsWith: `${messagesLoc}:` }, deletedAt: null },
+        data: { deletedAt: new Date(), deletedBy: args.createdBy ?? null },
+      });
+    }
     const channel = await ensureChannelRow(tx, { ...args, rootId });
     return { channel, rootId };
   });

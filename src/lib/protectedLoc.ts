@@ -29,9 +29,12 @@
  * under the address, a recursive delete of an ANCESTOR that contains it, a
  * move whose SOURCE subtree contains it or whose DESTINATION enters it — all
  * refused. Reads stay memory-wide (D-2026-08-25-004). A tombstoned Channel
- * still protects: the address stays reserved while either the row or its root
- * exists, so a soft-deleted team chat cannot be overwritten by a generic
- * create and then "restored" over.
+ * still RESERVES its address — so a soft-deleted team chat cannot be
+ * overwritten by a generic create and then "restored" over — but since #1226 it
+ * no longer blocks DELETE. Reservation is a claim about who may PUT something
+ * there; enforcing it against removal produced a gate with no exit, because
+ * `deleteChannel` leaves the message subtree behind and the refusal named
+ * operations of a Channel that was gone. See `CLEANUP_OPS`.
  *
  * The check lives in TWO places, deliberately (a-gate-a-caller-can-omit):
  *   - inside the subtree LOCK helpers (`nodeSubtreeLock.ts`) — every create,
@@ -69,6 +72,11 @@ export interface ProtectedLoc {
   source: ProtectedSource;
   /** The Channel row's id. Nullable only because a second source may return null again. */
   channelId: string | null;
+  /**
+   * Is the owning Channel still live? #1226 — a TOMBSTONED Channel keeps its
+   * address RESERVED but stops blocking cleanup; see `CLEANUP_OPS`.
+   */
+  live: boolean;
   /** Which authoring surface owns this address, named in the refusal. */
   owner: string;
 }
@@ -85,13 +93,14 @@ export function locsOverlap(a: string, b: string): boolean {
 export async function protectedLocsIn(db: ChannelReader, memoryId: string): Promise<ProtectedLoc[]> {
   const channels = await db.channel.findMany({
     where: { memoryId },
-    select: { id: true, loc: true, name: true },
+    select: { id: true, loc: true, name: true, deletedAt: true },
   });
   return channels.map((r) => ({
     loc: r.loc,
     name: r.name,
     source: 'channel',
     channelId: r.id,
+    live: r.deletedAt === null,
     owner: 'createTeamChatMessage / hadron_team_chat_post',
   }));
 }
@@ -131,6 +140,32 @@ export function protectedLocCovers(entry: ProtectedLoc, loc: string): boolean {
  * behaviour. A fixture is only as good as the belief behind it.
  */
 const CHANNEL_BACKED_OPS = new Set(['write', 'create', 'create under']);
+
+/**
+ * The ops a TOMBSTONED Channel stops blocking (#1226).
+ *
+ * A tombstoned Channel must keep its address RESERVED — that is this module's
+ * original reason and it still holds: without it a generic `create` could
+ * occupy a soft-deleted team chat's loc and then be "restored" over. But
+ * reservation is a claim about who may PUT something there, and it was being
+ * enforced against REMOVING what is already there.
+ *
+ * The result was a gate with no exit. `deleteChannel` tombstones the Channel
+ * and its chat root but not the message subtree, so the survivors were
+ * refused by a gate naming "the Channel's own operations" — operations of a
+ * Channel that no longer exists. @Jonas measured 7 such nodes, later 14, that
+ * no available operation could remove (#1226).
+ *
+ * It is also a spec violation as written: `cor:dmo:010:04` makes "reads treat a
+ * removed record as not-found" DURABLE, and this gate read a soft-deleted row
+ * and acted on it.
+ *
+ * So the carve-out is by OP, not by liveness alone — the narrowest change that
+ * both rescues the stranded nodes and keeps the reservation the header argues
+ * for. A live Channel still owns every op; a dead one owns only the ops that
+ * would REPOPULATE its address.
+ */
+const CLEANUP_OPS = new Set(['delete', 'delete under']);
 
 /** The remedy sentence — what a refused caller should use INSTEAD, when anything can. */
 function protectedRemedy(op: string): string {
@@ -185,8 +220,11 @@ export async function assertLocWritable(
   const all = await protectedLocsIn(db, memoryId);
   const protectedLocs = owns ? all.filter((p) => p.source !== owns) : all;
   if (protectedLocs.length === 0) return;
+  // #1226: a tombstoned Channel does not block cleanup of what it orphaned.
+  const relevant = CLEANUP_OPS.has(op) ? protectedLocs.filter((p) => p.live) : protectedLocs;
+  if (relevant.length === 0) return;
   for (const loc of list) {
-    const hit = protectedLocs.find((p) => protectedLocCovers(p, loc));
+    const hit = relevant.find((p) => protectedLocCovers(p, loc));
     if (hit) throw new LocProtectedError(loc, hit, op);
   }
 }
