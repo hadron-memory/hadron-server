@@ -292,10 +292,16 @@ they are **first-class review criteria**, not "general security" to defer:
 The Hadron review flow (`hrn:node:hadronmemory.com:hadron-server:review`) carries the
 runnable checklists for these; the `findings:` branch has the incidents.
 
-<!-- SPECKIT START -->
-The Spec Kit working docs that used to live under `specs/` were retired on 2026-09-22,
-once their durable contracts had been harvested into the platform law corpus,
-`hrn:mem:hadronmemory.com:specs`. Read the corpus (`hadron spec get <citation>`), not a
-plan. The retired docs remain in git history (commit "chore(specs): retire the Spec Kit
-working docs").
-<!-- SPECKIT END -->
+## Specs and the constitution
+
+Spec Kit, meaning both the working docs that lived under `specs/` and its
+tooling (`.specify/`, the `speckit-*` skills), was retired on 2026-09-22.
+Durable contracts live in the platform law corpus,
+`hrn:mem:hadronmemory.com:specs`: read the corpus (`hadron spec get <citation>`),
+not a plan. The retired docs remain in git history (commit "chore(specs): retire
+the Spec Kit working docs").
+
+The server constitution, cited in code as "Constitution Invariant #N" /
+"Principle N" / "S1–S6", moved unchanged from `.specify/memory/constitution.md`
+to [`docs/constitution.md`](docs/constitution.md). The `no-agent-specific-code`
+CI guard's exemptions moved to `.github/no-agent-specific-exemptions.txt`.
