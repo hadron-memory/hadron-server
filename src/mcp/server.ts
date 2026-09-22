@@ -8628,6 +8628,15 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
         return;
       }
 
+      // DELETE and transport.onclose do not enter this POST queue. Either can
+      // unregister the session while the database lookup above is in flight,
+      // so revalidate the exact transport after that await and immediately
+      // before mutating its captured auth or dispatching through it.
+      if (transports.get(sessionId) !== active) {
+        respondMcpSessionNotFound(res);
+        return;
+      }
+
       if (roles === null) {
         // Account deletion revokes self-contained JWTs per request. Apply the
         // same liveness contract to an already-open MCP transport: zero roles

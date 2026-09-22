@@ -98,6 +98,16 @@ function openMcpSse(token: string, sessionId: string, signal: AbortSignal): Prom
   });
 }
 
+function deleteMcpSession(token: string, sessionId: string): Promise<Response> {
+  return fetch(`${baseUrl}/mcp`, {
+    method: 'DELETE',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'mcp-session-id': sessionId,
+    },
+  });
+}
+
 async function createUserAndToken() {
   const suffix = generateId().slice(-8);
   const user = await db.user.create({
@@ -233,6 +243,38 @@ describe('#1251 — existing MCP sessions refresh platform roles', () => {
 
     const [invalidated, stale] = await Promise.all([invalidating, queued]);
     expect(invalidated.status).toBe(401);
+    expect(stale.status).toBe(404);
+    expect(await stale.json()).toEqual({
+      jsonrpc: '2.0',
+      error: { code: -32001, message: 'Session not found' },
+      id: null,
+    });
+  });
+
+  it('does not dispatch when DELETE closes the transport during role refresh', async () => {
+    const { token } = await createUserAndToken();
+    const sessionId = await initializeSession(token);
+    let markLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      markLookupStarted = resolve;
+    });
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    vi.spyOn(db.user, 'findFirst').mockImplementationOnce((async () => {
+      markLookupStarted();
+      await lookupGate;
+      return { roles: ['ADMIN'] };
+    }) as never);
+
+    const refreshing = mcpFetch(token, listToolsBody(27), sessionId);
+    await lookupStarted;
+    const deleted = await deleteMcpSession(token, sessionId);
+    expect(deleted.status).toBe(200);
+    releaseLookup();
+
+    const stale = await refreshing;
     expect(stale.status).toBe(404);
     expect(await stale.json()).toEqual({
       jsonrpc: '2.0',
