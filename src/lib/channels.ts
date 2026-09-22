@@ -240,6 +240,26 @@ async function resetReusedChannel(
   // can retain the previous incarnation's plaintext in `chunk_text`, so they
   // must leave atomically with the payload reset.
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: args.rootId } });
+  // Reply edges are first-class rows with their own liveness. Tombstoning
+  // only the endpoint nodes is insufficient: edge reads can still resolve
+  // deleted endpoints by stable id and expose the old message payload.
+  await tx.$executeRaw`
+    UPDATE edges AS e
+    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
+    WHERE e.deleted_at IS NULL
+      AND (
+        e.source_id IN (
+          SELECT id FROM nodes
+          WHERE memory_id = ${args.memoryId}
+            AND starts_with(loc, ${`${args.messagesLoc}:`})
+        )
+        OR e.target_id IN (
+          SELECT id FROM nodes
+          WHERE memory_id = ${args.memoryId}
+            AND starts_with(loc, ${`${args.messagesLoc}:`})
+        )
+      )
+  `;
   await tx.$executeRaw`
     UPDATE nodes
     SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}

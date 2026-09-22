@@ -213,7 +213,11 @@ describe('protection (S4)', () => {
     const before = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
     const first = before.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
     await M.createChannelMessage({}, { channelRef: first.id, body: 'secret one' }, ctx(admin.id));
-    await M.createChannelMessage({}, { channelRef: first.id, body: 'secret two' }, ctx(admin.id));
+    await M.createChannelMessage({}, { channelRef: first.id, body: 'secret two', replyToSeq: 1 }, ctx(admin.id));
+    const oldReply = await db.edge.findFirstOrThrow({
+      where: { memoryId: appMem.id, name: 'replies-to', deletedAt: null },
+      select: { id: true },
+    });
     const oldMessage = await db.node.findFirstOrThrow({
       where: { memoryId: appMem.id, loc: { startsWith: 'chats:team:messages:' }, deletedAt: null },
       select: { id: true },
@@ -272,6 +276,7 @@ describe('protection (S4)', () => {
     expect(cleanRoot.embeddingError).toBeNull();
     expect(cleanRoot.tokens).toBeNull();
     expect(await db.nodeEmbedding.count({ where: { nodeId: cleanRoot.id } })).toBe(0);
+    expect((await db.edge.findUniqueOrThrow({ where: { id: oldReply.id } })).deletedAt).not.toBeNull();
 
     // A caller may retry the stable id it deleted before reuse. Reset already
     // tombstoned that row, so GraphQL must preserve its soft-delete idempotency
