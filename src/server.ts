@@ -1255,7 +1255,7 @@ export async function createServer(): Promise<Express> {
       let mayReport = !!auth.appId;
       if (!mayReport) {
         const roles = await getCurrentUserRoles(db, auth);
-        mayReport = roles.some((r) =>
+        mayReport = (roles ?? []).some((r) =>
           r === 'CONTRIBUTOR' || r === 'ADMIN' || r === 'OWNER',
         );
       }

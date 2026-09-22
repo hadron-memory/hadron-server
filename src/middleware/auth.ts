@@ -205,13 +205,17 @@ function validatedUserRoles(roles: readonly string[]): NonNullable<AuthContext['
 export async function getCurrentUserRoles(
   db: PrismaClient,
   auth: Pick<AuthContext, 'userId' | 'impersonation'>,
-): Promise<NonNullable<AuthContext['roles']>> {
+): Promise<NonNullable<AuthContext['roles']> | null> {
   if (!auth.userId || auth.impersonation) return [];
   const user = await db.user.findFirst({
     where: { id: auth.userId, deletedAt: null },
     select: { roles: true },
   });
-  return user ? validatedUserRoles(user.roles) : [];
+  // `null` is deliberately distinct from an ordinary user with no platform
+  // roles. Long-lived MCP transports retain the authenticated identity fields,
+  // so collapsing a deleted user to [] would leave that identity usable by
+  // every non-role-based tool after account deletion.
+  return user ? validatedUserRoles(user.roles) : null;
 }
 
 export async function hasCurrentPlatformAdminRole(
@@ -219,7 +223,7 @@ export async function hasCurrentPlatformAdminRole(
   auth: Pick<AuthContext, 'userId' | 'impersonation'>,
 ): Promise<boolean> {
   const roles = await getCurrentUserRoles(db, auth);
-  return roles.includes('ADMIN') || roles.includes('OWNER');
+  return roles?.includes('ADMIN') === true || roles?.includes('OWNER') === true;
 }
 
 async function resolveUserApiKey(

@@ -8500,8 +8500,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
 type ActiveMcpTransport = {
   transport: StreamableHTTPServerTransport;
-  /** Mutated in place before dispatch so every tool closure sees live roles. */
+  /** Mutated only while holding this transport's request lock. */
   auth: AuthContext;
+  /**
+   * Settled by the previous request after BOTH role refresh and dispatch.
+   * Auth is captured by every tool closure, so those two steps are one
+   * authorization critical section rather than independent operations.
+   */
+  requestTail: Promise<void>;
 };
 
 const transports = new Map<string, ActiveMcpTransport>();
@@ -8574,20 +8580,52 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
   if (sessionId && transports.has(sessionId)) {
     const active = transports.get(sessionId)!;
+    const previousRequest = active.requestTail;
+    let releaseRequest!: () => void;
+    active.requestTail = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    await previousRequest;
     try {
-      active.auth.roles = await getCurrentUserRoles(db, active.auth);
-    } catch {
-      // Express 4 does not forward a rejected async handler. Fail this request
-      // closed and explicitly rather than either dispatching with cached roles
-      // or leaving the client hanging on a database failure.
-      mcpLog('error', 'mcp_role_refresh_failed', {
-        mcpSessionId: sessionId,
-        userId: active.auth.userId,
-      });
-      res.status(503).json({ error: 'Authentication temporarily unavailable' });
-      return;
+      // A request may have queued before another request invalidated and
+      // closed this transport. It must not dispatch through the stale object.
+      if (transports.get(sessionId) !== active) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+
+      let roles: Awaited<ReturnType<typeof getCurrentUserRoles>>;
+      try {
+        roles = await getCurrentUserRoles(db, active.auth);
+      } catch {
+        // Express 4 does not forward a rejected async handler. Fail this request
+        // closed and explicitly rather than either dispatching with cached roles
+        // or leaving the client hanging on a database failure.
+        mcpLog('error', 'mcp_role_refresh_failed', {
+          mcpSessionId: sessionId,
+          userId: active.auth.userId,
+        });
+        res.status(503).json({ error: 'Authentication temporarily unavailable' });
+        return;
+      }
+
+      if (roles === null) {
+        // Account deletion revokes self-contained JWTs per request. Apply the
+        // same liveness contract to an already-open MCP transport: zero roles
+        // is a valid ordinary user, while a missing live user is no principal.
+        transports.delete(sessionId);
+        activeAppByMcpSession.delete(sessionId);
+        sessionKeyCache.evict(`mcp:${sessionId}`);
+        await active.transport.close();
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+      }
+
+      active.auth.roles = roles;
+      await active.transport.handleRequest(req, res, req.body);
+    } finally {
+      releaseRequest();
     }
-    await active.transport.handleRequest(req, res, req.body);
     return;
   }
 
@@ -8808,7 +8846,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
   const sid = transport.sessionId;
   if (sid) {
-    transports.set(sid, { transport, auth });
+    transports.set(sid, { transport, auth, requestTail: Promise.resolve() });
   }
 }
 
