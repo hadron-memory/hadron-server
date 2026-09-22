@@ -212,6 +212,10 @@ describe('protection (S4)', () => {
     const first = before.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
     await M.createChannelMessage({}, { channelRef: first.id, body: 'secret one' }, ctx(admin.id));
     await M.createChannelMessage({}, { channelRef: first.id, body: 'secret two' }, ctx(admin.id));
+    const oldMessage = await db.node.findFirstOrThrow({
+      where: { memoryId: appMem.id, loc: { startsWith: 'chats:team:messages:' }, deletedAt: null },
+      select: { id: true },
+    });
     // A pre-#1196 team-chat root can still carry this retired marker. Reuse is
     // a new incarnation, so it must not inherit a stale audience assertion.
     const oldChannel = await db.channel.findUniqueOrThrow({ where: { id: first.id } });
@@ -238,6 +242,14 @@ describe('protection (S4)', () => {
     const cleanRoot = await db.node.findUniqueOrThrow({ where: { id: reborn.chatRootNodeId } });
     expect((cleanRoot.data as Record<string, unknown>).lastMessageAt).toBeUndefined();
     expect((cleanRoot.data as Record<string, unknown>).scope).toBeUndefined();
+
+    // A caller may retry the stable id it deleted before reuse. Reset already
+    // tombstoned that row, so GraphQL must preserve its soft-delete idempotency
+    // instead of treating the now-live Channel as a new delete attempt.
+    const deletedAt = (await db.node.findUniqueOrThrow({ where: { id: oldMessage.id } })).deletedAt;
+    expect(deletedAt).not.toBeNull();
+    await expect(M.deleteNode({}, { nodeRef: oldMessage.id }, ctx(admin.id))).resolves.toBe(true);
+    expect((await db.node.findUniqueOrThrow({ where: { id: oldMessage.id } })).deletedAt).toEqual(deletedAt);
 
     // The ALLOCATOR counter deliberately does NOT restart, even though the
     // live Channel watermark above does. Existing cursors then see an empty
@@ -352,7 +364,7 @@ describe('protection (S4)', () => {
     expect(err.message).not.toContain('DELETED');
   });
 
-  it('a tombstoned Channel still reserves its ROOT and ancestors against delete (#1226 P1)', async () => {
+  it('a tombstoned Channel still reserves its ROOT and ancestors against mutating delete (#1226 P1)', async () => {
     // @codex P1 on PR #1257. `Channel.chatRoot` is `onDelete: Cascade`, so a
     // HARD delete of the tombstoned root physically removes the node, cascades
     // the Channel row away, and takes the reservation with it — after which a
@@ -366,10 +378,10 @@ describe('protection (S4)', () => {
     })).id;
     await M.deleteChannel({}, { ref: target.id }, ctx(admin.id));
 
-    // The ROOT itself stays reserved, soft or hard.
-    await expect(
-      M.deleteNode({}, { nodeRef: rootId }, ctx(admin.id)),
-    ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
+    // A repeated default soft delete is an idempotent no-op (and matches MCP),
+    // so it does not threaten the reservation. A HARD delete would mutate the
+    // row and cascade the Channel away, and is still refused.
+    await expect(M.deleteNode({}, { nodeRef: rootId }, ctx(admin.id))).resolves.toBe(true);
     await expect(
       M.deleteNode({}, { nodeRef: rootId, hard: true }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });

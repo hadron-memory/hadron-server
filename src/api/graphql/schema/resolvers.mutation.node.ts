@@ -2182,16 +2182,20 @@ export const nodeMutations = {
       }
       // One check covers the subtree too: every descendant shares this memory.
       await requireMemoryWriteAccess(ctx, node.memoryId);
+
+      // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
+      // node preserves its original deletedAt/deletedBy (matches the
+      // hadron_delete_node MCP tool) instead of re-stamping it. This must run
+      // before Channel protection: clean Channel reuse tombstones the previous
+      // transcript, then makes the Channel live again, and a retry by stable id
+      // is still a no-op rather than a fresh attempt to mutate that live Channel.
+      if (!recursive && !hard && node.deletedAt !== null) return true;
+
       // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
       // 'delete', not 'write' (@copilot, PR #1198). The verb reaches the user twice —
       // "the only thing that may delete here", and the REMEDY, which must not offer
       // an authoring door for an operation neither door performs.
       await assertLocWritable(ctx.db, node.memoryId, node.loc, 'delete');
-
-      // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
-      // node preserves its original deletedAt/deletedBy (matches the
-      // hadron_delete_node MCP tool) instead of re-stamping it.
-      if (!recursive && !hard && node.deletedAt !== null) return true;
 
       const deletedBy = ctx.userId ?? ctx.appId ?? ctx.clientId ?? null;
       const now = new Date();
