@@ -130,6 +130,9 @@ describe('#1006 — the surface states its capabilities', () => {
     expect(out).toMatch(/recently active inside its idle window/);
     expect(out).toMatch(/session block falls away/);
     expect(out).toMatch(/human HOLD remains independent until explicit release/);
+    expect(out).toMatch(/created by hadron_start_session has no hard expiry/);
+    expect(out).toMatch(/stays open until hadron_end_session/);
+    expect(out).toMatch(/non-null hard expiry.*ended by the reaper/);
   });
 });
 

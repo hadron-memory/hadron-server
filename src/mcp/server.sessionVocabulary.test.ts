@@ -193,8 +193,10 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     expect(end).toMatch(/while open and recently active inside its idle window/);
     expect(end).toMatch(/session block falls away/);
     expect(end).toMatch(/human hold remains independent until explicit release/);
+    expect(end).toMatch(/hadron_start_session does not set one.*remain open until this tool is called/);
     expect(start).not.toMatch(/worker taken,? until/);
     expect(end).not.toMatch(/worker taken until/);
+    expect(end).not.toMatch(/leaves this binding open.*hard expiry passes/);
   });
 
   it('#1100 — the `summary` parameter says it is display-only and points at handoff', () => {
