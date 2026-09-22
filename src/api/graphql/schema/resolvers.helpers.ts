@@ -28,6 +28,7 @@ import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js'
 import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
 import {
   formatCanonicalUrn,
   type CanonicalUrnType,
@@ -1212,33 +1213,10 @@ export async function getAccessibleMemoryIds(
       where: {
         ...scope,
         deletedAt: null,
-        NOT: {
-          OR: [
-            // Another user's owner-owned personal/private memory (unchanged).
-            { class: { in: ['personal', 'private'] as any }, userId: { not: ctx.userId ?? '__none__' } },
-            // spec 047: a user-owned memory is STRICTLY private — a platform
-            // admin does NOT see another user's user-owned rows either.
-            //
-            // NON-personal classes only (@copilot, PR #1215). The clause above
-            // is the authority for personal/private — `userId` — exactly as
-            // `canReadMemoryRecord` and MCP's `canReadMemory` both branch (the
-            // latter says so outright: "Personal/private user-owned rows are
-            // already handled by the block above"). Unrestricted, this arm
-            // excluded a personal row on its TENANT owner, so an admin who is
-            // its STRICT owner lost node enumeration for a memory the record
-            // gate and this PR's list both admit them to. Fails CLOSED, so it
-            // was an over-narrowing rather than a leak — but this function is
-            // the one the parity test holds the list to, and a divergence that
-            // only shows for the admin shape is how the next copy drifts.
-            {
-              AND: [
-                { class: { notIn: ['personal', 'private'] as any } },
-                { ownerUserId: { not: null } },
-                { ownerUserId: { not: ctx.userId ?? '__none__' } },
-              ],
-            },
-          ],
-        },
+        // #1217 — one predicate shared with MCP browse/task discovery and both
+        // global-search slices. The strict owner of personal/private is userId;
+        // ownerUserId is only authoritative for the other classes.
+        NOT: foreignIdentityScopedMemoryFilter(ctx.userId),
       },
       select: { id: true },
     });

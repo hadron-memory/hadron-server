@@ -305,6 +305,31 @@ describe('hadron_run_task — resolution by name (cor:api:060:02)', () => {
     expect(text).not.toContain('Alpha');
     expect(text).not.toContain('Add review');
   });
+
+  it('discovers a personal task for an ADMIN who is its strict owner despite a different tenant owner (#1217)', async () => {
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'Strict Tasks',
+        urn: `rt-viewer:strict-tasks-${generateId()}`,
+        ownerUserId: fx.viewer.id,
+        userId: fx.admin.id,
+      },
+    });
+    await mkNode(memory.id, 'tasks:strict-owner', 'Strict owner task', {
+      content: 'strict-owner content',
+      isRunnable: true,
+    });
+
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
+      task: 'Strict owner task',
+      memory: 'Strict Tasks',
+    });
+
+    expect(text).toContain('# Node: Strict owner task');
+    expect(text).toContain('strict-owner content');
+  });
 });
 
 describe('hadron_run_task — URN bypass + shared run core', () => {

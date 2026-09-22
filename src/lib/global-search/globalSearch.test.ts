@@ -268,6 +268,42 @@ describe('globalSearch — access scope', () => {
     expect(ids(byType((await globalSearch(db, { query: 'Needle' }, viewerP())).hits, 'user'))).toContain(fx.userNeedle);
     expect(byType((await globalSearch(db, { query: 'Needle' }, anonP())).hits, 'user')).toHaveLength(0);
   });
+
+  it('an admin finds a personal memory and its nodes when userId makes them the strict owner (#1217)', async () => {
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'Divergent Strict Memory',
+        urn: `gs-viewer:divergent-${generateId()}`,
+        ownerUserId: fx.viewer,
+        userId: fx.admin,
+      },
+    });
+    const node = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: memory.id,
+        loc: 'strict-owner-node',
+        name: 'Divergent Strict Node',
+        tags: [],
+      },
+    });
+
+    const memoryHits = await globalSearch(
+      db,
+      { query: 'Divergent Strict Memory', entityTypes: ['memory'] },
+      adminP(),
+    );
+    const nodeHits = await globalSearch(
+      db,
+      { query: 'Divergent Strict Node', entityTypes: ['node'] },
+      adminP(),
+    );
+
+    expect(ids(byType(memoryHits.hits, 'memory'))).toContain(memory.id);
+    expect(ids(byType(nodeHits.hits, 'node'))).toContain(node.id);
+  });
 });
 
 describe('globalSearch — fields + entityTypes', () => {

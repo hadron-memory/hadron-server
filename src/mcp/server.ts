@@ -89,6 +89,7 @@ import {
 } from './app-selection-errors.js';
 import { mcpLog } from './mcp-log.js';
 import { tagsInputSchema } from './tagsInput.js';
+import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
 // Spec 025-oauth-for-mcp / research §R-6: error_description in the
 // 409 multi-App response links to a docs page that explains the
@@ -4014,12 +4015,7 @@ export function createMcpServerInstance(
         // memoryId resolved. Mirror the globalSearch admin carve-out (codex
         // review, #676).
         where.memory = {
-          NOT: {
-            OR: [
-              { class: { in: ['personal', 'private'] }, userId: { not: auth.userId ?? '__none__' } },
-              { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: auth.userId ?? '__none__' } }] },
-            ],
-          },
+          NOT: foreignIdentityScopedMemoryFilter(auth.userId),
         };
       }
       // NB: the runnable filter (cor:api:060) is applied IN-MEMORY below, not
@@ -6451,12 +6447,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const all = await db.memory.findMany({
         where: {
           deletedAt: null,
-          NOT: {
-            OR: [
-              { class: { in: ['personal', 'private'] as any }, userId: { not: auth.userId ?? '__none__' } },
-              { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: auth.userId ?? '__none__' } }] },
-            ],
-          },
+          NOT: foreignIdentityScopedMemoryFilter(auth.userId),
         },
         select: { id: true, urn: true, name: true },
       });

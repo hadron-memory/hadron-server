@@ -68,4 +68,30 @@ describe('#676 — hadron_list_nodes user-owned leak (ADMIN + bare parentRel)', 
     const text = await srv.callToolText('hadron_list_nodes', { memoryUrn: mem.urn });
     expect(text).not.toContain('TOP-SECRET-CHILD');
   });
+
+  it('lists a personal child for an ADMIN who is its strict owner despite a different tenant owner (#1217)', async () => {
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'divergent-owner-memory',
+        urn: `@${ownerId}:divergent-${generateId()}`,
+        ownerUserId: ownerId,
+        userId: adminId,
+      },
+    });
+    await createDbNode(db, { memoryId: mem.id, loc: 'strictowner', name: 'strict owner parent' });
+    await createDbNode(db, {
+      memoryId: mem.id,
+      loc: 'strictowner:child',
+      name: 'STRICT-OWNER-CHILD',
+    });
+
+    const text = await createTestableMcpServer({
+      userId: adminId,
+      roles: ['ADMIN'],
+    }).callToolText('hadron_list_nodes', { parentRel: 'strictowner' });
+
+    expect(text).toContain('STRICT-OWNER-CHILD');
+  });
 });
