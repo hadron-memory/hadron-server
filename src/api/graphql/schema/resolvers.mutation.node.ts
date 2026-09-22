@@ -52,6 +52,7 @@ import {
 } from '../../../lib/validateLoc.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { lockLiveEdgeEndpoints, lockLiveEdgeEndpointSet } from '../../../lib/edgeEndpointLock.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
@@ -461,6 +462,7 @@ export async function writeNodeCore(
       let resolvedEdges: Array<{
         targetNodeId: string;
         targetLoc: string;
+        targetMemoryId: string;
         name: string | null;
         loc: string | null;
         description: string | null;
@@ -518,6 +520,7 @@ export async function writeNodeCore(
             resolvedEdges.push({
               targetNodeId,
               targetLoc: tgt.loc,
+              targetMemoryId: tgt.memoryId,
               name: e.name ?? null,
               loc: e.loc ?? null,
               description: e.description ?? null,
@@ -1187,32 +1190,52 @@ export async function writeNodeCore(
 
       let finalNode = node;
       if (resolvedEdges !== null) {
-        // Replace the source's outgoing edges with the resolved set.
-        // skipDuplicates: true defends against a duplicate (loc, memoryId)
-        // inside the input array itself (e.g. two edges that derive the
-        // same loc). Spec 037: each edge carries memoryId (= source's
-        // memory) and a loc (author-supplied or derived).
-        await ctx.db.edge.deleteMany({ where: { sourceId: node.id } });
-        await ctx.db.pendingEdge.deleteMany({ where: { sourceId: node.id } });
-        if (resolvedEdges.length > 0) {
-          await ctx.db.edge.createMany({
-            data: resolvedEdges.map((e) => ({
-              memoryId: node.memoryId,
-              sourceId: node.id,
-              targetId: e.targetNodeId,
-              loc: e.loc ?? deriveEdgeLoc(node.loc, e.name, e.targetLoc),
-              name: e.name,
-              description: e.description,
-              isRunnable: e.isRunnable,
-              createdBy,
+        finalNode = await ctx.db.$transaction(async (tx) => {
+          const sourceSnapshot = { id: node.id, loc: node.loc, memoryId: node.memoryId };
+          const live = await lockLiveEdgeEndpointSet(tx, [
+            sourceSnapshot,
+            ...resolvedEdges.map((edge) => ({
+              id: edge.targetNodeId,
+              loc: edge.targetLoc,
+              memoryId: edge.targetMemoryId,
             })),
-            skipDuplicates: true,
+          ]);
+          if (!live.has(sourceSnapshot.id)) {
+            throw new GraphQLError(`Source node not found: "${node.id}"`, {
+              extensions: { code: 'NODE_NOT_FOUND' },
+            });
+          }
+          const missing = resolvedEdges.find((edge) => !live.has(edge.targetNodeId));
+          if (missing) {
+            throw new GraphQLError(`Edge target not found: "${missing.targetNodeId}"`, {
+              extensions: { code: 'NODE_NOT_FOUND', ref: missing.targetNodeId },
+            });
+          }
+
+          // Replace the source's outgoing edges with the resolved set while
+          // holding every endpoint memory's Channel-reuse key.
+          await tx.edge.deleteMany({ where: { sourceId: node.id } });
+          await tx.pendingEdge.deleteMany({ where: { sourceId: node.id } });
+          if (resolvedEdges.length > 0) {
+            await tx.edge.createMany({
+              data: resolvedEdges.map((e) => ({
+                memoryId: node.memoryId,
+                sourceId: node.id,
+                targetId: e.targetNodeId,
+                loc: e.loc ?? deriveEdgeLoc(node.loc, e.name, e.targetLoc),
+                name: e.name,
+                description: e.description,
+                isRunnable: e.isRunnable,
+                createdBy,
+              })),
+              skipDuplicates: true,
+            });
+          }
+          return tx.node.findUniqueOrThrow({
+            where: { id: node.id },
+            include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
           });
-        }
-        finalNode = (await ctx.db.node.findUnique({
-          where: { id: node.id },
-          include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
-        }))!;
+        });
         if (memEncInfo.isEncrypted) {
           decryptNodeFields(finalNode, memEncInfo);
         }
@@ -2445,28 +2468,45 @@ export const nodeMutations = {
         }
         throw e;
       }
-      const edge = await ctx.db.edge.create({
-        data: {
-          id: generateId(),
-          memoryId: src.memoryId,
-          sourceId: resolvedSourceId,
-          targetId: resolvedTargetId,
-          loc: edgeLoc,
-          name: name ?? null,
-          description: description ?? null,
-          isRunnable: isRunnable ?? null,
-          condition: (condition ?? null) as InputJsonValue,
-          // != null: the GraphQL arg is nullable, and non-JS clients (the
-          // Go CLI) send explicit nulls for unset args. priority is a
-          // non-nullable Int @default(0) — passing null to Prisma fails
-          // validation with a misleading "Argument source is missing"
-          // (the invalid field disqualifies the scalar-FK input variant).
-          // Issue #263.
-          ...(priority != null ? { priority } : {}),
-          data: (data ?? null) as InputJsonValue,
-          createdBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-        include: { source: true, target: true },
+      const edge = await ctx.db.$transaction(async (tx) => {
+        const locked = await lockLiveEdgeEndpoints(
+          tx,
+          { id: resolvedSourceId, ...src },
+          { id: resolvedTargetId, ...tgt },
+        );
+        if (!locked.source) {
+          throw new GraphQLError(`Source node not found: "${sourceRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND' },
+          });
+        }
+        if (!locked.target) {
+          throw new GraphQLError(`Target node not found: "${targetRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND' },
+          });
+        }
+        return tx.edge.create({
+          data: {
+            id: generateId(),
+            memoryId: locked.source.memoryId,
+            sourceId: locked.source.id,
+            targetId: locked.target.id,
+            loc: edgeLoc,
+            name: name ?? null,
+            description: description ?? null,
+            isRunnable: isRunnable ?? null,
+            condition: (condition ?? null) as InputJsonValue,
+            // != null: the GraphQL arg is nullable, and non-JS clients (the
+            // Go CLI) send explicit nulls for unset args. priority is a
+            // non-nullable Int @default(0) — passing null to Prisma fails
+            // validation with a misleading "Argument source is missing"
+            // (the invalid field disqualifies the scalar-FK input variant).
+            // Issue #263.
+            ...(priority != null ? { priority } : {}),
+            data: (data ?? null) as InputJsonValue,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+          include: { source: true, target: true },
+        });
       });
       // #1061 — an edge write is a graph write, attributed to the SOURCE node:
       // the edge lives in the source's memory (spec 037) and `UsageEvent` has

@@ -42,7 +42,11 @@ let knowledge: { id: string; urn: string };
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] }) as Context;
 
 /** Deterministic barrier: wait until this memory-scoped advisory key has a waiter. */
-async function waitForChannelMemoryLockWaiter(memoryId: string, timeoutMs = 10_000): Promise<void> {
+async function waitForChannelMemoryLockWaiter(
+  memoryId: string,
+  timeoutMs = 10_000,
+  minimumWaiters = 1,
+): Promise<void> {
   const key = `channel-host:${memoryId}`;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -56,7 +60,7 @@ async function waitForChannelMemoryLockWaiter(memoryId: string, timeoutMs = 10_0
         AND objid = ((hashtext(${key})::bigint & 4294967295))::oid
         AND objsubid = 1
     `;
-    if (Number(count) > 0) return;
+    if (Number(count) >= minimumWaiters) return;
     if (Date.now() > deadline) throw new Error(`timed out waiting for Channel memory-lock waiter on ${memoryId}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -347,6 +351,55 @@ describe('protection (S4)', () => {
       await M.createChannelMessage({}, { channelRef: channel.id, body: 'fresh transcript' }, ctx(admin.id));
       const page = await Q.channelMessages(null, { channelRef: channel.id }, ctx(admin.id));
       expect(page.items.map((m: { body: string }) => m.body)).toEqual(['fresh transcript']);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
+  it('serializes edge creation behind reuse and refuses the deleted transcript endpoint (#1226)', async () => {
+    const { channel } = await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:edge-race', name: 'edge-race', createdBy: admin.id,
+    });
+    const oldMessage = await M.createChannelMessage(
+      {}, { channelRef: channel.id, body: 'old transcript' }, ctx(admin.id),
+    );
+    const source = await db.node.create({
+      data: { id: generateId(), memoryId: appMem.id, loc: 'edge-race-source', name: 'source' },
+    });
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, appMem.id);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const reusing = ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:edge-race', name: 'edge-race', createdBy: admin.id,
+    });
+    try {
+      // Queue reuse first, then prove createEdge has resolved the still-live old
+      // message and is waiting on the same key before releasing the holder.
+      await waitForChannelMemoryLockWaiter(appMem.id);
+      const linking = M.createEdge(
+        {},
+        { sourceRef: source.id, targetRef: oldMessage.nodeId, name: 'points-to-old-message' },
+        ({ ...ctx(admin.id), roles: ['CONTRIBUTOR'] }) as Context,
+      );
+      await waitForChannelMemoryLockWaiter(appMem.id, 10_000, 2);
+      signalRelease();
+      await holder;
+      await reusing;
+      await expect(linking).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+      expect(await db.edge.count({
+        where: { targetId: oldMessage.nodeId, deletedAt: null },
+      })).toBe(0);
     } finally {
       signalRelease();
       await holder.catch(() => undefined);

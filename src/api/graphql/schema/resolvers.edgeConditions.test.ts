@@ -20,7 +20,7 @@ const EDGE_ID = 'e'.repeat(32);
 // Build a minimal mock that mirrors the parts of PrismaClient the
 // createEdge / updateEdge resolvers touch.
 function mockDb() {
-  return {
+  const client = {
     // Spec 037: createEdge fetches both endpoints to compose/derive the edge
     // loc + denormalize memoryId. #322: resolveNodeRef first does a bare-ID PK
     // lookup (findFirst, `deletedAt: null` filter), then the resolver re-fetches
@@ -39,6 +39,8 @@ function mockDb() {
         loc: 'l',
         memoryId: 'mem-1',
       })),
+      findMany: vi.fn().mockImplementation(async ({ where }: { where: { id?: { in?: string[] } } }) =>
+        (where.id?.in ?? []).map((id) => ({ id, loc: 'l', memoryId: 'mem-1' }))),
     },
     // #322/PR-348: createEdge now gates on requireMemoryWriteAccess(src) +
     // canReadMemory(tgt). The ADMIN+appId ctx short-circuits the write check
@@ -74,7 +76,11 @@ function mockDb() {
       // requireMemoryWriteAccess (the ADMIN+appId ctx short-circuits the check).
       findUnique: vi.fn().mockResolvedValue({ memoryId: 'mem-1' }),
     },
+    $executeRaw: vi.fn().mockResolvedValue(1),
+    $transaction: vi.fn(),
   };
+  client.$transaction.mockImplementation(async (fn: (tx: typeof client) => unknown) => fn(client));
+  return client;
 }
 
 function ctx(over: Partial<Context> = {}): Context {
