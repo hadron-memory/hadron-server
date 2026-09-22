@@ -51,6 +51,7 @@ import { pathToFileURL } from 'node:url';
 import { typeDefs } from '../src/api/graphql/schema/typeDefs.js';
 import { CONNECTION_GRANT_SCOPES } from '../src/lib/emailOperationScopes.js';
 import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
+import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
 
 /**
  * The sets this gate watches.
@@ -100,6 +101,31 @@ const WATCHED_SETS = [
     name: 'EMAIL_PROVIDER_KEYS',
     source: 'src/lib/emailClient.ts',
     members: EMAIL_PROVIDER_KEYS,
+  },
+  {
+    // #1246. `Edge.condition` enumerated these and got it wrong in two ways at
+    // once: it said "the FIVE variable scopes" over a set of four, and folded
+    // the time builtins in as the fifth — a count error and a category error in
+    // one sentence. They are separate constants with separate rejection paths
+    // (UNKNOWN_SCOPE applies to prefixes; a builtin is a whole reference).
+    //
+    // Admissible by this file's criterion: every member carries a trailing dot
+    // or parens, so none can occur as an ordinary English word in prose about
+    // the schema. Watched as TWO sets rather than one for the same reason the
+    // description was wrong — merging them here would encode the conflation
+    // this entry exists to catch.
+    name: 'VALID_SCOPE_PREFIXES',
+    source: 'src/lib/edge-conditions/operators.ts',
+    members: VALID_SCOPE_PREFIXES,
+    // The phrase the count attaches to. Declaring it turns on the count check
+    // for THIS set only — "the five variable scopes" over a set of four is the
+    // defect #1246 fixed, and completeness alone passed it.
+    countNoun: 'variable scopes?',
+  },
+  {
+    name: 'VALID_BUILTINS',
+    source: 'src/lib/edge-conditions/operators.ts',
+    members: VALID_BUILTINS,
   },
 ];
 
@@ -194,6 +220,46 @@ function collectDescriptions(sdl) {
 }
 
 /** Descriptions that enumerate part of a watched set. Exported for tests. */
+/** Number words a description might state a set's size with. */
+const NUMBER_WORDS = new Map([
+  ['one', 1], ['two', 2], ['three', 3], ['four', 4], ['five', 5],
+  ['six', 6], ['seven', 7], ['eight', 8], ['nine', 9], ['ten', 10],
+]);
+
+/**
+ * A description that ENUMERATES a set completely and also states a COUNT must
+ * state the right one at least once.
+ *
+ * Completeness alone does not catch the defect this gate was extended for
+ * (@codex, PR #1256). `Edge.condition` said "the FIVE variable scopes
+ * (memory.*, chat.*, agent.*, message.data.*, now()/today())" — which spells
+ * out every member of BOTH watched sets, so the completeness check passes it.
+ * The error was the number and the conflation, not an omission. Verified by
+ * restoring the original sentence and watching the gate go green.
+ *
+ * OPT-IN per set, via `countNoun`, and that is load-bearing. The first version
+ * scanned every number word in the description and produced TWO false positives
+ * immediately: `ExchangeConnection.provider` says "three providers out of date"
+ * in a historical note, and `Edge.condition` states "FOUR variable scopes" while
+ * also enumerating the two builtins — a number belonging to the OTHER set. A
+ * description may legitimately contain numbers about anything.
+ *
+ * So the check fires only where a registry entry names the noun phrase its
+ * count attaches to, and only for a number word immediately preceding it. A set
+ * with no `countNoun` gets completeness checking only — which is the honest
+ * default, since most enumerations never state a size.
+ */
+function statesAWrongCount(text, size, countNoun) {
+  if (!countNoun) return false;
+  const near = new RegExp(
+    `\\b(one|two|three|four|five|six|seven|eight|nine|ten)\\b[\\s\\S]{0,12}?${countNoun}`,
+    'i',
+  );
+  const m = near.exec(text);
+  if (!m) return false;
+  return NUMBER_WORDS.get(m[1].toLowerCase()) !== size;
+}
+
 export function findPartialEnumerations(sdl, sets = WATCHED_SETS) {
   const descriptions = collectDescriptions(sdl);
   const violations = [];
@@ -203,7 +269,17 @@ export function findPartialEnumerations(sdl, sets = WATCHED_SETS) {
       // Fewer than two is a mention, not an enumeration — see the docstring.
       if (present.length < 2) continue;
       const missing = set.members.filter((m) => !present.includes(m));
-      if (missing.length > 0) violations.push({ coord, set: set.name, present, missing, text });
+      if (missing.length > 0) {
+        violations.push({ coord, set: set.name, present, missing, text });
+        continue;
+      }
+      // Complete — but is the COUNT it claims the set's actual size?
+      if (statesAWrongCount(text, set.members.length, set.countNoun)) {
+        violations.push({
+          coord, set: set.name, present, missing: [],
+          wrongCount: set.members.length, text,
+        });
+      }
     }
   }
   return violations;
@@ -221,7 +297,13 @@ function main() {
 
   console.error(`✗ ${violations.length} SDL description(s) enumerate part of a set:\n`);
   for (const v of violations) {
-    console.error(`  ${v.coord} — enumerates ${v.set} but omits: ${v.missing.join(', ')}`);
+    if (v.missing.length === 0) {
+      console.error(
+        `  ${v.coord} — enumerates all ${v.wrongCount} of ${v.set}, but the count it states is not ${v.wrongCount}`,
+      );
+    } else {
+      console.error(`  ${v.coord} — enumerates ${v.set} but omits: ${v.missing.join(', ')}`);
+    }
     console.error(`    lists: ${v.present.join(', ')}`);
     console.error(`    from:  ${v.set} in ${WATCHED_SETS.find((s) => s.name === v.set)?.source}`);
     console.error(`    text:  ${v.text.replace(/\s+/g, ' ').trim().slice(0, 160)}\n`);
