@@ -3630,8 +3630,8 @@ model PendingLoginState {
 }
 
 // ─── Spec 040 — headless agent runs ─────────────────────────────────────────
-// Plan: specs/040-headless-runs/plan.md (D-2026-07-04 A–F over the 2026-05/06
-// design corpus). Spec: cor:agt:010 (+ cor:acl:040/:050).
+// Design: D-2026-07-04 A–F over the 2026-05/06 design corpus (the spec-040 plan
+// is retired; see git history). Spec: cor:agt:010 (+ cor:acl:040/:050).
 
 enum AppRunStatus {
   PENDING

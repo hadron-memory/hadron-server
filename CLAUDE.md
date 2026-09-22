@@ -293,7 +293,9 @@ The Hadron review flow (`hrn:node:hadronmemory.com:hadron-server:review`) carrie
 runnable checklists for these; the `findings:` branch has the incidents.
 
 <!-- SPECKIT START -->
-For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan:
-[specs/036-ai-service-config/plan.md](specs/036-ai-service-config/plan.md)
+The Spec Kit working docs that used to live under `specs/` were retired on 2026-09-22,
+once their durable contracts had been harvested into the platform law corpus,
+`hrn:mem:hadronmemory.com:specs`. Read the corpus (`hadron spec get <citation>`), not a
+plan. The retired docs remain in git history (commit "chore(specs): retire the Spec Kit
+working docs").
 <!-- SPECKIT END -->
