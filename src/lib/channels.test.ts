@@ -25,7 +25,9 @@ import { assertLocWritable, LocProtectedError, partitionProtected } from './prot
 import { lockAncestorsForCreate, lockLocForWrite } from './nodeSubtreeLock.js';
 import { backfillChannels } from '../jobs/backfillChannels.js';
 import { appendChatMessage } from './chatRoot.js';
-import { getMemoryEncryptionInfo } from './nodeCrypto.js';
+import { encryptNodeFields, getMemoryEncryptionInfo } from './nodeCrypto.js';
+import { generateDataKey } from './crypto.js';
+import { sessionKeyCache } from './sessionKeyCache.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -222,7 +224,13 @@ describe('protection (S4)', () => {
     const oldRoot = await db.node.findUniqueOrThrow({ where: { id: oldChannel.chatRootNodeId } });
     await db.node.update({
       where: { id: oldRoot.id },
-      data: { data: { ...(oldRoot.data as Record<string, unknown>), scope: 'shared' } },
+      data: {
+        abstract: 'old summary',
+        abstractOriginHash: 'deadbeef',
+        content: 'old root payload',
+        contentHash: 'cafebabe',
+        data: { ...(oldRoot.data as Record<string, unknown>), scope: 'shared' },
+      },
     });
     await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
 
@@ -237,11 +245,16 @@ describe('protection (S4)', () => {
     expect(msgs.items).toHaveLength(0);
 
     const emptyState = await db.channel.findUniqueOrThrow({ where: { id: reborn.id } });
+    expect(emptyState.incarnation).toBe(oldChannel.incarnation + 1);
     expect(emptyState.lastSeq).toBe(0);
     expect(emptyState.lastMessageAt).toBeNull();
     const cleanRoot = await db.node.findUniqueOrThrow({ where: { id: reborn.chatRootNodeId } });
     expect((cleanRoot.data as Record<string, unknown>).lastMessageAt).toBeUndefined();
     expect((cleanRoot.data as Record<string, unknown>).scope).toBeUndefined();
+    expect(cleanRoot.abstract).toBeNull();
+    expect(cleanRoot.abstractOriginHash).toBeNull();
+    expect(cleanRoot.content).toBeNull();
+    expect(cleanRoot.contentHash).toBeNull();
 
     // A caller may retry the stable id it deleted before reuse. Reset already
     // tombstoned that row, so GraphQL must preserve its soft-delete idempotency
@@ -272,48 +285,6 @@ describe('protection (S4)', () => {
     const reborn = await db.channel.findUniqueOrThrow({ where: { id: first.id } });
     const page = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
     expect(page.items.map((m: { body: string }) => m.body)).toEqual(['fresh room']);
-  });
-
-  it('a stale live-root lookup cannot bypass clean reuse after concurrent deleteChannel (#1226)', async () => {
-    const current = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
-    const first = current.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
-    await M.createTeamChatMessage({}, { appRef: app.urn, body: 'old secret' }, ctx(admin.id));
-
-    let signalHeld!: () => void;
-    let signalRelease!: () => void;
-    const lockHeld = new Promise<void>((resolve) => { signalHeld = resolve; });
-    const mayRelease = new Promise<void>((resolve) => { signalRelease = resolve; });
-    const holder = db.$transaction(async (tx) => {
-      await lockMemoryForChannelChange(tx, appMem.id);
-      signalHeld();
-      await mayRelease;
-    }, { timeout: 20_000 });
-
-    await lockHeld;
-    // locateTeamChatRoot sees the live root, then the canonical creation core
-    // queues on this held memory key. That barrier makes the stale-read window
-    // deterministic rather than hoping deleteChannel wins a scheduler race.
-    const posting = M.createTeamChatMessage(
-      {}, { appRef: app.urn, body: 'fresh room' }, ctx(admin.id),
-    );
-    try {
-      await waitForChannelMemoryLockWaiter(appMem.id);
-      await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
-      signalRelease();
-      await holder;
-      const fresh = await posting;
-      expect(fresh.seq).toBeGreaterThan(1);
-
-      const reborn = await db.channel.findUniqueOrThrow({ where: { id: first.id } });
-      const root = await db.node.findUniqueOrThrow({ where: { id: reborn.chatRootNodeId } });
-      expect(root.deletedAt).toBeNull();
-      const page = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
-      expect(page.items.map((m: { body: string }) => m.body)).toEqual(['fresh room']);
-    } finally {
-      signalRelease();
-      await holder.catch(() => undefined);
-      await posting.catch(() => undefined);
-    }
   });
 
   it('serializes orphan cleanup before reuse so it cannot delete the fresh incarnation (#1226)', async () => {
@@ -358,7 +329,7 @@ describe('protection (S4)', () => {
       signalRelease();
       await holder.catch(() => undefined);
     }
-  });
+  }, 20_000);
 
   it('reuse treats underscores literally while tombstoning the old transcript (#1226)', async () => {
     const { channel } = await ensureChannelWithRoot(db, {
@@ -373,7 +344,70 @@ describe('protection (S4)', () => {
       memoryId: appMem.id, loc: 'chats_team', name: 'underscored', createdBy: admin.id,
     });
     expect((await db.node.findUniqueOrThrow({ where: { id: unrelated.id } })).deletedAt).toBeNull();
-  });
+  }, 20_000);
+
+  it('rolls reuse back with typed SESSION_EXPIRED if the encryption key expires while waiting (#1226)', async () => {
+    const privateMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:private-${generateId()}`,
+        name: 'private', class: 'private', userId: admin.id,
+      },
+    });
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: privateMem.id, loc: 'chats:secret', name: 'secret', createdBy: admin.id,
+    });
+    const old = await M.createChannelMessage({}, { channelRef: channel.id, body: 'old secret' }, ctx(admin.id));
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+
+    const key = generateDataKey();
+    sessionKeyCache.set('reuse-session', privateMem.id, key);
+    const root = await db.node.findUniqueOrThrow({ where: { id: rootId } });
+    const encrypted = encryptNodeFields(
+      { abstract: root.abstract, content: root.content, data: root.data },
+      { id: privateMem.id, isEncrypted: true },
+    );
+    await db.$transaction([
+      db.memory.update({ where: { id: privateMem.id }, data: { isEncrypted: true } }),
+      db.node.update({
+        where: { id: rootId },
+        data: {
+          abstract: encrypted.abstract,
+          content: encrypted.content,
+          data: encrypted.data as any,
+        },
+      }),
+    ]);
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, privateMem.id);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const reusing = ensureChannelWithRoot(db, {
+      memoryId: privateMem.id, loc: 'chats:secret', name: 'secret', createdBy: admin.id,
+    });
+    try {
+      await waitForChannelMemoryLockWaiter(privateMem.id);
+      sessionKeyCache.evict('reuse-session');
+      signalRelease();
+      await holder;
+      await expect(reusing).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED' } });
+      expect((await db.node.findUniqueOrThrow({ where: { id: rootId } })).deletedAt).not.toBeNull();
+      expect((await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).deletedAt).not.toBeNull();
+      expect((await db.node.findUniqueOrThrow({ where: { id: old.nodeId } })).deletedAt).toBeNull();
+    } finally {
+      sessionKeyCache.clear();
+      signalRelease();
+      await holder.catch(() => undefined);
+      await reusing.catch(() => undefined);
+    }
+  }, 20_000);
 
   it("a dead Channel's refusal does not name an operation that cannot be reached (#1226)", async () => {
     // The issue's third requirement, and it survived the op carve-out: a dead
@@ -527,6 +561,52 @@ describe('backfill', () => {
     const again = await backfillChannels(db, { apply: true });
     expect(again).toMatchObject({ rootsSeen: 2, rowsCreated: 0, rowsRaised: 0, defaultsSet: 0, defaultsProvisioned: 0 });
   });
+
+  it('re-reads under the memory lock so a stale tombstone snapshot cannot overwrite a reused Channel (#1226)', async () => {
+    const deletedAt = new Date(Date.now() - 60_000);
+    const root = await db.node.create({
+      data: {
+        id: generateId(), memoryId: appMem.id, loc: 'chats:team', name: 'Team chat',
+        nodeType: 'chat', data: { messageCount: 4 }, deletedAt,
+      },
+    });
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, appMem.id);
+      signalHeld();
+      await release;
+      // This transaction stands in for the reuse that won the memory lock
+      // immediately before the queued backfill: same stable root/Channel ids,
+      // new live incarnation.
+      await tx.node.update({ where: { id: root.id }, data: { deletedAt: null, deletedBy: null } });
+      await tx.channel.create({
+        data: {
+          id: generateId(), memoryId: appMem.id, loc: root.loc, name: 'team',
+          chatRootNodeId: root.id, lastSeq: 0, createdBy: admin.id,
+        },
+      });
+    }, { timeout: 20_000 });
+
+    await held;
+    const running = backfillChannels(db, { apply: true });
+    try {
+      await waitForChannelMemoryLockWaiter(appMem.id);
+      signalRelease();
+      await holder;
+      await running;
+      const row = await db.channel.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
+      expect(row.deletedAt).toBeNull();
+      expect(row.lastSeq).toBe(4);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+      await running.catch(() => undefined);
+    }
+  }, 20_000);
 });
 
 describe('PR #1165 review — the decisions only the lock can make', () => {

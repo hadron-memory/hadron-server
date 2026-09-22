@@ -4228,6 +4228,10 @@ model Channel {
   chatRootNodeId String      @unique @map("chat_root_node_id")
   lastSeq        Int         @default(0) @map("last_seq")
   lastMessageAt  DateTime?   @map("last_message_at")
+  /// Monotonic identity of the live occupancy at this reserved address.
+  /// Incremented when a tombstoned Channel is reused so requests resolved
+  /// against the previous incarnation cannot post to or delete the new one.
+  incarnation    Int         @default(1)
   createdAt      DateTime    @default(now()) @map("created_at")
   createdBy      String?     @map("created_by")
   updatedAt      DateTime?   @updatedAt @map("updated_at")

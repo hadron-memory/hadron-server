@@ -38,6 +38,47 @@ let teamB: { id: string };
 
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] }) as Context;
 
+/** Pause one resolved Channel snapshot so a test can replace its incarnation. */
+function pausedChannelFindFirstContext(userId: string): {
+  context: Context;
+  reached: Promise<void>;
+  release: () => void;
+} {
+  let signalReached!: () => void;
+  let signalRelease!: () => void;
+  let pending = true;
+  const reached = new Promise<void>((resolve) => { signalReached = resolve; });
+  const released = new Promise<void>((resolve) => { signalRelease = resolve; });
+  const channel = new Proxy(db.channel, {
+    get(target, prop, receiver) {
+      if (prop === 'findFirst') {
+        return async (...args: unknown[]) => {
+          const row = await (target.findFirst as (...inner: unknown[]) => Promise<unknown>)(...args);
+          if (pending) {
+            pending = false;
+            signalReached();
+            await released;
+          }
+          return row;
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  const client = new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === 'channel') return channel;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return {
+    context: { db: client, userId, roles: ['READER'] } as unknown as Context,
+    reached,
+    release: signalRelease,
+  };
+}
+
 beforeEach(async () => {
   await cleanDb(db);
   const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
@@ -89,6 +130,27 @@ describe('Channel-addressed chat', () => {
     expect((await Q.channelMessages({}, { channelRef: teamA.defaultChannelId }, ctx(admin.id))).items[0].body).toBe('team hello');
     expect((await Q.teamChatMessages({}, { appRef: appA.urn }, ctx(admin.id))).items[0].body).toBe('team hello');
     await expect(M.createChannelMessage({}, { channelRef: release.id, body: 'x', replyToSeq: 99 }, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND' } });
+  });
+
+  it('treats `_` in a Channel loc literally for reads, replies, and seq allocation (#1226)', async () => {
+    const underscored = (await ensureChannelWithRoot(db, {
+      memoryId: memA.id, loc: 'chats_team', name: 'underscored', createdBy: admin.id,
+    })).channel;
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: memA.id, loc: 'chatsXteam:messages:0099-sibling',
+        name: 'sibling', nodeType: 'chat-message', seq: 99, content: 'not this Channel',
+        data: { authorUserId: admin.id, authorName: 'sibling' },
+      },
+    });
+
+    expect(await Q.channelMessages({}, { channelRef: underscored.id }, ctx(admin.id))).toEqual({ items: [], total: 0 });
+    await expect(
+      M.createChannelMessage({}, { channelRef: underscored.id, body: 'reply', replyToSeq: 99 }, ctx(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND' } });
+    const first = await M.createChannelMessage({}, { channelRef: underscored.id, body: 'first' }, ctx(admin.id));
+    expect(first.seq).toBe(1);
+    expect((await Q.channelMessages({}, { channelRef: underscored.id }, ctx(admin.id))).items.map((m: { body: string }) => m.body)).toEqual(['first']);
   });
 
   it('a Channel the caller may not read is CHANNEL_NOT_FOUND like a nonexistent one; readable-but-not-postable is FORBIDDEN', async () => {
@@ -157,6 +219,36 @@ describe('PR #1169 review — the memory boundary and the on-behalf-of user', ()
     await M.deleteChannel({}, { ref: release.id }, ctx(admin.id));
     await expect(M.createChannelMessage({}, { channelRef: target.id, body: 'late' }, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
     expect(await db.node.count({ where: { memoryId: memA.id, loc: { startsWith: 'chats:release:messages:' } } })).toBe(0);
+  });
+
+  it('a post resolved against an old incarnation cannot land after delete + reuse (#1226)', async () => {
+    await M.createChannelMessage({}, { channelRef: release.id, body: 'old' }, ctx(admin.id));
+    const paused = pausedChannelFindFirstContext(admin.id);
+    const stalePost = M.createChannelMessage(
+      {}, { channelRef: release.id, body: 'stale late post' }, paused.context,
+    );
+    await paused.reached;
+    await M.deleteChannel({}, { ref: release.id }, ctx(admin.id));
+    const { channel: reused } = await ensureChannelWithRoot(db, {
+      memoryId: memA.id, loc: 'chats:release', name: 'release', createdBy: admin.id,
+    });
+    paused.release();
+    await expect(stalePost).rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
+    expect((await Q.channelMessages({}, { channelRef: reused.id }, ctx(admin.id))).items).toEqual([]);
+  });
+
+  it('a stale delete request cannot tombstone a newly reused incarnation (#1226)', async () => {
+    const paused = pausedChannelFindFirstContext(admin.id);
+    const staleDelete = M.deleteChannel({}, { ref: release.id }, paused.context);
+    await paused.reached;
+    await M.deleteChannel({}, { ref: release.id }, ctx(admin.id));
+    const { channel: reused } = await ensureChannelWithRoot(db, {
+      memoryId: memA.id, loc: 'chats:release', name: 'release', createdBy: admin.id,
+    });
+    paused.release();
+    await expect(staleDelete).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+    expect((await db.channel.findUniqueOrThrow({ where: { id: reused.id } })).deletedAt).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: reused.chatRootNodeId } })).deletedAt).toBeNull();
   });
 });
 

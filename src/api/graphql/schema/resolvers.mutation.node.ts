@@ -2223,6 +2223,28 @@ export const nodeMutations = {
           // Memory-before-loc matches ensureChannelWithRoot's global order.
           await lockMemoryForChannelChange(tx, memoryId);
           await lockNodeForDelete(tx, memoryId, node.loc);
+          // The target may have moved while this delete waited. The loc lock
+          // above protects the address we authorized, not the stable id; do
+          // not let that id carry the delete into its new address or memory.
+          const current = await tx.node.findUnique({
+            where: { id: resolvedId },
+            select: { memoryId: true, loc: true },
+          });
+          if (!current || current.memoryId !== memoryId || current.loc !== node.loc) {
+            const movedMemory = !!current && current.memoryId !== memoryId;
+            throw new GraphQLError(
+              `Node "${nodeRef}" moved while this delete waited — re-read it and retry.`,
+              {
+                extensions: {
+                  code: 'NODE_WRITE_CONFLICT',
+                  ref: nodeRef,
+                  memoryId,
+                  movedMemory,
+                  ...(!movedMemory && current ? { currentLoc: current.loc } : {}),
+                },
+              },
+            );
+          }
           const useSubtree = !!recursive;
           if (!useSubtree) {
             // Non-recursive: refuse rather than silently orphan a subtree under a

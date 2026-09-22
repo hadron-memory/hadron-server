@@ -56,6 +56,7 @@ export interface ChannelRow {
   name: string;
   chatRootNodeId: string;
   lastSeq: number;
+  incarnation: number;
   deletedAt: Date | null;
 }
 
@@ -166,7 +167,9 @@ export async function ensureChannelRow(
       data: {
         deletedAt: null,
         deletedBy: null,
-        ...(args.resetForReuse ? { lastSeq: 0, lastMessageAt: null } : {}),
+        ...(args.resetForReuse
+          ? { lastSeq: 0, lastMessageAt: null, incarnation: { increment: 1 } }
+          : {}),
       },
     });
   }
@@ -202,21 +205,28 @@ async function resetReusedChannel(
   },
 ): Promise<void> {
   const now = new Date();
-  const root = await tx.node.findUniqueOrThrow({ where: { id: args.rootId }, select: { data: true } });
+  const root = await tx.node.findUniqueOrThrow({
+    where: { id: args.rootId },
+    select: { abstract: true, content: true, data: true },
+  });
   const encrypted = translateSessionExpired(args.memoryId, () => {
-    const plain = decryptNodeFields({ data: root.data }, args.memEncInfo);
+    const plain = decryptNodeFields(root, args.memEncInfo);
     const rootData = { ...((plain.data as Record<string, unknown> | null) ?? {}) };
     delete rootData.lastMessageAt;
     // Pre-#1196 team-chat roots stamped this retired audience marker. Reuse is
     // the canonical migration point: a new Channel derives access solely from
     // its host memory and must not inherit the legacy assertion.
     delete rootData.scope;
-    return encryptNodeFields({ content: null, data: rootData }, args.memEncInfo);
+    return encryptNodeFields({ abstract: null, content: null, data: rootData }, args.memEncInfo);
   });
 
   await tx.node.update({
     where: { id: args.rootId },
     data: {
+      abstract: encrypted.abstract ?? null,
+      abstractOriginHash: null,
+      content: encrypted.content ?? null,
+      contentHash: null,
       data: (encrypted.data ?? null) as InputJsonValue,
       updatedBy: args.deletedBy,
     },

@@ -5675,6 +5675,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       type DeleteResult =
         | { refused: 'descendants'; count: number }
         | { refused: 'crossMem'; count: number }
+        | { refused: 'changed' }
         | { ok: true; descendantCount: number };
 
       const result: DeleteResult = await db.$transaction(async (tx) => {
@@ -5682,6 +5683,15 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         // Channel resurrection takes this same key before any loc key.
         await lockMemoryForChannelChange(tx, memory.id);
         await lockNodeForDelete(tx, memory.id, loc);
+        // A stable node id can move while this request waits on the old loc.
+        // Abort instead of deleting that id at its new address/memory.
+        const current = await tx.node.findUnique({
+          where: { id: existing.id },
+          select: { memoryId: true, loc: true },
+        });
+        if (!current || current.memoryId !== memory.id || current.loc !== loc) {
+          return { refused: 'changed' };
+        }
         // Descendants by URN hierarchy: loc startsWith node.loc + ':'.
         // Soft-delete refuses based on LIVE descendants; hard-delete
         // refuses based on the union (a tombstoned descendant still has
@@ -5762,6 +5772,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       });
 
       if ('refused' in result) {
+        if (result.refused === 'changed') {
+          return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
+        }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
           return textResult(

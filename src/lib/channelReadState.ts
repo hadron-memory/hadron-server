@@ -26,6 +26,7 @@ import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.
 import { generateId } from './id.js';
 import { mentionTokenOf } from './mentionToken.js';
 import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegister.js';
+import { nodeIdsWithLiteralLocPrefix } from './literalLocPrefix.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -143,11 +144,14 @@ export async function renderAttentionSection(
     if (row.mentionOnly) {
       // Only new messages that name the attendee count — a small indexed
       // query over the (seen, lastSeq] window, content never injected.
-      const mentions = tokens.length
+      const transcriptIds = tokens.length
+        ? await nodeIdsWithLiteralLocPrefix(db, c.memoryId, `${c.loc}:messages:`)
+        : [];
+      const mentions = transcriptIds.length
         ? await db.node.count({
             where: {
               memoryId: c.memoryId,
-              loc: { startsWith: `${c.loc}:messages:` },
+              id: { in: transcriptIds },
               nodeType: { in: MESSAGE_NODE_TYPES },
               deletedAt: null,
               seq: { gt: seen, lte: c.lastSeq },

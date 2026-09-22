@@ -1,0 +1,2 @@
+ALTER TABLE "channels"
+ADD COLUMN "incarnation" INTEGER NOT NULL DEFAULT 1;
