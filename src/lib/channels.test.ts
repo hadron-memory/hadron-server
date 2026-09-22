@@ -229,7 +229,18 @@ describe('protection (S4)', () => {
         abstractOriginHash: 'deadbeef',
         content: 'old root payload',
         contentHash: 'cafebabe',
+        embeddingPendingAt: new Date(),
+        embeddingFailedAt: new Date(),
+        embeddingAttempts: 3,
+        embeddingError: 'old failure',
+        tokens: 42,
         data: { ...(oldRoot.data as Record<string, unknown>), scope: 'shared' },
+      },
+    });
+    await db.nodeEmbedding.create({
+      data: {
+        id: generateId(), nodeId: oldRoot.id, memoryId: appMem.id,
+        kind: 'abstract', provider: 'old', model: 'old', dim: 768,
       },
     });
     await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
@@ -255,6 +266,12 @@ describe('protection (S4)', () => {
     expect(cleanRoot.abstractOriginHash).toBeNull();
     expect(cleanRoot.content).toBeNull();
     expect(cleanRoot.contentHash).toBeNull();
+    expect(cleanRoot.embeddingPendingAt).toBeNull();
+    expect(cleanRoot.embeddingFailedAt).toBeNull();
+    expect(cleanRoot.embeddingAttempts).toBe(0);
+    expect(cleanRoot.embeddingError).toBeNull();
+    expect(cleanRoot.tokens).toBeNull();
+    expect(await db.nodeEmbedding.count({ where: { nodeId: cleanRoot.id } })).toBe(0);
 
     // A caller may retry the stable id it deleted before reuse. Reset already
     // tombstoned that row, so GraphQL must preserve its soft-delete idempotency
@@ -339,7 +356,12 @@ describe('protection (S4)', () => {
     const unrelated = await db.node.create({
       data: { id: generateId(), memoryId: appMem.id, loc: 'chatsXteam:messages:0001', name: 'unrelated' },
     });
+    const messages = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { memoryId: appMem.id, loc: 'chats_team:messages' } },
+    });
     await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+    await M.deleteNode({}, { nodeRef: messages.id, recursive: true }, ctx(admin.id));
+    expect((await db.node.findUniqueOrThrow({ where: { id: unrelated.id } })).deletedAt).toBeNull();
     await ensureChannelWithRoot(db, {
       memoryId: appMem.id, loc: 'chats_team', name: 'underscored', createdBy: admin.id,
     });
@@ -586,7 +608,7 @@ describe('backfill', () => {
       await tx.channel.create({
         data: {
           id: generateId(), memoryId: appMem.id, loc: root.loc, name: 'team',
-          chatRootNodeId: root.id, lastSeq: 0, createdBy: admin.id,
+          chatRootNodeId: root.id, lastSeq: 0, incarnation: 2, createdBy: admin.id,
         },
       });
     }, { timeout: 20_000 });
@@ -600,7 +622,7 @@ describe('backfill', () => {
       await running;
       const row = await db.channel.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
       expect(row.deletedAt).toBeNull();
-      expect(row.lastSeq).toBe(4);
+      expect(row.lastSeq).toBe(0);
     } finally {
       signalRelease();
       await holder.catch(() => undefined);

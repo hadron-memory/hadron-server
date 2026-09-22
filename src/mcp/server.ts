@@ -57,6 +57,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
+import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
@@ -5699,7 +5700,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         // for the caller).
         const descendantWhere = {
           memoryId: memory.id,
-          loc: { startsWith: loc + ':' },
+          loc: { startsWith: escapePrismaLikePattern(loc + ':') },
           ...(hard ? {} : { deletedAt: null }),
         };
         const descendantCount = await tx.node.count({ where: descendantWhere });
@@ -5714,7 +5715,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
               ? (await tx.node.findMany({
                   where: {
                     memoryId: memory.id,
-                    OR: [{ id: existing.id }, { loc: { startsWith: loc + ':' } }],
+                    OR: [{ id: existing.id }, { loc: { startsWith: escapePrismaLikePattern(loc + ':') } }],
                   },
                   select: { id: true },
                 })).map((n) => n.id)
@@ -5742,7 +5743,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
             await tx.node.deleteMany({
               where: {
                 memoryId: memory.id,
-                OR: [{ id: existing.id }, { loc: { startsWith: loc + ':' } }],
+                OR: [{ id: existing.id }, { loc: { startsWith: escapePrismaLikePattern(loc + ':') } }],
               },
             });
           } else {
@@ -5756,7 +5757,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
               where: {
                 memoryId: memory.id,
                 deletedAt: null,
-                OR: [{ id: existing.id }, { loc: { startsWith: loc + ':' } }],
+                OR: [{ id: existing.id }, { loc: { startsWith: escapePrismaLikePattern(loc + ':') } }],
               },
               data: { deletedAt: now, deletedBy },
             });

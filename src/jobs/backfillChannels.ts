@@ -152,7 +152,7 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
       if (!state.existing) {
         report.rowsCreated += 1;
         if (root.deletedAt) report.rowsTombstoned += 1;
-      } else if (state.existing.lastSeq < state.lastSeq) {
+      } else if (state.existing.incarnation === 1 && state.existing.lastSeq < state.lastSeq) {
         report.rowsRaised += 1;
       }
       continue;
@@ -196,7 +196,11 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
         });
         return { encrypted: state.encrypted, created: true, tombstoned: !!fresh.deletedAt, raised: false };
       }
-      if (state.existing.lastSeq < state.lastSeq) {
+      // Incarnation > 1 means clean reuse deliberately reset the live
+      // transcript watermark to zero while retaining allocator history. The
+      // one-shot legacy repair must not turn that history back into phantom
+      // attention for the new room.
+      if (state.existing.incarnation === 1 && state.existing.lastSeq < state.lastSeq) {
         await tx.channel.updateMany({
           where: { id: state.existing.id, lastSeq: { lt: state.lastSeq } },
           data: { lastSeq: state.lastSeq },

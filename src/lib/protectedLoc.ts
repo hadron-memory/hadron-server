@@ -50,6 +50,7 @@
 
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
+import { escapePrismaLikePattern } from './literalLocPrefix.js';
 
 /** Any client that can read the Channel table — the root client or a transaction. */
 export type ChannelReader = Pick<Prisma.TransactionClient, 'channel'>;
@@ -358,7 +359,7 @@ export function protectedDeletionFilter(protectedLocs: ProtectedLoc[]): {
     }
     return [
       { loc: p.loc },
-      { loc: { startsWith: `${p.loc}:` } },
+      { loc: { startsWith: escapePrismaLikePattern(`${p.loc}:`) } },
       ...(ancestors.length ? [{ loc: { in: ancestors } }] : []),
     ];
   });

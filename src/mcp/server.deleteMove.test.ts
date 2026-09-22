@@ -208,6 +208,27 @@ describe('hadron_delete_node — soft delete (default)', () => {
     });
     expect(liveSubtree).toHaveLength(0);
   });
+
+  it('treats `_` in a recursive-delete loc literally', async () => {
+    const root = await db.node.create({
+      data: { id: generateId(), memoryId: fx.memory.id, loc: 'under_score', name: 'root' },
+    });
+    const child = await db.node.create({
+      data: { id: generateId(), memoryId: fx.memory.id, loc: 'under_score:child', name: 'child' },
+    });
+    const sibling = await db.node.create({
+      data: { id: generateId(), memoryId: fx.memory.id, loc: 'underXscore:child', name: 'sibling' },
+    });
+    const srv = createTestableMcpServer(adminAuth());
+    await srv.callToolText('hadron_delete_node', {
+      urn: `urn:node:${fx.memory.urn}:${root.loc}`,
+      recursive: true,
+    });
+
+    expect((await db.node.findUniqueOrThrow({ where: { id: root.id } })).deletedAt).not.toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).deletedAt).not.toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: sibling.id } })).deletedAt).toBeNull();
+  });
 });
 
 describe('hadron_delete_node — hard delete', () => {

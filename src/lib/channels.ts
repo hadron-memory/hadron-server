@@ -228,9 +228,18 @@ async function resetReusedChannel(
       content: encrypted.content ?? null,
       contentHash: null,
       data: (encrypted.data ?? null) as InputJsonValue,
+      embeddingPendingAt: null,
+      embeddingFailedAt: null,
+      embeddingAttempts: 0,
+      embeddingError: null,
+      tokens: null,
       updatedBy: args.deletedBy,
     },
   });
+  // A live root is eligible for vector search again. Old abstract/chunk rows
+  // can retain the previous incarnation's plaintext in `chunk_text`, so they
+  // must leave atomically with the payload reset.
+  await tx.nodeEmbedding.deleteMany({ where: { nodeId: args.rootId } });
   await tx.$executeRaw`
     UPDATE nodes
     SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}

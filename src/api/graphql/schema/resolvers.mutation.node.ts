@@ -50,6 +50,7 @@ import {
   validateLoc,
   InvalidLocError,
 } from '../../../lib/validateLoc.js';
+import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import {
   moveNodeSubtree,
@@ -2205,7 +2206,7 @@ export const nodeMutations = {
       // extractParentNode / the bulk node ops.
       const subtree: Prisma.NodeWhereInput = {
         memoryId,
-        OR: [{ loc: node.loc }, { loc: { startsWith: `${node.loc}:` } }],
+        OR: [{ loc: node.loc }, { loc: { startsWith: escapePrismaLikePattern(`${node.loc}:`) } }],
       };
       try {
         // The count and the delete run in one transaction (parity with
@@ -2253,7 +2254,7 @@ export const nodeMutations = {
             const descendantCount = await tx.node.count({
               where: {
                 memoryId,
-                loc: { startsWith: `${node.loc}:` },
+                loc: { startsWith: escapePrismaLikePattern(`${node.loc}:`) },
                 ...(hard ? {} : { deletedAt: null }),
               },
             });
