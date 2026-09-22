@@ -1250,10 +1250,11 @@ export const typeDefs = `#graphql
   the other**: a chat session that closes leaves its worker session open
   until endSession. Since #1114 nothing ends it for inactivity — silence is not
   evidence of abandonment — but it stops reading as LIVE once nobody has driven
-  it inside its idle window, so an abandoned name frees itself for binding
-  without the session being ended or its unwritten handoff lost. Do not use "chat
-  session" for a Chat (the agent conversation entity) — that is an **agent
-  chat**, a third concept.
+  it inside its idle window, so the stale session stops blocking another bind
+  without being ended or losing its unwritten handoff. That changes no HOLD: a
+  human-held name stays held until explicit release, so only its holder can bind
+  it again. Do not use "chat session" for a Chat (the agent conversation entity)
+  — that is an **agent chat**, a third concept.
   """
   type Session {
     id: ID!
@@ -6848,11 +6849,12 @@ export const typeDefs = `#graphql
     **Ending your chat session does not end a worker session** (#1034): a chat
     session that closes leaves this session open until endSession — #1114
     removed inactivity as a reason to end one, so nothing else will. The worker
-    stops reading as LIVE once its idle window passes without a drive, which is
-    what lets an abandoned name be bound again; the session itself, and any
-    handoff still unwritten, survive. A client that ties its lifetime to a
-    conversation must call endSession itself; nothing about closing a window
-    reaches this server.
+    stops reading as LIVE once its idle window passes without a drive, which
+    lets another bind proceed without ending the stale session or losing its
+    unwritten handoff. A human HOLD stays in force until explicit release, so
+    only its holder can bind it again. A client that ties its lifetime to a
+    conversation must call endSession itself; nothing
+    about closing a window reaches this server.
     """
     startSession(input: SessionInput!): Session!
     """

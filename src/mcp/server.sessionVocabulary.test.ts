@@ -183,6 +183,18 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     expect(d.toLowerCase()).not.toMatch(/only thing that ends/);
   });
 
+  it('#1246 — session tools distinguish a liveness block from a persistent hold', () => {
+    const start = flat(srv().toolDescription('hadron_start_session'));
+    const end = flat(srv().toolDescription('hadron_end_session'));
+
+    expect(start).toContain('stops blocking a bind');
+    expect(start).toMatch(/human-held name stays held until explicit release/);
+    expect(end).toMatch(/blocks another bind only inside its idle window/);
+    expect(end).toContain('inactivity changes no hold');
+    expect(start).not.toMatch(/worker taken,? until/);
+    expect(end).not.toMatch(/worker taken until/);
+  });
+
   it('#1100 — the `summary` parameter says it is display-only and points at handoff', () => {
     // The schema is the ONLY thing guaranteed to be in front of the caller at
     // the moment of choosing: the end-worker-session skill is not always
@@ -297,6 +309,33 @@ describe('#1034 — the GraphQL schema carries the distinction for every client'
       // claimed the independence while asserting only the vocabulary
       // (PR #1056 review, Copilot).
       expect(statesIndependence(block), `${name} must state the independence`).toBe(true);
+    }
+  });
+
+  it('#1246 — idle worker sessions stop blocking binds without freeing held names', () => {
+    const sessionType = flat(
+      typeDefs.slice(
+        typeDefs.indexOf('A unit of work recorded against a user or App'),
+        typeDefs.indexOf('type Session {'),
+      ),
+    );
+    const start = flat(
+      typeDefs.slice(
+        typeDefs.indexOf('Open a session — and, when'),
+        typeDefs.indexOf('startSession(input: SessionInput!)'),
+      ),
+    );
+
+    for (const [name, block] of [['Session', sessionType], ['startSession', start]] as const) {
+      expect(block, `${name} must distinguish liveness from ownership`).toMatch(
+        /stops? blocking another bind|lets another bind proceed/,
+      );
+      expect(block, `${name} must say idleness does not release the hold`).toMatch(
+        /held until explicit release|hold stays in force until explicit release/,
+      );
+      expect(block, `${name} must not claim the name becomes free`).not.toMatch(
+        /(?:free|frees) (?:itself|the name)|name (?:becomes|is) free/,
+      );
     }
   });
 

@@ -177,8 +177,8 @@ describe('#1009 — App scope recovery reaches the rest of the worker flow', () 
 
   it('hadron_end_session recovers from its own id — no new argument needed', async () => {
     // The sharpest case in the gap: after a reconnect a multi-App caller could
-    // neither continue the session NOR end it, leaving the worker TAKEN until
-    // the reaper or a forced takeover.
+    // neither continue the session NOR end it, leaving the worker session open
+    // and blocking another bind while it still read live.
     const sessionId = await startThenReconnect();
     const after = server({ isReconnect: true });
 
