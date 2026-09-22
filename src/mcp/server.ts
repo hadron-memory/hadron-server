@@ -8503,7 +8503,7 @@ type ActiveMcpTransport = {
   /** Mutated only while holding this transport's request lock. */
   auth: AuthContext;
   /**
-   * Settled by the previous request after BOTH role refresh and dispatch.
+   * Settled by the previous POST after BOTH role refresh and dispatch.
    * Auth is captured by every tool closure, so those two steps are one
    * authorization critical section rather than independent operations.
    */
@@ -8567,19 +8567,38 @@ const activeAppByMcpSession = new Map<
   { appId: string; organizationId: string | null }
 >();
 
+function respondMcpSessionNotFound(res: Response): void {
+  res.status(404).json({
+    jsonrpc: '2.0',
+    error: { code: -32001, message: 'Session not found' },
+    id: null,
+  });
+}
+
 /**
  * Handle MCP requests on the Express /mcp endpoint.
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
   // Reuse the authenticated identity for an existing transport, but refresh
-  // its live platform roles before every request (#1251). `resolveJwt` only
+  // its live platform roles before every tool-dispatch POST (#1251). `resolveJwt` only
   // runs when the transport opens; without this, a demoted administrator keeps
   // the captured role for the lifetime of an already-open MCP session.
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
   if (sessionId && transports.has(sessionId)) {
     const active = transports.get(sessionId)!;
+
+    // Streamable HTTP GET opens the transport's long-lived SSE channel. Its
+    // handleRequest promise lasts for the stream lifetime, so putting it in
+    // the POST queue would prevent every later tool call from ever reaching
+    // role refresh or dispatch. GET does not dispatch role-gated tools and
+    // therefore does not mutate the shared authorization snapshot.
+    if (req.method === 'GET') {
+      await active.transport.handleRequest(req, res, req.body);
+      return;
+    }
+
     const previousRequest = active.requestTail;
     let releaseRequest!: () => void;
     active.requestTail = new Promise<void>((resolve) => {
@@ -8590,7 +8609,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       // A request may have queued before another request invalidated and
       // closed this transport. It must not dispatch through the stale object.
       if (transports.get(sessionId) !== active) {
-        res.status(404).json({ error: 'Session not found' });
+        respondMcpSessionNotFound(res);
         return;
       }
 
@@ -8660,11 +8679,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       // This timestamp is the only signal that survives the gap.
       lastStaleSessionAt = Date.now();
       mcpLog('info', 'stale_mcp_session_404', { mcpSessionId: sessionId, method: req.method });
-      res.status(404).json({
-        jsonrpc: '2.0',
-        error: { code: -32001, message: 'Session not found' },
-        id: null,
-      });
+      respondMcpSessionNotFound(res);
       return;
     }
   }

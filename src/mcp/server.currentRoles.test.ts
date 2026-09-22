@@ -86,6 +86,18 @@ function mcpFetch(token: string, body: unknown, sessionId?: string): Promise<Res
   });
 }
 
+function openMcpSse(token: string, sessionId: string, signal: AbortSignal): Promise<Response> {
+  return fetch(`${baseUrl}/mcp`, {
+    method: 'GET',
+    headers: {
+      accept: 'text/event-stream',
+      authorization: `Bearer ${token}`,
+      'mcp-session-id': sessionId,
+    },
+    signal,
+  });
+}
+
 async function createUserAndToken() {
   const suffix = generateId().slice(-8);
   const user = await db.user.create({
@@ -196,6 +208,39 @@ describe('#1251 — existing MCP sessions refresh platform roles', () => {
     expect(recovered.status).toBe(200);
   });
 
+  it('returns the standard JSON-RPC 404 when a queued POST follows invalidation', async () => {
+    const { token } = await createUserAndToken();
+    const sessionId = await initializeSession(token);
+    let markLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      markLookupStarted = resolve;
+    });
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    vi.spyOn(db.user, 'findFirst').mockImplementationOnce((async () => {
+      markLookupStarted();
+      await lookupGate;
+      return null;
+    }) as never);
+
+    const invalidating = mcpFetch(token, listToolsBody(25), sessionId);
+    await lookupStarted;
+    const queued = mcpFetch(token, listToolsBody(26), sessionId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    releaseLookup();
+
+    const [invalidated, stale] = await Promise.all([invalidating, queued]);
+    expect(invalidated.status).toBe(401);
+    expect(stale.status).toBe(404);
+    expect(await stale.json()).toEqual({
+      jsonrpc: '2.0',
+      error: { code: -32001, message: 'Session not found' },
+      id: null,
+    });
+  });
+
   it('serializes role refresh and dispatch for concurrent requests on one session', async () => {
     const { token } = await createUserAndToken();
     const sessionId = await initializeSession(token);
@@ -229,5 +274,26 @@ describe('#1251 — existing MCP sessions refresh platform roles', () => {
     expect(firstResponse.status).toBe(200);
     expect(secondResponse.status).toBe(200);
     expect(findFirst).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a long-lived SSE GET block role refresh and POST dispatch', async () => {
+    const { token } = await createUserAndToken();
+    const sessionId = await initializeSession(token);
+    const abort = new AbortController();
+
+    try {
+      const stream = await openMcpSse(token, sessionId, abort.signal);
+      expect(stream.status).toBe(200);
+
+      const post = await Promise.race([
+        mcpFetch(token, listToolsBody(40), sessionId),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('POST blocked behind SSE stream')), 1_000);
+        }),
+      ]);
+      expect(post.status).toBe(200);
+    } finally {
+      abort.abort();
+    }
   });
 });
