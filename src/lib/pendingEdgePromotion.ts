@@ -23,6 +23,12 @@ export function pendingEdgeStableTargetKey(targetNodeId: string): string {
   return `${PENDING_EDGE_STABLE_TARGET_PREFIX}${targetNodeId}`;
 }
 
+export function pendingEdgeStableTargetId(targetKey: string): string | null {
+  if (!targetKey.startsWith(PENDING_EDGE_STABLE_TARGET_PREFIX)) return null;
+  const targetNodeId = targetKey.slice(PENDING_EDGE_STABLE_TARGET_PREFIX.length);
+  return targetNodeId || null;
+}
+
 /** Recompute the dashboard count from the live queue rows it describes. */
 export async function reconcilePendingEdgeCount(
   db: PrismaClient | Prisma.TransactionClient,

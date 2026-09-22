@@ -4,6 +4,10 @@ import { generateId } from '../../lib/id.js';
 import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { computeContentHash } from '../../lib/contentHash.js';
+import {
+  pendingEdgeStableTargetId,
+  pendingEdgeStableTargetKey,
+} from '../../lib/pendingEdgePromotion.js';
 
 /**
  * Clone a Memory: copy the Memory row plus its live graph (Nodes, Edges,
@@ -318,19 +322,54 @@ export async function cloneMemoryGraph(
       }
 
       // ── PendingEdges ───────────────────────────────────────────────────
-      // targetId is a free-form string (not a FK) and may embed the source
-      // memory's URN — rewrite it like content.
+      // targetId is a free-form string (not a FK). Loc/URN-keyed references
+      // are rewritten like content; explicitly marked stable-id work follows
+      // the same internal-remap / cross-org-drop rules as materialized Edges.
       const pendingEdges = await tx.pendingEdge.findMany({
         where: { deletedAt: null, sourceId: { in: [...idMap.keys()] } },
       });
-      const pendingRows: Prisma.PendingEdgeCreateManyInput[] = pendingEdges.map((p) => ({
-        id: generateId(),
-        sourceId: idMap.get(p.sourceId)!,
-        targetId: rewriteMemoryUrnRefs(p.targetId, source.urn, args.newUrn)!,
-        loc: p.loc,
-        name: p.name,
-        createdBy: args.actorId,
-      }));
+      const unmappedStableTargetIds = [
+        ...new Set(
+          pendingEdges
+            .map((p) => pendingEdgeStableTargetId(p.targetId))
+            .filter((id): id is string => id !== null && !idMap.has(id)),
+        ),
+      ];
+      const internalStableTargetIds = new Set(
+        unmappedStableTargetIds.length > 0
+          ? (
+              await tx.node.findMany({
+                where: { id: { in: unmappedStableTargetIds }, memoryId: source.id },
+                select: { id: true },
+              })
+            ).map((n) => n.id)
+          : [],
+      );
+      const pendingRows: Prisma.PendingEdgeCreateManyInput[] = [];
+      for (const p of pendingEdges) {
+        const stableTargetId = pendingEdgeStableTargetId(p.targetId);
+        let targetId: string;
+        if (stableTargetId) {
+          const remappedTargetId = idMap.get(stableTargetId);
+          if (!remappedTargetId) {
+            // A soft-deleted internal target is absent from the clone. An
+            // external target is also dropped across orgs, matching the Edge
+            // isolation rule above; same-org clones may retain it.
+            if (internalStableTargetIds.has(stableTargetId) || isCrossOrg) continue;
+          }
+          targetId = pendingEdgeStableTargetKey(remappedTargetId ?? stableTargetId);
+        } else {
+          targetId = rewriteMemoryUrnRefs(p.targetId, source.urn, args.newUrn)!;
+        }
+        pendingRows.push({
+          id: generateId(),
+          sourceId: idMap.get(p.sourceId)!,
+          targetId,
+          loc: p.loc,
+          name: p.name,
+          createdBy: args.actorId,
+        });
+      }
       if (pendingRows.length > 0) {
         await tx.pendingEdge.createMany({ data: pendingRows, skipDuplicates: true });
       }

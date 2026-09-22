@@ -5,6 +5,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { generateId } from '../../lib/id.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { pendingEdgeStableTargetKey } from '../../lib/pendingEdgePromotion.js';
 import {
   rewriteMemoryUrnRefs,
   memoryUrnForms,
@@ -213,6 +214,13 @@ describe('cloneMemory', () => {
     await db.pendingEdge.create({
       data: { sourceId: guide.id, targetId: 'org-a::src-mem::missing:loc', name: 'pends' },
     });
+    await db.pendingEdge.create({
+      data: {
+        sourceId: guide.id,
+        targetId: pendingEdgeStableTargetKey(setup.id),
+        name: 'durable-internal',
+      },
+    });
 
     const clone = await resolvers.Mutation.cloneMemory(
       {},
@@ -232,7 +240,7 @@ describe('cloneMemory', () => {
     expect(clone.source).toBeNull();
     expect(clone.readBranch).toBeNull();
     expect(clone.writeBranch).toBeNull();
-    expect(clone.pendingEdgeCount).toBe(1);
+    expect(clone.pendingEdgeCount).toBe(2);
 
     // Nodes: live ones copied with NEW ids, same locs; deleted one skipped.
     const cloneNodes = await db.node.findMany({ where: { memoryId: clone.id } });
@@ -279,12 +287,18 @@ describe('cloneMemory', () => {
     const seeAlso = cloneEdges.find((e) => e.name === 'see-also')!;
     expect(seeAlso.targetId).toBe(external.id);
 
-    // PendingEdge: source remapped, target string rewritten.
+    // PendingEdges: source remapped, loc string rewritten, and durable stable
+    // internal target remapped to the cloned node rather than the original.
     const clonePending = await db.pendingEdge.findMany({
       where: { sourceId: cloneGuide.id },
     });
-    expect(clonePending).toHaveLength(1);
-    expect(clonePending[0].targetId).toBe('org-a::clone-mem::missing:loc');
+    expect(clonePending).toHaveLength(2);
+    expect(clonePending.find((p) => p.name === 'pends')?.targetId).toBe(
+      'org-a::clone-mem::missing:loc',
+    );
+    expect(clonePending.find((p) => p.name === 'durable-internal')?.targetId).toBe(
+      pendingEdgeStableTargetKey(cloneSetup.id),
+    );
 
     // Provenance log entry on the clone.
     const log = await db.memoryLogEntry.findMany({ where: { memoryId: clone.id } });
@@ -547,6 +561,20 @@ describe('cloneMemory', () => {
           name: 'see-also',
         },
       });
+      await db.pendingEdge.create({
+        data: {
+          sourceId: guide.id,
+          targetId: pendingEdgeStableTargetKey(internalTarget.id),
+          name: 'pending-internal',
+        },
+      });
+      await db.pendingEdge.create({
+        data: {
+          sourceId: guide.id,
+          targetId: pendingEdgeStableTargetKey(external.id),
+          name: 'pending-external',
+        },
+      });
 
       const clone = await resolvers.Mutation.cloneMemory(
         {},
@@ -561,6 +589,17 @@ describe('cloneMemory', () => {
       expect(cloneEdges.map((e) => e.name)).toEqual(['routes-to']);
       // And no cloned edge references the foreign node id.
       expect(cloneEdges.some((e) => e.targetId === external.id)).toBe(false);
+      const cloneGuide = cloneNodes.find((n) => n.loc === guide.loc)!;
+      const cloneTarget = cloneNodes.find((n) => n.loc === internalTarget.loc)!;
+      const clonePending = await db.pendingEdge.findMany({
+        where: { sourceId: cloneGuide.id },
+      });
+      expect(clonePending).toHaveLength(1);
+      expect(clonePending[0]).toMatchObject({
+        name: 'pending-internal',
+        targetId: pendingEdgeStableTargetKey(cloneTarget.id),
+      });
+      expect(clonePending.some((p) => p.targetId === pendingEdgeStableTargetKey(external.id))).toBe(false);
     });
 
     it('rejects a relative (not fully-qualified) targetUrn', async () => {
