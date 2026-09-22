@@ -189,8 +189,9 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
 
     expect(start).toContain('stops blocking a bind');
     expect(start).toMatch(/human-held name stays held until explicit release/);
-    expect(end).toMatch(/blocks another bind only inside its idle window/);
-    expect(end).toContain('inactivity changes no hold');
+    expect(end).toMatch(/while open and recently active inside its idle window/);
+    expect(end).toMatch(/session block falls away/);
+    expect(end).toMatch(/human hold remains independent until explicit release/);
     expect(start).not.toMatch(/worker taken,? until/);
     expect(end).not.toMatch(/worker taken until/);
   });

@@ -118,6 +118,19 @@ describe('#1006 — the surface states its capabilities', () => {
     expect(out).toContain('server:');
     expect(out).toContain('version:');
   });
+
+  it('#1246 — hadron_whoami renders liveness and a human hold as independent state', async () => {
+    const client = server();
+    await client.callToolText('hadron_start_session', {
+      description: 'exercise the whoami footer',
+      workerRef: worker.id,
+    });
+    const out = await client.callToolText('hadron_whoami', {});
+
+    expect(out).toMatch(/recently active inside its idle window/);
+    expect(out).toMatch(/session block falls away/);
+    expect(out).toMatch(/human HOLD remains independent until explicit release/);
+  });
 });
 
 describe('#1009 — a reconnect is legible instead of inferred', () => {
