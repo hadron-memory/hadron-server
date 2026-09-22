@@ -39,7 +39,7 @@ import { locateTeamAgent } from '../api/graphql/schema/resolvers.worker.js';
 import { DEFAULT_CHANNEL_NAME, ensureChannelRow, ensureChannelWithRoot, lockMemoryForChannelChange } from '../lib/channels.js';
 import { ensureInstallRegisterRows } from '../lib/registerInstall.js';
 import { TEAM_CHAT_LOC } from '../lib/teamChatLoc.js';
-import { maxMessageSeqAtLiteralLocPrefix, nodeIdsWithLiteralLocPrefix } from '../lib/literalLocPrefix.js';
+import { escapePrismaLikePattern, maxMessageSeqAtLiteralLocPrefix } from '../lib/literalLocPrefix.js';
 
 /** The message nodeTypes the allocator counts — mirrors chatRoot.ts. */
 const MESSAGE_NODE_TYPES = ['chat-message', 'record'];
@@ -132,11 +132,10 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
   for (const root of roots) {
     const inspect = async (scope: PrismaClient | Prisma.TransactionClient, fresh: typeof root) => {
       const { lastSeq, encrypted } = await highWater(scope, fresh);
-      const transcriptIds = await nodeIdsWithLiteralLocPrefix(scope, fresh.memoryId, `${fresh.loc}:messages:`);
       const lastMessage = await scope.node.findFirst({
         where: {
-          id: { in: transcriptIds },
           memoryId: fresh.memoryId,
+          loc: { startsWith: escapePrismaLikePattern(`${fresh.loc}:messages:`) },
           nodeType: { in: MESSAGE_NODE_TYPES },
           deletedAt: null,
         },

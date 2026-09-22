@@ -62,7 +62,7 @@ import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
-import { nodeIdsWithLiteralLocPrefix } from '../../../lib/literalLocPrefix.js';
+import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
 // listing and the shared chat-loc gate both have to exclude `chats:team`, and
@@ -856,14 +856,13 @@ async function postToChannelRoot(
     // a reply can never cite its own (still-uncommitted) seq.
     let replyTarget: { id: string; loc: string } | null = null;
     if (replyToSeq != null) {
-      const transcriptIds = await nodeIdsWithLiteralLocPrefix(tx, root.memoryId, `${messagesLoc}:`);
       replyTarget = await tx.node.findFirst({
         // nodeType-constrained (Copilot on PR #941): the generic write
         // surface may put off-road nodes under the prefix
         // (D-2026-08-10-003) — a reply must cite a canonical message.
         where: {
           memoryId: root.memoryId,
-          id: { in: transcriptIds },
+          loc: { startsWith: escapePrismaLikePattern(`${messagesLoc}:`) },
           nodeType: 'chat-message',
           seq: replyToSeq,
           deletedAt: null,
@@ -963,10 +962,9 @@ async function readChannelRoot(
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
   const take = clampListTake(limit);
   const skip = Math.max(0, offset ?? 0);
-  const transcriptIds = await nodeIdsWithLiteralLocPrefix(ctx.db, root.memoryId, `${root.loc}:messages:`);
   const where: Prisma.NodeWhereInput = {
     memoryId: root.memoryId,
-    id: { in: transcriptIds },
+    loc: { startsWith: escapePrismaLikePattern(`${root.loc}:messages:`) },
     // Only canonical messages (Copilot on PR #941): the generic write
     // surface stays open (D-2026-08-10-003), so off-road nodes under the
     // prefix must not surface as fabricated transcript entries.

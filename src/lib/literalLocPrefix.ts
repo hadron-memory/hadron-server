@@ -3,23 +3,14 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 type Db = PrismaClient | Prisma.TransactionClient;
 
 /**
- * Prisma's `startsWith` compiles to SQL LIKE, where `_` and `%` are
- * wildcards. Node locs permit both characters, so Channel ownership must use
- * PostgreSQL's literal `starts_with` predicate instead
+ * Prisma's string filters compile to PostgreSQL LIKE without escaping the
+ * caller's value. Escape LIKE's three metacharacters before passing a loc to
+ * `startsWith`, preserving indexed filtering, counts and pagination without
+ * first materializing an unbounded id list
  * (`findings:prisma-string-filters-are-unescaped-like`).
  */
-export async function nodeIdsWithLiteralLocPrefix(
-  db: Db,
-  memoryId: string,
-  prefix: string,
-): Promise<string[]> {
-  const rows = await db.$queryRaw<Array<{ id: string }>>`
-    SELECT id
-    FROM nodes
-    WHERE memory_id = ${memoryId}
-      AND starts_with(loc, ${prefix})
-  `;
-  return rows.map((row) => row.id);
+export function escapePrismaLikePattern(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
 }
 
 /** The allocator/backfill high-water over canonical message node types. */

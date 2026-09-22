@@ -132,7 +132,7 @@ describe('Channel-addressed chat', () => {
     await expect(M.createChannelMessage({}, { channelRef: release.id, body: 'x', replyToSeq: 99 }, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND' } });
   });
 
-  it('treats `_` in a Channel loc literally for reads, replies, and seq allocation (#1226)', async () => {
+  it('treats `_` and `%` in Channel locs literally for reads, replies, and seq allocation (#1226)', async () => {
     const underscored = (await ensureChannelWithRoot(db, {
       memoryId: memA.id, loc: 'chats_team', name: 'underscored', createdBy: admin.id,
     })).channel;
@@ -151,6 +151,19 @@ describe('Channel-addressed chat', () => {
     const first = await M.createChannelMessage({}, { channelRef: underscored.id, body: 'first' }, ctx(admin.id));
     expect(first.seq).toBe(1);
     expect((await Q.channelMessages({}, { channelRef: underscored.id }, ctx(admin.id))).items.map((m: { body: string }) => m.body)).toEqual(['first']);
+
+    const percent = (await ensureChannelWithRoot(db, {
+      memoryId: memA.id, loc: 'chats%team', name: 'percent', createdBy: admin.id,
+    })).channel;
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: memA.id, loc: 'chatsZZteam:messages:0077-sibling',
+        name: 'sibling', nodeType: 'chat-message', seq: 77, content: 'not percent',
+      },
+    });
+    const percentFirst = await M.createChannelMessage({}, { channelRef: percent.id, body: 'percent first' }, ctx(admin.id));
+    expect(percentFirst.seq).toBe(1);
+    expect((await Q.channelMessages({}, { channelRef: percent.id }, ctx(admin.id))).items.map((m: { body: string }) => m.body)).toEqual(['percent first']);
   });
 
   it('a Channel the caller may not read is CHANNEL_NOT_FOUND like a nonexistent one; readable-but-not-postable is FORBIDDEN', async () => {
