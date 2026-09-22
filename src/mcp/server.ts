@@ -644,6 +644,9 @@ export async function replaceOutgoingEdges(args: {
 }
 
 class InlineEdgeEndpointError extends Error {}
+class PendingEdgePromotionPreflightStale extends Error {}
+
+const MAX_PENDING_EDGE_PROMOTION_RETRIES = 3;
 
 async function lockOutgoingEdgeMemories(
   tx: Prisma.TransactionClient,
@@ -4720,37 +4723,82 @@ export function createMcpServerInstance(
       const pendingByLoc = await db.pendingEdge.findMany({ where: { targetId: loc } });
       const pendingById = await db.pendingEdge.findMany({ where: { targetId: upserted.id } });
       for (const p of [...pendingByLoc, ...pendingById]) {
-        const pSource = await db.node.findUnique({
-          where: { id: p.sourceId },
-          select: { loc: true, memoryId: true },
-        });
-        if (!pSource) {
-          await db.pendingEdge.delete({ where: { id: p.id } });
-          continue;
-        }
-        await db.$transaction(async (tx) => {
-          const locked = await lockLiveEdgeEndpoints(
-            tx,
-            { id: p.sourceId, loc: pSource.loc, memoryId: pSource.memoryId },
-            { id: upserted.id, loc: upserted.loc, memoryId: upserted.memoryId },
-          );
-          if (locked.source && locked.target) {
-            const pEdgeLoc = p.loc ?? deriveEdgeLoc(locked.source.loc, p.name, locked.target.loc);
-            await tx.edge.upsert({
-              where: { loc_memoryId: { loc: pEdgeLoc, memoryId: locked.source.memoryId } },
-              create: {
-                id: generateId(),
-                memoryId: locked.source.memoryId,
-                sourceId: locked.source.id,
-                targetId: locked.target.id,
-                loc: pEdgeLoc,
-                name: p.name,
-              },
-              update: {},
-            });
+        for (let attempt = 0; ; attempt++) {
+          const [pSource, pTarget] = await Promise.all([
+            db.node.findUnique({
+              where: { id: p.sourceId },
+              select: { id: true, loc: true, memoryId: true, deletedAt: true },
+            }),
+            db.node.findUnique({
+              where: { id: upserted.id },
+              select: { id: true, loc: true, memoryId: true, deletedAt: true },
+            }),
+          ]);
+          if (!pSource || pSource.deletedAt || !pTarget || pTarget.deletedAt) {
+            await db.pendingEdge.deleteMany({ where: { id: p.id } });
+            break;
           }
-          await tx.pendingEdge.delete({ where: { id: p.id } });
-        });
+
+          try {
+            await db.$transaction(async (tx) => {
+              const lockedMemoryIds = new Set([pSource.memoryId, pTarget.memoryId]);
+              await lockEdgeEndpointMemories(tx, [...lockedMemoryIds]);
+              await acquireLockSet(tx, [
+                { memoryId: pSource.memoryId, loc: pSource.loc },
+                { memoryId: pTarget.memoryId, loc: pTarget.loc },
+              ]);
+
+              const currentRows = await tx.node.findMany({
+                where: { id: { in: [pSource.id, pTarget.id] }, deletedAt: null },
+                select: { id: true, loc: true, memoryId: true },
+              });
+              const currentById = new Map(currentRows.map((row) => [row.id, row]));
+              const currentSource = currentById.get(pSource.id);
+              const currentTarget = currentById.get(pTarget.id);
+
+              // A move changes loc and may change memory while preserving the
+              // endpoint's stable id. Do not confuse that with deletion and
+              // discard the relationship. Abort and rerun preflight so both
+              // the endpoint's current memory key and current loc key join the
+              // lock set; once they match, the loc locks also prevent another
+              // move between this revalidation and insertion.
+              if (
+                (currentSource &&
+                  (currentSource.memoryId !== pSource.memoryId || currentSource.loc !== pSource.loc)) ||
+                (currentTarget &&
+                  (currentTarget.memoryId !== pTarget.memoryId || currentTarget.loc !== pTarget.loc))
+              ) {
+                throw new PendingEdgePromotionPreflightStale();
+              }
+
+              if (currentSource && currentTarget) {
+                const pEdgeLoc = p.loc ?? deriveEdgeLoc(currentSource.loc, p.name, currentTarget.loc);
+                await tx.edge.upsert({
+                  where: { loc_memoryId: { loc: pEdgeLoc, memoryId: currentSource.memoryId } },
+                  create: {
+                    id: generateId(),
+                    memoryId: currentSource.memoryId,
+                    sourceId: currentSource.id,
+                    targetId: currentTarget.id,
+                    loc: pEdgeLoc,
+                    name: p.name,
+                  },
+                  update: {},
+                });
+              }
+              await tx.pendingEdge.deleteMany({ where: { id: p.id } });
+            });
+            break;
+          } catch (error) {
+            if (
+              error instanceof PendingEdgePromotionPreflightStale &&
+              attempt < MAX_PENDING_EDGE_PROMOTION_RETRIES
+            ) {
+              continue;
+            }
+            throw error;
+          }
+        }
       }
 
       // Record usage event (#796 memoryId + 046 FR-001 attribution, as in

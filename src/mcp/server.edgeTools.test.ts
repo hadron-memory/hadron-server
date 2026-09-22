@@ -239,6 +239,62 @@ describe('the hazard #835 exists to remove', () => {
       await holder.catch(() => undefined);
     }
   }, 20_000);
+
+  it('retries PendingEdge promotion when the source moves after preflight', async () => {
+    const { organizationId } = await db.memory.findUniqueOrThrow({
+      where: { id: memId },
+      select: { organizationId: true },
+    });
+    const movedMemory = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: organizationId!, name: 'moved pending source' },
+      admin(),
+    );
+    const pending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId: 'future-moved-target',
+        name: 'survives-move',
+      },
+    });
+
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, memId);
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+
+    await held;
+    const creating = call('hadron_create_node', {
+      urn: `${memUrn.replace(':', '::')}::future-moved-target`,
+      name: 'future moved target',
+    });
+    try {
+      await waitForChannelMemoryLockWaiters(memId, 1);
+      await db.node.update({
+        where: { id: source.id },
+        data: { memoryId: movedMemory.id, loc: 'moved:review:item' },
+      });
+      signalRelease();
+      await holder;
+
+      expect(await creating).toMatch(/Node saved/);
+      expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+      const promoted = await db.edge.findFirstOrThrow({
+        where: { sourceId: source.id, name: 'survives-move', deletedAt: null },
+      });
+      expect(promoted.memoryId).toBe(movedMemory.id);
+      expect(promoted.loc).toMatch(/^moved:review:item:survives-move:/);
+    } finally {
+      signalRelease();
+      await holder.catch(() => undefined);
+    }
+  }, 20_000);
 });
 
 describe('hadron_update_edge — the single-edge intent (#835)', () => {
