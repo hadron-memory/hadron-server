@@ -3,6 +3,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbNode, createDbOrgAndGraph } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { pendingEdgeStableTargetKey } from '../lib/pendingEdgePromotion.js';
 import {
   runPendingEdgePromotionSweep,
   startPendingEdgePromotionSweepLoop,
@@ -33,7 +34,7 @@ async function seedStablePending() {
     data: {
       id: generateId(),
       sourceId: source.id,
-      targetId: target.id,
+      targetId: pendingEdgeStableTargetKey(target.id),
       name: 'durable',
     },
   });
@@ -72,6 +73,27 @@ describe('durable PendingEdge promotion sweep', () => {
       examined: 0,
     });
     expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
+  });
+
+  it('does not infer stable-id work when a loc happens to equal a node id', async () => {
+    const source = await createDbNode(db, { memoryId, loc: 'source' });
+    const coincidentalTarget = await createDbNode(db, { memoryId, loc: 'target' });
+    const pending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId: coincidentalTarget.id,
+        name: 'loc-shaped-like-id',
+      },
+    });
+
+    await expect(runPendingEdgePromotionSweep(db)).resolves.toEqual({
+      promoted: 0,
+      failed: 0,
+      examined: 0,
+    });
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
+    expect(await db.edge.count()).toBe(0);
   });
 
   it('settles the source-memory count when a dead source makes the work terminal', async () => {
@@ -163,7 +185,7 @@ describe('durable PendingEdge promotion sweep', () => {
       data: {
         id: generateId(),
         sourceId: nextSource.id,
-        targetId: nextTarget.id,
+        targetId: pendingEdgeStableTargetKey(nextTarget.id),
         name: 'next',
       },
     });

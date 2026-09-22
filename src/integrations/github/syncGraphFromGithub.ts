@@ -497,7 +497,7 @@ export const syncGraphFromGithub = async (
           }
           if (pSrc) {
             const pLoc = p.loc ?? deriveEdgeLoc(pSrc.loc, p.name, loc);
-            await tx.edge.upsert({
+            const promotedEdge = await tx.edge.upsert({
               where: { loc_memoryId: { loc: pLoc, memoryId: pSrc.memoryId } },
               create: {
                 id: generateId(),
@@ -509,7 +509,25 @@ export const syncGraphFromGithub = async (
               },
               update: {},
             });
+            // Loc is the edge identity. A no-op upsert can return another
+            // relationship already occupying the same loc, so consuming the
+            // queue row is safe only when the returned edge is exactly the
+            // requested live relationship.
+            if (
+              promotedEdge.deletedAt ||
+              promotedEdge.sourceId !== p.sourceId ||
+              promotedEdge.targetId !== p.targetId ||
+              promotedEdge.name !== p.name
+            ) {
+              throw new Error(
+                `Pending edge ${p.id} cannot promote: edge loc ${pLoc} is already occupied`,
+              );
+            }
             await tx.pendingEdge.delete({ where: { id: p.id } });
+            // The queue item belongs to its SOURCE memory, not necessarily to
+            // the Git memory that supplied the target. Keep that memory's
+            // dashboard projection exact in this same transaction.
+            await reconcilePendingEdgeCount(tx, pSrc.memoryId);
           }
         }
       }

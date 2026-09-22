@@ -10,6 +10,7 @@ import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/cha
 import { generateId } from '../../lib/id.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
 import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
+import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -394,6 +395,83 @@ describe('syncGraphFromGithub', () => {
     const edges = await db.edge.findMany();
     expect(edges).toHaveLength(1);
     expect(edges[0].name).toBe('depends on');
+  });
+
+  it('reconciles the foreign source memory when target sync promotes its PendingEdge', async () => {
+    const { graph: sourceMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'foreign-pending-source-org',
+      graphName: 'foreign/pending-source',
+    });
+    const source = await db.node.create({
+      data: { id: generateId(), memoryId: sourceMemory.id, loc: 'source', name: 'source' },
+    });
+    const targetId = 'eeee000000000000000000000000000000';
+    const pending = await db.pendingEdge.create({
+      data: { id: generateId(), sourceId: source.id, targetId, name: 'cross-memory' },
+    });
+    await db.memory.update({
+      where: { id: sourceMemory.id },
+      data: { pendingEdgeCount: 1 },
+    });
+
+    const targetDir = join(mockSources, 'test-org', 'test/repo', 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeNodeFiles(targetDir, { id: targetId, name: 'target' });
+
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+    expect(await db.edge.findFirst({
+      where: { memoryId: sourceMemory.id, sourceId: source.id, targetId, deletedAt: null },
+    })).not.toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: sourceMemory.id } })).pendingEdgeCount).toBe(0);
+  });
+
+  it('retains a PendingEdge when its derived loc is occupied by another relationship', async () => {
+    const { graph: sourceMemory } = await createDbOrgAndGraph(db, {
+      orgName: 'foreign-pending-collision-org',
+      graphName: 'foreign/pending-collision',
+    });
+    const source = await db.node.create({
+      data: { id: generateId(), memoryId: sourceMemory.id, loc: 'source', name: 'source' },
+    });
+    const otherTarget = await db.node.create({
+      data: { id: generateId(), memoryId: sourceMemory.id, loc: 'target', name: 'other target' },
+    });
+    const targetId = 'ffff000000000000000000000000000000';
+    const edgeLoc = deriveEdgeLoc(source.loc, 'cross-memory', 'target');
+    const occupied = await db.edge.create({
+      data: {
+        id: generateId(),
+        memoryId: sourceMemory.id,
+        sourceId: source.id,
+        targetId: otherTarget.id,
+        loc: edgeLoc,
+        name: 'cross-memory',
+      },
+    });
+    const pending = await db.pendingEdge.create({
+      data: { id: generateId(), sourceId: source.id, targetId, name: 'cross-memory' },
+    });
+    await db.memory.update({
+      where: { id: sourceMemory.id },
+      data: { pendingEdgeCount: 1 },
+    });
+
+    const targetDir = join(mockSources, 'test-org', 'test/repo', 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeNodeFiles(targetDir, { id: targetId, name: 'target' });
+
+    await expect(syncGraphFromGithub(makeGraph())).resolves.toMatchObject({
+      error: expect.stringContaining('already occupied'),
+    });
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
+    expect(await db.edge.findUniqueOrThrow({ where: { id: occupied.id } })).toMatchObject({
+      sourceId: source.id,
+      targetId: otherTarget.id,
+      deletedAt: null,
+    });
+    expect(await db.node.findUnique({ where: { id: targetId } })).toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: sourceMemory.id } })).pendingEdgeCount).toBe(1);
   });
 });
 

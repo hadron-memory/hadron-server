@@ -12,6 +12,17 @@ const MAX_PENDING_EDGE_PROMOTION_RETRIES = 3;
 const INITIAL_PENDING_EDGE_RETRY_DELAY_MS = 100;
 const MAX_PENDING_EDGE_RETRY_DELAY_MS = 5_000;
 
+// PendingEdge.targetId serves two different purposes: unresolved rows carry a
+// node loc, while retryable promotion work carries a stable node id. Never
+// infer which kind a row is from its value or from whether it happens to join
+// nodes.id: an ordinary loc can equal an existing node's id. `@` is forbidden
+// by validateLoc, so this marker is disjoint from every valid loc-keyed row.
+export const PENDING_EDGE_STABLE_TARGET_PREFIX = '@node-id:';
+
+export function pendingEdgeStableTargetKey(targetNodeId: string): string {
+  return `${PENDING_EDGE_STABLE_TARGET_PREFIX}${targetNodeId}`;
+}
+
 /** Recompute the dashboard count from the live queue rows it describes. */
 export async function reconcilePendingEdgeCount(
   db: PrismaClient | Prisma.TransactionClient,
@@ -84,9 +95,11 @@ async function retargetPendingEdgeToStableId(
     const pending = await tx.pendingEdge.findUnique({ where: { id: pendingId } });
     if (!pending) return null;
 
+    const stableTargetKey = pendingEdgeStableTargetKey(targetNodeId);
+
     const duplicate = await tx.pendingEdge.findUnique({
       where: {
-        sourceId_targetId: { sourceId: pending.sourceId, targetId: targetNodeId },
+        sourceId_targetId: { sourceId: pending.sourceId, targetId: stableTargetKey },
       },
     });
     if (duplicate && duplicate.id !== pending.id) {
@@ -96,7 +109,7 @@ async function retargetPendingEdgeToStableId(
 
     await tx.pendingEdge.update({
       where: { id: pending.id },
-      data: { targetId: targetNodeId },
+      data: { targetId: stableTargetKey },
     });
     return pending.id;
   });

@@ -2,14 +2,16 @@
  * Durable recovery for PendingEdges retargeted to a stable node id.
  *
  * Inline MCP/Git promotion is the low-latency path, but the PendingEdge row is
- * the durable queue: this sweep joins `pending_edges.target_id` to `nodes.id`
- * and retries after process restarts or transient failures. Loc-keyed forward
- * references do not join and remain parked until their target is created.
+ * the durable queue: this sweep selects only explicitly marked stable-id work
+ * and joins the unwrapped id to `nodes.id` after process restarts or transient
+ * failures. Loc-keyed forward references remain parked even when their string
+ * happens to equal an unrelated node id.
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { db as defaultDb } from '../integrations/db/client.js';
 import {
+  PENDING_EDGE_STABLE_TARGET_PREFIX,
   promotePendingEdgeForTarget,
   reconcileAllPendingEdgeCounts,
 } from '../lib/pendingEdgePromotion.js';
@@ -25,10 +27,14 @@ export async function runPendingEdgePromotionSweep(
   batchSize = 100,
 ): Promise<PendingEdgePromotionSweepOutcome> {
   const candidates = await db.$queryRaw<Array<{ id: string; targetId: string }>>`
-    SELECT p.id, p.target_id AS "targetId"
+    SELECT p.id, n.id AS "targetId"
     FROM pending_edges p
-    JOIN nodes n ON n.id = p.target_id
+    JOIN nodes n
+      ON n.id = substring(
+        p.target_id FROM char_length(${PENDING_EDGE_STABLE_TARGET_PREFIX}) + 1
+      )
     WHERE p.deleted_at IS NULL
+      AND starts_with(p.target_id, ${PENDING_EDGE_STABLE_TARGET_PREFIX})
     ORDER BY p.updated_at ASC NULLS FIRST, p.id ASC
     LIMIT ${batchSize}
   `;

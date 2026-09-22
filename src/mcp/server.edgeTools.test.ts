@@ -19,6 +19,7 @@ import type { AuthContext } from '../middleware/auth.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../lib/channels.js';
 import { acquireLockSet } from '../lib/nodeSubtreeLock.js';
 import { runPendingEdgePromotionSweep } from '../jobs/promotePendingEdges.js';
+import { pendingEdgeStableTargetKey } from '../lib/pendingEdgePromotion.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -290,7 +291,7 @@ describe('the hazard #835 exists to remove', () => {
       data: {
         id: generateId(),
         sourceId: source.id,
-        targetId: target.id,
+        targetId: pendingEdgeStableTargetKey(target.id),
         name: 'removed-while-waiting',
       },
     });
@@ -338,7 +339,7 @@ describe('the hazard #835 exists to remove', () => {
       data: {
         id: generateId(),
         sourceId: source.id,
-        targetId: target.id,
+        targetId: pendingEdgeStableTargetKey(target.id),
         name: 'survives-resurrection',
       },
     });
@@ -354,10 +355,16 @@ describe('the hazard #835 exists to remove', () => {
     }, { timeout: 20_000 });
 
     await held;
-    const resurrecting = call('hadron_create_node', {
-      urn: `${memUrn.replace(':', '::')}::${target.loc}`,
-      name: 'resurrected stable target',
-    });
+    // Durable stable-id work is intentionally not rediscovered through the
+    // loc-keyed create callback. Queue the resurrection transaction itself so
+    // it wins the shared memory lock before the sweep revalidates the target.
+    const resurrecting = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, memId);
+      return tx.node.update({
+        where: { id: target.id },
+        data: { deletedAt: null, deletedBy: null },
+      });
+    }, { timeout: 20_000 });
     try {
       await waitForChannelMemoryLockWaiters(memId, 1);
       const sweeping = runPendingEdgePromotionSweep(db);
@@ -365,7 +372,7 @@ describe('the hazard #835 exists to remove', () => {
       signalRelease();
       await holder;
 
-      expect(await resurrecting).toMatch(/Node saved/);
+      expect(await resurrecting).toMatchObject({ id: target.id, deletedAt: null });
       await sweeping;
       expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
       expect(await db.edge.findFirst({
@@ -556,7 +563,7 @@ describe('the hazard #835 exists to remove', () => {
         where: { loc_memoryId: { memoryId: memId, loc: 'future-retry-target' } },
       });
       expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toMatchObject({
-        targetId: target.id,
+        targetId: pendingEdgeStableTargetKey(target.id),
       });
       expect(await db.edge.count({
         where: { sourceId: source.id, name: 'waits-for-later', deletedAt: null },
