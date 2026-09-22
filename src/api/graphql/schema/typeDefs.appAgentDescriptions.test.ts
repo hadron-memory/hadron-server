@@ -48,9 +48,14 @@ describe('#1246 — App and Agent descriptions publish the live install model', 
 
   it('createApp distinguishes org-owned and personal install behavior', () => {
     const block = before('createApp(', 'Create an App and install its initial Agent', 2600);
+    const createAt = typeDefs.indexOf('createApp(');
+    const agentRefAt = typeDefs.indexOf('agentRef: ID!', createAt);
+    expect(agentRefAt).toBeGreaterThan(createAt);
+    const agentRef = flat(typeDefs.slice(createAt, agentRefAt));
 
     expect(block).toMatch(/with orgref.*organization.*without orgref.*user/);
     expect(block).toMatch(/only when that role is present/);
     expect(block).toMatch(/personal apps reject dependency cascades/);
+    expect(agentRef).toMatch(/initial agent installed into this new app/);
   });
 });

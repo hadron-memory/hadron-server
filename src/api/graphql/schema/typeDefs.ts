@@ -7920,8 +7920,9 @@ export const typeDefs = `#graphql
       """
       orgRef: ID
       """
-      The Agent this App deploys. Required as of 009-install-agent-flow:
-      every new App starts with an installed Agent. For an org-owned App the
+      The initial Agent installed into this new App. Required as of
+      009-install-agent-flow: every new App starts with an installed Agent.
+      For an org-owned App the
       server accepts any resolvable Agent and auto-provisions an AgentOrgGrant
       (008 behavior preserved); the portal's install flow restricts the
       affordance to Agents owned by the caller org. A personal App accepts only
