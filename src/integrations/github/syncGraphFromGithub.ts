@@ -12,13 +12,14 @@ import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { countCrossMemoryEdgesForNodeDelete } from '../../lib/crossMemoryEdgeDelete.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { execGit } from './execGit.js';
 import { validateMemorySource } from '../../lib/gitSource.js';
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
-import { ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
@@ -175,8 +176,8 @@ export const syncGraphFromGithub = async (
     const [rawTargets, existingGraphRows] = await Promise.all([
       rawTargetIds.length
         ? db.node.findMany({
-            where: { id: { in: rawTargetIds } },
-            select: { memoryId: true },
+            where: { id: { in: rawTargetIds }, deletedAt: null },
+            select: { id: true, loc: true, memoryId: true },
           })
         : [],
       candidateLocs.length
@@ -198,10 +199,16 @@ export const syncGraphFromGithub = async (
       : [];
     const pendingSources = incomingPending.length
       ? await db.node.findMany({
-          where: { id: { in: [...new Set(incomingPending.map((edge) => edge.sourceId))] } },
-          select: { memoryId: true },
+          where: {
+            id: { in: [...new Set(incomingPending.map((edge) => edge.sourceId))] },
+            deletedAt: null,
+          },
+          select: { id: true, loc: true, memoryId: true },
         })
       : [];
+    const endpointSnapshots = [...new Map(
+      [...rawTargets, ...pendingSources].map((node) => [node.id, node]),
+    ).values()];
     const edgeEndpointMemoryIds = [...new Set([
       graph.id,
       ...rawTargets.map((node) => node.memoryId),
@@ -228,13 +235,52 @@ export const syncGraphFromGithub = async (
       // (#1047). Skipped and reported, never a failed sync.
       const protectedLocs = await protectedLocsIn(tx, graph.id);
       const isProtected = (loc: string) => protectedLocs.some((p) => protectedLocCovers(p, loc));
+      const writableLocs = fsGraph.nodes
+        .map((n) => n.loc)
+        .filter((l): l is string => typeof l === 'string' && l !== '' && !isProtected(l));
+
+      // Declare the COMPLETE loc-key set before taking any of it. Incoming
+      // nodes need ancestor keys for create/delete coordination; every edge
+      // source and preflighted external endpoint needs its full path (strict
+      // ancestors + exact loc) so a subtree move cannot relocate it after the
+      // sync built its id map but before the edge insert.
+      await acquireLockSet(tx, [
+        ...writableLocs.flatMap((loc) =>
+          ancestorLocs(loc).map((ancestor) => ({ memoryId: graph.id, loc: ancestor })),
+        ),
+        ...edges.flatMap((edge) =>
+          [...ancestorLocs(edge.sourceLoc), edge.sourceLoc].map((loc) => ({ memoryId: graph.id, loc })),
+        ),
+        ...endpointSnapshots.flatMap((endpoint) =>
+          [...ancestorLocs(endpoint.loc), endpoint.loc].map((loc) => ({
+            memoryId: endpoint.memoryId,
+            loc,
+          })),
+        ),
+      ]);
       await lockAncestorsForCreateMany(
         tx,
         graph.id,
-        fsGraph.nodes
-          .map((n) => n.loc)
-          .filter((l): l is string => typeof l === 'string' && l !== '' && !isProtected(l)),
+        writableLocs,
       );
+
+      // A move that won before these locks were granted invalidates preflight.
+      // Retry the whole collection phase so the endpoint's current memory and
+      // path join the stable lock set; never mistake a move for deletion.
+      if (endpointSnapshots.length > 0) {
+        const currentEndpoints = await tx.node.findMany({
+          where: { id: { in: endpointSnapshots.map((node) => node.id) }, deletedAt: null },
+          select: { id: true, loc: true, memoryId: true },
+        });
+        const currentById = new Map(currentEndpoints.map((node) => [node.id, node]));
+        const stale = endpointSnapshots.find((snapshot) => {
+          const current = currentById.get(snapshot.id);
+          return !current || current.memoryId !== snapshot.memoryId || current.loc !== snapshot.loc;
+        });
+        if (stale) {
+          throw new EdgeEndpointPreflightStale(`Edge endpoint ${stale.id} moved after preflight`);
+        }
+      }
       // #1224 — files whose path cannot be a loc, resolved to the rows they
       // name. @copilot on PR #1229: the cleanup pass keys on the SURVIVING
       // ROW id, and a file's frontmatter id is not that id — the loc-keyed
@@ -488,22 +534,30 @@ export const syncGraphFromGithub = async (
           `[syncGraphFromGithub] "${graphName}": destructive cleanup SUPPRESSED — ${unprotectableSkips.length} file(s) have a path that is not a valid loc and carry no id naming a row in this memory: ${unprotectableSkips.join(', ')}`,
         );
       } else {
+        const cleanupWhere: Prisma.NodeWhereInput = {
+          ownerRepo,
+          memoryId: graph.id,
+          id: { notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds] },
+          ...(deletionFilter.notClauses.length
+            ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
+            : {}),
+        };
+        const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
+          tx,
+          graph.id,
+          cleanupWhere,
+        );
+        if (crossMemoryEdges > 0) {
+          throw new Error(
+            `Git sync cleanup refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
+          );
+        }
         await tx.node.deleteMany({
-          where: {
-            ownerRepo,
-            memoryId: graph.id,
-            // `skippedRowIds` joins the survivors for the same reason
-            // `protectedRowIds` does (#1224): a file skipped for an unusable
-            // path is absent from `fsGraph.nodes`, so `notIn: upsertedIds`
-            // would hard-delete the row it names. Repo-wins means "the repo
-            // decides what a node IS", not "a file this loader could not
-            // address stops being a node" — renaming a file to something
-            // that cannot be a loc must fail to move it, not destroy it.
-            id: { notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds] },
-            ...(deletionFilter.notClauses.length
-              ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
-              : {}),
-          },
+          // `skippedRowIds` joins the survivors for the same reason
+          // `protectedRowIds` does (#1224): a file skipped for an unusable
+          // path is absent from `fsGraph.nodes`, so `notIn: upsertedIds`
+          // would hard-delete the row it names.
+          where: cleanupWhere,
         });
       }
 
@@ -513,6 +567,19 @@ export const syncGraphFromGithub = async (
         // the referenced id, else stays raw (a cross-repo target).
         const edgeSourceId = locToRowId.get(edge.sourceLoc) ?? edge.sourceId;
         const edgeTargetId = fileIdToRowId.get(edge.targetId) ?? edge.targetId;
+        const sourceExists = await tx.node.findUnique({
+          where: { id: edgeSourceId, deletedAt: null },
+          select: { id: true, loc: true, memoryId: true },
+        });
+        if (
+          !sourceExists ||
+          sourceExists.memoryId !== graph.id ||
+          sourceExists.loc !== edge.sourceLoc
+        ) {
+          throw new EdgeEndpointPreflightStale(
+            `Edge source ${edgeSourceId} moved away from ${graph.id}:${edge.sourceLoc}`,
+          );
+        }
         const targetExists = await tx.node.findUnique({
           where: { id: edgeTargetId, deletedAt: null },
           select: { id: true, loc: true, memoryId: true },

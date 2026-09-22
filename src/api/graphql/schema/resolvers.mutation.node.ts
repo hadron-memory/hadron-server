@@ -52,6 +52,7 @@ import {
 } from '../../../lib/validateLoc.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { countCrossMemoryEdgesForNodeDelete } from '../../../lib/crossMemoryEdgeDelete.js';
 import {
   liveEdgeEndpointSet,
   lockEdgeEndpointMemories,
@@ -3421,14 +3422,26 @@ export const nodeMutations = {
           await protectedLocsIn(tx, resolvedMemoryId),
         );
         {
+          const replaceWhere: Prisma.NodeWhereInput = {
+            ownerRepo,
+            memoryId: resolvedMemoryId,
+            ...(replaceFilter.notClauses.length
+              ? { NOT: { OR: replaceFilter.notClauses as Prisma.NodeWhereInput[] } }
+              : {}),
+          };
+          const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
+            tx,
+            resolvedMemoryId,
+            replaceWhere,
+          );
+          if (crossMemoryEdges > 0) {
+            throw new GraphQLError(
+              `Subtree replacement refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
+              { extensions: { code: 'CROSS_MEMORY_EDGES', count: crossMemoryEdges } },
+            );
+          }
           await tx.node.deleteMany({
-            where: {
-              ownerRepo,
-              memoryId: resolvedMemoryId,
-              ...(replaceFilter.notClauses.length
-                ? { NOT: { OR: replaceFilter.notClauses as Prisma.NodeWhereInput[] } }
-                : {}),
-            },
+            where: replaceWhere,
           });
         }
 
