@@ -74,7 +74,11 @@ import {
   type MoveNodeSubtreeResult,
 } from '../lib/nodeSubtreeMove.js';
 import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
-import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
+import {
+  getCurrentUserRoles,
+  resolveAuthContext,
+  type AuthContext,
+} from '../middleware/auth.js';
 import {
   resolveAppForRequest,
   resolveAppIdentifier,
@@ -8494,7 +8498,13 @@ function ageOf(at: Date, now: Date = new Date()): string {
 // Transport management — one transport per MCP session
 // ---------------------------------------------------------------------------
 
-const transports = new Map<string, StreamableHTTPServerTransport>();
+type ActiveMcpTransport = {
+  transport: StreamableHTTPServerTransport;
+  /** Mutated in place before dispatch so every tool closure sees live roles. */
+  auth: AuthContext;
+};
+
+const transports = new Map<string, ActiveMcpTransport>();
 
 /**
  * Spec 026 — per-MCP-session active App, used by both regime (b)
@@ -8556,12 +8566,28 @@ const activeAppByMcpSession = new Map<
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
-  // Check for existing session first — skip expensive auth if already authenticated
+  // Reuse the authenticated identity for an existing transport, but refresh
+  // its live platform roles before every request (#1251). `resolveJwt` only
+  // runs when the transport opens; without this, a demoted administrator keeps
+  // the captured role for the lifetime of an already-open MCP session.
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
   if (sessionId && transports.has(sessionId)) {
-    const transport = transports.get(sessionId)!;
-    await transport.handleRequest(req, res, req.body);
+    const active = transports.get(sessionId)!;
+    try {
+      active.auth.roles = await getCurrentUserRoles(db, active.auth);
+    } catch {
+      // Express 4 does not forward a rejected async handler. Fail this request
+      // closed and explicitly rather than either dispatching with cached roles
+      // or leaving the client hanging on a database failure.
+      mcpLog('error', 'mcp_role_refresh_failed', {
+        mcpSessionId: sessionId,
+        userId: active.auth.userId,
+      });
+      res.status(503).json({ error: 'Authentication temporarily unavailable' });
+      return;
+    }
+    await active.transport.handleRequest(req, res, req.body);
     return;
   }
 
@@ -8613,8 +8639,9 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // hdr_user_<…> bearer tokens.
   const auth = await resolveAuthContext(req, db);
   // Admin impersonation: impersonation tokens are not accepted on /mcp (v1).
-  // MCP binds auth ONCE at session init and never re-checks it, so the
-  // per-request session-row revalidation (stop/expiry/demotion) that makes
+  // MCP binds credential identity at session init. Ordinary-user roles are
+  // refreshed per request below, but the impersonation SESSION row's full
+  // stop/expiry/membership contract is not, so the revalidation that makes
   // impersonation safe on /graphql cannot hold here. Rejecting at init is
   // sufficient — an established session was never minted from one.
   if (auth.impersonation) {
@@ -8781,7 +8808,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
   const sid = transport.sessionId;
   if (sid) {
-    transports.set(sid, transport);
+    transports.set(sid, { transport, auth });
   }
 }
 
@@ -8795,7 +8822,7 @@ export async function handleMcpDelete(req: Request, res: Response): Promise<void
     return;
   }
 
-  const transport = transports.get(sessionId)!;
+  const { transport } = transports.get(sessionId)!;
   await transport.close();
   transports.delete(sessionId);
   activeAppByMcpSession.delete(sessionId); // spec 026 — DELETE path also clears

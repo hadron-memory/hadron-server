@@ -9,6 +9,9 @@ export interface AuthContext {
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
   sessionId?: string;      // Session.id — set when operating inside an active session
+  // Current User-row roles for ordinary user principals. HTTP auth resolves
+  // them per request; an existing MCP transport refreshes them before every
+  // request because its AuthContext otherwise outlives the credential check.
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (not JWTs)
@@ -184,6 +187,41 @@ const ALLOWED_ROLES = new Set<NonNullable<AuthContext['roles']>[number]>([
   'READER',
 ]);
 
+function validatedUserRoles(roles: readonly string[]): NonNullable<AuthContext['roles']> {
+  return roles.filter(
+    (role): role is NonNullable<AuthContext['roles']>[number] =>
+      ALLOWED_ROLES.has(role as NonNullable<AuthContext['roles']>[number]),
+  );
+}
+
+/**
+ * Read an ordinary user's CURRENT platform roles (#1251).
+ *
+ * JWT claims and an MCP transport's AuthContext are both snapshots. The user
+ * row is the authority for role-sensitive work, so long-lived surfaces call
+ * this at their request boundary instead of trusting either snapshot.
+ * Impersonation is deliberately never upgraded through the target user's row.
+ */
+export async function getCurrentUserRoles(
+  db: PrismaClient,
+  auth: Pick<AuthContext, 'userId' | 'impersonation'>,
+): Promise<NonNullable<AuthContext['roles']>> {
+  if (!auth.userId || auth.impersonation) return [];
+  const user = await db.user.findFirst({
+    where: { id: auth.userId, deletedAt: null },
+    select: { roles: true },
+  });
+  return user ? validatedUserRoles(user.roles) : [];
+}
+
+export async function hasCurrentPlatformAdminRole(
+  db: PrismaClient,
+  auth: Pick<AuthContext, 'userId' | 'impersonation'>,
+): Promise<boolean> {
+  const roles = await getCurrentUserRoles(db, auth);
+  return roles.includes('ADMIN') || roles.includes('OWNER');
+}
+
 async function resolveUserApiKey(
   rawKey: string,
   db: PrismaClient,
@@ -227,10 +265,7 @@ async function resolveUserApiKey(
   // legacy data, future enum-value additions). `appId` is intentionally
   // absent — App resolution for user credentials happens at the MCP
   // boundary per FR-020, not in auth middleware.
-  const validatedRoles = (user.roles as readonly string[]).filter(
-    (r): r is NonNullable<AuthContext['roles']>[number] =>
-      ALLOWED_ROLES.has(r as NonNullable<AuthContext['roles']>[number]),
-  );
+  const validatedRoles = validatedUserRoles(user.roles);
 
   return {
     userId: user.id,
@@ -315,13 +350,13 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
     if (payload.imp) {
       return resolveImpersonationJwt(payload, db);
     }
-    // Liveness check: a JWT is self-contained, so without this a deleted
-    // user's token would keep authenticating until it expires (deleteUser
-    // #662 must cut off ALL credentials immediately — the API-key paths
-    // already check deletedAt on their lookup row).
+    // A JWT is self-contained, but account liveness AND platform roles are
+    // live authority. Re-read both on every request: otherwise deleteUser
+    // #662 would leave the credential live, and #1251 would leave a demoted
+    // ADMIN/OWNER authorized until the signed claim expired.
     const user = await db.user.findFirst({
       where: { id: payload.sub, deletedAt: null },
-      select: { id: true },
+      select: { id: true, roles: true },
     });
     if (!user) return {};
     const clientId = payload.githubUsername
@@ -330,7 +365,7 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
     return {
       clientId,
       userId: payload.sub,
-      roles: payload.roles,
+      roles: validatedUserRoles(user.roles),
     };
   } catch {
     return {}; // invalid or expired JWT
