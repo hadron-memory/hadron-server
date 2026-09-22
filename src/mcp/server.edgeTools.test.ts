@@ -17,6 +17,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../lib/channels.js';
+import { acquireLockSet } from '../lib/nodeSubtreeLock.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -92,6 +93,23 @@ async function waitForLockWaiters(
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+async function holdNodeLocLock(memoryId: string, loc: string): Promise<{
+  release: () => void;
+  done: Promise<unknown>;
+}> {
+  let signalHeld!: () => void;
+  let signalRelease!: () => void;
+  const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+  const release = new Promise<void>((resolve) => { signalRelease = resolve; });
+  const done = db.$transaction(async (tx) => {
+    await acquireLockSet(tx, [{ memoryId, loc }]);
+    signalHeld();
+    await release;
+  }, { timeout: 20_000 });
+  await held;
+  return { release: signalRelease, done };
 }
 
 beforeEach(async () => {
@@ -354,6 +372,94 @@ describe('the hazard #835 exists to remove', () => {
         memoryHolder.catch(() => undefined),
         edgeHolder.catch(() => undefined),
       ]);
+    }
+  }, 20_000);
+
+  it('keeps a successful create and its PendingEdge when move retries exhaust', async () => {
+    const { organizationId } = await db.memory.findUniqueOrThrow({
+      where: { id: memId },
+      select: { organizationId: true },
+    });
+    const movedMemory = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: organizationId!, name: 'pending retry destination' },
+      admin(),
+    );
+    const pending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId: 'future-retry-target',
+        name: 'waits-for-later',
+      },
+    });
+
+    type Holder = Awaited<ReturnType<typeof holdNodeLocLock>>;
+    const holders: Holder[] = [];
+    const hold = async (memoryId: string, loc: string): Promise<Holder> => {
+      const holder = await holdNodeLocLock(memoryId, loc);
+      holders.push(holder);
+      return holder;
+    };
+
+    // Hold the exact endpoint loc from the first outer snapshot. Each next
+    // barrier is acquired before releasing the current one; only two are held
+    // concurrently so the test does not consume Prisma's whole connection pool.
+    const a1 = await hold(memId, source.loc);
+    const creating = call('hadron_create_node', {
+      urn: `${memUrn.replace(':', '::')}::future-retry-target`,
+      name: 'future retry target',
+    });
+
+    try {
+      // Attempt 0 snapshots A and waits at the old exact loc; move to B before
+      // release. Attempts 1–3 alternate the same way. The final A3 lock stays
+      // held while `creating` resolves, proving there was no hidden fifth retry
+      // after the documented budget was exhausted.
+      await waitForLockWaiters('advisory', 1);
+      const b1 = await hold(movedMemory.id, 'bounce-b1:review:item');
+      await db.node.update({
+        where: { id: source.id },
+        data: { memoryId: movedMemory.id, loc: 'bounce-b1:review:item' },
+      });
+      a1.release();
+      await a1.done;
+
+      await waitForLockWaiters('advisory', 1);
+      const a2 = await hold(memId, 'bounce-a2:review:item');
+      await db.node.update({
+        where: { id: source.id },
+        data: { memoryId: memId, loc: 'bounce-a2:review:item' },
+      });
+      b1.release();
+      await b1.done;
+
+      await waitForLockWaiters('advisory', 1);
+      const b2 = await hold(movedMemory.id, 'bounce-b2:review:item');
+      await db.node.update({
+        where: { id: source.id },
+        data: { memoryId: movedMemory.id, loc: 'bounce-b2:review:item' },
+      });
+      a2.release();
+      await a2.done;
+
+      await waitForLockWaiters('advisory', 1);
+      await hold(memId, 'bounce-a3:review:item');
+      await db.node.update({
+        where: { id: source.id },
+        data: { memoryId: memId, loc: 'bounce-a3:review:item' },
+      });
+      b2.release();
+      await b2.done;
+
+      expect(await creating).toMatch(/Node saved/);
+      expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
+      expect(await db.edge.count({
+        where: { sourceId: source.id, name: 'waits-for-later', deletedAt: null },
+      })).toBe(0);
+    } finally {
+      for (const holder of holders) holder.release();
+      await Promise.all(holders.map((holder) => holder.done.catch(() => undefined)));
     }
   }, 20_000);
 });

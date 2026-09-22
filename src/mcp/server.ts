@@ -4794,11 +4794,15 @@ export function createMcpServerInstance(
             });
             break;
           } catch (error) {
-            if (
-              error instanceof PendingEdgePromotionPreflightStale &&
-              attempt < MAX_PENDING_EDGE_PROMOTION_RETRIES
-            ) {
-              continue;
+            if (error instanceof PendingEdgePromotionPreflightStale) {
+              if (attempt < MAX_PENDING_EDGE_PROMOTION_RETRIES) continue;
+              // The node upsert committed before this best-effort promotion
+              // pass began. Exhausting the bounded retry budget must not turn
+              // that successful create into a reported failure (whose retry
+              // then says "already exists"). The throwing transaction rolled
+              // back without deleting the PendingEdge, so leave it available
+              // for a later promotion pass and return the saved node.
+              break;
             }
             throw error;
           }
