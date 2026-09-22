@@ -1303,8 +1303,14 @@ model Edge {
   /// JSONLogic gating expression evaluated by the shared
   /// edge-condition evaluator at edge-resolution time. NULL means the
   /// edge always fires. Validated against the v1 operator subset and
-  /// the five variable scopes (`memory.*`, `chat.*`, `agent.*`,
-  /// `message.data.*`, `now()` / `today()`). Spec:
+  /// the FOUR variable scopes (`memory.*`, `chat.*`, `agent.*`,
+  /// `message.data.*` — `VALID_SCOPE_PREFIXES`; anything else is
+  /// UNKNOWN_SCOPE). The time builtins `now()` and `today()` are a
+  /// SEPARATE constant, not a fifth scope: whole references rather than
+  /// prefixes, pre-resolved by the evaluator from the request clock.
+  /// Said "five variable scopes" here until #1246, in the same sentence
+  /// as the GraphQL SDL and generated into the public Data Model
+  /// reference. Spec:
   /// `hadron-concept/spec-kits/specs/001-edge-condition-spec/spec.md`
   /// (sister repo). User docs:
   /// https://docs.hadronmemory.com/reference/edge-conditions/.
