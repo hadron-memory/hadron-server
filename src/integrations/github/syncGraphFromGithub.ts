@@ -22,6 +22,7 @@ import { ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeL
 import type { Prisma } from '../../generated/prisma/index.js';
 import type { Memory, Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
+import { lockMemoryForChannelChange } from '../../lib/channels.js';
 
 function decryptToken(ciphertext: string): string {
   const key = process.env.HADRON_ENCRYPTION_KEY;
@@ -152,6 +153,11 @@ export const syncGraphFromGithub = async (
     const writtenNodes: { id: string; loc: string; memoryId: string }[] = [];
     const skippedProtected: string[] = [];
     await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
+      // Hold the same memory key as Channel create/restore for the ENTIRE
+      // snapshot-to-cleanup interval. Without it, a sync could observe a dead
+      // Channel, release its descendants in the deletion filter, and consume
+      // that stale verdict after another transaction resurrected the Channel.
+      await lockMemoryForChannelChange(tx, graph.id);
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
       // synced loc (deduped, root→leaf) up front so a concurrent non-recursive
@@ -201,7 +207,7 @@ export const syncGraphFromGithub = async (
       // Rows the cleanup pass below must leave alone: a protected file's row
       // is not upserted, and `notIn: upsertedIds` would otherwise hard-delete
       // it — a root deletion cascading its Channel row (Copilot on PR #1165).
-      const protectedRowIds: string[] = [];
+      const protectedRowIds = new Set<string>();
       // File frontmatter ids already claimed in THIS run — a second file
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
@@ -218,6 +224,20 @@ export const syncGraphFromGithub = async (
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
         if (isProtected(loc)) {
+          // The file is PRESENT but intentionally skipped. Preserve the row it
+          // identifies even when the Channel is tombstoned and the deletion
+          // filter releases true orphan descendants. Prefer same-memory file
+          // identity; fall back to the exact loc for id-less/foreign-id files.
+          const byFileId = node.id
+            ? await tx.node.findUnique({ where: { id: node.id }, select: { id: true, memoryId: true } })
+            : null;
+          const protectedRow = byFileId?.memoryId === graph.id
+            ? byFileId
+            : await tx.node.findUnique({
+                where: { loc_memoryId: { loc, memoryId: graph.id } },
+                select: { id: true, memoryId: true },
+              });
+          if (protectedRow) protectedRowIds.add(protectedRow.id);
           skippedProtected.push(loc);
           continue;
         }
@@ -280,7 +300,7 @@ export const syncGraphFromGithub = async (
           // (Copilot on PR #1165).
           if (byId.loc !== loc && isProtected(byId.loc)) {
             skippedProtected.push(`${byId.loc} → ${loc}`);
-            protectedRowIds.push(byId.id);
+            protectedRowIds.add(byId.id);
             continue;
           }
           if (byId.loc !== loc) {
@@ -308,7 +328,7 @@ export const syncGraphFromGithub = async (
               console.warn(
                 `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.id} is held by a file whose path is not a valid loc`,
               );
-              protectedRowIds.push(byId.id);
+              protectedRowIds.add(byId.id);
               continue;
             }
             if (occupant && occupant.id !== byId.id) {

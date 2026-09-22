@@ -173,7 +173,9 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
     expect(root).not.toBeNull();
     expect(root!.nodeType).toBe('chat');
     const rootData = root!.data as Record<string, unknown>;
-    expect(rootData.scope).toBe('shared');
+    // Bootstrap delegates to the same Channel creation core as createChannel;
+    // the retired shared/private marker must not reappear on this path.
+    expect(rootData.scope).toBeUndefined();
     expect(rootData.messageCount).toBe(1);
 
     const row = await db.node.findUnique({ where: { id: msg.nodeId } });

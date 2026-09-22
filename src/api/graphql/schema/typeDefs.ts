@@ -523,10 +523,11 @@ export const typeDefs = `#graphql
   **Creating at a DELETED Channel's address starts CLEAN** (#1226). The address
   stays reserved by the tombstone, so a create here adopts it rather than
   inserting beside it — and the previous Channel's messages are tombstoned so
-  the new room is empty. The seq counter is deliberately NOT reset: read
-  watermarks key on seq, so restarting would make an attendee treat the new
-  room's first messages as already read. Expect a gap in the numbering, never
-  an inherited transcript.
+  the new room is empty. The allocator history remains, while the empty
+  Channel's last-sequence and last-message watermarks reset. Its first new
+  message therefore resumes above the old maximum, so an old read cursor
+  cannot hide it. Expect a gap in the numbering, never inherited transcript or
+  phantom attention.
   """
   input CreateChannelInput {
     memoryRef: ID!

@@ -4209,6 +4209,11 @@ enum ChannelKind {
 /// two jobs. `lastSeq − lastSeenSeq` is a watermark delta, never a message
 /// count (gaps and the known prod duplicate are preserved).
 ///
+/// Reusing a soft-deleted Channel address tombstones its old transcript and
+/// resets these Channel watermarks to the empty state, but preserves the root
+/// allocator history. The first new post therefore resumes above the old seq
+/// maximum, which prevents a retained read cursor from hiding that message.
+///
 /// The audience is the HOST MEMORY's (`cor:acl:030:01`): a Channel has no
 /// access layer of its own. Participation, reads and posts follow the memory.
 /// Soft-deleted in step with its root; the protection holds while either exists.

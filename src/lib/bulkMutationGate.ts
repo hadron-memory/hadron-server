@@ -37,7 +37,13 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 import { lockMemoryForChannelChange } from './channels.js';
-import { LocProtectedError, protectedLocsIn, protectedCoversForOp, type ChannelReader } from './protectedLoc.js';
+import {
+  LocProtectedError,
+  protectedLocsIn,
+  protectedCoversForOp,
+  releasesDeadChannelDescendants,
+  type ChannelReader,
+} from './protectedLoc.js';
 import { GOVERNED_ROLES, governedKindsOf, RoleGovernedError } from './governedRole.js';
 
 /**
@@ -117,9 +123,14 @@ export async function assertNoProtectedReach(
   const entries = await protectedLocsIn(db, memoryId);
   if (entries.length === 0) return;
   if (locs === 'all') {
-    // The whole memory is in reach, so the protected address itself is the loc
-    // being refused — there is no narrower one to name.
-    throw new LocProtectedError(entries[0].loc, entries[0], op);
+    // This sentinel is used by merge's final SOURCE-memory soft delete. A dead
+    // Channel's root is already hidden and stays physically present; the step
+    // cleans the live remainder, so apply the same strict-descendant release as
+    // every other cleanup gate. Live Channels and non-cleanup operations still
+    // refuse. (A hard root delete never comes through this whole-memory path.)
+    const hit = entries.find((entry) => !releasesDeadChannelDescendants(entry, op));
+    if (hit) throw new LocProtectedError(hit.loc, hit, op);
+    return;
   }
   for (const entry of entries) {
     // #1226 via the SHARED predicate: a dead Channel releases its orphaned

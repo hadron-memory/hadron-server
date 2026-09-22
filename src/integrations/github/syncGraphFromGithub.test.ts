@@ -6,6 +6,7 @@ import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../
 import { splitGitArgv } from '../../test/gitArgv.js';
 import { GIT_TRANSPORT_GUARD } from './execGit.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
+import { ensureChannelWithRoot } from '../../lib/channels.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -462,6 +463,41 @@ describe('move-aware identity', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(survivingId);
     expect(rows[0].name).toBe('updated');
+  });
+});
+
+describe('Channel-protected mirror cleanup (#1226)', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+
+  it('keeps a skipped file that still exists under a dead Channel and deletes only the true orphan', async () => {
+    const keptId = 'aaaa999900000000000000000000000001';
+    const goneId = 'bbbb999900000000000000000000000002';
+    const keptDir = join(repoRoot(), 'chats', 'dead', 'messages', 'kept');
+    const goneDir = join(repoRoot(), 'chats', 'dead', 'messages', 'gone');
+    mkdirSync(keptDir, { recursive: true });
+    mkdirSync(goneDir, { recursive: true });
+    writeNodeFiles(keptDir, { id: keptId, name: 'kept' });
+    writeNodeFiles(goneDir, { id: goneId, name: 'gone' });
+    await syncGraphFromGithub(makeGraph());
+
+    const { channel, rootId } = await ensureChannelWithRoot(db, {
+      memoryId: dbGraphId,
+      loc: 'chats:dead',
+      name: 'dead',
+      createdBy: null,
+    });
+    const now = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt: now } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt: now } }),
+    ]);
+    rmSync(goneDir, { recursive: true });
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(result.skippedProtected).toContain('chats:dead:messages:kept');
+    expect(await db.node.findUnique({ where: { id: keptId } })).not.toBeNull();
+    expect(await db.node.findUnique({ where: { id: goneId } })).toBeNull();
   });
 });
 

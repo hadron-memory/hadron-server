@@ -41,7 +41,7 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 import { generateId } from './id.js';
 import { ancestorLocs, lockAncestorsForCreateMany } from './nodeSubtreeLock.js';
-import { getMemoryEncryptionInfo, encryptNodeFields } from './nodeCrypto.js';
+import { getMemoryEncryptionInfo, decryptNodeFields, encryptNodeFields, type MemoryEncryptionInfo } from './nodeCrypto.js';
 import { locsOverlap } from './protectedLoc.js';
 import { ensureInstallRegisterRows } from './registerInstall.js';
 import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
@@ -113,6 +113,8 @@ export async function ensureChannelRow(
     createdBy: string | null;
     asDefaultOfAppId?: string | null;
     lastSeq?: number;
+    /** Reusing a tombstoned address starts a new, empty Channel incarnation. */
+    resetForReuse?: boolean;
   },
 ): Promise<ChannelRow> {
   let row = await db.channel.findUnique({ where: { chatRootNodeId: args.rootId } });
@@ -136,10 +138,20 @@ export async function ensureChannelRow(
       if ((e as { code?: string }).code !== 'P2002') throw e;
       row = await db.channel.findUniqueOrThrow({ where: { chatRootNodeId: args.rootId } });
     }
-  } else if (row.deletedAt) {
-    // The root was restored (the team chat's revive-not-recreate rule): the
-    // row follows it, keeping its lastSeq so the watermark survives the cycle.
-    row = await db.channel.update({ where: { id: row.id }, data: { deletedAt: null, deletedBy: null } });
+  } else if (row.deletedAt || args.resetForReuse) {
+    // The root was restored. Its allocator counter stays on the root so the
+    // next message never reuses an old seq, but the Channel watermark describes
+    // the NEW incarnation: empty until a fresh message lands. Existing read
+    // cursors may therefore stay where they are without producing phantom
+    // attention now or hiding the next message (#1226).
+    row = await db.channel.update({
+      where: { id: row.id },
+      data: {
+        deletedAt: null,
+        deletedBy: null,
+        ...(args.resetForReuse ? { lastSeq: 0, lastMessageAt: null } : {}),
+      },
+    });
   }
   if (args.asDefaultOfAppId) {
     const set = await db.app.updateMany({
@@ -151,6 +163,48 @@ export async function ensureChannelRow(
     if (set.count > 0) await ensureInstallRegisterRows(db, args.asDefaultOfAppId, { createdBy: args.createdBy });
   }
   return row;
+}
+
+/**
+ * Start a tombstoned Channel address as a clean incarnation (#1226).
+ *
+ * The root's `messageCount` is allocator history and survives, so a seq is
+ * never reused. The old transcript and `lastMessageAt` are incarnation state
+ * and do not survive. The descendant tombstone is one parameterized set write:
+ * `starts_with` is literal (`_` / `%` are not wildcards) and keeps the filter
+ * in Postgres instead of transferring every live loc to JavaScript.
+ */
+async function resetReusedChannel(
+  tx: Prisma.TransactionClient,
+  args: {
+    memoryId: string;
+    rootId: string;
+    messagesLoc: string;
+    deletedBy: string | null;
+    memEncInfo: MemoryEncryptionInfo;
+  },
+): Promise<void> {
+  const now = new Date();
+  const root = await tx.node.findUniqueOrThrow({ where: { id: args.rootId }, select: { data: true } });
+  const plain = decryptNodeFields({ data: root.data }, args.memEncInfo);
+  const rootData = { ...((plain.data as Record<string, unknown> | null) ?? {}) };
+  delete rootData.lastMessageAt;
+  const encrypted = encryptNodeFields({ content: null, data: rootData }, args.memEncInfo);
+
+  await tx.node.update({
+    where: { id: args.rootId },
+    data: {
+      data: (encrypted.data ?? null) as InputJsonValue,
+      updatedBy: args.deletedBy,
+    },
+  });
+  await tx.$executeRaw`
+    UPDATE nodes
+    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
+    WHERE memory_id = ${args.memoryId}
+      AND deleted_at IS NULL
+      AND starts_with(loc, ${`${args.messagesLoc}:`})
+  `;
 }
 
 /**
@@ -290,8 +344,7 @@ export async function ensureChannelWithRoot(
     // the schema forces it. Resurrecting the root lifts the transitive hide
     // that `cor:dmo:010:04` relies on ("removing a parent transitively hides
     // its children"), and the previous Channel's messages — never tombstoned
-    // by `deleteChannel` — become visible again under a new Channel, with
-    // `messageCount` continuing so `seq` does not restart.
+    // by `deleteChannel` — become visible again under a new Channel.
     //
     // @Jonas measured that: four messages read back after a delete (#1226).
     // The address is the ONLY thing the new Channel shares with the old one,
@@ -302,58 +355,22 @@ export async function ensureChannelWithRoot(
     // This mirrors an App's `uninstalledAt` reinstall (same spec): the address
     // is vacated and reused, the prior record retained rather than adopted.
     //
-    // The seq COUNTER is deliberately NOT reset, and that is not laziness.
-    // `ChannelReadState` watermarks key on seq, so restarting at 1 would make
-    // an attendee whose watermark sits at 2 treat the new room's first two
-    // messages as already read — silent unread-message LOSS. Keeping the
-    // counter costs a cosmetic gap in the numbering (the new room's first
-    // message is seq N+1 with nothing at 1..N); losing a message costs a
-    // message. `ensureChannelRow` keeps `Channel.lastSeq` for the same reason
-    // and says so, which is why this does not fight it.
+    // The root's allocator history (`messageCount`) is deliberately retained,
+    // while the Channel's current-transcript watermarks (`lastSeq` and
+    // `lastMessageAt`) are reset. The empty incarnation therefore has no
+    // phantom attention, but its first post receives seq N+1. Any read cursor
+    // retained from the previous incarnation is below that fresh seq and
+    // cannot hide the new message as already read.
     if (reusingDeadAddress) {
-      // NOT a `startsWith`. Prisma compiles it to an UNESCAPED `LIKE`, and `_`
-      // is both a single-character wildcard and a legal loc character
-      // (`findings:prisma-string-filters-are-unescaped-like`) — so reusing
-      // `chats_foo` would have matched and tombstoned message nodes under an
-      // unrelated `chatsXfoo:messages:` in the same memory. Data loss, in the
-      // fix for a data-visibility bug (@copilot, PR #1257).
-      //
-      // The house pattern instead (`assertNoChannelOverlap`, `bulkMutationGate`):
-      // narrow on an INDEXED column, then compare parsed locs in memory and
-      // delete by exact id. Memory-wide is affordable here — this path runs only
-      // when an address is REUSED, and it selects two columns.
-      // NOT `startsWith`: Prisma compiles it to an unescaped `LIKE`, and `_` is
-      // both a wildcard and a legal loc character, so reusing `chats_foo` would
-      // have tombstoned nodes under an unrelated `chatsXfoo:messages:`
-      // (`findings:prisma-string-filters-are-unescaped-like`, @copilot).
-      //
-      // NOT a `gte`/`lt` range either, which I tried next: Postgres compares
-      // text by the database COLLATION, not by byte order, so a `:`/`;` bound
-      // does not reliably contain the subtree. It silently matched nothing and
-      // the reuse test caught it.
-      //
-      // So: narrow on the INDEXED column, compare parsed locs in memory, delete
-      // by exact id — the house pattern (`assertNoChannelOverlap`,
-      // `bulkMutationGate`, `chatLoc`). @copilot is right that this is an
-      // unbounded transfer in a large memory; it is accepted rather than
-      // missed, because this path runs ONLY when a deleted address is reused,
-      // selects two columns, and the alternatives are a wildcard hazard and a
-      // collation hazard respectively. If it ever matters, the fix is a raw
-      // `LIKE … ESCAPE`, not a return to either of those.
-      const prefix = `${messagesLoc}:`;
-      const candidates = await tx.node.findMany({
-        where: { memoryId: args.memoryId, deletedAt: null },
-        select: { id: true, loc: true },
+      await resetReusedChannel(tx, {
+        memoryId: args.memoryId,
+        rootId,
+        messagesLoc,
+        deletedBy: args.createdBy ?? null,
+        memEncInfo,
       });
-      const stale = candidates.filter((n) => n.loc.startsWith(prefix)).map((n) => n.id);
-      if (stale.length > 0) {
-        await tx.node.updateMany({
-          where: { id: { in: stale } },
-          data: { deletedAt: new Date(), deletedBy: args.createdBy ?? null },
-        });
-      }
     }
-    const channel = await ensureChannelRow(tx, { ...args, rootId });
+    const channel = await ensureChannelRow(tx, { ...args, rootId, resetForReuse: reusingDeadAddress });
     return { channel, rootId };
   });
 }

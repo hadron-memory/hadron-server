@@ -203,15 +203,48 @@ describe('protection (S4)', () => {
     const msgs = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
     expect(msgs.items).toHaveLength(0);
 
-    // The seq COUNTER deliberately does NOT restart. `ChannelReadState`
-    // watermarks key on seq, so restarting at 1 would make an attendee whose
-    // watermark sits at 2 treat the new room's first two messages as already
-    // read — silent unread LOSS. A gap in the numbering is cosmetic; a lost
-    // message is not. Pinned so nobody "tidies" it into a reset.
+    const emptyState = await db.channel.findUniqueOrThrow({ where: { id: reborn.id } });
+    expect(emptyState.lastSeq).toBe(0);
+    expect(emptyState.lastMessageAt).toBeNull();
+    const cleanRoot = await db.node.findUniqueOrThrow({ where: { id: reborn.chatRootNodeId } });
+    expect((cleanRoot.data as Record<string, unknown>).lastMessageAt).toBeUndefined();
+
+    // The ALLOCATOR counter deliberately does NOT restart, even though the
+    // live Channel watermark above does. Existing cursors then see an empty
+    // room now and cannot hide the next message; the next seq still exceeds
+    // every old cursor. Pinned so nobody conflates the two numbers again.
     const posted = await M.createChannelMessage({}, { channelRef: reborn.id, body: 'fresh' }, ctx(admin.id));
     expect(posted.seq).toBeGreaterThan(2);
     const after = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
     expect(after.items.map((m: { body: string }) => m.body)).toEqual(['fresh']);
+  });
+
+  it('the default team-chat convenience path uses the SAME clean-reuse core (#1226)', async () => {
+    const current = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const first = current.items.find((c: { loc: string }) => c.loc === 'chats:team')!;
+    await M.createTeamChatMessage({}, { appRef: app.urn, body: 'old secret' }, ctx(admin.id));
+    await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
+
+    const fresh = await M.createTeamChatMessage({}, { appRef: app.urn, body: 'fresh room' }, ctx(admin.id));
+    expect(fresh.seq).toBeGreaterThan(1);
+    const reborn = await db.channel.findUniqueOrThrow({ where: { id: first.id } });
+    const page = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
+    expect(page.items.map((m: { body: string }) => m.body)).toEqual(['fresh room']);
+  });
+
+  it('reuse treats underscores literally while tombstoning the old transcript (#1226)', async () => {
+    const { channel } = await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats_team', name: 'underscored', createdBy: admin.id,
+    });
+    await M.createChannelMessage({}, { channelRef: channel.id, body: 'old' }, ctx(admin.id));
+    const unrelated = await db.node.create({
+      data: { id: generateId(), memoryId: appMem.id, loc: 'chatsXteam:messages:0001', name: 'unrelated' },
+    });
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+    await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats_team', name: 'underscored', createdBy: admin.id,
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: unrelated.id } })).deletedAt).toBeNull();
   });
 
   it("a dead Channel's refusal does not name an operation that cannot be reached (#1226)", async () => {

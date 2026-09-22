@@ -167,6 +167,11 @@ const CHANNEL_BACKED_OPS = new Set(['write', 'create', 'create under']);
  */
 const CLEANUP_OPS = new Set(['delete', 'delete under']);
 
+/** Does a dead Channel release its strict descendants for this operation? */
+export function releasesDeadChannelDescendants(entry: ProtectedLoc, op: string): boolean {
+  return !entry.live && CLEANUP_OPS.has(op);
+}
+
 /**
  * Does a TOMBSTONED Channel's reservation still cover `loc` for a cleanup op?
  *
@@ -200,7 +205,7 @@ function deadReservationCovers(entry: ProtectedLoc, loc: string): boolean {
  * it gets the rule of its author's memory.
  */
 export function protectedCoversForOp(entry: ProtectedLoc, loc: string, op: string): boolean {
-  return CLEANUP_OPS.has(op) && !entry.live
+  return releasesDeadChannelDescendants(entry, op)
     ? deadReservationCovers(entry, loc)
     : protectedLocCovers(entry, loc);
 }
@@ -331,6 +336,11 @@ function ancestorsOf(loc: string): string[] {
 export function protectedDeletionFilter(protectedLocs: ProtectedLoc[]): {
   notClauses: Array<{ loc: string } | { loc: { startsWith: string } } | { loc: { in: string[] } }>;
 } {
+  // Callers MUST hold `lockMemoryForChannelChange` from before they read
+  // `protectedLocs` through the delete: otherwise a dead Channel can be
+  // resurrected after this filter releases its descendants and before the
+  // write consumes the stale verdict (#1257 review).
+  //
   // #1226 — this is a DELETION filter, so the tombstone carve-out applies here
   // exactly as it does in `assertLocWritable`. Without it, cleanup through git
   // sync or `replaceSubtree` stayed blocked while the single-loc path allowed

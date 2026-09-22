@@ -9,6 +9,7 @@ import {
   type ProtectedLoc,
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
+import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import {
   assertGovernedWrite,
   mergedGovernedState,
@@ -3280,6 +3281,10 @@ export const nodeMutations = {
       const written: { id: string; loc: string; memoryId: string }[] = [];
 
       await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
+        // Same order as Channel creation: memory key before ancestor keys.
+        // Hold it through the ownerRepo cleanup so a tombstoned Channel cannot
+        // be resurrected after the protection snapshot but before deleteMany.
+        await lockMemoryForChannelChange(tx, resolvedMemoryId);
         // #664/#752: this bulk create bypasses the locked writeNodeCore path, so
         // a concurrent non-recursive delete of an ancestor could miss the rows
         // inserted below. Lock the ancestor path of every incoming loc (deduped,
@@ -3658,4 +3663,3 @@ export const nodeMutations = {
     },
 
 };
-
