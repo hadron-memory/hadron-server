@@ -2484,9 +2484,9 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_channel',
-    'Create a named Channel WITH its chat root (spec 049), in an app-class memory you may write. `loc` is the reserved address (e.g. chats:release) — it must not overlap an existing Channel\'s. Every App already has `team` at chats:team.',
+    'Create a named Channel WITH its chat root (spec 049), in ANY memory class you may write — the host memory\'s own audience decides who reads and posts (cor:acl:030:01), so a Channel in a private memory is private. `loc` is the reserved address (e.g. chats:release) — it must not overlap an existing Channel\'s. Every App already has `team` at chats:team.',
     {
-      memory: z.string().describe('Host memory (URN or id) — app-class.'),
+      memory: z.string().describe('Host memory (URN or id) — any class you may write.'),
       loc: z.string().describe('The reserved address, e.g. chats:release.'),
       name: z.string().describe('The Channel name.'),
       description: z.string().optional().describe('What the Channel is for.'),

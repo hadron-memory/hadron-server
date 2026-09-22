@@ -509,10 +509,16 @@ export const typeDefs = `#graphql
   }
 
   """
-  Create a named Channel WITH its chat root, in one transaction. The host must
-  be an app-class memory you may write (the chat-host rule). \`loc\` is the
-  reserved address (e.g. chats:release) and must not overlap an existing
-  Channel's; \`chats:team\` is every App's default and is created with the App.
+  Create a named Channel WITH its chat root, in one transaction. The host may be
+  a memory of ANY class that you may write — the host memory's own audience
+  decides who reads and posts (cor:acl:030:01), so a Channel in a private memory
+  is private and one in an app memory is the App's. \`loc\` is the reserved
+  address (e.g. chats:release) and must not overlap an existing Channel's;
+  \`chats:team\` is every App's default and is created with the App.
+
+  There is no app-class precondition. This said there was until #1248 — the
+  rule was retired by #1196 and the description outlived it, so every client
+  mirroring this SDL published a refusal that cannot fire.
   """
   input CreateChannelInput {
     memoryRef: ID!
@@ -7777,7 +7783,12 @@ export const typeDefs = `#graphql
     "Spec 049 Phase 2 — soft-delete a scope you may write; its name is free again at once."
     deleteScope(ref: ID!): Boolean!
 
-    "Spec 049 Phase 4 — create a named Channel with its chat root (host: an app-class memory you may write). LOC_OVERLAPS_CHANNEL when the address overlaps an existing Channel's."
+    """
+    Spec 049 Phase 4 — create a named Channel with its chat root. The host is
+    any memory class you may write; its audience decides the Channel's
+    (cor:acl:030:01). LOC_OVERLAPS_CHANNEL when the address overlaps an
+    existing Channel's.
+    """
     createChannel(input: CreateChannelInput!): Channel!
 
     "Spec 049 Phase 4 — rename / re-describe a Channel whose host memory you may write. ref: its id or its address (Channel.chatRootUrn, #1171)."
