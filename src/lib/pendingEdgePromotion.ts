@@ -85,15 +85,19 @@ async function consumePendingEdge(
   return deleted.count === 1;
 }
 
-async function retargetPendingEdgeToStableId(
+export async function retargetPendingEdgeToStableId(
   db: PrismaClient,
   pendingId: string,
+  expectedTargetId: string,
   targetNodeId: string,
   sourceMemoryId: string,
 ): Promise<string | null> {
   return db.$transaction(async (tx) => {
     const pending = await tx.pendingEdge.findUnique({ where: { id: pendingId } });
-    if (!pending) return null;
+    // This is a compare-and-swap against the promoter's outer snapshot. A
+    // concurrent promoter may already have attached the row to a different
+    // target incarnation; a stale retry must never overwrite that winner.
+    if (!pending || pending.deletedAt || pending.targetId !== expectedTargetId) return null;
 
     const stableTargetKey = pendingEdgeStableTargetKey(targetNodeId);
 
@@ -107,11 +111,16 @@ async function retargetPendingEdgeToStableId(
       return duplicate.id;
     }
 
-    await tx.pendingEdge.update({
-      where: { id: pending.id },
+    const retargeted = await tx.pendingEdge.updateMany({
+      where: {
+        id: pending.id,
+        sourceId: pending.sourceId,
+        targetId: expectedTargetId,
+        deletedAt: null,
+      },
       data: { targetId: stableTargetKey },
     });
-    return pending.id;
+    return retargeted.count === 1 ? pending.id : null;
   });
 }
 
@@ -276,6 +285,7 @@ export async function promotePendingEdgeForTarget(
         const stablePendingId = await retargetPendingEdgeToStableId(
           db,
           p.id,
+          p.targetId,
           targetNodeId,
           sourceMemoryId,
         );

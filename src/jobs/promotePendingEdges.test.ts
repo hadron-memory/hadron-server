@@ -3,7 +3,10 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbNode, createDbOrgAndGraph } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
-import { pendingEdgeStableTargetKey } from '../lib/pendingEdgePromotion.js';
+import {
+  pendingEdgeStableTargetKey,
+  retargetPendingEdgeToStableId,
+} from '../lib/pendingEdgePromotion.js';
 import {
   runPendingEdgePromotionSweep,
   startPendingEdgePromotionSweepLoop,
@@ -94,6 +97,35 @@ describe('durable PendingEdge promotion sweep', () => {
     });
     expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
     expect(await db.edge.count()).toBe(0);
+  });
+
+  it('does not let a stale promoter overwrite a newer stable target', async () => {
+    const source = await createDbNode(db, { memoryId, loc: 'source' });
+    const staleTarget = await createDbNode(db, { memoryId, loc: 'stale-target' });
+    const winningTarget = await createDbNode(db, { memoryId, loc: 'winning-target' });
+    const pending = await db.pendingEdge.create({
+      data: {
+        id: generateId(),
+        sourceId: source.id,
+        targetId: 'old-loc-snapshot',
+        name: 'retarget-race',
+      },
+    });
+    await db.pendingEdge.update({
+      where: { id: pending.id },
+      data: { targetId: pendingEdgeStableTargetKey(winningTarget.id) },
+    });
+
+    await expect(retargetPendingEdgeToStableId(
+      db,
+      pending.id,
+      'old-loc-snapshot',
+      staleTarget.id,
+      memoryId,
+    )).resolves.toBeNull();
+    expect(await db.pendingEdge.findUniqueOrThrow({ where: { id: pending.id } })).toMatchObject({
+      targetId: pendingEdgeStableTargetKey(winningTarget.id),
+    });
   });
 
   it('settles the source-memory count when a dead source makes the work terminal', async () => {
