@@ -94,4 +94,45 @@ describe('#676 — hadron_list_nodes user-owned leak (ADMIN + bare parentRel)', 
 
     expect(text).toContain('STRICT-OWNER-CHILD');
   });
+
+  it('does NOT cross the selected App when an ADMIN owns the other App personal memory', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'app-isolation-org', urn: `app-isolation-${generateId()}` },
+    });
+    const appA = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'App A', urn: `${org.urn}:app-a` },
+    });
+    const appB = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'App B', urn: `${org.urn}:app-b` },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Agent', urn: `${org.urn}:agent` },
+    });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'App B personal memory',
+        urn: `${org.urn}:app-b-personal`,
+        ownerUserId: ownerId,
+        userId: adminId,
+        appId: appB.id,
+        userMemoryOfAgentId: agent.id,
+      },
+    });
+    await createDbNode(db, { memoryId: mem.id, loc: 'crossapp', name: 'cross-App parent' });
+    await createDbNode(db, {
+      memoryId: mem.id,
+      loc: 'crossapp:child',
+      name: 'CROSS-APP-SECRET',
+    });
+
+    const text = await createTestableMcpServer({
+      userId: adminId,
+      roles: ['ADMIN'],
+      appId: appA.id,
+    }).callToolText('hadron_list_nodes', { parentRel: 'crossapp' });
+
+    expect(text).not.toContain('CROSS-APP-SECRET');
+  });
 });

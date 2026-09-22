@@ -4024,7 +4024,29 @@ export function createMcpServerInstance(
       // isRunnable=null), so the synthesize-parent walk would mislabel them as
       // "(missing — materialize)" even though they exist.
 
-      const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
+      let allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
+
+      // A bare parentRel can match the same loc in more than one memory. For
+      // ADMIN/OWNER callers `getAccessibleMemoryIds` intentionally returns
+      // null, so no resolved memoryId exists on that path and the query above
+      // is only a coarse identity-owner prefilter. Re-run the canonical gate
+      // for every candidate memory before rendering: personal/private access
+      // also depends on the selected App (and, for legacy rows, the installed
+      // Agent + active subscription), which cannot be represented by the
+      // ownership-only Prisma predicate.
+      if (!memoryId && memoryIds === null) {
+        const candidateMemoryIds = [...new Set(allNodes.map((node) => node.memoryId))];
+        const readableMemoryIds = new Set(
+          (
+            await Promise.all(
+              candidateMemoryIds.map(async (id) =>
+                (await canReadMemory(db, auth, id)) ? id : null,
+              ),
+            )
+          ).filter((id): id is string => id !== null),
+        );
+        allNodes = allNodes.filter((node) => readableMemoryIds.has(node.memoryId));
+      }
 
       // Deduplicate by (memoryId, loc): prefer canonical (isLink=false)
       // over link nodes. Multi-memory listings (memoryUrn unset, parentRel
