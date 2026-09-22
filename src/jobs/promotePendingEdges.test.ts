@@ -73,6 +73,22 @@ describe('durable PendingEdge promotion sweep', () => {
     expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
   });
 
+  it('settles the source-memory count when a dead source makes the work terminal', async () => {
+    const { source, pending } = await seedStablePending();
+    await db.node.update({
+      where: { id: source.id },
+      data: { deletedAt: new Date() },
+    });
+
+    await expect(runPendingEdgePromotionSweep(db)).resolves.toEqual({
+      promoted: 1,
+      failed: 0,
+      examined: 1,
+    });
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(0);
+  });
+
   it('fires on its own schedule so restart recovery is an active path', async () => {
     const { source, target, pending } = await seedStablePending();
     loop = startPendingEdgePromotionSweepLoop(db, 10_000, 5);

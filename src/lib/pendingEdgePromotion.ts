@@ -1,4 +1,4 @@
-import type { PrismaClient } from '../generated/prisma/index.js';
+import type { PendingEdge, Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { db as defaultDb } from '../integrations/db/client.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
 import { lockEdgeEndpointMemories } from './edgeEndpointLock.js';
@@ -11,10 +11,37 @@ const MAX_PENDING_EDGE_PROMOTION_RETRIES = 3;
 const INITIAL_PENDING_EDGE_RETRY_DELAY_MS = 100;
 const MAX_PENDING_EDGE_RETRY_DELAY_MS = 5_000;
 
+async function consumePendingEdge(
+  tx: Prisma.TransactionClient,
+  pending: Pick<PendingEdge, 'id' | 'sourceId' | 'targetId'>,
+  sourceMemoryId: string,
+): Promise<boolean> {
+  const deleted = await tx.pendingEdge.deleteMany({
+    where: {
+      id: pending.id,
+      sourceId: pending.sourceId,
+      targetId: pending.targetId,
+      deletedAt: null,
+    },
+  });
+  if (deleted.count === 1) {
+    // Git sync maintains this denormalized source-memory count. MCP and
+    // hand-authored legacy rows may not have credited it, so clamp at zero
+    // while settling the queue row in the same transaction.
+    await tx.$executeRaw`
+      UPDATE memories
+      SET pending_edge_count = GREATEST(pending_edge_count - 1, 0)
+      WHERE id = ${sourceMemoryId}
+    `;
+  }
+  return deleted.count === 1;
+}
+
 async function retargetPendingEdgeToStableId(
   db: PrismaClient,
   pendingId: string,
   targetNodeId: string,
+  sourceMemoryId: string,
 ): Promise<string | null> {
   return db.$transaction(async (tx) => {
     const pending = await tx.pendingEdge.findUnique({ where: { id: pendingId } });
@@ -26,7 +53,7 @@ async function retargetPendingEdgeToStableId(
       },
     });
     if (duplicate && duplicate.id !== pending.id) {
-      await tx.pendingEdge.delete({ where: { id: pending.id } });
+      await consumePendingEdge(tx, pending, sourceMemoryId);
       return duplicate.id;
     }
 
@@ -74,7 +101,13 @@ export async function promotePendingEdgeForTarget(
       }),
     ]);
     if (!pSource || pSource.deletedAt || !pTarget || pTarget.deletedAt) {
-      await db.pendingEdge.deleteMany({ where: { id: p.id } });
+      if (!pSource) {
+        // The source FK cascades PendingEdge deletion. If it vanished between
+        // reads, there is no source memory left whose counter we can settle.
+        await db.pendingEdge.deleteMany({ where: { id: p.id } });
+        return;
+      }
+      await db.$transaction((tx) => consumePendingEdge(tx, p, pSource.memoryId));
       return;
     }
 
@@ -140,25 +173,7 @@ export async function promotePendingEdgeForTarget(
             update: {},
           });
         }
-        const deleted = await tx.pendingEdge.deleteMany({
-          where: {
-            id: currentPending.id,
-            sourceId: currentPending.sourceId,
-            targetId: currentPending.targetId,
-            deletedAt: null,
-          },
-        });
-        if (deleted.count === 1) {
-          // Git sync maintains this denormalized source-memory count. MCP and
-          // hand-authored legacy rows may not have credited it, so clamp at
-          // zero while decrementing atomically with promotion.
-          await tx.$executeRaw`
-            UPDATE memories
-            SET pending_edge_count = GREATEST(pending_edge_count - 1, 0)
-            WHERE id = ${pSource.memoryId}
-          `;
-        }
-        return deleted.count === 1;
+        return consumePendingEdge(tx, currentPending, pSource.memoryId);
       });
       if (!consumed) return;
       return;
@@ -166,7 +181,12 @@ export async function promotePendingEdgeForTarget(
       if (error instanceof PendingEdgePromotionPreflightStale) {
         if (attempt < MAX_PENDING_EDGE_PROMOTION_RETRIES) continue;
 
-        const stablePendingId = await retargetPendingEdgeToStableId(db, p.id, targetNodeId);
+        const stablePendingId = await retargetPendingEdgeToStableId(
+          db,
+          p.id,
+          targetNodeId,
+          pSource.memoryId,
+        );
         if (stablePendingId && opts.scheduleFastRetry !== false) {
           const timer = setTimeout(() => {
             void promotePendingEdgeForTarget(stablePendingId, targetNodeId, {
