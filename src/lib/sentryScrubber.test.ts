@@ -106,15 +106,7 @@ describe('scrubSentryEvent', () => {
       method: 'POST',
     });
     expect(sent[0]?.tags).toEqual({ service: 'hadron-server' });
-    const sentFrames = sent[0]?.exception?.values?.[0]?.stacktrace?.frames;
-    expect(sentFrames?.length).toBeGreaterThan(0);
-    for (const frame of sentFrames ?? []) {
-      expect(
-        Object.keys(frame).every((key) =>
-          ['lineno', 'colno', 'in_app'].includes(key),
-        ),
-      ).toBe(true);
-    }
+    expect(sent[0]?.exception).toEqual({ values: [{ type: 'Error' }] });
 
     const serialized = JSON.stringify(sent[0]);
     for (const secret of [
