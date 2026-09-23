@@ -81,3 +81,41 @@ BEGIN
 
   ALTER TABLE workers ALTER COLUMN slug SET NOT NULL;
 END $$;
+
+-- ─── #1261: OAuth scopes on user keys + authorization codes ────────────────
+-- Migration-managed databases receive the same shape and backfill from
+-- 20260923010000_oauth_user_key_scopes. Local dev/test databases have no
+-- migration history, so this block must perform the transition before
+-- `prisma db push` sees the new array columns. The backfill is deliberately
+-- INSIDE each column-absence branch: a later run must never widen a newly
+-- issued restricted OAuth grant.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = current_schema() AND table_name = 'user_api_keys'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'user_api_keys' AND column_name = 'oauth_scopes'
+  ) THEN
+    ALTER TABLE user_api_keys
+      ADD COLUMN oauth_scopes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+    UPDATE user_api_keys
+    SET oauth_scopes = ARRAY['account']::TEXT[]
+    WHERE starts_with(issued_via, 'oauth:');
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = current_schema() AND table_name = 'auth_codes'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'auth_codes' AND column_name = 'oauth_scopes'
+  ) THEN
+    ALTER TABLE auth_codes
+      ADD COLUMN oauth_scopes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+    UPDATE auth_codes SET oauth_scopes = ARRAY['account']::TEXT[];
+  END IF;
+END $$;

@@ -27,6 +27,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
+import { hashUserApiKey, USER_API_KEY_PREFIX } from '../../middleware/auth.js';
 
 const startupMock = vi.hoisted(() => vi.fn());
 vi.mock('../../controller/controller.js', async (importOriginal) => {
@@ -39,6 +40,8 @@ let baseUrl: string;
 let adminJwt: string;
 let memberJwt: string;
 let staleAdminJwt: string;
+let mcpAdminKey: string;
+let accountAdminKey: string;
 
 beforeAll(async () => {
   await cleanDb(db);
@@ -54,6 +57,23 @@ beforeAll(async () => {
     data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
   adminJwt = await signJwt({ sub: admin.id, roles: ['ADMIN'] });
+  const issueKey = async (scope: 'mcp' | 'account', fill: string): Promise<string> => {
+    const rawKey = `${USER_API_KEY_PREFIX}${fill.repeat(64)}`;
+    await db.userApiKey.create({
+      data: {
+        userId: admin.id,
+        keyHash: hashUserApiKey(rawKey),
+        keyPreview: rawKey.slice(-4),
+        label: `${scope} reload test`,
+        createdBy: admin.id,
+        issuedVia: 'oauth:reload-test',
+        oauthScopes: [scope],
+      },
+    });
+    return rawKey;
+  };
+  mcpAdminKey = await issueKey('mcp', 'c');
+  accountAdminKey = await issueKey('account', 'd');
 
   // An ordinary signed-in user (READER — the Role enum has no MEMBER). The
   // interesting negative case: authentication alone must not be enough, or
@@ -121,6 +141,11 @@ describe('#556 — POST /reload is not anonymous', () => {
     expect(await reload(memberJwt)).toBe(403);
     expect(startupMock).not.toHaveBeenCalled();
   });
+
+  it('refuses an mcp-only OAuth admin key before the sync runs', async () => {
+    expect(await reload(mcpAdminKey)).toBe(403);
+    expect(startupMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('#556 — the claim in the token is not the authority', () => {
@@ -147,6 +172,11 @@ describe('#556 — a platform admin can still use it', () => {
     // trigger the README documents.
     expect(await reload(adminJwt)).toBe(200);
     expect(startupMock, 'the admin path really reaches startup()').toHaveBeenCalledOnce();
+  });
+
+  it('accepts an account-scoped OAuth admin key', async () => {
+    expect(await reload(accountAdminKey)).toBe(200);
+    expect(startupMock).toHaveBeenCalledOnce();
   });
 });
 

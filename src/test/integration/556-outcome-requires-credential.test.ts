@@ -32,12 +32,15 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
+import { hashUserApiKey, USER_API_KEY_PREFIX } from '../../middleware/auth.js';
 
 let server: Server;
 let baseUrl: string;
 let contributorJwt: string;
 let readerJwt: string;
 let staleContributorJwt: string;
+let mcpContributorKey: string;
+let accountContributorKey: string;
 let sessionId: string;
 let strangersSessionId: string;
 
@@ -68,6 +71,23 @@ beforeAll(async () => {
     },
   });
   contributorJwt = await signJwt({ sub: contributor.id, roles: ['CONTRIBUTOR'] });
+  const issueKey = async (scope: 'mcp' | 'account', fill: string): Promise<string> => {
+    const rawKey = `${USER_API_KEY_PREFIX}${fill.repeat(64)}`;
+    await db.userApiKey.create({
+      data: {
+        userId: contributor.id,
+        keyHash: hashUserApiKey(rawKey),
+        keyPreview: rawKey.slice(-4),
+        label: `${scope} outcome test`,
+        createdBy: contributor.id,
+        issuedVia: 'oauth:outcome-test',
+        oauthScopes: [scope],
+      },
+    });
+    return rawKey;
+  };
+  mcpContributorKey = await issueKey('mcp', 'a');
+  accountContributorKey = await issueKey('account', 'b');
 
   // READER is below the documented bar of "contributor or higher".
   const reader = await db.user.create({
@@ -135,6 +155,11 @@ describe('#556 — a credential is required', () => {
     expect(row?.outcome).toBeNull();
     expect(row?.outcomeRef).toBeNull();
   });
+
+  it('refuses an mcp-only OAuth user key before it can stamp the session', async () => {
+    expect(await report(sessionId, mcpContributorKey, { outcome: 0.77 })).toBe(403);
+    expect((await db.session.findUniqueOrThrow({ where: { id: sessionId } })).outcome).toBeNull();
+  });
 });
 
 describe('#556 — a credentialed reporter still works', () => {
@@ -152,6 +177,11 @@ describe('#556 — a credentialed reporter still works', () => {
     const row = await db.session.findUnique({ where: { id: sessionId } });
     expect(row?.outcome).toBe(0.8);
     expect(row?.outcomeRef).toBe('f3a9c1d2-feedback-form');
+  });
+
+  it('accepts an account-scoped OAuth user key', async () => {
+    expect(await report(sessionId, accountContributorKey, { outcome: 0.6 })).toBe(200);
+    expect((await db.session.findUniqueOrThrow({ where: { id: sessionId } })).outcome).toBe(0.6);
   });
 
   it('still validates the outcome range', async () => {
