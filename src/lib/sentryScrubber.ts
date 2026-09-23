@@ -63,8 +63,8 @@ export function scrubSentrySpan(span: SpanJSON): SpanJSON {
 
 function scrubRequest(event: ErrorEvent | TransactionEvent): void {
   // RequestData keeps the original request here, and incoming baggage can add
-  // arbitrary strings to the dynamic sampling context. Preserve only
-  // format-constrained trace/sampling fields, preferring the event's trace id.
+  // arbitrary strings to the dynamic sampling context. Preserve only a
+  // format-constrained trace id, preferring the event's separate trace context.
   const dynamicSamplingContext =
     event.sdkProcessingMetadata?.dynamicSamplingContext;
   const contextTraceId = event.contexts?.trace?.trace_id;
@@ -75,14 +75,8 @@ function scrubRequest(event: ErrorEvent | TransactionEvent): void {
       : isTraceId(dynamicSamplingContext.trace_id)
         ? dynamicSamplingContext.trace_id
         : undefined;
-    const sampleRate = dynamicSamplingContext.sample_rate;
-    const sampleRand = dynamicSamplingContext.sample_rand;
-    const sampled = dynamicSamplingContext.sampled;
     const safeDynamicSamplingContext = {
       ...(traceId ? { trace_id: traceId } : {}),
-      ...(isSamplingNumber(sampleRate) ? { sample_rate: sampleRate } : {}),
-      ...(sampled === 'true' || sampled === 'false' ? { sampled } : {}),
-      ...(isSamplingNumber(sampleRand) ? { sample_rand: sampleRand } : {}),
     };
     if (Object.keys(safeDynamicSamplingContext).length > 0) {
       event.sdkProcessingMetadata = {
@@ -111,14 +105,6 @@ function scrubRequest(event: ErrorEvent | TransactionEvent): void {
 
 function isTraceId(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
-}
-
-function isSamplingNumber(value: unknown): value is string {
-  if (typeof value !== 'string' || !/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(value)) {
-    return false;
-  }
-  const number = Number(value);
-  return Number.isFinite(number) && number >= 0 && number <= 1;
 }
 
 function scrubTracePayload(event: ErrorEvent | TransactionEvent): void {

@@ -215,9 +215,9 @@ describe('scrubSentryEvent', () => {
           environment: 'environment-secret',
           replay_id: 'replay-secret',
           org_id: 'org-secret',
-          sample_rate: '0.25',
+          sample_rate: '0.123456789012345678901234567890',
           sampled: 'true',
-          sample_rand: '0.5',
+          sample_rand: '0.987654321098765432109876543210',
         },
       },
       breadcrumbs: [
@@ -245,9 +245,6 @@ describe('scrubSentryEvent', () => {
     expect(scrubbed.sdkProcessingMetadata).toEqual({
       dynamicSamplingContext: {
         trace_id: 'e'.repeat(32),
-        sample_rate: '0.25',
-        sampled: 'true',
-        sample_rand: '0.5',
       },
     });
     expect(scrubbed.breadcrumbs).toBeUndefined();
