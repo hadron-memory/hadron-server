@@ -280,7 +280,10 @@ function buildExportPlan(args: {
     };
   }
 
-  if (targetOccupied) {
+  // Occupancy matters only when the action writes the destination. A forced
+  // REMOVE touches the paired source file and must not be blocked by an
+  // unrelated orphan at the declaration's (possibly renamed) target.
+  if (targetOccupied && forcedAction !== 'REMOVE') {
     return {
       action: 'REFUSE',
       preservesExistingFile: true,
@@ -671,7 +674,14 @@ export const skillQueries = {
         name,
         class: verdict.class ?? null,
         parseFailure: verdict.parseFailure === true,
-        movedFrom: verdict.movedFrom ?? null,
+        // A forced local-edit MOVE is selected by the planner rather than by
+        // classifySkill, so its source directory comes from the paired file.
+        // Clients must not have to reproduce server pairing policy to execute
+        // the server-owned action.
+        movedFrom:
+          exportPlan?.action === 'MOVE'
+            ? selectedFile?.dirName ?? verdict.movedFrom ?? null
+            : verdict.movedFrom ?? null,
         findings,
         renderedBody,
         exportPlan,

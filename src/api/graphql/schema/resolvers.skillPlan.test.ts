@@ -267,18 +267,28 @@ describe('classes and bodies', () => {
       }],
     });
     expect(moved.entries[0].renderedBody).toContain('name: new-name');
+    expect(moved.entries[0].movedFrom).toBe('my-skill');
     expect(moved.entries[0].exportPlan).toMatchObject({
       action: 'MOVE',
       preservesExistingFile: false,
       reasons: [{ code: 'locally-edited-override' }],
     });
 
-    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ enable: false }) } });
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ name: 'new-name', enable: false }) },
+    });
     const removed = await plan({
       intent: 'EXPORT',
       force: true,
       files: [{
         dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: 'f'.repeat(16),
+      }, {
+        dirName: 'new-name',
+        sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
+        nodeId: 'deleted-node',
+        headerHash: 'b'.repeat(16),
+        fileHash: 'b'.repeat(16),
       }],
     });
     expect(removed.entries[0].renderedBody).toBeNull();
@@ -287,6 +297,7 @@ describe('classes and bodies', () => {
       preservesExistingFile: false,
       reasons: [{ code: 'locally-edited-override' }],
     });
+    expect(removed.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['new-name']);
   });
 
   it('a parse failure is reported as a FAILURE, with no class', async () => {
