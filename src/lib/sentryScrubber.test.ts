@@ -235,7 +235,12 @@ describe('scrubSentryEvent', () => {
     const scrubbed = scrubSentryTransaction(event);
     expect(scrubbed.request).toEqual({ method: 'POST' });
     expect(scrubbed.transaction).toBeUndefined();
-    expect(scrubbed.sdkProcessingMetadata).toBeUndefined();
+    expect(scrubbed.sdkProcessingMetadata).toEqual({
+      dynamicSamplingContext: {
+        trace_id: '1'.repeat(32),
+        public_key: 'public',
+      },
+    });
     expect(scrubbed.breadcrumbs).toBeUndefined();
     expect(scrubbed.contexts?.trace).toEqual({
       trace_id: 'e'.repeat(32),

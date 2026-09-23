@@ -63,9 +63,37 @@ export function scrubSentrySpan(span: SpanJSON): SpanJSON {
 
 function scrubRequest(event: ErrorEvent | TransactionEvent): void {
   // RequestData keeps the original request here, and tracing can add a dynamic
-  // sampling context containing an unsanitized transaction name. Processing is
-  // complete by the time these hooks run, so no SDK metadata is safe to retain.
+  // sampling context containing an unsanitized transaction name. Rebuild the
+  // metadata from trace-correlation fields so the envelope remains useful.
+  const dynamicSamplingContext =
+    event.sdkProcessingMetadata?.dynamicSamplingContext;
   delete event.sdkProcessingMetadata;
+  if (dynamicSamplingContext) {
+    const {
+      trace_id,
+      public_key,
+      sample_rate,
+      release,
+      environment,
+      replay_id,
+      sampled,
+      sample_rand,
+      org_id,
+    } = dynamicSamplingContext;
+    event.sdkProcessingMetadata = {
+      dynamicSamplingContext: {
+        ...(trace_id ? { trace_id } : {}),
+        ...(public_key ? { public_key } : {}),
+        ...(sample_rate ? { sample_rate } : {}),
+        ...(release ? { release } : {}),
+        ...(environment ? { environment } : {}),
+        ...(replay_id ? { replay_id } : {}),
+        ...(sampled ? { sampled } : {}),
+        ...(sample_rand ? { sample_rand } : {}),
+        ...(org_id ? { org_id } : {}),
+      },
+    };
+  }
 
   // HTTP/fetch breadcrumbs may contain full caller-provided URLs. Drop the
   // whole collection rather than trying to predict every integration shape.
