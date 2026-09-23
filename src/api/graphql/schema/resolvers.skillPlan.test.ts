@@ -931,11 +931,20 @@ describe('the surface itself', () => {
     expect((resolvers.Mutation as Record<string, unknown>).skillPlan).toBeUndefined();
   });
 
-  it('refuses a host it has no renderer for', async () => {
+  it('refuses an unknown host by name, never answering with an empty plan (hadron-cli#622 P02)', async () => {
+    // `codex` is the spelling the portal first shipped (portal#888). An empty
+    // plan here would read as "nothing declared for this host", and --prune
+    // acting on it deletes that host's files.
     await mkNode('tasks:declared', { properties: declaration() });
-    await expect(plan({ intent: 'LINT', host: 'codexSkill' })).rejects.toMatchObject({
-      extensions: { code: 'BAD_USER_INPUT' },
+    await expect(plan({ intent: 'LINT', host: 'codex' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT', host: 'codex', supportedHosts: ['claudeSkill', 'codexSkill'] },
     });
+  });
+
+  it('CONTROL: every registered host is accepted', async () => {
+    await mkNode('tasks:declared', { properties: declaration() });
+    await expect(plan({ intent: 'LINT', host: 'claudeSkill' })).resolves.toBeTruthy();
+    await expect(plan({ intent: 'LINT', host: 'codexSkill' })).resolves.toBeTruthy();
   });
 
   it('accepts force only for an export invocation', async () => {
@@ -943,5 +952,185 @@ describe('the surface itself', () => {
     await expect(plan({ intent: 'STATUS', force: true })).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
+  });
+});
+
+/**
+ * #1254 part 2 — one host per call, and the host decides which declaration is
+ * read, which limits apply and which names collide. The renderer is shared.
+ * Case ids cite the hadron-cli#622 cross-host matrix, whose declaration, lint
+ * and collision columns run separately in skilldoc/crosshost.acceptance.test.ts.
+ */
+describe('hosts (#1254)', () => {
+  /** The literal the portal checkbox, the CLI matrix and this suite all pin (portal#888). */
+  const SHARED_PAYLOAD = {
+    exports: {
+      claudeSkill: { name: 'hadron-demo', description: 'Use when demoing.', enable: true },
+      codexSkill: { name: 'hadron-demo', description: 'Use when demoing.', enable: true },
+    },
+  };
+  const hashOf = (body: string) => /hash=([0-9a-f]{16})/.exec(body)![1]!;
+
+  it('judges the shared checkbox payload for BOTH hosts, from one renderer (P01, D01, R01)', async () => {
+    await mkNode('tasks:demo', { properties: SHARED_PAYLOAD });
+
+    const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+    const codex = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+
+    for (const got of [claude, codex]) {
+      expect(got.judged).toBe(1);
+      expect(got.entries).toHaveLength(1);
+      expect(got.entries[0]).toMatchObject({ name: 'hadron-demo', class: 'never-exported', exportPlan: { action: 'WRITE' } });
+    }
+    // Equal per-host metadata renders byte-identically: there is one
+    // renderer, and a host changes only what it is given.
+    expect(codex.entries[0].renderedBody).toBe(claude.entries[0].renderedBody);
+  });
+
+  it("renders each host's own name and description when they differ (D06)", async () => {
+    await mkNode('tasks:demo', {
+      properties: {
+        exports: {
+          claudeSkill: { name: 'hadron-demo', description: 'Use when demoing.', enable: true },
+          codexSkill: { name: 'hadron-demo-codex', description: 'Use when demoing in Codex.', enable: true },
+        },
+      },
+    });
+
+    const codex = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+    const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+
+    expect(codex.entries[0].name).toBe('hadron-demo-codex');
+    expect(codex.entries[0].renderedBody).toContain('name: hadron-demo-codex');
+    expect(codex.entries[0].renderedBody).toContain('Use when demoing in Codex.');
+    expect(claude.entries[0].name).toBe('hadron-demo');
+    // Different inputs, different provenance: each host's file is judged on its own.
+    expect(hashOf(codex.entries[0].renderedBody)).not.toBe(hashOf(claude.entries[0].renderedBody));
+  });
+
+  it('an unrecognized host key (`codex`) is judged by NO host (D02)', async () => {
+    await mkNode('tasks:demo', {
+      properties: { exports: { codex: { name: 'hadron-demo', description: 'Use when demoing.', enable: true } } },
+    });
+
+    for (const host of ['claudeSkill', 'codexSkill']) {
+      const got = await plan({ intent: 'LINT', host });
+      // Scanned (the `exports` key exists) and judged by nobody — the gap
+      // between the two numbers is the only trace of the silent failure.
+      expect(got.scanned).toBe(1);
+      expect(got.judged).toBe(0);
+      expect(got.entries).toHaveLength(0);
+    }
+  });
+
+  it('a legacy alias is a Claude declaration only (D07)', async () => {
+    await mkNode('tasks:legacy', {
+      properties: { skill: { name: 'hadron-demo', description: 'Use when demoing.', enable: true } },
+    });
+
+    const claude = await plan({ intent: 'LINT', host: 'claudeSkill' });
+    const codex = await plan({ intent: 'LINT', host: 'codexSkill' });
+
+    expect(claude.judged).toBe(1);
+    expect(claude.entries[0].findings.map((f: { rule: string }) => f.rule)).toContain('skill-legacy-key');
+    expect(codex.judged).toBe(0);
+    expect(codex.entries).toHaveLength(0);
+  });
+
+  it('enable is per host: Codex switched off REMOVES its file while Claude still writes (D03, P04)', async () => {
+    const node = await mkNode('tasks:demo', { properties: SHARED_PAYLOAD });
+    const first = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = hashOf(first.entries[0].renderedBody);
+
+    await db.node.update({
+      where: { id: node.id },
+      data: {
+        properties: {
+          exports: { ...SHARED_PAYLOAD.exports, codexSkill: { ...SHARED_PAYLOAD.exports.codexSkill, enable: false } },
+        },
+      },
+    });
+    const codexFile = { dirName: 'hadron-demo', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash };
+
+    const codex = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [codexFile] });
+    const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+
+    expect(codex.entries[0]).toMatchObject({ class: 'disabled', exportPlan: { action: 'REMOVE', reasons: [{ code: 'disabled' }] } });
+    expect(claude.entries[0]).toMatchObject({ class: 'never-exported', exportPlan: { action: 'WRITE' } });
+  });
+
+  it("applies the host's own limits: over 1,024 on Codex only is SKIPPED for Codex and preserves its file (L01, P09)", async () => {
+    const long = 'Use when demoing. ' + 'x'.repeat(1025 - 'Use when demoing. '.length);
+    const node = await mkNode('tasks:demo', { properties: SHARED_PAYLOAD });
+    const first = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = hashOf(first.entries[0].renderedBody);
+    await db.node.update({
+      where: { id: node.id },
+      data: {
+        properties: {
+          exports: { ...SHARED_PAYLOAD.exports, codexSkill: { ...SHARED_PAYLOAD.exports.codexSkill, description: long } },
+        },
+      },
+    });
+
+    const codex = await plan({
+      intent: 'EXPORT',
+      host: 'codexSkill',
+      files: [{ dirName: 'hadron-demo', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+    });
+    const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+
+    expect(codex.entries[0].renderedBody).toBeNull();
+    expect(codex.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-description-too-long' }],
+    });
+    expect(claude.entries[0].exportPlan).toMatchObject({ action: 'WRITE' });
+  });
+
+  it('collisions are per host: a shared Codex name collides for Codex only (C03)', async () => {
+    await mkNode('tasks:a', {
+      properties: {
+        exports: {
+          claudeSkill: { name: 'hadron-a', description: 'Use when a.', enable: true },
+          codexSkill: { name: 'hadron-x', description: 'Use when x.', enable: true },
+        },
+      },
+    });
+    await mkNode('tasks:b', {
+      properties: {
+        exports: {
+          claudeSkill: { name: 'hadron-b', description: 'Use when b.', enable: true },
+          codexSkill: { name: 'hadron-x', description: 'Use when x.', enable: true },
+        },
+      },
+    });
+
+    const codex = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+    const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+
+    expect(codex.entries).toHaveLength(2);
+    for (const e of codex.entries) {
+      expect(e).toMatchObject({ class: 'collision', renderedBody: null, exportPlan: { action: 'REFUSE' } });
+    }
+    for (const e of claude.entries) {
+      expect(e).toMatchObject({ class: 'never-exported', exportPlan: { action: 'WRITE' } });
+    }
+  });
+
+  it('a malformed Codex entry is reported by the Codex plan (matrix D10)', async () => {
+    await mkNode('tasks:demo', {
+      properties: { exports: { claudeSkill: SHARED_PAYLOAD.exports.claudeSkill, codexSkill: true } },
+    });
+
+    const codex = await plan({ intent: 'LINT', host: 'codexSkill' });
+
+    expect(codex.judged).toBe(1);
+    expect(codex.entries[0].findings).toEqual([
+      expect.objectContaining({ rule: 'skill-declaration-malformed', severity: 'error' }),
+    ]);
   });
 });

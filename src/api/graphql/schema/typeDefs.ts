@@ -955,7 +955,9 @@ export const typeDefs = `#graphql
     intent: SkillPlanIntent!
     """Memory refs to scan. Omitted means every memory the caller can read."""
     memories: [String!]
-    """Target host. Only claudeSkill has a renderer today (D10)."""
+    """
+    Target host, named by its D12 declaration key verbatim: claudeSkill (the default) or codexSkill. One host per call; the plan reads that host's declaration and applies its limits, and the retired top-level skill/claudeSkill keys alias to claudeSkill only. An unknown host is refused with BAD_USER_INPUT naming the supported hosts, never judged as another host and never answered with an empty plan.
+    """
     host: String
     """What the client found on disk. Empty for lint, which touches no disk."""
     files: [SkillFileFactsInput!]

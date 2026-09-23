@@ -55,6 +55,8 @@ import {
   EXPORTS_KEY,
   HOST_CLAUDE_SKILL,
   LEGACY_TOP_LEVEL_KEYS,
+  SKILL_HOSTS,
+  skillHost,
   lintCollisions,
   lintNode,
   pairFileToNode,
@@ -401,14 +403,21 @@ export const skillQueries = {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
+    // #1254: every host in the registry is plannable, one per call. There is
+    // one renderer; what differs per host is the declaration it reads (its
+    // name, description and enable) and the host's limits, both of which
+    // the skilldoc library takes from `host`.
+    //
+    // An unknown host is REFUSED, never judged as Claude and never answered
+    // with an empty plan (hadron-cli#622 matrix, P02). An empty plan would
+    // read as "nothing is declared for this host", and a client acting on it
+    // with --prune deletes that host's files. `codex`, the spelling the
+    // portal first shipped, is the case that makes this concrete.
     const host = input.host ?? HOST_CLAUDE_SKILL;
-    if (host !== HOST_CLAUDE_SKILL) {
-      // D10: a second host arrives with its RENDERER, not before it. Refusing
-      // is the honest answer — accepting the argument and rendering Claude's
-      // shape would hand a caller a file for a host we cannot yet write.
+    if (skillHost(host) === null) {
       throw new GraphQLError(
-        `skillPlan: host "${host}" has no renderer. Only "${HOST_CLAUDE_SKILL}" is supported today (D10).`,
-        { extensions: { code: 'BAD_USER_INPUT' } },
+        `skillPlan: unknown skill host "${host}". Supported hosts: ${SKILL_HOSTS.map((h) => `"${h.key}"`).join(', ')}.`,
+        { extensions: { code: 'BAD_USER_INPUT', host, supportedHosts: SKILL_HOSTS.map((h) => h.key) } },
       );
     }
 
@@ -536,7 +545,7 @@ export const skillQueries = {
       // all-clear wider than the read that produced it. `declaredSkill`
       // alone is the wrong predicate for exactly this reason.
       .filter((n) => {
-        const { declaration, malformed } = classifyDeclaration(n.properties);
+        const { declaration, malformed } = classifyDeclaration(n.properties, host);
         return declaration !== null || malformed.length > 0;
       }) as (SkillNode & { _id: string })[];
 
@@ -547,19 +556,20 @@ export const skillQueries = {
       // — `skill-content-empty` false, `skill-content-has-template` false —
       // and a finding asserting something about a body nobody could read is
       // worse than silence.
-      findingsByUrn.set(n.urn, lockedIds.has(n._id) ? [] : lintNode(n));
+      findingsByUrn.set(n.urn, lockedIds.has(n._id) ? [] : lintNode(n, host));
     }
-    for (const f of lintCollisions(skillNodes)) {
+    // Per host: one name on a node's Claude and Codex declarations is by
+    // design, and two nodes sharing a Codex name collide only for Codex.
+    const collisions = lintCollisions(skillNodes, host);
+    for (const f of collisions) {
       findingsByUrn.get(f.urn)?.push(f);
     }
-    const collidingUrns = new Set(
-      lintCollisions(skillNodes).map((f) => f.urn),
-    );
+    const collidingUrns = new Set(collisions.map((f) => f.urn));
 
     // ── Classify against what the client saw ─────────────────────────────
     const files = input.files ?? [];
     const nodeFacts: (NodeFacts & { _id: string })[] = skillNodes.map((n) => {
-      const declaration = declaredSkill(n.properties);
+      const declaration = declaredSkill(n.properties, host);
       const name = declaration ? storedName(declaration) : '';
       return {
         id: (n as SkillNode & { _id: string })._id,
