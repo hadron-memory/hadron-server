@@ -500,6 +500,47 @@ describe('classes and bodies', () => {
     });
   });
 
+  it('removes the paired disabled file even when an orphan occupies the renamed target', async () => {
+    const node = await mkNode('tasks:disable-renamed', {
+      properties: declaration({ name: 'old-name' }),
+    });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ name: 'new-name', enable: false }) },
+    });
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'old-name',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: headerHash,
+      }, {
+        dirName: 'new-name',
+        sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
+        nodeId: 'deleted-node',
+        headerHash: 'b'.repeat(16),
+        fileHash: 'b'.repeat(16),
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({
+      class: 'disabled',
+      movedFrom: 'old-name',
+      exportPlan: {
+        action: 'REMOVE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'disabled' }],
+      },
+    });
+    expect(got.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['new-name']);
+  });
+
   it('preserves an installed over-limit file even when the declaration is disabled', async () => {
     const node = await mkNode('tasks:disable-over-limit', { properties: declaration() });
     const first = await plan({ intent: 'EXPORT', files: [] });
