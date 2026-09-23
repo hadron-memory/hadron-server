@@ -93,8 +93,10 @@ function rebuildSpan(span: SpanJSON, pseudonymizeIds: boolean): SpanJSON {
 
 function scrubFreeformPayload(event: ErrorEvent | TransactionEvent): void {
   // Parser and router errors can echo caller-controlled URL segments in their
-  // message. Keep the stack shape for diagnosis, but replace every exception
-  // title with a fixed value and remove other free-form error payloads.
+  // message. Sentry can also parse newline-delimited fake V8 frames out of an
+  // attacker-controlled message, so textual frame fields are untrusted too.
+  // Keep only numeric/boolean stack shape for diagnosis, replace every
+  // exception title with a fixed value, and remove other free-form payloads.
   delete event.message;
   delete event.logentry;
   delete event.extra;
@@ -106,10 +108,17 @@ function scrubFreeformPayload(event: ErrorEvent | TransactionEvent): void {
       ...(exception.stacktrace
         ? {
             stacktrace: {
-              ...exception.stacktrace,
-              frames: exception.stacktrace.frames?.map(
-                ({ vars: _vars, ...frame }) => frame,
-              ),
+              frames: exception.stacktrace.frames?.map((frame) => ({
+                ...(typeof frame.lineno === 'number'
+                  ? { lineno: frame.lineno }
+                  : {}),
+                ...(typeof frame.colno === 'number'
+                  ? { colno: frame.colno }
+                  : {}),
+                ...(typeof frame.in_app === 'boolean'
+                  ? { in_app: frame.in_app }
+                  : {}),
+              })),
             },
           }
         : {}),

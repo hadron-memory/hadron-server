@@ -63,7 +63,9 @@ describe('scrubSentryEvent', () => {
       scope.setTag('graphql_operation', 'operation-tag-secret');
 
       Sentry.captureException(
-        new URIError("Failed to decode param 'whs_exception-secret%'"),
+        new URIError(
+          "Failed to decode param 'whs_exception-secret%'\n    at fake (https://example/hdr_user_stack-secret:1:1)",
+        ),
       );
       await Sentry.flush(2_000);
     });
@@ -95,12 +97,24 @@ describe('scrubSentryEvent', () => {
     expect(JSON.stringify(before[0]?.exception)).toContain(
       'whs_exception-secret',
     );
+    expect(
+      JSON.stringify(before[0]?.exception?.values?.[0]?.stacktrace?.frames),
+    ).toContain('hdr_user_stack-secret');
 
     expect(sent).toHaveLength(1);
     expect(sent[0]?.request).toEqual({
       method: 'POST',
     });
     expect(sent[0]?.tags).toEqual({ service: 'hadron-server' });
+    const sentFrames = sent[0]?.exception?.values?.[0]?.stacktrace?.frames;
+    expect(sentFrames?.length).toBeGreaterThan(0);
+    for (const frame of sentFrames ?? []) {
+      expect(
+        Object.keys(frame).every((key) =>
+          ['lineno', 'colno', 'in_app'].includes(key),
+        ),
+      ).toBe(true);
+    }
 
     const serialized = JSON.stringify(sent[0]);
     for (const secret of [
@@ -114,6 +128,7 @@ describe('scrubSentryEvent', () => {
       'breadcrumb-secret',
       'operation-tag-secret',
       'whs_exception-secret',
+      'hdr_user_stack-secret',
       'url-user',
       'url-pass',
     ]) {
