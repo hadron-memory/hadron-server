@@ -1101,7 +1101,7 @@
     {
       "id": "P11",
       "layer": "cli-lint",
-      "pendingOn": "unowned: docs/plans/skill-command-group.md says the all-host lint walk lands with the second renderer, and with one shared renderer nothing triggers it (routed to the coordinator)",
+      "pendingOn": "hadron-cli#665",
       "contracts": [
         "cor:agt:030:05"
       ],
