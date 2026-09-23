@@ -30,6 +30,7 @@ import {
   declaredSkill,
   EXPORTS_KEY,
   HOST_CLAUDE_SKILL,
+  isEnabled,
   legacyAliasPaths,
   storedName,
 } from './declaration.js';
@@ -205,7 +206,12 @@ export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Fin
 }
 
 /**
- * Two declaring nodes that store the SAME skill name.
+ * Two ENABLED declarations, for one host, that store the SAME skill name.
+ *
+ * Only enabled declarations count (cor:agt:030:06, D-2026-09-23-C): one that
+ * is off is not exported, so it claims no name. Lint judges a disabled
+ * declaration's NAME for shape all the same (`lintNode`); only the collision
+ * rule is scoped to what would actually be written.
  *
  * Since D12 the name is stored rather than derived, so a collision is two
  * authors having typed one name — there is no prefix left to keep two orgs'
@@ -226,7 +232,13 @@ export function lintCollisions(nodes: readonly SkillNode[], host: string = HOST_
     // Per host: a name is a directory under ONE host's root, so the same name
     // on a node's Claude and Codex declarations is by design, not a collision.
     const declaration = declaredSkill(node.properties, host);
-    if (declaration === null) continue;
+    // Only an ENABLED declaration claims its name (cor:agt:030:06,
+    // D-2026-09-23-C; #1289). A declaration that is off is not exported, so
+    // switching an old `foo` off and enabling a new `foo` is a hand-over, not
+    // a collision. Excluding it loses no protection: the old node's file, if
+    // still on disk, is kept safe by the planner's target-occupied refusal
+    // and by `locally-edited`, neither of which reads this function.
+    if (declaration === null || !isEnabled(declaration)) continue;
     // Grouped by the RAW stored name, with the trim used ONLY to decide
     // whether there is a name at all (@copilot, PR #1233). Grouping by the
     // trimmed value would make `" x-y "` collide with `"x-y"` — which the

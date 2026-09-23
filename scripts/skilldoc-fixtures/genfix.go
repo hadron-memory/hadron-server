@@ -89,6 +89,82 @@ func extras() []kase {
 	}
 }
 
+// collisionCases are the `lintCollisions` inputs, AUTHORED here and upserted
+// by name so the section can be regenerated rather than hand-edited (#1289).
+// Before #1289 the section was produced once, ad hoc, at 1a8036b, and nothing
+// could regenerate it — the README's "regenerate rather than hand-edit" had no
+// program behind it for this section, the same gap #1235 closed for `hash`.
+//
+// Every pre-#1289 case now carries `enable: true`. Their inputs had NO
+// `enable`, and since D-2026-09-23-C only an ENABLED declaration claims a name
+// (cor:agt:030:06) — so, left alone, the three collision cases would have
+// silently stopped colliding on BOTH sides and still passed, which is a parity
+// gate asserting nothing. The three disabled cases are the rule itself.
+func collisionCases() []kase {
+	node := func(urn, loc string, decl map[string]any) map[string]any {
+		return map[string]any{
+			"urn": urn, "loc": loc, "memoryUrn": "hrn:mem:acme.com:mem", "isRunnable": true,
+			"content":    "# Do the thing\n\nSteps.",
+			"properties": map[string]any{"exports": map[string]any{"claudeSkill": decl}},
+		}
+	}
+	decl := func(name any, enable any) map[string]any {
+		d := map[string]any{"description": "d. Use when x."}
+		if name != nil {
+			d["name"] = name
+		}
+		if enable != nil {
+			d["enable"] = enable
+		}
+		return d
+	}
+	const a, b, c = "hrn:node:a.com:m:one", "hrn:node:b.com:m:two", "hrn:node:c.com:m:three"
+	two := func(name string, ea, eb any) []any {
+		return []any{node(a, "tasks:x", decl(name, ea)), node(b, "tasks:x", decl(name, eb))}
+	}
+	return []kase{
+		{"name": "two nodes one name", "nodes": two("same-name", true, true)},
+		{"name": "three nodes one name", "nodes": []any{
+			node(a, "tasks:x", decl("dup", true)), node(b, "tasks:x", decl("dup", true)),
+			node(c, "tasks:x", decl("dup", true))}},
+		{"name": "distinct names", "nodes": []any{
+			node(a, "tasks:x", decl("alpha", true)), node(b, "tasks:x", decl("beta", true))}},
+		{"name": "a padded name does not collide with the trimmed one", "nodes": []any{
+			node(a, "tasks:x", decl(" x-y ", true)), node(b, "tasks:x", decl("x-y", true))}},
+		{"name": "two identically padded names DO collide", "nodes": two(" x-y ", true, true)},
+		{"name": "nameless nodes never collide", "nodes": []any{
+			node(a, "", decl(nil, true)), node(b, "", decl(nil, true))}},
+		{"name": "a disabled declaration does not collide with an enabled one", "nodes": two("same-name", false, true),
+			"why": "cor:agt:030:06 — switching an old foo off and enabling a new foo is a hand-over, not a collision (#1289)"},
+		{"name": "an absent enable does not collide with an enabled one", "nodes": two("same-name", nil, true),
+			"why": "enable defaults to off, so an absent enable claims no name either"},
+		{"name": "two disabled declarations do not collide", "nodes": two("same-name", false, false),
+			"why": "neither is exported, so neither claims the name"},
+	}
+}
+
+// collisionFindings runs Go's LintCollisions over a case's nodes and writes
+// the findings in the fixture's lower-camel shape. `memory` is omitted, as it
+// always was in this section: every input shares one memory.
+func collisionFindings(c kase) []any {
+	var nodes []skilldoc.Node
+	for _, raw := range c["nodes"].([]any) {
+		n := raw.(map[string]any)
+		props, _ := n["properties"].(map[string]any)
+		nodes = append(nodes, skilldoc.Node{
+			URN: n["urn"].(string), Loc: n["loc"].(string), MemoryURN: n["memoryUrn"].(string),
+			IsRunnable: n["isRunnable"].(bool), Content: n["content"].(string), Properties: props,
+		})
+	}
+	out := []any{}
+	for _, f := range skilldoc.LintCollisions(nodes) {
+		out = append(out, map[string]any{
+			"urn": f.URN, "rule": f.Rule, "severity": f.Severity, "message": f.Message,
+		})
+	}
+	return out
+}
+
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: genfix <fixtures.json> <hadron-cli-commit>")
@@ -148,6 +224,25 @@ func main() {
 		c["out"] = out
 	}
 	doc["render"], _ = json.Marshal(rc)
+
+	// ── lintCollisions ──────────────────────────────────────────────────────
+	// Stamped separately (`lintCollisionsSourceCommit`): `lint` is NOT
+	// regenerated here and stays at `lintSourceCommit`, and one commit field
+	// for two sections generated at different revisions would misstate one.
+	//
+	// Round-tripped through JSON first so the upserted Go literals and the
+	// decoded fixture cases share one representation ([]any / float64), which
+	// is what collisionFindings asserts on.
+	var lc []kase
+	cb, _ := json.Marshal(upsert(decode(doc, "lintCollisions"), collisionCases()...))
+	if err := json.Unmarshal(cb, &lc); err != nil {
+		panic(err)
+	}
+	for _, c := range lc {
+		c["findings"] = collisionFindings(c)
+	}
+	doc["lintCollisions"], _ = json.Marshal(lc)
+	doc["lintCollisionsSourceCommit"], _ = json.Marshal(commit)
 
 	// The commit is an ARGUMENT, never a literal. Hardcoding it meant the next
 	// regeneration at a newer revision would still stamp the old one, and
