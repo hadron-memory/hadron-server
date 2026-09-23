@@ -233,9 +233,12 @@ two-layer model without further setup:
   + 008 migrations both have hand-crafted SQL). The migration directory's
   timestamp is fixed-date by convention (recent migrations all use a
   `YYYYMMDDHHMMSS` prefix typed by hand, not generated).
-- **Spec kits**: `../spec-kits/specs/<NNN>-<name>/` (sibling repo). Read
-  `spec.md` first, then `plan.md`, then `tasks.md`. The spec corpus is the
-  source of truth for what the schema means.
+- **Specs**: the platform law corpus, `hrn:mem:hadronmemory.com:specs`, is the
+  source of truth for what the schema and the platform mean. Read a rule with
+  `hadron spec get <citation>`. The older Spec Kit trees (the sibling
+  `../spec-kits/specs/` and this repo's former `specs/`) are retired history.
+  Older code comments still cite them for background, but they are not law (see
+  "Specs and the constitution" below).
 
 ## Things to know before editing
 
@@ -292,8 +295,17 @@ they are **first-class review criteria**, not "general security" to defer:
 The Hadron review flow (`hrn:node:hadronmemory.com:hadron-server:review`) carries the
 runnable checklists for these; the `findings:` branch has the incidents.
 
-<!-- SPECKIT START -->
-For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan:
-[specs/036-ai-service-config/plan.md](specs/036-ai-service-config/plan.md)
-<!-- SPECKIT END -->
+## Specs and the constitution
+
+Spec Kit, meaning both the working docs that lived under `specs/` and its
+tooling (`.specify/`, the `speckit-*` skills), was retired on 2026-09-22.
+Durable contracts live in the platform law corpus,
+`hrn:mem:hadronmemory.com:specs`: read the corpus (`hadron spec get <citation>`),
+not a plan. The retired docs remain in git history (commit "chore(specs): retire
+the Spec Kit working docs").
+
+The server constitution came from Spec Kit and was retired with it. Comments that cite
+"Constitution Invariant #N" name the parent Hadron constitution in the sibling
+`spec-kits` repo; the server's own refinements remain in git history. The
+`no-agent-specific-code` CI guard's exemptions live in
+`.github/no-agent-specific-exemptions.txt`.

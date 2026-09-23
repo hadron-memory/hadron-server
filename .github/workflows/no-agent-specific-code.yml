@@ -7,13 +7,13 @@ name: No Agent-Specific Code
 # canonical agent-agnostic primitives — everything an Agent-author
 # wants to express must go through one of them.
 #
-# This is the installed copy of the spec-kits template at
-# `spec-kits/.specify/memory/no-agent-specific-code.yml`. Keep them
-# in sync by hand when the template changes (or set up a periodic
-# sync).
+# Originally installed from the spec-kits template at
+# `spec-kits/.specify/memory/no-agent-specific-code.yml`. Spec Kit was
+# retired in this repo on 2026-09-22; this copy is now the one that
+# runs here.
 #
 # Exemptions live at:
-#   .specify/memory/no-agent-specific-exemptions.txt
+#   .github/no-agent-specific-exemptions.txt
 #
 # Each line of that file is a `git grep` path-glob excluded from the
 # search. Test fixtures, migrations, and the dev-seed are pre-listed.
@@ -31,8 +31,8 @@ jobs:
 
       - name: Load exemptions list
         run: |
-          if [ -f .specify/memory/no-agent-specific-exemptions.txt ]; then
-            cp .specify/memory/no-agent-specific-exemptions.txt /tmp/exemptions.txt
+          if [ -f .github/no-agent-specific-exemptions.txt ]; then
+            cp .github/no-agent-specific-exemptions.txt /tmp/exemptions.txt
           else
             : > /tmp/exemptions.txt
           fi
@@ -66,9 +66,9 @@ jobs:
             echo "$MATCHES"
             echo ""
             echo "If a match is legitimate (e.g., a test fixture), add the file path to"
-            echo ".specify/memory/no-agent-specific-exemptions.txt and re-run."
-            echo "(That is the in-repo exemptions file. The same path also lives in"
-            echo "spec-kits/.specify/memory/ as the template — update both to keep them in sync.)"
+            echo ".github/no-agent-specific-exemptions.txt and re-run."
+            echo "(A copy of the original template still lives in spec-kits/.specify/memory/,"
+            echo "but this file is the one that runs here.)"
             exit 1
           fi
           echo "OK — no agent-specific references in src/."

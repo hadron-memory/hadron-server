@@ -975,7 +975,7 @@ async function resolveMemoryByUrn(
  * one renderer and cannot drift. Pure formatting — the caller fetches the
  * node (with outgoing/incoming edges + `memory.isEncrypted`), validates
  * `contentScope`, and fires any usage event; this only renders. Response
- * matrix: specs/031-node-abstract-field/contracts/hadron_get_node.md (spec 031 + 032).
+ * matrix: spec cor:api:020:03 (harvested from specs 031 + 032).
  */
 type ReadProjectionNode = {
   id: string;
@@ -1112,7 +1112,7 @@ async function renderNodeReadProjection(
     .filter(Boolean)
     .join('\n');
 
-  // Response matrix (specs/031-node-abstract-field/contracts/hadron_get_node.md).
+  // Response matrix: spec cor:api:020:03.
   if (scope === 'abstract') {
     // meta + abstract (no `---`, no body). Meta alone when abstract null.
     return hasAbstract ? `${meta}\n\n${node.abstract}` : meta;
