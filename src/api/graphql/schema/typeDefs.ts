@@ -6573,7 +6573,20 @@ export const typeDefs = `#graphql
     (the schema-governed JSONB column, DISTINCT from 'data'). The patch's
     top-level keys are written over the node's existing 'properties' (patch
     wins on collision); unmentioned keys are preserved; a node with no
-    'properties' takes the patch verbatim. 'properties' must be a JSON object
+    'properties' takes the patch verbatim.
+
+    ONE EXCEPTION (#1227): an OBJECT under 'exports' - the per-host skill
+    export declarations, keyed by host (D12) - is applied as a JSON Merge
+    Patch (RFC 7396), not replaced. Hosts and their fields merge recursively,
+    a null member DELETES that host or field, and scalars/arrays replace. So
+    '{exports: {codexSkill: {enable: false}}}' flips one flag and keeps the
+    host's name, description and every other host, and
+    '{exports: {codexSkill: null}}' removes that host. A non-object 'exports'
+    in the patch (null, a scalar, an array) keeps the top-level rule and
+    replaces the stored value. The merge runs under a per-node lock, so two
+    callers writing different hosts at once both land - do NOT
+    read-modify-write 'exports' client-side, which can lose a concurrent
+    writer's host. 'properties' must be a JSON object
     (not an array or scalar). 'nodeRef' is a node ID or fully-qualified URN.
     On a schema-governed memory the MERGED result is validated against the
     memory's schema (BAD_USER_INPUT on a violation). 'properties' is plaintext
@@ -6605,7 +6618,10 @@ export const typeDefs = `#graphql
     Merge fields into an existing object (server-side atomic shallow merge +
     schema conformance on the result). 'ref' is the object id (or node URN);
     'fields' wins on key collision, unmentioned keys preserved. Returns the
-    updated flat object.
+    updated flat object. The merge is shallow for EVERY field, including one
+    named 'exports': the per-host merge-patch updateNodeProperties applies to
+    'properties.exports' (#1227) is a node-level skill-declaration rule and
+    does not apply to object fields.
     """
     updateObject(ref: ID!, fields: JSON!, reason: String): JSON!
 

@@ -112,6 +112,12 @@ describe('getObject / updateObject / deleteObject', () => {
     expect(updated).toMatchObject({ id: obj.id, type: 'competitor', name: 'Letta', stage: 'series-a', fundingUsd: 10 });
   });
 
+  it('an object field named `exports` keeps the shallow merge (#1278 review: the #1227 merge-patch is node-only)', async () => {
+    const obj = await createObject({ memoryRef: memId, type: 'competitor', fields: { name: 'Letta', exports: { old: 1 } } });
+    const updated = await updateObject({ ref: obj.id, fields: { exports: { new: 1 } } });
+    expect(updated.exports).toEqual({ new: 1 });
+  });
+
   it('soft-deletes so a subsequent read returns null', async () => {
     const obj = await createObject({ memoryRef: memId, type: 'competitor', fields: { name: 'Letta' } });
     expect(await deleteObject({ ref: obj.id })).toBe(true);
