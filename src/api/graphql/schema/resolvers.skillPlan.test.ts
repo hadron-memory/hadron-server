@@ -332,6 +332,70 @@ describe('classes and bodies', () => {
     });
   });
 
+  it('writes a clean case-only rename in place instead of moving onto the same directory', async () => {
+    const node = await mkNode('tasks:case-only-rename', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'My-Skill',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: headerHash,
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({
+      class: 'renamed',
+      movedFrom: null,
+      exportPlan: {
+        action: 'WRITE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'renamed' }],
+      },
+    });
+  });
+
+  it('protects extra frontmatter on an unhashed legacy file unless force is explicit', async () => {
+    const node = await mkNode('tasks:legacy-extra-frontmatter', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const file = {
+      dirName: 'my-skill',
+      sourceUrn: urn,
+      nodeId: node.id,
+      headerHash: '',
+      fileHash: 'f'.repeat(16),
+      hasExtraFrontmatter: true,
+    };
+
+    const protectedPlan = await plan({ intent: 'EXPORT', files: [file] });
+    expect(protectedPlan.entries[0]).toMatchObject({
+      class: 'unhashed',
+      renderedBody: null,
+      exportPlan: {
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'locally-edited' }],
+      },
+    });
+
+    const forcedPlan = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(forcedPlan.entries[0]).toMatchObject({
+      class: 'unhashed',
+      exportPlan: {
+        action: 'WRITE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'locally-edited-override' }],
+      },
+    });
+    expect(forcedPlan.entries[0].renderedBody).toContain('# Body');
+  });
+
   it('a parse failure is reported as a FAILURE, with no class', async () => {
     await mkNode('tasks:declared', { properties: declaration() });
 

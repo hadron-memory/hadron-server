@@ -959,7 +959,7 @@ export const typeDefs = `#graphql
     host: String
     """What the client found on disk. Empty for lint, which touches no disk."""
     files: [SkillFileFactsInput!]
-    """With EXPORT only, explicitly replace, move, or remove a locally edited paired file for this invocation."""
+    """With EXPORT only, explicitly replace, move, or remove a paired file with detected local edits for this invocation."""
     force: Boolean
   }
 

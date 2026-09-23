@@ -166,6 +166,8 @@ function buildExportPlan(args: {
   parseFailure: boolean;
   hasFile: boolean;
   targetOccupied: boolean;
+  renameInPlace: boolean;
+  protectsLocalEdit: boolean;
   forceLocalEdit: boolean;
   forcedAction: 'WRITE' | 'MOVE' | 'REMOVE' | null;
   findings: Finding[];
@@ -177,6 +179,8 @@ function buildExportPlan(args: {
     parseFailure,
     hasFile,
     targetOccupied,
+    renameInPlace,
+    protectsLocalEdit,
     forceLocalEdit,
     forcedAction,
     findings,
@@ -198,7 +202,7 @@ function buildExportPlan(args: {
     };
   }
 
-  if (driftClass === 'locally-edited' && !forceLocalEdit) {
+  if (protectsLocalEdit && !forceLocalEdit) {
     return {
       action: 'REFUSE',
       preservesExistingFile: true,
@@ -318,9 +322,16 @@ function buildExportPlan(args: {
 
   if (driftClass === 'renamed' && renderedBody !== null) {
     return {
-      action: 'MOVE',
+      action: renameInPlace ? 'WRITE' : 'MOVE',
       preservesExistingFile: false,
-      reasons: [reason('renamed', 'The stored skill name changed; write the rendered file at the new name and remove the old generated file.')],
+      reasons: [
+        reason(
+          'renamed',
+          renameInPlace
+            ? 'The stored skill name differs only by filesystem-equivalent spelling; replace the paired file in place.'
+            : 'The stored skill name changed; write the rendered file at the new name and remove the old generated file.',
+        ),
+      ],
     };
   }
 
@@ -611,7 +622,14 @@ export const skillQueries = {
       const selectedOccupiesTarget = selectedFile !== null && filesystemDirKey(selectedFile.dirName) === targetKey;
       const targetOccupants = name === '' ? 0 : (occupantCountByDir.get(targetKey) ?? 0);
       const targetOccupied = targetOccupants > (selectedOccupiesTarget ? 1 : 0);
-      const forceLocalEdit = input.force === true && verdict.class === 'locally-edited';
+      // A legacy unhashed file cannot prove that its body stayed unchanged,
+      // but extra frontmatter is still direct evidence of a local edit. Keep
+      // the historical `unhashed` class while giving it the same overwrite
+      // protection and explicit one-invocation override as hashed edits.
+      const protectsLocalEdit =
+        verdict.class === 'locally-edited' ||
+        (verdict.class === 'unhashed' && selectedFile?.hasExtraFrontmatter === true);
+      const forceLocalEdit = input.force === true && protectsLocalEdit;
       const forcedAction = forceLocalEdit
         ? nf.declaration?.enable !== true
           ? 'REMOVE' as const
@@ -628,7 +646,8 @@ export const skillQueries = {
       const wantsBody =
         input.intent === 'EXPORT' &&
         verdict.class !== undefined &&
-        (WRITES_A_FILE.has(verdict.class) || (forceLocalEdit && forcedAction !== 'REMOVE')) &&
+        ((WRITES_A_FILE.has(verdict.class) && !protectsLocalEdit) ||
+          (forceLocalEdit && forcedAction !== 'REMOVE')) &&
         !hasError &&
         !targetOccupied;
 
@@ -660,6 +679,8 @@ export const skillQueries = {
               parseFailure: verdict.parseFailure === true,
               hasFile: selectedFile !== null,
               targetOccupied,
+              renameInPlace: verdict.class === 'renamed' && selectedOccupiesTarget,
+              protectsLocalEdit,
               forceLocalEdit,
               forcedAction,
               findings,
@@ -681,7 +702,9 @@ export const skillQueries = {
         movedFrom:
           exportPlan?.action === 'MOVE' || exportPlan?.action === 'REMOVE'
             ? selectedFile?.dirName ?? verdict.movedFrom ?? null
-            : verdict.movedFrom ?? null,
+            : exportPlan?.action === 'WRITE' && verdict.class === 'renamed'
+              ? null
+              : verdict.movedFrom ?? null,
         findings,
         renderedBody,
         exportPlan,
