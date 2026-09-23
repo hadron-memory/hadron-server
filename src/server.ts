@@ -43,6 +43,7 @@ import {
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import {
+  authContextAllowsOAuthSurface,
   getCurrentUserRoles,
   hasCurrentPlatformAdminRole,
   resolveAuthContext,
@@ -1140,6 +1141,10 @@ export async function createServer(): Promise<Express> {
         res.status(401).json({ error: 'Authentication required to read the GraphQL schema.' });
         return;
       }
+      if (!authContextAllowsOAuthSurface(auth, 'account')) {
+        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.' });
+        return;
+      }
       res.type('text/plain; charset=utf-8').send(graphqlSdl());
     } catch (err) {
       next(err);
@@ -1156,6 +1161,11 @@ export async function createServer(): Promise<Express> {
     expressMiddleware(apollo, {
       context: async ({ req }) => {
         const auth = await resolveAuthContext(req, db);
+        if (!authContextAllowsOAuthSurface(auth, 'account')) {
+          throw new GraphQLError('This OAuth credential is limited to the MCP surface.', {
+            extensions: { code: 'FORBIDDEN' },
+          });
+        }
         // Stage caller-held unlock keys from the request header. Every
         // encrypt/decrypt call site consults sessionKeyCache.getByMemoryId,
         // which checks the request store first — this is the whole
@@ -1246,6 +1256,10 @@ export async function createServer(): Promise<Express> {
       // a rejection above the try is an unhandled rejection rather than a
       // response (the #555 class).
       const auth = await resolveAuthContext(req, db);
+      if (!authContextAllowsOAuthSurface(auth, 'account')) {
+        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.' });
+        return;
+      }
 
       // An App key IS the machine credential this endpoint was designed for —
       // "any machine client with a valid key" — so it qualifies on its own.
@@ -1345,6 +1359,10 @@ export async function createServer(): Promise<Express> {
     // this week, reintroduced by putting an await above the try.
     try {
       const auth = await resolveAuthContext(req, db);
+      if (!authContextAllowsOAuthSurface(auth, 'account')) {
+        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.' });
+        return;
+      }
 
       // Roles come from the CURRENT user row, not from a token or transport
       // snapshot (@copilot, PR #1250; #1251). Re-reading costs one indexed

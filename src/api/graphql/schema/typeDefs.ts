@@ -2128,6 +2128,11 @@ export const typeDefs = `#graphql
     (POST /oauth/token). Powers source labels in the revocation UI.
     """
     issuedVia: String
+    """
+    Immutable OAuth scopes bound to this credential. Empty means an
+    unrestricted portal/legacy key rather than an OAuth-scoped key.
+    """
+    oauthScopes: [String!]!
   }
 
   """

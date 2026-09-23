@@ -416,6 +416,7 @@ describe('Mutation.mergeUsers — relationships', () => {
         keyHash: 'merge-source-key-hash',
         keyPreview: 'hash',
         createdBy: source.id,
+        oauthScopes: [],
       },
     });
     await db.pendingSetup.createMany({

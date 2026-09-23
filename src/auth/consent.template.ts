@@ -123,15 +123,11 @@ export const CONSENT_TEMPLATE = `<!doctype html>
       <li>Resource: <code>{{resource}}</code></li>
     </ul>
     <p>If you approve, the application will be issued an authorization code that it can exchange for an access token to act on your behalf.</p>
-    <p class="warn"><strong>This token has the same access you do.</strong> The scope and
-    resource above describe what {{clientName}} asked for — they do <strong>not</strong>
-    limit the token. It can read and change everything in your Hadron account through
-    every interface, and it can <strong>create further API keys of its own</strong>.</p>
-    <p class="warn-sub">Approve only applications you trust with your whole account.
-    Revoking this token does <strong>not</strong> automatically revoke keys the
-    application created with it — check your account's API keys as well.</p>
+    <p class="warn"><strong>{{grantHeading}}</strong> {{grantBody}}</p>
+    <p class="warn-sub">{{grantSub}}</p>
     <form method="post" action="/oauth/authorize" autocomplete="off">
       <input type="hidden" name="_csrf"                 value="{{csrfToken}}">
+      <input type="hidden" name="grant_proof"           value="{{grantProof}}">
       <input type="hidden" name="client_id"             value="{{clientId}}">
       <input type="hidden" name="redirect_uri"          value="{{redirectUri}}">
       <input type="hidden" name="code_challenge"        value="{{codeChallenge}}">

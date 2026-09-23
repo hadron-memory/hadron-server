@@ -99,6 +99,7 @@ async function seedAuthCode(
     resource?: string[];
     clientId?: string;
     redirectUri?: string;
+    oauthScopes?: string[];
   } = {},
 ): Promise<{
   rawCode: string;
@@ -118,6 +119,7 @@ async function seedAuthCode(
       redirectUri: overrides.redirectUri ?? REGISTERED_REDIRECT,
       codeChallenge: challenge,
       resource: overrides.resource ?? [RESOURCE_URL],
+      oauthScopes: overrides.oauthScopes ?? ['mcp'],
       expiresAt: new Date(Date.now() + (overrides.expiresInMs ?? 10 * 60 * 1000)),
       redeemedAt: overrides.redeemedAt ?? null,
       createdBy: testUser.id,
@@ -194,10 +196,20 @@ describe('POST /oauth/token — happy path', () => {
     expect(keys[0].issuedVia).toBe(`oauth:${TEST_CLIENT_ID}`);
     expect(keys[0].createdBy).toBe(testUser.id);
     expect(keys[0].label).toBe('OAuth: Test MCP Client');
+    expect(keys[0].oauthScopes).toEqual(['mcp']);
     // REV-5 carries over to UserApiKey: only the hash is stored.
     expect(keys[0].keyHash).toBe(
       createHash('sha256').update(body.access_token as string).digest('hex'),
     );
+  });
+
+  it('copies an account grant unchanged to the key and token response', async () => {
+    const { rawCode, verifier } = await seedAuthCode({ oauthScopes: ['account'] });
+    const res = await postToken(defaultFields(rawCode, verifier));
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ scope: 'account' });
+    const key = await db.userApiKey.findFirstOrThrow({ where: { userId: testUser.id } });
+    expect(key.oauthScopes).toEqual(['account']);
   });
 
   it('falls back to clientId in the label when clientName is empty', async () => {
@@ -253,6 +265,7 @@ describe('POST /oauth/token — happy path', () => {
     expect(ctx.userId).toBe(testUser.id);
     expect(ctx.clientId).toBe('github:alice');
     expect(ctx.roles).toEqual(['CONTRIBUTOR']);
+    expect(ctx.oauthScopes).toEqual(['mcp']);
   });
 });
 

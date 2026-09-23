@@ -14,6 +14,7 @@ import {
 import {
   APP_KEY_PREFIX,
   USER_API_KEY_LABEL_MAX_LEN,
+  authContextAllowsOAuthSurface,
   hashAppKey,
   mintUserApiKey,
 } from '../../../middleware/auth.js';
@@ -1063,6 +1064,12 @@ export const appMutations = {
           { extensions: { code: 'UNAUTHENTICATED' } },
         );
       }
+      if (!authContextAllowsOAuthSurface(ctx, 'account')) {
+        throw new GraphQLError(
+          'This OAuth credential is limited to the MCP surface and cannot create API keys.',
+          { extensions: { code: 'FORBIDDEN' } },
+        );
+      }
       // Cap label length to prevent unbounded TEXT writes. The Prisma
       // column is uncapped; 200 chars is plenty for a human-readable
       // display name (e.g., "MacBook Air — Claude Desktop").
@@ -1139,4 +1146,3 @@ export const appMutations = {
     // nodes, hard-delete it alongside the revocation (FR-029); otherwise
     // retain it (FR-028).
 };
-

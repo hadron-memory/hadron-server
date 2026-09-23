@@ -104,6 +104,7 @@ describe('/mcp 401 + WWW-Authenticate (FR-005, RFC 9728)', () => {
         revokedAt: new Date(), // revoked before first use
         createdBy: user.id,
         issuedVia: 'portal',
+        oauthScopes: [],
       },
     });
 

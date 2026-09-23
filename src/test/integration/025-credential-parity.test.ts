@@ -9,11 +9,11 @@
  *   - Same prefix (`hdr_user_`) + same entropy (256 bits) + same
  *     hashing primitive (SHA-256) — pinned by `mintUserApiKey`
  *     being the single insert path (Phase 2D PR #158).
- *   - Same persisted-row shape, differing ONLY in the
- *     discriminator fields `issuedVia` (`portal` vs
- *     `oauth:<clientId>`) and `label`.
- *   - Same `resolveAuthContext` resolution path: both produce the
- *     same `{ userId, clientId, roles }` context for the same User.
+ *   - Same persisted credential primitive. Audit fields and immutable OAuth
+ *     scope binding differ by issuance path: portal keys are deliberately
+ *     unscoped; this flow requests `mcp`.
+ *   - Same `resolveAuthContext` identity path: both produce the same
+ *     `{ userId, clientId, roles }`, with OAuth scope attached separately.
  *   - Same revocation semantics: after `revokedAt` is set, both
  *     produce the identical 401 + WWW-Authenticate from
  *     `handleMcpRequest`, with no shape that distinguishes
@@ -149,6 +149,9 @@ async function mintViaOAuth(): Promise<string> {
   const csrfTokenMatch = html.match(/name="_csrf"\s+value="([^"]+)"/);
   expect(csrfTokenMatch).not.toBeNull();
   const csrfToken = csrfTokenMatch![1];
+  const grantProofMatch = html.match(/name="grant_proof"\s+value="([^"]+)"/);
+  expect(grantProofMatch).not.toBeNull();
+  const grantProof = grantProofMatch![1];
   // Use `getSetCookie()` rather than `get('set-cookie')`: per the
   // Fetch spec the latter returns only the first value when multiple
   // Set-Cookie headers exist, and undici's current join-with-`, `
@@ -171,6 +174,7 @@ async function mintViaOAuth(): Promise<string> {
     resource: RESOURCE_URL,
     scope: 'mcp',
     state,
+    grant_proof: grantProof,
   });
   const postRes = await fetch(`${baseUrl}/oauth/authorize`, {
     method: 'POST',
@@ -318,9 +322,11 @@ describe('025-credential-parity: portal-minted vs OAuth-minted tokens', () => {
     // SAME preview shape — last 4 chars of the raw token.
     expect(portalRow!.keyPreview).toBe(portalKey.slice(-4));
     expect(oauthRow!.keyPreview).toBe(oauthKey.slice(-4));
+    expect(portalRow!.oauthScopes).toEqual([]);
+    expect(oauthRow!.oauthScopes).toEqual(['mcp']);
 
-    // ONLY discriminator fields differ. (Pinning this list of
-    // expected differences makes any future schema drift loud:
+    // Audit discriminators and the intentional OAuth grant differ. (Pinning
+    // this list of expected differences makes any future schema drift loud:
     // if a new column gets divergent values from the two paths, a
     // test here can be added to that column explicitly.)
     expect(portalRow!.issuedVia).toBe('portal');
@@ -349,6 +355,8 @@ describe('025-credential-parity: portal-minted vs OAuth-minted tokens', () => {
     expect(portalCtx.clientId).toBe('github:alice'); // synthesized from User.githubUsername
     expect(portalCtx.roles).toEqual(oauthCtx.roles);
     expect(portalCtx.roles).toEqual(['CONTRIBUTOR']);
+    expect(portalCtx.oauthScopes).toBeUndefined();
+    expect(oauthCtx.oauthScopes).toEqual(['mcp']);
     // Neither path sets appId at the middleware layer — App
     // resolution happens at the MCP boundary per FR-020.
     expect(portalCtx.appId).toBeUndefined();

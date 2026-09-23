@@ -131,7 +131,7 @@ async function getAuthorize(
  */
 async function startConsentFlow(
   query?: string,
-): Promise<{ csrfToken: string; csrfCookieValue: string; html: string }> {
+): Promise<{ csrfToken: string; csrfCookieValue: string; grantProof: string; html: string }> {
   const q = query ?? buildAuthorizeQuery();
   const res = await getAuthorize(q);
   expect(res.status).toBe(200);
@@ -141,6 +141,9 @@ async function startConsentFlow(
   const tokenMatch = html.match(/name="_csrf"\s+value="([^"]+)"/);
   expect(tokenMatch, 'csrf token must be in rendered consent HTML').not.toBeNull();
   const csrfToken = tokenMatch![1];
+  const grantProofMatch = html.match(/name="grant_proof"\s+value="([^"]+)"/);
+  expect(grantProofMatch, 'grant proof must be in rendered consent HTML').not.toBeNull();
+  const grantProof = grantProofMatch![1];
 
   // Extract the _hadron_csrf cookie value from Set-Cookie.
   const setCookieRaw = res.headers.get('set-cookie');
@@ -149,7 +152,7 @@ async function startConsentFlow(
   expect(cookieMatch, '_hadron_csrf cookie must be in Set-Cookie header').not.toBeNull();
   const csrfCookieValue = cookieMatch![1];
 
-  return { csrfToken, csrfCookieValue, html };
+  return { csrfToken, csrfCookieValue, grantProof, html };
 }
 
 /**
@@ -263,6 +266,13 @@ describe('GET /oauth/authorize — post-validation redirects with OAuth error', 
   it('unsupported scope → redirect with ?error=invalid_scope', async () => {
     const res = await getAuthorize(buildAuthorizeQuery({ scope: 'admin' }));
     expectRedirectToRegisteredCb(res, 'invalid_scope');
+  });
+
+  it('accepts the account scope and supported scope combinations', async () => {
+    for (const scope of ['account', 'mcp account', 'account mcp']) {
+      const res = await getAuthorize(buildAuthorizeQuery({ scope }));
+      expect(res.status, scope).toBe(200);
+    }
   });
 
   it('multi-value resource → 400 invalid_request (NOT a redirect — v1 contract)', async () => {
@@ -508,7 +518,7 @@ describe('POST /oauth/authorize — CSRF protection', () => {
 describe('POST /oauth/authorize — decision=approve mints AuthCode', () => {
   it('approve → 302 to redirect_uri with raw code + state', async () => {
     const codeChallenge = 'a'.repeat(43);
-    const { csrfToken, csrfCookieValue } = await startConsentFlow();
+    const { csrfToken, csrfCookieValue, grantProof } = await startConsentFlow();
     const res = await postAuthorize(
       {
         _csrf: csrfToken,
@@ -516,8 +526,11 @@ describe('POST /oauth/authorize — decision=approve mints AuthCode', () => {
         client_id: testClientId,
         redirect_uri: REGISTERED_REDIRECT,
         code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
         resource: RESOURCE_URL,
+        scope: 'mcp',
         state: 'opaque-state-value',
+        grant_proof: grantProof,
       },
       { csrfCookieValue },
     );
@@ -542,14 +555,40 @@ describe('POST /oauth/authorize — decision=approve mints AuthCode', () => {
     expect(row.redirectUri).toBe(REGISTERED_REDIRECT);
     expect(row.codeChallenge).toBe(codeChallenge);
     expect(row.resource).toEqual([RESOURCE_URL]); // REV-3: String[]
+    expect(row.oauthScopes).toEqual(['mcp']);
     expect(row.createdBy).toBe(testUser.id);
     expect(row.expiresAt.getTime()).toBeGreaterThan(Date.now() + 9 * 60 * 1000); // ≥9min
     expect(row.expiresAt.getTime()).toBeLessThan(Date.now() + 11 * 60 * 1000); // ≤11min
   });
 
+  it('persists the approved account grant in canonical order', async () => {
+    const codeChallenge = 'a'.repeat(43);
+    const { csrfToken, csrfCookieValue, grantProof } = await startConsentFlow(
+      buildAuthorizeQuery({ scope: 'account mcp' }),
+    );
+    const res = await postAuthorize(
+      {
+        _csrf: csrfToken,
+        decision: 'approve',
+        client_id: testClientId,
+        redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
+        resource: RESOURCE_URL,
+        scope: 'account mcp',
+        state: 'opaque-state-value',
+        grant_proof: grantProof,
+      },
+      { csrfCookieValue },
+    );
+    expect(res.status).toBe(302);
+    const row = await db.authCode.findFirstOrThrow();
+    expect(row.oauthScopes).toEqual(['mcp', 'account']);
+  });
+
   it('approve with no state → 302 without state in query', async () => {
     const codeChallenge = 'a'.repeat(43);
-    const { csrfToken, csrfCookieValue } = await startConsentFlow(
+    const { csrfToken, csrfCookieValue, grantProof } = await startConsentFlow(
       buildAuthorizeQuery({ state: '' }),
     );
     const res = await postAuthorize(
@@ -559,7 +598,10 @@ describe('POST /oauth/authorize — decision=approve mints AuthCode', () => {
         client_id: testClientId,
         redirect_uri: REGISTERED_REDIRECT,
         code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
         resource: RESOURCE_URL,
+        scope: 'mcp',
+        grant_proof: grantProof,
       },
       { csrfCookieValue },
     );
@@ -601,6 +643,77 @@ describe('POST /oauth/authorize — fail-closed decision (FR-012)', () => {
     expect(url.searchParams.get('error')).toBe('access_denied');
     expect(url.searchParams.get('state')).toBe('opaque-state-value');
     expect(url.searchParams.has('code')).toBe(false);
+    expect(await db.authCode.count()).toBe(0);
+  });
+});
+
+describe('POST /oauth/authorize — revalidates the immutable OAuth grant', () => {
+  it('rejects a hidden scope tampered to an unsupported value', async () => {
+    const { csrfToken, csrfCookieValue } = await startConsentFlow();
+    const res = await postAuthorize(
+      {
+        _csrf: csrfToken,
+        decision: 'approve',
+        client_id: testClientId,
+        redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: 'a'.repeat(43),
+        resource: RESOURCE_URL,
+        scope: 'admin',
+        state: 'opaque-state-value',
+      },
+      { csrfCookieValue },
+    );
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!);
+    expect(url.searchParams.get('error')).toBe('invalid_scope');
+    expect(await db.authCode.count()).toBe(0);
+  });
+
+  it('rejects a supported scope substituted after the user saw the consent grant', async () => {
+    const { csrfToken, csrfCookieValue, grantProof } = await startConsentFlow(
+      buildAuthorizeQuery({ scope: 'mcp' }),
+    );
+    const res = await postAuthorize(
+      {
+        _csrf: csrfToken,
+        decision: 'approve',
+        client_id: testClientId,
+        redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: 'a'.repeat(43),
+        code_challenge_method: 'S256',
+        resource: RESOURCE_URL,
+        scope: 'account',
+        state: 'opaque-state-value',
+        grant_proof: grantProof,
+      },
+      { csrfCookieValue },
+    );
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!);
+    expect(url.searchParams.get('error')).toBe('invalid_request');
+    expect(await db.authCode.count()).toBe(0);
+  });
+
+  it('rejects an invalid grant proof', async () => {
+    const { csrfToken, csrfCookieValue } = await startConsentFlow();
+    const res = await postAuthorize(
+      {
+        _csrf: csrfToken,
+        decision: 'approve',
+        client_id: testClientId,
+        redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: 'a'.repeat(43),
+        code_challenge_method: 'S256',
+        resource: RESOURCE_URL,
+        scope: 'mcp',
+        state: 'opaque-state-value',
+        grant_proof: 'invalid',
+      },
+      { csrfCookieValue },
+    );
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!);
+    expect(url.searchParams.get('error')).toBe('invalid_request');
     expect(await db.authCode.count()).toBe(0);
   });
 });
@@ -676,11 +789,13 @@ describe('POST /oauth/authorize — open-redirect mitigation', () => {
         client_id: pollutionClientId,
         redirect_uri: pollutionRedirect,
         code_challenge: codeChallenge,
+        state: 'fresh-state',
       }),
     );
     expect(getRes.status).toBe(200);
     const html = await getRes.text();
     const csrfToken = html.match(/name="_csrf"\s+value="([^"]+)"/)![1];
+    const grantProof = html.match(/name="grant_proof"\s+value="([^"]+)"/)![1];
     const csrfCookieValue = getRes.headers
       .get('set-cookie')!
       .match(/_hadron_csrf=([^;]+)/)![1];
@@ -694,8 +809,11 @@ describe('POST /oauth/authorize — open-redirect mitigation', () => {
         client_id: pollutionClientId,
         redirect_uri: pollutionRedirect,
         code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
         resource: RESOURCE_URL,
+        scope: 'mcp',
         state: 'fresh-state',
+        grant_proof: grantProof,
       },
       { csrfCookieValue },
     );

@@ -16,6 +16,14 @@ export interface AuthContext {
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (not JWTs)
   /**
+   * OAuth scopes bound to the presented `hdr_user_` key. Absent for JWTs,
+   * App keys, and legacy/portal user keys whose empty scope list deliberately
+   * means full user authority (cor:aut:010:02). Unknown non-empty values are
+   * preserved so the surface gate below fails closed rather than silently
+   * treating future or corrupt values as unscoped.
+   */
+  oauthScopes?: string[];
+  /**
    * Set when the request authenticated with an impersonation JWT: `userId` is
    * the TARGET user, `roles` is `[]`, and this carries the session + the
    * admin actor + the single org the session may see into. Read surfaces
@@ -34,6 +42,32 @@ export const APP_KEY_PREFIX = 'hdr_app_';
 // /token endpoint. Same SHA-256 hashing primitive as AppKey; resolves to
 // a User instead of an App. The raw key is `hdr_user_<64 hex chars>`.
 export const USER_API_KEY_PREFIX = 'hdr_user_';
+
+/** OAuth scope names supported by the authorization server. */
+export const SUPPORTED_OAUTH_SCOPES = ['mcp', 'account'] as const;
+export type OAuthScope = (typeof SUPPORTED_OAUTH_SCOPES)[number];
+export type OAuthSurface = 'mcp' | 'account';
+
+/**
+ * Enforce the immutable OAuth grant attached to a user API key.
+ *
+ * An empty/absent list is intentionally unrestricted for portal-minted and
+ * legacy credentials. `account` is the broad grant and is valid anywhere a
+ * user credential is accepted; `mcp` is valid only at the MCP boundary.
+ * Unknown non-empty values match neither branch and therefore fail closed.
+ */
+export function authContextAllowsOAuthSurface(
+  auth: Pick<AuthContext, 'oauthScopes'>,
+  surface: OAuthSurface,
+): boolean {
+  const scopes = auth.oauthScopes;
+  if (!scopes || scopes.length === 0) return true;
+  if (scopes.some((scope) => !SUPPORTED_OAUTH_SCOPES.includes(scope as OAuthScope))) {
+    return false;
+  }
+  if (scopes.includes('account')) return true;
+  return surface === 'mcp' && scopes.includes('mcp');
+}
 
 /**
  * Cap on `UserApiKey.label`. The Prisma column is uncapped TEXT;
@@ -280,6 +314,9 @@ async function resolveUserApiKey(
     // revokedAt). JWT-authenticated users have no UserApiKey, so this stays
     // unset on that path.
     apiKeyId: userApiKey.id,
+    ...(userApiKey.oauthScopes.length > 0
+      ? { oauthScopes: userApiKey.oauthScopes }
+      : {}),
   };
 }
 
@@ -306,12 +343,15 @@ async function resolveUserApiKey(
  *   - `issuedVia`  — path discriminator (REV-2; `'portal'` for the
  *                    portal mutation, `'oauth:<clientId>'` for the
  *                    OAuth token endpoint)
+ *   - `oauthScopes` — immutable OAuth grant copied from AuthCode;
+ *                     omitted/empty for portal and legacy keys
  */
 export interface MintUserApiKeyInput {
   userId: string;
   label: string | null;
   createdBy: string;
   issuedVia: string;
+  oauthScopes?: readonly OAuthScope[];
 }
 
 export interface MintUserApiKeyResult {
@@ -337,6 +377,7 @@ export async function mintUserApiKey(
       label: input.label,
       createdBy: input.createdBy,
       issuedVia: input.issuedVia,
+      oauthScopes: input.oauthScopes ? [...input.oauthScopes] : [],
     },
   });
   return { rawKey, userApiKey };
