@@ -62,7 +62,9 @@ describe('scrubSentryEvent', () => {
       });
       scope.setTag('graphql_operation', 'operation-tag-secret');
 
-      Sentry.captureException(new Error('positive-control resolver fault'));
+      Sentry.captureException(
+        new URIError("Failed to decode param 'whs_exception-secret%'"),
+      );
       await Sentry.flush(2_000);
     });
 
@@ -90,6 +92,9 @@ describe('scrubSentryEvent', () => {
       service: 'hadron-server',
       graphql_operation: 'operation-tag-secret',
     });
+    expect(JSON.stringify(before[0]?.exception)).toContain(
+      'whs_exception-secret',
+    );
 
     expect(sent).toHaveLength(1);
     expect(sent[0]?.request).toEqual({
@@ -108,6 +113,7 @@ describe('scrubSentryEvent', () => {
       'env-secret',
       'breadcrumb-secret',
       'operation-tag-secret',
+      'whs_exception-secret',
       'url-user',
       'url-pass',
     ]) {

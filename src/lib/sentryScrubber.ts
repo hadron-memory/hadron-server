@@ -18,6 +18,7 @@ const ID_PSEUDONYM_KEY = randomBytes(32);
  * body field is introduced. See cor:sec:040:01 and hadron-server#1268.
  */
 export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
+  scrubErrorPayload(event);
   scrubRequest(event);
   scrubTracePayload(event, false);
   return event;
@@ -64,6 +65,32 @@ function rebuildSpan(span: SpanJSON, pseudonymizeIds: boolean): SpanJSON {
           segment_id: translate('span', span.segment_id, 8),
         }
       : {}),
+  };
+}
+
+function scrubErrorPayload(event: ErrorEvent): void {
+  // Parser and router errors can echo caller-controlled URL segments in their
+  // message. Keep the stack shape for diagnosis, but replace every exception
+  // title with a fixed value and remove other free-form error payloads.
+  delete event.message;
+  delete event.logentry;
+  delete event.extra;
+
+  if (!event.exception?.values) return;
+  event.exception = {
+    values: event.exception.values.map((exception) => ({
+      type: 'Error',
+      ...(exception.stacktrace
+        ? {
+            stacktrace: {
+              ...exception.stacktrace,
+              frames: exception.stacktrace.frames?.map(
+                ({ vars: _vars, ...frame }) => frame,
+              ),
+            },
+          }
+        : {}),
+    })),
   };
 }
 
