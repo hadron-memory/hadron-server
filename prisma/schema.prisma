@@ -3404,6 +3404,9 @@ model UserApiKey {
   /// tokens. Distinct from `createdBy` so the audit-actor convention
   /// is preserved.
   issuedVia  String?   @map("issued_via")
+  /// Immutable OAuth scopes copied from the authorization code at token
+  /// redemption. Empty means an unrestricted portal/legacy user key.
+  oauthScopes String[] @default([]) @map("oauth_scopes")
   lastUsedAt DateTime? @map("last_used_at")
   revokedAt  DateTime? @map("revoked_at")
 
@@ -3540,6 +3543,9 @@ model AuthCode {
   /// per RFC 8707 §2; v1 MCP usage populates a single element (the MCP
   /// endpoint URL). Application enforces ≥1 element.
   resource      String[]
+  /// Immutable OAuth scopes approved by the user. Copied exactly to the
+  /// UserApiKey minted when this code is redeemed.
+  oauthScopes   String[]  @default([]) @map("oauth_scopes")
   expiresAt     DateTime  @map("expires_at")
   redeemedAt    DateTime? @map("redeemed_at")
   createdAt     DateTime  @default(now()) @map("created_at")

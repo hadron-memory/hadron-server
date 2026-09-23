@@ -87,6 +87,7 @@ async function seedRedemptionCandidate(): Promise<SeededCode> {
       redirectUri: REGISTERED_REDIRECT,
       codeChallenge: challenge,
       resource: [RESOURCE_URL],
+      oauthScopes: ['mcp'],
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
       createdBy: testUser.id,
     },

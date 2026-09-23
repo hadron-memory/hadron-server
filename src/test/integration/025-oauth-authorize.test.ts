@@ -265,6 +265,13 @@ describe('GET /oauth/authorize — post-validation redirects with OAuth error', 
     expectRedirectToRegisteredCb(res, 'invalid_scope');
   });
 
+  it('accepts the account scope and supported scope combinations', async () => {
+    for (const scope of ['account', 'mcp account', 'account mcp']) {
+      const res = await getAuthorize(buildAuthorizeQuery({ scope }));
+      expect(res.status, scope).toBe(200);
+    }
+  });
+
   it('multi-value resource → 400 invalid_request (NOT a redirect — v1 contract)', async () => {
     // Two `resource` params land as an array on req.query.
     const params = new URLSearchParams(buildAuthorizeQuery({ resource: undefined }));
@@ -542,9 +549,32 @@ describe('POST /oauth/authorize — decision=approve mints AuthCode', () => {
     expect(row.redirectUri).toBe(REGISTERED_REDIRECT);
     expect(row.codeChallenge).toBe(codeChallenge);
     expect(row.resource).toEqual([RESOURCE_URL]); // REV-3: String[]
+    expect(row.oauthScopes).toEqual(['mcp']);
     expect(row.createdBy).toBe(testUser.id);
     expect(row.expiresAt.getTime()).toBeGreaterThan(Date.now() + 9 * 60 * 1000); // ≥9min
     expect(row.expiresAt.getTime()).toBeLessThan(Date.now() + 11 * 60 * 1000); // ≤11min
+  });
+
+  it('persists the approved account grant in canonical order', async () => {
+    const codeChallenge = 'a'.repeat(43);
+    const { csrfToken, csrfCookieValue } = await startConsentFlow(
+      buildAuthorizeQuery({ scope: 'account mcp' }),
+    );
+    const res = await postAuthorize(
+      {
+        _csrf: csrfToken,
+        decision: 'approve',
+        client_id: testClientId,
+        redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: codeChallenge,
+        resource: RESOURCE_URL,
+        scope: 'account mcp',
+      },
+      { csrfCookieValue },
+    );
+    expect(res.status).toBe(302);
+    const row = await db.authCode.findFirstOrThrow();
+    expect(row.oauthScopes).toEqual(['mcp', 'account']);
   });
 
   it('approve with no state → 302 without state in query', async () => {
@@ -601,6 +631,29 @@ describe('POST /oauth/authorize — fail-closed decision (FR-012)', () => {
     expect(url.searchParams.get('error')).toBe('access_denied');
     expect(url.searchParams.get('state')).toBe('opaque-state-value');
     expect(url.searchParams.has('code')).toBe(false);
+    expect(await db.authCode.count()).toBe(0);
+  });
+});
+
+describe('POST /oauth/authorize — revalidates the immutable OAuth grant', () => {
+  it('rejects a hidden scope tampered to an unsupported value', async () => {
+    const { csrfToken, csrfCookieValue } = await startConsentFlow();
+    const res = await postAuthorize(
+      {
+        _csrf: csrfToken,
+        decision: 'approve',
+        client_id: testClientId,
+        redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: 'a'.repeat(43),
+        resource: RESOURCE_URL,
+        scope: 'admin',
+        state: 'opaque-state-value',
+      },
+      { csrfCookieValue },
+    );
+    expect(res.status).toBe(302);
+    const url = new URL(res.headers.get('location')!);
+    expect(url.searchParams.get('error')).toBe('invalid_scope');
     expect(await db.authCode.count()).toBe(0);
   });
 });

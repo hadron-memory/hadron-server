@@ -31,7 +31,7 @@ describe('buildProtectedResourceMetadata (RFC 9728)', () => {
     expect(meta).toEqual({
       resource: 'http://localhost:4000/mcp',
       authorization_servers: ['http://localhost:4000'],
-      scopes_supported: ['mcp'],
+      scopes_supported: ['mcp', 'account'],
       bearer_methods_supported: ['header'],
     });
   });
@@ -44,11 +44,11 @@ describe('buildProtectedResourceMetadata (RFC 9728)', () => {
     });
   });
 
-  it('advertises only the `mcp` scope (single coarse scope per Clarifications Q-025-004)', () => {
+  it('advertises the MCP-limited and broad account scopes', () => {
     const meta = buildProtectedResourceMetadata('http://localhost:4000') as {
       scopes_supported: string[];
     };
-    expect(meta.scopes_supported).toEqual(['mcp']);
+    expect(meta.scopes_supported).toEqual(['mcp', 'account']);
   });
 
   it('advertises only the `header` Bearer method (no query / form-body Bearer tokens)', () => {
@@ -105,7 +105,7 @@ describe('buildAuthorizationServerMetadata (RFC 8414)', () => {
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
       code_challenge_methods_supported: ['S256'],
-      scopes_supported: ['mcp'],
+      scopes_supported: ['mcp', 'account'],
       token_endpoint_auth_methods_supported: ['none'],
     });
   });
@@ -141,7 +141,7 @@ describe('GET /.well-known/oauth-protected-resource (PRM endpoint)', () => {
       authorization_servers: expect.arrayContaining([
         expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
       ]),
-      scopes_supported: ['mcp'],
+      scopes_supported: ['mcp', 'account'],
       bearer_methods_supported: ['header'],
     });
   });
@@ -257,7 +257,7 @@ describe('GET /.well-known/oauth-authorization-server (AS metadata endpoint)', (
     expect(body.registration_endpoint).toMatch(/\/oauth\/register$/);
     expect(body.token_endpoint_auth_methods_supported).toEqual(['none']);
     expect(body.code_challenge_methods_supported).toEqual(['S256']);
-    expect(body.scopes_supported).toEqual(['mcp']);
+    expect(body.scopes_supported).toEqual(['mcp', 'account']);
     expect(body.grant_types_supported).toEqual(['authorization_code']);
   });
 

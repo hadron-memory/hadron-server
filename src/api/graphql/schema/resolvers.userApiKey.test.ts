@@ -72,7 +72,33 @@ describe('createUserApiKey', () => {
     expect(persisted.keyHash).toBe(hashUserApiKey(result.rawKey));
     expect(persisted.createdBy).toBe(user.id); // R-2: actor's User.id
     expect(persisted.issuedVia).toBe('portal'); // R-2: path discriminator
+    expect(persisted.oauthScopes).toEqual([]);
     expect(persisted.revokedAt).toBeNull();
+  });
+
+  it('refuses an MCP-only OAuth credential from minting another key', async () => {
+    await expect(
+      resolvers.Mutation.createUserApiKey(
+        undefined,
+        { label: 'scope escape' },
+        userCtx(user.id, { oauthScopes: ['mcp'] }),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.userApiKey.count()).toBe(0);
+  });
+
+  it('allows account-scoped and unscoped user credentials to mint keys', async () => {
+    await resolvers.Mutation.createUserApiKey(
+      undefined,
+      { label: 'account child' },
+      userCtx(user.id, { oauthScopes: ['account'] }),
+    );
+    await resolvers.Mutation.createUserApiKey(
+      undefined,
+      { label: 'portal child' },
+      userCtx(user.id),
+    );
+    expect(await db.userApiKey.count()).toBe(2);
   });
 
   it('rejects AppKey-resolved callers with UNAUTHENTICATED', async () => {

@@ -72,6 +72,7 @@ export interface Context {
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
+  oauthScopes?: string[];  // immutable OAuth grant on the presented hdr_user_ key (#1261)
   // Admin impersonation: set when the request authenticated with an
   // impersonation JWT — userId is the TARGET, roles is [], and reads must be
   // scoped to impersonation.orgId with all personal-class access dropped (the

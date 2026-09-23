@@ -53,7 +53,12 @@ import {
   TOKEN_EXPIRY_MINUTES,
 } from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
-import { USER_API_KEY_LABEL_MAX_LEN, mintUserApiKey } from '../middleware/auth.js';
+import {
+  SUPPORTED_OAUTH_SCOPES,
+  USER_API_KEY_LABEL_MAX_LEN,
+  mintUserApiKey,
+  type OAuthScope,
+} from '../middleware/auth.js';
 
 /**
  * Validate a `BASE_URL` env-var value for OAuth-metadata use. Exported
@@ -199,7 +204,7 @@ export function buildProtectedResourceMetadata(origin: string): Record<string, u
   return {
     resource: `${origin}/mcp`,
     authorization_servers: [origin],
-    scopes_supported: ['mcp'],
+    scopes_supported: [...SUPPORTED_OAUTH_SCOPES],
     bearer_methods_supported: ['header'],
   };
 }
@@ -229,7 +234,7 @@ export function buildAuthorizationServerMetadata(origin: string): Record<string,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code'],
     code_challenge_methods_supported: ['S256'],
-    scopes_supported: ['mcp'],
+    scopes_supported: [...SUPPORTED_OAUTH_SCOPES],
     token_endpoint_auth_methods_supported: ['none'],
   };
 }
@@ -501,7 +506,7 @@ function escapeHtml(value: string): string {
 
 interface ConsentParams {
   clientName: string;
-  scope: string;
+  oauthScopes: readonly OAuthScope[];
   resource: string;
   clientId: string;
   redirectUri: string;
@@ -531,7 +536,28 @@ function renderTemplate(template: string, params: Record<string, string>): strin
 
 /** Render the consent HTML (spec 025 Phase 2C). */
 export function renderConsent(params: ConsentParams): string {
-  return renderTemplate(CONSENT_TEMPLATE, { ...params });
+  const scope = params.oauthScopes.join(' ');
+  const accountGrant = params.oauthScopes.includes('account');
+  return renderTemplate(CONSENT_TEMPLATE, {
+    clientName: params.clientName,
+    scope,
+    resource: params.resource,
+    clientId: params.clientId,
+    redirectUri: params.redirectUri,
+    codeChallenge: params.codeChallenge,
+    codeChallengeMethod: params.codeChallengeMethod,
+    state: params.state,
+    csrfToken: params.csrfToken,
+    grantHeading: accountGrant
+      ? 'This token has the same account access you do.'
+      : 'This token is limited to Hadron\'s MCP interface.',
+    grantBody: accountGrant
+      ? 'It can read and change everything in your Hadron account through every interface, and it can create further API keys of its own.'
+      : 'Hadron will refuse this token at GraphQL and other account interfaces. It cannot create further API keys.',
+    grantSub: accountGrant
+      ? 'Approve only applications you trust with your whole account. Revoking this token does not automatically revoke keys the application created with it — check your account\'s API keys as well.'
+      : 'Approve only if you want this application to use Hadron\'s MCP tools on your behalf.',
+  });
 }
 
 /**
@@ -754,6 +780,39 @@ const CODE_CHALLENGE_MIN_LENGTH = 43;
 const CODE_CHALLENGE_MAX_LENGTH = 128;
 const CODE_CHALLENGE_CHARSET = /^[A-Za-z0-9\-._~]+$/;
 const RESOURCE_MAX_LENGTH = 2048;
+const OAUTH_SCOPE_SET = new Set<string>(SUPPORTED_OAUTH_SCOPES);
+
+type ParsedOAuthScopes =
+  | { ok: true; scopes: OAuthScope[] }
+  | { ok: false; error: 'invalid_request' | 'invalid_scope' };
+
+/**
+ * Parse the RFC 6749 space-delimited OAuth scope parameter. Omission keeps the
+ * long-standing `mcp` default; supported combinations are deduplicated and
+ * stored in canonical metadata order so consent, AuthCode, and token response
+ * cannot drift. A non-string/repeated value is malformed; an unknown token is
+ * a well-formed but unsupported scope request.
+ */
+function parseRequestedOAuthScopes(value: unknown): ParsedOAuthScopes {
+  if (value === undefined || value === '') return { ok: true, scopes: ['mcp'] };
+  if (typeof value !== 'string') return { ok: false, error: 'invalid_request' };
+  const requested = value.trim().split(/ +/);
+  if (requested.length === 0 || requested.some((scope) => !OAUTH_SCOPE_SET.has(scope))) {
+    return { ok: false, error: 'invalid_scope' };
+  }
+  const requestedSet = new Set(requested);
+  return {
+    ok: true,
+    scopes: SUPPORTED_OAUTH_SCOPES.filter((scope) => requestedSet.has(scope)),
+  };
+}
+
+function validatedStoredOAuthScopes(scopes: readonly string[]): OAuthScope[] | null {
+  if (scopes.length === 0 || scopes.some((scope) => !OAUTH_SCOPE_SET.has(scope))) return null;
+  const scopeSet = new Set(scopes);
+  return SUPPORTED_OAUTH_SCOPES.filter((scope) => scopeSet.has(scope));
+}
+
 // 'apple' joined for App Store guideline 4.8 (#794): apps offering
 // third-party login must offer Sign in with Apple. /auth/apple implements
 // the same Option-C return_to round-trip as github/google (its callback is
@@ -885,16 +944,9 @@ function buildHandleAuthorizeGet(
       redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
       return;
     }
-    // Repeated `?scope=` (Express qs parser yields an array) is
-    // a malformed request — fail loudly rather than silently
-    // coerce to the default 'mcp'.
-    if (Array.isArray(q.scope)) {
-      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
-      return;
-    }
-    const scope = typeof q.scope === 'string' && q.scope.length > 0 ? q.scope : 'mcp';
-    if (scope !== 'mcp') {
-      redirectWithOAuthError(res, redirectUri, 'invalid_scope', state);
+    const parsedScopes = parseRequestedOAuthScopes(q.scope);
+    if (!parsedScopes.ok) {
+      redirectWithOAuthError(res, redirectUri, parsedScopes.error, state);
       return;
     }
 
@@ -902,7 +954,7 @@ function buildHandleAuthorizeGet(
     const csrfToken = csrf.generateCsrfToken(req, res);
     const html = renderConsent({
       clientName,
-      scope,
+      oauthScopes: parsedScopes.scopes,
       resource,
       clientId: validated.clientId,
       redirectUri,
@@ -974,6 +1026,11 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
     redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
     return;
   }
+  const parsedScopes = parseRequestedOAuthScopes(body.scope);
+  if (!parsedScopes.ok) {
+    redirectWithOAuthError(res, redirectUri, parsedScopes.error, state);
+    return;
+  }
 
   // 6. Mint the AuthCode.
   // Per REV-5: store SHA-256(code), never plaintext. The raw `code`
@@ -994,6 +1051,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
         redirectUri,
         codeChallenge,
         resource: [resource],
+        oauthScopes: parsedScopes.scopes,
         expiresAt,
         createdBy: userId,
       },
@@ -1393,7 +1451,7 @@ function isValidCodeVerifier(v: string): boolean {
  *      so the audit trail names the OAuth client that owns the
  *      token.
  *   7. Respond per RFC 6749 §5.1: `access_token`, `token_type:
- *      'Bearer'`, `scope: 'mcp'`. No `expires_in` (opaque tokens
+ *      'Bearer'`, and the approved scope set. No `expires_in` (opaque tokens
  *      are long-lived per D-2026-05-17-001). No `refresh_token`
  *      (spec Out of Scope).
  */
@@ -1448,6 +1506,19 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
     res.status(400).json({
       error: 'invalid_grant',
       error_description: 'code is unknown',
+    });
+    return;
+  }
+
+  // AuthCode scopes are server-authored and immutable. Refuse a corrupt or
+  // legacy-empty row rather than accidentally minting an unrestricted key.
+  // The rollout migration backfills every pre-enforcement code to `account`.
+  const oauthScopes = validatedStoredOAuthScopes(authCode.oauthScopes);
+  if (!oauthScopes) {
+    await revokeAuthCodeByHash(codeHash);
+    res.status(400).json({
+      error: 'invalid_grant',
+      error_description: 'authorization code has an invalid OAuth grant',
     });
     return;
   }
@@ -1580,6 +1651,7 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
       label,
       createdBy: authCode.userId,
       issuedVia: `oauth:${authCode.clientId}`,
+      oauthScopes,
     });
     rawKey = minted.rawKey;
   } catch {
@@ -1600,7 +1672,7 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
   res.status(200).json({
     access_token: rawKey,
     token_type: 'Bearer',
-    scope: 'mcp',
+    scope: oauthScopes.join(' '),
   });
 }
 
