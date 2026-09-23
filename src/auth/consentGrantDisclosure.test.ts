@@ -18,6 +18,7 @@ const consentBase = {
   codeChallengeMethod: 'S256',
   state: 'state',
   csrfToken: 'csrf',
+  grantProof: 'proof',
 };
 
 describe('#1261 — consent copy matches the effective OAuth grant', () => {
@@ -53,6 +54,7 @@ describe('#559 — the disclosure survives the template contract', () => {
       '{{scope}}',
       '{{resource}}',
       '{{csrfToken}}',
+      '{{grantProof}}',
       '{{grantHeading}}',
       '{{grantBody}}',
       '{{grantSub}}',

@@ -32,7 +32,7 @@
  *     auth issues no secret; we MUST explicitly declare `["none"]`.
  */
 
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
 import express, { Router } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -514,6 +514,7 @@ interface ConsentParams {
   codeChallengeMethod: string;
   state: string;
   csrfToken: string;
+  grantProof: string;
 }
 
 /**
@@ -548,6 +549,7 @@ export function renderConsent(params: ConsentParams): string {
     codeChallengeMethod: params.codeChallengeMethod,
     state: params.state,
     csrfToken: params.csrfToken,
+    grantProof: params.grantProof,
     grantHeading: accountGrant
       ? 'This token has the same account access you do.'
       : 'This token is limited to Hadron\'s MCP interface.',
@@ -580,6 +582,44 @@ function resolveCsrfSecret(): string {
     );
   }
   return 'dev-only-csrf-secret-not-for-production';
+}
+
+interface ConsentGrant {
+  csrfToken: string;
+  clientId: string;
+  redirectUri: string;
+  resource: string;
+  codeChallenge: string;
+  codeChallengeMethod: string;
+  oauthScopes: readonly OAuthScope[];
+  state: string;
+}
+
+/**
+ * Bind the approval POST to the exact grant rendered on the consent page.
+ * CSRF proves the POST came from the signed-in browser; this separate HMAC
+ * prevents that browser (or injected form data) from exchanging one valid
+ * displayed grant for another supported grant such as `account`.
+ */
+function createConsentGrantProof(grant: ConsentGrant): string {
+  const payload = JSON.stringify([
+    grant.csrfToken,
+    grant.clientId,
+    grant.redirectUri,
+    grant.resource,
+    grant.codeChallenge,
+    grant.codeChallengeMethod,
+    grant.oauthScopes,
+    grant.state,
+  ]);
+  return createHmac('sha256', resolveCsrfSecret()).update(payload).digest('base64url');
+}
+
+function hasValidConsentGrantProof(grant: ConsentGrant, candidate: unknown): boolean {
+  if (typeof candidate !== 'string') return false;
+  const expected = Buffer.from(createConsentGrantProof(grant));
+  const supplied = Buffer.from(candidate);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
 /**
@@ -952,6 +992,16 @@ function buildHandleAuthorizeGet(
 
     // 4. Happy path — issue CSRF token and render consent HTML.
     const csrfToken = csrf.generateCsrfToken(req, res);
+    const grantProof = createConsentGrantProof({
+      csrfToken,
+      clientId: validated.clientId,
+      redirectUri,
+      resource,
+      codeChallenge,
+      codeChallengeMethod,
+      oauthScopes: parsedScopes.scopes,
+      state,
+    });
     const html = renderConsent({
       clientName,
       oauthScopes: parsedScopes.scopes,
@@ -962,6 +1012,7 @@ function buildHandleAuthorizeGet(
       codeChallengeMethod,
       state,
       csrfToken,
+      grantProof,
     });
     res.type('html').send(html);
   };
@@ -1029,6 +1080,31 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   const parsedScopes = parseRequestedOAuthScopes(body.scope);
   if (!parsedScopes.ok) {
     redirectWithOAuthError(res, redirectUri, parsedScopes.error, state);
+    return;
+  }
+  const codeChallengeMethod =
+    typeof body.code_challenge_method === 'string' ? body.code_challenge_method : '';
+  if (codeChallengeMethod !== 'S256') {
+    redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+    return;
+  }
+  const csrfToken = typeof body._csrf === 'string' ? body._csrf : '';
+  if (
+    !hasValidConsentGrantProof(
+      {
+        csrfToken,
+        clientId: validated.clientId,
+        redirectUri,
+        resource,
+        codeChallenge,
+        codeChallengeMethod,
+        oauthScopes: parsedScopes.scopes,
+        state,
+      },
+      body.grant_proof,
+    )
+  ) {
+    redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
     return;
   }
 

@@ -61,6 +61,21 @@ describe('#1261 pre-push OAuth-scope transition', () => {
       ]);
       expect(codes).toEqual([{ id: 'outstanding', oauth_scopes: ['account'] }]);
 
+      // Old rolling-deploy writers omit the new column. The DB default keeps
+      // those credentials at their historical broad authority and prevents an
+      // empty AuthCode that the new token handler would reject.
+      await tx.$executeRawUnsafe(
+        "INSERT INTO user_api_keys (id, issued_via) VALUES ('oauth-old-writer', 'oauth:cli'), ('portal-old-writer', 'portal')",
+      );
+      await tx.$executeRawUnsafe("INSERT INTO auth_codes (id) VALUES ('old-writer-code')");
+      expect(await tx.$queryRawUnsafe('SELECT id, oauth_scopes FROM user_api_keys WHERE id LIKE \'%-old-writer\' ORDER BY id')).toEqual([
+        { id: 'oauth-old-writer', oauth_scopes: ['account'] },
+        { id: 'portal-old-writer', oauth_scopes: ['account'] },
+      ]);
+      expect(await tx.$queryRawUnsafe('SELECT oauth_scopes FROM auth_codes WHERE id = \'old-writer-code\'')).toEqual([
+        { oauth_scopes: ['account'] },
+      ]);
+
       // A second setup run must not reinterpret a newly restricted grant.
       await tx.$executeRawUnsafe(
         "INSERT INTO user_api_keys (id, issued_via, oauth_scopes) VALUES ('oauth-new', 'oauth:cli', ARRAY['mcp']::TEXT[])",
@@ -98,6 +113,18 @@ describe('#1261 pre-push OAuth-scope transition', () => {
       ]);
       expect(await tx.$queryRawUnsafe('SELECT id, oauth_scopes FROM auth_codes')).toEqual([
         { id: 'outstanding', oauth_scopes: ['account'] },
+      ]);
+
+      await tx.$executeRawUnsafe(
+        "INSERT INTO user_api_keys (id, issued_via) VALUES ('oauth-old-writer', 'oauth:cli'), ('portal-old-writer', 'portal')",
+      );
+      await tx.$executeRawUnsafe("INSERT INTO auth_codes (id) VALUES ('old-writer-code')");
+      expect(await tx.$queryRawUnsafe('SELECT id, oauth_scopes FROM user_api_keys WHERE id LIKE \'%-old-writer\' ORDER BY id')).toEqual([
+        { id: 'oauth-old-writer', oauth_scopes: ['account'] },
+        { id: 'portal-old-writer', oauth_scopes: ['account'] },
+      ]);
+      expect(await tx.$queryRawUnsafe('SELECT oauth_scopes FROM auth_codes WHERE id = \'old-writer-code\'')).toEqual([
+        { oauth_scopes: ['account'] },
       ]);
     });
   });

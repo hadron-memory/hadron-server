@@ -149,6 +149,9 @@ async function mintViaOAuth(): Promise<string> {
   const csrfTokenMatch = html.match(/name="_csrf"\s+value="([^"]+)"/);
   expect(csrfTokenMatch).not.toBeNull();
   const csrfToken = csrfTokenMatch![1];
+  const grantProofMatch = html.match(/name="grant_proof"\s+value="([^"]+)"/);
+  expect(grantProofMatch).not.toBeNull();
+  const grantProof = grantProofMatch![1];
   // Use `getSetCookie()` rather than `get('set-cookie')`: per the
   // Fetch spec the latter returns only the first value when multiple
   // Set-Cookie headers exist, and undici's current join-with-`, `
@@ -171,6 +174,7 @@ async function mintViaOAuth(): Promise<string> {
     resource: RESOURCE_URL,
     scope: 'mcp',
     state,
+    grant_proof: grantProof,
   });
   const postRes = await fetch(`${baseUrl}/oauth/authorize`, {
     method: 'POST',

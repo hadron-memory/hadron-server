@@ -127,6 +127,7 @@ export const CONSENT_TEMPLATE = `<!doctype html>
     <p class="warn-sub">{{grantSub}}</p>
     <form method="post" action="/oauth/authorize" autocomplete="off">
       <input type="hidden" name="_csrf"                 value="{{csrfToken}}">
+      <input type="hidden" name="grant_proof"           value="{{grantProof}}">
       <input type="hidden" name="client_id"             value="{{clientId}}">
       <input type="hidden" name="redirect_uri"          value="{{redirectUri}}">
       <input type="hidden" name="code_challenge"        value="{{codeChallenge}}">
