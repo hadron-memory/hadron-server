@@ -1206,6 +1206,65 @@ describe('hosts (#1254)', () => {
     });
   });
 
+  describe('an unrecognised exports key is reported, never blocks (#1292, cor:agt:030:06)', () => {
+    const ok = { name: 'hadron-demo', description: 'Use when demoing.', enable: true };
+
+    it('a node declaring ONLY an unknown key has no entry, and is in `unrecognized` for every host', async () => {
+      await mkNode('tasks:codex-only', { properties: { exports: { codex: ok } } });
+
+      const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+      const codex = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+
+      for (const p of [claude, codex]) {
+        expect(p.entries).toEqual([]);
+        // The scanned-minus-judged gap is now explained, not a bare number.
+        expect(p).toMatchObject({ scanned: 1, judged: 0 });
+        expect(p.unrecognized).toHaveLength(1);
+        expect(p.unrecognized[0]).toMatchObject({
+          keys: ['codex'],
+          findings: [{ rule: 'skill-unknown-host-key', severity: 'warning' }],
+        });
+        expect(p.unrecognized[0].urn).toContain('tasks:codex-only');
+      }
+      // Host-independent: the same report whichever host was asked for.
+      expect(claude.unrecognized).toEqual(codex.unrecognized);
+    });
+
+    it('a MALFORMED unknown key beside a valid Claude declaration no longer blocks it', async () => {
+      // Before #1292 `codex: "yes"` was a malformed ERROR on every host, so
+      // this valid Claude skill was SKIPPED.
+      await mkNode('tasks:mixed', { properties: { exports: { claudeSkill: ok, codex: 'yes' } } });
+
+      const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+
+      expect(got.entries).toHaveLength(1);
+      expect(got.entries[0].findings).toEqual([]);
+      expect(got.entries[0]).toMatchObject({ class: 'never-exported', exportPlan: { action: 'WRITE' } });
+      expect(got.entries[0].renderedBody).toContain('name: hadron-demo');
+      expect(got.unrecognized.map((u: { keys: string[] }) => u.keys)).toEqual([['codex']]);
+    });
+
+    it('CONTROL: known hosts only means nothing unrecognised', async () => {
+      await mkNode('tasks:both', { properties: { exports: { claudeSkill: ok, codexSkill: ok } } });
+
+      const got = await plan({ intent: 'LINT' });
+
+      expect(got.entries).toHaveLength(1);
+      expect(got.unrecognized).toEqual([]);
+    });
+
+    it('goes through the same access gate as the entries', async () => {
+      await mkNode('tasks:codex-only', { properties: { exports: { codex: ok } } });
+
+      const mine = await plan({ intent: 'LINT' });
+      const theirs = await plan({ intent: 'LINT' }, strangerCtx());
+
+      expect(mine.unrecognized).toHaveLength(1);
+      expect(theirs.unrecognized).toEqual([]);
+      expect(theirs.scanned).toBe(0);
+    });
+  });
+
   it('a malformed Codex entry is reported by the Codex plan (matrix D10)', async () => {
     await mkNode('tasks:demo', {
       properties: { exports: { claudeSkill: SHARED_PAYLOAD.exports.claudeSkill, codexSkill: true } },

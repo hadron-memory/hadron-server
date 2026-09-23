@@ -1056,6 +1056,27 @@ export const typeDefs = `#graphql
     design; the gap is a fact about the corpus, not a discrepancy.
     """
     judged: Int!
+    """
+    Nodes in scope carrying a key under properties.exports that names no host
+    (#1292, cor:agt:030:06): an unrecognised key is reported, never read as an
+    alias, and never blocks anything. HOST-INDEPENDENT: the list is identical
+    in every host's plan, because the key belongs to none of them, so a client
+    reports each node once rather than once per host. A node here may also
+    have an entry, when it declares a known host too; one declaring only
+    unknown keys has none, and is part of the scanned-minus-judged gap.
+    """
+    unrecognized: [SkillPlanUnrecognized!]!
+  }
+
+  """A node carrying one or more exports keys that name no host (#1292)."""
+  type SkillPlanUnrecognized {
+    urn: String!
+    nodeId: String!
+    memory: String!
+    """The unrecognised keys, in UTF-8 byte order — e.g. codex for properties.exports.codex."""
+    keys: [String!]!
+    """One warning per key. Attributed to no host."""
+    findings: [SkillFinding!]!
   }
 
   """

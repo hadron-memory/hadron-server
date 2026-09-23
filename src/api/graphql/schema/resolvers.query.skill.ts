@@ -59,10 +59,12 @@ import {
   skillHost,
   lintCollisions,
   lintNode,
+  lintUnknownHostKeys,
   pairFileToNode,
   render,
   hash,
   storedName,
+  unknownHostKeys,
   type Finding,
   type FileFacts,
   type DriftClass,
@@ -762,6 +764,36 @@ export const skillQueries = {
       recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(returnedContent), ctx);
     }
 
+    // ── Unrecognised exports keys (#1292) ────────────────────────────────
+    //
+    // Over EVERY scanned row, not `skillNodes`: a node declaring only an
+    // unknown key has no declaration for this host and so no entry, which is
+    // exactly the node this report exists for (a portal cannot find it by
+    // scanning page rows, which are capped). Host-independent, so identical
+    // in every host's plan. Judges `properties` only, which is never
+    // encrypted, so a locked memory's node is still reported truthfully.
+    const unrecognized = declaredRows
+      .map((r) => {
+        const keys = unknownHostKeys(r.properties);
+        if (keys.length === 0) return null;
+        const urn = safeNodeUrnV2(r.memory.urn, r.loc);
+        return {
+          urn,
+          nodeId: r.id,
+          memory: r.memory.urn,
+          keys,
+          findings: lintUnknownHostKeys({
+            urn,
+            loc: r.loc,
+            memoryUrn: r.memory.urn,
+            isRunnable: r.isRunnable === true,
+            content: '',
+            properties: r.properties,
+          }),
+        };
+      })
+      .filter((u): u is NonNullable<typeof u> => u !== null);
+
     // ── Orphans: files that paired with nothing ──────────────────────────
     const orphans = files
       .filter((f) => !selectedDirs.has(f.dirName))
@@ -788,6 +820,7 @@ export const skillQueries = {
       // a fact about the corpus rather than a discrepancy in the report.
       scanned: declaredRows.length,
       judged: skillNodes.length,
+      unrecognized,
     };
   },
 };
