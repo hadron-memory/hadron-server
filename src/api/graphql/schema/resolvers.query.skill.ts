@@ -164,11 +164,12 @@ function buildExportPlan(args: {
   driftClass: DriftClass | null;
   parseFailure: boolean;
   hasFile: boolean;
+  targetOccupied: boolean;
   findings: Finding[];
   renderedBody: string | null;
   renderFailure: string | null;
 }): SkillExportPlan {
-  const { driftClass, parseFailure, hasFile, findings, renderedBody, renderFailure } = args;
+  const { driftClass, parseFailure, hasFile, targetOccupied, findings, renderedBody, renderFailure } = args;
   const reason = (code: string, message: string): SkillExportReason => ({ code, message });
 
   if (parseFailure) {
@@ -223,6 +224,16 @@ function buildExportPlan(args: {
     };
   }
 
+  const blockingFindings = findings.filter((finding) => finding.severity === 'error');
+  const overLimitFindings = blockingFindings.filter((finding) => finding.rule === 'skill-description-too-long');
+  if (overLimitFindings.length > 0) {
+    return {
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: overLimitFindings.map((finding) => reason(finding.rule, finding.message)),
+    };
+  }
+
   if (driftClass === 'disabled') {
     return {
       action: hasFile ? 'REMOVE' : 'SKIP',
@@ -238,15 +249,9 @@ function buildExportPlan(args: {
     };
   }
 
-  if (driftClass === 'current') {
-    return {
-      action: 'SKIP',
-      preservesExistingFile: true,
-      reasons: [reason('current', 'The installed skill already matches the source node.')],
-    };
-  }
-
-  const blockingFindings = findings.filter((finding) => finding.severity === 'error');
+  // A file can still match its provenance after a non-rendered input changes
+  // (for example isRunnable). The lint result is the export gate, so it must
+  // outrank a relationship-only `current` verdict.
   if (blockingFindings.length > 0) {
     return {
       action: 'SKIP',
@@ -255,11 +260,32 @@ function buildExportPlan(args: {
     };
   }
 
+  if (driftClass === 'current') {
+    return {
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [reason('current', 'The installed skill already matches the source node.')],
+    };
+  }
+
   if (renderFailure !== null) {
     return {
       action: 'FAIL',
       preservesExistingFile: true,
       reasons: [reason('render-failed', renderFailure)],
+    };
+  }
+
+  if (targetOccupied) {
+    return {
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'target-occupied',
+          'Another installed directory already occupies this skill name. This export leaves both it and the paired source file unchanged.',
+        ),
+      ],
     };
   }
 
@@ -534,11 +560,18 @@ export const skillQueries = {
       fileFor.set(paired.urn, facts);
       selectedDirs.add(f.dirName);
     }
+    const occupantCountByDir = new Map<string, number>();
+    for (const file of files) {
+      occupantCountByDir.set(file.dirName, (occupantCountByDir.get(file.dirName) ?? 0) + 1);
+    }
 
     const entries = nodeFacts.map((nf) => {
-      const verdict = classifySkill(nf, fileFor.get(nf.urn) ?? null);
+      const selectedFile = fileFor.get(nf.urn) ?? null;
+      const verdict = classifySkill(nf, selectedFile);
       const findings = findingsByUrn.get(nf.urn) ?? [];
       const name = nf.declaration ? storedName(nf.declaration) : '';
+      const targetOccupants = name === '' ? 0 : (occupantCountByDir.get(name) ?? 0);
+      const targetOccupied = targetOccupants > (selectedFile?.dirName === name ? 1 : 0);
 
       // A node failing lint is NEVER exported (§5.1 step 2). Structural
       // rather than advisory: the body is simply absent, so a client cannot
@@ -549,7 +582,8 @@ export const skillQueries = {
         input.intent === 'EXPORT' &&
         verdict.class !== undefined &&
         WRITES_A_FILE.has(verdict.class) &&
-        !hasError;
+        !hasError &&
+        !targetOccupied;
 
       let renderedBody: string | null = null;
       let renderFailure: string | null = null;
@@ -577,7 +611,8 @@ export const skillQueries = {
           ? buildExportPlan({
               driftClass: verdict.class ?? null,
               parseFailure: verdict.parseFailure === true,
-              hasFile: fileFor.has(nf.urn),
+              hasFile: selectedFile !== null,
+              targetOccupied,
               findings,
               renderedBody,
               renderFailure,

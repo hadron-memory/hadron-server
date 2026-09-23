@@ -292,6 +292,91 @@ describe('classes and bodies', () => {
     expect(got.orphans).toHaveLength(0);
   });
 
+  it('a blocking lint finding outranks a current file relationship', async () => {
+    const node = await mkNode('tasks:becomes-invalid', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    // isRunnable is lint input but deliberately not part of the rendered-file
+    // hash. The file therefore remains `current` while the node becomes
+    // ineligible for export.
+    await db.node.update({ where: { id: node.id }, data: { isRunnable: false } });
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+    });
+
+    expect(got.entries[0].class).toBe('current');
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-not-runnable' }],
+    });
+  });
+
+  it('refuses WRITE when an orphan already occupies the target directory', async () => {
+    await mkNode('tasks:new-node', { properties: declaration() });
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
+        nodeId: 'deleted-node',
+        headerHash: 'a'.repeat(16),
+        fileHash: 'a'.repeat(16),
+      }],
+    });
+
+    expect(got.entries[0].class).toBe('never-exported');
+    expect(got.entries[0].renderedBody).toBeNull();
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [{ code: 'target-occupied' }],
+    });
+    expect(got.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['my-skill']);
+  });
+
+  it('plans MOVE for a rename, but refuses it when an orphan occupies the destination', async () => {
+    const node = await mkNode('tasks:renamed', { properties: declaration({ name: 'old-name' }) });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    const oldFile = {
+      dirName: 'old-name', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash,
+    };
+    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ name: 'new-name' }) } });
+
+    const movable = await plan({ intent: 'EXPORT', files: [oldFile] });
+    expect(movable.entries[0]).toMatchObject({
+      class: 'renamed',
+      movedFrom: 'old-name',
+      exportPlan: { action: 'MOVE', preservesExistingFile: false },
+    });
+    expect(movable.entries[0].renderedBody).toContain('name: new-name');
+
+    const blocked = await plan({
+      intent: 'EXPORT',
+      files: [oldFile, {
+        dirName: 'new-name',
+        sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
+        nodeId: 'deleted-node',
+        headerHash: 'b'.repeat(16),
+        fileHash: 'b'.repeat(16),
+      }],
+    });
+    expect(blocked.entries[0].class).toBe('renamed');
+    expect(blocked.entries[0].renderedBody).toBeNull();
+    expect(blocked.entries[0].exportPlan).toMatchObject({
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [{ code: 'target-occupied' }],
+    });
+    expect(blocked.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['new-name']);
+  });
+
   it('reports a file that pairs with nothing as an orphan', async () => {
     await mkNode('tasks:declared', { properties: declaration() });
 
@@ -348,6 +433,29 @@ describe('classes and bodies', () => {
       action: 'SKIP',
       preservesExistingFile: true,
       reasons: [{ code: 'disabled' }],
+    });
+  });
+
+  it('preserves an installed over-limit file even when the declaration is disabled', async () => {
+    const node = await mkNode('tasks:disable-over-limit', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ enable: false, description: 'x'.repeat(1083) }) },
+    });
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+    });
+
+    expect(got.entries[0].class).toBe('disabled');
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-description-too-long' }],
     });
   });
 });
