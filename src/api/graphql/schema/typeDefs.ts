@@ -971,6 +971,35 @@ export const typeDefs = `#graphql
     message: String!
   }
 
+  """A client-side filesystem action planned by the server. It does not claim that I/O occurred."""
+  enum SkillExportAction {
+    WRITE
+    MOVE
+    REMOVE
+    SKIP
+    REFUSE
+    FAIL
+  }
+
+  """One server-owned reason for an export action."""
+  type SkillExportReason {
+    """Stable machine-readable reason, usually a drift class or lint rule."""
+    code: String!
+    """Actionable text clients can display without recreating server policy."""
+    message: String!
+  }
+
+  """
+  The server's filesystem plan for one skill. The client still performs and
+  reports actual local I/O; this object records only what the server judged safe.
+  """
+  type SkillExportPlanEntry {
+    action: SkillExportAction!
+    """True when the client must leave any installed file unchanged."""
+    preservesExistingFile: Boolean!
+    reasons: [SkillExportReason!]!
+  }
+
   type SkillPlanEntry {
     urn: String!
     nodeId: String!
@@ -993,6 +1022,11 @@ export const typeDefs = `#graphql
     server already judged broken.
     """
     renderedBody: String
+    """
+    Present only for EXPORT. This is a planned action and its server-owned
+    reasons, not evidence that the client completed a filesystem write.
+    """
+    exportPlan: SkillExportPlanEntry
   }
 
   """A file that paired with no declared node. Never removed without an explicit prune."""

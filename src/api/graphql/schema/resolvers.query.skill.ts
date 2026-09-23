@@ -63,6 +63,7 @@ import {
   storedName,
   type Finding,
   type FileFacts,
+  type DriftClass,
   type NodeFacts,
   type SkillNode,
 } from '../../../lib/skilldoc/index.js';
@@ -136,6 +137,174 @@ const SKILL_PLAN_MAX_BODY_BYTES = BATCH_READ_MAX_BYTES;
 
 /** Classes whose §5 action writes a file. */
 const WRITES_A_FILE = new Set(['never-exported', 'stale', 'unhashed', 'renamed']);
+
+export type SkillExportAction = 'WRITE' | 'MOVE' | 'REMOVE' | 'SKIP' | 'REFUSE' | 'FAIL';
+
+export interface SkillExportReason {
+  code: string;
+  message: string;
+}
+
+export interface SkillExportPlan {
+  action: SkillExportAction;
+  preservesExistingFile: boolean;
+  reasons: SkillExportReason[];
+}
+
+/**
+ * Turn the server's class + lint judgment into the export action a client may
+ * perform. This is a PLAN, never a claim that local I/O happened: the server
+ * cannot see the caller's filesystem after the response.
+ *
+ * cor:agt:030:01 / :05 make the distinctions load-bearing: a local edit is
+ * REFUSED, an over-host-limit declaration is SKIPPED while preserving any
+ * installed file, and an unsafe render is a FAILURE with its reason intact.
+ */
+function buildExportPlan(args: {
+  driftClass: DriftClass | null;
+  parseFailure: boolean;
+  hasFile: boolean;
+  findings: Finding[];
+  renderedBody: string | null;
+  renderFailure: string | null;
+}): SkillExportPlan {
+  const { driftClass, parseFailure, hasFile, findings, renderedBody, renderFailure } = args;
+  const reason = (code: string, message: string): SkillExportReason => ({ code, message });
+
+  if (parseFailure) {
+    return {
+      action: 'FAIL',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'parse-failed',
+          'The installed skill file could not be parsed. Repair it or remove it before exporting again; this export leaves it unchanged.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'locally-edited') {
+    return {
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'locally-edited',
+          'The installed skill has local edits. This export preserves it; use an explicit one-invocation override only if replacing it is intended.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'collision') {
+    return {
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'collision',
+          'More than one declared node uses this skill name. The declarations need unique stored names before exporting; this export leaves existing files unchanged.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'unavailable') {
+    return {
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'unavailable',
+          'The declared node is not readable in this plan, so the export cannot judge or replace its installed file.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'disabled') {
+    return {
+      action: hasFile ? 'REMOVE' : 'SKIP',
+      preservesExistingFile: !hasFile,
+      reasons: [
+        reason(
+          'disabled',
+          hasFile
+            ? 'The declaration is disabled for this host, so the client should remove its generated file.'
+            : 'The declaration is disabled for this host and has no installed file to remove.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'current') {
+    return {
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [reason('current', 'The installed skill already matches the source node.')],
+    };
+  }
+
+  const blockingFindings = findings.filter((finding) => finding.severity === 'error');
+  if (blockingFindings.length > 0) {
+    return {
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: blockingFindings.map((finding) => reason(finding.rule, finding.message)),
+    };
+  }
+
+  if (renderFailure !== null) {
+    return {
+      action: 'FAIL',
+      preservesExistingFile: true,
+      reasons: [reason('render-failed', renderFailure)],
+    };
+  }
+
+  if (driftClass === 'renamed' && renderedBody !== null) {
+    return {
+      action: 'MOVE',
+      preservesExistingFile: false,
+      reasons: [reason('renamed', 'The stored skill name changed; write the rendered file at the new name and remove the old generated file.')],
+    };
+  }
+
+  if (
+    (driftClass === 'never-exported' || driftClass === 'stale' || driftClass === 'unhashed') &&
+    renderedBody !== null
+  ) {
+    return {
+      action: 'WRITE',
+      preservesExistingFile: false,
+      reasons: [
+        reason(
+          driftClass,
+          driftClass === 'never-exported'
+            ? 'No installed skill exists for this declaration.'
+            : driftClass === 'stale'
+              ? 'The source node changed after the installed skill was generated.'
+              : 'The installed skill uses a legacy provenance header and should be regenerated.',
+        ),
+      ],
+    };
+  }
+
+  // Defensive and loud: every Classification state is handled above. If a
+  // future class is added without an export policy, clients preserve the file
+  // and receive a reason instead of guessing an action.
+  return {
+    action: 'FAIL',
+    preservesExistingFile: true,
+    reasons: [
+      reason(
+        'export-action-unresolved',
+        `The server could not derive a safe export action for class ${JSON.stringify(driftClass)}.`,
+      ),
+    ],
+  };
+}
 
 export const skillQueries = {
   /**
@@ -383,6 +552,7 @@ export const skillQueries = {
         !hasError;
 
       let renderedBody: string | null = null;
+      let renderFailure: string | null = null;
       if (wantsBody) {
         // `render` refuses a source it could not write safely (#1223); a node
         // whose URN trips that is reported as a finding-free entry with no
@@ -395,10 +565,24 @@ export const skillQueries = {
             nf.declaration?.description ?? '',
             findContent(skillNodes, nf.urn),
           );
-        } catch {
+        } catch (error) {
           renderedBody = null;
+          renderFailure =
+            error instanceof Error ? error.message : 'The skill renderer failed with a non-Error value.';
         }
       }
+
+      const exportPlan =
+        input.intent === 'EXPORT'
+          ? buildExportPlan({
+              driftClass: verdict.class ?? null,
+              parseFailure: verdict.parseFailure === true,
+              hasFile: fileFor.has(nf.urn),
+              findings,
+              renderedBody,
+              renderFailure,
+            })
+          : null;
 
       return {
         urn: nf.urn,
@@ -409,6 +593,7 @@ export const skillQueries = {
         movedFrom: verdict.movedFrom ?? null,
         findings,
         renderedBody,
+        exportPlan,
       };
     });
 
