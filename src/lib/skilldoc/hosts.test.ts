@@ -37,6 +37,10 @@ describe('the host registry', () => {
     expect(skillHost('cursorRule')).toBeNull();
     expect(() => requireSkillHost('cursorRule')).toThrow(/unknown skill host "cursorRule"/);
     expect(() => classifyDeclaration({ exports: {} }, 'cursorRule')).toThrow(/unknown skill host/);
+    // Even over an EMPTY corpus: validating only inside the loop would make an
+    // unknown host an all-clear whenever nothing was loaded (#1280 review).
+    expect(() => lintCollisions([], 'cursorRule')).toThrow(/unknown skill host/);
+    expect(() => lintNode(node('e', {}), 'cursorRule')).toThrow(/unknown skill host/);
   });
 });
 

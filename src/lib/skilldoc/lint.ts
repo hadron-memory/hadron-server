@@ -217,6 +217,10 @@ export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Fin
  * exported together.
  */
 export function lintCollisions(nodes: readonly SkillNode[], host: string = HOST_CLAUDE_SKILL): Finding[] {
+  // Validate at ENTRY, not only inside the loop: over an empty corpus the
+  // loop never runs, and an unknown host would read as an all-clear
+  // (#1280 review, Copilot + Codex).
+  requireSkillHost(host);
   const byName = new Map<string, SkillNode[]>();
   for (const node of nodes) {
     // Per host: a name is a directory under ONE host's root, so the same name
