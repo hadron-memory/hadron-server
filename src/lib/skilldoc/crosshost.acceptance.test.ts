@@ -3,14 +3,14 @@
  *
  * `__fixtures__/crosshost-acceptance.json` is VENDORED, not authored here:
  * copied byte-for-byte from hadron-cli `internal/skilldoc/testdata/
- * crosshost-acceptance.json` at 67ba41b (hadron-cli PR #667; first vendored
+ * crosshost-acceptance.json` at 0894a9f (hadron-cli PR #671; first vendored
  * from #664 at 31d5f62). Its expectations
  * are written from the cor:agt:030 rules, not from either implementation, so
  * it can disagree with this one. That is the point of running it here.
  *
- * hadron-cli runs only the claudeSkill column, because its Go library knows one
- * host. This registry knows both, so this file runs both columns of every
- * declaration, lint, collision and rendering case.
+ * hadron-cli runs both columns too since #665, against its own Go host
+ * table; this file runs both against this registry, so the two
+ * implementations are checked against the same expectations independently.
  *
  * The digest pin below makes a local edit fail. To change a case, change it in
  * hadron-cli, re-vendor the file, and update the digest and the commit above
@@ -18,7 +18,8 @@
  *
  * The `pending` section is not run here. Its resolver cases (P01, P02) are
  * covered through `skillPlan` in resolvers.skillPlan.test.ts; the rest wait
- * on the hadron-cli#621 writer.
+ * on the hadron-cli#621 writer. (P11, `skill lint` over Codex, left pending
+ * when hadron-cli#665 made it a command-level test there.)
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'crypto';
@@ -38,7 +39,7 @@ import {
 } from './index.js';
 
 const FIXTURE = join(import.meta.dirname, '__fixtures__', 'crosshost-acceptance.json');
-const VENDORED_SHA256 = '13e654fa7523e2422263a11cfbba674cf76a5a401977a893d344295141baebd9';
+const VENDORED_SHA256 = '26325eefd2b034d70716c592b51aeac03c5fa90f1bcd4a5d708abd090b6efcdf';
 
 const raw = readFileSync(FIXTURE);
 const m = JSON.parse(raw.toString('utf8'));

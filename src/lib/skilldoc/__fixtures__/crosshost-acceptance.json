@@ -1,5 +1,5 @@
 {
-  "$comment": "hadron-cli#622 slice 2: the cross-host acceptance matrix for the #621 writer and server#1254. Expected outcomes are written from the contracts cited on each case, never generated from an implementation. crosshost_acceptance_test.go runs the Claude projection of every live section against internal/skilldoc; the Codex projection belongs to hadron-server's host registry (#1280), and server#1254 part 2 is to vendor this file and run both columns. `pending` cases have no implementation yet and are skipped by name, never passed.",
+  "$comment": "hadron-cli#622 slice 2: the cross-host acceptance matrix for the #621 writer and server#1254. Expected outcomes are written from the contracts cited on each case, never generated from an implementation. crosshost_acceptance_test.go runs BOTH host columns of every live section against internal/skilldoc (#665), and hadron-server runs both against its host registry from a sha256-pinned vendored copy (src/lib/skilldoc/crosshost.acceptance.test.ts). `pending` cases have no implementation yet and are skipped by name, never passed.",
   "version": 1,
   "hosts": [
     "claudeSkill",
@@ -999,7 +999,7 @@
     {
       "id": "P01",
       "layer": "resolver",
-      "pendingOn": "hadron-server#1254 (part 2)",
+      "pendingOn": "hadron-cli#621 (the CLI calling skillPlan per host; the server side is covered by hadron-server#1283 resolver tests)",
       "contracts": [
         "cor:agt:030:06"
       ],
@@ -1009,7 +1009,7 @@
     {
       "id": "P02",
       "layer": "resolver",
-      "pendingOn": "hadron-server#1254 (part 2)",
+      "pendingOn": "hadron-cli#621 (the CLI calling skillPlan per host; the server side is covered by hadron-server#1283 resolver tests)",
       "contracts": [
         "cor:agt:030:02"
       ],
@@ -1097,16 +1097,6 @@
       ],
       "given": "`status` over both roots where one skill directory is a symlink into the other root",
       "expect": "the one physical file is not reported as two hosts' current files"
-    },
-    {
-      "id": "P11",
-      "layer": "cli-lint",
-      "pendingOn": "hadron-cli#665",
-      "contracts": [
-        "cor:agt:030:05"
-      ],
-      "given": "`hadron skill lint` over L01",
-      "expect": "the Codex over-limit error is reported. Today `skill lint` runs the local Claude-only library, so it reports nothing for Codex"
     }
   ]
 }
