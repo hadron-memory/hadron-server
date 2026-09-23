@@ -20,7 +20,12 @@ was the one it forbade. `genfix.go` is that program, committed.
 #    rm -rf, NOT bare `mkdir -p`: extracting a second commit over a surviving
 #    tree leaves behind every file the new archive does not contain, so you
 #    build a mixture of two revisions and call it one (@codex, PR #1249).
-COMMIT=1d8ca46
+#
+#    The commit the checked-in file was LAST generated at, so running this
+#    unchanged reproduces it byte for byte (its `sourceCommit` says the same).
+#    Move it forward only to a commit whose Go matches the law you pin: an
+#    older one regenerates retired rules (@codex, PR #1295).
+COMMIT=3c30a38
 rm -rf /tmp/cli && mkdir -p /tmp/cli
 gh api repos/hadron-memory/hadron-cli/tarball/$COMMIT | tar xz -C /tmp/cli --strip-components=1
 
