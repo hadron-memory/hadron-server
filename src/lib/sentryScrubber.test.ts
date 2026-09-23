@@ -1,6 +1,6 @@
 import * as Sentry from '@sentry/node';
 import type { ErrorEvent } from '@sentry/node';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   scrubSentryEvent,
   scrubSentrySpan,
@@ -352,6 +352,70 @@ describe('scrubSentryEvent', () => {
       '1'.repeat(32),
     ]) {
       expect(serialized).not.toContain(secret);
+    }
+  });
+
+  it('drops transaction spans when the sanitized root trace is missing', () => {
+    const event = {
+      type: 'transaction',
+      spans: [
+        {
+          trace_id: 'a'.repeat(32),
+          span_id: 'b'.repeat(16),
+          start_timestamp: 1,
+          data: { secret: 'orphan-span-secret' },
+        },
+      ],
+      sdkProcessingMetadata: {
+        dynamicSamplingContext: { trace_id: 'a'.repeat(32) },
+      },
+    } as TransactionEvent;
+
+    const scrubbed = scrubSentryTransaction(event);
+    expect(scrubbed.spans).toBeUndefined();
+    expect(scrubbed.sdkProcessingMetadata).toBeUndefined();
+    expect(JSON.stringify(scrubbed)).not.toMatch(
+      /orphan-span-secret|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|bbbbbbbbbbbbbbbb/,
+    );
+  });
+
+  it('derives the same trace pseudonym in separate project processes', async () => {
+    const previousDsn = process.env.SENTRY_DSN;
+    process.env.SENTRY_DSN = 'https://public@sentry.example/1';
+
+    try {
+      vi.resetModules();
+      const firstModule = await import('./sentryScrubber.js');
+      const first: ErrorEvent = {
+        type: undefined,
+        contexts: {
+          trace: {
+            trace_id: 'a'.repeat(32),
+            span_id: 'b'.repeat(16),
+          },
+        },
+      };
+      firstModule.scrubSentryEvent(first);
+
+      vi.resetModules();
+      const secondModule = await import('./sentryScrubber.js');
+      const second: ErrorEvent = {
+        type: undefined,
+        contexts: {
+          trace: {
+            trace_id: 'a'.repeat(32),
+            span_id: 'b'.repeat(16),
+          },
+        },
+      };
+      secondModule.scrubSentryEvent(second);
+
+      expect(first.contexts?.trace).toEqual(second.contexts?.trace);
+      expect(first.contexts?.trace?.trace_id).not.toBe('a'.repeat(32));
+    } finally {
+      if (previousDsn === undefined) delete process.env.SENTRY_DSN;
+      else process.env.SENTRY_DSN = previousDsn;
+      vi.resetModules();
     }
   });
 

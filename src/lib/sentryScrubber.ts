@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import type { ErrorEvent, NodeOptions } from '@sentry/node';
 
 type TransactionEvent = Parameters<
@@ -6,7 +6,20 @@ type TransactionEvent = Parameters<
 >[0];
 type SpanJSON = Parameters<NonNullable<NodeOptions['beforeSendSpan']>>[0];
 
-const ID_PSEUDONYM_KEY = randomBytes(32);
+const ID_PSEUDONYM_KEY = deriveIdPseudonymKey();
+
+function deriveIdPseudonymKey(): Buffer {
+  const dsn = process.env.SENTRY_DSN?.trim();
+  if (!dsn) return randomBytes(32);
+
+  // A Sentry DSN identifies the shared project and is stable across its
+  // service processes. Use it as a project-scoped salt (not as a secret) so
+  // high-entropy trace IDs correlate across services without being exported.
+  return createHash('sha256')
+    .update('hadron-sentry-trace-pseudonym-v1\0')
+    .update(dsn)
+    .digest();
+}
 
 /**
  * Keep only request metadata that cannot carry credentials or caller content.
@@ -124,6 +137,13 @@ function scrubTracePayload(
 ): void {
   delete event.transaction;
   const trace = event.contexts?.trace;
+  if (idsAlreadyPseudonymized && !trace) {
+    // Static beforeSendSpan normally supplies a sanitized root context before
+    // this hook. Without that anchor we cannot prove the span IDs were already
+    // translated, so fail closed rather than forwarding caller identifiers.
+    delete event.spans;
+    return;
+  }
   if (!trace && !event.spans?.length) return;
 
   if (event.spans) {
