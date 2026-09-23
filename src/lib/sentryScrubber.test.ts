@@ -483,6 +483,7 @@ describe('scrubSentryEvent', () => {
         trace: {
           trace_id: 'a'.repeat(32),
           span_id: 'b'.repeat(16),
+          parent_span_id: 'd'.repeat(16),
           data: {
             'http.url':
               'https://srv.example/hooks/root-pipeline-secret/name?hpt=root-query-secret',
@@ -520,6 +521,9 @@ describe('scrubSentryEvent', () => {
     expect(rawTransactions[0]?.contexts?.trace?.span_id).not.toBe(
       'b'.repeat(16),
     );
+    expect(rawTransactions[0]?.contexts?.trace?.parent_span_id).not.toBe(
+      'd'.repeat(16),
+    );
     expect(rawTransactions[0]?.spans?.[0]?.trace_id).not.toBe('a'.repeat(32));
     expect(rawTransactions[0]?.spans?.[0]?.span_id).not.toBe('c'.repeat(16));
     expect(sentTransactions[0]?.contexts?.trace?.trace_id).toBe(
@@ -527,6 +531,9 @@ describe('scrubSentryEvent', () => {
     );
     expect(sentTransactions[0]?.contexts?.trace?.span_id).toBe(
       rawTransactions[0]?.contexts?.trace?.span_id,
+    );
+    expect(sentTransactions[0]?.contexts?.trace?.parent_span_id).toBe(
+      rawTransactions[0]?.contexts?.trace?.parent_span_id,
     );
     expect(sentTransactions[0]?.spans?.[0]?.trace_id).toBe(
       rawTransactions[0]?.spans?.[0]?.trace_id,
@@ -560,6 +567,7 @@ describe('scrubSentryEvent', () => {
       'a'.repeat(32),
       'b'.repeat(16),
       'c'.repeat(16),
+      'd'.repeat(16),
     ]) {
       expect(serialized).not.toContain(secret);
     }
