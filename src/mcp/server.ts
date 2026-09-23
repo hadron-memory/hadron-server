@@ -104,6 +104,7 @@ const MULTIPLE_APPS_DOCS_URL =
 import {
   canReadMemory,
   canWriteToMemory,
+  filterReadableMemoryIds,
   getAccessibleMemoryIds,
   getMemoryAccess,
 } from './access-control.js';
@@ -4035,15 +4036,10 @@ export function createMcpServerInstance(
       // Agent + active subscription), which cannot be represented by the
       // ownership-only Prisma predicate.
       if (!memoryId && memoryIds === null) {
-        const candidateMemoryIds = [...new Set(allNodes.map((node) => node.memoryId))];
-        const readableMemoryIds = new Set(
-          (
-            await Promise.all(
-              candidateMemoryIds.map(async (id) =>
-                (await canReadMemory(db, auth, id)) ? id : null,
-              ),
-            )
-          ).filter((id): id is string => id !== null),
+        const readableMemoryIds = await filterReadableMemoryIds(
+          db,
+          auth,
+          allNodes.map((node) => node.memoryId),
         );
         allNodes = allNodes.filter((node) => readableMemoryIds.has(node.memoryId));
       }
@@ -6492,7 +6488,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       });
       for (const m of own) byId.set(m.id, m);
     }
-    return [...byId.values()];
+    // The queries above deliberately over-select so their indexed predicates
+    // remain cheap. Ownership is only one part of the real gate: an App-scoped
+    // personal/private memory must match the selected App, and legacy rows also
+    // require an installed Agent plus an active subscription. Apply that gate
+    // in one batch before exposing memory or task names through discovery.
+    const readableIds = await filterReadableMemoryIds(db, auth, byId.keys());
+    return [...byId.values()].filter((memory) => readableIds.has(memory.id));
   }
 
   function loadRunnableNodes(memoryId: string): Promise<RunTaskNode[]> {
