@@ -56,6 +56,28 @@ describe('resolveAuthContext', () => {
     expect(ctx.roles).toEqual(['ADMIN']);
   });
 
+  it('#1251 — resolves JWT roles from the current user row, not the signed claim', async () => {
+    await db.user.create({
+      data: {
+        id: 'user-stale-admin',
+        githubUsername: 'stale-admin',
+        githubId: 1251,
+        roles: ['READER'],
+      },
+    });
+    const token = await makeJwt({
+      sub: 'user-stale-admin',
+      githubUsername: 'stale-admin',
+      roles: ['ADMIN'],
+      githubId: 1251,
+    });
+
+    const ctx = await resolveAuthContext(makeReq(`Bearer ${token}`), db);
+
+    expect(ctx.userId).toBe('user-stale-admin');
+    expect(ctx.roles).toEqual(['READER']);
+  });
+
   it('returns empty context for a JWT whose subject does not exist or is deleted', async () => {
     const token = await makeJwt({ sub: 'ghost', githubUsername: 'ghost', roles: ['READER'], githubId: 3 });
     expect(await resolveAuthContext(makeReq(`Bearer ${token}`), db)).toEqual({});

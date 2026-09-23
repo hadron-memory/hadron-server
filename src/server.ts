@@ -42,7 +42,11 @@ import {
 } from './auth/pendingLoginState.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
-import { resolveAuthContext } from './middleware/auth.js';
+import {
+  getCurrentUserRoles,
+  hasCurrentPlatformAdminRole,
+  resolveAuthContext,
+} from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
@@ -1246,16 +1250,12 @@ export async function createServer(): Promise<Express> {
       // An App key IS the machine credential this endpoint was designed for —
       // "any machine client with a valid key" — so it qualifies on its own.
       // A human principal is held to the documented CONTRIBUTOR-or-higher bar,
-      // read from the current user row rather than the token's claim (#1251:
-      // `resolveJwt` returns the roles that were true when the token was
-      // signed).
+      // read from the current user row rather than a token or transport
+      // snapshot (#1251).
       let mayReport = !!auth.appId;
-      if (!mayReport && auth.userId && !auth.impersonation) {
-        const user = await db.user.findFirst({
-          where: { id: auth.userId, deletedAt: null },
-          select: { roles: true },
-        });
-        mayReport = !!user?.roles.some((r) =>
+      if (!mayReport) {
+        const roles = await getCurrentUserRoles(db, auth);
+        mayReport = (roles ?? []).some((r) =>
           r === 'CONTRIBUTOR' || r === 'ADMIN' || r === 'OWNER',
         );
       }
@@ -1346,27 +1346,15 @@ export async function createServer(): Promise<Express> {
     try {
       const auth = await resolveAuthContext(req, db);
 
-      // Roles come from the CURRENT user row, not from the token's claim
-      // (@copilot, PR #1250). `resolveJwt` returns `payload.roles` — the roles
-      // that were true when the JWT was signed — and its liveness check
-      // selects only `id`. So a user demoted out of ADMIN keeps administering
-      // until their token expires, which is JWT_EXPIRY (7d by default) of
-      // continued access to a full graph sync. Re-reading costs one indexed
+      // Roles come from the CURRENT user row, not from a token or transport
+      // snapshot (@copilot, PR #1250; #1251). Re-reading costs one indexed
       // lookup on a route that is about to do far more than that.
       //
       // An IMPERSONATION session is refused outright rather than having its
       // roles checked: it carries the TARGET user's identity with `roles: []`,
       // and an admin acting as someone else should not be re-sync'ing the
       // fleet through that seat.
-      let isPlatformAdmin = false;
-      if (auth.userId && !auth.impersonation) {
-        const user = await db.user.findFirst({
-          where: { id: auth.userId, deletedAt: null },
-          select: { roles: true },
-        });
-        isPlatformAdmin =
-          !!user?.roles.includes('ADMIN') || !!user?.roles.includes('OWNER');
-      }
+      const isPlatformAdmin = await hasCurrentPlatformAdminRole(db, auth);
 
       if (!isPlatformAdmin) {
         // 404 rather than 403 for an ANONYMOUS caller would hide the route,

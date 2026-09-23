@@ -125,11 +125,10 @@ describe('#556 — POST /reload is not anonymous', () => {
 
 describe('#556 — the claim in the token is not the authority', () => {
   it('refuses a token that claims ADMIN for a user who is not one', async () => {
-    // @copilot on PR #1250. `resolveJwt` returns `payload.roles` — the roles
-    // that were true when the token was SIGNED — and its liveness check
-    // selects only `id`. So a user demoted out of ADMIN kept administering
-    // until their token expired: JWT_EXPIRY, 7 days by default, of continued
-    // access to a full graph sync.
+    // @copilot on PR #1250 / #1251. The token carries the roles that were true
+    // when it was signed, so a gate that trusts that snapshot lets a user
+    // demoted out of ADMIN keep administering until JWT_EXPIRY (7 days by
+    // default). Auth resolution and this route now use the current user row.
     //
     // This is the case that discriminates. Every other refusal here passes
     // just as well against the cached claim, because the admin fixture is an

@@ -74,7 +74,11 @@ import {
   type MoveNodeSubtreeResult,
 } from '../lib/nodeSubtreeMove.js';
 import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
-import { resolveAuthContext, type AuthContext } from '../middleware/auth.js';
+import {
+  getCurrentUserRoles,
+  resolveAuthContext,
+  type AuthContext,
+} from '../middleware/auth.js';
 import {
   resolveAppForRequest,
   resolveAppIdentifier,
@@ -8514,7 +8518,19 @@ function ageOf(at: Date, now: Date = new Date()): string {
 // Transport management — one transport per MCP session
 // ---------------------------------------------------------------------------
 
-const transports = new Map<string, StreamableHTTPServerTransport>();
+type ActiveMcpTransport = {
+  transport: StreamableHTTPServerTransport;
+  /** Mutated only while holding this transport's request lock. */
+  auth: AuthContext;
+  /**
+   * Settled by the previous POST after BOTH role refresh and dispatch.
+   * Auth is captured by every tool closure, so those two steps are one
+   * authorization critical section rather than independent operations.
+   */
+  requestTail: Promise<void>;
+};
+
+const transports = new Map<string, ActiveMcpTransport>();
 
 /**
  * Spec 026 — per-MCP-session active App, used by both regime (b)
@@ -8571,17 +8587,108 @@ const activeAppByMcpSession = new Map<
   { appId: string; organizationId: string | null }
 >();
 
+function respondMcpSessionNotFound(res: Response): void {
+  res.status(404).json({
+    jsonrpc: '2.0',
+    error: { code: -32001, message: 'Session not found' },
+    id: null,
+  });
+}
+
+/**
+ * Remove state owned by one concrete transport. Session IDs can be reused by
+ * a reconnecting initialize request while an older transport is still closing;
+ * cleanup from the old instance must never erase that replacement's state.
+ */
+function unregisterMcpTransport(
+  sessionId: string,
+  transport: StreamableHTTPServerTransport,
+): boolean {
+  const registered = transports.get(sessionId);
+  if (registered && registered.transport !== transport) return false;
+  transports.delete(sessionId);
+  activeAppByMcpSession.delete(sessionId);
+  sessionKeyCache.evict(`mcp:${sessionId}`);
+  return true;
+}
+
 /**
  * Handle MCP requests on the Express /mcp endpoint.
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
-  // Check for existing session first — skip expensive auth if already authenticated
+  // Reuse the authenticated identity for an existing transport, but refresh
+  // its live platform roles before every tool-dispatch POST (#1251). `resolveJwt` only
+  // runs when the transport opens; without this, a demoted administrator keeps
+  // the captured role for the lifetime of an already-open MCP session.
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
   if (sessionId && transports.has(sessionId)) {
-    const transport = transports.get(sessionId)!;
-    await transport.handleRequest(req, res, req.body);
+    const active = transports.get(sessionId)!;
+
+    // Streamable HTTP GET opens the transport's long-lived SSE channel. Its
+    // handleRequest promise lasts for the stream lifetime, so putting it in
+    // the POST queue would prevent every later tool call from ever reaching
+    // role refresh or dispatch. GET does not dispatch role-gated tools and
+    // therefore does not mutate the shared authorization snapshot.
+    if (req.method === 'GET') {
+      await active.transport.handleRequest(req, res, req.body);
+      return;
+    }
+
+    const previousRequest = active.requestTail;
+    let releaseRequest!: () => void;
+    active.requestTail = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    await previousRequest;
+    try {
+      // A request may have queued before another request invalidated and
+      // closed this transport. It must not dispatch through the stale object.
+      if (transports.get(sessionId) !== active) {
+        respondMcpSessionNotFound(res);
+        return;
+      }
+
+      let roles: Awaited<ReturnType<typeof getCurrentUserRoles>>;
+      try {
+        roles = await getCurrentUserRoles(db, active.auth);
+      } catch {
+        // Express 4 does not forward a rejected async handler. Fail this request
+        // closed and explicitly rather than either dispatching with cached roles
+        // or leaving the client hanging on a database failure.
+        mcpLog('error', 'mcp_role_refresh_failed', {
+          mcpSessionId: sessionId,
+          userId: active.auth.userId,
+        });
+        res.status(503).json({ error: 'Authentication temporarily unavailable' });
+        return;
+      }
+
+      // DELETE and transport.onclose do not enter this POST queue. Either can
+      // unregister the session while the database lookup above is in flight,
+      // so revalidate the exact transport after that await and immediately
+      // before mutating its captured auth or dispatching through it.
+      if (transports.get(sessionId) !== active) {
+        respondMcpSessionNotFound(res);
+        return;
+      }
+
+      if (roles === null) {
+        // Account deletion revokes self-contained JWTs per request. Apply the
+        // same liveness contract to an already-open MCP transport: zero roles
+        // is a valid ordinary user, while a missing live user is no principal.
+        unregisterMcpTransport(sessionId, active.transport);
+        await active.transport.close();
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+      }
+
+      active.auth.roles = roles;
+      await active.transport.handleRequest(req, res, req.body);
+    } finally {
+      releaseRequest();
+    }
     return;
   }
 
@@ -8616,11 +8723,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       // This timestamp is the only signal that survives the gap.
       lastStaleSessionAt = Date.now();
       mcpLog('info', 'stale_mcp_session_404', { mcpSessionId: sessionId, method: req.method });
-      res.status(404).json({
-        jsonrpc: '2.0',
-        error: { code: -32001, message: 'Session not found' },
-        id: null,
-      });
+      respondMcpSessionNotFound(res);
       return;
     }
   }
@@ -8633,8 +8736,9 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   // hdr_user_<…> bearer tokens.
   const auth = await resolveAuthContext(req, db);
   // Admin impersonation: impersonation tokens are not accepted on /mcp (v1).
-  // MCP binds auth ONCE at session init and never re-checks it, so the
-  // per-request session-row revalidation (stop/expiry/demotion) that makes
+  // MCP binds credential identity at session init. Ordinary-user roles are
+  // refreshed per request below, but the impersonation SESSION row's full
+  // stop/expiry/membership contract is not, so the revalidation that makes
   // impersonation safe on /graphql cannot hold here. Rejecting at init is
   // sufficient — an established session was never minted from one.
   if (auth.impersonation) {
@@ -8787,11 +8891,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
   transport.onclose = () => {
     const sid = transport.sessionId;
-    if (sid) {
-      transports.delete(sid);
-      activeAppByMcpSession.delete(sid); // spec 026 — clear per-session active App
-      sessionKeyCache.evict(`mcp:${sid}`); // spec 041 — drop unlock keys with the session
-    }
+    if (sid) unregisterMcpTransport(sid, transport);
   };
 
   await mcpServer.connect(transport);
@@ -8801,7 +8901,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
   const sid = transport.sessionId;
   if (sid) {
-    transports.set(sid, transport);
+    transports.set(sid, { transport, auth, requestTail: Promise.resolve() });
   }
 }
 
@@ -8815,10 +8915,11 @@ export async function handleMcpDelete(req: Request, res: Response): Promise<void
     return;
   }
 
-  const transport = transports.get(sessionId)!;
+  const { transport } = transports.get(sessionId)!;
   await transport.close();
-  transports.delete(sessionId);
-  activeAppByMcpSession.delete(sessionId); // spec 026 — DELETE path also clears
-  sessionKeyCache.evict(`mcp:${sessionId}`); // spec 041 — DELETE drops unlock keys too
+  // close() normally triggers onclose first. Keep this fallback for SDK paths
+  // that do not, but make it identity-aware in case a same-ID replacement was
+  // registered between onclose and close() settling.
+  unregisterMcpTransport(sessionId, transport);
   res.status(200).json({ ok: true });
 }

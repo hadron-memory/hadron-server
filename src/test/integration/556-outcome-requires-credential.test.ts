@@ -120,10 +120,10 @@ describe('#556 — a credential is required', () => {
   });
 
   it('refuses a token that CLAIMS contributor for a user who is not one', async () => {
-    // #1251 — `resolveJwt` returns the roles that were true when the token was
-    // signed, so this gate reads the current user row instead. Without this
-    // case the choice of source is unasserted, since the contributor fixture
-    // matches in both token and row.
+    // #1251 — the token carries the roles that were true when it was signed,
+    // so auth resolution and this gate read the current user row instead.
+    // Without this case the choice of source is unasserted, since the
+    // contributor fixture matches in both token and row.
     expect(await report(sessionId, staleContributorJwt)).toBe(401);
   });
 
