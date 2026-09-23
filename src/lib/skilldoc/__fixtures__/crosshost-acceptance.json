@@ -1,0 +1,1112 @@
+{
+  "$comment": "hadron-cli#622 slice 2: the cross-host acceptance matrix for the #621 writer and server#1254. Expected outcomes are written from the contracts cited on each case, never generated from an implementation. crosshost_acceptance_test.go runs the Claude projection of every live section against internal/skilldoc; the Codex projection belongs to hadron-server's host registry (#1280), and server#1254 part 2 is to vendor this file and run both columns. `pending` cases have no implementation yet and are skipped by name, never passed.",
+  "version": 1,
+  "hosts": [
+    "claudeSkill",
+    "codexSkill"
+  ],
+  "sharedPayload": {
+    "source": "hadron-portal#888 (comment 5789068155): the literal the portal checkbox, the server and the CLI all pin",
+    "properties": {
+      "exports": {
+        "claudeSkill": {
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true
+        },
+        "codexSkill": {
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true
+        }
+      }
+    }
+  },
+  "declarations": [
+    {
+      "id": "D01",
+      "title": "The shared checkbox payload (portal#888): both hosts declared and enabled, same name and description",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D02",
+      "title": "portal#887 as first written (`codex`, not `codexSkill`): Claude is declared, Codex is NOT, and nothing reports it",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "note": "The silent failure found on portal#888. Pinned so it stays visible: a shape-valid entry under a key no host owns is carried and judged by nobody.",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codex": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": null
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D03",
+      "title": "Independent enable: Claude on, Codex off",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": false
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": false,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D04",
+      "title": "Codex only: no Claude declaration at all",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": null,
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D05",
+      "title": "Enable omitted on Codex: declared, and OFF by default",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing."
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": false,
+          "enableSet": false
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D06",
+      "title": "Independent names and descriptions per host",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo-codex",
+            "description": "Use when demoing in Codex.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo-codex",
+          "description": "Use when demoing in Codex.",
+          "enable": true,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D07",
+      "title": "Legacy top-level `skill` is a Claude alias only",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "skill": {
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "skill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": null
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D08",
+      "title": "Legacy top-level `claudeSkill` beside exports.codexSkill: each host reads its own",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "claudeSkill": {
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true
+        },
+        "exports": {
+          "codexSkill": {
+            "name": "hadron-demo-codex",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo-codex",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D09",
+      "title": "exports.claudeSkill outranks a leftover alias; Codex is unaffected by either",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "skill": {
+          "name": "hadron-old",
+          "description": "Use when demoing.",
+          "enable": false
+        },
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D10",
+      "title": "A malformed Codex entry is not a declaration, and is reported under BOTH hosts",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "note": "Every entry under `exports` is shape-checked whichever host is asked, so a plan per host reports it once per host. Current behaviour, pinned rather than endorsed.",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": true
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": null
+      },
+      "malformed": {
+        "claudeSkill": [
+          "exports.codexSkill"
+        ],
+        "codexSkill": [
+          "exports.codexSkill"
+        ]
+      }
+    },
+    {
+      "id": "D11",
+      "title": "A malformed legacy alias is Claude's finding only",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "skill": "yes",
+        "exports": {
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": null,
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [
+          "skill"
+        ],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D12",
+      "title": "A non-boolean Codex enable reads as OFF and is reported",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": "yes"
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": false,
+          "enableSet": false
+        }
+      },
+      "malformed": {
+        "claudeSkill": [
+          "exports.codexSkill.enable"
+        ],
+        "codexSkill": [
+          "exports.codexSkill.enable"
+        ]
+      }
+    },
+    {
+      "id": "D13",
+      "title": "Enable omitted on Claude: declared, and OFF by default (the Claude column's view of D05)",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing."
+          },
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": false
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": false,
+          "enableSet": false
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": false,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D14",
+      "title": "Names differ per host, descriptions equal",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo-codex",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo-codex",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "D15",
+      "title": "Descriptions differ per host, names equal",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing in Codex.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": {
+          "key": "exports.codexSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing in Codex.",
+          "enable": true,
+          "enableSet": true
+        }
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    }
+  ],
+  "lint": [
+    {
+      "id": "L01",
+      "title": "Codex description over its limit (1,025) is an error for Codex only",
+      "contracts": [
+        "cor:agt:030:05"
+      ],
+      "note": "Codex's 1,024 is MEASURED, not assumed: codex-cli 0.153.0 cuts the catalog description at 1,024 (hrn:node:hadronmemory.com:hadron-cli:reference:codex-skill-host), and server PR #1280's host registry carries it. Re-verify on a Codex upgrade.",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": [
+          "skill-description-too-long:error"
+        ]
+      }
+    },
+    {
+      "id": "L02",
+      "title": "Exactly at the limit (1,024) is clean for both",
+      "contracts": [
+        "cor:agt:030:05"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "L03",
+      "title": "Codex name over 64 is an error for Codex only",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "note": "Codex's 64-character name cap is measured on codex-cli 0.153.0 (hrn:node:hadronmemory.com:hadron-cli:reference:codex-skill-host).",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codexSkill": {
+            "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": [
+          "skill-name-invalid:error"
+        ]
+      }
+    },
+    {
+      "id": "L04",
+      "title": "A legacy alias warns for Claude and is invisible to Codex",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "skill": {
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true
+        },
+        "exports": {
+          "codexSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": [
+          "skill-legacy-key:warning"
+        ],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "L05",
+      "title": "The #887 `codex` key over the limit: NO host reports it",
+      "contracts": [
+        "cor:agt:030:05"
+      ],
+      "note": "D02's silence extends to lint: an over-limit description under an unowned key passes every check.",
+      "properties": {
+        "exports": {
+          "codex": {
+            "name": "hadron-demo",
+            "description": "Use when demoing. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    }
+  ],
+  "collisions": [
+    {
+      "id": "C01",
+      "title": "One node, one name for both hosts: not a collision",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:example.com:demo:tasks:a",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-demo",
+                "description": "Use when demoing.",
+                "enable": true
+              },
+              "codexSkill": {
+                "name": "hadron-demo",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "C02",
+      "title": "Two nodes share a Claude name, Codex names differ: Claude collides only",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:example.com:demo:tasks:a",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              },
+              "codexSkill": {
+                "name": "hadron-a",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.com:demo:tasks:b",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              },
+              "codexSkill": {
+                "name": "hadron-b",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [
+          {
+            "name": "hadron-x",
+            "members": [
+              "hrn:node:example.com:demo:tasks:a",
+              "hrn:node:example.com:demo:tasks:b"
+            ]
+          }
+        ],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "C03",
+      "title": "Two nodes share a Codex name, Claude names differ: Codex collides only",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:example.com:demo:tasks:a",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-a",
+                "description": "Use when demoing.",
+                "enable": true
+              },
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.com:demo:tasks:b",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-b",
+                "description": "Use when demoing.",
+                "enable": true
+              },
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": [
+          {
+            "name": "hadron-x",
+            "members": [
+              "hrn:node:example.com:demo:tasks:a",
+              "hrn:node:example.com:demo:tasks:b"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "C04",
+      "title": "A legacy alias never collides with a Codex name",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:example.com:demo:tasks:a",
+          "properties": {
+            "skill": {
+              "name": "hadron-x",
+              "description": "Use when demoing.",
+              "enable": true
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.com:demo:tasks:b",
+          "properties": {
+            "exports": {
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "C05",
+      "title": "Disabled declarations still collide (lint judges a name before anyone turns it on)",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:example.com:demo:tasks:a",
+          "properties": {
+            "exports": {
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": false
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.com:demo:tasks:b",
+          "properties": {
+            "exports": {
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": [
+          {
+            "name": "hadron-x",
+            "members": [
+              "hrn:node:example.com:demo:tasks:a",
+              "hrn:node:example.com:demo:tasks:b"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "rendering": [
+    {
+      "id": "R01",
+      "title": "One renderer: equal name and description give byte-identical files for both hosts",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "case": "D01",
+      "sameFile": true
+    },
+    {
+      "id": "R02",
+      "title": "Name and description both differ per host: different files, different hashes",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "case": "D06",
+      "sameFile": false
+    },
+    {
+      "id": "R03",
+      "title": "ONLY the name differs: still different files and hashes, so the name is a render and hash input on its own",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "case": "D14",
+      "sameFile": false
+    },
+    {
+      "id": "R04",
+      "title": "ONLY the description differs: still different files and hashes, so the description is a render and hash input on its own",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "case": "D15",
+      "sameFile": false
+    }
+  ],
+  "pending": [
+    {
+      "id": "P01",
+      "layer": "resolver",
+      "pendingOn": "hadron-server#1254 (part 2)",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "given": "skillPlan(host: codexSkill) over a node carrying D01's properties",
+      "expect": "accepted; the node is judged for codexSkill with name hadron-demo and enable true"
+    },
+    {
+      "id": "P02",
+      "layer": "resolver",
+      "pendingOn": "hadron-server#1254 (part 2)",
+      "contracts": [
+        "cor:agt:030:02"
+      ],
+      "given": "skillPlan(host: codex), a key no host owns",
+      "expect": "PROPOSED, no contract states it yet: refused with a typed error naming the host; never judged as Claude, never an empty plan"
+    },
+    {
+      "id": "P03",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:02"
+      ],
+      "given": "export over D01, on a machine with no Codex installed",
+      "expect": "writes ~/.claude/skills/hadron-demo/SKILL.md AND ~/.agents/skills/hadron-demo/SKILL.md (not the deprecated ~/.codex/skills); no detection, no prompt"
+    },
+    {
+      "id": "P04",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:06",
+        "cor:agt:030:01"
+      ],
+      "given": "export over D03, with an unedited Codex file from an earlier export on disk",
+      "expect": "Claude file written; the Codex file is REMOVED and the removal is in the report"
+    },
+    {
+      "id": "P05",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:06",
+        "cor:agt:030:01"
+      ],
+      "given": "export over D03, with a HAND-EDITED Codex file on disk",
+      "expect": "Codex file refused (not removed) and reported; Claude file written; --force removes it"
+    },
+    {
+      "id": "P06",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "given": "~/.agents/skills/hadron-demo is a symlink to ~/.claude/skills/hadron-demo; export over D06",
+      "expect": "the Codex write is refused and reported (remove the link); the Claude file is byte-identical to a Claude-only export, never the Codex rendering"
+    },
+    {
+      "id": "P07",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:02"
+      ],
+      "given": "the server reports a host the CLI has no root for",
+      "expect": "export exits non-zero naming the host, never a silent skip. OPEN: whether the known hosts are still written is not decided by any contract"
+    },
+    {
+      "id": "P08",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "given": "a file with a legacy `Generated from` header (no id=) in EITHER host's root, paired to D01's node. The rule is not host-specific",
+      "expect": "skipped and reported, not rewritten (Holger, team chat #1130, superseding the plan's older upgrade-on-export); --force rewrites it"
+    },
+    {
+      "id": "P09",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:05"
+      ],
+      "given": "export over L01, with an earlier Codex file on disk",
+      "expect": "Claude written; Codex skipped as out of export naming the 1,024 limit; the earlier Codex file is left in place"
+    },
+    {
+      "id": "P10",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "given": "`status` over both roots where one skill directory is a symlink into the other root",
+      "expect": "the one physical file is not reported as two hosts' current files"
+    },
+    {
+      "id": "P11",
+      "layer": "cli-lint",
+      "pendingOn": "unowned: docs/plans/skill-command-group.md says the all-host lint walk lands with the second renderer, and with one shared renderer nothing triggers it (routed to the coordinator)",
+      "contracts": [
+        "cor:agt:030:05"
+      ],
+      "given": "`hadron skill lint` over L01",
+      "expect": "the Codex over-limit error is reported. Today `skill lint` runs the local Claude-only library, so it reports nothing for Codex"
+    }
+  ]
+}
