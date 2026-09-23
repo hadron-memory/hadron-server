@@ -21,6 +21,7 @@ describe('scrubSentryEvent', () => {
 
     Sentry.init({
       dsn: 'https://public@example.com/1',
+      initialScope: { tags: { service: 'hadron-server' } },
       integrations: (defaults) =>
         defaults.filter((integration) => integration.name !== 'ContextLines'),
       beforeSend(event) {
@@ -59,6 +60,7 @@ describe('scrubSentryEvent', () => {
           url: 'https://srv.example/import?token=breadcrumb-secret',
         },
       });
+      scope.setTag('graphql_operation', 'operation-tag-secret');
 
       Sentry.captureException(new Error('positive-control resolver fault'));
       await Sentry.flush(2_000);
@@ -84,11 +86,16 @@ describe('scrubSentryEvent', () => {
         }),
       }),
     );
+    expect(before[0]?.tags).toMatchObject({
+      service: 'hadron-server',
+      graphql_operation: 'operation-tag-secret',
+    });
 
     expect(sent).toHaveLength(1);
     expect(sent[0]?.request).toEqual({
       method: 'POST',
     });
+    expect(sent[0]?.tags).toEqual({ service: 'hadron-server' });
 
     const serialized = JSON.stringify(sent[0]);
     for (const secret of [
@@ -100,6 +107,7 @@ describe('scrubSentryEvent', () => {
       'body-secret',
       'env-secret',
       'breadcrumb-secret',
+      'operation-tag-secret',
       'url-user',
       'url-pass',
     ]) {

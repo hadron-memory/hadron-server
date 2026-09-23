@@ -71,6 +71,12 @@ function scrubRequest(event: ErrorEvent | TransactionEvent): void {
   // whole collection rather than trying to predict every integration shape.
   delete event.breadcrumbs;
 
+  // Apollo adds the client-controlled GraphQL operation name as a tag. Keep
+  // only the fixed service discriminator configured by instrument.ts.
+  const service = event.tags?.service;
+  delete event.tags;
+  if (service === 'hadron-server') event.tags = { service };
+
   if (!event.request) return;
 
   const { method } = event.request;
