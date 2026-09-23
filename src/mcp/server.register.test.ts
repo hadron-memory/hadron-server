@@ -16,6 +16,7 @@ import { generateId } from '../lib/id.js';
 import { ensureChannelWithRoot } from '../lib/channels.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
+import { idleWindowMsFor } from '../lib/sessionActivity.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -114,5 +115,174 @@ describe('the register on the identity surfaces (Phase 6)', () => {
     const who = await asAdmin.callToolText('hadron_whoami', {});
     expect(who).toContain('working as: Iris');
     expect(who).toContain('    ## Channels (register)');
+  });
+});
+
+describe('team-chat monitor (#1265)', () => {
+  type MonitorCheckpoint = { worker: string; channel: string; seq: number; proof: string };
+  const checkpointsOf = (text: string): MonitorCheckpoint[] => {
+    const raw = text.match(/deliberately acknowledge this checkpoint:\n(\[[^\n]+\])/s)?.[1];
+    expect(raw).toBeTruthy();
+    return JSON.parse(raw!) as MonitorCheckpoint[];
+  };
+
+  it('routes mention-only attention for this operator\'s live Workers and advances only on deliberate acknowledgement', async () => {
+    const mira = await db.worker.create({
+      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' },
+    });
+    const asAdmin = server(admin.id);
+    const irisStarted = await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: 'Iris' });
+    const miraStarted = await asAdmin.callToolText('hadron_start_session', { description: 'Mira stint', workerRef: 'Mira' });
+    expect(irisStarted).toContain('Session started:');
+    expect(miraStarted).toContain('Session started:');
+
+    expect(await asAdmin.callToolText('hadron_register_add', {
+      channel: channel.id,
+      attendee: worker.id,
+      role: 'WATCH',
+      mentionOnly: true,
+    })).toContain('Added.');
+    expect(await asAdmin.callToolText('hadron_register_add', {
+      channel: channel.id,
+      attendee: mira.id,
+      role: 'WATCH',
+      mentionOnly: true,
+    })).toContain('Added.');
+    expect(await asAdmin.callToolText('hadron_team_chat_post', { body: 'Please check this, @Iris.' })).toContain('message #1');
+
+    const first = await asAdmin.callToolText('hadron_team_chat_read', { monitor: true });
+    expect(first).toContain('1 message needs routing');
+    expect(first).toContain('Please check this, @Iris.');
+    expect(first).toContain('mentions: @iris');
+    expect(first).toContain(`route to: hrn:worker:${org.urn}:app:iris`);
+    expect(first).not.toContain(`route to: hrn:worker:${org.urn}:app:mira`);
+    expect(first).toContain('watching with HOST_MEMORY_NOT_WRITABLE');
+    const checkpoints = checkpointsOf(first);
+    expect(checkpoints).toEqual(expect.arrayContaining([
+      expect.objectContaining({ worker: worker.id, channel: channel.id, seq: 1 }),
+      expect.objectContaining({ worker: mira.id, channel: channel.id, seq: 1 }),
+    ]));
+    expect(checkpoints.every((checkpoint) => checkpoint.proof.length > 20)).toBe(true);
+    expect(await db.channelReadState.count()).toBe(0);
+
+    // A read (and even a fresh server instance after a relay restart) repeats
+    // the same window until the host says its action succeeded.
+    const restarted = server(admin.id);
+    expect(await restarted.callToolText('hadron_team_chat_read', { monitor: true })).toContain('Please check this, @Iris.');
+    expect(await db.channelReadState.count()).toBe(0);
+
+    const afterAck = await restarted.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      acknowledge: checkpoints,
+    });
+    expect(afterAck).toContain('Acknowledged');
+    expect(afterAck).toContain('No new registered team-chat attention');
+    expect(await db.channelReadState.findMany({
+      where: { channelId: channel.id },
+      orderBy: { workerId: 'asc' },
+      select: { workerId: true, lastSeenSeq: true },
+    })).toEqual([
+      { workerId: [worker.id, mira.id].sort()[0], lastSeenSeq: 1 },
+      { workerId: [worker.id, mira.id].sort()[1], lastSeenSeq: 1 },
+    ]);
+    expect(await server(admin.id).callToolText('hadron_team_chat_read', { monitor: true })).toContain('No new registered team-chat attention');
+  });
+
+  it('refuses manual cursors, App-key monitoring, non-live targets and impossible acknowledgements', async () => {
+    const asAdmin = server(admin.id);
+    await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: 'Iris' });
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, sinceSeq: 0 })).toMatch(/^\[bad_user_input\]/);
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, limit: 0 })).toMatch(/^\[bad_user_input\]/);
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitorFor: worker.id })).toMatch(/^\[bad_user_input\]/);
+
+    const theirs = await db.worker.create({
+      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Theirs', slug: 'theirs' },
+    });
+    await server(member.id).callToolText('hadron_start_session', { description: 'another operator', workerRef: 'Theirs' });
+    const ownOnly = await asAdmin.callToolText('hadron_team_chat_read', { monitor: true });
+    expect(ownOnly).toContain('1 live Worker monitored');
+    expect(ownOnly).not.toContain(`hrn:worker:${org.urn}:app:${theirs.slug}`);
+
+    const idle = await db.worker.create({
+      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Idle', slug: 'idle' },
+    });
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, monitorFor: idle.id })).toMatch(/^\[monitor_target_not_live\]/);
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, monitorFor: 'does-not-exist' })).toMatch(/^\[monitor_target_not_live\]/);
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, channel: channel2.id })).toMatch(/^\[channel_not_found\]/);
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'checkpoint me' });
+    const checkpoint = checkpointsOf(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, monitorFor: worker.id }))[0];
+    expect(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      monitorFor: worker.id,
+      acknowledge: [checkpoint, { ...checkpoint, seq: checkpoint.seq + 1 }],
+    })).toMatch(/^\[invalid_checkpoint\]/);
+    expect(await db.channelReadState.count()).toBe(0);
+    expect(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      monitorFor: worker.id,
+      acknowledge: Array.from({ length: 21 }, () => checkpoint),
+    })).toMatch(/^\[bad_user_input\]/);
+
+    const memoryId = (await db.channel.findUniqueOrThrow({ where: { id: channel.id }, select: { memoryId: true } })).memoryId;
+    const otherChannel = (await ensureChannelWithRoot(db, {
+      memoryId,
+      loc: 'chats:other',
+      name: 'other',
+      createdBy: admin.id,
+    })).channel;
+    await asAdmin.callToolText('hadron_register_add', { channel: otherChannel.id, attendee: worker.id, role: 'WATCH' });
+    expect(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      monitorFor: worker.id,
+      channel: otherChannel.id,
+      acknowledge: [checkpoint],
+    })).toMatch(/^\[invalid_checkpoint\]/);
+
+    const appKey = createTestableMcpServer(
+      { appId: app.id, organizationId: org.id } as AuthContext,
+      { sessionId: `rgm-app-${generateId()}` },
+    );
+    expect(await appKey.callToolText('hadron_team_chat_read', { monitor: true })).toMatch(/^\[forbidden\]/);
+  });
+
+  it('observes a stale Worker session without heartbeating it back to live', async () => {
+    const asAdmin = server(admin.id);
+    const started = await asAdmin.callToolText('hadron_start_session', { description: 'stale stint', workerRef: 'Iris' });
+    const sessionId = started.match(/Session started: (\S+)/)![1];
+    const staleAt = new Date(Date.now() - idleWindowMsFor('DEVELOPER') - 60_000);
+    await db.session.update({ where: { id: sessionId }, data: { startedAt: staleAt, updatedAt: staleAt } });
+    await db.usageEvent.deleteMany({ where: { sessionId } });
+
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, session: sessionId })).toContain(
+      'No live Worker sessions of yours',
+    );
+    expect((await db.session.findUniqueOrThrow({ where: { id: sessionId }, select: { updatedAt: true } })).updatedAt?.getTime()).toBe(staleAt.getTime());
+  });
+
+  it('does not attribute monitor transcript reads to the transport-bound Worker session', async () => {
+    const asAdmin = server(admin.id);
+    const started = await asAdmin.callToolText('hadron_start_session', { description: 'observed stint', workerRef: 'Iris' });
+    const sessionId = started.match(/Session started: (\S+)/)![1];
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'new attention' });
+    await db.usageEvent.deleteMany({ where: { sessionId } });
+    const bound = createTestableMcpServer(
+      { userId: admin.id, roles: ['READER'], clientId: `user:${admin.id}`, appId: app.id, organizationId: org.id, sessionId } as AuthContext,
+      { sessionId: `rgm-bound-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } },
+    );
+
+    expect(await bound.callToolText('hadron_team_chat_read', { monitor: true })).toContain('new attention');
+    expect(await db.usageEvent.count({ where: { sessionId } })).toBe(0);
+  });
+
+  it('checkpoints the captured watermark after an exhausted page ending in a tombstone', async () => {
+    const asAdmin = server(admin.id);
+    await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: 'Iris' });
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'soon deleted' });
+    const { memoryId } = await db.channel.findUniqueOrThrow({ where: { id: channel.id }, select: { memoryId: true } });
+    await db.node.updateMany({ where: { memoryId, seq: 1, nodeType: { in: ['chat-message', 'record'] } }, data: { deletedAt: new Date() } });
+
+    const out = await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, monitorFor: worker.id });
+    expect(out).toContain('No messages in the scanned window need routing');
+    expect(checkpointsOf(out)[0]).toEqual(expect.objectContaining({ worker: worker.id, channel: channel.id, seq: 1 }));
   });
 });

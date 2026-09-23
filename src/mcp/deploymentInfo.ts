@@ -92,7 +92,10 @@
 // is a capability: MCP drops unknown arguments, so a client sending `channel` to
 // an older build silently posts into — or reads — the DEFAULT team chat instead
 // (Copilot on PR #1169). Token: `channels`.
-export const HADRON_SERVER_VERSION = '0.18.0';
+// 0.19.0: #1265 — register + ChannelReadState-backed unattended team-chat
+// monitoring on hadron_team_chat_read (`monitor`, server-bound checkpoints,
+// deliberate acknowledgement). Token: `team-chat-monitor`.
+export const HADRON_SERVER_VERSION = '0.19.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
@@ -164,6 +167,8 @@ export const MCP_SURFACE_CAPABILITIES = [
    * default team chat on such a build.
    */
   'channels',
+  /** #1265 — register-routed team-chat monitor with durable read state. */
+  'team-chat-monitor',
 ] as const;
 
 /**
