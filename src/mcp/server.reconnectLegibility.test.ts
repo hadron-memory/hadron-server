@@ -118,6 +118,22 @@ describe('#1006 — the surface states its capabilities', () => {
     expect(out).toContain('server:');
     expect(out).toContain('version:');
   });
+
+  it('#1246 — hadron_whoami renders liveness and a human hold as independent state', async () => {
+    const client = server();
+    await client.callToolText('hadron_start_session', {
+      description: 'exercise the whoami footer',
+      workerRef: worker.id,
+    });
+    const out = await client.callToolText('hadron_whoami', {});
+
+    expect(out).toMatch(/recently active inside its idle window/);
+    expect(out).toMatch(/session block falls away/);
+    expect(out).toMatch(/human HOLD remains independent until explicit release/);
+    expect(out).toMatch(/created by hadron_start_session has no hard expiry/);
+    expect(out).toMatch(/stays open until hadron_end_session/);
+    expect(out).toMatch(/non-null hard expiry.*ended by the reaper/);
+  });
 });
 
 describe('#1009 — a reconnect is legible instead of inferred', () => {
@@ -177,8 +193,8 @@ describe('#1009 — App scope recovery reaches the rest of the worker flow', () 
 
   it('hadron_end_session recovers from its own id — no new argument needed', async () => {
     // The sharpest case in the gap: after a reconnect a multi-App caller could
-    // neither continue the session NOR end it, leaving the worker TAKEN until
-    // the reaper or a forced takeover.
+    // neither continue the session NOR end it, leaving the worker session open
+    // and blocking another bind while it still read live.
     const sessionId = await startThenReconnect();
     const after = server({ isReconnect: true });
 
