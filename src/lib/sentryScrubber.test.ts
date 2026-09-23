@@ -377,6 +377,23 @@ describe('scrubSentryEvent', () => {
     expect(JSON.stringify(scrubbed)).not.toMatch(
       /orphan-span-secret|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|bbbbbbbbbbbbbbbb/,
     );
+
+    const errorEvent: ErrorEvent = {
+      type: undefined,
+      spans: [
+        {
+          trace_id: 'c'.repeat(32),
+          span_id: 'd'.repeat(16),
+          start_timestamp: 1,
+          data: { secret: 'orphan-error-span-secret' },
+        },
+      ],
+    };
+    scrubSentryEvent(errorEvent);
+    expect(errorEvent.spans).toBeUndefined();
+    expect(JSON.stringify(errorEvent)).not.toMatch(
+      /orphan-error-span-secret|cccccccccccccccccccccccccccccccc|dddddddddddddddd/,
+    );
   });
 
   it('derives the same trace pseudonym in separate project processes', async () => {

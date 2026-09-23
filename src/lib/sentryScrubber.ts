@@ -146,10 +146,10 @@ function scrubTracePayload(
 ): void {
   delete event.transaction;
   const trace = event.contexts?.trace;
-  if (idsAlreadyPseudonymized && !trace) {
-    // Static beforeSendSpan normally supplies a sanitized root context before
-    // this hook. Without that anchor we cannot prove the span IDs were already
-    // translated, so fail closed rather than forwarding caller identifiers.
+  if (!trace) {
+    // Without a root context there is no trusted anchor for correlation or for
+    // proving that child identifiers already passed through the span hook.
+    // Fail closed on both error and transaction events.
     delete event.spans;
     return;
   }
