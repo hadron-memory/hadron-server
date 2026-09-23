@@ -47,7 +47,19 @@ export function mergePatch(target: unknown, patch: unknown): unknown {
     if (value === null) {
       delete result[key];
     } else {
-      result[key] = mergePatch(result[key], value);
+      // Read OWN, write as an own DATA property — never `result[key] = …`.
+      // A key literally named `__proto__` is ordinary data here (JSON.parse
+      // makes it an own key, and the declaration reader accepts it as a host
+      // name), but bracket assignment of a NEW `__proto__` key invokes the
+      // inherited setter: the host vanishes from the serialized result and
+      // the object's prototype changes (#1278 review, Copilot + Codex).
+      const current = Object.prototype.hasOwnProperty.call(result, key) ? result[key] : undefined;
+      Object.defineProperty(result, key, {
+        value: mergePatch(current, value),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
   }
   return result;

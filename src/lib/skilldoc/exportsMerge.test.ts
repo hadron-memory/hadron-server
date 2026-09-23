@@ -37,6 +37,30 @@ describe('mergePatch (RFC 7396)', () => {
   });
 });
 
+describe('a host literally named __proto__ is data, not a prototype (#1278 review)', () => {
+  // JSON.parse makes "__proto__" an OWN key, and the declaration reader treats
+  // it as a valid host (declaration.substrate.test.ts). Bracket assignment
+  // would hit the inherited setter instead: the host would vanish from the
+  // serialized result and the object's prototype would change.
+  it('adds an own __proto__ host that survives serialization', () => {
+    const patch = JSON.parse('{"__proto__": {"name": "x-y", "description": "d"}}');
+    const merged = mergePatch({ claudeSkill: claude }, patch) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(merged, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+    expect(JSON.parse(JSON.stringify(merged))).toEqual(
+      JSON.parse('{"claudeSkill": ' + JSON.stringify(claude) + ', "__proto__": {"name": "x-y", "description": "d"}}'),
+    );
+  });
+
+  it('merges into, and deletes, an existing own __proto__ host', () => {
+    const stored = JSON.parse('{"__proto__": {"name": "x-y", "description": "d", "enable": true}}');
+    const flipped = mergePatch(stored, JSON.parse('{"__proto__": {"enable": false}}')) as Record<string, unknown>;
+    expect(JSON.stringify(flipped)).toBe('{"__proto__":{"name":"x-y","description":"d","enable":false}}');
+    const removed = mergePatch(stored, JSON.parse('{"__proto__": null}')) as Record<string, unknown>;
+    expect(JSON.stringify(removed)).toBe('{}');
+  });
+});
+
 describe('mergePropertiesPatch — exports gains depth, nothing else does', () => {
   it('writing one host keeps every sibling host (the #1227 defect)', () => {
     const merged = mergePropertiesPatch({ exports: { claudeSkill: claude } }, { exports: { codexSkill: codex } });

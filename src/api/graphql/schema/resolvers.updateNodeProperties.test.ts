@@ -124,6 +124,21 @@ describe('updateNodeProperties — per-host skill declarations under `exports` (
     expect(reread!.properties).toEqual({ exports: { claudeSkill: claude } });
   });
 
+  it('a host literally named __proto__ does not corrupt the merge (#1278 review)', async () => {
+    // The merge keeps a new `__proto__` host as data (exportsMerge.test.ts).
+    // PERSISTING that key is out of this PR's reach: measured, a direct
+    // `db.node.update` drops an own `__proto__` JSON key, so no Prisma write
+    // path stores one. What the merge must guarantee through the resolver is
+    // that the sibling host survives and nothing inherits from the patch.
+    const node = await makeNode('exp5', { exports: { claudeSkill: claude } });
+    const res = await call(node.id, JSON.parse('{"exports": {"__proto__": {"name": "x-y", "description": "d"}}}'));
+    const exp = (res.properties as Record<string, unknown>).exports as Record<string, unknown>;
+    expect(Object.getPrototypeOf(exp)).toBe(Object.prototype);
+    expect((exp as Record<string, unknown>).name).toBeUndefined();
+    const reread = await db.node.findUnique({ where: { id: node.id } });
+    expect((reread!.properties as Record<string, unknown>).exports).toEqual({ claudeSkill: claude });
+  });
+
   it('concurrent writes to DIFFERENT hosts both land (why the merge is server-side)', async () => {
     const node = await makeNode('exp4', { exports: { claudeSkill: claude } });
     await Promise.all([
