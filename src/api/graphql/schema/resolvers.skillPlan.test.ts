@@ -301,7 +301,7 @@ describe('classes and bodies', () => {
     expect(removed.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['new-name']);
   });
 
-  it('forces a case-only local-edit target in place instead of moving onto the same directory', async () => {
+  it('refuses an ambiguous case-only local-edit target even with force', async () => {
     const node = await mkNode('tasks:case-only-local-edit', {
       properties: declaration({ name: 'my-skill' }),
     });
@@ -324,15 +324,16 @@ describe('classes and bodies', () => {
     expect(got.entries[0]).toMatchObject({
       class: 'locally-edited',
       movedFrom: null,
+      renderedBody: null,
       exportPlan: {
-        action: 'WRITE',
-        preservesExistingFile: false,
-        reasons: [{ code: 'locally-edited-override' }],
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'filesystem-alias-ambiguous' }],
       },
     });
   });
 
-  it('writes a clean case-only rename in place instead of moving onto the same directory', async () => {
+  it('refuses a clean case-only rename whose filesystem semantics are ambiguous', async () => {
     const node = await mkNode('tasks:case-only-rename', { properties: declaration() });
     const first = await plan({ intent: 'EXPORT', files: [] });
     const urn = first.entries[0].urn as string;
@@ -351,13 +352,42 @@ describe('classes and bodies', () => {
 
     expect(got.entries[0]).toMatchObject({
       class: 'renamed',
-      movedFrom: null,
+      movedFrom: 'My-Skill',
+      renderedBody: null,
       exportPlan: {
-        action: 'WRITE',
-        preservesExistingFile: false,
-        reasons: [{ code: 'renamed' }],
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'filesystem-alias-ambiguous' }],
       },
     });
+  });
+
+  it('moves an unhashed legacy file when its directory truly changed', async () => {
+    const node = await mkNode('tasks:legacy-rename', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'old-name',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash: '',
+        fileHash: 'f'.repeat(16),
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({
+      class: 'unhashed',
+      movedFrom: 'old-name',
+      exportPlan: {
+        action: 'MOVE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'unhashed' }],
+      },
+    });
+    expect(got.entries[0].renderedBody).toContain('# Body');
   });
 
   it('protects extra frontmatter on an unhashed legacy file unless force is explicit', async () => {

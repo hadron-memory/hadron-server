@@ -166,7 +166,8 @@ function buildExportPlan(args: {
   parseFailure: boolean;
   hasFile: boolean;
   targetOccupied: boolean;
-  renameInPlace: boolean;
+  ambiguousFilesystemAlias: boolean;
+  unhashedMove: boolean;
   protectsLocalEdit: boolean;
   forceLocalEdit: boolean;
   forcedAction: 'WRITE' | 'MOVE' | 'REMOVE' | null;
@@ -179,7 +180,8 @@ function buildExportPlan(args: {
     parseFailure,
     hasFile,
     targetOccupied,
-    renameInPlace,
+    ambiguousFilesystemAlias,
+    unhashedMove,
     protectsLocalEdit,
     forceLocalEdit,
     forcedAction,
@@ -276,6 +278,24 @@ function buildExportPlan(args: {
     };
   }
 
+  // The server cannot know whether the caller's filesystem is case-sensitive.
+  // A raw rename that normalizes to the same path would need MOVE on one host
+  // and in-place WRITE on another; either universal answer can delete or
+  // duplicate a skill. Refuse the ambiguous write and leave the paired source
+  // named so the client/user can resolve it with local filesystem knowledge.
+  if (ambiguousFilesystemAlias) {
+    return {
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'filesystem-alias-ambiguous',
+          'The source and target names may identify the same directory on this filesystem. Resolve the case or Unicode-only rename locally before exporting.',
+        ),
+      ],
+    };
+  }
+
   if (renderFailure !== null) {
     return {
       action: 'FAIL',
@@ -322,16 +342,9 @@ function buildExportPlan(args: {
 
   if (driftClass === 'renamed' && renderedBody !== null) {
     return {
-      action: renameInPlace ? 'WRITE' : 'MOVE',
+      action: 'MOVE',
       preservesExistingFile: false,
-      reasons: [
-        reason(
-          'renamed',
-          renameInPlace
-            ? 'The stored skill name differs only by filesystem-equivalent spelling; replace the paired file in place.'
-            : 'The stored skill name changed; write the rendered file at the new name and remove the old generated file.',
-        ),
-      ],
+      reasons: [reason('renamed', 'The stored skill name changed; write the rendered file at the new name and remove the old generated file.')],
     };
   }
 
@@ -340,7 +353,7 @@ function buildExportPlan(args: {
     renderedBody !== null
   ) {
     return {
-      action: 'WRITE',
+      action: driftClass === 'unhashed' && unhashedMove ? 'MOVE' : 'WRITE',
       preservesExistingFile: false,
       reasons: [
         reason(
@@ -620,6 +633,8 @@ export const skillQueries = {
       const name = nf.declaration ? storedName(nf.declaration) : '';
       const targetKey = filesystemDirKey(name);
       const selectedOccupiesTarget = selectedFile !== null && filesystemDirKey(selectedFile.dirName) === targetKey;
+      const ambiguousFilesystemAlias =
+        selectedFile !== null && selectedFile.dirName !== name && selectedOccupiesTarget;
       const targetOccupants = name === '' ? 0 : (occupantCountByDir.get(targetKey) ?? 0);
       const targetOccupied = targetOccupants > (selectedOccupiesTarget ? 1 : 0);
       // A legacy unhashed file cannot prove that its body stayed unchanged,
@@ -649,6 +664,7 @@ export const skillQueries = {
         ((WRITES_A_FILE.has(verdict.class) && !protectsLocalEdit) ||
           (forceLocalEdit && forcedAction !== 'REMOVE')) &&
         !hasError &&
+        !ambiguousFilesystemAlias &&
         !targetOccupied;
 
       let renderedBody: string | null = null;
@@ -679,7 +695,12 @@ export const skillQueries = {
               parseFailure: verdict.parseFailure === true,
               hasFile: selectedFile !== null,
               targetOccupied,
-              renameInPlace: verdict.class === 'renamed' && selectedOccupiesTarget,
+              ambiguousFilesystemAlias,
+              unhashedMove:
+                verdict.class === 'unhashed' &&
+                selectedFile !== null &&
+                selectedFile.dirName !== name &&
+                !selectedOccupiesTarget,
               protectsLocalEdit,
               forceLocalEdit,
               forcedAction,
