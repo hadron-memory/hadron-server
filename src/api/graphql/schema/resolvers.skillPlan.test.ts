@@ -238,6 +238,55 @@ describe('classes and bodies', () => {
       reasons: [{ code: 'locally-edited' }],
     });
     expect(got.entries[0].exportPlan.reasons[0].message).toContain('one-invocation override');
+
+    const forced = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: 'f'.repeat(16),
+      }],
+    });
+    expect(forced.entries[0].class).toBe('locally-edited');
+    expect(forced.entries[0].renderedBody).toContain('# Body');
+    expect(forced.entries[0].exportPlan).toMatchObject({
+      action: 'WRITE',
+      preservesExistingFile: false,
+      reasons: [{ code: 'locally-edited-override' }],
+    });
+
+    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ name: 'new-name' }) } });
+    const moved = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: 'f'.repeat(16),
+      }],
+    });
+    expect(moved.entries[0].renderedBody).toContain('name: new-name');
+    expect(moved.entries[0].exportPlan).toMatchObject({
+      action: 'MOVE',
+      preservesExistingFile: false,
+      reasons: [{ code: 'locally-edited-override' }],
+    });
+
+    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ enable: false }) } });
+    const removed = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: 'f'.repeat(16),
+      }],
+    });
+    expect(removed.entries[0].renderedBody).toBeNull();
+    expect(removed.entries[0].exportPlan).toMatchObject({
+      action: 'REMOVE',
+      preservesExistingFile: false,
+      reasons: [{ code: 'locally-edited-override' }],
+    });
   });
 
   it('a parse failure is reported as a FAILURE, with no class', async () => {
@@ -315,29 +364,32 @@ describe('classes and bodies', () => {
     });
   });
 
-  it('refuses WRITE when an orphan already occupies the target directory', async () => {
-    await mkNode('tasks:new-node', { properties: declaration() });
+  it.each(['my-skill', 'My-Skill'])(
+    'refuses WRITE when an orphan at %s already occupies the target directory',
+    async (occupiedDir) => {
+      await mkNode('tasks:new-node', { properties: declaration() });
 
-    const got = await plan({
-      intent: 'EXPORT',
-      files: [{
-        dirName: 'my-skill',
-        sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
-        nodeId: 'deleted-node',
-        headerHash: 'a'.repeat(16),
-        fileHash: 'a'.repeat(16),
-      }],
-    });
+      const got = await plan({
+        intent: 'EXPORT',
+        files: [{
+          dirName: occupiedDir,
+          sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
+          nodeId: 'deleted-node',
+          headerHash: 'a'.repeat(16),
+          fileHash: 'a'.repeat(16),
+        }],
+      });
 
-    expect(got.entries[0].class).toBe('never-exported');
-    expect(got.entries[0].renderedBody).toBeNull();
-    expect(got.entries[0].exportPlan).toMatchObject({
-      action: 'REFUSE',
-      preservesExistingFile: true,
-      reasons: [{ code: 'target-occupied' }],
-    });
-    expect(got.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['my-skill']);
-  });
+      expect(got.entries[0].class).toBe('never-exported');
+      expect(got.entries[0].renderedBody).toBeNull();
+      expect(got.entries[0].exportPlan).toMatchObject({
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'target-occupied' }],
+      });
+      expect(got.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual([occupiedDir]);
+    },
+  );
 
   it('plans MOVE for a rename, but refuses it when an orphan occupies the destination', async () => {
     const node = await mkNode('tasks:renamed', { properties: declaration({ name: 'old-name' }) });
@@ -456,6 +508,28 @@ describe('classes and bodies', () => {
       action: 'SKIP',
       preservesExistingFile: true,
       reasons: [{ code: 'skill-description-too-long' }],
+    });
+  });
+
+  it('preserves a disabled installed file when any blocking lint finding remains', async () => {
+    const node = await mkNode('tasks:disable-invalid', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ enable: false }), content: '' },
+    });
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+    });
+    expect(got.entries[0].class).toBe('disabled');
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-content-empty' }],
     });
   });
 });
@@ -629,6 +703,13 @@ describe('the surface itself', () => {
   it('refuses a host it has no renderer for', async () => {
     await mkNode('tasks:declared', { properties: declaration() });
     await expect(plan({ intent: 'LINT', host: 'codexSkill' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
+  it('accepts force only for an export invocation', async () => {
+    await mkNode('tasks:declared', { properties: declaration() });
+    await expect(plan({ intent: 'STATUS', force: true })).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
   });

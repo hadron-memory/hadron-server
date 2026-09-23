@@ -86,6 +86,7 @@ export interface SkillPlanInput {
   memories?: string[] | null;
   host?: string | null;
   files?: SkillFileFactsInput[] | null;
+  force?: boolean | null;
 }
 
 /**
@@ -165,11 +166,23 @@ function buildExportPlan(args: {
   parseFailure: boolean;
   hasFile: boolean;
   targetOccupied: boolean;
+  forceLocalEdit: boolean;
+  forcedAction: 'WRITE' | 'MOVE' | 'REMOVE' | null;
   findings: Finding[];
   renderedBody: string | null;
   renderFailure: string | null;
 }): SkillExportPlan {
-  const { driftClass, parseFailure, hasFile, targetOccupied, findings, renderedBody, renderFailure } = args;
+  const {
+    driftClass,
+    parseFailure,
+    hasFile,
+    targetOccupied,
+    forceLocalEdit,
+    forcedAction,
+    findings,
+    renderedBody,
+    renderFailure,
+  } = args;
   const reason = (code: string, message: string): SkillExportReason => ({ code, message });
 
   if (parseFailure) {
@@ -185,7 +198,7 @@ function buildExportPlan(args: {
     };
   }
 
-  if (driftClass === 'locally-edited') {
+  if (driftClass === 'locally-edited' && !forceLocalEdit) {
     return {
       action: 'REFUSE',
       preservesExistingFile: true,
@@ -225,12 +238,14 @@ function buildExportPlan(args: {
   }
 
   const blockingFindings = findings.filter((finding) => finding.severity === 'error');
-  const overLimitFindings = blockingFindings.filter((finding) => finding.rule === 'skill-description-too-long');
-  if (overLimitFindings.length > 0) {
+  // Lint is the export gate even when no write would otherwise be needed, and
+  // even when the declaration is disabled. A blocked entry always preserves
+  // its installed file; it cannot quietly become a prune instruction.
+  if (blockingFindings.length > 0) {
     return {
       action: 'SKIP',
       preservesExistingFile: true,
-      reasons: overLimitFindings.map((finding) => reason(finding.rule, finding.message)),
+      reasons: blockingFindings.map((finding) => reason(finding.rule, finding.message)),
     };
   }
 
@@ -246,17 +261,6 @@ function buildExportPlan(args: {
             : 'The declaration is disabled for this host and has no installed file to remove.',
         ),
       ],
-    };
-  }
-
-  // A file can still match its provenance after a non-rendered input changes
-  // (for example isRunnable). The lint result is the export gate, so it must
-  // outrank a relationship-only `current` verdict.
-  if (blockingFindings.length > 0) {
-    return {
-      action: 'SKIP',
-      preservesExistingFile: true,
-      reasons: blockingFindings.map((finding) => reason(finding.rule, finding.message)),
     };
   }
 
@@ -283,7 +287,27 @@ function buildExportPlan(args: {
       reasons: [
         reason(
           'target-occupied',
-          'Another installed directory already occupies this skill name. This export leaves both it and the paired source file unchanged.',
+          'An installed directory already occupies this skill name. This export leaves existing files unchanged.',
+        ),
+      ],
+    };
+  }
+
+  if (forceLocalEdit && forcedAction !== null) {
+    if (forcedAction !== 'REMOVE' && renderedBody === null) {
+      return {
+        action: 'FAIL',
+        preservesExistingFile: true,
+        reasons: [reason('export-action-unresolved', 'The local-edit override could not produce a safe replacement body.')],
+      };
+    }
+    return {
+      action: forcedAction,
+      preservesExistingFile: false,
+      reasons: [
+        reason(
+          'locally-edited-override',
+          'This invocation explicitly overrides the local edit; the client may apply the planned replacement, move, or removal.',
         ),
       ],
     };
@@ -345,6 +369,11 @@ export const skillQueries = {
     { input }: { input: SkillPlanInput },
     ctx: Context,
   ) => {
+    if (input.force === true && input.intent !== 'EXPORT') {
+      throw new GraphQLError('skillPlan: force is valid only with EXPORT intent.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
     const host = input.host ?? HOST_CLAUDE_SKILL;
     if (host !== HOST_CLAUDE_SKILL) {
       // D10: a second host arrives with its RENDERER, not before it. Refusing
@@ -560,9 +589,14 @@ export const skillQueries = {
       fileFor.set(paired.urn, facts);
       selectedDirs.add(f.dirName);
     }
+    // A plan can be executed on macOS's default case-insensitive filesystem.
+    // Conservatively fold names here so `My-Skill` occupies `my-skill` on
+    // every host instead of returning an unsafe WRITE on one common host.
+    const filesystemDirKey = (dirName: string): string => dirName.normalize('NFC').toLowerCase();
     const occupantCountByDir = new Map<string, number>();
     for (const file of files) {
-      occupantCountByDir.set(file.dirName, (occupantCountByDir.get(file.dirName) ?? 0) + 1);
+      const key = filesystemDirKey(file.dirName);
+      occupantCountByDir.set(key, (occupantCountByDir.get(key) ?? 0) + 1);
     }
 
     const entries = nodeFacts.map((nf) => {
@@ -570,8 +604,18 @@ export const skillQueries = {
       const verdict = classifySkill(nf, selectedFile);
       const findings = findingsByUrn.get(nf.urn) ?? [];
       const name = nf.declaration ? storedName(nf.declaration) : '';
-      const targetOccupants = name === '' ? 0 : (occupantCountByDir.get(name) ?? 0);
-      const targetOccupied = targetOccupants > (selectedFile?.dirName === name ? 1 : 0);
+      const targetKey = filesystemDirKey(name);
+      const selectedOccupiesTarget = selectedFile !== null && filesystemDirKey(selectedFile.dirName) === targetKey;
+      const targetOccupants = name === '' ? 0 : (occupantCountByDir.get(targetKey) ?? 0);
+      const targetOccupied = targetOccupants > (selectedOccupiesTarget ? 1 : 0);
+      const forceLocalEdit = input.force === true && verdict.class === 'locally-edited';
+      const forcedAction = forceLocalEdit
+        ? nf.declaration?.enable !== true
+          ? 'REMOVE' as const
+          : selectedFile?.dirName !== name
+            ? 'MOVE' as const
+            : 'WRITE' as const
+        : null;
 
       // A node failing lint is NEVER exported (§5.1 step 2). Structural
       // rather than advisory: the body is simply absent, so a client cannot
@@ -581,7 +625,7 @@ export const skillQueries = {
       const wantsBody =
         input.intent === 'EXPORT' &&
         verdict.class !== undefined &&
-        WRITES_A_FILE.has(verdict.class) &&
+        (WRITES_A_FILE.has(verdict.class) || (forceLocalEdit && forcedAction !== 'REMOVE')) &&
         !hasError &&
         !targetOccupied;
 
@@ -613,6 +657,8 @@ export const skillQueries = {
               parseFailure: verdict.parseFailure === true,
               hasFile: selectedFile !== null,
               targetOccupied,
+              forceLocalEdit,
+              forcedAction,
               findings,
               renderedBody,
               renderFailure,

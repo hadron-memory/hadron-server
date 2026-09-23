@@ -959,6 +959,8 @@ export const typeDefs = `#graphql
     host: String
     """What the client found on disk. Empty for lint, which touches no disk."""
     files: [SkillFileFactsInput!]
+    """With EXPORT only, explicitly replace, move, or remove a locally edited paired file for this invocation."""
+    force: Boolean
   }
 
   """One lint result, carrying the node and memory so a renderer never looks them back up."""
