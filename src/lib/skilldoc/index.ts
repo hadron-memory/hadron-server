@@ -17,6 +17,7 @@
 export { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
 export { MAX_DESCRIPTION_LEN, MAX_NAME_LEN, validName } from './name.js';
 export { hash } from './hash.js';
+export { mergePatch, mergePropertiesPatch } from './exportsMerge.js';
 export { HUMAN_LINE, LEGACY_HUMAN_LINE, render, SkillRenderError } from './render.js';
 export { isNodeUrn, parseFile, SkillFileParseError, type SkillFile } from './parse.js';
 export {

@@ -95,6 +95,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
   ancestorLocs,
   lockAncestorsForCreate,
@@ -1787,13 +1788,13 @@ export const nodeMutations = {
           });
         }
 
-        // Shallow merge: the patch wins on key collision; absent keys preserved.
-        // A node with no properties yet takes the patch as-is.
-        const existing = fresh.properties;
-        const merged =
-          existing != null && typeof existing === 'object' && !Array.isArray(existing)
-            ? { ...(existing as Record<string, unknown>), ...(properties as Record<string, unknown>) }
-            : (properties as Record<string, unknown>);
+        // Shallow merge (the patch wins on key collision; absent keys
+        // preserved), EXCEPT `exports`, which is merge-patched one host at a
+        // time (#1227): D12 made it an object keyed by host, and a shallow
+        // merge of one host's declaration deleted every sibling host. Done
+        // HERE, under the lock, so two clients toggling different hosts both
+        // land. A node with no properties yet takes the patch as-is.
+        const merged = mergePropertiesPatch(fresh.properties, properties as Record<string, unknown>);
 
         // Delegate the write to the core in update mode. Anchor on the immutable
         // PK (targetNodeId), not (memoryId, loc): a concurrent move that frees this
