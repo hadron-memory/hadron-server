@@ -230,4 +230,83 @@ describe('scrubSentryEvent', () => {
       expect(serialized).not.toContain(secret);
     }
   });
+
+  it('sanitizes transaction and span payloads in the SDK pipeline', async () => {
+    const rawTransactions: TransactionEvent[] = [];
+    const sentTransactions: TransactionEvent[] = [];
+    const rawSpans: SpanJSON[] = [];
+    const sentSpans: SpanJSON[] = [];
+
+    Sentry.init({
+      dsn: 'https://public@example.com/1',
+      defaultIntegrations: false,
+      tracesSampleRate: 1,
+      beforeSendTransaction(event) {
+        rawTransactions.push(structuredClone(event));
+        const scrubbed = scrubSentryTransaction(event);
+        sentTransactions.push(structuredClone(scrubbed));
+        return scrubbed;
+      },
+      beforeSendSpan(span) {
+        rawSpans.push(structuredClone(span));
+        const scrubbed = scrubSentrySpan(span);
+        sentSpans.push(structuredClone(scrubbed));
+        return scrubbed;
+      },
+      transport: (options) =>
+        Sentry.createTransport(options, async () => ({ statusCode: 200 })),
+    });
+
+    Sentry.captureEvent({
+      type: 'transaction',
+      transaction: 'POST /hooks/root-pipeline-secret/name',
+      start_timestamp: 1,
+      timestamp: 2,
+      contexts: {
+        trace: {
+          trace_id: 'a'.repeat(32),
+          span_id: 'b'.repeat(16),
+          data: {
+            'http.url':
+              'https://srv.example/hooks/root-pipeline-secret/name?hpt=root-query-secret',
+            secret: 'root-attribute-secret',
+          },
+        },
+      },
+      spans: [
+        {
+          trace_id: 'a'.repeat(32),
+          span_id: 'c'.repeat(16),
+          parent_span_id: 'b'.repeat(16),
+          start_timestamp: 1.25,
+          timestamp: 1.75,
+          op: 'http.client',
+          description: 'GET /hooks/child-pipeline-secret/name',
+          data: {
+            'http.url':
+              'https://srv.example/hooks/child-pipeline-secret/name',
+            secret: 'child-attribute-secret',
+          },
+        },
+      ],
+    });
+    await Sentry.flush(2_000);
+
+    expect(rawTransactions).toHaveLength(1);
+    expect(rawSpans.length).toBeGreaterThan(0);
+    expect(JSON.stringify(rawSpans)).toMatch(
+      /root-pipeline-secret|child-pipeline-secret/,
+    );
+
+    const serialized = JSON.stringify({ sentTransactions, sentSpans });
+    for (const secret of [
+      'root-pipeline-secret',
+      'root-query-secret',
+      'root-attribute-secret',
+      'child-pipeline-secret',
+      'child-attribute-secret',
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
 });
