@@ -95,14 +95,43 @@ describe('scrubSentryEvent', () => {
   it('removes credential-bearing URL paths from error events', () => {
     const event: ErrorEvent = {
       type: undefined,
+      transaction: 'POST /hooks/error-transaction-secret/name',
       request: {
         method: 'POST',
         url: 'https://srv.example/hooks/hook-secret/name?hpt=query-secret',
       },
+      contexts: {
+        trace: {
+          trace_id: 'a'.repeat(32),
+          span_id: 'b'.repeat(16),
+          op: 'http.server',
+          description:
+            'POST /hooks/root-span-secret/name?hpt=root-query-secret',
+          data: {
+            'http.url': 'https://srv.example/hooks/root-data-secret/name',
+          },
+          tags: { secret: 'root-tag-secret' },
+          links: [
+            {
+              trace_id: 'c'.repeat(32),
+              span_id: 'd'.repeat(16),
+              attributes: { secret: 'root-link-secret' },
+            },
+          ],
+        },
+      },
     };
 
     expect(scrubSentryEvent(event).request).toEqual({ method: 'POST' });
-    expect(JSON.stringify(event)).not.toMatch(/hook-secret|query-secret/);
+    expect(event.transaction).toBeUndefined();
+    expect(event.contexts?.trace).toEqual({
+      trace_id: 'a'.repeat(32),
+      span_id: 'b'.repeat(16),
+      op: 'http.server',
+    });
+    expect(JSON.stringify(event)).not.toMatch(
+      /hook-secret|query-secret|error-transaction-secret|root-(span|query|data|tag|link)-secret/,
+    );
   });
 
   it('drops malformed request URLs instead of retaining user-info', () => {
@@ -154,12 +183,24 @@ describe('scrubSentryEvent', () => {
           headers: { 'x-hadron-memory-keys': 'transaction-memory-secret' },
         },
       },
+      contexts: {
+        trace: {
+          trace_id: 'e'.repeat(32),
+          span_id: 'f'.repeat(16),
+          description: 'POST /hooks/root-secret/name',
+          data: { 'http.url': 'https://srv.example/root-data-secret' },
+        },
+      },
       spans: [span],
     };
 
     const scrubbed = scrubSentryTransaction(event);
     expect(scrubbed.request).toEqual({ method: 'POST' });
     expect(scrubbed.transaction).toBeUndefined();
+    expect(scrubbed.contexts?.trace).toEqual({
+      trace_id: 'e'.repeat(32),
+      span_id: 'f'.repeat(16),
+    });
     expect(scrubbed.spans).toEqual([scrubSentrySpan(span)]);
     expect(scrubbed.spans?.[0]).toMatchObject({
       trace_id: 'a'.repeat(32),
@@ -179,6 +220,8 @@ describe('scrubSentryEvent', () => {
       'span-query-secret',
       'span-header-secret',
       'span-link-secret',
+      'root-secret',
+      'root-data-secret',
     ]) {
       expect(serialized).not.toContain(secret);
     }

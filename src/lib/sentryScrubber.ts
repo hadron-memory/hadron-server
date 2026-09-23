@@ -16,6 +16,7 @@ type SpanJSON = Parameters<NonNullable<NodeOptions['beforeSendSpan']>>[0];
  */
 export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
   scrubRequest(event);
+  scrubTracePayload(event);
   return event;
 }
 
@@ -27,8 +28,7 @@ export function scrubSentryTransaction(
   event: TransactionEvent,
 ): TransactionEvent {
   scrubRequest(event);
-  delete event.transaction;
-  if (event.spans) event.spans = event.spans.map(scrubSentrySpan);
+  scrubTracePayload(event);
   return event;
 }
 
@@ -55,5 +55,23 @@ function scrubRequest(event: ErrorEvent | TransactionEvent): void {
   const { method } = event.request;
   event.request = {
     ...(method ? { method } : {}),
+  };
+}
+
+function scrubTracePayload(event: ErrorEvent | TransactionEvent): void {
+  delete event.transaction;
+  if (event.spans) event.spans = event.spans.map(scrubSentrySpan);
+
+  const trace = event.contexts?.trace;
+  if (!trace) return;
+
+  const { trace_id, span_id, parent_span_id, op, status, origin } = trace;
+  event.contexts!.trace = {
+    trace_id,
+    span_id,
+    ...(parent_span_id ? { parent_span_id } : {}),
+    ...(op ? { op } : {}),
+    ...(status ? { status } : {}),
+    ...(origin ? { origin } : {}),
   };
 }
