@@ -615,7 +615,7 @@ export const skillQueries = {
       const forcedAction = forceLocalEdit
         ? nf.declaration?.enable !== true
           ? 'REMOVE' as const
-          : selectedFile?.dirName !== name
+          : selectedFile !== null && filesystemDirKey(selectedFile.dirName) !== targetKey
             ? 'MOVE' as const
             : 'WRITE' as const
         : null;

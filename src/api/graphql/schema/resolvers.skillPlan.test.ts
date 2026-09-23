@@ -301,6 +301,37 @@ describe('classes and bodies', () => {
     expect(removed.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['new-name']);
   });
 
+  it('forces a case-only local-edit target in place instead of moving onto the same directory', async () => {
+    const node = await mkNode('tasks:case-only-local-edit', {
+      properties: declaration({ name: 'my-skill' }),
+    });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+
+    const got = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'My-Skill',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: 'f'.repeat(16),
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({
+      class: 'locally-edited',
+      movedFrom: null,
+      exportPlan: {
+        action: 'WRITE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'locally-edited-override' }],
+      },
+    });
+  });
+
   it('a parse failure is reported as a FAILURE, with no class', async () => {
     await mkNode('tasks:declared', { properties: declaration() });
 
