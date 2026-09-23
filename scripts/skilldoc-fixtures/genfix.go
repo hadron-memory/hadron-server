@@ -244,6 +244,39 @@ func main() {
 	doc["lintCollisions"], _ = json.Marshal(lc)
 	doc["lintCollisionsSourceCommit"], _ = json.Marshal(commit)
 
+	// ── declared ────────────────────────────────────────────────────────────
+	// Inputs kept as they are; the reader's verdict recomputed from Go (#1292).
+	// Before this the section had no generator. Its `two malformed hosts sort`
+	// and UTF-8 ordering cases pinned unknown keys as MALFORMED, which
+	// cor:agt:030:06 now rules out (an unknown key is a warning and never
+	// blocks). Regenerated at a commit whose Go agrees, they come back with an
+	// empty `malformed`. Stamped separately, like lintCollisions.
+	dc := decode(doc, "declared")
+	for _, c := range dc {
+		props, _ := c["properties"].(map[string]any)
+		d, found := skilldoc.Declared(props)
+		out := map[string]any{"found": found, "nameSet": false, "enable": false, "enableSet": false}
+		if found {
+			out["key"], out["host"] = d.Key, d.Host
+			out["nameSet"], out["enable"], out["enableSet"] = d.NameSet, d.Enable, d.EnableSet
+			// Empty strings omitted, matching the section's existing shape.
+			if d.Description != "" {
+				out["description"] = d.Description
+			}
+			if d.Name != "" {
+				out["name"] = d.Name
+			}
+		}
+		c["declared"] = out
+		malformed := skilldoc.Malformed(props)
+		if malformed == nil {
+			malformed = []string{}
+		}
+		c["malformed"] = malformed
+	}
+	doc["declared"], _ = json.Marshal(dc)
+	doc["declaredSourceCommit"], _ = json.Marshal(commit)
+
 	// The commit is an ARGUMENT, never a literal. Hardcoding it meant the next
 	// regeneration at a newer revision would still stamp the old one, and
 	// `sourceCommit` is the only provenance this file carries — a wrong one is
