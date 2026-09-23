@@ -1558,9 +1558,11 @@ export const typeDefs = `#graphql
   }
 
   """
-  The runtime deployment of an Agent in an Organization. Owns long-lived
-  App Keys and references its Agent via App.agent_id (a direct FK; the
-  legacy AppAgent join was dropped in 008-agent-installation).
+  A runtime caller identity owned by exactly one Organization or User. It owns
+  long-lived App Keys and installs Agents through the AppAgent N:M join: one
+  App may install many Agents, and one Agent may be installed in many Apps.
+  The singular agentId / agent fields below are soft-deprecated convenience
+  reads of the first install, not a direct foreign key.
   """
   type App {
     id: ID!
@@ -1582,17 +1584,19 @@ export const typeDefs = `#graphql
     agentId: ID
     agent: Agent
     """
-    The installed Agent's canonical URN. An installed agent stays
-    AUTHOR-ROOTED forever, so this is simply the Agent's own URN:
+    SOFT-DEPRECATED convenience read: the FIRST installed Agent's canonical
+    URN, matching agentId / agent. Use appAgents for the full install roster.
+    An installed agent stays AUTHOR-ROOTED forever, so this is simply that
+    Agent's own URN:
     hrn:agent:<author-org>:<agent-slug>. Two orgs installing same-slug
     agents from different authors therefore still produce distinct URNs
     (they differ at the author root), enabling audit-log entries to
-    identify each install unambiguously without a PK disambiguator.
+    identify the selected Agent unambiguously without a PK disambiguator.
     The v1 spec-021 R2 install chain
     (hrn:agent:<installing-org>::<app-slug>::<author-org>:<agent-slug>)
-    is RETIRED — see #697 Stage 2 / D10 and emitInstalledAgentUrnV2. Returns null when the App has no agent attached
-    (orphan apps from the 008 cutover; new apps require an agentId per
-    009).
+    is RETIRED — see #697 Stage 2 / D10 and emitInstalledAgentUrnV2. Returns
+    null when the App has no installed Agent or the selected Agent's stored URN
+    cannot be emitted in grammar v2.
     """
     installedAgentUrn: String
     trainingMode: Boolean!
@@ -2493,9 +2497,10 @@ export const typeDefs = `#graphql
   }
 
   """
-  The definition (one per Agent) — what a Builder creates and what the
-  marketplace sells. Per 008-agent-installation. An App is the deployment
-  of an Agent in some org.
+  The reusable definition a Builder creates and the marketplace can list.
+  Agents are installed into runtime Apps through the AppAgent N:M join: an App
+  may install many Agents, and an Agent may be installed in many Apps. The App,
+  not the Agent, is the org- or user-owned caller identity and deployment.
   """
   type Agent {
     id: ID!
@@ -7889,12 +7894,16 @@ export const typeDefs = `#graphql
     # App management (org ADMIN) — the unified caller-identity entity per
     # Constitution Invariant #6.
     """
-    Install an Agent into an organization, creating an App that deploys it.
+    Create an App and install its initial Agent. With orgRef, the App is owned
+    by that Organization and requires org ADMIN; without orgRef, it is owned by
+    the authenticated User and remains owner-only.
 
-    Auto-provisions an AgentOrgGrant for (orgId, agentId) on first install,
-    and adds the caller as an AppMember with role 'owner'. Required
-    AgentImports cascade automatically; optional imports cascade only when
-    their id appears in installOptional.
+    An org-owned install auto-provisions an AgentOrgGrant for (orgId, agentId).
+    It adds the caller as an AppMember with role 'owner' only when that role is
+    present in the Agent's installationPolicy and the caller is a User.
+    Required AgentImports cascade automatically for org-owned Apps; optional
+    imports cascade only when their id appears in installOptional. Personal
+    Apps reject dependency cascades in v1.
 
     009-install-agent-flow: the cross-org install restriction (FR-009) is
     enforced at the portal — the Install affordance is hidden for Agents
@@ -7913,12 +7922,14 @@ export const typeDefs = `#graphql
       """
       orgRef: ID
       """
-      The Agent this App deploys. Required as of 009-install-agent-flow:
-      every App must reference an Agent. The server itself accepts any
-      Agent the caller can resolve and auto-provisions an AgentOrgGrant
+      The initial Agent installed into this new App. Required as of
+      009-install-agent-flow: every new App starts with an installed Agent.
+      For an org-owned App the
+      server accepts any resolvable Agent and auto-provisions an AgentOrgGrant
       (008 behavior preserved); the portal's install flow restricts the
-      affordance to Agents owned by the caller org. A hard server-side
-      cross-org gate is reserved for the marketplace spec.
+      affordance to Agents owned by the caller org. A personal App accepts only
+      a PUBLIC Agent or one owned by the caller, and licenses a foreign PUBLIC
+      Agent through the owner's AgentSubscription.
       """
       agentRef: ID!
       name: String!
@@ -8007,7 +8018,7 @@ export const typeDefs = `#graphql
     context, and the returned Agent carries its systemPrompt — so this gate
     stays at the level that can already read the org's Agents.
 
-    Accepts the entity's ID or URN for both appId and agentId. Optional
+    Accepts the entity's ID or URN for both appRef and agentRef. Optional
     trainingMode flag updates the per-App training flag (applies to
     every installed Agent — training mode is per-App, not per-Agent,
     per spec 023 FR-001).
