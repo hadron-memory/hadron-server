@@ -32,6 +32,10 @@ if (dsn) {
     environment,
     release: process.env.SENTRY_RELEASE || undefined,
     tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0),
+    // scrubSentrySpan consumes the static SpanJSON shape. Pin this explicitly
+    // so an SDK default change cannot move spans onto the streamed path and
+    // bypass the sanitizer.
+    traceLifecycle: 'static',
     beforeSend: scrubSentryEvent,
     beforeSendTransaction: scrubSentryTransaction,
     beforeSendSpan: scrubSentrySpan,

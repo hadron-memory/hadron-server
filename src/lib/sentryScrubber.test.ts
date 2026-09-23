@@ -300,6 +300,7 @@ describe('scrubSentryEvent', () => {
       dsn: 'https://public@example.com/1',
       defaultIntegrations: false,
       tracesSampleRate: 1,
+      traceLifecycle: 'static',
       beforeSendTransaction(event) {
         rawTransactions.push(structuredClone(event));
         const scrubbed = scrubSentryTransaction(event);
@@ -315,6 +316,8 @@ describe('scrubSentryEvent', () => {
       transport: (options) =>
         Sentry.createTransport(options, async () => ({ statusCode: 200 })),
     });
+
+    expect(Sentry.getClient()?.getOptions().traceLifecycle).toBe('static');
 
     Sentry.captureEvent({
       type: 'transaction',
