@@ -147,10 +147,16 @@ describe('scrubSentryEvent', () => {
 
     expect(scrubSentryEvent(event).request).toEqual({ method: 'POST' });
     expect(event.transaction).toBeUndefined();
-    expect(event.contexts?.trace).toEqual({
-      trace_id: 'a'.repeat(32),
-      span_id: 'b'.repeat(16),
-      op: 'http.server',
+    expect(event.contexts?.trace).toMatchObject({
+      trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+      span_id: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
+    expect(event.contexts?.trace?.trace_id).not.toBe('a'.repeat(32));
+    expect(event.contexts?.trace?.span_id).not.toBe('b'.repeat(16));
+    expect(event.sdkProcessingMetadata).toEqual({
+      dynamicSamplingContext: {
+        trace_id: event.contexts?.trace?.trace_id,
+      },
     });
     expect(JSON.stringify(event)).not.toMatch(
       /hook-secret|query-secret|error-transaction-secret|root-(span|query|data|tag|link)-secret/,
@@ -242,23 +248,35 @@ describe('scrubSentryEvent', () => {
     const scrubbed = scrubSentryTransaction(event);
     expect(scrubbed.request).toEqual({ method: 'POST' });
     expect(scrubbed.transaction).toBeUndefined();
+    expect(scrubbed.breadcrumbs).toBeUndefined();
+    expect(scrubbed.contexts?.trace).toMatchObject({
+      trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+      span_id: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
+    expect(scrubbed.contexts?.trace?.trace_id).not.toBe('e'.repeat(32));
+    expect(scrubbed.contexts?.trace?.span_id).not.toBe('f'.repeat(16));
     expect(scrubbed.sdkProcessingMetadata).toEqual({
       dynamicSamplingContext: {
-        trace_id: 'e'.repeat(32),
+        trace_id: scrubbed.contexts?.trace?.trace_id,
       },
     });
-    expect(scrubbed.breadcrumbs).toBeUndefined();
-    expect(scrubbed.contexts?.trace).toEqual({
-      trace_id: 'e'.repeat(32),
-      span_id: 'f'.repeat(16),
-    });
-    expect(scrubbed.spans).toEqual([scrubSentrySpan(span)]);
     expect(scrubbed.spans?.[0]).toMatchObject({
-      trace_id: 'a'.repeat(32),
-      span_id: 'b'.repeat(16),
-      op: 'http.server',
+      trace_id: scrubbed.contexts?.trace?.trace_id,
+      span_id: expect.stringMatching(/^[0-9a-f]{16}$/),
       data: {},
     });
+    expect(scrubbed.spans?.[0]?.span_id).not.toBe('b'.repeat(16));
+
+    const standalone = scrubSentrySpan(span);
+    expect(standalone).toMatchObject({
+      trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+      span_id: expect.stringMatching(/^[0-9a-f]{16}$/),
+      start_timestamp: 1,
+      timestamp: 2,
+      data: {},
+    });
+    expect(standalone.trace_id).not.toBe('a'.repeat(32));
+    expect(standalone.span_id).not.toBe('b'.repeat(16));
 
     const serialized = JSON.stringify(scrubbed);
     for (const secret of [
@@ -282,6 +300,11 @@ describe('scrubSentryEvent', () => {
       'span-unknown-secret',
       'root-secret',
       'root-data-secret',
+      'a'.repeat(32),
+      'b'.repeat(16),
+      'e'.repeat(32),
+      'f'.repeat(16),
+      '1'.repeat(32),
     ]) {
       expect(serialized).not.toContain(secret);
     }
@@ -356,6 +379,15 @@ describe('scrubSentryEvent', () => {
     expect(JSON.stringify(rawSpans)).toMatch(
       /root-pipeline-secret|child-pipeline-secret/,
     );
+    expect(sentTransactions[0]?.contexts?.trace).toMatchObject({
+      trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+      span_id: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
+    expect(sentTransactions[0]?.sdkProcessingMetadata).toEqual({
+      dynamicSamplingContext: {
+        trace_id: sentTransactions[0]?.contexts?.trace?.trace_id,
+      },
+    });
 
     const serialized = JSON.stringify({ sentTransactions, sentSpans });
     for (const secret of [
@@ -364,6 +396,9 @@ describe('scrubSentryEvent', () => {
       'root-attribute-secret',
       'child-pipeline-secret',
       'child-attribute-secret',
+      'a'.repeat(32),
+      'b'.repeat(16),
+      'c'.repeat(16),
     ]) {
       expect(serialized).not.toContain(secret);
     }

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type { ErrorEvent, NodeOptions } from '@sentry/node';
 
 type TransactionEvent = Parameters<
@@ -32,58 +33,15 @@ export function scrubSentryTransaction(
   return event;
 }
 
-/** Keep span timing/identity while discarding request descriptions and data. */
+/** Keep span timing while replacing caller-influenced identity and payloads. */
 export function scrubSentrySpan(span: SpanJSON): SpanJSON {
-  const {
-    trace_id,
-    span_id,
-    start_timestamp,
-    parent_span_id,
-    timestamp,
-    op,
-    status,
-    origin,
-    is_segment,
-    segment_id,
-  } = span;
-  return {
-    trace_id,
-    span_id,
-    start_timestamp,
-    data: {},
-    ...(parent_span_id ? { parent_span_id } : {}),
-    ...(timestamp !== undefined ? { timestamp } : {}),
-    ...(op ? { op } : {}),
-    ...(status ? { status } : {}),
-    ...(origin ? { origin } : {}),
-    ...(is_segment !== undefined ? { is_segment } : {}),
-    ...(segment_id ? { segment_id } : {}),
-  };
+  return rebuildSpan(span, randomHex(16), randomHex(8));
 }
 
 function scrubRequest(event: ErrorEvent | TransactionEvent): void {
-  // RequestData keeps the original request here, and incoming baggage can add
-  // arbitrary strings to the dynamic sampling context. Preserve only a
-  // format-constrained trace id, preferring the event's separate trace context.
-  const dynamicSamplingContext =
-    event.sdkProcessingMetadata?.dynamicSamplingContext;
-  const contextTraceId = event.contexts?.trace?.trace_id;
+  // RequestData keeps the original request here, and incoming trace/baggage
+  // headers populate SDK metadata with caller-controlled identifiers/strings.
   delete event.sdkProcessingMetadata;
-  if (dynamicSamplingContext) {
-    const traceId = isTraceId(contextTraceId)
-      ? contextTraceId
-      : isTraceId(dynamicSamplingContext.trace_id)
-        ? dynamicSamplingContext.trace_id
-        : undefined;
-    const safeDynamicSamplingContext = {
-      ...(traceId ? { trace_id: traceId } : {}),
-    };
-    if (Object.keys(safeDynamicSamplingContext).length > 0) {
-      event.sdkProcessingMetadata = {
-        dynamicSamplingContext: safeDynamicSamplingContext,
-      };
-    }
-  }
 
   // HTTP/fetch breadcrumbs may contain full caller-provided URLs. Drop the
   // whole collection rather than trying to predict every integration shape.
@@ -103,24 +61,64 @@ function scrubRequest(event: ErrorEvent | TransactionEvent): void {
   };
 }
 
-function isTraceId(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
-}
-
 function scrubTracePayload(event: ErrorEvent | TransactionEvent): void {
   delete event.transaction;
-  if (event.spans) event.spans = event.spans.map(scrubSentrySpan);
-
   const trace = event.contexts?.trace;
-  if (!trace) return;
+  if (!trace && !event.spans?.length) return;
 
-  const { trace_id, span_id, parent_span_id, op, status, origin } = trace;
-  event.contexts!.trace = {
-    trace_id,
-    span_id,
-    ...(parent_span_id ? { parent_span_id } : {}),
-    ...(op ? { op } : {}),
-    ...(status ? { status } : {}),
-    ...(origin ? { origin } : {}),
+  const traceId = randomHex(16);
+  const rootSpanId = randomHex(8);
+  const oldRootSpanId = trace?.span_id;
+  const spanIds = new Map(
+    event.spans?.map((span) => [span.span_id, randomHex(8)]) ?? [],
+  );
+
+  if (event.spans) {
+    event.spans = event.spans.map((span) => {
+      const parentSpanId =
+        span.parent_span_id === oldRootSpanId
+          ? rootSpanId
+          : span.parent_span_id
+            ? spanIds.get(span.parent_span_id)
+            : undefined;
+      return rebuildSpan(
+        span,
+        traceId,
+        spanIds.get(span.span_id) ?? randomHex(8),
+        parentSpanId,
+      );
+    });
+  }
+
+  if (trace) {
+    event.contexts!.trace = {
+      trace_id: traceId,
+      span_id: rootSpanId,
+    };
+  }
+  event.sdkProcessingMetadata = {
+    dynamicSamplingContext: { trace_id: traceId },
   };
+}
+
+function rebuildSpan(
+  span: SpanJSON,
+  traceId: string,
+  spanId: string,
+  parentSpanId?: string,
+): SpanJSON {
+  const { start_timestamp, timestamp, is_segment } = span;
+  return {
+    trace_id: traceId,
+    span_id: spanId,
+    start_timestamp,
+    data: {},
+    ...(parentSpanId ? { parent_span_id: parentSpanId } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    ...(is_segment !== undefined ? { is_segment } : {}),
+  };
+}
+
+function randomHex(bytes: number): string {
+  return randomBytes(bytes).toString('hex');
 }
