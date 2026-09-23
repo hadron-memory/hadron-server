@@ -16,10 +16,11 @@
  * hadron-cli, re-vendor the file, and update the digest and the commit above
  * in the same change.
  *
- * The `pending` section is not run here. Its resolver cases (P01, P02) are
- * covered through `skillPlan` in resolvers.skillPlan.test.ts; the rest wait
- * on the hadron-cli#621 writer. (P11, `skill lint` over Codex, left pending
- * when hadron-cli#665 made it a command-level test there.)
+ * The `pending` section is not run here. Its resolver cases (P01, P02) and
+ * P08's server-owned no-ID action matrix are covered through `skillPlan` in
+ * resolvers.skillPlan.test.ts; filesystem execution and the remaining cases
+ * wait on the hadron-cli#621 writer. (P11, `skill lint` over Codex, left
+ * pending when hadron-cli#665 made it a command-level test there.)
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'crypto';

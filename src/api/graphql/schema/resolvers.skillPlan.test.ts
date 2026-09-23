@@ -362,7 +362,7 @@ describe('classes and bodies', () => {
     });
   });
 
-  it('moves an unhashed legacy file when its directory truly changed', async () => {
+  it('moves an ID-bearing file with a missing hash when its directory truly changed', async () => {
     const node = await mkNode('tasks:legacy-rename', { properties: declaration() });
     const first = await plan({ intent: 'EXPORT', files: [] });
     const urn = first.entries[0].urn as string;
@@ -388,6 +388,102 @@ describe('classes and bodies', () => {
       },
     });
     expect(got.entries[0].renderedBody).toContain('# Body');
+  });
+
+  it.each([
+    { change: 'rewrite', localEdit: false, force: false, action: 'SKIP', reason: 'missing-node-id' },
+    { change: 'rewrite', localEdit: false, force: true, action: 'WRITE', reason: 'missing-node-id-override' },
+    { change: 'rewrite', localEdit: true, force: false, action: 'REFUSE', reason: 'locally-edited' },
+    { change: 'rewrite', localEdit: true, force: true, action: 'WRITE', reason: 'locally-edited-override' },
+    { change: 'move', localEdit: false, force: false, action: 'SKIP', reason: 'missing-node-id' },
+    { change: 'move', localEdit: false, force: true, action: 'MOVE', reason: 'missing-node-id-override' },
+    { change: 'move', localEdit: true, force: false, action: 'REFUSE', reason: 'locally-edited' },
+    { change: 'move', localEdit: true, force: true, action: 'MOVE', reason: 'locally-edited-override' },
+    { change: 'remove', localEdit: false, force: false, action: 'REMOVE', reason: 'disabled' },
+    { change: 'remove', localEdit: false, force: true, action: 'REMOVE', reason: 'disabled' },
+    { change: 'remove', localEdit: true, force: false, action: 'REFUSE', reason: 'locally-edited' },
+    { change: 'remove', localEdit: true, force: true, action: 'REMOVE', reason: 'locally-edited-override' },
+  ] as const)(
+    'P08: no-ID $change (localEdit=$localEdit, force=$force) plans $action',
+    async ({ change, localEdit, force, action, reason }) => {
+      const node = await mkNode(`tasks:no-id-${change}-${localEdit}-${force}`, { properties: declaration() });
+      const first = await plan({ intent: 'EXPORT', files: [] });
+      const urn = first.entries[0].urn as string;
+      const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+
+      if (change === 'move') {
+        await db.node.update({
+          where: { id: node.id },
+          data: { properties: declaration({ name: 'new-name' }) },
+        });
+      } else if (change === 'remove') {
+        await db.node.update({
+          where: { id: node.id },
+          data: { properties: declaration({ enable: false }) },
+        });
+      }
+
+      const got = await plan({
+        intent: 'EXPORT',
+        force,
+        files: [{
+          dirName: 'my-skill',
+          sourceUrn: urn,
+          // P08's predicate is the missing provenance ID, not a missing
+          // hash. A valid hash also lets the local-edit cases prove that the
+          // ordinary hash evidence still outranks disabled/remove behavior.
+          headerHash,
+          fileHash: localEdit ? 'f'.repeat(16) : headerHash,
+        }],
+      });
+
+      expect(got.entries[0].exportPlan).toMatchObject({
+        action,
+        preservesExistingFile: action === 'SKIP' || action === 'REFUSE',
+        reasons: [{ code: reason }],
+      });
+      expect(got.entries[0].renderedBody === null).toBe(
+        action === 'SKIP' || action === 'REFUSE' || action === 'REMOVE',
+      );
+      expect(got.entries[0].movedFrom).toBe(
+        action === 'MOVE' || action === 'REMOVE' || (change === 'move' && !localEdit)
+          ? 'my-skill'
+          : null,
+      );
+    },
+  );
+
+  it('P08: a source-only legacy header is preserved until force explicitly rewrites it', async () => {
+    await mkNode('tasks:no-id-source-only', { properties: declaration() });
+    const urn = (await plan({ intent: 'LINT' })).entries[0].urn as string;
+    const file = {
+      dirName: 'my-skill',
+      sourceUrn: urn,
+      headerHash: '',
+      fileHash: 'f'.repeat(16),
+    };
+
+    const protectedPlan = await plan({ intent: 'EXPORT', files: [file] });
+    expect(protectedPlan.entries[0]).toMatchObject({
+      class: 'unhashed',
+      renderedBody: null,
+      exportPlan: {
+        action: 'SKIP',
+        preservesExistingFile: true,
+        reasons: [{ code: 'missing-node-id' }],
+      },
+    });
+
+    const forcedPlan = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(forcedPlan.entries[0]).toMatchObject({
+      class: 'unhashed',
+      exportPlan: {
+        action: 'WRITE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'missing-node-id-override' }],
+      },
+    });
+    expect(forcedPlan.entries[0].renderedBody).toContain('# Body');
   });
 
   it('protects extra frontmatter on an unhashed legacy file unless force is explicit', async () => {
@@ -775,6 +871,28 @@ describe('review round 1 — @codex', () => {
       }],
     });
     expect(forced.entries[0]).toMatchObject({
+      class: 'unavailable',
+      renderedBody: null,
+      exportPlan: {
+        action: 'SKIP',
+        preservesExistingFile: true,
+        reasons: [{ code: 'unavailable' }],
+      },
+    });
+
+    // The no-ID override is no broader than the local-edit override. In
+    // particular, `force` must not make an unreadable legacy source renderable.
+    const forcedNoId = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: got.entries[0].urn,
+        headerHash: '',
+        fileHash: 'f'.repeat(16),
+      }],
+    });
+    expect(forcedNoId.entries[0]).toMatchObject({
       class: 'unavailable',
       renderedBody: null,
       exportPlan: {

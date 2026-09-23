@@ -375,7 +375,8 @@ describe('#1177 — parseFile agrees with Go', () => {
   it('a legacy header yields a source and NO hash — the whole live corpus', () => {
     // Measured: all 20 provenance files on disk are this shape, which is why
     // the "every existing file classifies locally-edited" risk in the spec
-    // cannot fire — they classify `unhashed`, whose action is rewrite.
+    // cannot fire — they classify `unhashed`. Their missing IDs independently
+    // make export preserve them by default; explicit force permits the rewrite.
     const c = F.parseFile.find((x) => x.name === 'legacy-header-is-unhashed')!;
     const got = parseFile(c.input);
     expect(got.source).toBeTruthy();

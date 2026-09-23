@@ -151,7 +151,7 @@ describe('precedence — which class wins when several are true', () => {
   it('a locally-edited file with NO header hash is unhashed, not locally-edited', () => {
     // The pre-#580 generation carries no hash, so there is nothing to compare
     // the file against — claiming a hand edit would be an assertion the data
-    // cannot support. Its action (rewrite) is also how the §4a id arrives.
+    // cannot support. The export planner independently protects a missing id.
     const got = classifySkill(node(), file({ headerHash: '', fileHash: 'cccccccccccccccc' }));
     expect(got.class).toBe('unhashed');
   });
