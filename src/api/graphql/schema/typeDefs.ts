@@ -1072,6 +1072,8 @@ export const typeDefs = `#graphql
   type SkillPlanUnrecognized {
     urn: String!
     nodeId: String!
+    """The node's display name, not a skill name: an unrecognised key has no host, so it declares no skill name anyone reads."""
+    name: String!
     memory: String!
     """The unrecognised keys, in UTF-8 byte order — e.g. codex for properties.exports.codex."""
     keys: [String!]!

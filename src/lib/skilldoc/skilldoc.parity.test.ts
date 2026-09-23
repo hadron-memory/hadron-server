@@ -37,7 +37,7 @@ import { hash } from './hash.js';
 import { render, SkillRenderError } from './render.js';
 import { isNodeUrn, parseFile, SkillFileParseError } from './parse.js';
 import { lintCollisions, lintNode, type SkillNode } from './lint.js';
-import { classifyDeclaration } from './declaration.js';
+import { classifyDeclaration, unknownHostKeys } from './declaration.js';
 
 interface Fixtures {
   sourceCommit: string;
@@ -85,6 +85,8 @@ interface Fixtures {
       name?: string; nameSet: boolean; enable: boolean; enableSet: boolean;
     };
     malformed: string[];
+    /** #1292 — Go's UnknownHostKeys, in UTF-8 byte order. */
+    unknown: string[];
   }[];
 }
 
@@ -445,6 +447,10 @@ describe('#1177 D12 — the declaration reader agrees with Go', () => {
   it.each(F.declared.map((c) => [c.name, c] as const))('declared: %s', (_n, c) => {
     const { declaration, malformed } = classifyDeclaration(c.properties);
     expect(malformed).toEqual(c.malformed);
+    // REQUIRED, not optional: a case generated without it would otherwise
+    // pass as "no unknown keys" (#1292).
+    expect(Array.isArray(c.unknown)).toBe(true);
+    expect(unknownHostKeys(c.properties)).toEqual(c.unknown);
     if (!c.declared.found) {
       expect(declaration).toBeNull();
       return;

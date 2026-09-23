@@ -273,6 +273,15 @@ func main() {
 			malformed = []string{}
 		}
 		c["malformed"] = malformed
+		// The unknown keys, in UTF-8 byte order — the ORDER the pre-#1292
+		// malformed-path vectors pinned now lives here. Needs a hadron-cli
+		// commit that has UnknownHostKeys (#679 or later); older commits do
+		// not compile this generator, which is the right failure.
+		unknown := skilldoc.UnknownHostKeys(props)
+		if unknown == nil {
+			unknown = []string{}
+		}
+		c["unknown"] = unknown
 	}
 	doc["declared"], _ = json.Marshal(dc)
 	doc["declaredSourceCommit"], _ = json.Marshal(commit)

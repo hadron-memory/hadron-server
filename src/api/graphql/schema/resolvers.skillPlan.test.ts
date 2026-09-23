@@ -1225,6 +1225,9 @@ describe('hosts (#1254)', () => {
           findings: [{ rule: 'skill-unknown-host-key', severity: 'warning' }],
         });
         expect(p.unrecognized[0].urn).toContain('tasks:codex-only');
+        // Labelled by the node's name (mkNode sets name = loc), so a report can
+        // show a node that has no entry anywhere without deriving a label.
+        expect(p.unrecognized[0].name).toBe('tasks:codex-only');
       }
       // Host-independent: the same report whichever host was asked for.
       expect(claude.unrecognized).toEqual(codex.unrecognized);

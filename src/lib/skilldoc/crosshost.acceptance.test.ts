@@ -31,11 +31,13 @@ import {
   declaredSkill,
   lintCollisions,
   lintNode,
+  lintUnknownHostKeys,
   normalizeDescription,
   parseFile,
   render,
   hash,
   SKILL_HOSTS,
+  unknownHostKeys,
   type SkillNode,
 } from './index.js';
 
@@ -69,6 +71,34 @@ describe('crosshost acceptance matrix (vendored from hadron-cli#622)', () => {
   it('POSITIVE CONTROL: every executable section is non-empty', () => {
     for (const section of ['declarations', 'lint', 'collisions', 'rendering']) {
       expect(m[section].length, section).toBeGreaterThan(0);
+    }
+  });
+
+  // #1292: an unknown `exports` key belongs to NO host, so these columns sit
+  // beside the per-host ones rather than inside them. Both are REQUIRED on
+  // every case: a missing column must fail here, not pass as "nothing
+  // reported" — which is the silent outcome #1292 exists to end.
+  describe('host-free columns (#1292)', () => {
+    it('POSITIVE CONTROL: both columns are present everywhere and exercised somewhere', () => {
+      for (const c of m.declarations) expect(Array.isArray(c.unknown), `${c.id} unknown`).toBe(true);
+      for (const c of m.lint) expect(Array.isArray(c.unhosted), `${c.id} unhosted`).toBe(true);
+      expect(m.declarations.some((c: { unknown: unknown[] }) => c.unknown.length > 0)).toBe(true);
+      expect(m.lint.some((c: { unhosted: unknown[] }) => c.unhosted.length > 0)).toBe(true);
+    });
+
+    for (const c of m.declarations) {
+      it(`${c.id} unknown keys: ${c.title}`, () => {
+        expect(unknownHostKeys(c.properties)).toEqual(c.unknown);
+      });
+    }
+
+    for (const c of m.lint) {
+      it(`${c.id} unhosted lint: ${c.title}`, () => {
+        const rules = lintUnknownHostKeys(node(`hrn:node:example.com:demo:tasks:${c.id}`, c.properties))
+          .map((f) => `${f.rule}:${f.severity}`)
+          .sort();
+        expect(rules).toEqual(c.unhosted);
+      });
     }
   });
 

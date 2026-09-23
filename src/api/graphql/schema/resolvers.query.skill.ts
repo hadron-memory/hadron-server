@@ -474,6 +474,9 @@ export const skillQueries = {
       select: {
         id: true,
         loc: true,
+        // #1292: only `unrecognized` reads it, so an item for a node with no
+        // entry anywhere can still be labelled by name rather than by URN.
+        name: true,
         content: true,
         isRunnable: true,
         properties: true,
@@ -780,6 +783,7 @@ export const skillQueries = {
         return {
           urn,
           nodeId: r.id,
+          name: r.name,
           memory: r.memory.urn,
           keys,
           findings: lintUnknownHostKeys({
