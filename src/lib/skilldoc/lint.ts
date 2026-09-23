@@ -1,8 +1,10 @@
 /**
  * #1177 §6 — the corpus lint rules, server-side.
  *
- * TWELVE rules over a node's declaration and body — eleven per node plus
- * `skill-name-collision`, which is corpus-wide. They answer *is this node
+ * THIRTEEN rules over a node's declaration and body: eleven per node and per
+ * host (`lintNode`), `skill-name-collision`, which is corpus-wide and per host
+ * (`lintCollisions`), and `skill-unknown-host-key`, which is per node and
+ * attributed to NO host (`lintUnknownHostKeys`, #1292). They answer *is this node
  * exportable, and will the host do what its author expects* — judgment over
  * corpus inputs alone, with no file and no disk, which is what makes this half
  * of the split (A3) pure.
@@ -12,8 +14,9 @@
  * ref it could not read. That one is not a judgment about a node — it is a
  * report about a read that failed — so it cannot live in a pure function over
  * a node it does not have. Said here rather than left as an off-by-one,
- * because "thirteen" in this header would misstate what the port covers
- * (@copilot, PR #1233).
+ * because counting it in this header would misstate what the port covers
+ * (@copilot, PR #1233). (The count above reached thirteen in #1292 with a
+ * rule of its own; the spec's §6 figure still predates that rule.)
  *
  * Ported from `internal/skilldoc`'s `Lint` / `LintCollisions`. The message text
  * is part of the port: an operator reading `hadron skill lint` and a portal
@@ -33,8 +36,9 @@ import {
   isEnabled,
   legacyAliasPaths,
   storedName,
+  unknownHostKeys,
 } from './declaration.js';
-import { requireSkillHost } from './hosts.js';
+import { requireSkillHost, SKILL_HOSTS } from './hosts.js';
 import { validName } from './name.js';
 import { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
 
@@ -203,6 +207,35 @@ export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Fin
     );
   }
   return out;
+}
+
+/**
+ * The rule for a key under `properties.exports` that names no host.
+ *
+ * PROVISIONAL NAME, proposed by hadron-cli (team chat #1206) and pending the
+ * specs engineer: kept in ONE constant so the agreed spelling is a one-line
+ * change here and in the Go reference together.
+ */
+export const RULE_UNKNOWN_HOST_KEY = 'skill-unknown-host-key';
+
+/**
+ * The host-independent pass: one WARNING per unknown `exports.<key>`
+ * (cor:agt:030:06, D-2026-09-23-E).
+ *
+ * Deliberately NOT part of `lintNode(node, host)`. Every finding that returns
+ * is attributed to a host, and this one belongs to none — emitted from each
+ * host's pass it would merge into one row claiming all of them. A warning,
+ * never an error: an unrecognised key is reported, and never blocks anything.
+ */
+export function lintUnknownHostKeys(node: SkillNode): Finding[] {
+  const known = SKILL_HOSTS.map((h) => h.key).join(', ');
+  return unknownHostKeys(node.properties).map((key) => ({
+    urn: node.urn,
+    memory: node.memoryUrn,
+    rule: RULE_UNKNOWN_HOST_KEY,
+    severity: 'warning' as const,
+    message: `properties.${EXPORTS_KEY}.${key} names no host (known: ${known}) — nothing exports it; rename it to a host key or remove it`,
+  }));
 }
 
 /**

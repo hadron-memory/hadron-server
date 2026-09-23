@@ -17,7 +17,7 @@
  * rather than about the fixture.
  */
 import { describe, it, expect } from 'vitest';
-import { classifyDeclaration, declaredSkill, malformedDeclarationPaths } from './declaration.js';
+import { classifyDeclaration, declaredSkill, malformedDeclarationPaths, unknownHostKeys } from './declaration.js';
 import { lintCollisions, lintNode, type SkillNode } from './lint.js';
 import { render, SkillRenderError } from './render.js';
 import { parseFile } from './parse.js';
@@ -95,9 +95,13 @@ describe('the prototype chain, which a Go map does not have', () => {
     expect(({} as Record<string, unknown>)['name']).toBeUndefined();
   });
 
-  it('reports a malformed OWN `__proto__` host entry like any other host', () => {
+  it('sees an OWN `__proto__` host key like any other key', () => {
+    // Since #1292 an unknown key is not shape-checked, so this is no longer a
+    // malformed path; the own-key detection it pins moved to unknownHostKeys,
+    // which must still see the key rather than lose it to the prototype.
     const props = JSON.parse('{"exports": {"__proto__": "nope"}}') as unknown;
-    expect(malformedDeclarationPaths(props)).toEqual(['exports.__proto__']);
+    expect(malformedDeclarationPaths(props)).toEqual([]);
+    expect(unknownHostKeys(props)).toEqual(['__proto__']);
   });
 });
 
@@ -233,10 +237,21 @@ describe('determinism the reference gets from sorting', () => {
     // was written rather than of the node. An unsorted list makes a `--strict`
     // gate nondeterministic across two reads of identical data — the defect
     // @Eli hit on the Go side with map iteration.
+    //
+    // Since #1292 only KNOWN hosts are shape-checked, so the malformed half
+    // runs over the two known hosts, and the ordering of unknown keys is
+    // pinned on unknownHostKeys, which reports them now.
+    expect(malformedDeclarationPaths({ exports: { codexSkill: 'no', claudeSkill: 'no' } })).toEqual([
+      'exports.claudeSkill',
+      'exports.codexSkill',
+    ]);
+    expect(malformedDeclarationPaths({ exports: { claudeSkill: 'no', codexSkill: 'no' } })).toEqual([
+      'exports.claudeSkill',
+      'exports.codexSkill',
+    ]);
     const a = { exports: { zebra: 'no', alpha: 'no', mango: 'no' } };
     const b = { exports: { mango: 'no', zebra: 'no', alpha: 'no' } };
-    const expected = ['exports.alpha', 'exports.mango', 'exports.zebra'];
-    expect(malformedDeclarationPaths(a)).toEqual(expected);
-    expect(malformedDeclarationPaths(b)).toEqual(expected);
+    expect(unknownHostKeys(a)).toEqual(['alpha', 'mango', 'zebra']);
+    expect(unknownHostKeys(b)).toEqual(['alpha', 'mango', 'zebra']);
   });
 });
