@@ -538,10 +538,11 @@ async function participantTeamSpaceFolds(
  * principal (no `userId`) never matches an owner, and is denied by the point
  * gates for exactly that reason, so it is denied here too.
  *
- * `personal`/`private` are deliberately NOT filtered here: the map's callers in
- * this module strict-gate those classes above it, and `hadron_list_memories`
- * folds the caller's own rows in separately. The GraphQL gate, which has no
- * per-row check, applies that filter itself (`appDerivedMemoryIds`).
+ * **3. Strict-owner classes.** `personal`/`private` never enter an App-derived
+ * map. Their identity, selected-App and subscription checks live in the
+ * canonical per-memory gate; discovery callers consume this map directly and
+ * cannot safely reproduce those checks. `hadron_list_memories` folds the
+ * caller's own strict-owner rows in separately through that gate.
  */
 async function admissibleFoldRows(
   db: PrismaClient,
@@ -554,9 +555,11 @@ async function admissibleFoldRows(
 
   const rows = await db.memory.findMany({
     where: { id: { in: ids } },
-    select: { id: true, appId: true, ownerUserId: true },
+    select: { id: true, class: true, appId: true, ownerUserId: true },
   });
   for (const row of rows) {
+    // Rule 3 — a fold is never authority for a strict-owner class.
+    if (row.class === 'personal' || row.class === 'private') continue;
     // Rule 2 — strict ownership admits the owner alone, nobody else, and no
     // credential-only principal.
     if (row.ownerUserId != null && row.ownerUserId !== callerUserId) continue;

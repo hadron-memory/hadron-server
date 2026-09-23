@@ -17,7 +17,11 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
-import { canWriteToMemory, getPrincipalAppMemoryAccess } from '../../../mcp/access-control.js';
+import {
+  canWriteToMemory,
+  filterReadableMemoryIds,
+  getPrincipalAppMemoryAccess,
+} from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
@@ -1111,9 +1115,10 @@ export async function granteeShareAccess(
  * per request.
  *
  * Delegates the reach question to `getPrincipalAppMemoryAccess` — the one
- * predicate this and the MCP gate share, which enforces App scope and spec-047
- * strict ownership for both — and adds the one rule that is genuinely local to
- * THIS consumer: a **`personal`/`private` class filter**.
+ * predicate this and the MCP gate share, which enforces App scope, spec-047
+ * strict ownership, and exclusion of personal/private folds for both. The
+ * class filter below remains as defense in depth at this direct-enumeration
+ * boundary.
  *
  * That filter is not defensive decoration. The MCP map is documented
  * personal-free, and when #1092 shipped NOTHING enforced the claim:
@@ -1138,13 +1143,9 @@ export async function granteeShareAccess(
  * admits personal/private ONLY through its identity-scoped clauses (owner,
  * holdings, share grantee). Nothing App-derived may add to that set.
  *
- * The **`ownerUserId`** axis deliberately lives upstream instead (PR #1102
- * review). It is not a quirk of this consumer: `canReadMemory` and
- * `canWriteToMemory` both enforce it, so a map carrying rows they hard-deny is
- * wrong for every caller, not just this one. The rule of thumb the two placements
- * encode — push a filter to the shared predicate when the other consumers also
- * want it, keep it local only when it compensates for something local (here, the
- * absence of a per-row check).
+ * Both strict-owner axes live upstream as well (PR #1102 and #1260 reviews):
+ * a map carrying rows the canonical point gate hard-denies is wrong for every
+ * direct consumer, not just this one.
  */
 async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
   const all = await (ctx.appDerivedMemoryIdCache ??= (async () => {
@@ -1220,7 +1221,12 @@ export async function getAccessibleMemoryIds(
       },
       select: { id: true },
     });
-    return all.map((m: { id: string }) => m.id);
+    const readable = await filterReadableMemoryIds(
+      ctx.db,
+      ctx,
+      all.map((memory) => memory.id),
+    );
+    return all.map((memory) => memory.id).filter((id) => readable.has(id));
   }
 
   // App Key without an active session — the App's installed-agent reach:

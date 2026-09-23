@@ -135,4 +135,47 @@ describe('#676 — hadron_list_nodes user-owned leak (ADMIN + bare parentRel)', 
 
     expect(text).not.toContain('CROSS-APP-SECRET');
   });
+
+  it('does not trust an App-derived allow-list carrying a strict-owner row', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'fold-org', urn: `fold-org-${generateId()}` },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Fold App', urn: `${org.urn}:app` },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Fold Agent', urn: `${org.urn}:agent` },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'directly attached personal memory',
+        urn: `${org.urn}:attached-personal`,
+        ownerUserId: ownerId,
+        userId: ownerId,
+        appId: app.id,
+        userMemoryOfAgentId: agent.id,
+      },
+    });
+    // This legacy/direct shape bypasses the modern attach mutation's class
+    // refusal and proves the read gate does not depend on every writer behaving.
+    await db.agentMemoryItem.create({
+      data: { agentId: agent.id, memoryId: mem.id, role: 'read' },
+    });
+    await createDbNode(db, { memoryId: mem.id, loc: 'foldsecret', name: 'fold parent' });
+    await createDbNode(db, {
+      memoryId: mem.id,
+      loc: 'foldsecret:child',
+      name: 'FOLDED-PERSONAL-SECRET',
+    });
+
+    const text = await createTestableMcpServer({ appId: app.id }).callToolText(
+      'hadron_list_nodes',
+      { parentRel: 'foldsecret' },
+    );
+
+    expect(text).not.toContain('FOLDED-PERSONAL-SECRET');
+  });
 });

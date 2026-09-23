@@ -4028,14 +4028,14 @@ export function createMcpServerInstance(
       let allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
 
       // A bare parentRel can match the same loc in more than one memory. For
-      // ADMIN/OWNER callers `getAccessibleMemoryIds` intentionally returns
-      // null, so no resolved memoryId exists on that path and the query above
-      // is only a coarse identity-owner prefilter. Re-run the canonical gate
-      // for every candidate memory before rendering: personal/private access
-      // also depends on the selected App (and, for legacy rows, the installed
-      // Agent + active subscription), which cannot be represented by the
-      // ownership-only Prisma predicate.
-      if (!memoryId && memoryIds === null) {
+      // An unpinned parent can match the same loc in more than one memory. The
+      // query above is only a coarse candidate filter, for both ADMIN/OWNER
+      // callers (`memoryIds === null`) and ordinary callers (whose App-derived
+      // allow-list can contain legacy/directly-created rows). Re-run the
+      // canonical gate for every candidate memory before rendering:
+      // personal/private access also depends on identity, the selected App and,
+      // for legacy rows, the installed Agent + active subscription.
+      if (!memoryId) {
         const readableMemoryIds = await filterReadableMemoryIds(
           db,
           auth,
