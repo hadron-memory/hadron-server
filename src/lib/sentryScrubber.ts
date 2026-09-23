@@ -35,12 +35,30 @@ export function scrubSentryTransaction(
 /** Keep span timing/identity while discarding request descriptions and data. */
 export function scrubSentrySpan(span: SpanJSON): SpanJSON {
   const {
-    description: _sensitiveDescription,
-    data: _sensitiveData,
-    links: _sensitiveLinks,
-    ...safeSpan
+    trace_id,
+    span_id,
+    start_timestamp,
+    parent_span_id,
+    timestamp,
+    op,
+    status,
+    origin,
+    is_segment,
+    segment_id,
   } = span;
-  return { ...safeSpan, data: {} };
+  return {
+    trace_id,
+    span_id,
+    start_timestamp,
+    data: {},
+    ...(parent_span_id ? { parent_span_id } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    ...(op ? { op } : {}),
+    ...(status ? { status } : {}),
+    ...(origin ? { origin } : {}),
+    ...(is_segment !== undefined ? { is_segment } : {}),
+    ...(segment_id ? { segment_id } : {}),
+  };
 }
 
 function scrubRequest(event: ErrorEvent | TransactionEvent): void {

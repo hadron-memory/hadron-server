@@ -151,7 +151,7 @@ describe('scrubSentryEvent', () => {
   });
 
   it('scrubs transaction events and their spans', () => {
-    const span: SpanJSON = {
+    const span = {
       trace_id: 'a'.repeat(32),
       span_id: 'b'.repeat(16),
       start_timestamp: 1,
@@ -169,7 +169,9 @@ describe('scrubSentryEvent', () => {
           attributes: { secret: 'span-link-secret' },
         },
       ],
-    };
+      tags: { secret: 'span-tag-secret' },
+      unknownRequestField: 'span-unknown-secret',
+    } as SpanJSON;
     const event: TransactionEvent = {
       type: 'transaction',
       transaction: 'POST /hooks/transaction-secret/name',
@@ -220,6 +222,8 @@ describe('scrubSentryEvent', () => {
       'span-query-secret',
       'span-header-secret',
       'span-link-secret',
+      'span-tag-secret',
+      'span-unknown-secret',
       'root-secret',
       'root-data-secret',
     ]) {
