@@ -15,7 +15,11 @@
 // `--import ./dist/instrument.js` loader flag to instrument correctly.
 import 'dotenv/config';
 import * as Sentry from '@sentry/node';
-import { scrubSentryEvent } from './lib/sentryScrubber.js';
+import {
+  scrubSentryEvent,
+  scrubSentrySpan,
+  scrubSentryTransaction,
+} from './lib/sentryScrubber.js';
 
 const dsn = process.env.SENTRY_DSN?.trim();
 const environment =
@@ -29,6 +33,8 @@ if (dsn) {
     release: process.env.SENTRY_RELEASE || undefined,
     tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0),
     beforeSend: scrubSentryEvent,
+    beforeSendTransaction: scrubSentryTransaction,
+    beforeSendSpan: scrubSentrySpan,
   });
   console.log(`[sentry] initialized (environment=${environment})`);
 } else if (process.env.NODE_ENV !== 'test') {

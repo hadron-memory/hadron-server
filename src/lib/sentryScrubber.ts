@@ -1,4 +1,9 @@
-import type { ErrorEvent } from '@sentry/node';
+import type { ErrorEvent, NodeOptions } from '@sentry/node';
+
+type TransactionEvent = Parameters<
+  NonNullable<NodeOptions['beforeSendTransaction']>
+>[0];
+type SpanJSON = Parameters<NonNullable<NodeOptions['beforeSendSpan']>>[0];
 
 /**
  * Keep only request metadata that cannot carry credentials or caller content.
@@ -10,35 +15,45 @@ import type { ErrorEvent } from '@sentry/node';
  * body field is introduced. See cor:sec:040:01 and hadron-server#1268.
  */
 export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
+  scrubRequest(event);
+  return event;
+}
+
+/**
+ * Transaction events bypass `beforeSend`. Remove request data, transaction
+ * names and span payloads that can contain raw URLs or route credentials.
+ */
+export function scrubSentryTransaction(
+  event: TransactionEvent,
+): TransactionEvent {
+  scrubRequest(event);
+  delete event.transaction;
+  if (event.spans) event.spans = event.spans.map(scrubSentrySpan);
+  return event;
+}
+
+/** Keep span timing/identity while discarding request descriptions and data. */
+export function scrubSentrySpan(span: SpanJSON): SpanJSON {
+  const {
+    description: _sensitiveDescription,
+    data: _sensitiveData,
+    links: _sensitiveLinks,
+    ...safeSpan
+  } = span;
+  return { ...safeSpan, data: {} };
+}
+
+function scrubRequest(event: ErrorEvent | TransactionEvent): void {
   if (event.sdkProcessingMetadata) {
     const { normalizedRequest: _sensitiveRequest, ...safeMetadata } =
       event.sdkProcessingMetadata;
     event.sdkProcessingMetadata = safeMetadata;
   }
 
-  if (!event.request) return event;
+  if (!event.request) return;
 
-  const { method, url } = event.request;
-  const safeUrl = url ? stripUrlSecrets(url) : undefined;
+  const { method } = event.request;
   event.request = {
     ...(method ? { method } : {}),
-    ...(safeUrl ? { url: safeUrl } : {}),
   };
-
-  return event;
-}
-
-/** Remove query, fragment and URL user-info while retaining route identity. */
-function stripUrlSecrets(value: string): string | undefined {
-  try {
-    const absolute = /^[a-z][a-z\d+.-]*:\/\//i.test(value);
-    const parsed = new URL(value, 'http://sentry.invalid');
-    return absolute
-      ? `${parsed.protocol}//${parsed.host}${parsed.pathname}`
-      : parsed.pathname;
-  } catch {
-    // Any string-level fallback can retain user-info from a malformed absolute
-    // URL. Lose the route rather than risk transmitting a credential.
-    return undefined;
-  }
 }

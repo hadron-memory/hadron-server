@@ -1,7 +1,14 @@
 import * as Sentry from '@sentry/node';
 import type { ErrorEvent } from '@sentry/node';
 import { afterEach, describe, expect, it } from 'vitest';
-import { scrubSentryEvent } from './sentryScrubber.js';
+import {
+  scrubSentryEvent,
+  scrubSentrySpan,
+  scrubSentryTransaction,
+} from './sentryScrubber.js';
+
+type SpanJSON = Parameters<typeof scrubSentrySpan>[0];
+type TransactionEvent = Parameters<typeof scrubSentryTransaction>[0];
 
 describe('scrubSentryEvent', () => {
   afterEach(async () => {
@@ -67,7 +74,6 @@ describe('scrubSentryEvent', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.request).toEqual({
       method: 'POST',
-      url: 'https://srv.example/graphql',
     });
 
     const serialized = JSON.stringify(sent[0]);
@@ -86,6 +92,19 @@ describe('scrubSentryEvent', () => {
     }
   });
 
+  it('removes credential-bearing URL paths from error events', () => {
+    const event: ErrorEvent = {
+      type: undefined,
+      request: {
+        method: 'POST',
+        url: 'https://srv.example/hooks/hook-secret/name?hpt=query-secret',
+      },
+    };
+
+    expect(scrubSentryEvent(event).request).toEqual({ method: 'POST' });
+    expect(JSON.stringify(event)).not.toMatch(/hook-secret|query-secret/);
+  });
+
   it('drops malformed request URLs instead of retaining user-info', () => {
     const event: ErrorEvent = {
       type: undefined,
@@ -100,5 +119,68 @@ describe('scrubSentryEvent', () => {
       method: 'GET',
     });
     expect(JSON.stringify(event)).not.toMatch(/url-user|url-pass|query-secret/);
+  });
+
+  it('scrubs transaction events and their spans', () => {
+    const span: SpanJSON = {
+      trace_id: 'a'.repeat(32),
+      span_id: 'b'.repeat(16),
+      start_timestamp: 1,
+      timestamp: 2,
+      op: 'http.server',
+      description: 'POST /hooks/span-secret/name?hpt=span-query-secret',
+      data: {
+        'http.request.header.authorization': 'Bearer span-header-secret',
+        'http.url': 'https://srv.example/hooks/span-secret/name',
+      },
+      links: [
+        {
+          trace_id: 'c'.repeat(32),
+          span_id: 'd'.repeat(16),
+          attributes: { secret: 'span-link-secret' },
+        },
+      ],
+    };
+    const event: TransactionEvent = {
+      type: 'transaction',
+      transaction: 'POST /hooks/transaction-secret/name',
+      request: {
+        method: 'POST',
+        url: 'https://srv.example/hooks/request-secret/name?hpt=request-query-secret',
+        headers: { authorization: 'Bearer transaction-header-secret' },
+      },
+      sdkProcessingMetadata: {
+        normalizedRequest: {
+          headers: { 'x-hadron-memory-keys': 'transaction-memory-secret' },
+        },
+      },
+      spans: [span],
+    };
+
+    const scrubbed = scrubSentryTransaction(event);
+    expect(scrubbed.request).toEqual({ method: 'POST' });
+    expect(scrubbed.transaction).toBeUndefined();
+    expect(scrubbed.spans).toEqual([scrubSentrySpan(span)]);
+    expect(scrubbed.spans?.[0]).toMatchObject({
+      trace_id: 'a'.repeat(32),
+      span_id: 'b'.repeat(16),
+      op: 'http.server',
+      data: {},
+    });
+
+    const serialized = JSON.stringify(scrubbed);
+    for (const secret of [
+      'transaction-secret',
+      'request-secret',
+      'request-query-secret',
+      'transaction-header-secret',
+      'transaction-memory-secret',
+      'span-secret',
+      'span-query-secret',
+      'span-header-secret',
+      'span-link-secret',
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
   });
 });
