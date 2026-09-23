@@ -67,6 +67,7 @@ async function mintKey(userId: string, overrides: Record<string, unknown> = {}) 
       label: 'ci-deploy',
       createdBy: userId,
       issuedVia: 'portal',
+      oauthScopes: [],
       ...overrides,
     },
   });

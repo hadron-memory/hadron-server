@@ -65,6 +65,7 @@ async function mintUserApiKey(userId: string): Promise<string> {
       keyPreview: rawKey.slice(-4),
       createdBy: userId,
       issuedVia: 'portal',
+      oauthScopes: [],
     },
   });
   return rawKey;

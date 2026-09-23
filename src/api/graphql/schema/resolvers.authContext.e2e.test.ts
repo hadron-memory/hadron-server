@@ -33,7 +33,7 @@ describe('authContext e2e through the executable schema', () => {
     const key = await db.userApiKey.create({
       data: {
         id: generateId(), userId: user.id, keyHash: generateId(), keyPreview: 'zz99',
-        label: 'l', createdBy: user.id, issuedVia: 'portal',
+        label: 'l', createdBy: user.id, issuedVia: 'portal', oauthScopes: [],
       },
     });
     const r = await run(QUERY, { userId: user.id, apiKeyId: key.id, roles: ['READER'] });

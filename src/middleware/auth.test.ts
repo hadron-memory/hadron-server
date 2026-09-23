@@ -346,6 +346,7 @@ describe('resolveAuthContext', () => {
           label: 'test',
           createdBy: createdUser.id,
           issuedVia: 'portal',
+          oauthScopes: [],
         },
       });
       return { userId: createdUser.id, rawKey, keyId: apiKey.id };
@@ -478,6 +479,7 @@ describe('resolveAuthContext', () => {
           label: 'test',
           createdBy: user.id,
           issuedVia: 'portal',
+          oauthScopes: [],
         },
       });
       return { userId: user.id, rawKey };
