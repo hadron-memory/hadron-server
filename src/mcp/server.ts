@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
@@ -175,6 +175,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
+import { safeEqual } from '../lib/constantTime.js';
 
 /**
  * Annotate a node projection that was reached through a `#<fragment>` URN.
@@ -219,6 +220,51 @@ import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/inde
 
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
+}
+
+/** One operator can monitor this many live Workers in one poll. */
+const TEAM_CHAT_MONITOR_MAX_TARGETS = 20;
+
+interface TeamChatMonitorCheckpoint {
+  v: 1;
+  appId: string;
+  channelId: string;
+  workerId: string;
+  seq: number;
+}
+
+/** Sign the exact attendee/Channel watermark the server scanned and returned. */
+function signTeamChatMonitorCheckpoint(payload: TeamChatMonitorCheckpoint): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET is required for team-chat monitor checkpoints.');
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = createHmac('sha256', secret).update(body).digest('base64url');
+  return `${body}.${signature}`;
+}
+
+/** Verify a server-bound checkpoint; caller-authored or damaged values are null. */
+function verifyTeamChatMonitorCheckpoint(token: string): TeamChatMonitorCheckpoint | null {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET is required for team-chat monitor checkpoints.');
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [body, suppliedSignature] = parts;
+  const expectedSignature = createHmac('sha256', secret).update(body).digest('base64url');
+  if (!safeEqual(suppliedSignature, expectedSignature)) return null;
+  try {
+    const value = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Partial<TeamChatMonitorCheckpoint>;
+    if (
+      value.v !== 1 ||
+      typeof value.appId !== 'string' ||
+      typeof value.channelId !== 'string' ||
+      typeof value.workerId !== 'string' ||
+      !Number.isInteger(value.seq) ||
+      (value.seq ?? -1) < 0
+    ) return null;
+    return value as TeamChatMonitorCheckpoint;
+  } catch {
+    return null;
+  }
 }
 
 // Server-identity / deployment-info surface lives in ./deploymentInfo.js so
@@ -7531,7 +7577,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     appRef: string;
     channel?: string;
     monitorFor?: string;
-    acknowledge?: Array<{ worker: string; seq: number }>;
+    acknowledge?: Array<{ worker: string; channel: string; seq: number; proof: string }>;
     limit?: number;
   }) => {
     if (!auth.userId || auth.impersonation) {
@@ -7550,12 +7596,23 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         ...chatCtx(),
         appId: app.id,
         organizationId: app.organizationId ?? undefined,
+        // A monitor observes liveness; its transcript read must not itself
+        // create a UsageEvent that makes the transport-bound session live.
+        sessionId: undefined,
       };
       if (!(await isAppParticipant(ctx, app))) return textResult('[forbidden] You do not participate in that App.');
 
       const resolveWorkerInApp = async (ref: string) => {
-        const worker = await resolvers.Query.worker({}, { ref, appRef: app.id }, ctx);
-        return worker.appId === app.id ? worker : null;
+        try {
+          const worker = await resolvers.Query.worker({}, { ref, appRef: app.id }, ctx);
+          return worker.appId === app.id ? worker : null;
+        } catch (e) {
+          if (
+            (e instanceof ScopeGraphQLError && ['WORKER_NOT_FOUND', 'FORBIDDEN'].includes(String(e.extensions?.code))) ||
+            (e instanceof Error && e.message === 'Forbidden')
+          ) return null;
+          throw e;
+        }
       };
       const requestedWorker = args.monitorFor !== undefined
         ? await resolveWorkerInApp(args.monitorFor)
@@ -7591,6 +7648,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           .map((s) => s.workerId as string),
       )];
       const liveWorkerSet = new Set(liveWorkerIds);
+      if (!requestedWorker && liveWorkerIds.length > TEAM_CHAT_MONITOR_MAX_TARGETS) {
+        return textResult(
+          `[monitor_scope_too_large] More than ${TEAM_CHAT_MONITOR_MAX_TARGETS} live Workers match. Pass monitorFor to narrow the monitor.`,
+        );
+      }
 
       let targetWorkerIds = liveWorkerIds;
       if (requestedWorker) {
@@ -7613,20 +7675,39 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       });
       if (!selectedChannel) return textResult('[channel_not_found] No matching Channel.');
 
-      const resolvedAcks: Array<{ workerId: string; seq: number }> = [];
+      if ((args.acknowledge?.length ?? 0) > TEAM_CHAT_MONITOR_MAX_TARGETS) {
+        return textResult(`[bad_user_input] acknowledge accepts at most ${TEAM_CHAT_MONITOR_MAX_TARGETS} checkpoints.`);
+      }
+      const ackByWorker = new Map<string, { workerId: string; seq: number }>();
       const targetWorkerSet = new Set(targetWorkerIds);
       for (const ack of args.acknowledge ?? []) {
-        const worker = await resolveWorkerInApp(ack.worker);
-        if (!worker || !liveWorkerSet.has(worker.id) || !targetWorkerSet.has(worker.id)) {
+        const checkpoint = verifyTeamChatMonitorCheckpoint(ack.proof);
+        if (
+          !checkpoint ||
+          checkpoint.appId !== app.id ||
+          checkpoint.channelId !== selectedChannel.id ||
+          checkpoint.workerId !== ack.worker ||
+          checkpoint.channelId !== ack.channel ||
+          checkpoint.seq !== ack.seq
+        ) {
+          return textResult('[invalid_checkpoint] The acknowledgement was not issued for this Worker, Channel and sequence. Poll again.');
+        }
+        if (!liveWorkerSet.has(checkpoint.workerId) || !targetWorkerSet.has(checkpoint.workerId)) {
           return textResult('[monitor_target_not_live] An acknowledgement named a Worker outside this monitor\'s live targets.');
         }
-        const ackView = await resolveRegister(db, { attendee: { workerId: worker.id }, actor: ctx });
+        const held = ackByWorker.get(checkpoint.workerId);
+        if (!held || checkpoint.seq > held.seq) {
+          ackByWorker.set(checkpoint.workerId, { workerId: checkpoint.workerId, seq: checkpoint.seq });
+        }
+      }
+      const resolvedAcks = [...ackByWorker.values()];
+      for (const ack of resolvedAcks) {
+        const ackView = await resolveRegister(db, { attendee: { workerId: ack.workerId }, actor: ctx });
         const ackRow = ackView?.rows.find((candidate) => candidate.channel.id === selectedChannel.id);
         if (!ackRow) return textResult('[channel_not_found] No matching Channel.');
         if (!ackRow.canRead || ackRow.entry.role === 'POST') {
           return textResult('[forbidden] An acknowledgement named a Channel this Worker cannot watch.');
         }
-        resolvedAcks.push({ workerId: worker.id, seq: ack.seq });
       }
       // One checkpoint is one act. If any entry is invalid or a write fails,
       // roll all of them back rather than partially silencing the monitor.
@@ -7717,7 +7798,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         { channelRef: selectedChannel.id, sinceSeq, beforeSeq: null, mentionsRef: null, limit: args.limit ?? null, offset: null },
         ctx,
       );
-      const scannedThrough = page.items.reduce((max, message) => Math.max(max, message.seq), sinceSeq);
+      // lastSeq includes tombstones while channelMessages deliberately omits
+      // them. Once the visible page is exhausted, the captured watermark is
+      // nevertheless fully scanned and safe to acknowledge.
+      const pageExhausted = page.total <= page.items.length;
+      const scannedThrough = pageExhausted
+        ? selectedChannel.lastSeq
+        : page.items.reduce((max, message) => Math.max(max, message.seq), sinceSeq);
       const routed: string[] = [];
       for (const message of page.items) {
         const routes = watchers.filter((watcher) => {
@@ -7738,7 +7825,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const checkpoints = watchers
         .map((watcher) => ({ worker: watcher, seq: Math.min(scannedThrough, selectedChannel.lastSeq) }))
         .filter(({ worker, seq }) => seq > worker.seen)
-        .map(({ worker, seq }) => ({ worker: worker.workerId, seq }));
+        .map(({ worker, seq }) => ({
+          worker: worker.workerId,
+          channel: selectedChannel.id,
+          seq,
+          proof: signTeamChatMonitorCheckpoint({ v: 1, appId: app.id, channelId: selectedChannel.id, workerId: worker.workerId, seq }),
+        }));
       const more = page.total > page.items.length
         ? `\nMore messages remain after this page (${page.items.length} of ${page.total} scanned from the oldest stored cursor).`
         : '';
@@ -7892,9 +7984,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       monitor: z.boolean().optional().describe('Use the register + stored ChannelReadState for your live Worker sessions. Incompatible with sinceSeq, beforeSeq, mentions and offset.'),
       monitorFor: z.string().optional().describe('With monitor:true, narrow to one Worker by name, id or URN. It must be bound to one of your live sessions in this App.'),
       acknowledge: z.array(z.object({
-        worker: z.string().describe('Worker name, id or URN from the returned checkpoint.'),
-        seq: z.number().int().min(0).describe('Checkpoint seq to advance through after routing/action succeeded.'),
-      })).optional().describe('With monitor:true, deliberately advance these Workers\' stored cursors before polling again.'),
+        worker: z.string().describe('Exact Worker id from the returned checkpoint.'),
+        channel: z.string().describe('Exact Channel id from the returned checkpoint.'),
+        seq: z.number().int().min(0).describe('Exact sequence from the returned checkpoint.'),
+        proof: z.string().describe('Opaque server proof from the returned checkpoint; binds Worker + Channel + sequence.'),
+      })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
     },
     async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel, monitor, monitorFor, acknowledge }) => {
       if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
