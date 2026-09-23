@@ -229,6 +229,20 @@ describe('scrubSentryEvent', () => {
     const event: TransactionEvent = {
       type: 'transaction',
       transaction: 'POST /hooks/transaction-secret/name',
+      message: 'transaction-message-secret',
+      logentry: {
+        message: 'transaction-log-secret',
+        params: ['transaction-log-param-secret'],
+      },
+      extra: { secret: 'transaction-extra-secret' },
+      exception: {
+        values: [
+          {
+            type: 'URIError',
+            value: 'transaction-exception-secret',
+          },
+        ],
+      },
       request: {
         method: 'POST',
         url: 'https://srv.example/hooks/request-secret/name?hpt=request-query-secret',
@@ -307,6 +321,11 @@ describe('scrubSentryEvent', () => {
     const serialized = JSON.stringify(scrubbed);
     for (const secret of [
       'transaction-secret',
+      'transaction-message-secret',
+      'transaction-log-secret',
+      'transaction-log-param-secret',
+      'transaction-extra-secret',
+      'transaction-exception-secret',
       'request-secret',
       'request-query-secret',
       'transaction-header-secret',

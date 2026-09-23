@@ -18,7 +18,7 @@ const ID_PSEUDONYM_KEY = randomBytes(32);
  * body field is introduced. See cor:sec:040:01 and hadron-server#1268.
  */
 export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
-  scrubErrorPayload(event);
+  scrubFreeformPayload(event);
   scrubRequest(event);
   scrubTracePayload(event, false);
   return event;
@@ -31,6 +31,7 @@ export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
 export function scrubSentryTransaction(
   event: TransactionEvent,
 ): TransactionEvent {
+  scrubFreeformPayload(event);
   scrubRequest(event);
   // With the configured static lifecycle Sentry runs beforeSendSpan for the
   // root and children before assembling the beforeSendTransaction event. Keep
@@ -68,7 +69,7 @@ function rebuildSpan(span: SpanJSON, pseudonymizeIds: boolean): SpanJSON {
   };
 }
 
-function scrubErrorPayload(event: ErrorEvent): void {
+function scrubFreeformPayload(event: ErrorEvent | TransactionEvent): void {
   // Parser and router errors can echo caller-controlled URL segments in their
   // message. Keep the stack shape for diagnosis, but replace every exception
   // title with a fixed value and remove other free-form error payloads.
