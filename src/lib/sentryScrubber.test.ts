@@ -21,8 +21,8 @@ describe('scrubSentryEvent', () => {
 
     Sentry.init({
       dsn: 'https://public@example.com/1',
-      defaultIntegrations: false,
-      integrations: [Sentry.requestDataIntegration()],
+      integrations: (defaults) =>
+        defaults.filter((integration) => integration.name !== 'ContextLines'),
       beforeSend(event) {
         before.push(structuredClone(event));
         const scrubbed = scrubSentryEvent(event);
@@ -53,6 +53,12 @@ describe('scrubSentryEvent', () => {
           env: { HTTP_AUTHORIZATION: 'Bearer env-secret' },
         },
       });
+      scope.addBreadcrumb({
+        category: 'http',
+        data: {
+          url: 'https://srv.example/import?token=breadcrumb-secret',
+        },
+      });
 
       Sentry.captureException(new Error('positive-control resolver fault'));
       await Sentry.flush(2_000);
@@ -60,6 +66,7 @@ describe('scrubSentryEvent', () => {
 
     // Positive control: RequestData really did attach the sensitive values.
     expect(before).toHaveLength(1);
+    expect(before[0]?.sdk?.integrations).toContain('Http');
     expect(before[0]?.request).toMatchObject({
       headers: {
         authorization: 'Bearer hdr_user_secret',
@@ -70,6 +77,13 @@ describe('scrubSentryEvent', () => {
       },
       query_string: 'token=query-secret',
     });
+    expect(before[0]?.breadcrumbs).toContainEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          url: 'https://srv.example/import?token=breadcrumb-secret',
+        }),
+      }),
+    );
 
     expect(sent).toHaveLength(1);
     expect(sent[0]?.request).toEqual({
@@ -85,6 +99,7 @@ describe('scrubSentryEvent', () => {
       'query-secret',
       'body-secret',
       'env-secret',
+      'breadcrumb-secret',
       'url-user',
       'url-pass',
     ]) {
@@ -184,7 +199,20 @@ describe('scrubSentryEvent', () => {
         normalizedRequest: {
           headers: { 'x-hadron-memory-keys': 'transaction-memory-secret' },
         },
+        dynamicSamplingContext: {
+          trace_id: '1'.repeat(32),
+          transaction: 'POST /hooks/dsc-secret/name',
+          public_key: 'public',
+        },
       },
+      breadcrumbs: [
+        {
+          category: 'http',
+          data: {
+            url: 'https://srv.example/import?token=transaction-breadcrumb-secret',
+          },
+        },
+      ],
       contexts: {
         trace: {
           trace_id: 'e'.repeat(32),
@@ -199,6 +227,8 @@ describe('scrubSentryEvent', () => {
     const scrubbed = scrubSentryTransaction(event);
     expect(scrubbed.request).toEqual({ method: 'POST' });
     expect(scrubbed.transaction).toBeUndefined();
+    expect(scrubbed.sdkProcessingMetadata).toBeUndefined();
+    expect(scrubbed.breadcrumbs).toBeUndefined();
     expect(scrubbed.contexts?.trace).toEqual({
       trace_id: 'e'.repeat(32),
       span_id: 'f'.repeat(16),
@@ -218,6 +248,8 @@ describe('scrubSentryEvent', () => {
       'request-query-secret',
       'transaction-header-secret',
       'transaction-memory-secret',
+      'dsc-secret',
+      'transaction-breadcrumb-secret',
       'span-secret',
       'span-query-secret',
       'span-header-secret',

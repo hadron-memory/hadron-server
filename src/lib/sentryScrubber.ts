@@ -62,11 +62,14 @@ export function scrubSentrySpan(span: SpanJSON): SpanJSON {
 }
 
 function scrubRequest(event: ErrorEvent | TransactionEvent): void {
-  if (event.sdkProcessingMetadata) {
-    const { normalizedRequest: _sensitiveRequest, ...safeMetadata } =
-      event.sdkProcessingMetadata;
-    event.sdkProcessingMetadata = safeMetadata;
-  }
+  // RequestData keeps the original request here, and tracing can add a dynamic
+  // sampling context containing an unsanitized transaction name. Processing is
+  // complete by the time these hooks run, so no SDK metadata is safe to retain.
+  delete event.sdkProcessingMetadata;
+
+  // HTTP/fetch breadcrumbs may contain full caller-provided URLs. Drop the
+  // whole collection rather than trying to predict every integration shape.
+  delete event.breadcrumbs;
 
   if (!event.request) return;
 
