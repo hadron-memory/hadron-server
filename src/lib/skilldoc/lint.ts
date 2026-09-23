@@ -33,7 +33,8 @@ import {
   legacyAliasPaths,
   storedName,
 } from './declaration.js';
-import { MAX_DESCRIPTION_LEN, MAX_NAME_LEN, validName } from './name.js';
+import { requireSkillHost } from './hosts.js';
+import { validName } from './name.js';
 import { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
 
 /** Finding severities — the same vocabulary `spec lint` renders, so a caller
@@ -86,13 +87,14 @@ const TEMPLATE_RE = /\{\{[^}]*\}\}/;
  * A node with no declaration and no malformed key yields nothing: **not
  * declared is not a defect, it is the opt-in working.**
  */
-export function lintNode(node: SkillNode): Finding[] {
+export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Finding[] {
+  const hostRow = requireSkillHost(host);
   const out: Finding[] = [];
   const add = (rule: string, severity: Severity, message: string): void => {
     out.push({ urn: node.urn, memory: node.memoryUrn, rule, severity, message });
   };
 
-  const { declaration, malformed } = classifyDeclaration(node.properties);
+  const { declaration, malformed } = classifyDeclaration(node.properties, host);
   for (const key of malformed) {
     add(
       'skill-declaration-malformed',
@@ -104,8 +106,10 @@ export function lintNode(node: SkillNode): Finding[] {
 
   // D12 moved the declaration to `exports.<host>`; the top-level keys are read
   // as aliases, so this steers them across.
-  const migrated = declaration.key === `${EXPORTS_KEY}.${HOST_CLAUDE_SKILL}`;
-  const strays = legacyAliasPaths(node.properties);
+  // Claude only: the retired keys alias to Claude alone, so for any other host
+  // the declaration is always at exports.<host> and there is nothing to steer.
+  const migrated = !hostRow.legacyAliases || declaration.key === `${EXPORTS_KEY}.${host}`;
+  const strays = hostRow.legacyAliases ? legacyAliasPaths(node.properties) : [];
   if (!migrated) {
     add(
       'skill-legacy-key',
@@ -130,11 +134,11 @@ export function lintNode(node: SkillNode): Finding[] {
       'error',
       `properties.${declaration.key}.description is missing or empty — it is the trigger text the host matches against; the node cannot be exported without it`,
     );
-  } else if (descLen > MAX_DESCRIPTION_LEN) {
+  } else if (descLen > hostRow.maxDescriptionLength) {
     add(
       'skill-description-too-long',
       'error',
-      `description is ${descLen} characters; the host caps it at ${MAX_DESCRIPTION_LEN} and TRUNCATES the rest in the skill listing, so trigger phrases past the cut never fire — shorten by ${descLen - MAX_DESCRIPTION_LEN}`,
+      `description is ${descLen} characters; the host caps it at ${hostRow.maxDescriptionLength} and TRUNCATES the rest in the skill listing, so trigger phrases past the cut never fire — shorten by ${descLen - hostRow.maxDescriptionLength}`,
     );
   }
   if (desc !== '' && !TRIGGER_RE.test(desc)) {
@@ -152,11 +156,11 @@ export function lintNode(node: SkillNode): Finding[] {
       'error',
       `properties.${declaration.key}.name is missing or empty — since D12 the name is stored rather than derived, so there is nothing to fall back to; it is the skill's directory name and the host's identifier`,
     );
-  } else if (!validName(declaration.name)) {
+  } else if (!validName(declaration.name, hostRow.maxNameLength)) {
     add(
       'skill-name-invalid',
       'error',
-      `skill name "${declaration.name}" is not a valid skill name (kebab-case, ≤${MAX_NAME_LEN} chars) — it is stored at properties.${declaration.key}.name, so that is what to change`,
+      `skill name "${declaration.name}" is not a valid skill name (kebab-case, ≤${hostRow.maxNameLength} chars) — it is stored at properties.${declaration.key}.name, so that is what to change`,
     );
   }
 
@@ -212,10 +216,16 @@ export function lintNode(node: SkillNode): Finding[] {
  * population, and a collision is only meaningful over the set that will be
  * exported together.
  */
-export function lintCollisions(nodes: readonly SkillNode[]): Finding[] {
+export function lintCollisions(nodes: readonly SkillNode[], host: string = HOST_CLAUDE_SKILL): Finding[] {
+  // Validate at ENTRY, not only inside the loop: over an empty corpus the
+  // loop never runs, and an unknown host would read as an all-clear
+  // (#1280 review, Copilot + Codex).
+  requireSkillHost(host);
   const byName = new Map<string, SkillNode[]>();
   for (const node of nodes) {
-    const declaration = declaredSkill(node.properties);
+    // Per host: a name is a directory under ONE host's root, so the same name
+    // on a node's Claude and Codex declarations is by design, not a collision.
+    const declaration = declaredSkill(node.properties, host);
     if (declaration === null) continue;
     // Grouped by the RAW stored name, with the trim used ONLY to decide
     // whether there is a name at all (@copilot, PR #1233). Grouping by the

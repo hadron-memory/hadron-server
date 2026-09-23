@@ -18,6 +18,13 @@ export { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './n
 export { MAX_DESCRIPTION_LEN, MAX_NAME_LEN, validName } from './name.js';
 export { hash } from './hash.js';
 export { mergePatch, mergePropertiesPatch } from './exportsMerge.js';
+export {
+  HOST_CODEX_SKILL,
+  requireSkillHost,
+  SKILL_HOSTS,
+  skillHost,
+  type SkillHost,
+} from './hosts.js';
 export { HUMAN_LINE, LEGACY_HUMAN_LINE, render, SkillRenderError } from './render.js';
 export { isNodeUrn, parseFile, SkillFileParseError, type SkillFile } from './parse.js';
 export {

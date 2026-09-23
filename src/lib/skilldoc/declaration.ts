@@ -30,12 +30,13 @@ import { goTrimSpace } from './normalize.js';
 export const EXPORTS_KEY = 'exports';
 
 /**
- * The only host with a specified renderer (D10/D12). Other keys under
- * `exports` are recognised as declarations and shape-checked, but their
- * contents are not judged here — a second host's limits arrive with its
- * renderer, not before it.
+ * The hosts live in `hosts.ts` (#1254): one row per host, carrying its limits
+ * and whether the retired top-level keys alias to it. Every `exports.<host>`
+ * entry is shape-checked here whatever its host; which one BECOMES the
+ * declaration is the caller's `host` argument.
  */
-export const HOST_CLAUDE_SKILL = 'claudeSkill';
+import { HOST_CLAUDE_SKILL, requireSkillHost } from './hosts.js';
+export { HOST_CLAUDE_SKILL };
 
 /**
  * The pre-D12 declaration properties, read as aliases for
@@ -117,7 +118,7 @@ function ownValue(obj: Record<string, unknown>, key: string): unknown {
 /**
  * The ONE scan of a node's declaration properties.
  *
- * Returns the declaration for the `claudeSkill` host, and every property PATH
+ * Returns the declaration for `host` (default `claudeSkill`), and every property PATH
  * that is present but of the wrong shape.
  *
  * **Precedence:** `exports.claudeSkill` wins over the retired top-level
@@ -131,10 +132,17 @@ function ownValue(obj: Record<string, unknown>, key: string): unknown {
  * alias. A wrongly-typed field is reported rather than ignored, or a value the
  * contract requires would escape its rule by being a number.
  */
-export function classifyDeclaration(properties: unknown): {
+export function classifyDeclaration(
+  properties: unknown,
+  host: string = HOST_CLAUDE_SKILL,
+): {
   declaration: Declaration | null;
   malformed: string[];
 } {
+  // Throws on an unknown host: the boundary (skillPlan) refuses those, so one
+  // arriving here is a bug, and silently judging it as Claude would apply the
+  // wrong host's rules.
+  const { legacyAliases } = requireSkillHost(host);
   const malformed: string[] = [];
   if (!isPlainObject(properties)) return { declaration: null, malformed };
 
@@ -178,20 +186,25 @@ export function classifyDeclaration(properties: unknown): {
       // By UTF-8 bytes, matching Go: the default `.sort()` compares UTF-16
       // code units and orders an astral key against U+E000 the other way
       // round. A fixture generated from Go pins this.
-      for (const host of Object.keys(raw).sort(compareUtf8)) {
-        const path = `${EXPORTS_KEY}.${host}`;
-        const entry = raw[host];
+      for (const entryHost of Object.keys(raw).sort(compareUtf8)) {
+        const path = `${EXPORTS_KEY}.${entryHost}`;
+        const entry = raw[entryHost];
         if (!isPlainObject(entry)) {
           malformed.push(path);
           continue;
         }
-        const d = read(path, host, entry);
-        if (host === HOST_CLAUDE_SKILL) declaration = d;
+        const d = read(path, entryHost, entry);
+        if (entryHost === host) declaration = d;
       }
     }
   }
 
-  // Then the retired top-level keys, as aliases for the same host.
+  // Then the retired top-level keys, as aliases — for Claude only. They
+  // predate hosts and always meant Claude; reading them as another host's
+  // declaration would publish somewhere nobody chose. For any other host they
+  // are neither a declaration nor that host's malformed finding (the Claude
+  // plan reports them).
+  if (!legacyAliases) return { declaration, malformed };
   for (const key of LEGACY_TOP_LEVEL_KEYS) {
     if (!own(properties, key)) continue;
     const raw = ownValue(properties, key);
@@ -207,7 +220,7 @@ export function classifyDeclaration(properties: unknown): {
 }
 
 /**
- * A node's `claudeSkill` declaration, or null when it has none.
+ * A node's declaration for `host` (default `claudeSkill`), or null when it has none.
  *
  * **Not the same question as "will it export".** `enable` defaults to off, so
  * most declarations are declared and not enabled — and lint judges a
@@ -215,8 +228,8 @@ export function classifyDeclaration(properties: unknown): {
  * reporting BEFORE somebody turns it on. `status` likewise has to be able to
  * name a file whose declaration is switched off.
  */
-export function declaredSkill(properties: unknown): Declaration | null {
-  return classifyDeclaration(properties).declaration;
+export function declaredSkill(properties: unknown, host: string = HOST_CLAUDE_SKILL): Declaration | null {
+  return classifyDeclaration(properties, host).declaration;
 }
 
 /**
@@ -226,8 +239,8 @@ export function declaredSkill(properties: unknown): Declaration | null {
  * without a finding it would be silently skipped and counted in nobody's
  * total — an all-clear wider than the read that produced it.
  */
-export function malformedDeclarationPaths(properties: unknown): string[] {
-  return classifyDeclaration(properties).malformed;
+export function malformedDeclarationPaths(properties: unknown, host: string = HOST_CLAUDE_SKILL): string[] {
+  return classifyDeclaration(properties, host).malformed;
 }
 
 /**

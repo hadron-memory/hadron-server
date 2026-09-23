@@ -30,6 +30,6 @@ export const MAX_DESCRIPTION_LEN = 1024;
  * emoji in a name must measure the same on both sides or the parity fixtures
  * diverge on a value a human can see is identical.
  */
-export function validName(name: string): boolean {
-  return runeCount(name) <= MAX_NAME_LEN && NAME_RE.test(name);
+export function validName(name: string, maxLength: number = MAX_NAME_LEN): boolean {
+  return runeCount(name) <= maxLength && NAME_RE.test(name);
 }
