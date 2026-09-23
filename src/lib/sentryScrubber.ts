@@ -1,10 +1,15 @@
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import type { ErrorEvent, NodeOptions } from '@sentry/node';
 
 type TransactionEvent = Parameters<
   NonNullable<NodeOptions['beforeSendTransaction']>
 >[0];
 type SpanJSON = Parameters<NonNullable<NodeOptions['beforeSendSpan']>>[0];
+
+const ID_PSEUDONYM_KEY = randomBytes(32);
+const REMEMBERED_SAFE_ID_LIMIT = 10_000;
+const safeTraceIds = new Set<string>();
+const safeSpanIds = new Set<string>();
 
 /**
  * Keep only request metadata that cannot carry credentials or caller content.
@@ -35,7 +40,35 @@ export function scrubSentryTransaction(
 
 /** Keep span timing while replacing caller-influenced identity and payloads. */
 export function scrubSentrySpan(span: SpanJSON): SpanJSON {
-  return rebuildSpan(span, randomHex(16), randomHex(8));
+  const { start_timestamp, timestamp, is_segment } = span;
+  return {
+    trace_id: pseudonymizeId('trace', span.trace_id, 16, safeTraceIds),
+    span_id: pseudonymizeId('span', span.span_id, 8, safeSpanIds),
+    start_timestamp,
+    data: {},
+    ...(span.parent_span_id
+      ? {
+          parent_span_id: pseudonymizeId(
+            'span',
+            span.parent_span_id,
+            8,
+            safeSpanIds,
+          ),
+        }
+      : {}),
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    ...(is_segment !== undefined ? { is_segment } : {}),
+    ...(span.segment_id
+      ? {
+          segment_id: pseudonymizeId(
+            'span',
+            span.segment_id,
+            8,
+            safeSpanIds,
+          ),
+        }
+      : {}),
+  };
 }
 
 function scrubRequest(event: ErrorEvent | TransactionEvent): void {
@@ -66,34 +99,26 @@ function scrubTracePayload(event: ErrorEvent | TransactionEvent): void {
   const trace = event.contexts?.trace;
   if (!trace && !event.spans?.length) return;
 
-  const traceId = randomHex(16);
-  const rootSpanId = randomHex(8);
-  const oldRootSpanId = trace?.span_id;
-  const spanIds = new Map(
-    event.spans?.map((span) => [span.span_id, randomHex(8)]) ?? [],
-  );
+  if (event.spans) event.spans = event.spans.map(scrubSentrySpan);
 
-  if (event.spans) {
-    event.spans = event.spans.map((span) => {
-      const parentSpanId =
-        span.parent_span_id === oldRootSpanId
-          ? rootSpanId
-          : span.parent_span_id
-            ? spanIds.get(span.parent_span_id)
-            : undefined;
-      return rebuildSpan(
-        span,
-        traceId,
-        spanIds.get(span.span_id) ?? randomHex(8),
-        parentSpanId,
-      );
-    });
-  }
+  const traceId = trace
+    ? pseudonymizeId('trace', trace.trace_id, 16, safeTraceIds)
+    : event.spans![0]!.trace_id;
 
   if (trace) {
     event.contexts!.trace = {
       trace_id: traceId,
-      span_id: rootSpanId,
+      span_id: pseudonymizeId('span', trace.span_id, 8, safeSpanIds),
+      ...(trace.parent_span_id
+        ? {
+            parent_span_id: pseudonymizeId(
+              'span',
+              trace.parent_span_id,
+              8,
+              safeSpanIds,
+            ),
+          }
+        : {}),
     };
   }
   event.sdkProcessingMetadata = {
@@ -101,24 +126,25 @@ function scrubTracePayload(event: ErrorEvent | TransactionEvent): void {
   };
 }
 
-function rebuildSpan(
-  span: SpanJSON,
-  traceId: string,
-  spanId: string,
-  parentSpanId?: string,
-): SpanJSON {
-  const { start_timestamp, timestamp, is_segment } = span;
-  return {
-    trace_id: traceId,
-    span_id: spanId,
-    start_timestamp,
-    data: {},
-    ...(parentSpanId ? { parent_span_id: parentSpanId } : {}),
-    ...(timestamp !== undefined ? { timestamp } : {}),
-    ...(is_segment !== undefined ? { is_segment } : {}),
-  };
-}
+function pseudonymizeId(
+  domain: 'trace' | 'span',
+  value: string,
+  bytes: number,
+  rememberedSafeIds: Set<string>,
+): string {
+  if (rememberedSafeIds.has(value)) return value;
 
-function randomHex(bytes: number): string {
-  return randomBytes(bytes).toString('hex');
+  const pseudonym = createHmac('sha256', ID_PSEUDONYM_KEY)
+    .update(domain)
+    .update('\0')
+    .update(value)
+    .digest('hex')
+    .slice(0, bytes * 2);
+
+  if (rememberedSafeIds.size >= REMEMBERED_SAFE_ID_LIMIT) {
+    const oldest = rememberedSafeIds.values().next().value;
+    if (oldest) rememberedSafeIds.delete(oldest);
+  }
+  rememberedSafeIds.add(pseudonym);
+  return pseudonym;
 }

@@ -158,6 +158,17 @@ describe('scrubSentryEvent', () => {
         trace_id: event.contexts?.trace?.trace_id,
       },
     });
+    const relatedEvent: ErrorEvent = {
+      type: undefined,
+      contexts: {
+        trace: {
+          trace_id: 'a'.repeat(32),
+          span_id: 'b'.repeat(16),
+        },
+      },
+    };
+    scrubSentryEvent(relatedEvent);
+    expect(relatedEvent.contexts?.trace).toEqual(event.contexts?.trace);
     expect(JSON.stringify(event)).not.toMatch(
       /hook-secret|query-secret|error-transaction-secret|root-(span|query|data|tag|link)-secret/,
     );
@@ -236,7 +247,7 @@ describe('scrubSentryEvent', () => {
       ],
       contexts: {
         trace: {
-          trace_id: 'e'.repeat(32),
+          trace_id: 'a'.repeat(32),
           span_id: 'f'.repeat(16),
           description: 'POST /hooks/root-secret/name',
           data: { 'http.url': 'https://srv.example/root-data-secret' },
@@ -253,7 +264,7 @@ describe('scrubSentryEvent', () => {
       trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
       span_id: expect.stringMatching(/^[0-9a-f]{16}$/),
     });
-    expect(scrubbed.contexts?.trace?.trace_id).not.toBe('e'.repeat(32));
+    expect(scrubbed.contexts?.trace?.trace_id).not.toBe('a'.repeat(32));
     expect(scrubbed.contexts?.trace?.span_id).not.toBe('f'.repeat(16));
     expect(scrubbed.sdkProcessingMetadata).toEqual({
       dynamicSamplingContext: {
@@ -277,6 +288,8 @@ describe('scrubSentryEvent', () => {
     });
     expect(standalone.trace_id).not.toBe('a'.repeat(32));
     expect(standalone.span_id).not.toBe('b'.repeat(16));
+    expect(scrubbed.spans).toEqual([standalone]);
+    expect(scrubSentrySpan(standalone)).toEqual(standalone);
 
     const serialized = JSON.stringify(scrubbed);
     for (const secret of [
@@ -388,6 +401,12 @@ describe('scrubSentryEvent', () => {
         trace_id: sentTransactions[0]?.contexts?.trace?.trace_id,
       },
     });
+    const transactionSpanIds = new Set(
+      sentTransactions[0]?.spans?.map((span) => span.span_id),
+    );
+    expect(sentSpans.some((span) => transactionSpanIds.has(span.span_id))).toBe(
+      true,
+    );
 
     const serialized = JSON.stringify({ sentTransactions, sentSpans });
     for (const secret of [
