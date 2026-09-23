@@ -233,9 +233,12 @@ two-layer model without further setup:
   + 008 migrations both have hand-crafted SQL). The migration directory's
   timestamp is fixed-date by convention (recent migrations all use a
   `YYYYMMDDHHMMSS` prefix typed by hand, not generated).
-- **Spec kits**: `../spec-kits/specs/<NNN>-<name>/` (sibling repo). Read
-  `spec.md` first, then `plan.md`, then `tasks.md`. The spec corpus is the
-  source of truth for what the schema means.
+- **Specs**: the platform law corpus, `hrn:mem:hadronmemory.com:specs`, is the
+  source of truth for what the schema and the platform mean. Read a rule with
+  `hadron spec get <citation>`. The older Spec Kit trees (the sibling
+  `../spec-kits/specs/` and this repo's former `specs/`) are retired history.
+  Older code comments still cite them for background, but they are not law (see
+  "Specs and the constitution" below).
 
 ## Things to know before editing
 
