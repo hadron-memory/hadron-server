@@ -22,8 +22,14 @@ UPDATE "auth_codes"
 SET "oauth_scopes" = ARRAY['account']::TEXT[];
 
 -- Deliberately NO database default: every current writer supplies the exact
--- grant. A pre-migration server process that omits this column fails closed
--- instead of turning a newly approved `mcp` grant into `account`. Deployment
--- must drain old OAuth writers before this migration is applied.
+-- grant. A pre-migration writer that omits this column fails closed instead of
+-- turning a newly approved `mcp` grant into `account`.
+--
+-- This migration REQUIRES A HARD SERVER CUTOVER, not a mixed-version rolling
+-- deploy. An old reader does not select or enforce oauth_scopes, so it would
+-- treat a newly issued `mcp` key as unrestricted even though old writers fail
+-- closed. Prepare dependent clients first; stop and drain EVERY old server
+-- process; apply this migration and start the enforcing server; only then
+-- allow restricted-key issuance and release those clients.
 ALTER TABLE "user_api_keys" ALTER COLUMN "oauth_scopes" SET NOT NULL;
 ALTER TABLE "auth_codes" ALTER COLUMN "oauth_scopes" SET NOT NULL;
