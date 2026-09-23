@@ -1015,7 +1015,7 @@ export const typeDefs = `#graphql
     class: String
     """True when the file exists and does not parse. Reported identically by status and export."""
     parseFailure: Boolean!
-    """For the renamed class: the directory the file currently occupies."""
+    """Source directory selected for a MOVE or REMOVE action; also reported for the renamed class."""
     movedFrom: String
     findings: [SkillFinding!]!
     """

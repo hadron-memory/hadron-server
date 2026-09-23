@@ -292,6 +292,7 @@ describe('classes and bodies', () => {
       }],
     });
     expect(removed.entries[0].renderedBody).toBeNull();
+    expect(removed.entries[0].movedFrom).toBe('my-skill');
     expect(removed.entries[0].exportPlan).toMatchObject({
       action: 'REMOVE',
       preservesExistingFile: false,

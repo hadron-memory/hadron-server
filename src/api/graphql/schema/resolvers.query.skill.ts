@@ -674,12 +674,12 @@ export const skillQueries = {
         name,
         class: verdict.class ?? null,
         parseFailure: verdict.parseFailure === true,
-        // A forced local-edit MOVE is selected by the planner rather than by
-        // classifySkill, so its source directory comes from the paired file.
-        // Clients must not have to reproduce server pairing policy to execute
-        // the server-owned action.
+        // Forced local-edit MOVE/REMOVE actions are selected by the planner
+        // rather than by classifySkill, so their source directory comes from
+        // the paired file. Clients must not have to reproduce server pairing
+        // policy to execute the server-owned action.
         movedFrom:
-          exportPlan?.action === 'MOVE'
+          exportPlan?.action === 'MOVE' || exportPlan?.action === 'REMOVE'
             ? selectedFile?.dirName ?? verdict.movedFrom ?? null
             : verdict.movedFrom ?? null,
         findings,
