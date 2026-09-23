@@ -68,4 +68,114 @@ describe('#676 — hadron_list_nodes user-owned leak (ADMIN + bare parentRel)', 
     const text = await srv.callToolText('hadron_list_nodes', { memoryUrn: mem.urn });
     expect(text).not.toContain('TOP-SECRET-CHILD');
   });
+
+  it('lists a personal child for an ADMIN who is its strict owner despite a different tenant owner (#1217)', async () => {
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'divergent-owner-memory',
+        urn: `@${ownerId}:divergent-${generateId()}`,
+        ownerUserId: ownerId,
+        userId: adminId,
+      },
+    });
+    await createDbNode(db, { memoryId: mem.id, loc: 'strictowner', name: 'strict owner parent' });
+    await createDbNode(db, {
+      memoryId: mem.id,
+      loc: 'strictowner:child',
+      name: 'STRICT-OWNER-CHILD',
+    });
+
+    const text = await createTestableMcpServer({
+      userId: adminId,
+      roles: ['ADMIN'],
+    }).callToolText('hadron_list_nodes', { parentRel: 'strictowner' });
+
+    expect(text).toContain('STRICT-OWNER-CHILD');
+  });
+
+  it('does NOT cross the selected App when an ADMIN owns the other App personal memory', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'app-isolation-org', urn: `app-isolation-${generateId()}` },
+    });
+    const appA = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'App A', urn: `${org.urn}:app-a` },
+    });
+    const appB = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'App B', urn: `${org.urn}:app-b` },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Agent', urn: `${org.urn}:agent` },
+    });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'App B personal memory',
+        urn: `${org.urn}:app-b-personal`,
+        ownerUserId: ownerId,
+        userId: adminId,
+        appId: appB.id,
+        userMemoryOfAgentId: agent.id,
+      },
+    });
+    await createDbNode(db, { memoryId: mem.id, loc: 'crossapp', name: 'cross-App parent' });
+    await createDbNode(db, {
+      memoryId: mem.id,
+      loc: 'crossapp:child',
+      name: 'CROSS-APP-SECRET',
+    });
+
+    const text = await createTestableMcpServer({
+      userId: adminId,
+      roles: ['ADMIN'],
+      appId: appA.id,
+    }).callToolText('hadron_list_nodes', { parentRel: 'crossapp' });
+
+    expect(text).not.toContain('CROSS-APP-SECRET');
+  });
+
+  it('does not trust an App-derived allow-list carrying a strict-owner row', async () => {
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'fold-org', urn: `fold-org-${generateId()}` },
+    });
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Fold App', urn: `${org.urn}:app` },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Fold Agent', urn: `${org.urn}:agent` },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'directly attached personal memory',
+        urn: `${org.urn}:attached-personal`,
+        ownerUserId: ownerId,
+        userId: ownerId,
+        appId: app.id,
+        userMemoryOfAgentId: agent.id,
+      },
+    });
+    // This legacy/direct shape bypasses the modern attach mutation's class
+    // refusal and proves the read gate does not depend on every writer behaving.
+    await db.agentMemoryItem.create({
+      data: { agentId: agent.id, memoryId: mem.id, role: 'read' },
+    });
+    await createDbNode(db, { memoryId: mem.id, loc: 'foldsecret', name: 'fold parent' });
+    await createDbNode(db, {
+      memoryId: mem.id,
+      loc: 'foldsecret:child',
+      name: 'FOLDED-PERSONAL-SECRET',
+    });
+
+    const text = await createTestableMcpServer({ appId: app.id }).callToolText(
+      'hadron_list_nodes',
+      { parentRel: 'foldsecret' },
+    );
+
+    expect(text).not.toContain('FOLDED-PERSONAL-SECRET');
+  });
 });

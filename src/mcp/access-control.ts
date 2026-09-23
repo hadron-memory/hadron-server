@@ -25,7 +25,7 @@
  *     installs auto-pass.
  */
 
-import type { PrismaClient } from '../generated/prisma/index.js';
+import type { AgentSubscription, Memory, PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { participantAppIds } from '../lib/auth/appParticipation.js';
@@ -538,10 +538,11 @@ async function participantTeamSpaceFolds(
  * principal (no `userId`) never matches an owner, and is denied by the point
  * gates for exactly that reason, so it is denied here too.
  *
- * `personal`/`private` are deliberately NOT filtered here: the map's callers in
- * this module strict-gate those classes above it, and `hadron_list_memories`
- * folds the caller's own rows in separately. The GraphQL gate, which has no
- * per-row check, applies that filter itself (`appDerivedMemoryIds`).
+ * **3. Strict-owner classes.** `personal`/`private` never enter an App-derived
+ * map. Their identity, selected-App and subscription checks live in the
+ * canonical per-memory gate; discovery callers consume this map directly and
+ * cannot safely reproduce those checks. `hadron_list_memories` folds the
+ * caller's own strict-owner rows in separately through that gate.
  */
 async function admissibleFoldRows(
   db: PrismaClient,
@@ -554,9 +555,11 @@ async function admissibleFoldRows(
 
   const rows = await db.memory.findMany({
     where: { id: { in: ids } },
-    select: { id: true, appId: true, ownerUserId: true },
+    select: { id: true, class: true, appId: true, ownerUserId: true },
   });
   for (const row of rows) {
+    // Rule 3 — a fold is never authority for a strict-owner class.
+    if (row.class === 'personal' || row.class === 'private') continue;
     // Rule 2 — strict ownership admits the owner alone, nobody else, and no
     // credential-only principal.
     if (row.ownerUserId != null && row.ownerUserId !== callerUserId) continue;
@@ -746,26 +749,25 @@ export async function canWriteToMemory(
   return access.get(memoryId) === 'READ_WRITE';
 }
 
-/**
- * Check if a caller has read access to a specific memory.
- *
- * Personal-class memories enforce strict ownership (FR-016) — even ADMIN/OWNER
- * cannot read another user's personal memory. The 008 per-App isolation
- * (Memory.app_id === auth.appId) also applies. Private-class memories
- * (added 2026-05-24) follow the same rules in this layer.
- */
-export async function canReadMemory(
+type MemoryReadRow = Pick<
+  Memory,
+  'id' | 'class' | 'userId' | 'userMemoryOfAgentId' | 'appId' | 'ownerUserId'
+>;
+type SubscriptionReadRow = Pick<AgentSubscription, 'activatedAt' | 'expiresAt' | 'revokedAt'>;
+
+interface MemoryReadRowOptions {
+  access?: Map<string, string>;
+  installedAgentIds?: ReadonlySet<string>;
+  subscriptionsByAgentId?: ReadonlyMap<string, SubscriptionReadRow>;
+}
+
+/** Apply the canonical MCP memory-read gate to a row that is already loaded. */
+async function canReadMemoryRow(
   db: PrismaClient,
   auth: AuthContext,
-  memoryId: string,
-  opts: { access?: Map<string, string> } = {},
+  memory: MemoryReadRow,
+  opts: MemoryReadRowOptions = {},
 ): Promise<boolean> {
-  const memory = await db.memory.findUnique({
-    where: { id: memoryId },
-    select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true, ownerUserId: true },
-  });
-  if (!memory) return false;
-
   if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId) return false;
 
@@ -787,23 +789,24 @@ export async function canReadMemory(
       if (memory.appId !== null) {
         if (memory.appId !== auth.appId) return false;
       } else {
-        if (
-          !memory.userMemoryOfAgentId ||
-          !(await isAgentInstalled(db, auth.appId, memory.userMemoryOfAgentId))
-        ) {
-          return false;
-        }
+        if (!memory.userMemoryOfAgentId) return false;
+        const installed = opts.installedAgentIds
+          ? opts.installedAgentIds.has(memory.userMemoryOfAgentId)
+          : await isAgentInstalled(db, auth.appId, memory.userMemoryOfAgentId);
+        if (!installed) return false;
       }
 
       if (!memory.userMemoryOfAgentId || !memory.userId) return false;
-      const sub = await db.agentSubscription.findUnique({
-        where: {
-          userId_agentId: {
-            userId: memory.userId,
-            agentId: memory.userMemoryOfAgentId,
-          },
-        },
-      });
+      const sub = opts.subscriptionsByAgentId
+        ? opts.subscriptionsByAgentId.get(memory.userMemoryOfAgentId)
+        : await db.agentSubscription.findUnique({
+            where: {
+              userId_agentId: {
+                userId: memory.userId,
+                agentId: memory.userMemoryOfAgentId,
+              },
+            },
+          });
       if (!sub || !isActiveAgentSubscription(sub)) return false;
     }
     return true;
@@ -824,18 +827,132 @@ export async function canReadMemory(
   // on this memory via *any* of their App memberships?"
   if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
   // `opts.access` is a REQUEST-SCOPED memo of this same call for this same
-  // auth, nothing more — a caller checking many memories at once (GraphQL
-  // `appNodes`, PR #1093) would otherwise rebuild the whole App fold per
-  // memory, which is an N+1 over the App's agents and their memory items.
-  //
-  // It is only ever consulted HERE, on the non-personal path. The
-  // personal/private branch above returns before it, so a precomputed map can
-  // never widen the answer for the rows where the owner, per-App and
-  // subscription rules apply — the ones a caller is most likely to get wrong
-  // by hand. Pass it only when it came from `getMemoryAccess(db, auth)` with
-  // the SAME auth; a map from another principal would be a gate bypass.
+  // auth, nothing more — a caller checking many memories at once would
+  // otherwise rebuild the whole App fold per memory.
   const access = opts.access ?? (await getMemoryAccess(db, auth));
-  return access.has(memoryId);
+  return access.has(memory.id);
+}
+
+/**
+ * Check if a caller has read access to a specific memory.
+ *
+ * Personal-class memories enforce strict ownership (FR-016) — even ADMIN/OWNER
+ * cannot read another user's personal memory. The 008 per-App isolation
+ * (Memory.app_id === auth.appId) also applies. Private-class memories
+ * (added 2026-05-24) follow the same rules in this layer.
+ */
+export async function canReadMemory(
+  db: PrismaClient,
+  auth: AuthContext,
+  memoryId: string,
+  opts: { access?: Map<string, string> } = {},
+): Promise<boolean> {
+  const memory = await db.memory.findUnique({
+    where: { id: memoryId },
+    select: {
+      id: true,
+      class: true,
+      userId: true,
+      userMemoryOfAgentId: true,
+      appId: true,
+      ownerUserId: true,
+    },
+  });
+  if (!memory) return false;
+  return canReadMemoryRow(db, auth, memory, opts);
+}
+
+/**
+ * Batch the canonical MCP memory-read gate across a candidate set.
+ *
+ * This is the bulk companion to {@link canReadMemory}: it loads Memory rows
+ * once, builds the non-admin access map once, and batches the two
+ * personal/private side lookups (legacy AppAgent installs and subscriptions).
+ * The final decision stays in `canReadMemoryRow`, so discovery surfaces cannot
+ * replace the real gate with an ownership-only predicate.
+ */
+export async function filterReadableMemoryIds(
+  db: PrismaClient,
+  auth: AuthContext,
+  memoryIds: Iterable<string>,
+): Promise<Set<string>> {
+  const ids = [...new Set(memoryIds)];
+  if (ids.length === 0) return new Set();
+
+  const memories = await db.memory.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      class: true,
+      userId: true,
+      userMemoryOfAgentId: true,
+      appId: true,
+      ownerUserId: true,
+    },
+  });
+
+  const isPlatformAdmin = auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER');
+  const access = isPlatformAdmin ? undefined : await getMemoryAccess(db, auth);
+  let installedAgentIds: Set<string> | undefined;
+  let subscriptionsByAgentId: Map<string, SubscriptionReadRow> | undefined;
+
+  if (auth.appId && auth.userId) {
+    const ownedPersonal = memories.filter(
+      (memory) =>
+        (memory.class === 'personal' || memory.class === 'private') &&
+        memory.userId === auth.userId &&
+        memory.userMemoryOfAgentId !== null,
+    );
+    const legacyAgentIds = [
+      ...new Set(
+        ownedPersonal
+          .filter((memory) => memory.appId === null)
+          .map((memory) => memory.userMemoryOfAgentId!),
+      ),
+    ];
+    const installed = legacyAgentIds.length
+      ? await db.appAgent.findMany({
+          where: { appId: auth.appId, agentId: { in: legacyAgentIds } },
+          select: { agentId: true },
+        })
+      : [];
+    installedAgentIds = new Set(installed.map((row) => row.agentId));
+
+    const subscriptionAgentIds = [
+      ...new Set(
+        ownedPersonal
+          .filter(
+            (memory) =>
+              memory.appId === auth.appId ||
+              (memory.appId === null && installedAgentIds!.has(memory.userMemoryOfAgentId!)),
+          )
+          .map((memory) => memory.userMemoryOfAgentId!),
+      ),
+    ];
+    const subscriptions = subscriptionAgentIds.length
+      ? await db.agentSubscription.findMany({
+          where: { userId: auth.userId, agentId: { in: subscriptionAgentIds } },
+          select: { agentId: true, activatedAt: true, expiresAt: true, revokedAt: true },
+        })
+      : [];
+    subscriptionsByAgentId = new Map(
+      subscriptions.map(({ agentId, ...subscription }) => [agentId, subscription]),
+    );
+  }
+
+  const readable = new Set<string>();
+  for (const memory of memories) {
+    if (
+      await canReadMemoryRow(db, auth, memory, {
+        access,
+        installedAgentIds,
+        subscriptionsByAgentId,
+      })
+    ) {
+      readable.add(memory.id);
+    }
+  }
+  return readable;
 }
 
 /**

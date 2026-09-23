@@ -334,6 +334,39 @@ describe('#1092 memory read gates agree per principal shape', () => {
     expect(await enumerateGate(keyCtx, secret.id)).toBe(false);
   });
 
+  it('applies selected-App isolation to a strict-owner ADMIN on the enumeration gate', async () => {
+    const admin = await makeUser(920008, 'parity-admin');
+    const otherApp = await db.app.create({
+      data: {
+        id: generateId(),
+        name: 'parity-admin-other-app',
+        urn: `${fx.orgId}:parity-admin-other-app`,
+        organizationId: fx.orgId,
+      },
+    });
+    const agentId = (
+      await db.appAgent.findFirstOrThrow({ where: { appId: fx.appId }, select: { agentId: true } })
+    ).agentId;
+    const secret = await db.memory.create({
+      data: {
+        id: generateId(),
+        ownerUserId: strangerId,
+        userId: admin,
+        appId: otherApp.id,
+        userMemoryOfAgentId: agentId,
+        urn: `${fx.orgId}:parity-admin-cross-app`,
+        name: 'parity-admin-cross-app',
+        class: 'personal',
+      },
+    });
+    const ctx = { db, roles: ['ADMIN'], userId: admin, appId: fx.appId } as Context;
+    const auth = { roles: ['ADMIN'], userId: admin, appId: fx.appId } as AuthContext;
+
+    expect(await mcpGate(auth, secret.id)).toBe(false);
+    expect(await enumerateGate(ctx, secret.id)).toBe(false);
+    expect(await getAccessibleMemoryIds(ctx)).not.toContain(secret.id);
+  });
+
   it('never lets the App fold carry a spec-047 USER-OWNED row to a co-member (PR #1102 review)', async () => {
     // @codex P1 + @copilot, and both were right. The first strict-owner filter
     // excluded only `personal`/`private` — but spec 047 adds a SECOND

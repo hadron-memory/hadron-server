@@ -17,7 +17,11 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
-import { canWriteToMemory, getPrincipalAppMemoryAccess } from '../../../mcp/access-control.js';
+import {
+  canWriteToMemory,
+  filterReadableMemoryIds,
+  getPrincipalAppMemoryAccess,
+} from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
@@ -28,6 +32,7 @@ import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js'
 import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
+import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
 import {
   formatCanonicalUrn,
   type CanonicalUrnType,
@@ -1110,9 +1115,10 @@ export async function granteeShareAccess(
  * per request.
  *
  * Delegates the reach question to `getPrincipalAppMemoryAccess` — the one
- * predicate this and the MCP gate share, which enforces App scope and spec-047
- * strict ownership for both — and adds the one rule that is genuinely local to
- * THIS consumer: a **`personal`/`private` class filter**.
+ * predicate this and the MCP gate share, which enforces App scope, spec-047
+ * strict ownership, and exclusion of personal/private folds for both. The
+ * class filter below remains as defense in depth at this direct-enumeration
+ * boundary.
  *
  * That filter is not defensive decoration. The MCP map is documented
  * personal-free, and when #1092 shipped NOTHING enforced the claim:
@@ -1137,13 +1143,9 @@ export async function granteeShareAccess(
  * admits personal/private ONLY through its identity-scoped clauses (owner,
  * holdings, share grantee). Nothing App-derived may add to that set.
  *
- * The **`ownerUserId`** axis deliberately lives upstream instead (PR #1102
- * review). It is not a quirk of this consumer: `canReadMemory` and
- * `canWriteToMemory` both enforce it, so a map carrying rows they hard-deny is
- * wrong for every caller, not just this one. The rule of thumb the two placements
- * encode — push a filter to the shared predicate when the other consumers also
- * want it, keep it local only when it compensates for something local (here, the
- * absence of a per-row check).
+ * Both strict-owner axes live upstream as well (PR #1102 and #1260 reviews):
+ * a map carrying rows the canonical point gate hard-denies is wrong for every
+ * direct consumer, not just this one.
  */
 async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
   const all = await (ctx.appDerivedMemoryIdCache ??= (async () => {
@@ -1212,37 +1214,19 @@ export async function getAccessibleMemoryIds(
       where: {
         ...scope,
         deletedAt: null,
-        NOT: {
-          OR: [
-            // Another user's owner-owned personal/private memory (unchanged).
-            { class: { in: ['personal', 'private'] as any }, userId: { not: ctx.userId ?? '__none__' } },
-            // spec 047: a user-owned memory is STRICTLY private — a platform
-            // admin does NOT see another user's user-owned rows either.
-            //
-            // NON-personal classes only (@copilot, PR #1215). The clause above
-            // is the authority for personal/private — `userId` — exactly as
-            // `canReadMemoryRecord` and MCP's `canReadMemory` both branch (the
-            // latter says so outright: "Personal/private user-owned rows are
-            // already handled by the block above"). Unrestricted, this arm
-            // excluded a personal row on its TENANT owner, so an admin who is
-            // its STRICT owner lost node enumeration for a memory the record
-            // gate and this PR's list both admit them to. Fails CLOSED, so it
-            // was an over-narrowing rather than a leak — but this function is
-            // the one the parity test holds the list to, and a divergence that
-            // only shows for the admin shape is how the next copy drifts.
-            {
-              AND: [
-                { class: { notIn: ['personal', 'private'] as any } },
-                { ownerUserId: { not: null } },
-                { ownerUserId: { not: ctx.userId ?? '__none__' } },
-              ],
-            },
-          ],
-        },
+        // #1217 — one predicate shared with MCP browse/task discovery and both
+        // global-search slices. The strict owner of personal/private is userId;
+        // ownerUserId is only authoritative for the other classes.
+        NOT: foreignIdentityScopedMemoryFilter(ctx.userId),
       },
       select: { id: true },
     });
-    return all.map((m: { id: string }) => m.id);
+    const readable = await filterReadableMemoryIds(
+      ctx.db,
+      ctx,
+      all.map((memory) => memory.id),
+    );
+    return all.map((memory) => memory.id).filter((id) => readable.has(id));
   }
 
   // App Key without an active session — the App's installed-agent reach:

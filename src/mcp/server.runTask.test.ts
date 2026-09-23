@@ -305,6 +305,84 @@ describe('hadron_run_task — resolution by name (cor:api:060:02)', () => {
     expect(text).not.toContain('Alpha');
     expect(text).not.toContain('Add review');
   });
+
+  it('discovers a personal task for an ADMIN who is its strict owner despite a different tenant owner (#1217)', async () => {
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'Strict Tasks',
+        urn: `rt-viewer:strict-tasks-${generateId()}`,
+        ownerUserId: fx.viewer.id,
+        userId: fx.admin.id,
+      },
+    });
+    await mkNode(memory.id, 'tasks:strict-owner', 'Strict owner task', {
+      content: 'strict-owner content',
+      isRunnable: true,
+    });
+
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_run_task', {
+      task: 'Strict owner task',
+      memory: 'Strict Tasks',
+    });
+
+    expect(text).toContain('# Node: Strict owner task');
+    expect(text).toContain('strict-owner content');
+  });
+
+  it('does not disclose task candidates from another App personal memory to its ADMIN owner', async () => {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'run-task-org' } });
+    const appA = await db.app.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        name: 'Discovery App A',
+        urn: `${org.urn}:discovery-app-a`,
+      },
+    });
+    const appB = await db.app.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        name: 'Discovery App B',
+        urn: `${org.urn}:discovery-app-b`,
+      },
+    });
+    const agent = await db.agent.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        name: 'Discovery Agent',
+        urn: `${org.urn}:discovery-agent`,
+      },
+    });
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(),
+        class: 'personal',
+        name: 'App B secret task memory',
+        urn: `${org.urn}:app-b-secret-tasks`,
+        ownerUserId: fx.viewer.id,
+        userId: fx.admin.id,
+        appId: appB.id,
+        userMemoryOfAgentId: agent.id,
+      },
+    });
+    await mkNode(memory.id, 'tasks:cross-app-secret', 'Cross App Secret', {
+      content: 'must stay inside App B',
+      isRunnable: true,
+    });
+
+    const text = await createTestableMcpServer({
+      ...adminAuth(),
+      appId: appA.id,
+    }).callToolText('hadron_run_task', { task: 'Cross App Secret' });
+
+    expect(text).not.toContain('App B secret task memory');
+    expect(text).not.toContain('Cross App Secret');
+    expect(text).not.toContain('must stay inside App B');
+  });
 });
 
 describe('hadron_run_task — URN bypass + shared run core', () => {

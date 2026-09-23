@@ -30,6 +30,7 @@ import { emitEntityUrnV2, emitNodeUrnV2 } from '../urnEmit.js';
 import type { GlobalSearchHit, SearchEntityType, SearchField, SearchPrincipal } from './types.js';
 import { userUrn } from '../userHandle.js';
 import { canSeeUserPersonalFields, type UserVisibilityCtx } from '../auth/userVisibility.js';
+import { foreignIdentityScopedMemoryFilter } from '../auth/memoryOwnership.js';
 import { discoverableOrgWhere } from '../orgDiscoverability.js';
 
 type AnyWhere = Record<string, unknown>;
@@ -51,8 +52,6 @@ export interface AdapterCtx {
 
 // ── Scope helpers ──────────────────────────────────────────────────────────
 
-const PERSONAL_CLASSES = ['personal', 'private'] as unknown as Prisma.Enumerable<never>;
-
 // org-scope narrowing (issue #463): when `orgScopeId` is set, AND it onto the
 // access scope so it can only ever *narrow*, never widen (the Memory + Node
 // slices; the org-rooted slices are confined via `orgIds` instead). When unset,
@@ -66,12 +65,7 @@ function memoryScopeWhere(p: SearchPrincipal): AnyWhere {
       // Admin: everything except OTHER users' personal/private (034 carve-out)
       // AND other users' user-owned memories (spec 047 strict ownership).
       : {
-          NOT: {
-            OR: [
-              { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } },
-              { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: p.viewerUserId ?? '__none__' } }] },
-            ],
-          },
+          NOT: foreignIdentityScopedMemoryFilter(p.viewerUserId),
         };
   return p.orgScopeId ? { AND: [base, { organizationId: p.orgScopeId }] } : base;
 }
@@ -83,12 +77,7 @@ function nodeScopeWhere(p: SearchPrincipal): AnyWhere {
       ? { memoryId: { in: p.accessibleMemoryIds } }
       : {
           memory: {
-            NOT: {
-              OR: [
-                { class: { in: PERSONAL_CLASSES }, userId: { not: p.viewerUserId ?? '__none__' } },
-                { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: p.viewerUserId ?? '__none__' } }] },
-              ],
-            },
+            NOT: foreignIdentityScopedMemoryFilter(p.viewerUserId),
           },
         };
   return p.orgScopeId ? { AND: [base, { memory: { organizationId: p.orgScopeId } }] } : base;

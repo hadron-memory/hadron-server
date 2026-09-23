@@ -89,6 +89,7 @@ import {
 } from './app-selection-errors.js';
 import { mcpLog } from './mcp-log.js';
 import { tagsInputSchema } from './tagsInput.js';
+import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
 // Spec 025-oauth-for-mcp / research §R-6: error_description in the
 // 409 multi-App response links to a docs page that explains the
@@ -103,6 +104,7 @@ const MULTIPLE_APPS_DOCS_URL =
 import {
   canReadMemory,
   canWriteToMemory,
+  filterReadableMemoryIds,
   getAccessibleMemoryIds,
   getMemoryAccess,
 } from './access-control.js';
@@ -4014,12 +4016,7 @@ export function createMcpServerInstance(
         // memoryId resolved. Mirror the globalSearch admin carve-out (codex
         // review, #676).
         where.memory = {
-          NOT: {
-            OR: [
-              { class: { in: ['personal', 'private'] }, userId: { not: auth.userId ?? '__none__' } },
-              { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: auth.userId ?? '__none__' } }] },
-            ],
-          },
+          NOT: foreignIdentityScopedMemoryFilter(auth.userId),
         };
       }
       // NB: the runnable filter (cor:api:060) is applied IN-MEMORY below, not
@@ -4028,7 +4025,24 @@ export function createMcpServerInstance(
       // isRunnable=null), so the synthesize-parent walk would mislabel them as
       // "(missing — materialize)" even though they exist.
 
-      const allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
+      let allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
+
+      // A bare parentRel can match the same loc in more than one memory. For
+      // An unpinned parent can match the same loc in more than one memory. The
+      // query above is only a coarse candidate filter, for both ADMIN/OWNER
+      // callers (`memoryIds === null`) and ordinary callers (whose App-derived
+      // allow-list can contain legacy/directly-created rows). Re-run the
+      // canonical gate for every candidate memory before rendering:
+      // personal/private access also depends on identity, the selected App and,
+      // for legacy rows, the installed Agent + active subscription.
+      if (!memoryId) {
+        const readableMemoryIds = await filterReadableMemoryIds(
+          db,
+          auth,
+          allNodes.map((node) => node.memoryId),
+        );
+        allNodes = allNodes.filter((node) => readableMemoryIds.has(node.memoryId));
+      }
 
       // Deduplicate by (memoryId, loc): prefer canonical (isLink=false)
       // over link nodes. Multi-memory listings (memoryUrn unset, parentRel
@@ -6451,12 +6465,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const all = await db.memory.findMany({
         where: {
           deletedAt: null,
-          NOT: {
-            OR: [
-              { class: { in: ['personal', 'private'] as any }, userId: { not: auth.userId ?? '__none__' } },
-              { AND: [{ ownerUserId: { not: null } }, { ownerUserId: { not: auth.userId ?? '__none__' } }] },
-            ],
-          },
+          NOT: foreignIdentityScopedMemoryFilter(auth.userId),
         },
         select: { id: true, urn: true, name: true },
       });
@@ -6479,7 +6488,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       });
       for (const m of own) byId.set(m.id, m);
     }
-    return [...byId.values()];
+    // The queries above deliberately over-select so their indexed predicates
+    // remain cheap. Ownership is only one part of the real gate: an App-scoped
+    // personal/private memory must match the selected App, and legacy rows also
+    // require an installed Agent plus an active subscription. Apply that gate
+    // in one batch before exposing memory or task names through discovery.
+    const readableIds = await filterReadableMemoryIds(db, auth, byId.keys());
+    return [...byId.values()].filter((memory) => readableIds.has(memory.id));
   }
 
   function loadRunnableNodes(memoryId: string): Promise<RunTaskNode[]> {
