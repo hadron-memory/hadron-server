@@ -745,7 +745,7 @@ describe('review round 1 — @codex', () => {
     // readable encrypted memory has no session key. Hashing or rendering that
     // blob would hand an EXPORT client a file containing `enc:v1…` — which
     // overwrites a perfectly good local skill with ciphertext.
-    await mkNode('tasks:locked', {
+    const node = await mkNode('tasks:locked', {
       properties: declaration(),
       content: 'enc:v1:AAAA:BBBB:CCCC',
     });
@@ -757,6 +757,32 @@ describe('review round 1 — @codex', () => {
     // No findings either: every rule would be judging ciphertext, and a
     // finding about a body nobody could read is worse than silence.
     expect(got.entries[0].findings).toEqual([]);
+
+    // A legacy file with extra frontmatter normally gains local-edit
+    // protection, but even an explicit override cannot make an unreadable
+    // source safe to render. The unavailable verdict wins and ciphertext is
+    // never returned as an export body.
+    const forced = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: got.entries[0].urn,
+        nodeId: node.id,
+        headerHash: '',
+        fileHash: 'f'.repeat(16),
+        hasExtraFrontmatter: true,
+      }],
+    });
+    expect(forced.entries[0]).toMatchObject({
+      class: 'unavailable',
+      renderedBody: null,
+      exportPlan: {
+        action: 'SKIP',
+        preservesExistingFile: true,
+        reasons: [{ code: 'unavailable' }],
+      },
+    });
   });
 
   it('CONTROL: the same node with readable content is judged normally', async () => {

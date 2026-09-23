@@ -204,19 +204,6 @@ function buildExportPlan(args: {
     };
   }
 
-  if (protectsLocalEdit && !forceLocalEdit) {
-    return {
-      action: 'REFUSE',
-      preservesExistingFile: true,
-      reasons: [
-        reason(
-          'locally-edited',
-          'The installed skill has local edits. This export preserves it; use an explicit one-invocation override only if replacing it is intended.',
-        ),
-      ],
-    };
-  }
-
   if (driftClass === 'collision') {
     return {
       action: 'REFUSE',
@@ -238,6 +225,19 @@ function buildExportPlan(args: {
         reason(
           'unavailable',
           'The declared node is not readable in this plan, so the export cannot judge or replace its installed file.',
+        ),
+      ],
+    };
+  }
+
+  if (protectsLocalEdit && !forceLocalEdit) {
+    return {
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'locally-edited',
+          'The installed skill has local edits. This export preserves it; use an explicit one-invocation override only if replacing it is intended.',
         ),
       ],
     };
@@ -644,7 +644,12 @@ export const skillQueries = {
       const protectsLocalEdit =
         verdict.class === 'locally-edited' ||
         (selectedFile?.headerHash === '' && selectedFile.hasExtraFrontmatter === true);
-      const forceLocalEdit = input.force === true && protectsLocalEdit;
+      // `force` may override an actionable local edit, but it must never turn
+      // an unavailable/colliding source into a renderable one. In particular,
+      // an encrypted node without a session key still contains ciphertext.
+      const forceEligibleClass =
+        verdict.class === 'locally-edited' || verdict.class === 'unhashed' || verdict.class === 'disabled';
+      const forceLocalEdit = input.force === true && protectsLocalEdit && forceEligibleClass;
       const forcedAction = forceLocalEdit
         ? nf.declaration?.enable !== true
           ? 'REMOVE' as const
