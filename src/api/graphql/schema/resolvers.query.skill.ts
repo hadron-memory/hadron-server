@@ -628,7 +628,7 @@ export const skillQueries = {
       // protection and explicit one-invocation override as hashed edits.
       const protectsLocalEdit =
         verdict.class === 'locally-edited' ||
-        (verdict.class === 'unhashed' && selectedFile?.hasExtraFrontmatter === true);
+        (selectedFile?.headerHash === '' && selectedFile.hasExtraFrontmatter === true);
       const forceLocalEdit = input.force === true && protectsLocalEdit;
       const forcedAction = forceLocalEdit
         ? nf.declaration?.enable !== true

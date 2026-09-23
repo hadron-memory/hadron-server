@@ -394,6 +394,33 @@ describe('classes and bodies', () => {
       },
     });
     expect(forcedPlan.entries[0].renderedBody).toContain('# Body');
+
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ enable: false }) },
+    });
+    const disabledProtected = await plan({ intent: 'EXPORT', files: [file] });
+    expect(disabledProtected.entries[0]).toMatchObject({
+      class: 'disabled',
+      renderedBody: null,
+      exportPlan: {
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'locally-edited' }],
+      },
+    });
+
+    const disabledForced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(disabledForced.entries[0]).toMatchObject({
+      class: 'disabled',
+      movedFrom: 'my-skill',
+      renderedBody: null,
+      exportPlan: {
+        action: 'REMOVE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'disabled' }],
+      },
+    });
   });
 
   it('a parse failure is reported as a FAILURE, with no class', async () => {
