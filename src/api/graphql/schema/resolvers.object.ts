@@ -18,7 +18,7 @@ import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
 import { type Context, getAccessibleMemoryIds } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { nodeMutations } from './resolvers.mutation.node.js';
+import { nodeMutations, updateNodePropertiesWith } from './resolvers.mutation.node.js';
 import { nodeQueries } from './resolvers.query.node.js';
 import type { MemorySchema } from '../../../lib/memorySchema.js';
 import type { NodeWhere } from '../../../lib/retrieval/nodeWhere.js';
@@ -110,7 +110,7 @@ export const objectMutations = {
     } catch (e) {
       mapObjectError(e);
     }
-    const node = await nodeMutations.updateNodeProperties(_, { nodeRef: ref, properties: f, reason }, ctx);
+    const node = await updateNodePropertiesWith({ nodeRef: ref, properties: f, reason }, ctx, { mergeExports: false });
     return projectNodeToObject(node);
   },
 

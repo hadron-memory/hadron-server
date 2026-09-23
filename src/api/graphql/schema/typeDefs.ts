@@ -6618,7 +6618,10 @@ export const typeDefs = `#graphql
     Merge fields into an existing object (server-side atomic shallow merge +
     schema conformance on the result). 'ref' is the object id (or node URN);
     'fields' wins on key collision, unmentioned keys preserved. Returns the
-    updated flat object.
+    updated flat object. The merge is shallow for EVERY field, including one
+    named 'exports': the per-host merge-patch updateNodeProperties applies to
+    'properties.exports' (#1227) is a node-level skill-declaration rule and
+    does not apply to object fields.
     """
     updateObject(ref: ID!, fields: JSON!, reason: String): JSON!
 
