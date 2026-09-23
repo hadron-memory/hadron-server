@@ -3,9 +3,9 @@
  *
  * `__fixtures__/crosshost-acceptance.json` is VENDORED, not authored here:
  * copied byte-for-byte from hadron-cli `internal/skilldoc/testdata/
- * crosshost-acceptance.json` at 3c30a38 (hadron-cli PR #678: collisions
- * count enabled declarations only, #1289; previously 0894a9f from #671, first
- * vendored from #664 at 31d5f62). Its expectations
+ * crosshost-acceptance.json` at e67ff80 (hadron-cli PR #679: an unknown
+ * `exports` key is a host-free warning, #1292; before that 3c30a38 from #678,
+ * 0894a9f from #671, first vendored from #664 at 31d5f62). Its expectations
  * are written from the cor:agt:030 rules, not from either implementation, so
  * it can disagree with this one. That is the point of running it here.
  *
@@ -42,7 +42,7 @@ import {
 } from './index.js';
 
 const FIXTURE = join(import.meta.dirname, '__fixtures__', 'crosshost-acceptance.json');
-const VENDORED_SHA256 = '3285c87c2e0adbbfd53065b8b4a1fdfbcde61a6915ecd46757bfe44118b17d3c';
+const VENDORED_SHA256 = '89e81131c65e28752416a16f16a946cc490a0dbad46c07574c4ffe4f3d2fbae3';
 
 const raw = readFileSync(FIXTURE);
 const m = JSON.parse(raw.toString('utf8'));

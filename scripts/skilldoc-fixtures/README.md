@@ -25,7 +25,7 @@ was the one it forbade. `genfix.go` is that program, committed.
 #    unchanged reproduces it byte for byte (its `sourceCommit` says the same).
 #    Move it forward only to a commit whose Go matches the law you pin: an
 #    older one regenerates retired rules (@codex, PR #1295).
-COMMIT=3c30a38
+COMMIT=e67ff80
 rm -rf /tmp/cli && mkdir -p /tmp/cli
 gh api repos/hadron-memory/hadron-cli/tarball/$COMMIT | tar xz -C /tmp/cli --strip-components=1
 
@@ -81,9 +81,12 @@ instead of the thing is the mistake this file keeps being about.
 ## What it covers, and what it does NOT
 
 `genfix.go` regenerates `hash`, `render`, `renderParseRoundTrip` (stamping
-`sourceCommit`) and, since #1289, `lintCollisions` (stamping
-`lintCollisionsSourceCommit`). The `lintCollisions` INPUTS are authored in
-`collisionCases()` and upserted by name; only the findings come from Go.
+`sourceCommit`); since #1289, `lintCollisions` (stamping
+`lintCollisionsSourceCommit`); and since #1292, `declared` (stamping
+`declaredSourceCommit`). The `lintCollisions` INPUTS are authored in
+`collisionCases()` and upserted by name; `declared` keeps its inputs. Only the
+verdicts come from Go, including each `declared` case's `unknown` list
+(`UnknownHostKeys`, so the generator needs hadron-cli#679 or later to build).
 
 It does NOT touch `lint`, which stays at `lintSourceCommit`. Regenerating that
 wholesale mixes a re-measurement into a port.

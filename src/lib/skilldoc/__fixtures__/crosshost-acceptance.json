@@ -62,15 +62,16 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D02",
-      "title": "portal#887 as first written (`codex`, not `codexSkill`): Claude is declared, Codex is NOT, and nothing reports it",
+      "title": "portal#887 as first written (`codex`, not `codexSkill`): Claude is declared, Codex is NOT, and `codex` is an unknown key",
       "contracts": [
         "cor:agt:030:06"
       ],
-      "note": "The silent failure found on portal#888. Pinned so it stays visible: a shape-valid entry under a key no host owns is carried and judged by nobody.",
+      "note": "The silent failure found on portal#888: a shape-valid entry under a key no host owns was carried and judged by nobody. Since D-2026-09-23-E it is no longer silent: no HOST declares it (this case), and it is reported once, host-free, as skill-unknown-host-key (its `unknown` list here; lint L05-L07's `unhosted` column).",
       "properties": {
         "exports": {
           "claudeSkill": {
@@ -98,7 +99,10 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": [
+        "codex"
+      ]
     },
     {
       "id": "D03",
@@ -139,7 +143,8 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D04",
@@ -169,7 +174,8 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D05",
@@ -209,7 +215,8 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D06",
@@ -250,7 +257,8 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D07",
@@ -278,7 +286,8 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D08",
@@ -319,7 +328,8 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D09",
@@ -365,7 +375,8 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D10",
@@ -401,7 +412,8 @@
         "codexSkill": [
           "exports.codexSkill"
         ]
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D11",
@@ -434,7 +446,8 @@
           "skill"
         ],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D12",
@@ -479,7 +492,8 @@
         "codexSkill": [
           "exports.codexSkill.enable"
         ]
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D13",
@@ -519,7 +533,8 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D14",
@@ -560,7 +575,8 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
     },
     {
       "id": "D15",
@@ -601,7 +617,73 @@
       "malformed": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unknown": []
+    },
+    {
+      "id": "D16",
+      "title": "A MALFORMED unknown key beside a valid Claude declaration: nothing is malformed, Claude is still declared",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "note": "The second #1292 defect: a malformed exports.codex was a malformed ERROR on every host and withheld the valid Claude export beside it. An unknown key is never shape-checked; it is reported once, host-free.",
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codex": "yes"
+        }
+      },
+      "expect": {
+        "claudeSkill": {
+          "key": "exports.claudeSkill",
+          "name": "hadron-demo",
+          "description": "Use when demoing.",
+          "enable": true,
+          "enableSet": true
+        },
+        "codexSkill": null
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      },
+      "unknown": [
+        "codex"
+      ]
+    },
+    {
+      "id": "D17",
+      "title": "Several unknown keys are listed in UTF-8 byte order (U+10000 after U+E000; UTF-16 order would reverse them)",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "note": "Moved from hadron-server's two `declared` parity vectors, which pinned this ORDER under the old malformed verdict.",
+      "properties": {
+        "exports": {
+          "zulu": true,
+          "𐀀": true,
+          "alpha": true,
+          "": true
+        }
+      },
+      "expect": {
+        "claudeSkill": null,
+        "codexSkill": null
+      },
+      "malformed": {
+        "claudeSkill": [],
+        "codexSkill": []
+      },
+      "unknown": [
+        "alpha",
+        "zulu",
+        "",
+        "𐀀"
+      ]
     }
   ],
   "lint": [
@@ -631,7 +713,8 @@
         "codexSkill": [
           "skill-description-too-long:error"
         ]
-      }
+      },
+      "unhosted": []
     },
     {
       "id": "L02",
@@ -656,7 +739,8 @@
       "expect": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unhosted": []
     },
     {
       "id": "L03",
@@ -684,7 +768,8 @@
         "codexSkill": [
           "skill-name-invalid:error"
         ]
-      }
+      },
+      "unhosted": []
     },
     {
       "id": "L04",
@@ -711,15 +796,17 @@
           "skill-legacy-key:warning"
         ],
         "codexSkill": []
-      }
+      },
+      "unhosted": []
     },
     {
       "id": "L05",
-      "title": "The #887 `codex` key over the limit: NO host reports it",
+      "title": "The #887 `codex` key over the limit: no HOST judges it, and it is reported once, with no host, as a warning",
       "contracts": [
-        "cor:agt:030:05"
+        "cor:agt:030:05",
+        "cor:agt:030:06"
       ],
-      "note": "D02's silence extends to lint: an over-limit description under an unowned key passes every check.",
+      "note": "No host judges an unowned key, so its over-limit description is never an error; since D-2026-09-23-E the key itself is a warning attributed to no host (the `unhosted` column), never an alias.",
       "properties": {
         "exports": {
           "codex": {
@@ -732,7 +819,62 @@
       "expect": {
         "claudeSkill": [],
         "codexSkill": []
-      }
+      },
+      "unhosted": [
+        "skill-unknown-host-key:warning"
+      ]
+    },
+    {
+      "id": "L06",
+      "title": "A valid Claude declaration beside a well-formed unknown key: Claude lints clean, one host-free warning",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codex": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          }
+        }
+      },
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": []
+      },
+      "unhosted": [
+        "skill-unknown-host-key:warning"
+      ]
+    },
+    {
+      "id": "L07",
+      "title": "A valid Claude declaration beside a MALFORMED unknown key: no malformed error on any host, Claude lints clean, one host-free warning",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "properties": {
+        "exports": {
+          "claudeSkill": {
+            "name": "hadron-demo",
+            "description": "Use when demoing.",
+            "enable": true
+          },
+          "codex": "yes"
+        }
+      },
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": []
+      },
+      "unhosted": [
+        "skill-unknown-host-key:warning"
+      ]
     }
   ],
   "collisions": [
@@ -1355,6 +1497,17 @@
       ],
       "given": "a no-id file whose node's declaration is disabled AND whose node is over its host's limit",
       "expect": "left in place and reported: an over-limit node is skipped, and skipping never deletes"
+    },
+    {
+      "id": "P16",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621 (consuming hadron-server#1292's SkillPlan.unrecognized)",
+      "contracts": [
+        "cor:agt:030:00",
+        "cor:agt:030:06"
+      ],
+      "given": "export over D02 (a valid Claude declaration and an `exports.codex` entry)",
+      "expect": "the Claude file is written; the `codex` key is named ONCE in the end-of-run report as a declaration nothing can export, attributed to no host; the run continues and never prompts"
     }
   ]
 }
