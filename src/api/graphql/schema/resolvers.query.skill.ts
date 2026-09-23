@@ -617,25 +617,26 @@ export const skillQueries = {
       selectedDirs.add(f.dirName);
     }
     // A plan can be executed on macOS's default case-insensitive filesystem.
-    // Conservatively fold names here so `My-Skill` occupies `my-skill` on
-    // every host instead of returning an unsafe WRITE on one common host.
-    const filesystemDirKey = (dirName: string): string => dirName.normalize('NFC').toLowerCase();
-    const occupantCountByDir = new Map<string, number>();
-    for (const file of files) {
-      const key = filesystemDirKey(file.dirName);
-      occupantCountByDir.set(key, (occupantCountByDir.get(key) ?? 0) + 1);
-    }
+    // Plain lowercasing is not Unicode case folding (`ſkill` can alias
+    // `skill` while remaining unchanged by toLowerCase). ICU search collation
+    // covers those compatibility/case aliases and normalization differences.
+    // Base sensitivity is deliberately conservative: an occasional refusal
+    // for distinct names is safer than returning a destructive WRITE/MOVE.
+    const filesystemNameCollator = new Intl.Collator('und', { usage: 'search', sensitivity: 'base' });
+    const filesystemNamesEquivalent = (left: string, right: string): boolean =>
+      filesystemNameCollator.compare(left, right) === 0;
 
     const entries = nodeFacts.map((nf) => {
       const selectedFile = fileFor.get(nf.urn) ?? null;
       const verdict = classifySkill(nf, selectedFile);
       const findings = findingsByUrn.get(nf.urn) ?? [];
       const name = nf.declaration ? storedName(nf.declaration) : '';
-      const targetKey = filesystemDirKey(name);
-      const selectedOccupiesTarget = selectedFile !== null && filesystemDirKey(selectedFile.dirName) === targetKey;
+      const selectedOccupiesTarget =
+        selectedFile !== null && filesystemNamesEquivalent(selectedFile.dirName, name);
       const ambiguousFilesystemAlias =
         selectedFile !== null && selectedFile.dirName !== name && selectedOccupiesTarget;
-      const targetOccupants = name === '' ? 0 : (occupantCountByDir.get(targetKey) ?? 0);
+      const targetOccupants =
+        name === '' ? 0 : files.filter((file) => filesystemNamesEquivalent(file.dirName, name)).length;
       const targetOccupied = targetOccupants > (selectedOccupiesTarget ? 1 : 0);
       // A legacy unhashed file cannot prove that its body stayed unchanged,
       // but extra frontmatter is still direct evidence of a local edit. Keep
@@ -653,7 +654,7 @@ export const skillQueries = {
       const forcedAction = forceLocalEdit
         ? nf.declaration?.enable !== true
           ? 'REMOVE' as const
-          : selectedFile !== null && filesystemDirKey(selectedFile.dirName) !== targetKey
+          : selectedFile !== null && !filesystemNamesEquivalent(selectedFile.dirName, name)
             ? 'MOVE' as const
             : 'WRITE' as const
         : null;

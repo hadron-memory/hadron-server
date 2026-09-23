@@ -528,7 +528,7 @@ describe('classes and bodies', () => {
     });
   });
 
-  it.each(['my-skill', 'My-Skill'])(
+  it.each(['my-skill', 'My-Skill', 'my-ſkill'])(
     'refuses WRITE when an orphan at %s already occupies the target directory',
     async (occupiedDir) => {
       await mkNode('tasks:new-node', { properties: declaration() });
