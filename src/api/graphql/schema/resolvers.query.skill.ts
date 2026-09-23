@@ -63,6 +63,7 @@ import {
   storedName,
   type Finding,
   type FileFacts,
+  type DriftClass,
   type NodeFacts,
   type SkillNode,
 } from '../../../lib/skilldoc/index.js';
@@ -85,6 +86,7 @@ export interface SkillPlanInput {
   memories?: string[] | null;
   host?: string | null;
   files?: SkillFileFactsInput[] | null;
+  force?: boolean | null;
 }
 
 /**
@@ -137,6 +139,250 @@ const SKILL_PLAN_MAX_BODY_BYTES = BATCH_READ_MAX_BYTES;
 /** Classes whose §5 action writes a file. */
 const WRITES_A_FILE = new Set(['never-exported', 'stale', 'unhashed', 'renamed']);
 
+export type SkillExportAction = 'WRITE' | 'MOVE' | 'REMOVE' | 'SKIP' | 'REFUSE' | 'FAIL';
+
+export interface SkillExportReason {
+  code: string;
+  message: string;
+}
+
+export interface SkillExportPlan {
+  action: SkillExportAction;
+  preservesExistingFile: boolean;
+  reasons: SkillExportReason[];
+}
+
+/**
+ * Turn the server's class + lint judgment into the export action a client may
+ * perform. This is a PLAN, never a claim that local I/O happened: the server
+ * cannot see the caller's filesystem after the response.
+ *
+ * cor:agt:030:01 / :05 make the distinctions load-bearing: a local edit is
+ * REFUSED, an over-host-limit declaration is SKIPPED while preserving any
+ * installed file, and an unsafe render is a FAILURE with its reason intact.
+ */
+function buildExportPlan(args: {
+  driftClass: DriftClass | null;
+  parseFailure: boolean;
+  hasFile: boolean;
+  targetOccupied: boolean;
+  ambiguousFilesystemAlias: boolean;
+  unhashedMove: boolean;
+  protectsLocalEdit: boolean;
+  forceLocalEdit: boolean;
+  forcedAction: 'WRITE' | 'MOVE' | 'REMOVE' | null;
+  findings: Finding[];
+  renderedBody: string | null;
+  renderFailure: string | null;
+}): SkillExportPlan {
+  const {
+    driftClass,
+    parseFailure,
+    hasFile,
+    targetOccupied,
+    ambiguousFilesystemAlias,
+    unhashedMove,
+    protectsLocalEdit,
+    forceLocalEdit,
+    forcedAction,
+    findings,
+    renderedBody,
+    renderFailure,
+  } = args;
+  const reason = (code: string, message: string): SkillExportReason => ({ code, message });
+
+  if (parseFailure) {
+    return {
+      action: 'FAIL',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'parse-failed',
+          'The installed skill file could not be parsed. Repair it or remove it before exporting again; this export leaves it unchanged.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'collision') {
+    return {
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'collision',
+          'More than one declared node uses this skill name. The declarations need unique stored names before exporting; this export leaves existing files unchanged.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'unavailable') {
+    return {
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'unavailable',
+          'The declared node is not readable in this plan, so the export cannot judge or replace its installed file.',
+        ),
+      ],
+    };
+  }
+
+  if (protectsLocalEdit && !forceLocalEdit) {
+    return {
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'locally-edited',
+          'The installed skill has local edits. This export preserves it; use an explicit one-invocation override only if replacing it is intended.',
+        ),
+      ],
+    };
+  }
+
+  const blockingFindings = findings.filter((finding) => finding.severity === 'error');
+  // Lint is the export gate even when no write would otherwise be needed, and
+  // even when the declaration is disabled. A blocked entry always preserves
+  // its installed file; it cannot quietly become a prune instruction.
+  if (blockingFindings.length > 0) {
+    return {
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: blockingFindings.map((finding) => reason(finding.rule, finding.message)),
+    };
+  }
+
+  if (driftClass === 'disabled') {
+    return {
+      action: hasFile ? 'REMOVE' : 'SKIP',
+      preservesExistingFile: !hasFile,
+      reasons: [
+        reason(
+          'disabled',
+          hasFile
+            ? 'The declaration is disabled for this host, so the client should remove its generated file.'
+            : 'The declaration is disabled for this host and has no installed file to remove.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'current') {
+    return {
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [reason('current', 'The installed skill already matches the source node.')],
+    };
+  }
+
+  // The server cannot know whether the caller's filesystem is case-sensitive.
+  // A raw rename that normalizes to the same path would need MOVE on one host
+  // and in-place WRITE on another; either universal answer can delete or
+  // duplicate a skill. Refuse the ambiguous write and leave the paired source
+  // named so the client/user can resolve it with local filesystem knowledge.
+  if (ambiguousFilesystemAlias) {
+    return {
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'filesystem-alias-ambiguous',
+          'The source and target names may identify the same directory on this filesystem. Resolve the case or Unicode-only rename locally before exporting.',
+        ),
+      ],
+    };
+  }
+
+  if (renderFailure !== null) {
+    return {
+      action: 'FAIL',
+      preservesExistingFile: true,
+      reasons: [reason('render-failed', renderFailure)],
+    };
+  }
+
+  // Occupancy matters only when the action writes the destination. A forced
+  // REMOVE touches the paired source file and must not be blocked by an
+  // unrelated orphan at the declaration's (possibly renamed) target.
+  if (targetOccupied && forcedAction !== 'REMOVE') {
+    return {
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'target-occupied',
+          'An installed directory already occupies this skill name. This export leaves existing files unchanged.',
+        ),
+      ],
+    };
+  }
+
+  if (forceLocalEdit && forcedAction !== null) {
+    if (forcedAction !== 'REMOVE' && renderedBody === null) {
+      return {
+        action: 'FAIL',
+        preservesExistingFile: true,
+        reasons: [reason('export-action-unresolved', 'The local-edit override could not produce a safe replacement body.')],
+      };
+    }
+    return {
+      action: forcedAction,
+      preservesExistingFile: false,
+      reasons: [
+        reason(
+          'locally-edited-override',
+          'This invocation explicitly overrides the local edit; the client may apply the planned replacement, move, or removal.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'renamed' && renderedBody !== null) {
+    return {
+      action: 'MOVE',
+      preservesExistingFile: false,
+      reasons: [reason('renamed', 'The stored skill name changed; write the rendered file at the new name and remove the old generated file.')],
+    };
+  }
+
+  if (
+    (driftClass === 'never-exported' || driftClass === 'stale' || driftClass === 'unhashed') &&
+    renderedBody !== null
+  ) {
+    return {
+      action: driftClass === 'unhashed' && unhashedMove ? 'MOVE' : 'WRITE',
+      preservesExistingFile: false,
+      reasons: [
+        reason(
+          driftClass,
+          driftClass === 'never-exported'
+            ? 'No installed skill exists for this declaration.'
+            : driftClass === 'stale'
+              ? 'The source node changed after the installed skill was generated.'
+              : 'The installed skill uses a legacy provenance header and should be regenerated.',
+        ),
+      ],
+    };
+  }
+
+  // Defensive and loud: every Classification state is handled above. If a
+  // future class is added without an export policy, clients preserve the file
+  // and receive a reason instead of guessing an action.
+  return {
+    action: 'FAIL',
+    preservesExistingFile: true,
+    reasons: [
+      reason(
+        'export-action-unresolved',
+        `The server could not derive a safe export action for class ${JSON.stringify(driftClass)}.`,
+      ),
+    ],
+  };
+}
+
 export const skillQueries = {
   /**
    * Judge a corpus of declared nodes against the files a client found.
@@ -150,6 +396,11 @@ export const skillQueries = {
     { input }: { input: SkillPlanInput },
     ctx: Context,
   ) => {
+    if (input.force === true && input.intent !== 'EXPORT') {
+      throw new GraphQLError('skillPlan: force is valid only with EXPORT intent.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
     const host = input.host ?? HOST_CLAUDE_SKILL;
     if (host !== HOST_CLAUDE_SKILL) {
       // D10: a second host arrives with its RENDERER, not before it. Refusing
@@ -365,11 +616,48 @@ export const skillQueries = {
       fileFor.set(paired.urn, facts);
       selectedDirs.add(f.dirName);
     }
+    // A plan can be executed on macOS's default case-insensitive filesystem.
+    // Plain lowercasing is not Unicode case folding (`ſkill` can alias
+    // `skill` while remaining unchanged by toLowerCase). ICU search collation
+    // covers those compatibility/case aliases and normalization differences.
+    // Base sensitivity is deliberately conservative: an occasional refusal
+    // for distinct names is safer than returning a destructive WRITE/MOVE.
+    const filesystemNameCollator = new Intl.Collator('und', { usage: 'search', sensitivity: 'base' });
+    const filesystemNamesEquivalent = (left: string, right: string): boolean =>
+      filesystemNameCollator.compare(left, right) === 0;
 
     const entries = nodeFacts.map((nf) => {
-      const verdict = classifySkill(nf, fileFor.get(nf.urn) ?? null);
+      const selectedFile = fileFor.get(nf.urn) ?? null;
+      const verdict = classifySkill(nf, selectedFile);
       const findings = findingsByUrn.get(nf.urn) ?? [];
       const name = nf.declaration ? storedName(nf.declaration) : '';
+      const selectedOccupiesTarget =
+        selectedFile !== null && filesystemNamesEquivalent(selectedFile.dirName, name);
+      const ambiguousFilesystemAlias =
+        selectedFile !== null && selectedFile.dirName !== name && selectedOccupiesTarget;
+      const targetOccupants =
+        name === '' ? 0 : files.filter((file) => filesystemNamesEquivalent(file.dirName, name)).length;
+      const targetOccupied = targetOccupants > (selectedOccupiesTarget ? 1 : 0);
+      // A legacy unhashed file cannot prove that its body stayed unchanged,
+      // but extra frontmatter is still direct evidence of a local edit. Keep
+      // the historical `unhashed` class while giving it the same overwrite
+      // protection and explicit one-invocation override as hashed edits.
+      const protectsLocalEdit =
+        verdict.class === 'locally-edited' ||
+        (selectedFile?.headerHash === '' && selectedFile.hasExtraFrontmatter === true);
+      // `force` may override an actionable local edit, but it must never turn
+      // an unavailable/colliding source into a renderable one. In particular,
+      // an encrypted node without a session key still contains ciphertext.
+      const forceEligibleClass =
+        verdict.class === 'locally-edited' || verdict.class === 'unhashed' || verdict.class === 'disabled';
+      const forceLocalEdit = input.force === true && protectsLocalEdit && forceEligibleClass;
+      const forcedAction = forceLocalEdit
+        ? nf.declaration?.enable !== true
+          ? 'REMOVE' as const
+          : selectedFile !== null && !filesystemNamesEquivalent(selectedFile.dirName, name)
+            ? 'MOVE' as const
+            : 'WRITE' as const
+        : null;
 
       // A node failing lint is NEVER exported (§5.1 step 2). Structural
       // rather than advisory: the body is simply absent, so a client cannot
@@ -379,10 +667,14 @@ export const skillQueries = {
       const wantsBody =
         input.intent === 'EXPORT' &&
         verdict.class !== undefined &&
-        WRITES_A_FILE.has(verdict.class) &&
-        !hasError;
+        ((WRITES_A_FILE.has(verdict.class) && !protectsLocalEdit) ||
+          (forceLocalEdit && forcedAction !== 'REMOVE')) &&
+        !hasError &&
+        !ambiguousFilesystemAlias &&
+        !targetOccupied;
 
       let renderedBody: string | null = null;
+      let renderFailure: string | null = null;
       if (wantsBody) {
         // `render` refuses a source it could not write safely (#1223); a node
         // whose URN trips that is reported as a finding-free entry with no
@@ -395,10 +687,34 @@ export const skillQueries = {
             nf.declaration?.description ?? '',
             findContent(skillNodes, nf.urn),
           );
-        } catch {
+        } catch (error) {
           renderedBody = null;
+          renderFailure =
+            error instanceof Error ? error.message : 'The skill renderer failed with a non-Error value.';
         }
       }
+
+      const exportPlan =
+        input.intent === 'EXPORT'
+          ? buildExportPlan({
+              driftClass: verdict.class ?? null,
+              parseFailure: verdict.parseFailure === true,
+              hasFile: selectedFile !== null,
+              targetOccupied,
+              ambiguousFilesystemAlias,
+              unhashedMove:
+                verdict.class === 'unhashed' &&
+                selectedFile !== null &&
+                selectedFile.dirName !== name &&
+                !selectedOccupiesTarget,
+              protectsLocalEdit,
+              forceLocalEdit,
+              forcedAction,
+              findings,
+              renderedBody,
+              renderFailure,
+            })
+          : null;
 
       return {
         urn: nf.urn,
@@ -406,9 +722,19 @@ export const skillQueries = {
         name,
         class: verdict.class ?? null,
         parseFailure: verdict.parseFailure === true,
-        movedFrom: verdict.movedFrom ?? null,
+        // Forced local-edit MOVE/REMOVE actions are selected by the planner
+        // rather than by classifySkill, so their source directory comes from
+        // the paired file. Clients must not have to reproduce server pairing
+        // policy to execute the server-owned action.
+        movedFrom:
+          exportPlan?.action === 'MOVE' || exportPlan?.action === 'REMOVE'
+            ? selectedFile?.dirName ?? verdict.movedFrom ?? null
+            : exportPlan?.action === 'WRITE' && verdict.class === 'renamed'
+              ? null
+              : verdict.movedFrom ?? null,
         findings,
         renderedBody,
+        exportPlan,
       };
     });
 

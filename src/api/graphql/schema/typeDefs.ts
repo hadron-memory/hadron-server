@@ -959,6 +959,8 @@ export const typeDefs = `#graphql
     host: String
     """What the client found on disk. Empty for lint, which touches no disk."""
     files: [SkillFileFactsInput!]
+    """With EXPORT only, explicitly replace, move, or remove a paired file with detected local edits for this invocation."""
+    force: Boolean
   }
 
   """One lint result, carrying the node and memory so a renderer never looks them back up."""
@@ -969,6 +971,35 @@ export const typeDefs = `#graphql
     """Either error or warning — the same vocabulary spec lint renders."""
     severity: String!
     message: String!
+  }
+
+  """A client-side filesystem action planned by the server. It does not claim that I/O occurred."""
+  enum SkillExportAction {
+    WRITE
+    MOVE
+    REMOVE
+    SKIP
+    REFUSE
+    FAIL
+  }
+
+  """One server-owned reason for an export action."""
+  type SkillExportReason {
+    """Stable machine-readable reason, usually a drift class or lint rule."""
+    code: String!
+    """Actionable text clients can display without recreating server policy."""
+    message: String!
+  }
+
+  """
+  The server's filesystem plan for one skill. The client still performs and
+  reports actual local I/O; this object records only what the server judged safe.
+  """
+  type SkillExportPlanEntry {
+    action: SkillExportAction!
+    """True when the client must leave any installed file unchanged."""
+    preservesExistingFile: Boolean!
+    reasons: [SkillExportReason!]!
   }
 
   type SkillPlanEntry {
@@ -984,7 +1015,7 @@ export const typeDefs = `#graphql
     class: String
     """True when the file exists and does not parse. Reported identically by status and export."""
     parseFailure: Boolean!
-    """For the renamed class: the directory the file currently occupies."""
+    """Source directory selected for a MOVE or REMOVE action; also reported for the renamed class."""
     movedFrom: String
     findings: [SkillFinding!]!
     """
@@ -993,6 +1024,11 @@ export const typeDefs = `#graphql
     server already judged broken.
     """
     renderedBody: String
+    """
+    Present only for EXPORT. This is a planned action and its server-owned
+    reasons, not evidence that the client completed a filesystem write.
+    """
+    exportPlan: SkillExportPlanEntry
   }
 
   """A file that paired with no declared node. Never removed without an explicit prune."""

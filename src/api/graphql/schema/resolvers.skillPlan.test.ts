@@ -138,8 +138,14 @@ describe('classes and bodies', () => {
 
     expect(status.entries[0].class).toBe('never-exported');
     expect(status.entries[0].renderedBody).toBeNull();
+    expect(status.entries[0].exportPlan).toBeNull();
     expect(exported.entries[0].class).toBe('never-exported');
     expect(exported.entries[0].renderedBody).toContain('# Body');
+    expect(exported.entries[0].exportPlan).toEqual({
+      action: 'WRITE',
+      preservesExistingFile: false,
+      reasons: [{ code: 'never-exported', message: 'No installed skill exists for this declaration.' }],
+    });
     // The body is a real skill file, not just the node's content.
     expect(exported.entries[0].renderedBody).toContain('name: my-skill');
   });
@@ -156,6 +162,295 @@ describe('classes and bodies', () => {
     expect(got.entries[0].class).toBe('never-exported');
     expect(got.entries[0].findings.map((f: { rule: string }) => f.rule)).toContain('skill-name-invalid');
     expect(got.entries[0].renderedBody).toBeNull();
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-name-invalid' }],
+    });
+  });
+
+  it('reports an over-limit description as out of export and preserves an installed file', async () => {
+    const node = await mkNode('tasks:too-long', {
+      properties: declaration({ description: 'x'.repeat(1083) }),
+    });
+    const urn = (await plan({ intent: 'LINT' })).entries[0].urn as string;
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash: 'a'.repeat(16),
+        fileHash: 'a'.repeat(16),
+      }],
+    });
+
+    expect(got.entries[0].class).toBe('stale');
+    expect(got.entries[0].renderedBody).toBeNull();
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-description-too-long' }],
+    });
+    expect(got.entries[0].exportPlan.reasons[0].message).toContain('1083 characters');
+    expect(got.entries[0].exportPlan.reasons[0].message).toContain('1024');
+    expect(got.orphans).toEqual([]);
+  });
+
+  it('reports an unsafe render as a failure with the renderer reason', async () => {
+    await mkNode('tasks:unsafe-->source', { properties: declaration() });
+
+    const got = await plan({ intent: 'EXPORT', files: [] });
+
+    expect(got.entries[0].class).toBe('never-exported');
+    expect(got.entries[0].renderedBody).toBeNull();
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'FAIL',
+      preservesExistingFile: true,
+      reasons: [{ code: 'render-failed' }],
+    });
+    expect(got.entries[0].exportPlan.reasons[0].message).toContain('provenance comment');
+  });
+
+  it('refuses a locally edited file and names the remedies', async () => {
+    const node = await mkNode('tasks:locally-edited', { properties: declaration() });
+    const exported = await plan({ intent: 'EXPORT', files: [] });
+    const urn = exported.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(exported.entries[0].renderedBody as string)![1]!;
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: 'f'.repeat(16),
+      }],
+    });
+
+    expect(got.entries[0].class).toBe('locally-edited');
+    expect(got.entries[0].renderedBody).toBeNull();
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [{ code: 'locally-edited' }],
+    });
+    expect(got.entries[0].exportPlan.reasons[0].message).toContain('one-invocation override');
+
+    const forced = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: 'f'.repeat(16),
+      }],
+    });
+    expect(forced.entries[0].class).toBe('locally-edited');
+    expect(forced.entries[0].renderedBody).toContain('# Body');
+    expect(forced.entries[0].exportPlan).toMatchObject({
+      action: 'WRITE',
+      preservesExistingFile: false,
+      reasons: [{ code: 'locally-edited-override' }],
+    });
+
+    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ name: 'new-name' }) } });
+    const moved = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: 'f'.repeat(16),
+      }],
+    });
+    expect(moved.entries[0].renderedBody).toContain('name: new-name');
+    expect(moved.entries[0].movedFrom).toBe('my-skill');
+    expect(moved.entries[0].exportPlan).toMatchObject({
+      action: 'MOVE',
+      preservesExistingFile: false,
+      reasons: [{ code: 'locally-edited-override' }],
+    });
+
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ name: 'new-name', enable: false }) },
+    });
+    const removed = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: 'f'.repeat(16),
+      }, {
+        dirName: 'new-name',
+        sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
+        nodeId: 'deleted-node',
+        headerHash: 'b'.repeat(16),
+        fileHash: 'b'.repeat(16),
+      }],
+    });
+    expect(removed.entries[0].renderedBody).toBeNull();
+    expect(removed.entries[0].movedFrom).toBe('my-skill');
+    expect(removed.entries[0].exportPlan).toMatchObject({
+      action: 'REMOVE',
+      preservesExistingFile: false,
+      reasons: [{ code: 'locally-edited-override' }],
+    });
+    expect(removed.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['new-name']);
+  });
+
+  it('refuses an ambiguous case-only local-edit target even with force', async () => {
+    const node = await mkNode('tasks:case-only-local-edit', {
+      properties: declaration({ name: 'my-skill' }),
+    });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+
+    const got = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'My-Skill',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: 'f'.repeat(16),
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({
+      class: 'locally-edited',
+      movedFrom: null,
+      renderedBody: null,
+      exportPlan: {
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'filesystem-alias-ambiguous' }],
+      },
+    });
+  });
+
+  it('refuses a clean case-only rename whose filesystem semantics are ambiguous', async () => {
+    const node = await mkNode('tasks:case-only-rename', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'My-Skill',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: headerHash,
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({
+      class: 'renamed',
+      movedFrom: 'My-Skill',
+      renderedBody: null,
+      exportPlan: {
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'filesystem-alias-ambiguous' }],
+      },
+    });
+  });
+
+  it('moves an unhashed legacy file when its directory truly changed', async () => {
+    const node = await mkNode('tasks:legacy-rename', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'old-name',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash: '',
+        fileHash: 'f'.repeat(16),
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({
+      class: 'unhashed',
+      movedFrom: 'old-name',
+      exportPlan: {
+        action: 'MOVE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'unhashed' }],
+      },
+    });
+    expect(got.entries[0].renderedBody).toContain('# Body');
+  });
+
+  it('protects extra frontmatter on an unhashed legacy file unless force is explicit', async () => {
+    const node = await mkNode('tasks:legacy-extra-frontmatter', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const file = {
+      dirName: 'my-skill',
+      sourceUrn: urn,
+      nodeId: node.id,
+      headerHash: '',
+      fileHash: 'f'.repeat(16),
+      hasExtraFrontmatter: true,
+    };
+
+    const protectedPlan = await plan({ intent: 'EXPORT', files: [file] });
+    expect(protectedPlan.entries[0]).toMatchObject({
+      class: 'unhashed',
+      renderedBody: null,
+      exportPlan: {
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'locally-edited' }],
+      },
+    });
+
+    const forcedPlan = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(forcedPlan.entries[0]).toMatchObject({
+      class: 'unhashed',
+      exportPlan: {
+        action: 'WRITE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'locally-edited-override' }],
+      },
+    });
+    expect(forcedPlan.entries[0].renderedBody).toContain('# Body');
+
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ enable: false }) },
+    });
+    const disabledProtected = await plan({ intent: 'EXPORT', files: [file] });
+    expect(disabledProtected.entries[0]).toMatchObject({
+      class: 'disabled',
+      renderedBody: null,
+      exportPlan: {
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'locally-edited' }],
+      },
+    });
+
+    const disabledForced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(disabledForced.entries[0]).toMatchObject({
+      class: 'disabled',
+      movedFrom: 'my-skill',
+      renderedBody: null,
+      exportPlan: {
+        action: 'REMOVE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'disabled' }],
+      },
+    });
   });
 
   it('a parse failure is reported as a FAILURE, with no class', async () => {
@@ -173,6 +468,16 @@ describe('classes and bodies', () => {
 
     expect(got.entries[0].parseFailure).toBe(true);
     expect(got.entries[0].class).toBeNull();
+
+    const exported = await plan({
+      intent: 'EXPORT',
+      files: [{ dirName: 'my-skill', sourceUrn: urn, parseFailed: true }],
+    });
+    expect(exported.entries[0].exportPlan).toMatchObject({
+      action: 'FAIL',
+      preservesExistingFile: true,
+      reasons: [{ code: 'parse-failed' }],
+    });
   });
 
   it('pairs a file by its source URN and reports it current when everything agrees', async () => {
@@ -186,12 +491,106 @@ describe('classes and bodies', () => {
     const headerHash = /hash=([0-9a-f]{16})/.exec(body)![1]!;
 
     const got = await plan({
-      intent: 'STATUS',
+      intent: 'EXPORT',
       files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
     });
 
     expect(got.entries[0].class).toBe('current');
+    expect(got.entries[0].renderedBody).toBeNull();
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'current' }],
+    });
     expect(got.orphans).toHaveLength(0);
+  });
+
+  it('a blocking lint finding outranks a current file relationship', async () => {
+    const node = await mkNode('tasks:becomes-invalid', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    // isRunnable is lint input but deliberately not part of the rendered-file
+    // hash. The file therefore remains `current` while the node becomes
+    // ineligible for export.
+    await db.node.update({ where: { id: node.id }, data: { isRunnable: false } });
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+    });
+
+    expect(got.entries[0].class).toBe('current');
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-not-runnable' }],
+    });
+  });
+
+  it.each(['my-skill', 'My-Skill', 'my-ſkill'])(
+    'refuses WRITE when an orphan at %s already occupies the target directory',
+    async (occupiedDir) => {
+      await mkNode('tasks:new-node', { properties: declaration() });
+
+      const got = await plan({
+        intent: 'EXPORT',
+        files: [{
+          dirName: occupiedDir,
+          sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
+          nodeId: 'deleted-node',
+          headerHash: 'a'.repeat(16),
+          fileHash: 'a'.repeat(16),
+        }],
+      });
+
+      expect(got.entries[0].class).toBe('never-exported');
+      expect(got.entries[0].renderedBody).toBeNull();
+      expect(got.entries[0].exportPlan).toMatchObject({
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'target-occupied' }],
+      });
+      expect(got.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual([occupiedDir]);
+    },
+  );
+
+  it('plans MOVE for a rename, but refuses it when an orphan occupies the destination', async () => {
+    const node = await mkNode('tasks:renamed', { properties: declaration({ name: 'old-name' }) });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    const oldFile = {
+      dirName: 'old-name', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash,
+    };
+    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ name: 'new-name' }) } });
+
+    const movable = await plan({ intent: 'EXPORT', files: [oldFile] });
+    expect(movable.entries[0]).toMatchObject({
+      class: 'renamed',
+      movedFrom: 'old-name',
+      exportPlan: { action: 'MOVE', preservesExistingFile: false },
+    });
+    expect(movable.entries[0].renderedBody).toContain('name: new-name');
+
+    const blocked = await plan({
+      intent: 'EXPORT',
+      files: [oldFile, {
+        dirName: 'new-name',
+        sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
+        nodeId: 'deleted-node',
+        headerHash: 'b'.repeat(16),
+        fileHash: 'b'.repeat(16),
+      }],
+    });
+    expect(blocked.entries[0].class).toBe('renamed');
+    expect(blocked.entries[0].renderedBody).toBeNull();
+    expect(blocked.entries[0].exportPlan).toMatchObject({
+      action: 'REFUSE',
+      preservesExistingFile: true,
+      reasons: [{ code: 'target-occupied' }],
+    });
+    expect(blocked.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['new-name']);
   });
 
   it('reports a file that pairs with nothing as an orphan', async () => {
@@ -217,6 +616,127 @@ describe('classes and bodies', () => {
     expect(got.entries[0].class).toBe('disabled');
     expect(got.entries[0].renderedBody).toBeNull();
   });
+
+  it('plans removal for a disabled declaration only when a generated file exists', async () => {
+    const node = await mkNode('tasks:disable-after-export', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ enable: false }) },
+    });
+
+    const withFile = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: headerHash,
+      }],
+    });
+    const withoutFile = await plan({ intent: 'EXPORT', files: [] });
+
+    expect(withFile.entries[0].class).toBe('disabled');
+    expect(withFile.entries[0].exportPlan).toMatchObject({
+      action: 'REMOVE',
+      preservesExistingFile: false,
+      reasons: [{ code: 'disabled' }],
+    });
+    expect(withoutFile.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'disabled' }],
+    });
+  });
+
+  it('removes the paired disabled file even when an orphan occupies the renamed target', async () => {
+    const node = await mkNode('tasks:disable-renamed', {
+      properties: declaration({ name: 'old-name' }),
+    });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ name: 'new-name', enable: false }) },
+    });
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{
+        dirName: 'old-name',
+        sourceUrn: urn,
+        nodeId: node.id,
+        headerHash,
+        fileHash: headerHash,
+      }, {
+        dirName: 'new-name',
+        sourceUrn: 'hrn:node:other.example:skills:tasks:deleted',
+        nodeId: 'deleted-node',
+        headerHash: 'b'.repeat(16),
+        fileHash: 'b'.repeat(16),
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({
+      class: 'disabled',
+      movedFrom: 'old-name',
+      exportPlan: {
+        action: 'REMOVE',
+        preservesExistingFile: false,
+        reasons: [{ code: 'disabled' }],
+      },
+    });
+    expect(got.orphans.map((orphan: { dirName: string }) => orphan.dirName)).toEqual(['new-name']);
+  });
+
+  it('preserves an installed over-limit file even when the declaration is disabled', async () => {
+    const node = await mkNode('tasks:disable-over-limit', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ enable: false, description: 'x'.repeat(1083) }) },
+    });
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+    });
+
+    expect(got.entries[0].class).toBe('disabled');
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-description-too-long' }],
+    });
+  });
+
+  it('preserves a disabled installed file when any blocking lint finding remains', async () => {
+    const node = await mkNode('tasks:disable-invalid', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const urn = first.entries[0].urn as string;
+    const headerHash = /hash=([0-9a-f]{16})/.exec(first.entries[0].renderedBody as string)![1]!;
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ enable: false }), content: '' },
+    });
+
+    const got = await plan({
+      intent: 'EXPORT',
+      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+    });
+    expect(got.entries[0].class).toBe('disabled');
+    expect(got.entries[0].exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-content-empty' }],
+    });
+  });
 });
 
 describe('review round 1 — @codex', () => {
@@ -225,7 +745,7 @@ describe('review round 1 — @codex', () => {
     // readable encrypted memory has no session key. Hashing or rendering that
     // blob would hand an EXPORT client a file containing `enc:v1…` — which
     // overwrites a perfectly good local skill with ciphertext.
-    await mkNode('tasks:locked', {
+    const node = await mkNode('tasks:locked', {
       properties: declaration(),
       content: 'enc:v1:AAAA:BBBB:CCCC',
     });
@@ -237,6 +757,32 @@ describe('review round 1 — @codex', () => {
     // No findings either: every rule would be judging ciphertext, and a
     // finding about a body nobody could read is worse than silence.
     expect(got.entries[0].findings).toEqual([]);
+
+    // A legacy file with extra frontmatter normally gains local-edit
+    // protection, but even an explicit override cannot make an unreadable
+    // source safe to render. The unavailable verdict wins and ciphertext is
+    // never returned as an export body.
+    const forced = await plan({
+      intent: 'EXPORT',
+      force: true,
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: got.entries[0].urn,
+        nodeId: node.id,
+        headerHash: '',
+        fileHash: 'f'.repeat(16),
+        hasExtraFrontmatter: true,
+      }],
+    });
+    expect(forced.entries[0]).toMatchObject({
+      class: 'unavailable',
+      renderedBody: null,
+      exportPlan: {
+        action: 'SKIP',
+        preservesExistingFile: true,
+        reasons: [{ code: 'unavailable' }],
+      },
+    });
   });
 
   it('CONTROL: the same node with readable content is judged normally', async () => {
@@ -388,6 +934,13 @@ describe('the surface itself', () => {
   it('refuses a host it has no renderer for', async () => {
     await mkNode('tasks:declared', { properties: declaration() });
     await expect(plan({ intent: 'LINT', host: 'codexSkill' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
+  it('accepts force only for an export invocation', async () => {
+    await mkNode('tasks:declared', { properties: declaration() });
+    await expect(plan({ intent: 'STATUS', force: true })).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
   });
