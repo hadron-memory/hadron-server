@@ -100,10 +100,14 @@ BEGIN
       AND table_name = 'user_api_keys' AND column_name = 'oauth_scopes'
   ) THEN
     ALTER TABLE user_api_keys
-      ADD COLUMN oauth_scopes TEXT[] NOT NULL DEFAULT ARRAY['account']::TEXT[];
+      ADD COLUMN oauth_scopes TEXT[];
     UPDATE user_api_keys
-    SET oauth_scopes = ARRAY[]::TEXT[]
-    WHERE NOT starts_with(COALESCE(issued_via, ''), 'oauth:');
+    SET oauth_scopes = CASE
+      WHEN starts_with(COALESCE(issued_via, ''), 'oauth:')
+        THEN ARRAY['account']::TEXT[]
+      ELSE ARRAY[]::TEXT[]
+    END;
+    ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
   END IF;
 
   IF EXISTS (
@@ -115,7 +119,8 @@ BEGIN
       AND table_name = 'auth_codes' AND column_name = 'oauth_scopes'
   ) THEN
     ALTER TABLE auth_codes
-      ADD COLUMN oauth_scopes TEXT[] NOT NULL DEFAULT ARRAY['account']::TEXT[];
+      ADD COLUMN oauth_scopes TEXT[];
     UPDATE auth_codes SET oauth_scopes = ARRAY['account']::TEXT[];
+    ALTER TABLE auth_codes ALTER COLUMN oauth_scopes SET NOT NULL;
   END IF;
 END $$;

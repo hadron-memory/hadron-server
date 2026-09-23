@@ -3405,10 +3405,9 @@ model UserApiKey {
   /// is preserved.
   issuedVia  String?   @map("issued_via")
   /// Immutable OAuth scopes copied from the authorization code at token
-  /// redemption. Empty means an unrestricted portal/legacy user key. The DB
-  /// default stays `account` as a rolling-deploy rail for old writers; every
-  /// current issuance path writes its intended scope (including portal `[]`).
-  oauthScopes String[] @default(["account"]) @map("oauth_scopes")
+  /// redemption. Empty means an unrestricted portal/legacy user key. There is
+  /// deliberately no DB default: every issuance path writes the exact grant.
+  oauthScopes String[] @map("oauth_scopes")
   lastUsedAt DateTime? @map("last_used_at")
   revokedAt  DateTime? @map("revoked_at")
 
@@ -3547,9 +3546,8 @@ model AuthCode {
   resource      String[]
   /// Immutable OAuth scopes approved by the user. Copied exactly to the
   /// UserApiKey minted when this code is redeemed.
-  /// The broad default keeps codes written by an old rolling-deploy instance
-  /// redeemable; the current authorize path always writes the approved grant.
-  oauthScopes   String[]  @default(["account"]) @map("oauth_scopes")
+  /// No DB default: the authorize path must always write the approved grant.
+  oauthScopes   String[]  @map("oauth_scopes")
   expiresAt     DateTime  @map("expires_at")
   redeemedAt    DateTime? @map("redeemed_at")
   createdAt     DateTime  @default(now()) @map("created_at")

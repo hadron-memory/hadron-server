@@ -22,6 +22,23 @@ const migrationSql = readFileSync(
 );
 const schema = `oauth_prepush_${generateId().replaceAll('-', '')}`;
 const migrationSchema = `oauth_migration_${generateId().replaceAll('-', '')}`;
+const assertLegacyWritesFailClosed = `
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO user_api_keys (id, issued_via) VALUES ('legacy-writer-key', 'oauth:cli');
+    RAISE EXCEPTION 'legacy user_api_keys writer unexpectedly succeeded';
+  EXCEPTION WHEN not_null_violation THEN
+    NULL;
+  END;
+  BEGIN
+    INSERT INTO auth_codes (id) VALUES ('legacy-writer-code');
+    RAISE EXCEPTION 'legacy auth_codes writer unexpectedly succeeded';
+  EXCEPTION WHEN not_null_violation THEN
+    NULL;
+  END;
+END $$;
+`;
 
 beforeAll(async () => {
   await db.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
@@ -61,20 +78,14 @@ describe('#1261 pre-push OAuth-scope transition', () => {
       ]);
       expect(codes).toEqual([{ id: 'outstanding', oauth_scopes: ['account'] }]);
 
-      // Old rolling-deploy writers omit the new column. The DB default keeps
-      // those credentials at their historical broad authority and prevents an
-      // empty AuthCode that the new token handler would reject.
-      await tx.$executeRawUnsafe(
-        "INSERT INTO user_api_keys (id, issued_via) VALUES ('oauth-old-writer', 'oauth:cli'), ('portal-old-writer', 'portal')",
+      const columns = await tx.$queryRawUnsafe<Array<{ table_name: string; column_default: string | null; is_nullable: string }>>(
+        "SELECT table_name, column_default, is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'oauth_scopes' ORDER BY table_name",
       );
-      await tx.$executeRawUnsafe("INSERT INTO auth_codes (id) VALUES ('old-writer-code')");
-      expect(await tx.$queryRawUnsafe('SELECT id, oauth_scopes FROM user_api_keys WHERE id LIKE \'%-old-writer\' ORDER BY id')).toEqual([
-        { id: 'oauth-old-writer', oauth_scopes: ['account'] },
-        { id: 'portal-old-writer', oauth_scopes: ['account'] },
+      expect(columns).toEqual([
+        { table_name: 'auth_codes', column_default: null, is_nullable: 'NO' },
+        { table_name: 'user_api_keys', column_default: null, is_nullable: 'NO' },
       ]);
-      expect(await tx.$queryRawUnsafe('SELECT oauth_scopes FROM auth_codes WHERE id = \'old-writer-code\'')).toEqual([
-        { oauth_scopes: ['account'] },
-      ]);
+      await tx.$executeRawUnsafe(assertLegacyWritesFailClosed);
 
       // A second setup run must not reinterpret a newly restricted grant.
       await tx.$executeRawUnsafe(
@@ -115,17 +126,14 @@ describe('#1261 pre-push OAuth-scope transition', () => {
         { id: 'outstanding', oauth_scopes: ['account'] },
       ]);
 
-      await tx.$executeRawUnsafe(
-        "INSERT INTO user_api_keys (id, issued_via) VALUES ('oauth-old-writer', 'oauth:cli'), ('portal-old-writer', 'portal')",
+      const columns = await tx.$queryRawUnsafe<Array<{ table_name: string; column_default: string | null; is_nullable: string }>>(
+        "SELECT table_name, column_default, is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'oauth_scopes' ORDER BY table_name",
       );
-      await tx.$executeRawUnsafe("INSERT INTO auth_codes (id) VALUES ('old-writer-code')");
-      expect(await tx.$queryRawUnsafe('SELECT id, oauth_scopes FROM user_api_keys WHERE id LIKE \'%-old-writer\' ORDER BY id')).toEqual([
-        { id: 'oauth-old-writer', oauth_scopes: ['account'] },
-        { id: 'portal-old-writer', oauth_scopes: ['account'] },
+      expect(columns).toEqual([
+        { table_name: 'auth_codes', column_default: null, is_nullable: 'NO' },
+        { table_name: 'user_api_keys', column_default: null, is_nullable: 'NO' },
       ]);
-      expect(await tx.$queryRawUnsafe('SELECT oauth_scopes FROM auth_codes WHERE id = \'old-writer-code\'')).toEqual([
-        { oauth_scopes: ['account'] },
-      ]);
+      await tx.$executeRawUnsafe(assertLegacyWritesFailClosed);
     });
   });
 });
