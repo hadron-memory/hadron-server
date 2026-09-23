@@ -398,6 +398,8 @@ describe('scrubSentryEvent', () => {
       firstModule.scrubSentryEvent(first);
 
       vi.resetModules();
+      process.env.SENTRY_DSN =
+        'https://different-public-key:different-secret@sentry.example/1';
       const secondModule = await import('./sentryScrubber.js');
       const second: ErrorEvent = {
         type: undefined,

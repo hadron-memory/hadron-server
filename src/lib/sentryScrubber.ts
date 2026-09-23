@@ -12,12 +12,21 @@ function deriveIdPseudonymKey(): Buffer {
   const dsn = process.env.SENTRY_DSN?.trim();
   if (!dsn) return randomBytes(32);
 
-  // A Sentry DSN identifies the shared project and is stable across its
-  // service processes. Use it as a project-scoped salt (not as a secret) so
-  // high-entropy trace IDs correlate across services without being exported.
+  // Different services can use different DSN public keys for one project.
+  // Remove credentials and hash only the shared host/path identity. This is a
+  // project-scoped salt (not a secret), so high-entropy trace IDs correlate
+  // across services without being exported.
+  let projectIdentity = dsn;
+  try {
+    const url = new URL(dsn);
+    projectIdentity = `${url.host}${url.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    // Sentry.init will reject an invalid DSN. Keeping the raw value here makes
+    // the scrubber fail safe and deterministic until that validation occurs.
+  }
   return createHash('sha256')
     .update('hadron-sentry-trace-pseudonym-v1\0')
-    .update(dsn)
+    .update(projectIdentity)
     .digest();
 }
 
