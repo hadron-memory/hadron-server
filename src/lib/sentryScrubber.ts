@@ -19,16 +19,17 @@ export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
   if (!event.request) return event;
 
   const { method, url } = event.request;
+  const safeUrl = url ? stripUrlSecrets(url) : undefined;
   event.request = {
     ...(method ? { method } : {}),
-    ...(url ? { url: stripUrlSecrets(url) } : {}),
+    ...(safeUrl ? { url: safeUrl } : {}),
   };
 
   return event;
 }
 
 /** Remove query, fragment and URL user-info while retaining route identity. */
-function stripUrlSecrets(value: string): string {
+function stripUrlSecrets(value: string): string | undefined {
   try {
     const absolute = /^[a-z][a-z\d+.-]*:\/\//i.test(value);
     const parsed = new URL(value, 'http://sentry.invalid');
@@ -36,8 +37,8 @@ function stripUrlSecrets(value: string): string {
       ? `${parsed.protocol}//${parsed.host}${parsed.pathname}`
       : parsed.pathname;
   } catch {
-    // Preserve useful malformed-path context without retaining a query or
-    // fragment. Request URLs should be valid, but telemetry must fail closed.
-    return value.split(/[?#]/, 1)[0] ?? '';
+    // Any string-level fallback can retain user-info from a malformed absolute
+    // URL. Lose the route rather than risk transmitting a credential.
+    return undefined;
   }
 }

@@ -86,19 +86,19 @@ describe('scrubSentryEvent', () => {
     }
   });
 
-  it('fails closed for malformed request URLs', () => {
+  it('drops malformed request URLs instead of retaining user-info', () => {
     const event: ErrorEvent = {
       type: undefined,
       request: {
         method: 'GET',
-        url: 'not a valid URL?token=secret#fragment',
+        url: 'https://url-user:url-pass@[bad]/path?token=query-secret#fragment',
         headers: { authorization: 'Bearer secret' },
       },
     };
 
     expect(scrubSentryEvent(event).request).toEqual({
       method: 'GET',
-      url: '/not%20a%20valid%20URL',
     });
+    expect(JSON.stringify(event)).not.toMatch(/url-user|url-pass|query-secret/);
   });
 });
