@@ -209,6 +209,7 @@ import { GraphQLError as ScopeGraphQLError } from 'graphql';
 import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchScopeResolution } from '../lib/scopes.js';
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
+import { attendeeMentionTokens } from '../lib/channelReadState.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 
@@ -7519,6 +7520,243 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     }
   };
 
+  /**
+   * #1265 — unattended team-chat polling for the Workers THIS user is
+   * currently driving. Register says who attends; ChannelReadState says where
+   * each attendee is up to. Reading never advances either record: the host
+   * acknowledges a returned checkpoint only after it has routed/acted on the
+   * window, so a crash can duplicate attention but cannot skip it.
+   */
+  const monitorTeamChat = async (args: {
+    appRef: string;
+    channel?: string;
+    monitorFor?: string;
+    acknowledge?: Array<{ worker: string; seq: number }>;
+    limit?: number;
+  }) => {
+    if (!auth.userId || auth.impersonation) {
+      return textResult('[forbidden] Team-chat monitoring is available only to an ordinary user driving their own live Worker sessions.');
+    }
+
+    try {
+      const { id: appId } = await resolveAppRef(db, args.appRef);
+      const app = await db.app.findFirst({
+        where: { id: appId, deletedAt: null, uninstalledAt: null },
+        select: { id: true, organizationId: true, ownerUserId: true, defaultChannelId: true },
+      });
+      if (!app) return textResult('[app_not_found] App not found.');
+
+      const ctx: Context = {
+        ...chatCtx(),
+        appId: app.id,
+        organizationId: app.organizationId ?? undefined,
+      };
+      if (!(await isAppParticipant(ctx, app))) return textResult('[forbidden] You do not participate in that App.');
+
+      const resolveWorkerInApp = async (ref: string) => {
+        const worker = await resolvers.Query.worker({}, { ref, appRef: app.id }, ctx);
+        return worker.appId === app.id ? worker : null;
+      };
+      const requestedWorker = args.monitorFor !== undefined
+        ? await resolveWorkerInApp(args.monitorFor)
+        : null;
+      if (args.monitorFor !== undefined && !requestedWorker) {
+        return textResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
+      }
+
+      // A monitor is an operator-owned relay, not a presence board. Enumerate
+      // only this user's live, Worker-bound sessions in this App. The +1 makes
+      // the resource cap fail closed instead of silently omitting a Worker.
+      const now = new Date();
+      const open = await db.session.findMany({
+        where: {
+          userId: auth.userId,
+          workerId: requestedWorker ? requestedWorker.id : { not: null },
+          endedAt: null,
+          deletedAt: null,
+          worker: { appId: app.id, retiredAt: null },
+          ...recentlyTouchedFilter(now),
+        },
+        orderBy: [{ updatedAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
+        select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+        take: requestedWorker ? OPEN_SESSION_SCAN_CAP : OPEN_SESSION_SCAN_CAP + 1,
+      });
+      if (!requestedWorker && open.length > OPEN_SESSION_SCAN_CAP) {
+        return textResult(`[monitor_scope_too_large] More than ${OPEN_SESSION_SCAN_CAP} recent Worker sessions match. Pass monitorFor to narrow the monitor.`);
+      }
+      const lastEvents = await loadLastEventBySession(db as never, open.map((s) => s.id));
+      const liveWorkerIds = [...new Set(
+        open
+          .filter((s) => s.workerId && isSessionLive(s, lastEvents.get(s.id), now))
+          .map((s) => s.workerId as string),
+      )];
+      const liveWorkerSet = new Set(liveWorkerIds);
+
+      let targetWorkerIds = liveWorkerIds;
+      if (requestedWorker) {
+        if (!liveWorkerSet.has(requestedWorker.id)) {
+          return textResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
+        }
+        targetWorkerIds = [requestedWorker.id];
+      }
+      if (targetWorkerIds.length === 0) {
+        return textResult('No live Worker sessions of yours need team-chat monitoring in this App.');
+      }
+
+      const channelId = args.channel !== undefined
+        ? await resolveChannelRefId(db, args.channel)
+        : app.defaultChannelId;
+      if (!channelId) return textResult('[channel_not_found] No matching Channel.');
+      const selectedChannel = await db.channel.findFirst({
+        where: { id: channelId, deletedAt: null },
+        select: { id: true, name: true, loc: true, lastSeq: true },
+      });
+      if (!selectedChannel) return textResult('[channel_not_found] No matching Channel.');
+
+      const resolvedAcks: Array<{ workerId: string; seq: number }> = [];
+      const targetWorkerSet = new Set(targetWorkerIds);
+      for (const ack of args.acknowledge ?? []) {
+        const worker = await resolveWorkerInApp(ack.worker);
+        if (!worker || !liveWorkerSet.has(worker.id) || !targetWorkerSet.has(worker.id)) {
+          return textResult('[monitor_target_not_live] An acknowledgement named a Worker outside this monitor\'s live targets.');
+        }
+        const ackView = await resolveRegister(db, { attendee: { workerId: worker.id }, actor: ctx });
+        const ackRow = ackView?.rows.find((candidate) => candidate.channel.id === selectedChannel.id);
+        if (!ackRow) return textResult('[channel_not_found] No matching Channel.');
+        if (!ackRow.canRead || ackRow.entry.role === 'POST') {
+          return textResult('[forbidden] An acknowledgement named a Channel this Worker cannot watch.');
+        }
+        resolvedAcks.push({ workerId: worker.id, seq: ack.seq });
+      }
+      // One checkpoint is one act. If any entry is invalid or a write fails,
+      // roll all of them back rather than partially silencing the monitor.
+      const acknowledged = resolvedAcks.length
+        ? await db.$transaction(async (tx) => {
+            const receipts: string[] = [];
+            const txCtx = { ...ctx, db: tx as unknown as PrismaClient };
+            for (const ack of resolvedAcks) {
+              const state = await resolvers.Mutation.advanceChannelReadState(
+                {},
+                { attendeeRef: ack.workerId, appRef: app.id, channelRef: selectedChannel.id, seq: ack.seq },
+                txCtx,
+              );
+              receipts.push(`${state.attendeeUrn ?? ack.workerId} through #${state.lastSeenSeq}`);
+            }
+            return receipts;
+          })
+        : [];
+
+      const views = await Promise.all(targetWorkerIds.map(async (workerId) => ({
+        workerId,
+        view: await resolveRegister(db, { attendee: { workerId }, actor: ctx }),
+      })));
+      const statuses: string[] = [];
+      const watchers: Array<{
+        workerId: string;
+        urn: string;
+        seen: number;
+        mentionOnly: boolean;
+        disclosure: string | null;
+        mentionTokens: Set<string>;
+      }> = [];
+      let registeredTargets = 0;
+
+      for (const { workerId, view } of views) {
+        const urn = view?.attendeeUrn ?? workerId;
+        const row = view?.rows.find((candidate) => candidate.channel.id === selectedChannel.id);
+        if (!row) {
+          statuses.push(`- ${urn}: not registered for this Channel`);
+          continue;
+        }
+        registeredTargets += 1;
+        if (row.entry.role === 'POST') {
+          statuses.push(`- ${urn}: role POST does not watch${row.disclosure ? ` (${row.disclosure})` : ''}`);
+          continue;
+        }
+        if (!row.canRead) {
+          statuses.push(`- ${urn}: ${row.disclosure ?? 'HOST_MEMORY_NOT_READABLE'}`);
+          continue;
+        }
+        const tokens = row.entry.mentionOnly
+          ? await attendeeMentionTokens(db, { workerId })
+          : [];
+        watchers.push({
+          workerId,
+          urn,
+          seen: row.readState?.lastSeenSeq ?? 0,
+          mentionOnly: row.entry.mentionOnly,
+          disclosure: row.disclosure,
+          mentionTokens: new Set(tokens),
+        });
+        if (row.disclosure) statuses.push(`- ${urn}: watching with ${row.disclosure}`);
+      }
+
+      // No applicable register row means the monitor has no legitimate route
+      // to this Channel. Collapse that with absence, matching every other
+      // Channel read surface instead of becoming an id-existence oracle.
+      if (registeredTargets === 0) return textResult('[channel_not_found] No matching Channel.');
+
+      const ackLine = acknowledged.length ? `Acknowledged ${acknowledged.join('; ')}.\n` : '';
+      const pollStateLine = acknowledged.length
+        ? 'Acknowledgements were applied; polling made no further read-state changes.'
+        : 'Stored read state was not changed.';
+      if (watchers.length === 0) {
+        return textResult(`${ackLine}No readable WATCH/BOTH register entry applies to your live Worker sessions.${statuses.length ? `\n\nStatus:\n${statuses.join('\n')}` : ''}`);
+      }
+
+      if (watchers.every((watcher) => watcher.seen >= selectedChannel.lastSeq)) {
+        return textResult(
+          `${ackLine}No new registered team-chat attention. Channel is at #${selectedChannel.lastSeq}; ${watchers.length} live Worker${watchers.length === 1 ? '' : 's'} monitored. ${pollStateLine}` +
+          (statuses.length ? `\n\nStatus:\n${statuses.join('\n')}` : ''),
+        );
+      }
+
+      const sinceSeq = Math.min(...watchers.map((watcher) => watcher.seen));
+      const page = await resolvers.Query.channelMessages(
+        {},
+        { channelRef: selectedChannel.id, sinceSeq, beforeSeq: null, mentionsRef: null, limit: args.limit ?? null, offset: null },
+        ctx,
+      );
+      const scannedThrough = page.items.reduce((max, message) => Math.max(max, message.seq), sinceSeq);
+      const routed: string[] = [];
+      for (const message of page.items) {
+        const routes = watchers.filter((watcher) => {
+          if (message.seq <= watcher.seen) return false;
+          if (!watcher.mentionOnly) return true;
+          return message.mentions.some((mention) => watcher.mentionTokens.has(mention));
+        });
+        if (routes.length === 0) continue;
+        const reply = message.replyToSeq != null ? ` (reply to #${message.replyToSeq})` : '';
+        const cross = message.authorAppId ? ' [cross-App]' : '';
+        const mentionLine = message.mentions.length ? `\nmentions: ${message.mentions.map((mention) => `@${mention}`).join(', ')}` : '';
+        routed.push(
+          `#${message.seq} [${message.authorName ?? 'unknown'}]${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
+          `${mentionLine}\nroute to: ${routes.map((route) => route.urn).join(', ')}`,
+        );
+      }
+
+      const checkpoints = watchers
+        .map((watcher) => ({ worker: watcher, seq: Math.min(scannedThrough, selectedChannel.lastSeq) }))
+        .filter(({ worker, seq }) => seq > worker.seen)
+        .map(({ worker, seq }) => ({ worker: worker.workerId, seq }));
+      const more = page.total > page.items.length
+        ? `\nMore messages remain after this page (${page.items.length} of ${page.total} scanned from the oldest stored cursor).`
+        : '';
+      const routing = routed.length
+        ? `${routed.length} message${routed.length === 1 ? '' : 's'} need${routed.length === 1 ? 's' : ''} routing:\n\n${routed.join('\n\n')}`
+        : 'No messages in the scanned window need routing to these attendees.';
+      const checkpoint = checkpoints.length
+        ? `\n\nAfter routing/action succeeds, deliberately acknowledge this checkpoint:\n${JSON.stringify(checkpoints)}`
+        : '';
+      const status = statuses.length ? `\n\nStatus:\n${statuses.join('\n')}` : '';
+      return textResult(
+        `${ackLine}Team-chat monitor: ${selectedChannel.name} (${selectedChannel.loc}), Channel at #${selectedChannel.lastSeq}. ${pollStateLine}\n\n${routing}${more}${checkpoint}${status}`,
+      );
+    } catch (e) {
+      return scopeErrorText(e);
+    }
+  };
+
   server.tool(
     'hadron_channel_post',
     'Post a message into a Channel by id or ADDRESS — the chat-root URN hadron_list_channels prints (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
@@ -7641,38 +7879,47 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_read',
-    'Read the team App\'s chat (#939), oldest first by seq. Pass sinceSeq to fetch only messages AFTER a watermark (strictly greater — pass the last seq you have seen). Pass beforeSeq to page BACKWARD (#1116): only messages with seq strictly LESS are considered and the NEWEST page of those comes back — the messages immediately before the cursor, still oldest-first. That is the stable way to walk back through history; offset is a position in a list other people are appending to, so it skips or repeats under a chat being posted to. offset is IGNORED when beforeSeq is given. Pass mentions (a worker name or id, or a user handle/id) to filter to messages that mention them. Returns seq, author, timestamp, and body per message plus the total count.',
+    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
       mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Page offset.'),
-      session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. Pass the session hadron_start_session returned. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
+      session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       channel: z.string().optional().describe('Spec 049: read THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
+      monitor: z.boolean().optional().describe('Use the register + stored ChannelReadState for your live Worker sessions. Incompatible with sinceSeq, beforeSeq, mentions and offset.'),
+      monitorFor: z.string().optional().describe('With monitor:true, narrow to one Worker by name, id or URN. It must be bound to one of your live sessions in this App.'),
+      acknowledge: z.array(z.object({
+        worker: z.string().describe('Worker name, id or URN from the returned checkpoint.'),
+        seq: z.number().int().min(0).describe('Checkpoint seq to advance through after routing/action succeeded.'),
+      })).optional().describe('With monitor:true, deliberately advance these Workers\' stored cursors before polling again.'),
     },
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel }) => {
-      // Presence, not truthiness (Copilot on PR #1169): a supplied '' is a
-      // malformed Channel selector and resolves as CHANNEL_NOT_FOUND, never
-      // a silent fall-through to the default team chat.
-      if (channel !== undefined) {
-        await heartbeatSession(session);
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel, monitor, monitorFor, acknowledge }) => {
+      if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
+        return textResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
+      }
+      if (monitor && (sinceSeq !== undefined || beforeSeq !== undefined || mentions !== undefined || offset !== undefined)) {
+        return textResult('[bad_user_input] monitor:true owns the cursor and mention routing; do not pass sinceSeq, beforeSeq, mentions or offset.');
+      }
+      if (monitor && limit !== undefined && limit < 1) {
+        return textResult('[bad_user_input] monitor:true requires a positive limit.');
+      }
+      // Monitoring observes liveness; it never creates it. Ordinary reads keep
+      // the long-standing #1081 heartbeat contract when a session is passed.
+      if (!monitor) await heartbeatSession(session);
+      // A normal Channel-addressed read is self-scoping and keeps its existing
+      // contract: it needs no active App. Monitor mode still needs an App to
+      // decide which of this operator's live Worker sessions participate.
+      if (!monitor && channel !== undefined) {
         return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset });
       }
-      // #1081 — the caller just drove this session, so it is alive. The
-      // touch is explicit here rather than a side effect of whichever tool
-      // happens to write the Session row (see heartbeatSession).
-      await heartbeatSession(session);
+
       let appRef = app;
       if (!appRef) {
-        // #1005: this read is the one App-scoped team tool that took NEITHER an
-        // app nor a session, so it had no way to answer "which App?" other than
-        // the in-process selection — which is exactly why it was the call that
-        // failed first when that selection evaporated. `session` is accepted
-        // here purely as an App-resolution hint (the read itself is unchanged
-        // and is gated by team-App participation, not by the session).
-        await adoptAppFromSession(session);
+        const scopedBySession = await adoptAppFromSession(session);
+        if (!scopedBySession && monitorFor !== undefined) await adoptAppFromWorker(monitorFor);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
@@ -7680,6 +7927,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
         }
       }
+      if (monitor) {
+        return monitorTeamChat({ appRef, channel, monitorFor, acknowledge, limit });
+      }
+
       try {
         const page = await resolvers.Query.teamChatMessages(
           {},
