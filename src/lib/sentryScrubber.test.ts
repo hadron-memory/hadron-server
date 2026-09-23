@@ -210,7 +210,14 @@ describe('scrubSentryEvent', () => {
         dynamicSamplingContext: {
           trace_id: '1'.repeat(32),
           transaction: 'POST /hooks/dsc-secret/name',
-          public_key: 'public',
+          public_key: 'public-key-secret',
+          release: 'release-secret',
+          environment: 'environment-secret',
+          replay_id: 'replay-secret',
+          org_id: 'org-secret',
+          sample_rate: '0.25',
+          sampled: 'true',
+          sample_rand: '0.5',
         },
       },
       breadcrumbs: [
@@ -237,8 +244,10 @@ describe('scrubSentryEvent', () => {
     expect(scrubbed.transaction).toBeUndefined();
     expect(scrubbed.sdkProcessingMetadata).toEqual({
       dynamicSamplingContext: {
-        trace_id: '1'.repeat(32),
-        public_key: 'public',
+        trace_id: 'e'.repeat(32),
+        sample_rate: '0.25',
+        sampled: 'true',
+        sample_rand: '0.5',
       },
     });
     expect(scrubbed.breadcrumbs).toBeUndefined();
@@ -262,6 +271,11 @@ describe('scrubSentryEvent', () => {
       'transaction-header-secret',
       'transaction-memory-secret',
       'dsc-secret',
+      'public-key-secret',
+      'release-secret',
+      'environment-secret',
+      'replay-secret',
+      'org-secret',
       'transaction-breadcrumb-secret',
       'span-secret',
       'span-query-secret',

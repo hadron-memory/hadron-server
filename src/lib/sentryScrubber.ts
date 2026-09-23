@@ -62,37 +62,33 @@ export function scrubSentrySpan(span: SpanJSON): SpanJSON {
 }
 
 function scrubRequest(event: ErrorEvent | TransactionEvent): void {
-  // RequestData keeps the original request here, and tracing can add a dynamic
-  // sampling context containing an unsanitized transaction name. Rebuild the
-  // metadata from trace-correlation fields so the envelope remains useful.
+  // RequestData keeps the original request here, and incoming baggage can add
+  // arbitrary strings to the dynamic sampling context. Preserve only
+  // format-constrained trace/sampling fields, preferring the event's trace id.
   const dynamicSamplingContext =
     event.sdkProcessingMetadata?.dynamicSamplingContext;
+  const contextTraceId = event.contexts?.trace?.trace_id;
   delete event.sdkProcessingMetadata;
   if (dynamicSamplingContext) {
-    const {
-      trace_id,
-      public_key,
-      sample_rate,
-      release,
-      environment,
-      replay_id,
-      sampled,
-      sample_rand,
-      org_id,
-    } = dynamicSamplingContext;
-    event.sdkProcessingMetadata = {
-      dynamicSamplingContext: {
-        ...(trace_id ? { trace_id } : {}),
-        ...(public_key ? { public_key } : {}),
-        ...(sample_rate ? { sample_rate } : {}),
-        ...(release ? { release } : {}),
-        ...(environment ? { environment } : {}),
-        ...(replay_id ? { replay_id } : {}),
-        ...(sampled ? { sampled } : {}),
-        ...(sample_rand ? { sample_rand } : {}),
-        ...(org_id ? { org_id } : {}),
-      },
+    const traceId = isTraceId(contextTraceId)
+      ? contextTraceId
+      : isTraceId(dynamicSamplingContext.trace_id)
+        ? dynamicSamplingContext.trace_id
+        : undefined;
+    const sampleRate = dynamicSamplingContext.sample_rate;
+    const sampleRand = dynamicSamplingContext.sample_rand;
+    const sampled = dynamicSamplingContext.sampled;
+    const safeDynamicSamplingContext = {
+      ...(traceId ? { trace_id: traceId } : {}),
+      ...(isSamplingNumber(sampleRate) ? { sample_rate: sampleRate } : {}),
+      ...(sampled === 'true' || sampled === 'false' ? { sampled } : {}),
+      ...(isSamplingNumber(sampleRand) ? { sample_rand: sampleRand } : {}),
     };
+    if (Object.keys(safeDynamicSamplingContext).length > 0) {
+      event.sdkProcessingMetadata = {
+        dynamicSamplingContext: safeDynamicSamplingContext,
+      };
+    }
   }
 
   // HTTP/fetch breadcrumbs may contain full caller-provided URLs. Drop the
@@ -111,6 +107,18 @@ function scrubRequest(event: ErrorEvent | TransactionEvent): void {
   event.request = {
     ...(method ? { method } : {}),
   };
+}
+
+function isTraceId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
+}
+
+function isSamplingNumber(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(value)) {
+    return false;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 && number <= 1;
 }
 
 function scrubTracePayload(event: ErrorEvent | TransactionEvent): void {
