@@ -82,8 +82,16 @@ describe('crosshost acceptance matrix (vendored from hadron-cli#622)', () => {
     expect(m.writer.length).toBeGreaterThan(0);
     for (const c of m.writer) {
       expect(Object.keys(c).sort(), c.id).toEqual(['contracts', 'expect', 'given', 'id', 'layer', 'test']);
-      for (const k of ['id', 'layer', 'given', 'expect', 'test']) expect(typeof c[k], `${c.id}.${k}`).toBe('string');
-      expect(Array.isArray(c.contracts) && c.contracts.length > 0, `${c.id}.contracts`).toBe(true);
+      // Non-empty, not merely present: an empty `test` names no test, and an
+      // empty `expect` asserts nothing (@copilot, #1311).
+      for (const k of ['id', 'layer', 'given', 'expect', 'test']) {
+        expect(typeof c[k] === 'string' && c[k].trim() !== '', `${c.id}.${k} is a non-empty string`).toBe(true);
+      }
+      expect(Array.isArray(c.contracts) && c.contracts.length > 0, `${c.id}.contracts is non-empty`).toBe(true);
+      for (const ref of c.contracts) {
+        // A contract is a spec citation, e.g. cor:agt:030:01.
+        expect(typeof ref === 'string' && /^[a-z]+(:[a-z0-9]+)+$/.test(ref), `${c.id}.contracts: ${JSON.stringify(ref)}`).toBe(true);
+      }
     }
     const writerIds = m.writer.map((c: { id: string }) => c.id);
     const pendingIds = (m.pending ?? []).map((c: { id: string }) => c.id);
