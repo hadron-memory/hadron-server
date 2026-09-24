@@ -3,6 +3,7 @@ import { createHmac, randomUUID } from 'crypto';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
+  type GovernedKind,
   mergedGovernedState,
   RoleGovernedError,
   GOVERNED_KINDS,
@@ -322,14 +323,33 @@ export const GOVERNED_MCP_DOOR_FIELDS: readonly string[] = [
 ];
 
 /**
- * Whether a generic MCP node write could be replayed through a governed door:
- * every field it sets is one the door carries, and it clears neither
- * `content` nor `abstract` (the doors take strings only). The kind signals
- * (`role`, `isRunnable`) are the door's own business and never disqualify.
+ * Whether a generic MCP node write could be replayed through `kind`'s door
+ * (`op`): every field it sets is one that door carries, and it clears neither
+ * `content` nor `abstract` (the doors take strings only).
+ *
+ * The kind SIGNALS are door-specific (@copilot + @codex, PR #1305): only the
+ * task update door carries `isRunnable`, only the review update door carries
+ * `role`, and the create doors carry neither: they SET their own signal. So a
+ * signal is replayable only through its own kind's door, and on a create only
+ * as the value that door sets. Other kinds (spec) have no MCP door, so the
+ * question is moot and answered true.
  */
-export function mcpDoorCanReplay(fields: Record<string, unknown>): boolean {
+export function mcpDoorCanReplay(
+  fields: Record<string, unknown>,
+  kind: GovernedKind,
+  op: 'create' | 'update',
+): boolean {
+  if (kind !== 'task' && kind !== 'review') return true;
   for (const [key, value] of Object.entries(fields)) {
-    if (value === undefined || key === 'role' || key === 'isRunnable') continue;
+    if (value === undefined) continue;
+    if (key === 'isRunnable') {
+      if (kind !== 'task' || (op === 'create' && value !== true)) return false;
+      continue;
+    }
+    if (key === 'role') {
+      if (kind !== 'review' || (op === 'create' && value !== 'review')) return false;
+      continue;
+    }
     if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
     if ((key === 'content' || key === 'abstract') && value === null) return false;
   }
@@ -4453,11 +4473,14 @@ export function createMcpServerInstance(
           // A LIVE node at this loc makes any create a NODE_LOC_CONFLICT, the
           // create doors included, so a route is offered only when the loc is
           // free or holds a tombstone to resurrect (@codex, PR #1305).
-          // …and only when the door could replay this exact call.
-          (governedProbe && governedProbe.deletedAt == null) ||
-            !mcpDoorCanReplay({ name, nodeType, objectType, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges })
+          // …and only when that kind's door could replay this exact call.
+          governedProbe && governedProbe.deletedAt == null
             ? {}
-            : { context: 'node-write' },
+            : {
+                context: 'node-write',
+                canReplay: (kind) =>
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }, kind, 'create'),
+              },
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
@@ -4940,9 +4963,12 @@ export function createMcpServerInstance(
           undefined,
           // A route only for a LIVE node (a tombstone is NODE_NOT_FOUND to the
           // update doors too) and a call the door could replay (@codex, #1305).
-          existing && existing.deletedAt == null &&
-            mcpDoorCanReplay({ name, nodeType, objectType, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason })
-            ? { context: 'node-write' }
+          existing && existing.deletedAt == null
+            ? {
+                context: 'node-write',
+                canReplay: (kind) =>
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }, kind, 'update'),
+              }
             : {},
         );
       } catch (e) {

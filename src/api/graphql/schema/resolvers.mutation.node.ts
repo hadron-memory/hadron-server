@@ -969,7 +969,9 @@ export async function writeNodeCore(
           // The AUTHORITATIVE check, under the lock: a merge that loses the
           // promotion race must still get the merge wording, or the refusal
           // sends it to a replacing door without saying so (@codex P1, #1305).
-          { context: opts?.governedContext, merge: opts?.governedMerge },
+          // And a row tombstoned in that window gets no route: every door
+          // answers it NODE_NOT_FOUND (@codex, #1305).
+          { context: current.deletedAt ? undefined : opts?.governedContext, merge: opts?.governedMerge },
         );
 
         if (current.deletedAt) {

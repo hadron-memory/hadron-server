@@ -119,6 +119,13 @@ export interface GovernedRefusalOptions {
    * (@copilot + @codex, PR #1305).
    */
   kinds?: readonly GovernedKindEntry[];
+  /**
+   * Whether the refused call could be replayed through the door of `kind`.
+   * Asked by the error, because only the gate knows WHICH kind it is refusing;
+   * a surface whose doors carry fewer fields than its generic writer (MCP)
+   * supplies it, and `false` withdraws every route (@copilot + @codex, #1305).
+   */
+  canReplay?: (kind: GovernedKind) => boolean;
 }
 
 /**
@@ -199,7 +206,7 @@ export class RoleGovernedError extends GraphQLError {
     public readonly refusal: GovernedRefusal = 'produces',
     opts: GovernedRefusalOptions = {},
   ) {
-    const { merge, context, kinds } = opts;
+    const { merge, context, kinds, canReplay } = opts;
     const door = entry.doors[op];
     const mcpDoor = entry.mcpDoors?.[op] ?? null;
     const subject =
@@ -235,7 +242,11 @@ export class RoleGovernedError extends GraphQLError {
     // (@codex, PR #1305). Where false, no route is offered in the prose OR in
     // `extensions.mcpDoor`: a client routing from extensions must not be sent
     // where the message declined to send a reader.
-    const routable = context === 'node-write' && !multi && !(op === 'create' && refusal === 'removes');
+    const routable =
+      context === 'node-write' &&
+      !multi &&
+      !(op === 'create' && refusal === 'removes') &&
+      (canReplay?.(entry.kind) ?? true);
     const message = multi
       ? // No single door owns every kind the node carries, so none can write it.
         `${act}, and the node is governed as more than one kind (${multi.map((k) => k.kind).join(' and ')}). ` +

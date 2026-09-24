@@ -17,7 +17,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { createTestableMcpServer, GOVERNED_MCP_DOOR_FIELDS } from '../../../mcp/server.js';
+import { createTestableMcpServer, GOVERNED_MCP_DOOR_FIELDS, mcpDoorCanReplay } from '../../../mcp/server.js';
 import { GOVERNED_KINDS, RoleGovernedError } from '../../../lib/governedRole.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -270,5 +270,35 @@ describe('GraphQL-side cases from review round 4 (@copilot, PR #1305)', () => {
     // that would itself answer NODE_NOT_FOUND.
     expect(r.message).not.toMatch(/routes to it by itself|Over MCP/);
     expect(r.ext.mcpDoor ?? null).toBeNull();
+  });
+});
+
+describe('kind signals are door-specific (@copilot + @codex, PR #1305 round 5)', () => {
+  it('mcpDoorCanReplay: each door carries only its own signal, and a create door only the value it sets', () => {
+    // update doors
+    expect(mcpDoorCanReplay({ isRunnable: false }, 'task', 'update')).toBe(true);
+    expect(mcpDoorCanReplay({ role: null }, 'task', 'update')).toBe(false);
+    expect(mcpDoorCanReplay({ role: 'note' }, 'task', 'update')).toBe(false);
+    expect(mcpDoorCanReplay({ role: null }, 'review', 'update')).toBe(true);
+    expect(mcpDoorCanReplay({ isRunnable: false }, 'review', 'update')).toBe(false);
+    // create doors SET their signal: only that value replays
+    expect(mcpDoorCanReplay({ isRunnable: true }, 'task', 'create')).toBe(true);
+    expect(mcpDoorCanReplay({ isRunnable: true, role: 'note' }, 'task', 'create')).toBe(false);
+    expect(mcpDoorCanReplay({ role: 'review' }, 'review', 'create')).toBe(true);
+    expect(mcpDoorCanReplay({ role: 'review', isRunnable: false }, 'review', 'create')).toBe(false);
+  });
+
+  it('MCP: editing a live task while setting a role names no door; the control (content only) still does', async () => {
+    await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:sig', name: 's', content: 'x', isRunnable: true } }, ctx());
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const urn = `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:tasks:sig`;
+    const mcp = createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never);
+
+    const withRole = await mcp.callToolText('hadron_update_node', { urn, role: 'note' });
+    expect(withRole).toMatch(/role_governed/);
+    expect(withRole).not.toContain('hadron_update_task');
+
+    const plain = await mcp.callToolText('hadron_update_node', { urn, content: 'y' });
+    expect(plain).toContain('Over MCP, use hadron_update_task');
   });
 });
