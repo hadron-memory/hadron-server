@@ -38,6 +38,7 @@ export {
   malformedDeclarationPaths,
   storedName,
   unknownHostKeys,
+  unknownHostKeyStats,
   type Declaration,
 } from './declaration.js';
 export {

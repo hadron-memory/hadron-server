@@ -65,6 +65,7 @@ import {
   hash,
   storedName,
   unknownHostKeys,
+  unknownHostKeyStats,
   type Finding,
   type FileFacts,
   type DriftClass,
@@ -139,6 +140,25 @@ const DISCOVERY_OR = DECLARATION_KEYS.map((key) => ({
  * read dropped.
  */
 const SKILL_PLAN_MAX_BODY_BYTES = BATCH_READ_MAX_BYTES;
+
+/**
+ * Aggregate ceilings on the unrecognised-`exports`-key report (#1292; @codex
+ * P1, PR #1296).
+ *
+ * `properties` is arbitrary JSON a writer controls, and the body ceiling above
+ * counts only `content`. So without these, one node carrying a huge `exports`
+ * object of tiny unknown keys makes every plan sort them all and build a
+ * warning per key, at roughly 25× the stored size, whether or not the caller
+ * even selected `unrecognized`. Both are measured BEFORE anything per key is
+ * built, and both refuse loudly, the posture of the ceilings above: a report
+ * silently cut short would tell the client its corpus is cleaner than it is.
+ * Bytes as well as count, because one enormous key passes any count.
+ *
+ * Generous by design: a real node carries one stray key (the `codex` shape),
+ * so either ceiling is reached only by data no author meant to write.
+ */
+const SKILL_PLAN_MAX_UNKNOWN_KEYS = 1_000;
+const SKILL_PLAN_MAX_UNKNOWN_KEY_BYTES = 64 * 1024;
 
 /** Classes whose §5 action writes a file. */
 const WRITES_A_FILE = new Set(['never-exported', 'stale', 'unhashed', 'renamed']);
@@ -506,6 +526,22 @@ export const skillQueries = {
     if (loadedBytes > SKILL_PLAN_MAX_BODY_BYTES) {
       throw new GraphQLError(
         `skillPlan: the nodes in scope carry ${loadedBytes} bytes of content, over the ${SKILL_PLAN_MAX_BODY_BYTES}-byte ceiling. Narrow \`memories\`, or work in batches; this surface does not silently truncate.`,
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
+
+    // #1292 / @codex P1 on PR #1296: bound the unrecognised-key report before
+    // a single key is sorted or a single warning is built.
+    let unknownKeyCount = 0;
+    let unknownKeyBytes = 0;
+    for (const r of declaredRows) {
+      const stats = unknownHostKeyStats(r.properties);
+      unknownKeyCount += stats.count;
+      unknownKeyBytes += stats.bytes;
+    }
+    if (unknownKeyCount > SKILL_PLAN_MAX_UNKNOWN_KEYS || unknownKeyBytes > SKILL_PLAN_MAX_UNKNOWN_KEY_BYTES) {
+      throw new GraphQLError(
+        `skillPlan: the nodes in scope carry ${unknownKeyCount} unrecognised \`exports\` keys (${unknownKeyBytes} bytes), over the ceiling of ${SKILL_PLAN_MAX_UNKNOWN_KEYS} keys / ${SKILL_PLAN_MAX_UNKNOWN_KEY_BYTES} bytes. Remove the stray keys, or narrow \`memories\`; this surface does not silently truncate.`,
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }

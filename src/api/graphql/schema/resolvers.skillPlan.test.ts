@@ -1256,6 +1256,30 @@ describe('hosts (#1254)', () => {
       expect(got.unrecognized).toEqual([]);
     });
 
+    // @codex P1 on PR #1296: `properties` is writer-controlled JSON, so the
+    // report is bounded BEFORE it is built, and the bound refuses loudly.
+    const manyKeys = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, 0]));
+
+    it('refuses loudly past the unknown-key COUNT ceiling, and plans normally at it', async () => {
+      await mkNode('tasks:at', { properties: { exports: manyKeys(1_000) } });
+      const at = await plan({ intent: 'LINT' });
+      expect(at.unrecognized[0].keys).toHaveLength(1_000);
+
+      await mkNode('tasks:over', { properties: { exports: { k: 0 } } });
+      await expect(plan({ intent: 'LINT' })).rejects.toMatchObject({
+        message: expect.stringMatching(/1001 unrecognised `exports` keys .* over the ceiling of 1000 keys/),
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    });
+
+    it('refuses loudly past the unknown-key BYTE ceiling, even for one key', async () => {
+      await mkNode('tasks:huge', { properties: { exports: { ['x'.repeat(64 * 1024 + 1)]: 0 } } });
+      await expect(plan({ intent: 'EXPORT', files: [] })).rejects.toMatchObject({
+        message: expect.stringMatching(/1 unrecognised `exports` keys \(65537 bytes\)/),
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    });
+
     it('goes through the same access gate as the entries', async () => {
       await mkNode('tasks:codex-only', { properties: { exports: { codex: ok } } });
 
