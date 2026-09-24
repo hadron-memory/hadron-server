@@ -266,9 +266,10 @@ export class RoleGovernedError extends GraphQLError {
         : routable && merge
           ? // A merge cannot be redirected to the door as-is: the door REPLACES.
             `This ${merge} MERGE edits ${subject}, and no door merges: ${door} REPLACES ${merge} instead, so send the whole object, including the keys it already has. ` +
-            // Merges arrive over GraphQL only (MCP's merge tool delegates), so
-            // the route named is the GraphQL/CLI one.
-            `From the CLI, \`hadron node update <ref> --${merge} '<object>'\` routes to ${door} by itself.`
+            `From the CLI, \`hadron node update <ref> --${merge} '<object>'\` routes to ${door} by itself.` +
+            // An MCP merge arrives by delegation (Context.transport); the MCP
+            // doors take a whole ${merge} object, so they replay a replace.
+            (onMcp ? (mcpDoor ? ` Over MCP, pass the whole ${merge} object to ${mcpDoor}.` : ` No MCP tool writes a ${kindWord} node.`) : '')
           : routable
             ? `${base} ${cli}${onMcp ? ` ${mcp}` : ''}`
             : // No route for THIS operation: name no door as if it were one

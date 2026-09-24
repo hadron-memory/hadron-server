@@ -5478,6 +5478,8 @@ export function createMcpServerInstance(
       // the chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
+        // #1301: a refusal from the delegated resolver addresses an MCP caller.
+        transport: 'mcp',
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
         appId: auth.appId ?? undefined,

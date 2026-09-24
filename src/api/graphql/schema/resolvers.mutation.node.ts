@@ -448,6 +448,7 @@ export async function writeNodeCore(
           // …nor for an UPDATE of a loc with no row at all (@copilot, #1305).
           context: mode === 'update' && (!existing || existing.deletedAt) ? undefined : opts?.governedContext,
           merge: opts?.governedMerge,
+          surface: ctx.transport === 'mcp' ? 'mcp' : 'graphql',
         },
       );
 
@@ -972,7 +973,11 @@ export async function writeNodeCore(
           // sends it to a replacing door without saying so (@codex P1, #1305).
           // And a row tombstoned in that window gets no route: every door
           // answers it NODE_NOT_FOUND (@codex, #1305).
-          { context: current.deletedAt ? undefined : opts?.governedContext, merge: opts?.governedMerge },
+          {
+            context: current.deletedAt ? undefined : opts?.governedContext,
+            merge: opts?.governedMerge,
+            surface: ctx.transport === 'mcp' ? 'mcp' : 'graphql',
+          },
         );
 
         if (current.deletedAt) {

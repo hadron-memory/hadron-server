@@ -65,6 +65,13 @@ import {
 
 export interface Context {
   db: PrismaClient;
+  /**
+   * #1301 — set by an MCP handler that DELEGATES to a GraphQL resolver (e.g.
+   * `hadron_update_node_data` → `updateNodeData`), so a refusal addresses the
+   * caller on the surface they are actually on (@codex, PR #1305). Unset means
+   * a GraphQL caller.
+   */
+  transport?: 'mcp';
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key

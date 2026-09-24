@@ -339,3 +339,25 @@ describe('an UPDATE of a loc with no row at all (@copilot, PR #1305)', () => {
     expect(r.ext.mcpDoor ?? null).toBeNull();
   });
 });
+
+describe('an MCP data merge DELEGATED to GraphQL keeps its MCP origin (@codex, PR #1305 round 8)', () => {
+  const mcp = () => createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never);
+  const urnOf = async (loc: string) => {
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    return `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:${loc}`;
+  };
+
+  it('a task: names the MCP door, which takes the whole data object', async () => {
+    await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:md', name: 'm', content: 'x', isRunnable: true } }, ctx());
+    const text = await mcp().callToolText('hadron_update_node_data', { nodeUrn: await urnOf('tasks:md'), data: { a: 1 } });
+    expect(text).toContain('no door merges');
+    expect(text).toContain('Over MCP, pass the whole data object to hadron_update_task');
+  });
+
+  it('a spec: says plainly that no MCP tool writes it', async () => {
+    await spec();
+    const text = await mcp().callToolText('hadron_update_node_data', { nodeUrn: await urnOf('app:onb:010'), data: { a: 1 } });
+    expect(text).toContain('no door merges');
+    expect(text).toContain('No MCP tool writes a spec node');
+  });
+});
