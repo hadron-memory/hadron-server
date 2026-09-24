@@ -81,6 +81,11 @@ beforeAll(async () => {
   const outsider = await db.user.create({ data: { id: generateId(), handle: `out-${t}`, githubUsername: `out-${t}` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'OWNER' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'READER' } });
+  // CROSS-TENANT, not merely unaffiliated (@codex, #1308): the outsider OWNS
+  // another organisation, so a gate that admitted "anyone with an active org
+  // membership" would let them through and the denial cases would catch it.
+  const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'other', urn: `other-${t}` } });
+  await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: outsider.id, role: 'OWNER' } });
 
   const mint = async (userId: string, label: string, oauthScopes: OAuthScope[]) =>
     (await mintUserApiKey(db, { userId, label, createdBy: userId, issuedVia: 'test', oauthScopes })).rawKey;
