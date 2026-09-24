@@ -72,6 +72,13 @@ export interface Context {
    * a GraphQL caller.
    */
   transport?: 'mcp';
+  /**
+   * #1301 — with `transport: 'mcp'`: whether the delegating MCP call could be
+   * replayed through `kind`'s MCP door. Only the MCP handler knows which fields
+   * its caller sent, so it answers; a refusal that cannot be replayed on MCP
+   * names no MCP door (@codex, PR #1305).
+   */
+  governedCanReplay?: (kind: 'task' | 'review' | 'spec') => boolean;
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key

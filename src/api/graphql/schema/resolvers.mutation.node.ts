@@ -449,6 +449,7 @@ export async function writeNodeCore(
           context: mode === 'update' && (!existing || existing.deletedAt) ? undefined : opts?.governedContext,
           merge: opts?.governedMerge,
           surface: ctx.transport === 'mcp' ? 'mcp' : 'graphql',
+          canReplay: ctx.governedCanReplay,
         },
       );
 
@@ -977,6 +978,7 @@ export async function writeNodeCore(
             context: current.deletedAt ? undefined : opts?.governedContext,
             merge: opts?.governedMerge,
             surface: ctx.transport === 'mcp' ? 'mcp' : 'graphql',
+          canReplay: ctx.governedCanReplay,
           },
         );
 

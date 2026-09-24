@@ -5305,8 +5305,12 @@ export function createMcpServerInstance(
   // A second verb for the same act buys nothing a reader can act on.
 
   /** The GraphQL context for a delegated door call — same shape as chatCtx below. */
-  const doorCtx = (): Context => ({
+  const doorCtx = (canReplay?: Context['governedCanReplay']): Context => ({
     db,
+    // #1301: a refusal from the delegated door addresses an MCP caller, and
+    // names an MCP door only if this call could be replayed through it.
+    transport: 'mcp',
+    ...(canReplay ? { governedCanReplay: canReplay } : {}),
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     appId: auth.appId ?? undefined,
@@ -5387,7 +5391,7 @@ export function createMcpServerInstance(
       )[doorName](
         {},
         { input: { memoryId: memory.id, loc, ...fields, ...signal } },
-        doorCtx(),
+        doorCtx((k) => mcpDoorCanReplay(fields, k, mode)),
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
     } catch (e) {
@@ -5478,8 +5482,10 @@ export function createMcpServerInstance(
       // the chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
-        // #1301: a refusal from the delegated resolver addresses an MCP caller.
+        // #1301: a refusal from the delegated resolver addresses an MCP caller;
+        // a door takes a whole `data` object, so the replace it names replays.
         transport: 'mcp',
+        governedCanReplay: () => true,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
         appId: auth.appId ?? undefined,

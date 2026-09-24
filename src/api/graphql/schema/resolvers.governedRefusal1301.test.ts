@@ -361,3 +361,24 @@ describe('an MCP data merge DELEGATED to GraphQL keeps its MCP origin (@codex, P
     expect(text).toContain('No MCP tool writes a spec node');
   });
 });
+
+describe('an MCP door tool delegating to GraphQL keeps its MCP origin (@codex, PR #1305 round 9)', () => {
+  const mcp = () => createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never);
+  const reviewUrn = async () => {
+    await M.createReviewNode({}, { input: { memoryId, loc: 'checks:r', name: 'r', content: 'x', role: 'review' } }, ctx());
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    return `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:checks:r`;
+  };
+
+  it('hadron_update_task on a REVIEW names hadron_update_review, the door that can take the call', async () => {
+    const text = await mcp().callToolText('hadron_update_task', { urn: await reviewUrn(), content: 'y' });
+    expect(text).toMatch(/role_governed/);
+    expect(text).toContain('Over MCP, use hadron_update_review');
+  });
+
+  it('…but not when the call carries isRunnable, which the review door does not take', async () => {
+    const text = await mcp().callToolText('hadron_update_task', { urn: await reviewUrn(), content: 'y', isRunnable: false });
+    expect(text).toMatch(/role_governed/);
+    expect(text).not.toContain('hadron_update_review');
+  });
+});
