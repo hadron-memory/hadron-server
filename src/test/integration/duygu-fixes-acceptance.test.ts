@@ -198,12 +198,10 @@ describe('#1300/#1307 — edges for a global-READER org OWNER, over HTTP', () =>
         expect(res.status, op).toBe(200);
         expect(res.errors, op).toHaveLength(1);
         expect(res.errors![0]!.message, op).toBe('Forbidden: no write access to this memory');
-        // PINNED AS IT IS, NOT AS IT SHOULD BE. The memory write gate throws a
-        // plain Error, which Apollo reports as INTERNAL_SERVER_ERROR — the code
-        // an operator pages on, and the one a server fault also carries.
-        // hadron-server#1220 types these as FORBIDDEN; when it does, this line
-        // flips deliberately, and a client rule keyed on `reason` is unaffected.
-        expect(res.errors![0]!.extensions, op).toEqual({ code: 'INTERNAL_SERVER_ERROR' });
+        // The shared memory-write gate is a typed ordinary denial. It retains
+        // GraphQL's partial-response transport and carries no OAuth reason, so
+        // clients do not mistake it for either a server fault or re-auth advice.
+        expect(res.errors![0]!.extensions, op).toEqual({ code: 'FORBIDDEN' });
       }
       await unchanged();
     });
@@ -237,6 +235,23 @@ describe('#1300/#1307 — edges for a global-READER org OWNER, over HTTP', () =>
         .toEqual(strip(await gql(k, UPDATE_EDGE, { e: missingEdge, d: 'x' }), missingEdge));
       expect(strip(await gql(k, DELETE_EDGE, { e: edgeId }), edgeId))
         .toEqual(strip(await gql(k, DELETE_EDGE, { e: missingEdge }), missingEdge));
+    });
+
+    it('a genuine internal failure stays INTERNAL_SERVER_ERROR and writes nothing', async () => {
+      const fault = vi
+        .spyOn(db.memory, 'findUniqueOrThrow')
+        .mockRejectedValueOnce(new Error('synthetic database failure'));
+      try {
+        const r = await gql(key.reader!, CREATE_EDGE, { s: src, t: tgt, n: 'fault' });
+        expect(r.status).toBe(200);
+        expect(r.data).toBeNull();
+        expect(r.errors).toHaveLength(1);
+        expect(r.errors![0]!.extensions).toEqual({ code: 'INTERNAL_SERVER_ERROR' });
+        expect(r.errors![0]!.extensions).not.toHaveProperty('reason');
+        expect(await db.edge.count({ where: { sourceId: src, name: 'fault' } })).toBe(0);
+      } finally {
+        fault.mockRestore();
+      }
     });
   });
 });

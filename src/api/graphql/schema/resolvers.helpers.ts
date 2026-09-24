@@ -1586,7 +1586,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
       if (m?.ownerUserId == null) return;
     }
     if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
-    throw new Error('Forbidden: no write access to this memory');
+    throw memoryWriteForbidden();
   }
 
   // JWT user path
@@ -1612,7 +1612,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   if (memory.class === 'personal' || memory.class === 'private') {
     if (memory.userId === ctx.userId) return;
     if (await granteeShareAccess(ctx.db, ctx.userId, memory, { requireWrite: true })) return;
-    throw new Error('Forbidden: no write access to this memory');
+    throw memoryWriteForbidden();
   }
 
   // spec 047: a USER-owned memory is writable ONLY by its owner — STRICT
@@ -1622,7 +1622,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // non-personal memory, e.g. a user-owned agent's system/knowledge memory.
   if (memory.ownerUserId !== null) {
     if (ctx.userId === memory.ownerUserId) return;
-    throw new Error('Forbidden: no write access to this memory');
+    throw memoryWriteForbidden();
   }
 
   // Non-personal/private, org-owned: global ADMIN/OWNER bypass.
@@ -1634,11 +1634,11 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // through the App-key/agent path (canWriteToMemory via getAppMemoryAccess); a
   // JWT org contributor who isn't ADMIN gets no write here (codex review, #660).
   if (memory.appId !== null && (memory.class === 'knowledge' || memory.class === 'group')) {
-    throw new Error('Forbidden: no write access to this memory');
+    throw memoryWriteForbidden();
   }
 
   if (memory.organizationId === null) {
-    throw new Error('Forbidden: no write access to this memory');
+    throw memoryWriteForbidden();
   }
 
   // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
@@ -1664,7 +1664,18 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     if (memorySub && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
   }
 
-  throw new Error('Forbidden: no write access to this memory');
+  throw memoryWriteForbidden();
+}
+
+/**
+ * The shared memory-write denial. Keep the established prose and GraphQL
+ * partial-response transport, but make the authorization classification
+ * explicit so Apollo does not report an ordinary denial as a server fault.
+ */
+function memoryWriteForbidden(): GraphQLError {
+  return new GraphQLError('Forbidden: no write access to this memory', {
+    extensions: { code: 'FORBIDDEN' },
+  });
 }
 
 export const MEMORY_INCLUDE = {
