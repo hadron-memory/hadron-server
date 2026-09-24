@@ -628,6 +628,10 @@ export const skillQueries = {
       return {
         id: (n as SkillNode & { _id: string })._id,
         urn: n.urn,
+        // Identity for no-id pairing (#1309) — the stored memory URN and loc,
+        // not `urn`, which is lossy for a compound memory.
+        memoryUrn: n.memoryUrn,
+        loc: n.loc,
         declaration,
         // #1235 §4a: the node's id leads the hash, so a file re-pointed at a
         // different node by a header edit reads as locally-edited rather than
