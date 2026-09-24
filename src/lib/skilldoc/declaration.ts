@@ -271,27 +271,6 @@ export function unknownHostKeys(properties: unknown): string[] {
 }
 
 /**
- * How many unknown `exports` keys a node carries, and their total UTF-8
- * length, WITHOUT sorting them or building anything per key (@codex P1,
- * PR #1296). `properties` is arbitrary JSON, so a caller bounding a report
- * over many nodes must measure before it materializes one: the same predicate
- * as `unknownHostKeys`, at a cost proportional to the keys alone.
- */
-export function unknownHostKeyStats(properties: unknown): { count: number; bytes: number } {
-  if (!isPlainObject(properties) || !own(properties, EXPORTS_KEY)) return { count: 0, bytes: 0 };
-  const raw = ownValue(properties, EXPORTS_KEY);
-  if (!isPlainObject(raw)) return { count: 0, bytes: 0 };
-  let count = 0;
-  let bytes = 0;
-  for (const key of Object.keys(raw)) {
-    if (skillHost(key) !== null) continue;
-    count += 1;
-    bytes += Buffer.byteLength(key, 'utf8');
-  }
-  return { count, bytes };
-}
-
-/**
  * The retired top-level alias paths a node still carries as OBJECTS.
  *
  * Lives here rather than in `lint.ts` so the "what counts as a declaration

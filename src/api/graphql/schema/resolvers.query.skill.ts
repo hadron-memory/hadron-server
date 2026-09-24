@@ -59,13 +59,13 @@ import {
   skillHost,
   lintCollisions,
   lintNode,
-  lintUnknownHostKeys,
   pairFileToNode,
   render,
   hash,
   storedName,
+  unknownHostKeyFinding,
   unknownHostKeys,
-  unknownHostKeyStats,
+  unknownHostKeysOmittedFinding,
   type Finding,
   type FileFacts,
   type DriftClass,
@@ -142,23 +142,26 @@ const DISCOVERY_OR = DECLARATION_KEYS.map((key) => ({
 const SKILL_PLAN_MAX_BODY_BYTES = BATCH_READ_MAX_BYTES;
 
 /**
- * Aggregate ceilings on the unrecognised-`exports`-key report (#1292; @codex
- * P1, PR #1296).
+ * Bounds on the unrecognised-`exports`-key REPORT (#1292): at most this many
+ * keys LISTED per node, and none longer than this many UTF-8 bytes.
  *
  * `properties` is arbitrary JSON a writer controls, and the body ceiling above
- * counts only `content`. So without these, one node carrying a huge `exports`
- * object of tiny unknown keys makes every plan sort them all and build a
- * warning per key, at roughly 25× the stored size, whether or not the caller
- * even selected `unrecognized`. Both are measured BEFORE anything per key is
- * built, and both refuse loudly, the posture of the ceilings above: a report
- * silently cut short would tell the client its corpus is cleaner than it is.
- * Bytes as well as count, because one enormous key passes any count.
+ * counts only `content`, so an unbounded report let one node carrying a huge
+ * `exports` object of tiny keys make every plan build a warning per key, at
+ * about 25× the stored size (@codex P1, PR #1296).
  *
- * Generous by design: a real node carries one stray key (the `codex` shape),
- * so either ceiling is reached only by data no author meant to write.
+ * The bound is on the report, NEVER on the plan (@copilot, PR #1296): the first
+ * fix refused the whole plan past a ceiling, which made an unknown key block
+ * every valid entry beside it, the one thing cor:agt:030:06 rules out. Nothing
+ * is dropped silently either: `keyCount` is the true total, and every key not
+ * listed is counted in one summary warning.
+ *
+ * Worst case, bounded: 500 nodes × 10 keys × (128 bytes listed + a warning).
+ * A real node carries one stray key (the `codex` shape), so neither bound is
+ * reached by data anyone meant to write.
  */
-const SKILL_PLAN_MAX_UNKNOWN_KEYS = 1_000;
-const SKILL_PLAN_MAX_UNKNOWN_KEY_BYTES = 64 * 1024;
+const SKILL_PLAN_UNRECOGNIZED_KEYS_LISTED = 10;
+const SKILL_PLAN_UNRECOGNIZED_KEY_MAX_BYTES = 128;
 
 /** Classes whose §5 action writes a file. */
 const WRITES_A_FILE = new Set(['never-exported', 'stale', 'unhashed', 'renamed']);
@@ -530,22 +533,6 @@ export const skillQueries = {
       );
     }
 
-    // #1292 / @codex P1 on PR #1296: bound the unrecognised-key report before
-    // a single key is sorted or a single warning is built.
-    let unknownKeyCount = 0;
-    let unknownKeyBytes = 0;
-    for (const r of declaredRows) {
-      const stats = unknownHostKeyStats(r.properties);
-      unknownKeyCount += stats.count;
-      unknownKeyBytes += stats.bytes;
-    }
-    if (unknownKeyCount > SKILL_PLAN_MAX_UNKNOWN_KEYS || unknownKeyBytes > SKILL_PLAN_MAX_UNKNOWN_KEY_BYTES) {
-      throw new GraphQLError(
-        `skillPlan: the nodes in scope carry ${unknownKeyCount} unrecognised \`exports\` keys (${unknownKeyBytes} bytes), over the ceiling of ${SKILL_PLAN_MAX_UNKNOWN_KEYS} keys / ${SKILL_PLAN_MAX_UNKNOWN_KEY_BYTES} bytes. Remove the stray keys, or narrow \`memories\`; this surface does not silently truncate.`,
-        { extensions: { code: 'BAD_USER_INPUT' } },
-      );
-    }
-
     // #1177 / @codex P1 on PR #1240 — LOCKED ENCRYPTED CONTENT.
     //
     // `decryptNodesBatch` leaves a node's content as CIPHERTEXT rather than
@@ -813,23 +800,34 @@ export const skillQueries = {
     // encrypted, so a locked memory's node is still reported truthfully.
     const unrecognized = declaredRows
       .map((r) => {
-        const keys = unknownHostKeys(r.properties);
-        if (keys.length === 0) return null;
+        const all = unknownHostKeys(r.properties);
+        if (all.length === 0) return null;
         const urn = safeNodeUrnV2(r.memory.urn, r.loc);
+        const node = {
+          urn,
+          loc: r.loc,
+          memoryUrn: r.memory.urn,
+          isRunnable: r.isRunnable === true,
+          content: '',
+          properties: r.properties,
+        };
+        // Bounded LISTING, never a refusal and never a silent drop: see
+        // SKILL_PLAN_UNRECOGNIZED_KEYS_LISTED.
+        const keys = all
+          .filter((k) => Buffer.byteLength(k, 'utf8') <= SKILL_PLAN_UNRECOGNIZED_KEY_MAX_BYTES)
+          .slice(0, SKILL_PLAN_UNRECOGNIZED_KEYS_LISTED);
+        const omitted = all.length - keys.length;
         return {
           urn,
           nodeId: r.id,
           name: r.name,
           memory: r.memory.urn,
+          keyCount: all.length,
           keys,
-          findings: lintUnknownHostKeys({
-            urn,
-            loc: r.loc,
-            memoryUrn: r.memory.urn,
-            isRunnable: r.isRunnable === true,
-            content: '',
-            properties: r.properties,
-          }),
+          findings: [
+            ...keys.map((k) => unknownHostKeyFinding(node, k)),
+            ...(omitted > 0 ? [unknownHostKeysOmittedFinding(node, omitted)] : []),
+          ],
         };
       })
       .filter((u): u is NonNullable<typeof u> => u !== null);

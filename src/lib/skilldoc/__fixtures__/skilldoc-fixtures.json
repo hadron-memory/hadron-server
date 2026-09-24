@@ -1690,12 +1690,32 @@
           "severity": "warning"
         },
         {
+          "message": "properties.exports key \"en\\u2000quad\" names no skill host (supported: claudeSkill, codexSkill) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it",
+          "rule": "skill-unknown-host-key",
+          "severity": "warning"
+        },
+        {
+          "message": "properties.exports key \"ideo\\u3000space\" names no skill host (supported: claudeSkill, codexSkill) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it",
+          "rule": "skill-unknown-host-key",
+          "severity": "warning"
+        },
+        {
+          "message": "properties.exports key \"line\\u2028sep\" names no skill host (supported: claudeSkill, codexSkill) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it",
+          "rule": "skill-unknown-host-key",
+          "severity": "warning"
+        },
+        {
           "message": "properties.exports key \"nbsp\\u00a0\" names no skill host (supported: claudeSkill, codexSkill) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it",
           "rule": "skill-unknown-host-key",
           "severity": "warning"
         },
         {
           "message": "properties.exports key \"new\\nline\" names no skill host (supported: claudeSkill, codexSkill) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it",
+          "rule": "skill-unknown-host-key",
+          "severity": "warning"
+        },
+        {
+          "message": "properties.exports key \"ogham\\u1680mark\" names no skill host (supported: claudeSkill, codexSkill) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it",
           "rule": "skill-unknown-host-key",
           "severity": "warning"
         },
@@ -1743,7 +1763,11 @@
         "",
         "𐀀",
         "emoji😀",
-        "sp ace"
+        "sp ace",
+        "en quad",
+        "ideo　space",
+        "ogham mark",
+        "line\u2028sep"
       ],
       "name": "keys Go and JSON quote differently"
     }

@@ -1075,9 +1075,16 @@ export const typeDefs = `#graphql
     """The node's display name, not a skill name: an unrecognised key has no host, so it declares no skill name anyone reads."""
     name: String!
     memory: String!
-    """The unrecognised keys, in UTF-8 byte order — e.g. codex for properties.exports.codex."""
+    """How many unrecognised keys the node carries — the true total, whether or not each is listed."""
+    keyCount: Int!
+    """
+    The unrecognised keys LISTED, in UTF-8 byte order — e.g. codex for
+    properties.exports.codex. At most 10, and none over 128 bytes: the report
+    is bounded because properties is writer-controlled. keyCount is the total;
+    anything not listed is counted in one extra warning, never dropped silently.
+    """
     keys: [String!]!
-    """One warning per key. Attributed to no host."""
+    """One warning per listed key, plus one for any not listed. Attributed to no host; never blocks."""
     findings: [SkillFinding!]!
   }
 

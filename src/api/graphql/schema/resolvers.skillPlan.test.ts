@@ -1256,28 +1256,41 @@ describe('hosts (#1254)', () => {
       expect(got.unrecognized).toEqual([]);
     });
 
-    // @codex P1 on PR #1296: `properties` is writer-controlled JSON, so the
-    // report is bounded BEFORE it is built, and the bound refuses loudly.
-    const manyKeys = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, 0]));
+    // @codex P1 then @copilot on PR #1296: `properties` is writer-controlled,
+    // so the REPORT is bounded, and the bound never blocks the plan: an
+    // unknown key must not cost a valid entry its export (cor:agt:030:06).
+    const manyKeys = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${String(i).padStart(4, '0')}`, 0]));
 
-    it('refuses loudly past the unknown-key COUNT ceiling, and plans normally at it', async () => {
-      await mkNode('tasks:at', { properties: { exports: manyKeys(1_000) } });
-      const at = await plan({ intent: 'LINT' });
-      expect(at.unrecognized[0].keys).toHaveLength(1_000);
+    it('a node with thousands of unknown keys: the valid entry still exports, and nothing is dropped silently', async () => {
+      await mkNode('tasks:noisy', { properties: { exports: { claudeSkill: ok, ...manyKeys(5_000) } } });
 
-      await mkNode('tasks:over', { properties: { exports: { k: 0 } } });
-      await expect(plan({ intent: 'LINT' })).rejects.toMatchObject({
-        message: expect.stringMatching(/1001 unrecognised `exports` keys .* over the ceiling of 1000 keys/),
-        extensions: { code: 'BAD_USER_INPUT' },
-      });
+      const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+
+      expect(got.entries).toHaveLength(1);
+      expect(got.entries[0]).toMatchObject({ findings: [], exportPlan: { action: 'WRITE' } });
+      const u = got.unrecognized[0];
+      expect(u.keyCount).toBe(5_000);
+      expect(u.keys).toEqual(Object.keys(manyKeys(10)));
+      expect(u.findings).toHaveLength(11);
+      expect(u.findings.every((f: { severity: string }) => f.severity === 'warning')).toBe(true);
+      expect(u.findings[10].message).toMatch(/carries 4990 more unrecognised key\(s\) not listed/);
     });
 
-    it('refuses loudly past the unknown-key BYTE ceiling, even for one key', async () => {
-      await mkNode('tasks:huge', { properties: { exports: { ['x'.repeat(64 * 1024 + 1)]: 0 } } });
-      await expect(plan({ intent: 'EXPORT', files: [] })).rejects.toMatchObject({
-        message: expect.stringMatching(/1 unrecognised `exports` keys \(65537 bytes\)/),
-        extensions: { code: 'BAD_USER_INPUT' },
-      });
+    it('one enormous key is counted, not listed, and blocks nothing', async () => {
+      await mkNode('tasks:huge', { properties: { exports: { claudeSkill: ok, ['x'.repeat(129)]: 0, codex: 0 } } });
+
+      const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+
+      expect(got.entries[0]).toMatchObject({ exportPlan: { action: 'WRITE' } });
+      expect(got.unrecognized[0]).toMatchObject({ keyCount: 2, keys: ['codex'] });
+      expect(got.unrecognized[0].findings[1].message).toMatch(/carries 1 more unrecognised key\(s\)/);
+    });
+
+    it('CONTROL: an ordinary node lists every key, with no summary warning', async () => {
+      await mkNode('tasks:plain', { properties: { exports: { claudeSkill: ok, codex: 0, cursor: 0 } } });
+      const got = await plan({ intent: 'LINT' });
+      expect(got.unrecognized[0]).toMatchObject({ keyCount: 2, keys: ['codex', 'cursor'] });
+      expect(got.unrecognized[0].findings).toHaveLength(2);
     });
 
     it('goes through the same access gate as the entries', async () => {

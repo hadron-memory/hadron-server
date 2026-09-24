@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { HOST_CLAUDE_SKILL, HOST_CODEX_SKILL } from './hosts.js';
-import { unknownHostKeys, unknownHostKeyStats } from './declaration.js';
+import { unknownHostKeys } from './declaration.js';
 import { lintNode, lintUnknownHostKeys, RULE_UNKNOWN_HOST_KEY, type SkillNode } from './lint.js';
 
 const ok = { name: 'hadron-demo', description: 'Use when demoing.', enable: true };
@@ -97,10 +97,4 @@ describe('an unknown exports key (#1292)', () => {
     expect(lintUnknownHostKeys(node({ exports: {} }))).toEqual([]);
   });
 
-  it('unknownHostKeyStats counts unknown keys and their UTF-8 bytes, ignoring known hosts', () => {
-    // Measured without sorting or building anything per key (@codex P1, #1296).
-    expect(unknownHostKeyStats({ exports: { claudeSkill: ok, codex: ok, 'é': 1 } })).toEqual({ count: 2, bytes: 5 + 2 });
-    expect(unknownHostKeyStats({ exports: 'yes' })).toEqual({ count: 0, bytes: 0 });
-    expect(unknownHostKeyStats({})).toEqual({ count: 0, bytes: 0 });
-  });
 });

@@ -229,17 +229,38 @@ export const RULE_UNKNOWN_HOST_KEY = 'skill-unknown-host-key';
  * never an error: an unrecognised key is reported, and never blocks anything.
  */
 export function lintUnknownHostKeys(node: SkillNode): Finding[] {
+  return unknownHostKeys(node.properties).map((key) => unknownHostKeyFinding(node, key));
+}
+
+/** The one warning for one unknown key: shared by the full pass and by a caller that lists only some keys. */
+export function unknownHostKeyFinding(node: SkillNode, key: string): Finding {
   const known = SKILL_HOSTS.map((h) => h.key).join(', ');
-  return unknownHostKeys(node.properties).map((key) => ({
+  return {
     urn: node.urn,
     memory: node.memoryUrn,
     rule: RULE_UNKNOWN_HOST_KEY,
-    severity: 'warning' as const,
+    severity: 'warning',
     // Word for word Go's LintUnknownHostKeys (@copilot, PR #1296), with the
     // key quoted as Go's %q quotes it: the key is author-controlled, so it can
     // carry exactly the characters JSON.stringify and Go escape differently.
     message: `properties.${EXPORTS_KEY} key ${goQuote(key)} names no skill host (supported: ${known}) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it`,
-  }));
+  };
+}
+
+/**
+ * The summary warning for unknown keys a report does not LIST (#1292; @codex
+ * P1 then @copilot, PR #1296). Server-only: Go lists every key, and a report
+ * over a writer-controlled object has to bound what it builds. The keys are
+ * counted, not dropped, and still a warning: an unknown key never blocks.
+ */
+export function unknownHostKeysOmittedFinding(node: SkillNode, omitted: number): Finding {
+  return {
+    urn: node.urn,
+    memory: node.memoryUrn,
+    rule: RULE_UNKNOWN_HOST_KEY,
+    severity: 'warning',
+    message: `properties.${EXPORTS_KEY} carries ${omitted} more unrecognised key(s) not listed in this report (too many, or too long to show) — nothing exports them, and they are not read as an alias for any host; remove them`,
+  };
 }
 
 /**

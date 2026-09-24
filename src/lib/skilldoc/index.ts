@@ -38,7 +38,6 @@ export {
   malformedDeclarationPaths,
   storedName,
   unknownHostKeys,
-  unknownHostKeyStats,
   type Declaration,
 } from './declaration.js';
 export {
@@ -54,6 +53,8 @@ export {
   lintNode,
   lintUnknownHostKeys,
   RULE_UNKNOWN_HOST_KEY,
+  unknownHostKeyFinding,
+  unknownHostKeysOmittedFinding,
   type Finding,
   type Severity,
   type SkillNode,

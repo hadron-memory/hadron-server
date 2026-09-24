@@ -306,7 +306,10 @@ func main() {
 		kase{"name": "the codex shape", "keys": []any{"codex"}},
 		kase{"name": "keys Go and JSON quote differently", "keys": []any{
 			"with\"quote", "back\\slash", "new\nline", "tab\there", "bell\a", "del\x7f",
-			"nbsp\u00a0", "soft\u00adhyphen", "caf\u00e9", "\ue000", "\U00010000", "emoji\U0001F600", "sp ace"}},
+			"nbsp\u00a0", "soft\u00adhyphen", "caf\u00e9", "\ue000", "\U00010000", "emoji\U0001F600", "sp ace",
+			// Unicode space separators other than U+0020, and U+2028: %q
+			// ESCAPES them (measured, @copilot on PR #1296 read it the other way).
+			"en\u2000quad", "ideo\u3000space", "ogham\u1680mark", "line\u2028sep"}},
 	)
 	for _, c := range uk {
 		exports := map[string]any{"claudeSkill": map[string]any{"name": "x", "description": "d. Use when x."}}
