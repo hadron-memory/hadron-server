@@ -145,8 +145,19 @@ type NodeWriteMode = 'create' | 'update' | 'upsert';
 /** NodeInput with `name` optional — update mode preserves it on omit (D4). */
 type NodeWriteInput = Omit<NodeInput, 'name'> & { name?: string };
 
-/** Read the complete record-gate shape; omitting one field can fail open. */
-async function canReadNodeWriteMemory(ctx: Context, memoryId: string): Promise<boolean> {
+/** Classify a denied direct write with the matching read surface's shared gate. */
+async function canReadNodeWriteTarget(
+  ctx: Context,
+  memoryId: string,
+  entity: 'memory' | 'node',
+): Promise<boolean> {
+  // Node contents have a deliberately narrower read set than Memory records:
+  // for example, an org member may open an app/system Memory record without
+  // being allowed to read its nodes. Keep update-by-node-id aligned with
+  // Query.node so that record readability cannot preserve a node oracle.
+  if (entity === 'node') return isMemoryReadableCached(ctx, memoryId);
+
+  // Read the complete record-gate shape; omitting one field can fail open.
   const memory = await ctx.db.memory.findUnique({
     where: { id: memoryId },
     select: {
@@ -305,7 +316,11 @@ export async function writeNodeCore(
         if (
           !opts?.concealUnreadable ||
           !isMemoryWriteDenial(error) ||
-          (await canReadNodeWriteMemory(ctx, resolvedMemoryId))
+          (await canReadNodeWriteTarget(
+            ctx,
+            resolvedMemoryId,
+            opts.concealUnreadable.entity,
+          ))
         ) {
           throw error;
         }

@@ -51,6 +51,8 @@ let memoryUrn: string;
 let missingMemoryUrn: string;
 let sharedMemoryId: string;
 let anchorId: string;
+let recordOnlyMemoryId: string;
+let recordOnlyNodeId: string;
 const key: Record<string, string> = {};
 
 async function gql(k: string, query: string, variables: Record<string, unknown>): Promise<Gql> {
@@ -116,6 +118,31 @@ beforeAll(async () => {
   await db.memoryShare.create({
     data: { memoryId: sharedMemory.id, granteeId: grantee.id, grantorId: owner.id, role: 'writer' },
   });
+
+  // An org member may open this system Memory RECORD, but the shared
+  // node-content gate deliberately excludes its nodes. This pins the distinct
+  // gate update-by-id needs when classifying an ordinary write denial.
+  const recordOnlyMemory = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: org.id,
+      urn: `${org.urn}:record-only-system`,
+      name: 'record-readable, nodes-unreadable system memory',
+      class: 'system',
+      visibility: null,
+      acceptsUploads: false,
+    },
+  });
+  recordOnlyMemoryId = recordOnlyMemory.id;
+  const recordOnlyNode = await db.node.create({
+    data: {
+      id: generateId(),
+      memoryId: recordOnlyMemory.id,
+      loc: 'private:node',
+      name: 'must stay concealed',
+    },
+  });
+  recordOnlyNodeId = recordOnlyNode.id;
 
   const app = await createServer();
   server = createHttpServer(app);
@@ -297,6 +324,26 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
         expect(await db.edge.count()).toBe(edgesBefore);
       });
     }
+
+    it('uses the node-content gate when the Memory record is readable but its nodes are not', async () => {
+      const read = await gql(key.reader!, READ_MEMORY, { ref: recordOnlyMemoryId });
+      expect(read.errors).toBeUndefined();
+      expect(read.data!.memory.id).toBe(recordOnlyMemoryId);
+
+      const missingNodeId = generateId();
+      const existing = await gql(key.reader!, UPDATE_NODE, {
+        input: { id: recordOnlyNodeId, content: 'must not land' },
+      });
+      const missing = await gql(key.reader!, UPDATE_NODE, {
+        input: { id: missingNodeId, content: 'must not land' },
+      });
+
+      expect(normalizeSentRef(existing, recordOnlyNodeId)).toEqual(
+        normalizeSentRef(missing, missingNodeId),
+      );
+      expectCode(existing, 'NODE_NOT_FOUND');
+      expect((await db.node.findUniqueOrThrow({ where: { id: recordOnlyNodeId } })).content).toBeNull();
+    });
 
     it('does not disguise malformed refs or internal DB faults as not-found', async () => {
       const malformed = await gql(key.outsider!, CREATE_SPEC, {
