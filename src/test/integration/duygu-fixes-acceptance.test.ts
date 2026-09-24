@@ -277,10 +277,19 @@ describe('#1301/#1305 — a governed refusal names a route, and that route works
     expect(e.message).not.toContain('MCP');
   });
 
-  it('TRUTHFUL: the named route, followed literally by the same caller, succeeds and keeps what was resent', async () => {
-    const n = await specNode(key.ownerAccount!, loc('app:onb'));
-    const r = await gql(key.ownerAccount!, UPDATE_SPEC, { i: { id: n, data: { version: '0.0.1', provenance: 'x' } } });
+  it('TRUTHFUL: on the SAME node, the refusal changes nothing and the named route then succeeds, keeping what was resent', async () => {
+    // One resource end to end: the node that was refused is the node the
+    // route is followed on (@copilot, #1308 round 2).
+    const k = key.ownerAccount!;
+    const n = await specNode(k, loc('app:onb'));
+
+    const refused = await gql(k, MERGE_DATA, { n, d: { provenance: 'x' } });
+    expect(refused.errors?.[0]?.extensions).toMatchObject({ code: 'ROLE_GOVERNED', door: 'updateSpecNode', merge: 'data' });
+    expect((await db.node.findUniqueOrThrow({ where: { id: n } })).data).toEqual({ version: '0.0.1' });
+
+    // What the refusal says to do: a REPLACE carrying the keys already there.
+    const r = await gql(k, UPDATE_SPEC, { i: { id: n, data: { version: '0.0.1', provenance: 'x' } } });
     expect(r.errors).toBeUndefined();
-    expect(r.data!.updateSpecNode.data).toEqual({ version: '0.0.1', provenance: 'x' });
+    expect(r.data!.updateSpecNode).toEqual({ id: n, data: { version: '0.0.1', provenance: 'x' } });
   });
 });
