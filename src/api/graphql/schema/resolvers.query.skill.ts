@@ -619,13 +619,15 @@ export const skillQueries = {
     // Per host: one name on a node's Claude and Codex declarations is by
     // design, and two nodes sharing a Codex name collide only for Codex.
     const collisions = lintCollisions(skillNodes, host);
-    // A collision finding carries only a URN, so it attaches to EVERY node
-    // emitting that URN — conservative: a collision withholds a write, never
-    // performs one.
+    // A collision finding names its node by URN AND memory (lint sets
+    // `memory: node.memoryUrn`). The URN alone can name two nodes; within one
+    // memory it cannot, so the pair is exact. Attaching by URN alone handed a
+    // twin with a UNIQUE name another node's collision, refusing its export
+    // (@copilot, #1310 round 3).
     const collidingIds = new Set<string>();
     for (const f of collisions) {
       for (const n of skillNodes) {
-        if (n.urn !== f.urn) continue;
+        if (n.urn !== f.urn || n.memoryUrn !== f.memory) continue;
         findingsById.get(n._id)?.push(f);
         collidingIds.add(n._id);
       }

@@ -1639,3 +1639,32 @@ describe('#1310 — two nodes that emit ONE URN stay two nodes, end to end', () 
     expect(entryFor(p, first.id).renderedBody).toBeNull();
   });
 });
+
+describe('#1310 review round 3 (@copilot): a collision finding reaches ONLY the node it is about', () => {
+  it('the compound twin of a colliding node is NOT refused when its own name is unique', async () => {
+    // Plain `tasks:b` and plain `tasks:z` both store `dup` — a real collision.
+    // The compound twin `<mem>:tasks` + `b` emits the same URN as plain
+    // `tasks:b` but stores a unique name, so it must plan a normal WRITE.
+    const plainB = await mkNode('tasks:b', { properties: declaration({ name: 'dup' }) });
+    const plainZ = await mkNode('tasks:z', { properties: declaration({ name: 'dup' }) });
+    const compoundMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, name: 'compound', urn: `${mem.urn}:tasks`, class: 'knowledge' },
+    });
+    const twin = await db.node.create({
+      data: {
+        id: generateId(), memoryId: compoundMem.id, loc: 'b', name: 'b', isRunnable: true,
+        content: '# TWIN body', properties: declaration({ name: 'unique-twin' }),
+      },
+    });
+    const p = await plan({ intent: 'EXPORT', files: [] });
+    const e = (id: string) => p.entries.find((x: { nodeId: string }) => x.nodeId === id) as any;
+    const rules = (id: string) => (e(id).findings as { rule: string }[]).map((f) => f.rule);
+
+    expect(e(twin.id).urn).toBe(e(plainB.id).urn); // PRECONDITION: one emitted URN
+    expect(rules(plainB.id)).toContain('skill-name-collision');
+    expect(rules(plainZ.id)).toContain('skill-name-collision');
+    expect(rules(twin.id)).not.toContain('skill-name-collision');
+    expect(e(twin.id).class).not.toBe('collision');
+    expect(e(twin.id).exportPlan).toMatchObject({ action: 'WRITE' });
+  });
+});
