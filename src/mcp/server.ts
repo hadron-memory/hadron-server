@@ -311,6 +311,31 @@ export interface TestableMcpServer {
   toolNames(): string[];
 }
 
+/**
+ * #1301 — the generic node-write fields a governed MCP door tool can ALSO
+ * carry (its `governedDoorArgs`), so a refusal only advertises the door when
+ * the refused call could be replayed through it (@codex, PR #1305). A test
+ * pins every entry to the registered door schemas, so the two cannot drift.
+ */
+export const GOVERNED_MCP_DOOR_FIELDS: readonly string[] = [
+  'name', 'description', 'abstract', 'content', 'tags', 'nodeType', 'seq', 'properties', 'data',
+];
+
+/**
+ * Whether a generic MCP node write could be replayed through a governed door:
+ * every field it sets is one the door carries, and it clears neither
+ * `content` nor `abstract` (the doors take strings only). The kind signals
+ * (`role`, `isRunnable`) are the door's own business and never disqualify.
+ */
+export function mcpDoorCanReplay(fields: Record<string, unknown>): boolean {
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined || key === 'role' || key === 'isRunnable') continue;
+    if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
+    if ((key === 'content' || key === 'abstract') && value === null) return false;
+  }
+  return true;
+}
+
 export function createTestableMcpServer(
   auth: AuthContext,
   opts?: {
@@ -4428,7 +4453,11 @@ export function createMcpServerInstance(
           // A LIVE node at this loc makes any create a NODE_LOC_CONFLICT, the
           // create doors included, so a route is offered only when the loc is
           // free or holds a tombstone to resurrect (@codex, PR #1305).
-          governedProbe && governedProbe.deletedAt == null ? {} : { context: 'node-write' },
+          // …and only when the door could replay this exact call.
+          (governedProbe && governedProbe.deletedAt == null) ||
+            !mcpDoorCanReplay({ name, nodeType, objectType, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges })
+            ? {}
+            : { context: 'node-write' },
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
@@ -4909,7 +4938,12 @@ export function createMcpServerInstance(
           mergedGovernedState(existing, { role, isRunnable }),
           'update',
           undefined,
-          { context: 'node-write' },
+          // A route only for a LIVE node (a tombstone is NODE_NOT_FOUND to the
+          // update doors too) and a call the door could replay (@codex, #1305).
+          existing && existing.deletedAt == null &&
+            mcpDoorCanReplay({ name, nodeType, objectType, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason })
+            ? { context: 'node-write' }
+            : {},
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);

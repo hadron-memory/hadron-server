@@ -17,7 +17,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
+import { createTestableMcpServer, GOVERNED_MCP_DOOR_FIELDS } from '../../../mcp/server.js';
 import { GOVERNED_KINDS, RoleGovernedError } from '../../../lib/governedRole.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -211,5 +211,44 @@ describe('callers whose refused operation no node-write route performs (@codex, 
     expect(text).not.toContain('hadron_create_task');
     // CONTROL: the loc really is live, so a create door would be refused too.
     expect((await db.node.findUniqueOrThrow({ where: { id: t.id } })).deletedAt).toBeNull();
+  });
+});
+
+describe('MCP advertises a door only when it could replay the refused call (@codex, PR #1305)', () => {
+  const adminMcp = () => createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never);
+  const taskUrn = async (loc: string) => {
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    return `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:${loc}`;
+  };
+
+  it('every field the check calls replayable is a parameter of every door tool', () => {
+    const srv = adminMcp();
+    for (const tool of ['hadron_create_task', 'hadron_update_task', 'hadron_create_review', 'hadron_update_review']) {
+      for (const field of GOVERNED_MCP_DOOR_FIELDS) {
+        expect(() => srv.toolParamDescription(tool, field), `${tool}.${field}`).not.toThrow();
+      }
+    }
+    // CONTROL: a generic field the doors do NOT carry is detected as missing.
+    expect(() => srv.toolParamDescription('hadron_update_task', 'objectType')).toThrow();
+  });
+
+  it('CONTROL: a replayable update of a live task names hadron_update_task', async () => {
+    await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:ok', name: 'o', content: 'x', isRunnable: true } }, ctx());
+    const text = await adminMcp().callToolText('hadron_update_node', { urn: await taskUrn('tasks:ok'), content: 'y' });
+    expect(text).toContain('Over MCP, use hadron_update_task');
+  });
+
+  it('an update carrying a field the door lacks (objectType) names no door', async () => {
+    await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:ot', name: 'o', content: 'x', isRunnable: true } }, ctx());
+    const text = await adminMcp().callToolText('hadron_update_node', { urn: await taskUrn('tasks:ot'), objectType: 'thing' });
+    expect(text).toMatch(/role_governed/);
+    expect(text).not.toContain('hadron_update_task');
+  });
+
+  it('an update of a TOMBSTONED task names no door: the update doors answer NODE_NOT_FOUND too', async () => {
+    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:dead', name: 'd', content: 'x', isRunnable: true } }, ctx());
+    await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
+    const text = await adminMcp().callToolText('hadron_update_node', { urn: await taskUrn('tasks:dead'), content: 'y' });
+    expect(text).not.toContain('hadron_update_task');
   });
 });
