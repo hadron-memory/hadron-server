@@ -50,25 +50,65 @@ describe('#1300 — an org OWNER with default platform roles', () => {
     expect(parent.id).toBeTruthy();
   });
 
-  it('REPRODUCED: the generic createEdge refuses her, and the refusal is the GLOBAL role gate', async () => {
-    // Not the #1201 spec protection: `createEdge` opens with
-    // `requireRole(ctx, 'CONTRIBUTOR')`, a PLATFORM role, before any memory
-    // gate runs. Every self-signed-up user holds `[READER]`, so this refuses
-    // an edge between ANY two nodes, spec or not, in a memory she owns.
-    // Whether that gate should stay is a decision, not this file's to make:
-    // it pins today's behaviour so a change to it is a visible act.
-    const parent = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, await ownerCtx());
-    const child = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010:02', name: 'rule', role: 'spec' } }, await ownerCtx());
-    const plainA = await M.createNode({}, { input: { memoryId, loc: 'notes:a', name: 'a' } }, await ownerCtx());
-    const plainB = await M.createNode({}, { input: { memoryId, loc: 'notes:b', name: 'b' } }, await ownerCtx());
+  it('FIXED (Q1, Holger 2026-09-24): createEdge / updateEdge / deleteEdge work for her, spec or plain nodes', async () => {
+    const c = await ownerCtx();
+    const parent = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, c);
+    const child = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010:02', name: 'rule', role: 'spec' } }, c);
+    const plainA = await M.createNode({}, { input: { memoryId, loc: 'notes:a', name: 'a' } }, c);
+    const plainB = await M.createNode({}, { input: { memoryId, loc: 'notes:b', name: 'b' } }, c);
 
-    await expect(
-      M.createEdge({}, { sourceRef: child.id, targetRef: parent.id, name: 'part-of' }, await ownerCtx()),
-    ).rejects.toThrow(/^Forbidden$/);
-    // Same refusal with no spec node anywhere: the gate is not about specs.
-    await expect(
-      M.createEdge({}, { sourceRef: plainA.id, targetRef: plainB.id, name: 'rel' }, await ownerCtx()),
-    ).rejects.toThrow(/^Forbidden$/);
+    const specEdge = await M.createEdge({}, { sourceRef: child.id, targetRef: parent.id, name: 'part-of' }, c);
+    expect(specEdge).toMatchObject({ sourceId: child.id, targetId: parent.id });
+    const plainEdge = await M.createEdge({}, { sourceRef: plainA.id, targetRef: plainB.id, name: 'rel' }, c);
+
+    const updated = await M.updateEdge({}, { edgeRef: plainEdge.id, description: 'why' }, c);
+    expect(updated.description).toBe('why');
+    expect(await M.deleteEdge({}, { edgeRef: plainEdge.id }, c)).toBe(true);
+    expect(await db.edge.findUnique({ where: { id: plainEdge.id } })).toBeNull();
+  });
+
+  describe('DENIAL CONTROLS: the memory gate alone still refuses everyone who cannot write (@Bo, #1306)', () => {
+    // The platform gate was never the thing keeping these out; the memory gate
+    // was, on all three mutations, delete included. Pinned per mutation.
+    let edgeId: string;
+    let srcId: string;
+    let tgtId: string;
+    beforeEach(async () => {
+      const c = await ownerCtx();
+      srcId = (await M.createNode({}, { input: { memoryId, loc: 'n:src', name: 's' } }, c)).id;
+      tgtId = (await M.createNode({}, { input: { memoryId, loc: 'n:tgt', name: 't' } }, c)).id;
+      edgeId = (await M.createEdge({}, { sourceRef: srcId, targetRef: tgtId, name: 'rel' }, c)).id;
+    });
+
+    const denied = async (who: Context) => {
+      const results = await Promise.all([
+        M.createEdge({}, { sourceRef: srcId, targetRef: tgtId, name: 'again' }, who).then(() => 'OK', () => 'REFUSED'),
+        M.updateEdge({}, { edgeRef: edgeId, description: 'x' }, who).then(() => 'OK', () => 'REFUSED'),
+        M.deleteEdge({}, { edgeRef: edgeId }, who).then(() => 'OK', () => 'REFUSED'),
+      ]);
+      expect(results).toEqual(['REFUSED', 'REFUSED', 'REFUSED']);
+      // …and nothing changed: the edge is still there, unedited, with no twin.
+      const edges = await db.edge.findMany({ where: { sourceId: srcId } });
+      expect(edges.map((e) => [e.id, e.description])).toEqual([[edgeId, null]]);
+    };
+
+    it('a READER member of the same org', async () => {
+      const t = `${Date.now()}-${Math.floor(Math.random() * 1e5)}`;
+      const reader = await db.user.create({ data: { id: generateId(), githubId: 13001, githubUsername: `rd-${t}` } });
+      const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      await db.orgMember.create({ data: { organizationId: mem.organizationId!, userId: reader.id, role: 'READER' } });
+      await denied({ db, roles: ['READER'], userId: reader.id, clientId: `user:${reader.id}` } as Context);
+    });
+
+    it('a user of another organisation', async () => {
+      const t = `${Date.now()}-${Math.floor(Math.random() * 1e5)}`;
+      const stranger = await db.user.create({ data: { id: generateId(), githubId: 13002, githubUsername: `st-${t}` } });
+      await denied({ db, roles: ['READER'], userId: stranger.id, clientId: `user:${stranger.id}` } as Context);
+    });
+
+    it('an unauthenticated caller', async () => {
+      await denied({ db, roles: [] } as unknown as Context);
+    });
   });
 
   it('CAN wire the edge through the spec door itself: createSpecNode with inline edges', async () => {

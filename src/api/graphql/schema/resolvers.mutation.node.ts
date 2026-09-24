@@ -115,7 +115,6 @@ import {
   type Context,
   getAccessibleMemoryIds,
   mapToolDriveFile,
-  requireRole,
   runOwnedEmailOperation,
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
@@ -2538,7 +2537,12 @@ export const nodeMutations = {
       },
       ctx: Context,
     ) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
+      // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
+      // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
+      // of the memory, while inline `edges` and MCP hadron_create_edge gated on
+      // memory access alone. Authorization is the memory gate below, before
+      // any write.
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
@@ -2578,8 +2582,8 @@ export const nodeMutations = {
       if (!src) throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
       if (!tgt) throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
 
-      // PR-348 review (Gemini, critical): the global CONTRIBUTOR role gate
-      // above is not memory-scoped. Mirror the MCP addEdge posture (and the
+      // PR-348 review (Gemini, critical): the memory gate IS the authorization
+      // (since #1300 there is no platform-role gate). Mirror the MCP addEdge posture (and the
       // sibling upsertNode/moveNode mutations): require write access to the
       // SOURCE memory, and at least read on the TARGET. Without this any
       // CONTRIBUTOR could write an edge into a memory they can't touch. The
@@ -2665,7 +2669,12 @@ export const nodeMutations = {
       },
       ctx: Context,
     ) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
+      // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
+      // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
+      // of the memory, while inline `edges` and MCP hadron_create_edge gated on
+      // memory access alone. Authorization is the memory gate below, before
+      // any write.
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
@@ -2710,11 +2719,11 @@ export const nodeMutations = {
         }
         throw e;
       }
-      // PR-348 parity (Codex #554): the global CONTRIBUTOR gate above is not
-      // memory-scoped. With edgeRef now accepting a cross-memory URN, a
-      // contributor could otherwise update an edge in a memory they can't
-      // write. Gate on write access to the edge's (denormalized) memory —
-      // matching createEdge / deleteNode / moveNode.
+      // PR-348 parity (Codex #554): gate on write access to the edge's
+      // (denormalized) memory, before the update — matching createEdge /
+      // deleteNode / moveNode. Since #1300 this is the only gate, and with
+      // edgeRef accepting a cross-memory URN it is what stops an update in a
+      // memory the caller cannot write.
       const edgeMem = await ctx.db.edge.findUnique({
         where: { id: resolvedEdgeId },
         select: { memoryId: true },
@@ -2749,7 +2758,12 @@ export const nodeMutations = {
       { edgeRef }: { edgeRef: string },
       ctx: Context,
     ) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
+      // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
+      // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
+      // of the memory, while inline `edges` and MCP hadron_create_edge gated on
+      // memory access alone. Authorization is the memory gate below, before
+      // any write.
       // #542: resolve edgeRef (ID or fully-qualified edge URN) via the shared
       // resolveEdgeRef (Tier 2 — was PK-only). A miss → EDGE_NOT_FOUND instead
       // of an unwrapped Prisma P2025.
@@ -2765,7 +2779,8 @@ export const nodeMutations = {
         throw e;
       }
       // PR-348 parity (Codex #554): gate on write access to the edge's memory
-      // before deleting — the global CONTRIBUTOR role gate is not memory-scoped.
+      // before deleting. Since #1300 this is the only gate, and it runs before
+      // the delete.
       // `source` rides along for the #1061 usage attribution below; it is read
       // here rather than after the delete, when the row is gone.
       const edgeMem = await ctx.db.edge.findUnique({
