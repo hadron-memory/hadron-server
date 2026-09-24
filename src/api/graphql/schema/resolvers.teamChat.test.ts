@@ -1251,3 +1251,21 @@ describe('#1209 review (@codex P2): a COMPOUND host memory URN yields null, not 
     expect(m.body).toBe('legacy space');
   });
 });
+
+describe('#1317 review (@codex P1): no fallible work after the message commits', () => {
+  it('a failing host-URN lookup fails the post BEFORE anything is written, so a retry cannot duplicate', async () => {
+    await post(ctx(appMember.id), { body: 'bootstrap the chat' });
+    const before = await db.node.count({ where: { loc: { contains: ':messages:' } } });
+    const real = db.memory.findUnique.bind(db.memory);
+    const spy = vi.spyOn(db.memory, 'findUnique').mockImplementation(((args: any) =>
+      args?.select?.urn === true && Object.keys(args.select).length === 1
+        ? Promise.reject(new Error('transient: connection reset'))
+        : real(args)) as any);
+    try {
+      await expect(post(ctx(appMember.id), { body: 'must not half-land' })).rejects.toThrow(/connection reset/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await db.node.count({ where: { loc: { contains: ':messages:' } } })).toBe(before);
+  });
+});

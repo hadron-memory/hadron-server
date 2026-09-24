@@ -856,6 +856,10 @@ async function postToChannelRoot(
 
   const messagesLoc = `${root.loc}:messages`;
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
+  // Loaded BEFORE the write (@codex P1, PR #1317): no fallible await may
+  // follow the commit, or a transient failure reports an error for a message
+  // that was written, and the client's retry posts it twice.
+  const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
   const msgFields = translateSessionExpired(memEncInfo, () =>
     encryptNodeFields({ content: body, data: envelope }, memEncInfo),
   );
@@ -955,7 +959,7 @@ async function postToChannelRoot(
 
   return {
     nodeId: messageId,
-    urn: messageUrn(await hostMemoryUrn(ctx, root.memoryId), messageLoc),
+    urn: messageUrn(memBareUrn, messageLoc),
     seq,
     body,
     at: createdAt,
