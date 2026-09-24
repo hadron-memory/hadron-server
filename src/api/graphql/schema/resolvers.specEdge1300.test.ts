@@ -134,6 +134,27 @@ describe('#1300 — an org OWNER with default platform roles', () => {
       }
     });
 
+    it('NO PAIRED ORACLE on createEdge: varying either ref never changes the answer (@codex + @copilot, round 2)', async () => {
+      const t = `${Date.now()}-${Math.floor(Math.random() * 1e5)}`;
+      const stranger = await db.user.create({ data: { id: generateId(), githubId: 13005, githubUsername: `po-${t}` } });
+      const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      const missing = (loc: string) => `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:${loc}`;
+      for (const who of [
+        { db, roles: ['READER'], userId: stranger.id, clientId: `user:${stranger.id}` } as Context,
+        { db, roles: [] } as unknown as Context,
+      ]) {
+        const answer = async (source: string, target: string) =>
+          (await M.createEdge({}, { sourceRef: source, targetRef: target, name: 'x' }, who).then(
+            () => 'OK',
+            (e: { message: string; extensions?: { code?: string } }) => `${e.extensions?.code}|${e.message.split(':')[0]}`,
+          ));
+        // Existing vs missing SOURCE, with a missing target.
+        expect(await answer(srcId, missing('n:no-t'))).toBe(await answer(missing('n:no-s'), missing('n:no-t')));
+        // Existing vs missing TARGET, holding an existing but unreadable source.
+        expect(await answer(srcId, tgtId)).toBe(await answer(srcId, missing('n:no-t')));
+      }
+    });
+
     it('CONTROL: a READER member (who can see the edge) is told Forbidden, not not-found', async () => {
       const t = `${Date.now()}-${Math.floor(Math.random() * 1e5)}`;
       const reader = await db.user.create({ data: { id: generateId(), githubId: 13004, githubUsername: `rc-${t}` } });
