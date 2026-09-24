@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { HOST_CLAUDE_SKILL, HOST_CODEX_SKILL } from './hosts.js';
-import { unknownHostKeys } from './declaration.js';
+import { unknownHostKeys, unknownHostKeysBounded } from './declaration.js';
 import { lintNode, lintUnknownHostKeys, RULE_UNKNOWN_HOST_KEY, type SkillNode } from './lint.js';
 
 const ok = { name: 'hadron-demo', description: 'Use when demoing.', enable: true };
@@ -97,4 +97,26 @@ describe('an unknown exports key (#1292)', () => {
     expect(lintUnknownHostKeys(node({ exports: {} }))).toEqual([]);
   });
 
+
+  it('unknownHostKeysBounded EQUALS the sorted definition, for random key sets (property test)', () => {
+    // Deterministic PRNG so a failure reproduces.
+    let seed = 1292;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    const alphabet = ['a', 'b', 'z', 'é', '\u{E000}', '\u{10000}', 'claudeSkill', 'codexSkill', ' ', '"'];
+    for (let run = 0; run < 300; run += 1) {
+      const exports: Record<string, unknown> = {};
+      const n = Math.floor(rnd() * 40);
+      for (let i = 0; i < n; i += 1) {
+        const len = 1 + Math.floor(rnd() * 4);
+        let k = '';
+        for (let j = 0; j < len; j += 1) k += alphabet[Math.floor(rnd() * alphabet.length)];
+        exports[k] = true;
+      }
+      const limit = Math.floor(rnd() * 12);
+      const maxBytes = 1 + Math.floor(rnd() * 8);
+      const props = { exports };
+      const expected = unknownHostKeys(props).filter((k) => Buffer.byteLength(k, 'utf8') <= maxBytes).slice(0, limit);
+      expect(unknownHostKeysBounded(props, limit, maxBytes)).toEqual({ total: unknownHostKeys(props).length, keys: expected });
+    }
+  });
 });

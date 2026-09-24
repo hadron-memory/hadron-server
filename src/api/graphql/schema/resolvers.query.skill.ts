@@ -64,7 +64,7 @@ import {
   hash,
   storedName,
   unknownHostKeyFinding,
-  unknownHostKeys,
+  unknownHostKeysBounded,
   unknownHostKeysOmittedFinding,
   type Finding,
   type FileFacts,
@@ -800,8 +800,14 @@ export const skillQueries = {
     // encrypted, so a locked memory's node is still reported truthfully.
     const unrecognized = declaredRows
       .map((r) => {
-        const all = unknownHostKeys(r.properties);
-        if (all.length === 0) return null;
+        // Bounded SELECTION, not sort-then-slice: never sorts the full,
+        // writer-controlled key list (@copilot, PR #1296).
+        const { total, keys } = unknownHostKeysBounded(
+          r.properties,
+          SKILL_PLAN_UNRECOGNIZED_KEYS_LISTED,
+          SKILL_PLAN_UNRECOGNIZED_KEY_MAX_BYTES,
+        );
+        if (total === 0) return null;
         const urn = safeNodeUrnV2(r.memory.urn, r.loc);
         const node = {
           urn,
@@ -813,16 +819,13 @@ export const skillQueries = {
         };
         // Bounded LISTING, never a refusal and never a silent drop: see
         // SKILL_PLAN_UNRECOGNIZED_KEYS_LISTED.
-        const keys = all
-          .filter((k) => Buffer.byteLength(k, 'utf8') <= SKILL_PLAN_UNRECOGNIZED_KEY_MAX_BYTES)
-          .slice(0, SKILL_PLAN_UNRECOGNIZED_KEYS_LISTED);
-        const omitted = all.length - keys.length;
+        const omitted = total - keys.length;
         return {
           urn,
           nodeId: r.id,
           name: r.name,
           memory: r.memory.urn,
-          keyCount: all.length,
+          keyCount: total,
           keys,
           findings: [
             ...keys.map((k) => unknownHostKeyFinding(node, k)),

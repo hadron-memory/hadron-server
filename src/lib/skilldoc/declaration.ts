@@ -271,6 +271,40 @@ export function unknownHostKeys(properties: unknown): string[] {
 }
 
 /**
+ * `unknownHostKeys`, bounded for a caller that lists only some of them: the
+ * total count, plus the first `limit` keys of at most `maxBytes` UTF-8 bytes,
+ * in the SAME UTF-8 byte order (@copilot, PR #1296).
+ *
+ * One pass, keeping a sorted window of `limit` keys: O(n × limit), and it
+ * never materializes or sorts the full list. `properties` is writer-controlled,
+ * so a report that bounded only its OUTPUT still let one huge `exports` object
+ * make every plan sort all of it. Defined to equal
+ * `unknownHostKeys(p).filter(fits).slice(0, limit)`; a property test pins that.
+ */
+export function unknownHostKeysBounded(
+  properties: unknown,
+  limit: number,
+  maxBytes: number,
+): { total: number; keys: string[] } {
+  if (!isPlainObject(properties) || !own(properties, EXPORTS_KEY)) return { total: 0, keys: [] };
+  const raw = ownValue(properties, EXPORTS_KEY);
+  if (!isPlainObject(raw)) return { total: 0, keys: [] };
+  let total = 0;
+  const window: string[] = [];
+  for (const key of Object.keys(raw)) {
+    if (skillHost(key) !== null) continue;
+    total += 1;
+    if (limit <= 0 || Buffer.byteLength(key, 'utf8') > maxBytes) continue;
+    if (window.length === limit && compareUtf8(key, window[limit - 1]!) >= 0) continue;
+    let i = window.length;
+    while (i > 0 && compareUtf8(key, window[i - 1]!) < 0) i -= 1;
+    window.splice(i, 0, key);
+    if (window.length > limit) window.pop();
+  }
+  return { total, keys: window };
+}
+
+/**
  * The retired top-level alias paths a node still carries as OBJECTS.
  *
  * Lives here rather than in `lint.ts` so the "what counts as a declaration
