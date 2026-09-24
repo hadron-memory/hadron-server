@@ -1714,3 +1714,12 @@ describe('#1318 review (@codex P1): a host-reserved directory is never offered f
     expect(codex.orphans.map((o: { dirName: string }) => o.dirName)).toEqual(['synced']);
   });
 });
+
+describe('#1318 review (@copilot): reserved directories are matched with the planner\'s FILESYSTEM equivalence', () => {
+  it('a Unicode/case alias of `synced` (NFD accent, long s) is not offered to --prune on claudeSkill', async () => {
+    for (const dirName of ['SYNCED', 'sýnced'.normalize('NFD'), 'ſynced']) {
+      const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName, sourceUrn: '' }] });
+      expect(got.orphans, JSON.stringify(dirName)).toEqual([]);
+    }
+  });
+});

@@ -39,7 +39,7 @@ import {
   unknownHostKeys,
 } from './declaration.js';
 import { goQuote } from './goQuote.js';
-import { requireSkillHost, SKILL_HOSTS } from './hosts.js';
+import { isHostReservedName, requireSkillHost, SKILL_HOSTS } from './hosts.js';
 import { validName } from './name.js';
 import { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
 
@@ -168,10 +168,14 @@ export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Fin
       'error',
       `skill name "${declaration.name}" is not a valid skill name (kebab-case, ≤${hostRow.maxNameLength} chars) — it is stored at properties.${declaration.key}.name, so that is what to change`,
     );
-  } else if (hostRow.reservedNames.includes(declaration.name.toLowerCase())) {
-    // #1315: a name the HOST refuses to load from the export root. An error,
-    // so the planner's lint gate keeps it out of export and preserves any file
-    // already there — the host would ignore the file anyway.
+  }
+  // #1315: a name the HOST refuses to load from the export root. An error, so
+  // the planner's lint gate keeps it out of export and preserves any file
+  // already there — the host would ignore the file anyway. Checked
+  // INDEPENDENTLY of the grammar check (@copilot, PR #1318): `Synced` fails
+  // both, and reporting only the grammar would reveal the reservation as a
+  // second error after the author fixed the case.
+  if (storedName(declaration) !== '' && isHostReservedName(hostRow, declaration.name)) {
     add(
       'skill-name-reserved',
       'error',

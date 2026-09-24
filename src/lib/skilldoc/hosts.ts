@@ -65,6 +65,20 @@ export const SKILL_HOSTS: readonly SkillHost[] = Object.freeze([
   Object.freeze({ key: HOST_CODEX_SKILL, maxNameLength: 64, maxDescriptionLength: 1024, legacyAliases: false, reservedNames: Object.freeze([]) }),
 ]);
 
+/**
+ * Whether `name` is one the host reserves (#1315), compared the way a
+ * FILESYSTEM compares names rather than by `toLowerCase`: ICU search collation
+ * at base sensitivity folds case, Unicode normalization and compatibility
+ * variants (`SYNCED`, a decomposed accent, the long s in `ſynced`) — the same
+ * collator the skill planner uses for directory aliasing. The host reserves the
+ * name "in any capitalization", and an alias that lands on the same directory
+ * is the same directory (@copilot, PR #1318).
+ */
+const reservedNameCollator = new Intl.Collator('und', { usage: 'search', sensitivity: 'base' });
+export function isHostReservedName(host: SkillHost, name: string): boolean {
+  return host.reservedNames.some((reserved) => reservedNameCollator.compare(name, reserved) === 0);
+}
+
 /** The host row for `key`, or null when the server has no renderer for it. */
 export function skillHost(key: string): SkillHost | null {
   return SKILL_HOSTS.find((h) => h.key === key) ?? null;

@@ -57,3 +57,13 @@ describe('#1315 — host-reserved skill names', () => {
     expect(rules('plain-skill', HOST_CLAUDE_SKILL).filter((r) => r.startsWith('skill-name-'))).toEqual([]);
   });
 });
+
+describe('#1318 review (@copilot): the reservation is reported whatever else is wrong with the name', () => {
+  it('`Synced` / `SYNCED` get BOTH the grammar error and the host reason, so fixing the case does not reveal a second error', () => {
+    for (const name of ['Synced', 'SYNCED']) {
+      const got = rules(name, HOST_CLAUDE_SKILL);
+      expect(got, name).toContain('skill-name-invalid:error');
+      expect(got, name).toContain('skill-name-reserved:error');
+    }
+  });
+});
