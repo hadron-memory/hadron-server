@@ -604,21 +604,32 @@ export const skillQueries = {
       }) as (SkillNode & { _id: string })[];
 
     // ── Lint: per node, plus the corpus-wide collision rule ──────────────
-    const findingsByUrn = new Map<string, Finding[]>();
+    // Keyed by node ID, never URN: two DIFFERENT nodes can emit one URN (the
+    // emitter flattens a compound memory), and a URN key made them share a
+    // file, a body and findings — a `set` even dropped one twin's lint errors
+    // (#1310, @codex P1). The same holds for every per-node map below.
+    const findingsById = new Map<string, Finding[]>();
     for (const n of skillNodes) {
       // No findings for a locked node. Every rule would be judging ciphertext
       // — `skill-content-empty` false, `skill-content-has-template` false —
       // and a finding asserting something about a body nobody could read is
       // worse than silence.
-      findingsByUrn.set(n.urn, lockedIds.has(n._id) ? [] : lintNode(n, host));
+      findingsById.set(n._id, lockedIds.has(n._id) ? [] : lintNode(n, host));
     }
     // Per host: one name on a node's Claude and Codex declarations is by
     // design, and two nodes sharing a Codex name collide only for Codex.
     const collisions = lintCollisions(skillNodes, host);
+    // A collision finding carries only a URN, so it attaches to EVERY node
+    // emitting that URN — conservative: a collision withholds a write, never
+    // performs one.
+    const collidingIds = new Set<string>();
     for (const f of collisions) {
-      findingsByUrn.get(f.urn)?.push(f);
+      for (const n of skillNodes) {
+        if (n.urn !== f.urn) continue;
+        findingsById.get(n._id)?.push(f);
+        collidingIds.add(n._id);
+      }
     }
-    const collidingUrns = new Set(collisions.map((f) => f.urn));
 
     // ── Classify against what the client saw ─────────────────────────────
     const files = input.files ?? [];
@@ -643,7 +654,7 @@ export const skillQueries = {
           declaration?.description ?? '',
           n.content,
         ),
-        collides: collidingUrns.has(n.urn),
+        collides: collidingIds.has((n as SkillNode & { _id: string })._id),
         unavailable: lockedIds.has((n as SkillNode & { _id: string })._id),
         _id: (n as SkillNode & { _id: string })._id,
       };
@@ -680,8 +691,8 @@ export const skillQueries = {
       // maintain, which is what an orphan IS operationally and what `--prune`
       // acts on. The class table does not name this case; reported to @Eli
       // rather than invented as a tenth class.
-      if (fileFor.has(paired.urn)) continue;
-      fileFor.set(paired.urn, facts);
+      if (fileFor.has(paired.id)) continue;
+      fileFor.set(paired.id, facts);
       selectedDirs.add(f.dirName);
     }
     // A plan can be executed on macOS's default case-insensitive filesystem.
@@ -695,9 +706,9 @@ export const skillQueries = {
       filesystemNameCollator.compare(left, right) === 0;
 
     const entries = nodeFacts.map((nf) => {
-      const selectedFile = fileFor.get(nf.urn) ?? null;
+      const selectedFile = fileFor.get(nf.id) ?? null;
       const verdict = classifySkill(nf, selectedFile);
-      const findings = findingsByUrn.get(nf.urn) ?? [];
+      const findings = findingsById.get(nf.id) ?? [];
       const name = nf.declaration ? storedName(nf.declaration) : '';
       const selectedOccupiesTarget =
         selectedFile !== null && filesystemNamesEquivalent(selectedFile.dirName, name);
@@ -760,7 +771,7 @@ export const skillQueries = {
             name,
             nf.urn,
             nf.declaration?.description ?? '',
-            findContent(skillNodes, nf.urn),
+            findContent(skillNodes, nf.id),
           );
         } catch (error) {
           renderedBody = null;
@@ -906,6 +917,6 @@ export const skillQueries = {
 };
 
 /** The node body for a urn, read from the already-loaded set. */
-function findContent(nodes: SkillNode[], urn: string): string {
-  return nodes.find((n) => n.urn === urn)?.content ?? '';
+function findContent(nodes: SkillNode[], id: string): string {
+  return nodes.find((n) => (n as SkillNode & { _id: string })._id === id)?.content ?? '';
 }

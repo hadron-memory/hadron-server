@@ -1567,3 +1567,75 @@ describe('#1309 — a no-id legacy file pairs by its source URN in every accepte
     });
   });
 });
+
+// ── #1310 review round 2 (@codex P1): identity survives PAST pairing ──────
+//
+// Two DIFFERENT nodes can emit ONE URN (the emitter flattens a compound
+// memory). Pairing now picks the right one, but every per-node lookup after it
+// — the paired file, the rendered content, the lint findings — was keyed by
+// that URN, so a disabled twin could claim the other node's file and plan an
+// unforced REMOVE of it. Built from real rows, not stubs.
+describe('#1310 — two nodes that emit ONE URN stay two nodes, end to end', () => {
+  const setup = async () => {
+    // Plain memory `<mem>` + loc `tasks:b`, and compound memory `<mem>:tasks`
+    // + loc `b`: both emit `hrn:node:<mem>:tasks:b`.
+    const plain = await mkNode('tasks:b', {
+      content: '# PLAIN body',
+      properties: declaration({ name: 'plain-skill' }),
+    });
+    const compoundMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, name: 'compound', urn: `${mem.urn}:tasks`, class: 'knowledge' },
+    });
+    const compound = await db.node.create({
+      data: {
+        id: generateId(), memoryId: compoundMem.id, loc: 'b', name: 'b', isRunnable: true,
+        content: '# COMPOUND body',
+        properties: declaration({ name: 'compound-skill', enable: false }),
+      },
+    });
+    return { plain, compound };
+  };
+  const entryFor = (p: { entries: { nodeId: string }[] }, id: string) => p.entries.find((e) => e.nodeId === id) as any;
+  // The file names the PLAIN node unambiguously (`::` grammar), carries no id.
+  const legacyFile = () => ({ dirName: 'plain-skill', sourceUrn: `${mem.urn.replace(':', '::')}::tasks:b` });
+
+  it('PRECONDITION: the two entries really do share one emitted URN', async () => {
+    const { plain, compound } = await setup();
+    const p = await plan({ intent: 'LINT' });
+    expect(entryFor(p, plain.id).urn).toBe(entryFor(p, compound.id).urn);
+  });
+
+  it('the disabled twin does NOT claim the other node\'s file: no REMOVE of a directory it does not own', async () => {
+    const { plain, compound } = await setup();
+    const p = await plan({ intent: 'EXPORT', files: [legacyFile()] });
+    expect(p.orphans).toEqual([]);
+    expect(entryFor(p, plain.id).exportPlan).toMatchObject({ action: 'SKIP', reasons: [{ code: 'missing-node-id' }] });
+    expect(entryFor(p, compound.id)).toMatchObject({
+      class: 'disabled',
+      movedFrom: null,
+      exportPlan: { action: 'SKIP', preservesExistingFile: true },
+    });
+  });
+
+  it('each node renders ITS OWN content', async () => {
+    const { plain, compound } = await setup();
+    await db.node.update({ where: { id: compound.id }, data: { properties: declaration({ name: 'compound-skill' }) } });
+    const p = await plan({ intent: 'EXPORT', files: [] });
+    expect(entryFor(p, plain.id).renderedBody).toContain('# PLAIN body');
+    expect(entryFor(p, plain.id).renderedBody).not.toContain('COMPOUND');
+    expect(entryFor(p, compound.id).renderedBody).toContain('# COMPOUND body');
+  });
+
+  it('each node keeps ITS OWN lint findings: one twin\'s error is not overwritten by the other\'s clean result', async () => {
+    const { plain, compound } = await setup();
+    // An empty body is a lint error; give it to the node linted FIRST.
+    const [first] = [plain, compound];
+    await db.node.update({ where: { id: first.id }, data: { content: '' } });
+    await db.node.update({ where: { id: compound.id }, data: { properties: declaration({ name: 'compound-skill' }) } });
+    const p = await plan({ intent: 'EXPORT', files: [] });
+    const rules = (id: string) => (entryFor(p, id).findings as { rule: string }[]).map((f) => f.rule);
+    expect(rules(first.id)).toContain('skill-content-empty');
+    expect(rules(compound.id)).not.toContain('skill-content-empty');
+    expect(entryFor(p, first.id).renderedBody).toBeNull();
+  });
+});
