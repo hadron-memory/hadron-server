@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { splitNodeUrn } from '../../../lib/urn.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -1434,5 +1435,236 @@ describe('hosts (#1254)', () => {
     expect(codex.entries[0].findings).toEqual([
       expect.objectContaining({ rule: 'skill-declaration-malformed', severity: 'error' }),
     ]);
+  });
+});
+
+// ── #1309 — the CLI's REAL legacy payload, in every accepted spelling ─────
+//
+// D-2026-09-24-A (cor:agt:030:01, Holger via Vera, team chat #1368): a file
+// with no `id=` pairs with the node AT its header's source URN; an id-bearing
+// file pairs by id only; a URN that no longer resolves is an orphan; one file
+// reported as both refused and orphaned is invalid.
+//
+// The P08 table above submits the CANONICAL spelling, which is why it was
+// green while production refused Tove's legacy file (team chat #1346/#1366):
+// hadron-cli's `legacyHeaderRE` accepts the `::` grammar and `status.go` sends
+// the token verbatim, with no nodeId and — for a no-id file — no hashes at all.
+// These cases send exactly that payload.
+describe('#1309 — a no-id legacy file pairs by its source URN in every accepted spelling (D-2026-09-24-A)', () => {
+  /** The spellings a legacy `<!-- Generated from <urn> -->` header can carry. */
+  const spellings = (canonical: string) => {
+    const { memoryUrn, loc } = splitNodeUrn(canonical);
+    const doubleColon = `${memoryUrn.replace(':', '::')}::${loc}`;
+    return {
+      canonical,
+      'double-colon': doubleColon,
+      'v1-prefixed': `urn:node:${doubleColon}`,
+    } as Record<string, string>;
+  };
+  const SPELLINGS = ['canonical', 'double-colon', 'v1-prefixed'] as const;
+
+  /** A declared node, and its canonical URN as the planner states it. */
+  const declared = async (loc: string) => {
+    const node = await mkNode(loc, { properties: declaration() });
+    const urn = (await plan({ intent: 'LINT' })).entries.find((e: { nodeId: string }) => e.nodeId === node.id).urn as string;
+    return { node, urn };
+  };
+
+  it.each(SPELLINGS)('P08 (%s): preserved and reported — never an orphan, never target-occupied', async (spelling) => {
+    const { urn } = await declared('tasks:legacy-p08');
+    const file = { dirName: 'my-skill', sourceUrn: spellings(urn)[spelling] };
+
+    const got = await plan({ intent: 'EXPORT', files: [file] });
+    expect(got.orphans).toEqual([]);
+    expect(got.entries[0]).toMatchObject({
+      urn,
+      class: 'unhashed',
+      renderedBody: null,
+      exportPlan: { action: 'SKIP', preservesExistingFile: true, reasons: [{ code: 'missing-node-id' }] },
+    });
+
+    const forced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(forced.orphans).toEqual([]);
+    expect(forced.entries[0].exportPlan).toMatchObject({ action: 'WRITE', reasons: [{ code: 'missing-node-id-override' }] });
+    expect(forced.entries[0].renderedBody).toContain('# Body');
+  });
+
+  it.each(SPELLINGS)('P12 (%s): a rename is SKIPPED; --force MOVES it from the legacy directory', async (spelling) => {
+    const { node, urn } = await declared('tasks:legacy-p12');
+    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ name: 'new-name' }) } });
+    const file = { dirName: 'my-skill', sourceUrn: spellings(urn)[spelling] };
+
+    const got = await plan({ intent: 'EXPORT', files: [file] });
+    expect(got.orphans).toEqual([]);
+    expect(got.entries[0].exportPlan).toMatchObject({ action: 'SKIP', reasons: [{ code: 'missing-node-id' }] });
+
+    const forced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(forced.entries[0]).toMatchObject({
+      movedFrom: 'my-skill',
+      exportPlan: { action: 'MOVE', reasons: [{ code: 'missing-node-id-override' }] },
+    });
+  });
+
+  it.each(SPELLINGS)('P13 (%s): a disabled declaration REMOVES it without --force', async (spelling) => {
+    const { node, urn } = await declared('tasks:legacy-p13');
+    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ enable: false }) } });
+
+    const got = await plan({ intent: 'EXPORT', files: [{ dirName: 'my-skill', sourceUrn: spellings(urn)[spelling] }] });
+    expect(got.orphans).toEqual([]);
+    expect(got.entries[0]).toMatchObject({
+      movedFrom: 'my-skill',
+      exportPlan: { action: 'REMOVE', reasons: [{ code: 'disabled' }] },
+    });
+  });
+
+  it.each(SPELLINGS)('P14 (%s): evidence of a hand edit REFUSES without --force', async (spelling) => {
+    const { urn } = await declared('tasks:legacy-p14');
+    const file = { dirName: 'my-skill', sourceUrn: spellings(urn)[spelling], hasExtraFrontmatter: true };
+
+    const got = await plan({ intent: 'EXPORT', files: [file] });
+    expect(got.orphans).toEqual([]);
+    expect(got.entries[0].exportPlan).toMatchObject({ action: 'REFUSE', reasons: [{ code: 'locally-edited' }] });
+
+    const forced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(forced.entries[0].exportPlan).toMatchObject({ action: 'WRITE', reasons: [{ code: 'locally-edited-override' }] });
+  });
+
+  describe('controls: the fallback widens only the SPELLING, never the identity rule', () => {
+    it('an id-bearing file still pairs by id ONLY: a dead id with a live `::` source is an orphan', async () => {
+      const { urn } = await declared('tasks:legacy-id-first');
+      const got = await plan({
+        intent: 'EXPORT',
+        files: [{ dirName: 'elsewhere', nodeId: generateId(), sourceUrn: spellings(urn)['double-colon'] }],
+      });
+      expect(got.orphans.map((o: { dirName: string }) => o.dirName)).toEqual(['elsewhere']);
+      expect(got.entries[0].class).toBe('never-exported');
+    });
+
+    it('a URN that no longer resolves is an orphan, in any spelling', async () => {
+      const { urn } = await declared('tasks:legacy-live');
+      const gone = urn.replace(/tasks:legacy-live$/, 'tasks:moved-away');
+      const got = await plan({
+        intent: 'EXPORT',
+        files: SPELLINGS.map((s, i) => ({ dirName: `gone-${i}`, sourceUrn: spellings(gone)[s] })),
+      });
+      expect(got.orphans.map((o: { dirName: string }) => o.dirName).sort()).toEqual(['gone-0', 'gone-1', 'gone-2']);
+      expect(got.entries[0].class).toBe('never-exported');
+    });
+
+    it('a source that is not a node URN at all is an orphan, and never throws', async () => {
+      await declared('tasks:legacy-garbage');
+      for (const sourceUrn of ['not a urn', 'tasks:legacy-garbage', 'hrn:memory:x:y', generateId(), '::::']) {
+        const got = await plan({ intent: 'EXPORT', files: [{ dirName: 'junk', sourceUrn }] });
+        expect(got.orphans.map((o: { dirName: string }) => o.dirName), sourceUrn).toEqual(['junk']);
+      }
+    });
+
+    it('the orphan report keeps the spelling the client SENT, so a client can find its own file', async () => {
+      const { urn } = await declared('tasks:legacy-echo');
+      const sent = spellings(urn.replace(/legacy-echo$/, 'nope'))['double-colon'];
+      const got = await plan({ intent: 'EXPORT', files: [{ dirName: 'x', sourceUrn: sent }] });
+      expect(got.orphans).toEqual([{ dirName: 'x', sourceUrn: sent, nodeId: null }]);
+    });
+  });
+});
+
+// ── #1310 review round 2 (@codex P1): identity survives PAST pairing ──────
+//
+// Two DIFFERENT nodes can emit ONE URN (the emitter flattens a compound
+// memory). Pairing now picks the right one, but every per-node lookup after it
+// — the paired file, the rendered content, the lint findings — was keyed by
+// that URN, so a disabled twin could claim the other node's file and plan an
+// unforced REMOVE of it. Built from real rows, not stubs.
+describe('#1310 — two nodes that emit ONE URN stay two nodes, end to end', () => {
+  const setup = async () => {
+    // Plain memory `<mem>` + loc `tasks:b`, and compound memory `<mem>:tasks`
+    // + loc `b`: both emit `hrn:node:<mem>:tasks:b`.
+    const plain = await mkNode('tasks:b', {
+      content: '# PLAIN body',
+      properties: declaration({ name: 'plain-skill' }),
+    });
+    const compoundMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, name: 'compound', urn: `${mem.urn}:tasks`, class: 'knowledge' },
+    });
+    const compound = await db.node.create({
+      data: {
+        id: generateId(), memoryId: compoundMem.id, loc: 'b', name: 'b', isRunnable: true,
+        content: '# COMPOUND body',
+        properties: declaration({ name: 'compound-skill', enable: false }),
+      },
+    });
+    return { plain, compound };
+  };
+  const entryFor = (p: { entries: { nodeId: string }[] }, id: string) => p.entries.find((e) => e.nodeId === id) as any;
+  // The file names the PLAIN node unambiguously (`::` grammar), carries no id.
+  const legacyFile = () => ({ dirName: 'plain-skill', sourceUrn: `${mem.urn.replace(':', '::')}::tasks:b` });
+
+  it('PRECONDITION: the two entries really do share one emitted URN', async () => {
+    const { plain, compound } = await setup();
+    const p = await plan({ intent: 'LINT' });
+    expect(entryFor(p, plain.id).urn).toBe(entryFor(p, compound.id).urn);
+  });
+
+  it('the disabled twin does NOT claim the other node\'s file: no REMOVE of a directory it does not own', async () => {
+    const { plain, compound } = await setup();
+    const p = await plan({ intent: 'EXPORT', files: [legacyFile()] });
+    expect(p.orphans).toEqual([]);
+    expect(entryFor(p, plain.id).exportPlan).toMatchObject({ action: 'SKIP', reasons: [{ code: 'missing-node-id' }] });
+    expect(entryFor(p, compound.id)).toMatchObject({
+      class: 'disabled',
+      movedFrom: null,
+      exportPlan: { action: 'SKIP', preservesExistingFile: true },
+    });
+  });
+
+  it('each node renders ITS OWN content', async () => {
+    const { plain, compound } = await setup();
+    await db.node.update({ where: { id: compound.id }, data: { properties: declaration({ name: 'compound-skill' }) } });
+    const p = await plan({ intent: 'EXPORT', files: [] });
+    expect(entryFor(p, plain.id).renderedBody).toContain('# PLAIN body');
+    expect(entryFor(p, plain.id).renderedBody).not.toContain('COMPOUND');
+    expect(entryFor(p, compound.id).renderedBody).toContain('# COMPOUND body');
+  });
+
+  it('each node keeps ITS OWN lint findings: one twin\'s error is not overwritten by the other\'s clean result', async () => {
+    const { plain, compound } = await setup();
+    // An empty body is a lint error; give it to the node linted FIRST.
+    const [first] = [plain, compound];
+    await db.node.update({ where: { id: first.id }, data: { content: '' } });
+    await db.node.update({ where: { id: compound.id }, data: { properties: declaration({ name: 'compound-skill' }) } });
+    const p = await plan({ intent: 'EXPORT', files: [] });
+    const rules = (id: string) => (entryFor(p, id).findings as { rule: string }[]).map((f) => f.rule);
+    expect(rules(first.id)).toContain('skill-content-empty');
+    expect(rules(compound.id)).not.toContain('skill-content-empty');
+    expect(entryFor(p, first.id).renderedBody).toBeNull();
+  });
+});
+
+describe('#1310 review round 3 (@copilot): a collision finding reaches ONLY the node it is about', () => {
+  it('the compound twin of a colliding node is NOT refused when its own name is unique', async () => {
+    // Plain `tasks:b` and plain `tasks:z` both store `dup` — a real collision.
+    // The compound twin `<mem>:tasks` + `b` emits the same URN as plain
+    // `tasks:b` but stores a unique name, so it must plan a normal WRITE.
+    const plainB = await mkNode('tasks:b', { properties: declaration({ name: 'dup' }) });
+    const plainZ = await mkNode('tasks:z', { properties: declaration({ name: 'dup' }) });
+    const compoundMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, name: 'compound', urn: `${mem.urn}:tasks`, class: 'knowledge' },
+    });
+    const twin = await db.node.create({
+      data: {
+        id: generateId(), memoryId: compoundMem.id, loc: 'b', name: 'b', isRunnable: true,
+        content: '# TWIN body', properties: declaration({ name: 'unique-twin' }),
+      },
+    });
+    const p = await plan({ intent: 'EXPORT', files: [] });
+    const e = (id: string) => p.entries.find((x: { nodeId: string }) => x.nodeId === id) as any;
+    const rules = (id: string) => (e(id).findings as { rule: string }[]).map((f) => f.rule);
+
+    expect(e(twin.id).urn).toBe(e(plainB.id).urn); // PRECONDITION: one emitted URN
+    expect(rules(plainB.id)).toContain('skill-name-collision');
+    expect(rules(plainZ.id)).toContain('skill-name-collision');
+    expect(rules(twin.id)).not.toContain('skill-name-collision');
+    expect(e(twin.id).class).not.toBe('collision');
+    expect(e(twin.id).exportPlan).toMatchObject({ action: 'WRITE' });
   });
 });

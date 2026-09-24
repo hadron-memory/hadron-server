@@ -25,6 +25,8 @@ const decl = (over: Partial<Declaration> = {}): Declaration => ({
 const node = (over: Partial<NodeFacts> = {}): NodeFacts => ({
   id: 'node-1',
   urn: 'hrn:node:acme.com:mem:tasks:x',
+  memoryUrn: 'acme.com:mem',
+  loc: 'tasks:x',
   declaration: decl(),
   nodeHash: 'aaaaaaaaaaaaaaaa',
   ...over,
@@ -166,8 +168,8 @@ describe('precedence — which class wins when several are true', () => {
 });
 
 describe('pairing a file to a node (§4a)', () => {
-  const a = node({ id: 'id-a', urn: 'hrn:node:acme.com:mem:tasks:a' });
-  const b = node({ id: 'id-b', urn: 'hrn:node:acme.com:mem:tasks:b' });
+  const a = node({ id: 'id-a', urn: 'hrn:node:acme.com:mem:tasks:a', memoryUrn: 'acme.com:mem', loc: 'tasks:a' });
+  const b = node({ id: 'id-b', urn: 'hrn:node:acme.com:mem:tasks:b', memoryUrn: 'acme.com:mem', loc: 'tasks:b' });
 
   it('pairs by ID, so a loc rename reads as the same skill', () => {
     // The whole point of §4a: `moveNode` keeps the id and changes the URN, so
@@ -193,6 +195,55 @@ describe('pairing a file to a node (§4a)', () => {
   it('is an orphan when neither key resolves', () => {
     expect(pairFileToNode(file({ headerId: '', headerSource: 'hrn:node:x:y:z' }), [a, b])).toBeNull();
     expect(pairFileToNode(file({ headerId: '', headerSource: '' }), [a, b])).toBeNull();
+  });
+
+  it.each([
+    ['the `::` grammar', 'acme.com::mem::tasks:b'],
+    ['a v1 `urn:node:` prefix', 'urn:node:acme.com::mem::tasks:b'],
+    ['a mixed `hrn:node:` + `::` form', 'hrn:node:acme.com::mem::tasks:b'],
+  ])('D-2026-09-24-A (#1309): the URN fallback accepts %s', (_label, headerSource) => {
+    // A pre-§4a header names its node in whatever spelling the exporter of the
+    // day wrote; the spelling is not part of the address.
+    expect(pairFileToNode(file({ headerId: '', headerSource }), [a, b])?.id).toBe('id-b');
+  });
+
+  describe('pairs by the IDENTITY the address names, never by the emitted string (@codex P1, PR #1310)', () => {
+    // Two DIFFERENT nodes whose emitted URNs are the same string: the emitter
+    // flattens a compound memory. A string match cannot tell them apart; a
+    // wrong pair against a disabled declaration plans REMOVE without --force.
+    const compound = node({ id: 'id-compound', urn: 'hrn:node:acme.com:mem:tasks:b', memoryUrn: 'acme.com::mem::tasks', loc: 'b' });
+    const plain = node({ id: 'id-plain', urn: 'hrn:node:acme.com:mem:tasks:b', memoryUrn: 'acme.com:mem', loc: 'tasks:b' });
+    const pair = (headerSource: string, nodes = [compound, plain]) =>
+      pairFileToNode(file({ headerId: '', headerSource }), nodes)?.id ?? null;
+
+    it('each unambiguous spelling reaches its own node', () => {
+      expect(pair('hrn:node:acme.com::mem::tasks::b')).toBe('id-compound');
+      expect(pair('acme.com::mem::tasks:b')).toBe('id-plain');
+    });
+
+    it('the flat string is read the way the platform parser reads it — not as whichever node emits it', () => {
+      expect(pair('hrn:node:acme.com:mem:tasks:b')).toBe('id-plain');
+      // With only the compound node declared, the flat string does NOT name it:
+      // unpaired (an orphan, kept), rather than paired by coincidence.
+      expect(pair('hrn:node:acme.com:mem:tasks:b', [compound])).toBeNull();
+    });
+  });
+
+  it('a FRAGMENT addresses part of a node, so it never pairs a whole-node file (@copilot, PR #1310)', () => {
+    for (const headerSource of ['acme.com::mem::tasks:b#data', 'hrn:node:acme.com:mem:tasks:b#data']) {
+      expect(pairFileToNode(file({ headerId: '', headerSource }), [a, b]), headerSource).toBeNull();
+    }
+    // CONTROL: the same address without the fragment pairs.
+    expect(pairFileToNode(file({ headerId: '', headerSource: 'acme.com::mem::tasks:b' }), [a, b])?.id).toBe('id-b');
+  });
+
+  it('…widening the spelling never widens the identity rule', () => {
+    // An id-bearing file still pairs by id alone, whatever its source says.
+    expect(pairFileToNode(file({ headerId: 'id-gone', headerSource: 'acme.com::mem::tasks:a' }), [a, b])).toBeNull();
+    // Not a node URN at all: unpaired, and no throw.
+    for (const headerSource of ['not a urn', 'tasks:b', 'hrn:memory:acme.com:mem', '::::']) {
+      expect(pairFileToNode(file({ headerId: '', headerSource }), [a, b]), headerSource).toBeNull();
+    }
   });
 
   it('CONTROL: the pairer can return both answers over one node set', () => {

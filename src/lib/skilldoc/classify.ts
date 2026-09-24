@@ -33,6 +33,7 @@
  * which is exactly the protection the class vocabulary gives everything else.
  */
 import type { Declaration } from './declaration.js';
+import { normalizeUrnForLookup, splitNodeUrn } from '../urn.js';
 
 /**
  * The ten classes. Nine from §5 plus `disabled` (D12).
@@ -77,6 +78,12 @@ export interface NodeFacts {
   id: string;
   /** The node's canonical URN. */
   urn: string;
+  /**
+   * The node's memory URN and loc — its IDENTITY. Pairing a no-id file compares
+   * these, never `urn`: the emitted URN is lossy for a compound memory (#1309).
+   */
+  memoryUrn: string;
+  loc: string;
   /** The declaration, or null when the node no longer declares an export. */
   declaration: Declaration | null;
   /** The hash of the node as it would be rendered. */
@@ -174,7 +181,10 @@ export function classifySkill(node: NodeFacts, file: FileFacts | null): Classifi
  * between memories after its export.
  *
  * Pairing is by **id first** (§4a), falling back to the URN for a header
- * generation that predates the id. #1235 shipped the write side and the hash
+ * generation that predates the id. The URN fallback accepts any spelling the shared
+ * parser does (`::` grammar, a `urn:node:` prefix): D-2026-09-24-A pairs the
+ * file with the node AT that URN, and the spelling is not part of the address
+ * (#1309). #1235 shipped the write side and the hash
  * change it required, so files gain the key as installations re-export; until
  * `hadron skill export` ships (hadron-cli#621) the fallback is still what
  * every file takes. That fallback is what makes a `loc` rename
@@ -197,5 +207,42 @@ export function pairFileToNode(
   }
   const bySource = file.headerSource ?? '';
   if (bySource === '') return null;
-  return declaredNodes.find((n) => n.urn === bySource) ?? null;
+  // D-2026-09-24-A (#1309): the file pairs with the node AT its source URN —
+  // the node the platform's own parser says that address names. Two things
+  // that are NOT that, and which an earlier cut of this fix did (PR #1310):
+  //
+  // - Matching the EMITTED string `n.urn`, exactly or after re-emitting the
+  //   source. `safeNodeUrnV2` is lossy for a compound memory: memory
+  //   `acme.com::mem::tasks` + loc `b` and memory `acme.com:mem` + loc
+  //   `tasks:b` both emit `hrn:node:acme.com:mem:tasks:b`, so a string match
+  //   can pair a file with a node its address does not name — and a disabled
+  //   declaration then plans REMOVE without --force (@codex P1).
+  // - Ignoring a fragment. `#data` addresses a PART of a node; a whole-node
+  //   file operation must not claim it (@copilot).
+  //
+  // So compare the parsed IDENTITY — normalized memory URN and loc — in every
+  // spelling the parser accepts (`::` grammar, a `urn:node:` prefix: hadron-
+  // cli's legacyHeaderRE takes both and submits the token verbatim, which is
+  // how a file naming its own node came back orphaned AND target-occupied,
+  // #1346). An id-bearing file never reaches this line, and anything the parser
+  // rejects stays unpaired — an orphan, which is kept, never removed unasked.
+  const target = sourceIdentity(bySource);
+  if (target === null) return null;
+  const hits = declaredNodes.filter(
+    (n) => n.loc === target.loc && normalizeUrnForLookup(n.memoryUrn) === target.memory,
+  );
+  // Live (memory, loc) is unique, so this is one or none; were it ever more,
+  // choosing would be a guess, and a guess here can delete a file.
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+/** The node a source URN addresses, as a normalized (memory, loc) pair; null if it is not a whole-node URN. */
+function sourceIdentity(ref: string): { memory: string; loc: string } | null {
+  try {
+    const parts = splitNodeUrn(ref);
+    if (parts.fragment) return null;
+    return { memory: normalizeUrnForLookup(parts.memoryUrn), loc: parts.loc };
+  } catch {
+    return null;
+  }
 }
