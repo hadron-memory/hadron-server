@@ -73,7 +73,9 @@ describe('#1303 — POST /graphql', () => {
   });
 
   it('a key carrying an unsupported scope: a DIFFERENT reason, naming the scope', async () => {
-    const e = (await gql(keys.unsupported!, '{ me { id } }')).body.errors![0]!;
+    const r = await gql(keys.unsupported!, '{ me { id } }');
+    expect(r.status).toBe(403);
+    const e = r.body.errors![0]!;
     expect(e.extensions).toEqual({
       code: 'FORBIDDEN',
       reason: 'OAUTH_SCOPE_UNSUPPORTED',
@@ -130,7 +132,13 @@ describe('#1303 — the REST surfaces answer 403 with the same fields', () => {
   it('POST /reload', async () => {
     const res = await fetch(`${baseUrl}/reload`, { method: 'POST', headers: { Authorization: `Bearer ${keys.mcp}` } });
     expect(res.status).toBe(403);
-    expect(await res.json()).toMatchObject({ code: 'FORBIDDEN', reason: 'OAUTH_SCOPE_INSUFFICIENT' });
+    expect(await res.json()).toEqual({
+      error: PROSE,
+      code: 'FORBIDDEN',
+      reason: 'OAUTH_SCOPE_INSUFFICIENT',
+      requiredScope: 'account',
+      grantedScopes: ['mcp'],
+    });
   });
 });
 
