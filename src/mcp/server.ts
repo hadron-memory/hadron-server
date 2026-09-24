@@ -77,7 +77,8 @@ import {
 } from '../lib/nodeSubtreeMove.js';
 import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
 import {
-  authContextAllowsOAuthSurface,
+  oauthSurfaceRefusal,
+  oauthSurfaceRefusalMessage,
   getCurrentUserRoles,
   resolveAuthContext,
   type AuthContext,
@@ -9201,9 +9202,12 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     res.status(401).json({ error: 'Impersonation tokens are not accepted on /mcp' });
     return;
   }
-  if (!authContextAllowsOAuthSurface(auth, 'mcp')) {
+  const surfaceRefusal = oauthSurfaceRefusal(auth, 'mcp');
+  if (surfaceRefusal) {
     res.setHeader('WWW-Authenticate', 'Bearer error="insufficient_scope", scope="mcp"');
-    res.status(403).json({ error: 'This OAuth credential does not grant MCP access' });
+    // #1303: the same matchable fields as the account surfaces (@copilot, PR
+    // #1306); prose and status unchanged.
+    res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential does not grant MCP access'), code: 'FORBIDDEN', ...surfaceRefusal });
     return;
   }
   if (!auth.appId && !auth.userId && !auth.clientId) {
