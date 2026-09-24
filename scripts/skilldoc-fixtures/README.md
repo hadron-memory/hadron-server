@@ -20,7 +20,12 @@ was the one it forbade. `genfix.go` is that program, committed.
 #    rm -rf, NOT bare `mkdir -p`: extracting a second commit over a surviving
 #    tree leaves behind every file the new archive does not contain, so you
 #    build a mixture of two revisions and call it one (@codex, PR #1249).
-COMMIT=1d8ca46
+#
+#    The commit the checked-in file was LAST generated at, so running this
+#    unchanged reproduces it byte for byte (its `sourceCommit` says the same).
+#    Move it forward only to a commit whose Go matches the law you pin: an
+#    older one regenerates retired rules (@codex, PR #1295).
+COMMIT=3c30a38
 rm -rf /tmp/cli && mkdir -p /tmp/cli
 gh api repos/hadron-memory/hadron-cli/tarball/$COMMIT | tar xz -C /tmp/cli --strip-components=1
 
@@ -73,9 +78,19 @@ instead of the thing is the mistake this file keeps being about.
   inputs skips the normalization the section exists to exercise. Also found the
   hard way, one round earlier.
 
-## What this does NOT cover
+## What it covers, and what it does NOT
 
-Sections generated at a different commit (`lint`, `lintCollisions`, recorded
-separately as `lintSourceCommit`). Regenerating those wholesale mixes a
-re-measurement into a port, which is why they were left alone; `genfix.go`
-touches only `hash`, `render`, `renderParseRoundTrip` and `sourceCommit`.
+`genfix.go` regenerates `hash`, `render`, `renderParseRoundTrip` (stamping
+`sourceCommit`) and, since #1289, `lintCollisions` (stamping
+`lintCollisionsSourceCommit`). The `lintCollisions` INPUTS are authored in
+`collisionCases()` and upserted by name; only the findings come from Go.
+
+It does NOT touch `lint`, which stays at `lintSourceCommit`. Regenerating that
+wholesale mixes a re-measurement into a port.
+
+**Run it at a commit whose Go matches the law you are pinning.** The collision
+cases include `enable: false` and absent-`enable` declarations, which collide
+under Go before hadron-cli#676 and do not after (cor:agt:030:06,
+D-2026-09-23-C). Generated at an older commit, the file would pin the retired
+rule, and the TypeScript side would red against it. That is the gate working,
+but it is the wrong fix.

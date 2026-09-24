@@ -145,7 +145,7 @@ describe('collision reporting is stable under corpus read order (@codex P2, #123
       memoryUrn: 'hrn:mem:acme.com:mem',
       isRunnable: true,
       content: '# body',
-      properties: { exports: { claudeSkill: { name: 'shared-name', description: 'd. Use when x.' } } },
+      properties: { exports: { claudeSkill: { name: 'shared-name', description: 'd. Use when x.', enable: true } } },
     });
     const a = mk('hrn:node:a.com:m:one');
     const b = mk('hrn:node:b.com:m:two');

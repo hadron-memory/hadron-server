@@ -913,7 +913,7 @@
     },
     {
       "id": "C05",
-      "title": "Disabled declarations still collide (lint judges a name before anyone turns it on)",
+      "title": "A disabled declaration claims no name: disabled plus enabled is not a collision",
       "contracts": [
         "cor:agt:030:06"
       ],
@@ -945,15 +945,229 @@
       ],
       "expect": {
         "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "C06",
+      "title": "Two enabled declarations in DIFFERENT organisations collide (a stored name carries no prefix)",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:acme.com:kb:tasks:notes",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "release-notes",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.org:ops:tasks:notes",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "release-notes",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [
+          {
+            "name": "release-notes",
+            "members": [
+              "hrn:node:acme.com:kb:tasks:notes",
+              "hrn:node:example.org:ops:tasks:notes"
+            ]
+          }
+        ],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "C07",
+      "title": "Two disabled declarations sharing a name: no collision",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:example.com:demo:tasks:a",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": false
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.com:demo:tasks:b",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "C08",
+      "title": "Three share a name, one disabled: the two enabled collide, and the disabled one is not a member",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:example.com:demo:tasks:a",
+          "properties": {
+            "exports": {
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.com:demo:tasks:b",
+          "properties": {
+            "exports": {
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": false
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.com:demo:tasks:c",
+          "properties": {
+            "exports": {
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [],
         "codexSkill": [
           {
             "name": "hadron-x",
             "members": [
               "hrn:node:example.com:demo:tasks:a",
-              "hrn:node:example.com:demo:tasks:b"
+              "hrn:node:example.com:demo:tasks:c"
             ]
           }
         ]
+      }
+    },
+    {
+      "id": "C09",
+      "title": "Each node enables the name for a different host and disables it for the other: neither host collides",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:example.com:demo:tasks:a",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              },
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": false
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.com:demo:tasks:b",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": false
+              },
+              "codexSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": []
+      }
+    },
+    {
+      "id": "C10",
+      "title": "A declaration with no enable is off by default, so it claims no name",
+      "contracts": [
+        "cor:agt:030:06"
+      ],
+      "nodes": [
+        {
+          "urn": "hrn:node:example.com:demo:tasks:a",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing."
+              }
+            }
+          }
+        },
+        {
+          "urn": "hrn:node:example.com:demo:tasks:b",
+          "properties": {
+            "exports": {
+              "claudeSkill": {
+                "name": "hadron-x",
+                "description": "Use when demoing.",
+                "enable": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "claudeSkill": [],
+        "codexSkill": []
       }
     }
   ],
@@ -1011,10 +1225,11 @@
       "layer": "resolver",
       "pendingOn": "hadron-cli#621 (the CLI calling skillPlan per host; the server side is covered by hadron-server#1283 resolver tests)",
       "contracts": [
+        "cor:agt:030:00",
         "cor:agt:030:02"
       ],
       "given": "skillPlan(host: codex), a key no host owns",
-      "expect": "PROPOSED, no contract states it yet: refused with a typed error naming the host; never judged as Claude, never an empty plan"
+      "expect": "Two different things, kept apart. PLANNING: skillPlan(host: codex) is refused with a typed error naming the supported hosts (hadron-server#1283) — an implementation choice, NOT a contract (Holger via Vera, team chat #1184). EXPORT RUN: a requested host the exporting tool does not support is an ITEM failure named in the end-of-run report, and every other item still runs (cor:agt:030:00). Never judged as Claude, never an empty plan read as success."
     },
     {
       "id": "P03",
@@ -1063,10 +1278,11 @@
       "layer": "writer",
       "pendingOn": "hadron-cli#621",
       "contracts": [
+        "cor:agt:030:00",
         "cor:agt:030:02"
       ],
       "given": "the server reports a host the CLI has no root for",
-      "expect": "export exits non-zero naming the host, never a silent skip. OPEN: whether the known hosts are still written is not decided by any contract"
+      "expect": "That host's items FAIL and each is named in the end-of-run report; every other host's items are still written; the run never prompts (cor:agt:030:00, D-2026-09-23-D). The exit status of a run with failed items is not decided by any contract."
     },
     {
       "id": "P08",
@@ -1075,8 +1291,8 @@
       "contracts": [
         "cor:agt:030:01"
       ],
-      "given": "a file with a legacy `Generated from` header (no id=) in EITHER host's root, paired to D01's node. The rule is not host-specific",
-      "expect": "skipped and reported, not rewritten (Holger, team chat #1130, superseding the plan's older upgrade-on-export); --force rewrites it"
+      "given": "a file whose provenance header carries NO id= (e.g. the legacy `Generated from` line) in EITHER host's root, paired to D01's enabled node whose content has changed. The rule is not host-specific, and the predicate is the id's ABSENCE, not a missing hash",
+      "expect": "rewrite SKIPPED and reported, not regenerated; --force in that invocation regenerates it with a full header (cor:agt:030:01, D-2026-09-23-A)"
     },
     {
       "id": "P09",
@@ -1097,6 +1313,48 @@
       ],
       "given": "`status` over both roots where one skill directory is a symlink into the other root",
       "expect": "the one physical file is not reported as two hosts' current files"
+    },
+    {
+      "id": "P12",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "given": "the same no-id file, and D01's node renames its skill (a new stored name)",
+      "expect": "the MOVE is skipped and reported: the no-id file stays at the old name and no new file is written; --force writes the new file and removes the old one"
+    },
+    {
+      "id": "P13",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:01",
+        "cor:agt:030:06"
+      ],
+      "given": "the same no-id file, showing NO evidence of a hand edit, and D01's declaration switched to enable: false",
+      "expect": "REMOVED without --force, and the removal is in the report (switching the declaration off says the skill should go)"
+    },
+    {
+      "id": "P14",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "given": "a no-id file that DOES show evidence of a hand edit (a frontmatter key the renderer never writes)",
+      "expect": "treated as hand-edited: rewrite, move AND removal are each REFUSED and reported unless --force is given in that invocation"
+    },
+    {
+      "id": "P15",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:05",
+        "cor:agt:030:06"
+      ],
+      "given": "a no-id file whose node's declaration is disabled AND whose node is over its host's limit",
+      "expect": "left in place and reported: an over-limit node is skipped, and skipping never deletes"
     }
   ]
 }

@@ -1121,6 +1121,91 @@ describe('hosts (#1254)', () => {
     }
   });
 
+  describe('only ENABLED declarations claim a name (cor:agt:030:06, D-2026-09-23-C; #1289)', () => {
+    const decl = (name: string, enable?: boolean) => ({
+      exports: {
+        codexSkill: {
+          name,
+          description: 'Use when x.',
+          ...(enable === undefined ? {} : { enable }),
+        },
+      },
+    });
+    const collisionRules = (entries: { findings: { rule: string }[] }[]) =>
+      entries.flatMap((e) => e.findings.map((f) => f.rule)).filter((r) => r === 'skill-name-collision');
+
+    it.each([
+      ['switched off', false],
+      ['never switched on (enable absent)', undefined],
+    ])('an old declaration %s hands its name to a new enabled one', async (_label, enable) => {
+      await mkNode('tasks:old', { properties: decl('hadron-x', enable) });
+      await mkNode('tasks:new', { properties: decl('hadron-x', true) });
+
+      const got = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+      const byLoc = (loc: string) => got.entries.find((e: { urn: string }) => e.urn.endsWith(loc));
+
+      expect(collisionRules(got.entries)).toEqual([]);
+      expect(byLoc('tasks:old')).toMatchObject({ class: 'disabled', renderedBody: null });
+      expect(byLoc('tasks:new')).toMatchObject({ class: 'never-exported', exportPlan: { action: 'WRITE' } });
+      expect(byLoc('tasks:new').renderedBody).toContain('name: hadron-x');
+    });
+
+    it('two ENABLED declarations in different organisations still collide', async () => {
+      // The control for the two cases above: the rule narrowed WHICH
+      // declarations count, not whether a collision spans orgs.
+      const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+      const org2 = await db.organization.create({ data: { id: generateId(), name: 'sp2', urn: `sp2-${t}` } });
+      await db.orgMember.create({ data: { organizationId: org2.id, userId: admin.id, role: 'ADMIN' } });
+      const mem2 = await resolvers.Mutation.createMemory({}, { orgId: org2.id, name: `sp2-mem-${t}` }, ctx());
+      await mkNode('tasks:here', { properties: decl('hadron-x', true) });
+      await mkNode('tasks:there', { memoryId: mem2.id, properties: decl('hadron-x', true) });
+
+      const got = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+
+      expect(got.entries).toHaveLength(2);
+      expect(new Set(got.entries.map((e: { urn: string }) => e.urn.split(':')[2])).size).toBe(2);
+      for (const e of got.entries) {
+        expect(e).toMatchObject({ class: 'collision', renderedBody: null, exportPlan: { action: 'REFUSE' } });
+      }
+      expect(collisionRules(got.entries)).toHaveLength(2);
+    });
+
+    it.each([
+      // The old file was hand-edited: `:01` refuses to remove it, and the new
+      // node must not overwrite it either.
+      ['hand-edited', 'b'.repeat(16), 'REFUSE'],
+      // An unedited old file is removed in this run. The new node is still
+      // refused THIS run: the plan is computed against the disk as the client
+      // saw it, and the directory is occupied until the removal happens.
+      ['unedited', 'a'.repeat(16), 'REMOVE'],
+    ])('the old node\'s %s file still protects its directory', async (_label, fileHash, oldAction) => {
+      const old = await mkNode('tasks:old', { properties: decl('hadron-x', false) });
+      await mkNode('tasks:new', { properties: decl('hadron-x', true) });
+
+      const got = await plan({
+        intent: 'EXPORT',
+        host: 'codexSkill',
+        files: [{
+          dirName: 'hadron-x',
+          sourceUrn: 'hrn:node:example.com:demo:tasks:old',
+          nodeId: old.id,
+          headerHash: 'a'.repeat(16),
+          fileHash,
+        }],
+      });
+      const byLoc = (loc: string) => got.entries.find((e: { urn: string }) => e.urn.endsWith(loc));
+
+      expect(collisionRules(got.entries)).toEqual([]);
+      expect(byLoc('tasks:old').exportPlan).toMatchObject({ action: oldAction });
+      expect(byLoc('tasks:new').renderedBody).toBeNull();
+      expect(byLoc('tasks:new').exportPlan).toMatchObject({
+        action: 'REFUSE',
+        preservesExistingFile: true,
+        reasons: [{ code: 'target-occupied' }],
+      });
+    });
+  });
+
   it('a malformed Codex entry is reported by the Codex plan (matrix D10)', async () => {
     await mkNode('tasks:demo', {
       properties: { exports: { claudeSkill: SHARED_PAYLOAD.exports.claudeSkill, codexSkill: true } },
