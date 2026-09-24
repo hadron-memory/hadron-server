@@ -126,10 +126,12 @@ describe('#1300/#1307 — edges for a global-READER org OWNER, over HTTP', () =>
       const edgeId = c.data!.createEdge.id;
 
       const u = await gql(k, UPDATE_EDGE, { e: edgeId, d: 'why' });
+      expect(u.status).toBe(200);
       expect(u.errors).toBeUndefined();
       expect(u.data!.updateEdge).toEqual({ id: edgeId, description: 'why' });
 
       const d = await gql(k, DELETE_EDGE, { e: edgeId });
+      expect(d.status).toBe(200);
       expect(d.errors).toBeUndefined();
       expect(d.data!.deleteEdge).toBe(true);
     });
@@ -250,16 +252,29 @@ describe('#1303/#1306 — the OAuth refusal and a genuine denial are distinguish
     expect(await db.edge.count({ where: { sourceId: s } })).toBe(0);
   });
 
-  it('the rule a client applies: `reason` present ⇒ the credential; absent ⇒ an ordinary denial', async () => {
-    // Keyed on `reason`, not on `code`, so the rule survives #1220 retyping the
-    // ordinary denial from INTERNAL_SERVER_ERROR to FORBIDDEN.
+  it('the rule a client applies: `reason` is one of the OAUTH_SCOPE_* VALUES ⇒ the credential; anything else is not', async () => {
+    // Keyed on the reason VALUE — not on `code`, so it survives #1220 retyping
+    // the ordinary denial to FORBIDDEN; and not on the mere presence of
+    // `reason`, which other errors also carry (@codex, #1308): an invalid edge
+    // condition, a malformed URN (formatError's BAD_USER_INPUT).
+    const OAUTH_REFUSALS = ['OAUTH_SCOPE_INSUFFICIENT', 'OAUTH_SCOPE_UNSUPPORTED'];
+    const isCredentialRefusal = (r: Gql) => OAUTH_REFUSALS.includes(r.errors?.[0]?.extensions?.reason as string);
+
     const s = await plainNode(key.ownerAccount!, loc('n'));
     const t = await plainNode(key.ownerAccount!, loc('n'));
     const oauth = await gql(key.ownerMcp!, CREATE_EDGE, { s, t, n: 'rel' });
     const denial = await gql(key.reader!, CREATE_EDGE, { s, t, n: 'rel' });
-    expect([oauth.status, denial.status]).toEqual([403, 200]);
-    expect(oauth.errors![0]!.extensions).toHaveProperty('reason', 'OAUTH_SCOPE_INSUFFICIENT');
-    expect(denial.errors![0]!.extensions).not.toHaveProperty('reason');
+    // COUNTEREXAMPLE: her own valid key, an input error that DOES carry a reason.
+    const inputError = await gql(
+      key.ownerAccount!,
+      `mutation($s: ID!, $t: ID!, $c: JSON) { createEdge(sourceRef: $s, targetRef: $t, name: "c", condition: $c) { id } }`,
+      { s, t, c: { op: 'no-such-operator' } },
+    );
+
+    expect([oauth.status, denial.status, inputError.status]).toEqual([403, 200, 200]);
+    expect(inputError.errors![0]!.extensions).toMatchObject({ code: 'INVALID_EDGE_CONDITION' });
+    expect(inputError.errors![0]!.extensions).toHaveProperty('reason');
+    expect([isCredentialRefusal(oauth), isCredentialRefusal(denial), isCredentialRefusal(inputError)]).toEqual([true, false, false]);
   });
 });
 
