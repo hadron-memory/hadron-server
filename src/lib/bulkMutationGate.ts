@@ -89,7 +89,12 @@ export function assertNoGovernedRows(rows: readonly GatedRow[], op: 'create' | '
       // 'edits' — this operation is neither minting the marker nor clearing it;
       // it is mutating a node that already carries one, which is exactly the
       // case the generic surface must not reach.
-      const err = new RoleGovernedError(kinds[0], op, 'edits');
+      const err = new RoleGovernedError(kinds[0], op, 'edits', {
+        // A bulk merge/extract is not completed by editing one node, so no
+        // node-write route is offered (@codex, PR #1305).
+        context: 'bulk',
+        ...(kinds.length > 1 ? { kinds } : {}),
+      });
       // NAME THE NODE. `RoleGovernedError` describes the KIND, which is all a
       // per-node writer needs — it already knows which node it was writing.
       // A bulk caller does not: a merge or extract refused over one row among

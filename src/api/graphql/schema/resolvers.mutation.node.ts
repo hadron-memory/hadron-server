@@ -16,6 +16,8 @@ import {
   governedKindsOf,
   GOVERNED_KINDS,
   type GovernedKind,
+  type GovernedContext,
+  type GovernedMerge,
 } from '../../../lib/governedRole.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
@@ -224,6 +226,23 @@ export async function writeNodeCore(
      * review and neither can reach a Channel address.
      */
     ownsKind?: GovernedKind;
+    /**
+     * #1301 — set by the generic MERGE mutations (`updateNodeData`,
+     * `updateNodeProperties`) so a governed refusal can say that no door
+     * merges and name the REPLACE route, instead of pointing at a door that
+     * would drop every key the caller did not resend. Wording only: the gate
+     * decides exactly as it would without it.
+     */
+    governedMerge?: GovernedMerge;
+    /**
+     * #1301 — set ONLY by the direct node mutations (createNode, updateNode,
+     * the kind doors, the two merges), whose refusal can honestly name a
+     * node-write route. Every other caller (clone, import, run tools, session
+     * handoffs, asset references…) leaves it unset and its refusal offers no
+     * route: "use hadron node create" does not perform a clone or a run step
+     * (@codex, PR #1305).
+     */
+    governedContext?: GovernedContext;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -421,6 +440,23 @@ export async function writeNodeCore(
         mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
         mode === 'update' ? 'update' : 'create',
         opts?.ownsKind,
+        {
+          // No route for an UPDATE of a tombstone or of a missing row: every door answers it
+          // NODE_NOT_FOUND too, and this gate runs before that check (@copilot,
+          // PR #1305). A create over a LIVE row never gets here — the
+          // collision check above refuses it first.
+          // …nor for an UPDATE of a loc with no row at all (@copilot, #1305),
+          // nor for a CREATE onto any existing row: a resurrection's routes
+          // depend on which fields it names (the CLI routes by input), so, as
+          // on MCP, a create is routable only onto a free loc (@codex, #1305).
+          context:
+            (mode === 'update' && (!existing || existing.deletedAt)) || (mode === 'create' && existing)
+              ? undefined
+              : opts?.governedContext,
+          merge: opts?.governedMerge,
+          surface: ctx.transport === 'mcp' ? 'mcp' : 'graphql',
+          canReplay: ctx.governedCanReplay,
+        },
       );
 
       // Mode gate (spec 039 Phase 0 D1). Create: reject if a **live** node
@@ -939,6 +975,17 @@ export async function writeNodeCore(
           mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
           'update',
           opts?.ownsKind,
+          // The AUTHORITATIVE check, under the lock: a merge that loses the
+          // promotion race must still get the merge wording, or the refusal
+          // sends it to a replacing door without saying so (@codex P1, #1305).
+          // And a row tombstoned in that window gets no route: every door
+          // answers it NODE_NOT_FOUND (@codex, #1305).
+          {
+            context: current.deletedAt ? undefined : opts?.governedContext,
+            merge: opts?.governedMerge,
+            surface: ctx.transport === 'mcp' ? 'mcp' : 'graphql',
+          canReplay: ctx.governedCanReplay,
+          },
         );
 
         if (current.deletedAt) {
@@ -1444,7 +1491,7 @@ async function updateNodeCore(
   input: UpdateNodeInput,
   ctx: Context,
   op: string,
-  opts?: { ownsKind?: GovernedKind },
+  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext },
 ) {
   const { id, memoryId, loc, ...fields } = input;
   const hasId = id != null && id !== '';
@@ -1502,6 +1549,7 @@ async function updateNodeCore(
   return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
     targetNodeId,
     ownsKind: opts?.ownsKind,
+    governedContext: opts?.governedContext,
   });
 }
 
@@ -1521,7 +1569,11 @@ async function updateNodeCore(
 export async function updateNodePropertiesWith(
   { nodeRef, properties, reason }: { nodeRef: string; properties: unknown; reason?: string | null },
   ctx: Context,
-  opts: { mergeExports: boolean },
+  // `governedContext`: set by `updateNodeProperties` only. `updateObject`
+  // shares this body but its refusal must not send a reader to the NODE
+  // surface, which skips the object contract's reserved-key checks (@copilot,
+  // PR #1305).
+  opts: { mergeExports: boolean; governedContext?: GovernedContext },
 ) {
   // The patch must be a JSON object — the operation merges keys, so an
   // array / scalar / null has no sensible "apply onto existing properties"
@@ -1630,7 +1682,7 @@ export async function updateNodePropertiesWith(
       },
       ctx,
       'update',
-      { targetNodeId: meta.id },
+      { targetNodeId: meta.id, governedMerge: 'properties', governedContext: opts.governedContext },
     );
   });
 }
@@ -1648,7 +1700,7 @@ export const nodeMutations = {
     // soft-deleted one is resurrected. `input.id` is a forced create-PK
     // (importer/sync), never a selector.
     createNode: async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-      writeNodeCore(input, ctx, 'create'),
+      writeNodeCore(input, ctx, 'create', { governedContext: 'node-write' }),
 
     // #1201 — THE KIND-SPECIFIC AUTHORING DOORS. One create + one update per
     // governed kind, generated from the register so a kind cannot ship with a
@@ -1673,21 +1725,23 @@ export const nodeMutations = {
     // this split exists to remove. Each door here is exempt from its own kind
     // and subject to every other, Channel protection included.
     //
-    // NONE of them is exposed as an MCP tool, and that absence is the mechanism
-    // rather than an oversight: an agent's node surface is hadron_create_node /
-    // hadron_update_node, which now refuse. Pinned per door by a test that
+    // None of these MUTATIONS is itself an MCP tool: an agent's generic node
+    // surface is hadron_create_node / hadron_update_node, which refuse. Tasks
+    // and reviews have separate, deliberate MCP door tools (hadron_create_task,
+    // hadron_update_review, …) that delegate here; specs have none, by design.
+    // That no mutation is an MCP tool is pinned per door by a test that
     // iterates this same register.
     ...Object.fromEntries(
       GOVERNED_KINDS.flatMap((entry) => [
         [
           entry.doors.create,
           async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-            writeNodeCore(input, ctx, 'create', { ownsKind: entry.kind }),
+            writeNodeCore(input, ctx, 'create', { ownsKind: entry.kind, governedContext: 'node-write' }),
         ],
         [
           entry.doors.update,
           async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
-            updateNodeCore(input, ctx, entry.doors.update, { ownsKind: entry.kind }),
+            updateNodeCore(input, ctx, entry.doors.update, { ownsKind: entry.kind, governedContext: 'node-write' }),
         ],
       ]),
     ),
@@ -1696,7 +1750,7 @@ export const nodeMutations = {
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
     // never moves. All content fields preserve-on-omit.
     updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
-      updateNodeCore(input, ctx, 'updateNode'),
+      updateNodeCore(input, ctx, 'updateNode', { governedContext: 'node-write' }),
 
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
@@ -1821,7 +1875,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
-        { targetNodeId: meta.id },
+        { targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
       );
     },
 
@@ -1842,7 +1896,7 @@ export const nodeMutations = {
       _: unknown,
       args: { nodeRef: string; properties: unknown; reason?: string | null },
       ctx: Context,
-    ) => updateNodePropertiesWith(args, ctx, { mergeExports: true }),
+    ) => updateNodePropertiesWith(args, ctx, { mergeExports: true, governedContext: 'node-write' }),
 
     // Bulk literal/regex search-and-replace across selected nodes. Reuses the
     // single-write invariants from upsertNode (per-memory write auth,
@@ -3593,6 +3647,8 @@ export const nodeMutations = {
           isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
         }),
         'update',
+        undefined,
+        { context: 'restore' },
       );
 
       // #725/#737 — a restored snapshot must satisfy the CURRENT schema. Validate

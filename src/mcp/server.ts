@@ -3,6 +3,8 @@ import { createHmac, randomUUID } from 'crypto';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
+  GOVERNED_ROLES,
+  type GovernedKind,
   mergedGovernedState,
   RoleGovernedError,
   GOVERNED_KINDS,
@@ -298,6 +300,8 @@ export interface TestableMcpServer {
    * a renamed tool fails the assertion loudly instead of vacuously passing.
    */
   toolDescription(name: string): string;
+  /** A parameter's registered zod schema — see the implementation (#1301). */
+  toolParamSchema(name: string, param: string): { parse: (v: unknown) => unknown };
   toolParamDescription(name: string, param: string): string;
   /**
    * Every registered tool name (#1141).
@@ -309,6 +313,57 @@ export interface TestableMcpServer {
    * a new name is not a removal.
    */
   toolNames(): string[];
+}
+
+/**
+ * #1301 — the generic node-write fields a governed MCP door tool can ALSO
+ * carry (its `governedDoorArgs`), so a refusal only advertises the door when
+ * the refused call could be replayed through it (@codex, PR #1305). A test
+ * pins every entry to the registered door schemas, so the two cannot drift.
+ */
+export const GOVERNED_MCP_DOOR_FIELDS: readonly string[] = [
+  'name', 'description', 'abstract', 'content', 'tags', 'nodeType', 'seq', 'properties', 'data',
+];
+
+/**
+ * Whether a generic MCP node write could be replayed through `kind`'s door
+ * (`op`): every field it sets is one that door carries, and it clears neither
+ * `content` nor `abstract` (the doors take strings only).
+ *
+ * The kind SIGNALS are door-specific (@copilot + @codex, PR #1305): only the
+ * task update door carries `isRunnable`, only the review update door carries
+ * `role`, and the create doors carry neither: they SET their own signal. So a
+ * signal is replayable only through its own kind's door, and on a create only
+ * as the value that door sets. Other kinds (spec) have no MCP door, so the
+ * question is moot and answered true.
+ */
+export function mcpDoorCanReplay(
+  fields: Record<string, unknown>,
+  kind: GovernedKind,
+  op: 'create' | 'update',
+): boolean {
+  if (kind !== 'task' && kind !== 'review') return true;
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined) continue;
+    if (key === 'isRunnable') {
+      if (kind !== 'task' || (op === 'create' && value !== true)) return false;
+      continue;
+    }
+    if (key === 'role') {
+      if (kind !== 'review' || (op === 'create' && value !== 'review')) return false;
+      // The review door refuses ANOTHER governed value ("spec" has its own
+      // door), so only null, 'review' or an ordinary role replays (@copilot,
+      // PR #1305).
+      if (typeof value === 'string' && value !== 'review' && GOVERNED_ROLES.includes(value)) return false;
+      continue;
+    }
+    if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
+    if ((key === 'content' || key === 'abstract') && value === null) return false;
+  }
+  // The create doors require a non-blank name (callGovernedDoor), which the
+  // generic create tool does not (@codex, PR #1305).
+  if (op === 'create' && (typeof fields.name !== 'string' || fields.name.trim() === '')) return false;
+  return true;
 }
 
 export function createTestableMcpServer(
@@ -398,6 +453,20 @@ export function createTestableMcpServer(
       const entry = shape?.[param];
       if (!entry) throw new Error(`Tool "${name}" has no parameter "${param}"`);
       return entry.description ?? '';
+    },
+    /**
+     * A single parameter's registered zod SCHEMA. `callTool` invokes the
+     * handler directly and skips the SDK's argument parsing, so a test that
+     * needs to know what a tool ACCEPTS (a preprocessed shape such as
+     * comma-separated tags) asks the schema instead (#1301).
+     */
+    toolParamSchema(name: string, param: string): { parse: (v: unknown) => unknown } {
+      const tool = tools[name] as unknown as { inputSchema?: { shape?: Record<string, unknown> } & Record<string, unknown> };
+      if (!tool) throw new Error(`Tool not registered: ${name}`);
+      const shape = (tool.inputSchema?.shape ?? tool.inputSchema) as Record<string, { parse: (v: unknown) => unknown }> | undefined;
+      const entry = shape?.[param];
+      if (!entry) throw new Error(`Tool "${name}" has no parameter "${param}"`);
+      return entry;
     },
     async callToolText(name: string, args: unknown = {}) {
       const result = await this.callTool(name, args);
@@ -2845,6 +2914,8 @@ export function createMcpServerInstance(
           parentGovernedProbe,
           mergedGovernedState(parentGovernedProbe, {}),
           'update',
+          // No route: a parent (section) write is not an edit the kind's
+          // door performs.
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
@@ -4415,13 +4486,30 @@ export function createMcpServerInstance(
       // the lock. What this closes is the ordinary, unraced case.
       const governedProbe = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId } },
-        select: { role: true, isRunnable: true },
+        select: { role: true, isRunnable: true, deletedAt: true },
       });
       try {
         assertGovernedWrite(
           governedProbe,
           mergedGovernedState(governedProbe, { role, isRunnable }),
           'create',
+          undefined,
+          // A LIVE node at this loc makes any create a NODE_LOC_CONFLICT, the
+          // create doors included (@codex, PR #1305).
+          // …and only when that kind's door could replay this exact call.
+          // Not for a RESURRECTION either (@codex, PR #1305 round 6): this
+          // tool CLEARS the fields a resurrecting call omits, while the doors
+          // PRESERVE them, so no door replays it. A route is offered only when
+          // the loc holds no row at all — the conservative rule, closing the
+          // class rather than chasing each field.
+          governedProbe
+            ? {}
+            : {
+                context: 'node-write',
+                surface: 'mcp',
+                canReplay: (kind) =>
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }, kind, 'create'),
+              },
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
@@ -4901,6 +4989,17 @@ export function createMcpServerInstance(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
           'update',
+          undefined,
+          // A route only for a LIVE node (a tombstone is NODE_NOT_FOUND to the
+          // update doors too) and a call the door could replay (@codex, #1305).
+          existing && existing.deletedAt == null
+            ? {
+                context: 'node-write',
+                surface: 'mcp',
+                canReplay: (kind) =>
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }, kind, 'update'),
+              }
+            : {},
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
@@ -5230,8 +5329,12 @@ export function createMcpServerInstance(
   // A second verb for the same act buys nothing a reader can act on.
 
   /** The GraphQL context for a delegated door call — same shape as chatCtx below. */
-  const doorCtx = (): Context => ({
+  const doorCtx = (canReplay?: Context['governedCanReplay']): Context => ({
     db,
+    // #1301: a refusal from the delegated door addresses an MCP caller, and
+    // names an MCP door only if this call could be replayed through it.
+    transport: 'mcp',
+    ...(canReplay ? { governedCanReplay: canReplay } : {}),
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     appId: auth.appId ?? undefined,
@@ -5246,7 +5349,10 @@ export function createMcpServerInstance(
     description: z.string().optional().describe('Short description'),
     abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars).'),
     content: z.string().optional().describe('Markdown content'),
-    tags: z.array(z.string()).optional().describe('Tags'),
+    // The same lenient schema as the generic node tools ("a,b" or an array),
+    // so a call the generic tool accepted replays through the door
+    // unchanged (@codex, PR #1305).
+    tags: tagsInputSchema.optional().describe('Tags'),
     nodeType: z.string().optional().describe('Node classification. Distinct from the governed kind — see Node.role.'),
     seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
     properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
@@ -5312,7 +5418,7 @@ export function createMcpServerInstance(
       )[doorName](
         {},
         { input: { memoryId: memory.id, loc, ...fields, ...signal } },
-        doorCtx(),
+        doorCtx((k) => mcpDoorCanReplay(fields, k, mode)),
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
     } catch (e) {
@@ -5403,6 +5509,10 @@ export function createMcpServerInstance(
       // the chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
+        // #1301: a refusal from the delegated resolver addresses an MCP caller;
+        // a door takes a whole `data` object, so the replace it names replays.
+        transport: 'mcp',
+        governedCanReplay: () => true,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
         appId: auth.appId ?? undefined,

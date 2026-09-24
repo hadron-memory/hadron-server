@@ -82,6 +82,58 @@ export interface GovernedKindEntry {
   strength: GateStrength;
   /** The mutations that may produce this kind, named in the refusal. */
   doors: { create: string; update: string };
+  /**
+   * The MCP tools that are this kind's doors, or null when NO MCP tool writes
+   * it (a spec, by design). Named in the refusal so an agent is sent somewhere
+   * it can actually go (#1301): the GraphQL mutation above is not an MCP tool.
+   */
+  mcpDoors: { create: string; update: string } | null;
+  /** Extra CLI guidance for this kind, beyond `hadron node create|update`. */
+  cliNote?: string;
+}
+
+/**
+ * A MERGE surface: the generic `updateNodeData` / `updateNodeProperties`. No
+ * governed door merges; each door REPLACES the field (#1301). A refusal from a
+ * merge says so, rather than sending its reader to a door that would silently
+ * drop every key they did not resend.
+ */
+export type GovernedMerge = 'data' | 'properties';
+
+/**
+ * WHICH operation was refused, so the refusal offers only routes that perform
+ * THAT operation (@codex, PR #1305). A node write can be retried through the
+ * kind's door; a revision restore has no door at all (#1204); a bulk merge or
+ * extract is not completed by editing one node. Omitted means "offer no
+ * route": the safe default for any caller not listed here.
+ */
+export type GovernedContext = 'node-write' | 'restore' | 'bulk';
+
+export interface GovernedRefusalOptions {
+  merge?: GovernedMerge;
+  context?: GovernedContext;
+  /**
+   * Every governed kind the node matches, when there is more than one (a
+   * runnable review). Each door is exempt from its OWN kind only, so no single
+   * door can write such a node, and naming one would name a route that fails
+   * (@copilot + @codex, PR #1305).
+   */
+  kinds?: readonly GovernedKindEntry[];
+  /**
+   * Whether the refused call could be replayed through the door of `kind`.
+   * Asked by the error, because only the gate knows WHICH kind it is refusing;
+   * a surface whose doors carry fewer fields than its generic writer (MCP)
+   * supplies it, and `false` withdraws every route (@copilot + @codex, #1305).
+   */
+  canReplay?: (kind: GovernedKind) => boolean;
+  /**
+   * The surface the refused call arrived on. A route is only named on the
+   * surface that can replay the call (@codex, PR #1305 round 7): the MCP door
+   * tools carry fewer fields than the GraphQL input, so a GraphQL refusal
+   * names the GraphQL door and the CLI route, never an MCP tool. Default:
+   * `graphql`.
+   */
+  surface?: 'graphql' | 'mcp';
 }
 
 /**
@@ -97,18 +149,23 @@ export const GOVERNED_KINDS: readonly GovernedKindEntry[] = [
     signal: { field: 'isRunnable' },
     strength: 'capability',
     doors: { create: 'createTaskNode', update: 'updateTaskNode' },
+    mcpDoors: { create: 'hadron_create_task', update: 'hadron_update_task' },
   },
   {
     kind: 'review',
     signal: { field: 'role', value: 'review' },
     strength: 'security',
     doors: { create: 'createReviewNode', update: 'updateReviewNode' },
+    mcpDoors: { create: 'hadron_create_review', update: 'hadron_update_review' },
   },
   {
     kind: 'spec',
     signal: { field: 'role', value: 'spec' },
     strength: 'diligence',
     doors: { create: 'createSpecNode', update: 'updateSpecNode' },
+    // By design (#1201): an agent's node surface cannot author platform law.
+    mcpDoors: null,
+    cliNote: '`hadron spec new` and `hadron spec edit` are the spec commands',
   },
 ] as const;
 
@@ -155,8 +212,11 @@ export class RoleGovernedError extends GraphQLError {
     public readonly entry: GovernedKindEntry,
     public readonly op: 'create' | 'update',
     public readonly refusal: GovernedRefusal = 'produces',
+    opts: GovernedRefusalOptions = {},
   ) {
+    const { merge, context, kinds, canReplay, surface = 'graphql' } = opts;
     const door = entry.doors[op];
+    const mcpDoor = entry.mcpDoors?.[op] ?? null;
     const subject =
       entry.signal.field === 'isRunnable'
         ? 'a RUNNABLE node'
@@ -171,14 +231,66 @@ export class RoleGovernedError extends GraphQLError {
       entry.signal.field === 'isRunnable'
         ? 'Authoring or retiring something the platform will execute is not the same act as writing prose; the generic node surface does not reach it.'
         : 'The generic node surface does not reach it.';
-    super(`${act}, which only ${door} may ${op}. ${tail}`, {
+    // #1301: name a route on EVERY surface the refusal can reach, because the
+    // GraphQL mutation alone is a door most readers cannot open. A CLI user is
+    // routed by `hadron node create|update` without asking; an agent needs the
+    // MCP tool, or to be told plainly that there is none.
+    const kindWord = entry.kind === 'task' ? 'runnable' : entry.kind;
+    const cli = `From the CLI, \`hadron node ${op}\` routes to it by itself${entry.cliNote ? `; ${entry.cliNote}` : ''}.`;
+    const mcp = mcpDoor
+      ? `Over MCP, use ${mcpDoor}.`
+      : `No MCP tool writes a ${kindWord} node.`;
+    const base = `${act}, which only ${door} may ${op}. ${tail}`;
+    const multi = kinds && kinds.length > 1 ? kinds : null;
+    // Whether ONE door, reached from the CLI or MCP, can perform exactly the
+    // refused write. Not for a multi-kind node (every door fails on the other
+    // kind), not outside a node write, and not for a CREATE that un-governs a
+    // node it resurrects: the MCP create doors force the signal back ON, and
+    // `hadron node create` routes by the input, which here names no kind
+    // (@codex, PR #1305). Where false, no route is offered in the prose OR in
+    // `extensions.mcpDoor`: a client routing from extensions must not be sent
+    // where the message declined to send a reader.
+    const routable =
+      context === 'node-write' &&
+      !multi &&
+      !(op === 'create' && refusal === 'removes') &&
+      (canReplay?.(entry.kind) ?? true);
+    const onMcp = surface === 'mcp';
+    // RESTORE first: whatever kinds the node carries, the reason nothing can
+    // do it is that no door restores (@copilot, PR #1305 round 12).
+    const message = context === 'restore'
+      ? // Not `base`: "only updateX may update" is not a route to a RESTORE.
+        `${act}, and no door restores a revision: a governed node's history cannot be restored through any surface yet (tracked with deletes in #1204). ${tail}`
+      : multi
+        ? // No single door owns every kind the node carries, so none can write it.
+          `${act}, and the node is governed as more than one kind (${multi.map((k) => k.kind).join(' and ')}). ` +
+          `Each door is exempt from its own kind only (${multi.map((k) => k.doors[op]).join(', ')}), so no current route can write it. ${tail}`
+        : routable && merge
+          ? // A merge cannot be redirected to the door as-is: the door REPLACES.
+            `This ${merge} MERGE edits ${subject}, and no door merges: ${door} REPLACES ${merge} instead, so send the whole object, including the keys it already has. ` +
+            `From the CLI, \`hadron node update <ref> --${merge} '<object>'\` routes to ${door} by itself.` +
+            // An MCP merge arrives by delegation (Context.transport); the MCP
+            // doors take a whole ${merge} object, so they replay a replace.
+            (onMcp ? (mcpDoor ? ` Over MCP, pass the whole ${merge} object to ${mcpDoor}.` : ` No MCP tool writes a ${kindWord} node.`) : '')
+          : routable
+            ? `${base} ${cli}${onMcp ? ` ${mcp}` : ''}`
+            : // No route for THIS operation: name no door as if it were one
+              // (@copilot, PR #1305 round 7). `extensions.door` still says
+              // which door governs the kind, for tooling that wants it.
+              `${act}. ${tail} There is no route to suggest for this operation.`;
+    super(message, {
       extensions: {
         code: 'ROLE_GOVERNED',
         kind: entry.kind,
         strength: entry.strength,
         door,
+        // Only where the message offers it (see `routable`). `door` is the
+        // pre-existing field and keeps its meaning: the kind's GraphQL door.
+        mcpDoor: routable && onMcp ? mcpDoor : null,
         op,
         refusal,
+        ...(merge ? { merge } : {}),
+        ...(multi ? { kinds: multi.map((k) => k.kind) } : {}),
       },
     });
     this.name = 'RoleGovernedError';
@@ -220,6 +332,7 @@ export function assertGovernedWrite(
   next: GovernedState,
   op: 'create' | 'update',
   owns?: GovernedKind,
+  opts: Omit<GovernedRefusalOptions, 'kinds'> = {},
 ): void {
   // BEFORE **union** AFTER, and the union is the whole correction.
   //
@@ -246,7 +359,10 @@ export function assertGovernedWrite(
       : !after.has(entry.kind)
         ? 'removes'
         : 'edits';
-    throw new RoleGovernedError(entry, op, refusal);
+    throw new RoleGovernedError(entry, op, refusal, {
+      ...opts,
+      ...(affected.size > 1 ? { kinds: [...affected.values()] } : {}),
+    });
   }
 }
 
