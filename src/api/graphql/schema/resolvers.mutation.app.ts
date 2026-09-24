@@ -14,7 +14,7 @@ import {
 import {
   APP_KEY_PREFIX,
   USER_API_KEY_LABEL_MAX_LEN,
-  authContextAllowsOAuthSurface,
+  oauthSurfaceRefusal,
   hashAppKey,
   mintUserApiKey,
 } from '../../../middleware/auth.js';
@@ -1064,10 +1064,11 @@ export const appMutations = {
           { extensions: { code: 'UNAUTHENTICATED' } },
         );
       }
-      if (!authContextAllowsOAuthSurface(ctx, 'account')) {
+      const surfaceRefusal = oauthSurfaceRefusal(ctx, 'account');
+      if (surfaceRefusal) {
         throw new GraphQLError(
           'This OAuth credential is limited to the MCP surface and cannot create API keys.',
-          { extensions: { code: 'FORBIDDEN' } },
+          { extensions: { code: 'FORBIDDEN', ...surfaceRefusal } },
         );
       }
       // Cap label length to prevent unbounded TEXT writes. The Prisma

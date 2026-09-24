@@ -70,6 +70,41 @@ export function authContextAllowsOAuthSurface(
 }
 
 /**
+ * WHY a credential is refused a surface, as data (#1303). Additive to the
+ * existing refusals: their `code` (FORBIDDEN) and prose are unchanged, so a
+ * client matching either keeps working; a client can now match `reason`
+ * instead of prose, and tell this apart from an ordinary permission denial.
+ *
+ * Two causes that used to share one sentence:
+ * - `OAUTH_SCOPE_INSUFFICIENT`: every scope is supported, and none grants
+ *   `surface` (today: an `mcp`-only key on an account surface).
+ * - `OAUTH_SCOPE_UNSUPPORTED`: the grant carries a scope this server does not
+ *   support, so it fails closed whatever else it carries.
+ *
+ * `grantedScopes` names scopes, never a key. PROVISIONAL NAMES, pending the
+ * CLI owner and the specs engineer (team chat #1292).
+ */
+export interface OAuthSurfaceRefusal {
+  reason: 'OAUTH_SCOPE_INSUFFICIENT' | 'OAUTH_SCOPE_UNSUPPORTED';
+  requiredScope: OAuthScope;
+  grantedScopes: string[];
+  unsupportedScopes?: string[];
+}
+
+/** The refusal for `surface`, or null when `authContextAllowsOAuthSurface` admits it. */
+export function oauthSurfaceRefusal(
+  auth: Pick<AuthContext, 'oauthScopes'>,
+  surface: OAuthSurface,
+): OAuthSurfaceRefusal | null {
+  if (authContextAllowsOAuthSurface(auth, surface)) return null;
+  const granted = [...(auth.oauthScopes ?? [])];
+  const unsupported = granted.filter((scope) => !SUPPORTED_OAUTH_SCOPES.includes(scope as OAuthScope));
+  return unsupported.length > 0
+    ? { reason: 'OAUTH_SCOPE_UNSUPPORTED', requiredScope: surface, grantedScopes: granted, unsupportedScopes: unsupported }
+    : { reason: 'OAUTH_SCOPE_INSUFFICIENT', requiredScope: surface, grantedScopes: granted };
+}
+
+/**
  * Cap on `UserApiKey.label`. The Prisma column is uncapped TEXT;
  * 200 chars is plenty for a human-readable display name and prevents
  * megabyte-sized labels from being persisted. Both `mintUserApiKey`

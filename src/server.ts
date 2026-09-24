@@ -43,7 +43,7 @@ import {
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import {
-  authContextAllowsOAuthSurface,
+  oauthSurfaceRefusal,
   getCurrentUserRoles,
   hasCurrentPlatformAdminRole,
   resolveAuthContext,
@@ -1141,8 +1141,10 @@ export async function createServer(): Promise<Express> {
         res.status(401).json({ error: 'Authentication required to read the GraphQL schema.' });
         return;
       }
-      if (!authContextAllowsOAuthSurface(auth, 'account')) {
-        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.' });
+      const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
+      if (surfaceRefusal) {
+        // #1303: the prose is unchanged; `code` + `reason` make it matchable.
+        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.', code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
       res.type('text/plain; charset=utf-8').send(graphqlSdl());
@@ -1161,9 +1163,13 @@ export async function createServer(): Promise<Express> {
     expressMiddleware(apollo, {
       context: async ({ req }) => {
         const auth = await resolveAuthContext(req, db);
-        if (!authContextAllowsOAuthSurface(auth, 'account')) {
+        const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
+        if (surfaceRefusal) {
+          // #1303: `code` and prose unchanged; `reason` & co. are additive.
+          // The HTTP status is still Apollo's context-failure 500 — changing
+          // it is a separate, asked-for decision (team chat #1292).
           throw new GraphQLError('This OAuth credential is limited to the MCP surface.', {
-            extensions: { code: 'FORBIDDEN' },
+            extensions: { code: 'FORBIDDEN', ...surfaceRefusal },
           });
         }
         // Stage caller-held unlock keys from the request header. Every
@@ -1256,8 +1262,10 @@ export async function createServer(): Promise<Express> {
       // a rejection above the try is an unhandled rejection rather than a
       // response (the #555 class).
       const auth = await resolveAuthContext(req, db);
-      if (!authContextAllowsOAuthSurface(auth, 'account')) {
-        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.' });
+      const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
+      if (surfaceRefusal) {
+        // #1303: the prose is unchanged; `code` + `reason` make it matchable.
+        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.', code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
 
@@ -1359,8 +1367,10 @@ export async function createServer(): Promise<Express> {
     // this week, reintroduced by putting an await above the try.
     try {
       const auth = await resolveAuthContext(req, db);
-      if (!authContextAllowsOAuthSurface(auth, 'account')) {
-        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.' });
+      const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
+      if (surfaceRefusal) {
+        // #1303: the prose is unchanged; `code` + `reason` make it matchable.
+        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.', code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
 
