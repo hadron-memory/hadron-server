@@ -445,8 +445,14 @@ export async function writeNodeCore(
           // NODE_NOT_FOUND too, and this gate runs before that check (@copilot,
           // PR #1305). A create over a LIVE row never gets here — the
           // collision check above refuses it first.
-          // …nor for an UPDATE of a loc with no row at all (@copilot, #1305).
-          context: mode === 'update' && (!existing || existing.deletedAt) ? undefined : opts?.governedContext,
+          // …nor for an UPDATE of a loc with no row at all (@copilot, #1305),
+          // nor for a CREATE onto any existing row: a resurrection's routes
+          // depend on which fields it names (the CLI routes by input), so, as
+          // on MCP, a create is routable only onto a free loc (@codex, #1305).
+          context:
+            (mode === 'update' && (!existing || existing.deletedAt)) || (mode === 'create' && existing)
+              ? undefined
+              : opts?.governedContext,
           merge: opts?.governedMerge,
           surface: ctx.transport === 'mcp' ? 'mcp' : 'graphql',
           canReplay: ctx.governedCanReplay,

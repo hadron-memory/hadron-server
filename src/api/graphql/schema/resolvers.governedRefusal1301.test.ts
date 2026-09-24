@@ -382,3 +382,18 @@ describe('an MCP door tool delegating to GraphQL keeps its MCP origin (@codex, P
     expect(text).not.toContain('hadron_update_review');
   });
 });
+
+describe('a GraphQL create that RESURRECTS a governed tombstone (@codex, PR #1305 round 10)', () => {
+  it('offers no route when the signal is omitted: the CLI routes create by input, which names no kind', async () => {
+    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:rz', name: 'r', content: 'x', isRunnable: true } }, ctx());
+    await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
+    const r = await refusal(M.createNode({}, { input: { memoryId, loc: 'tasks:rz', name: 'again', content: 'y' } }, ctx()));
+    expect(r.ext).toMatchObject({ code: 'ROLE_GOVERNED', refusal: 'edits', op: 'create', mcpDoor: null });
+    expect(r.message).toContain('There is no route to suggest for this operation');
+  });
+
+  it('CONTROL: a create onto a FREE loc still names the CLI route', async () => {
+    const r = await refusal(M.createNode({}, { input: { memoryId, loc: 'tasks:free', name: 'f', isRunnable: true } }, ctx()));
+    expect(r.message).toContain('`hadron node create` routes to it by itself');
+  });
+});
