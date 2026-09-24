@@ -16,6 +16,7 @@ import {
   governedKindsOf,
   GOVERNED_KINDS,
   type GovernedKind,
+  type GovernedMerge,
 } from '../../../lib/governedRole.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
@@ -224,6 +225,14 @@ export async function writeNodeCore(
      * review and neither can reach a Channel address.
      */
     ownsKind?: GovernedKind;
+    /**
+     * #1301 — set by the generic MERGE mutations (`updateNodeData`,
+     * `updateNodeProperties`) so a governed refusal can say that no door
+     * merges and name the REPLACE route, instead of pointing at a door that
+     * would drop every key the caller did not resend. Wording only: the gate
+     * decides exactly as it would without it.
+     */
+    governedMerge?: GovernedMerge;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -421,6 +430,7 @@ export async function writeNodeCore(
         mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
         mode === 'update' ? 'update' : 'create',
         opts?.ownsKind,
+        opts?.governedMerge,
       );
 
       // Mode gate (spec 039 Phase 0 D1). Create: reject if a **live** node
@@ -1630,7 +1640,7 @@ export async function updateNodePropertiesWith(
       },
       ctx,
       'update',
-      { targetNodeId: meta.id },
+      { targetNodeId: meta.id, governedMerge: 'properties' },
     );
   });
 }
@@ -1821,7 +1831,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
-        { targetNodeId: meta.id },
+        { targetNodeId: meta.id, governedMerge: 'data' },
       );
     },
 
