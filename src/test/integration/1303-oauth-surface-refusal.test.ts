@@ -111,6 +111,22 @@ describe('#1303 — the REST surfaces answer 403 with the same fields', () => {
     });
   });
 
+  it('POST /sessions/:id/outcome: the full refusal payload (@copilot, PR #1306)', async () => {
+    const res = await fetch(`${baseUrl}/sessions/any-session/outcome`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${keys.mcp}` },
+      body: JSON.stringify({ outcome: 0.5 }),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: PROSE,
+      code: 'FORBIDDEN',
+      reason: 'OAUTH_SCOPE_INSUFFICIENT',
+      requiredScope: 'account',
+      grantedScopes: ['mcp'],
+    });
+  });
+
   it('POST /reload', async () => {
     const res = await fetch(`${baseUrl}/reload`, { method: 'POST', headers: { Authorization: `Bearer ${keys.mcp}` } });
     expect(res.status).toBe(403);
@@ -125,6 +141,32 @@ describe('#1303 — createUserApiKey (defence in depth behind the context gate)'
     await expect(M.createUserApiKey({}, { label: 'x' }, ctx)).rejects.toMatchObject({
       message: 'This OAuth credential is limited to the MCP surface and cannot create API keys.',
       extensions: { code: 'FORBIDDEN', reason: 'OAUTH_SCOPE_INSUFFICIENT', requiredScope: 'account', grantedScopes: ['mcp'] },
+    });
+  });
+});
+
+describe('#1303 — the /mcp surface refuses with the same fields (@copilot, PR #1306)', () => {
+  it('a key whose grant cannot reach MCP: 403, the RFC 6750 header, and a matchable reason', async () => {
+    // Only a scope the server does not support can fail the MCP surface: an
+    // `mcp` or `account` grant both reach it.
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        Authorization: `Bearer ${keys.unsupported}`,
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('www-authenticate')).toBe('Bearer error="insufficient_scope", scope="mcp"');
+    expect(await res.json()).toEqual({
+      error: 'This OAuth credential does not grant MCP access',
+      code: 'FORBIDDEN',
+      reason: 'OAUTH_SCOPE_UNSUPPORTED',
+      requiredScope: 'mcp',
+      grantedScopes: ['mcp', 'telepathy'],
+      unsupportedScopes: ['telepathy'],
     });
   });
 });
