@@ -1381,7 +1381,7 @@
         "cor:agt:030:02"
       ],
       "given": "export over D01, on a machine with no Codex installed",
-      "expect": "writes ~/.claude/skills/hadron-demo/SKILL.md AND ~/.agents/skills/hadron-demo/SKILL.md (not the deprecated ~/.codex/skills); no detection, no prompt"
+      "expect": "writes ~/.claude/skills/hadron-demo/SKILL.md AND ~/.agents/skills/hadron-demo/SKILL.md (not the deprecated ~/.codex/skills); no detection, no prompt — including when ~/.agents/skills, or ~/.agents itself, does not exist yet (cor:agt:030:02: a location whose host is absent is written anyway)"
     },
     {
       "id": "P04",
@@ -1410,10 +1410,11 @@
       "layer": "writer",
       "pendingOn": "hadron-cli#621",
       "contracts": [
-        "cor:agt:030:01"
+        "cor:agt:030:00",
+        "cor:agt:030:02"
       ],
       "given": "~/.agents/skills/hadron-demo is a symlink to ~/.claude/skills/hadron-demo; export over D06",
-      "expect": "the Codex write is refused and reported (remove the link); the Claude file is byte-identical to a Claude-only export, never the Codex rendering"
+      "expect": "the Codex write is refused and reported (remove the link): writing through it would put Codex's declaration in CLAUDE's destination (cor:agt:030:02: a destination per host), and an item that cannot be written safely fails without stopping the rest (cor:agt:030:00). The Claude file is byte-identical to a Claude-only export, never the Codex rendering."
     },
     {
       "id": "P07",
@@ -1445,16 +1446,6 @@
       ],
       "given": "export over L01, with an earlier Codex file on disk",
       "expect": "Claude written; Codex skipped as out of export naming the 1,024 limit; the earlier Codex file is left in place"
-    },
-    {
-      "id": "P10",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:01"
-      ],
-      "given": "`status` over both roots where one skill directory is a symlink into the other root",
-      "expect": "the one physical file is not reported as two hosts' current files"
     },
     {
       "id": "P12",
@@ -1508,6 +1499,48 @@
       ],
       "given": "export over D02 (a valid Claude declaration and an `exports.codex` entry)",
       "expect": "the Claude file is written; the `codex` key is named ONCE in the end-of-run report as a declaration nothing can export, attributed to no host; the run continues and never prompts"
+    },
+    {
+      "id": "P17",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:00",
+        "cor:agt:030:02"
+      ],
+      "given": "~/.agents/skills is ITSELF a symlink to ~/.claude/skills (the root, not one skill directory); export over D01",
+      "expect": "every Codex item FAILS and is named in the report; every Claude item is written unchanged. Writing through the link would put Codex's declaration in Claude's destination (cor:agt:030:02: a destination per host), and an item that cannot be written safely fails without stopping the rest (cor:agt:030:00)."
+    },
+    {
+      "id": "P18",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:00",
+        "cor:agt:030:02"
+      ],
+      "given": "an ANCESTOR of the Codex root is a symlink (~/.agents -> ~/.claude), so ~/.agents/skills resolves into Claude's root; export over D01",
+      "expect": "same outcome as P17: every Codex item fails and is named in the report; every Claude item is written unchanged"
+    },
+    {
+      "id": "P20",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:02"
+      ],
+      "given": "the codexSkill host only: a Hadron-generated SKILL.md for D01's node sits in the DEPRECATED ~/.codex/skills, which Codex 0.153 still reads",
+      "expect": "for codexSkill the export WRITES only ~/.agents/skills, never ~/.codex/skills (cor:agt:030:02: one destination per host). (Reporting that copy, and whether an export may remove or migrate it, are plan-only: Q4 and Q7.)"
+    },
+    {
+      "id": "P21",
+      "layer": "writer",
+      "pendingOn": "hadron-cli#621",
+      "contracts": [
+        "cor:agt:030:02"
+      ],
+      "given": "the codexSkill host only: the same skill name exists in BOTH ~/.agents/skills (current export) and ~/.codex/skills (an older copy)",
+      "expect": "for codexSkill the export WRITES only ~/.agents/skills, never ~/.codex/skills (cor:agt:030:02: one destination per host). (Reporting the duplicate, and cleanup of the older copy, are plan-only: Q5 and Q7.)"
     }
   ]
 }
