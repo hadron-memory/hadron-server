@@ -105,6 +105,19 @@ export function oauthSurfaceRefusal(
 }
 
 /**
+ * The human sentence for a surface refusal (#1303). OAUTH_SCOPE_INSUFFICIENT
+ * keeps each surface's EXISTING prose byte for byte, because deployed clients
+ * match it; OAUTH_SCOPE_UNSUPPORTED gets its own sentence, because it is a
+ * different cause with a different remedy, and sharing the MCP-only prose made
+ * today's CLI mislabel it (hadron-cli, PR #1306 review).
+ */
+export function oauthSurfaceRefusalMessage(refusal: OAuthSurfaceRefusal, insufficientProse: string): string {
+  if (refusal.reason === 'OAUTH_SCOPE_INSUFFICIENT') return insufficientProse;
+  const scopes = (refusal.unsupportedScopes ?? []).map((s) => JSON.stringify(s)).join(', ');
+  return `This OAuth credential carries a scope this server does not support (${scopes}), so it is refused everywhere. Sign in again to get a credential with supported scopes.`;
+}
+
+/**
  * Cap on `UserApiKey.label`. The Prisma column is uncapped TEXT;
  * 200 chars is plenty for a human-readable display name and prevents
  * megabyte-sized labels from being persisted. Both `mintUserApiKey`

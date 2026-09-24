@@ -44,6 +44,7 @@ import { failLoginCallback, type LoginFailureReason } from './auth/login-error.t
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import {
   oauthSurfaceRefusal,
+  oauthSurfaceRefusalMessage,
   getCurrentUserRoles,
   hasCurrentPlatformAdminRole,
   resolveAuthContext,
@@ -1144,7 +1145,7 @@ export async function createServer(): Promise<Express> {
       const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
       if (surfaceRefusal) {
         // #1303: the prose is unchanged; `code` + `reason` make it matchable.
-        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.', code: 'FORBIDDEN', ...surfaceRefusal });
+        res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
       res.type('text/plain; charset=utf-8').send(graphqlSdl());
@@ -1169,7 +1170,7 @@ export async function createServer(): Promise<Express> {
           // `http.status: 403` replaces Apollo's context-failure 500 for THIS
           // error only (no global mapping change). The CLI keys on the envelope,
           // not the status, so the move is safe (hadron-cli, team chat #1313).
-          throw new GraphQLError('This OAuth credential is limited to the MCP surface.', {
+          throw new GraphQLError(oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), {
             extensions: { code: 'FORBIDDEN', ...surfaceRefusal, http: { status: 403 } },
           });
         }
@@ -1266,7 +1267,7 @@ export async function createServer(): Promise<Express> {
       const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
       if (surfaceRefusal) {
         // #1303: the prose is unchanged; `code` + `reason` make it matchable.
-        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.', code: 'FORBIDDEN', ...surfaceRefusal });
+        res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
 
@@ -1371,7 +1372,7 @@ export async function createServer(): Promise<Express> {
       const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
       if (surfaceRefusal) {
         // #1303: the prose is unchanged; `code` + `reason` make it matchable.
-        res.status(403).json({ error: 'This OAuth credential is limited to the MCP surface.', code: 'FORBIDDEN', ...surfaceRefusal });
+        res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
 

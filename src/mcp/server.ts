@@ -78,6 +78,7 @@ import {
 import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
 import {
   oauthSurfaceRefusal,
+  oauthSurfaceRefusalMessage,
   getCurrentUserRoles,
   resolveAuthContext,
   type AuthContext,
@@ -9206,7 +9207,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     res.setHeader('WWW-Authenticate', 'Bearer error="insufficient_scope", scope="mcp"');
     // #1303: the same matchable fields as the account surfaces (@copilot, PR
     // #1306); prose and status unchanged.
-    res.status(403).json({ error: 'This OAuth credential does not grant MCP access', code: 'FORBIDDEN', ...surfaceRefusal });
+    res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential does not grant MCP access'), code: 'FORBIDDEN', ...surfaceRefusal });
     return;
   }
   if (!auth.appId && !auth.userId && !auth.clientId) {

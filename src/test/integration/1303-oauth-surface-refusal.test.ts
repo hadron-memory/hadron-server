@@ -27,6 +27,9 @@ let userId: string;
 const keys: Record<string, string> = {};
 
 const PROSE = 'This OAuth credential is limited to the MCP surface.';
+/** Its OWN sentence: sharing the MCP-only prose made deployed CLIs mislabel it (PR #1306). */
+const UNSUPPORTED_PROSE =
+  'This OAuth credential carries a scope this server does not support ("telepathy"), so it is refused everywhere. Sign in again to get a credential with supported scopes.';
 
 async function gql(key: string, query: string) {
   const res = await fetch(`${baseUrl}/graphql`, {
@@ -76,6 +79,9 @@ describe('#1303 — POST /graphql', () => {
     const r = await gql(keys.unsupported!, '{ me { id } }');
     expect(r.status).toBe(403);
     const e = r.body.errors![0]!;
+    // Not the MCP-only sentence, which a deployed CLI would match and mislabel.
+    expect(e.message).toContain(UNSUPPORTED_PROSE);
+    expect(e.message).not.toContain(PROSE);
     expect(e.extensions).toEqual({
       code: 'FORBIDDEN',
       reason: 'OAUTH_SCOPE_UNSUPPORTED',
@@ -169,7 +175,7 @@ describe('#1303 — the /mcp surface refuses with the same fields (@copilot, PR 
     expect(res.status).toBe(403);
     expect(res.headers.get('www-authenticate')).toBe('Bearer error="insufficient_scope", scope="mcp"');
     expect(await res.json()).toEqual({
-      error: 'This OAuth credential does not grant MCP access',
+      error: UNSUPPORTED_PROSE,
       code: 'FORBIDDEN',
       reason: 'OAUTH_SCOPE_UNSUPPORTED',
       requiredScope: 'mcp',

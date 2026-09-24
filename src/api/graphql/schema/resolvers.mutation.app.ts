@@ -15,6 +15,7 @@ import {
   APP_KEY_PREFIX,
   USER_API_KEY_LABEL_MAX_LEN,
   oauthSurfaceRefusal,
+  oauthSurfaceRefusalMessage,
   hashAppKey,
   mintUserApiKey,
 } from '../../../middleware/auth.js';
@@ -1067,7 +1068,7 @@ export const appMutations = {
       const surfaceRefusal = oauthSurfaceRefusal(ctx, 'account');
       if (surfaceRefusal) {
         throw new GraphQLError(
-          'This OAuth credential is limited to the MCP surface and cannot create API keys.',
+          oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface and cannot create API keys.'),
           { extensions: { code: 'FORBIDDEN', ...surfaceRefusal } },
         );
       }
