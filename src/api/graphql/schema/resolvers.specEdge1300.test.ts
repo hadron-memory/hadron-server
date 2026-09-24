@@ -109,6 +109,39 @@ describe('#1300 — an org OWNER with default platform roles', () => {
     it('an unauthenticated caller', async () => {
       await denied({ db, roles: [] } as unknown as Context);
     });
+
+    // @codex P2 on PR #1307: with no platform gate in front, a denial must not
+    // tell a caller who cannot READ the memory whether a ref exists.
+    const code = (p: Promise<unknown>) =>
+      p.then(() => 'OK', (e: { extensions?: { code?: string }; message?: string }) => e.extensions?.code ?? e.message ?? 'ERR');
+
+    it('NO EXISTENCE ORACLE: an outsider and an anonymous caller get the same answer for an existing ref as for a missing one', async () => {
+      const t = `${Date.now()}-${Math.floor(Math.random() * 1e5)}`;
+      const stranger = await db.user.create({ data: { id: generateId(), githubId: 13003, githubUsername: `or-${t}` } });
+      const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      const missingNode = `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:n:nope`;
+      const missingEdge = 'hrn:edge:nowhere.example:m:n:rel:n';
+      for (const who of [
+        { db, roles: ['READER'], userId: stranger.id, clientId: `user:${stranger.id}` } as Context,
+        { db, roles: [] } as unknown as Context,
+      ]) {
+        expect(await code(M.createEdge({}, { sourceRef: srcId, targetRef: tgtId, name: 'x' }, who)))
+          .toBe(await code(M.createEdge({}, { sourceRef: missingNode, targetRef: tgtId, name: 'x' }, who)));
+        expect(await code(M.updateEdge({}, { edgeRef: edgeId, description: 'x' }, who)))
+          .toBe(await code(M.updateEdge({}, { edgeRef: missingEdge, description: 'x' }, who)));
+        expect(await code(M.deleteEdge({}, { edgeRef: edgeId }, who)))
+          .toBe(await code(M.deleteEdge({}, { edgeRef: missingEdge }, who)));
+      }
+    });
+
+    it('CONTROL: a READER member (who can see the edge) is told Forbidden, not not-found', async () => {
+      const t = `${Date.now()}-${Math.floor(Math.random() * 1e5)}`;
+      const reader = await db.user.create({ data: { id: generateId(), githubId: 13004, githubUsername: `rc-${t}` } });
+      const m = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      await db.orgMember.create({ data: { organizationId: m.organizationId!, userId: reader.id, role: 'READER' } });
+      const who = { db, roles: ['READER'], userId: reader.id, clientId: `user:${reader.id}` } as Context;
+      expect(await code(M.deleteEdge({}, { edgeRef: edgeId }, who))).not.toBe('EDGE_NOT_FOUND');
+    });
   });
 
   it('CAN wire the edge through the spec door itself: createSpecNode with inline edges', async () => {

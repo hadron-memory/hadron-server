@@ -2589,6 +2589,14 @@ export const nodeMutations = {
       // CONTRIBUTOR could write an edge into a memory they can't touch. The
       // target denial returns the same NODE_NOT_FOUND wording as a genuine
       // miss so it can't be used as a cross-memory existence oracle.
+      // #1300 / @codex P2 on PR #1307: with no platform gate in front, a
+      // denial must not distinguish "exists but not yours" from "missing".
+      // A caller who cannot even READ the source's memory gets the same
+      // NODE_NOT_FOUND a missing ref gets; only a reader who may not write
+      // learns "Forbidden" (the existence is theirs to see already).
+      if (!(await isMemoryReadableCached(ctx, src.memoryId))) {
+        throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+      }
       await requireMemoryWriteAccess(ctx, src.memoryId);
       if (!(await canReadMemory(ctx.db, ctx, tgt.memoryId))) {
         throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
@@ -2733,6 +2741,14 @@ export const nodeMutations = {
           extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
         });
       }
+      // #1300 / @codex P2 on PR #1307: a caller who cannot READ the edge's
+      // memory gets the same EDGE_NOT_FOUND as a missing edge, so the refusal
+      // is not an existence oracle; a reader who may not write gets Forbidden.
+      if (!(await isMemoryReadableCached(ctx, edgeMem.memoryId))) {
+        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        });
+      }
       await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
       const updatedEdge = await ctx.db.edge.update({
         where: { id: resolvedEdgeId },
@@ -2791,6 +2807,14 @@ export const nodeMutations = {
         },
       });
       if (!edgeMem) {
+        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        });
+      }
+      // #1300 / @codex P2 on PR #1307: a caller who cannot READ the edge's
+      // memory gets the same EDGE_NOT_FOUND as a missing edge, so the refusal
+      // is not an existence oracle; a reader who may not write gets Forbidden.
+      if (!(await isMemoryReadableCached(ctx, edgeMem.memoryId))) {
         throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
           extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
         });
