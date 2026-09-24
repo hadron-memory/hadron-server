@@ -256,13 +256,15 @@ export class RoleGovernedError extends GraphQLError {
       !(op === 'create' && refusal === 'removes') &&
       (canReplay?.(entry.kind) ?? true);
     const onMcp = surface === 'mcp';
-    const message = multi
-      ? // No single door owns every kind the node carries, so none can write it.
-        `${act}, and the node is governed as more than one kind (${multi.map((k) => k.kind).join(' and ')}). ` +
-        `Each door is exempt from its own kind only (${multi.map((k) => k.doors[op]).join(', ')}), so no current route can write it. ${tail}`
-      : context === 'restore'
-        ? // Not `base`: "only updateX may update" is not a route to a RESTORE.
-          `${act}, and no door restores a revision: a governed node's history cannot be restored through any surface yet (tracked with deletes in #1204). ${tail}`
+    // RESTORE first: whatever kinds the node carries, the reason nothing can
+    // do it is that no door restores (@copilot, PR #1305 round 12).
+    const message = context === 'restore'
+      ? // Not `base`: "only updateX may update" is not a route to a RESTORE.
+        `${act}, and no door restores a revision: a governed node's history cannot be restored through any surface yet (tracked with deletes in #1204). ${tail}`
+      : multi
+        ? // No single door owns every kind the node carries, so none can write it.
+          `${act}, and the node is governed as more than one kind (${multi.map((k) => k.kind).join(' and ')}). ` +
+          `Each door is exempt from its own kind only (${multi.map((k) => k.doors[op]).join(', ')}), so no current route can write it. ${tail}`
         : routable && merge
           ? // A merge cannot be redirected to the door as-is: the door REPLACES.
             `This ${merge} MERGE edits ${subject}, and no door merges: ${door} REPLACES ${merge} instead, so send the whole object, including the keys it already has. ` +

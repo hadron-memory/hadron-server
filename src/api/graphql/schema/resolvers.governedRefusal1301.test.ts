@@ -420,3 +420,14 @@ describe('review round 11 (@codex + @copilot, PR #1305)', () => {
     }
   });
 });
+
+describe('a RESTORE of a multi-kind node (@copilot, PR #1305 round 12)', () => {
+  it('gives the restore reason, not the multi-kind one', () => {
+    const task = GOVERNED_KINDS.find((k) => k.kind === 'task')!;
+    const review = GOVERNED_KINDS.find((k) => k.kind === 'review')!;
+    const e = new RoleGovernedError(task, 'update', 'edits', { context: 'restore', kinds: [task, review] });
+    expect(e.message).toContain('no door restores a revision');
+    expect(e.message).not.toContain('more than one kind');
+    expect(e.extensions.mcpDoor).toBeNull();
+  });
+});
