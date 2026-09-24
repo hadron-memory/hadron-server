@@ -178,7 +178,7 @@ export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Fin
   // INDEPENDENTLY of the grammar check (@copilot, PR #1318): `Synced` fails
   // both, and reporting only the grammar would reveal the reservation as a
   // second error after the author fixed the case.
-  if (storedName(declaration) !== '' && isHostReservedName(hostRow, declaration.name)) {
+  if (storedName(declaration) !== '' && isHostReservedName(hostRow, storedName(declaration))) {
     add(
       'skill-name-reserved',
       'error',

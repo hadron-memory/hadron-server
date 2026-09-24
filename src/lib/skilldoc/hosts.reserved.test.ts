@@ -66,4 +66,8 @@ describe('#1318 review (@copilot): the reservation is reported whatever else is 
       expect(got, name).toContain('skill-name-reserved:error');
     }
   });
+
+  it('checks the TRIMMED name the planner exports under: `" synced "` is reserved too (@copilot, PR #1318)', () => {
+    expect(rules(' synced ', HOST_CLAUDE_SKILL)).toContain('skill-name-reserved:error');
+  });
 });
