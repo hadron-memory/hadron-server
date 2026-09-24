@@ -4471,10 +4471,14 @@ export function createMcpServerInstance(
           'create',
           undefined,
           // A LIVE node at this loc makes any create a NODE_LOC_CONFLICT, the
-          // create doors included, so a route is offered only when the loc is
-          // free or holds a tombstone to resurrect (@codex, PR #1305).
+          // create doors included (@codex, PR #1305).
           // …and only when that kind's door could replay this exact call.
-          governedProbe && governedProbe.deletedAt == null
+          // Not for a RESURRECTION either (@codex, PR #1305 round 6): this
+          // tool CLEARS the fields a resurrecting call omits, while the doors
+          // PRESERVE them, so no door replays it. A route is offered only when
+          // the loc holds no row at all — the conservative rule, closing the
+          // class rather than chasing each field.
+          governedProbe
             ? {}
             : {
                 context: 'node-write',

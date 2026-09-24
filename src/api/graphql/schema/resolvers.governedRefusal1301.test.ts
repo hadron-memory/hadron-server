@@ -302,3 +302,26 @@ describe('kind signals are door-specific (@copilot + @codex, PR #1305 round 5)',
     expect(plain).toContain('Over MCP, use hadron_update_task');
   });
 });
+
+describe('MCP create over a TOMBSTONE offers no door (@codex, PR #1305 round 6)', () => {
+  it('resurrection clears omitted fields here but the doors preserve them, so no door replays it', async () => {
+    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:res', name: 'r', content: 'x', isRunnable: true } }, ctx());
+    await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const text = await createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never).callToolText(
+      'hadron_create_node',
+      { urn: `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:tasks:res`, name: 'again', isRunnable: true },
+    );
+    expect(text).toMatch(/role_governed/);
+    expect(text).not.toContain('hadron_create_task');
+  });
+
+  it('CONTROL: MCP create on a FREE loc still names hadron_create_task', async () => {
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const text = await createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never).callToolText(
+      'hadron_create_node',
+      { urn: `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:tasks:fresh`, name: 'n', content: 'x', isRunnable: true },
+    );
+    expect(text).toContain('Over MCP, use hadron_create_task');
+  });
+});
