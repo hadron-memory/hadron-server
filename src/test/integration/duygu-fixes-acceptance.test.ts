@@ -159,7 +159,9 @@ describe('#1300/#1307 — edges for a global-READER org OWNER, over HTTP', () =>
       i: { memoryId, loc: l, name: 'rule', role: 'spec', edges: [{ targetId: 'app:onb:does-not-exist', name: 'part-of' }] },
     });
     expect(r.errors?.[0]?.message).toMatch(/Edge target not found/);
-    expect(await db.node.findFirst({ where: { memoryId, loc: l, deletedAt: null } })).toBeNull();
+    // No row at all, tombstones included: a create-then-soft-delete rollback
+    // would leave one behind and still read as "no live node" (@copilot, #1308).
+    expect(await db.node.findFirst({ where: { memoryId, loc: l } })).toBeNull();
   });
 
   describe('DENIAL CONTROLS, per mutation, and nothing changes', () => {
@@ -199,10 +201,15 @@ describe('#1300/#1307 — edges for a global-READER org OWNER, over HTTP', () =>
       await unchanged();
     });
 
-    it('a user of another organisation: refused on all three, with no OAuth reason, and nothing changes', async () => {
+    it('a user of another organisation: refused on all three as not-found, with no OAuth reason, and nothing changes', async () => {
       const r = await tryAll(key.outsider!);
+      // The code is pinned, not just the absence of `reason`: a validation
+      // failure would satisfy "one error, no reason" with the gate deleted.
+      const expected = { create: 'NODE_NOT_FOUND', update: 'EDGE_NOT_FOUND', del: 'EDGE_NOT_FOUND' };
       for (const [op, res] of Object.entries(r)) {
+        expect(res.status, op).toBe(200);
         expect(res.errors, op).toHaveLength(1);
+        expect(res.errors![0]!.extensions?.code, op).toBe(expected[op as keyof typeof expected]);
         expect(res.errors![0]!.extensions, op).not.toHaveProperty('reason');
       }
       await unchanged();
@@ -213,9 +220,10 @@ describe('#1300/#1307 — edges for a global-READER org OWNER, over HTTP', () =>
       const missingEdge = 'hrn:edge:nowhere.example:m:n:rel:n';
       const k = key.outsider!;
       // The message and `extensions.ref` echo the ref the caller SENT, so that part differs by
-      // construction and discloses nothing; everything else must be identical.
+      // construction and discloses nothing; everything else — the HTTP status, `data`, and every
+      // error — must be identical (@copilot, #1308: the status is part of the wire contract too).
       const strip = (r: Gql, sent: string) =>
-        r.errors?.map((e) => JSON.parse(JSON.stringify([e.message, e.extensions]).replaceAll(JSON.stringify(sent).slice(1, -1), '<ref>')));
+        JSON.parse(JSON.stringify([r.status, r.data, r.errors?.map((e) => [e.message, e.extensions])]).replaceAll(JSON.stringify(sent).slice(1, -1), '<ref>'));
       expect(strip(await gql(k, CREATE_EDGE, { s: src, t: tgt, n: 'x' }), src))
         .toEqual(strip(await gql(k, CREATE_EDGE, { s: missingNode, t: tgt, n: 'x' }), missingNode));
       expect(strip(await gql(k, UPDATE_EDGE, { e: edgeId, d: 'x' }), edgeId))
