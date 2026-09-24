@@ -37,6 +37,8 @@ export {
   LEGACY_TOP_LEVEL_KEYS,
   malformedDeclarationPaths,
   storedName,
+  unknownHostKeys,
+  unknownHostKeysBounded,
   type Declaration,
 } from './declaration.js';
 export {
@@ -47,4 +49,14 @@ export {
   type FileFacts,
   type NodeFacts,
 } from './classify.js';
-export { lintCollisions, lintNode, type Finding, type Severity, type SkillNode } from './lint.js';
+export {
+  lintCollisions,
+  lintNode,
+  lintUnknownHostKeys,
+  RULE_UNKNOWN_HOST_KEY,
+  unknownHostKeyFinding,
+  unknownHostKeysOmittedFinding,
+  type Finding,
+  type Severity,
+  type SkillNode,
+} from './lint.js';

@@ -1,8 +1,10 @@
 /**
  * #1177 §6 — the corpus lint rules, server-side.
  *
- * TWELVE rules over a node's declaration and body — eleven per node plus
- * `skill-name-collision`, which is corpus-wide. They answer *is this node
+ * THIRTEEN rules over a node's declaration and body: eleven per node and per
+ * host (`lintNode`), `skill-name-collision`, which is corpus-wide and per host
+ * (`lintCollisions`), and `skill-unknown-host-key`, which is per node and
+ * attributed to NO host (`lintUnknownHostKeys`, #1292). They answer *is this node
  * exportable, and will the host do what its author expects* — judgment over
  * corpus inputs alone, with no file and no disk, which is what makes this half
  * of the split (A3) pure.
@@ -12,8 +14,9 @@
  * ref it could not read. That one is not a judgment about a node — it is a
  * report about a read that failed — so it cannot live in a pure function over
  * a node it does not have. Said here rather than left as an off-by-one,
- * because "thirteen" in this header would misstate what the port covers
- * (@copilot, PR #1233).
+ * because counting it in this header would misstate what the port covers
+ * (@copilot, PR #1233). (The count above reached thirteen in #1292 with a
+ * rule of its own; the spec's §6 figure still predates that rule.)
  *
  * Ported from `internal/skilldoc`'s `Lint` / `LintCollisions`. The message text
  * is part of the port: an operator reading `hadron skill lint` and a portal
@@ -33,8 +36,10 @@ import {
   isEnabled,
   legacyAliasPaths,
   storedName,
+  unknownHostKeys,
 } from './declaration.js';
-import { requireSkillHost } from './hosts.js';
+import { goQuote } from './goQuote.js';
+import { requireSkillHost, SKILL_HOSTS } from './hosts.js';
 import { validName } from './name.js';
 import { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
 
@@ -203,6 +208,59 @@ export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Fin
     );
   }
   return out;
+}
+
+/**
+ * The rule for a key under `properties.exports` that names no host.
+ *
+ * PROVISIONAL NAME, proposed by hadron-cli (team chat #1206) and pending the
+ * specs engineer: kept in ONE constant so the agreed spelling is a one-line
+ * change here and in the Go reference together.
+ */
+export const RULE_UNKNOWN_HOST_KEY = 'skill-unknown-host-key';
+
+/**
+ * The host-independent pass: one WARNING per unknown `exports.<key>`
+ * (cor:agt:030:06, D-2026-09-23-E).
+ *
+ * Deliberately NOT part of `lintNode(node, host)`. Every finding that returns
+ * is attributed to a host, and this one belongs to none — emitted from each
+ * host's pass it would merge into one row claiming all of them. A warning,
+ * never an error: an unrecognised key is reported, and never blocks anything.
+ */
+export function lintUnknownHostKeys(node: SkillNode): Finding[] {
+  return unknownHostKeys(node.properties).map((key) => unknownHostKeyFinding(node, key));
+}
+
+/** The one warning for one unknown key: shared by the full pass and by a caller that lists only some keys. */
+export function unknownHostKeyFinding(node: SkillNode, key: string): Finding {
+  const known = SKILL_HOSTS.map((h) => h.key).join(', ');
+  return {
+    urn: node.urn,
+    memory: node.memoryUrn,
+    rule: RULE_UNKNOWN_HOST_KEY,
+    severity: 'warning',
+    // Word for word Go's LintUnknownHostKeys (@copilot, PR #1296), with the
+    // key quoted as Go's %q quotes it: the key is author-controlled, so it can
+    // carry exactly the characters JSON.stringify and Go escape differently.
+    message: `properties.${EXPORTS_KEY} key ${goQuote(key)} names no skill host (supported: ${known}) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it`,
+  };
+}
+
+/**
+ * The summary warning for unknown keys a report does not LIST (#1292; @codex
+ * P1 then @copilot, PR #1296). Server-only: Go lists every key, and a report
+ * over a writer-controlled object has to bound what it builds. The keys are
+ * counted, not dropped, and still a warning: an unknown key never blocks.
+ */
+export function unknownHostKeysOmittedFinding(node: SkillNode, omitted: number): Finding {
+  return {
+    urn: node.urn,
+    memory: node.memoryUrn,
+    rule: RULE_UNKNOWN_HOST_KEY,
+    severity: 'warning',
+    message: `properties.${EXPORTS_KEY} carries ${omitted} more unrecognised key(s) not listed in this report (too many, or too long to show) — nothing exports them, and they are not read as an alias for any host; remove them`,
+  };
 }
 
 /**

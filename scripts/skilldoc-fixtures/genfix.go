@@ -62,6 +62,15 @@ func upsert(cases []kase, add ...kase) []kase {
 	return cases
 }
 
+// decodeOrEmpty is decode for a section this generator introduces: absent the
+// first time it runs, so there is nothing to upsert into yet.
+func decodeOrEmpty(doc map[string]json.RawMessage, section string) []kase {
+	if _, ok := doc[section]; !ok {
+		return []kase{}
+	}
+	return decode(doc, section)
+}
+
 func decode(doc map[string]json.RawMessage, section string) []kase {
 	var cases []kase
 	if err := json.Unmarshal(doc[section], &cases); err != nil {
@@ -243,6 +252,80 @@ func main() {
 	}
 	doc["lintCollisions"], _ = json.Marshal(lc)
 	doc["lintCollisionsSourceCommit"], _ = json.Marshal(commit)
+
+	// ── declared ────────────────────────────────────────────────────────────
+	// Inputs kept as they are; the reader's verdict recomputed from Go (#1292).
+	// Before this the section had no generator. Its `two malformed hosts sort`
+	// and UTF-8 ordering cases pinned unknown keys as MALFORMED, which
+	// cor:agt:030:06 now rules out (an unknown key is a warning and never
+	// blocks). Regenerated at a commit whose Go agrees, they come back with an
+	// empty `malformed`. Stamped separately, like lintCollisions.
+	dc := decode(doc, "declared")
+	for _, c := range dc {
+		props, _ := c["properties"].(map[string]any)
+		d, found := skilldoc.Declared(props)
+		out := map[string]any{"found": found, "nameSet": false, "enable": false, "enableSet": false}
+		if found {
+			out["key"], out["host"] = d.Key, d.Host
+			out["nameSet"], out["enable"], out["enableSet"] = d.NameSet, d.Enable, d.EnableSet
+			// Empty strings omitted, matching the section's existing shape.
+			if d.Description != "" {
+				out["description"] = d.Description
+			}
+			if d.Name != "" {
+				out["name"] = d.Name
+			}
+		}
+		c["declared"] = out
+		malformed := skilldoc.Malformed(props)
+		if malformed == nil {
+			malformed = []string{}
+		}
+		c["malformed"] = malformed
+		// The unknown keys, in UTF-8 byte order — the ORDER the pre-#1292
+		// malformed-path vectors pinned now lives here. Needs a hadron-cli
+		// commit that has UnknownHostKeys (#679 or later); older commits do
+		// not compile this generator, which is the right failure.
+		unknown := skilldoc.UnknownHostKeys(props)
+		if unknown == nil {
+			unknown = []string{}
+		}
+		c["unknown"] = unknown
+	}
+	doc["declared"], _ = json.Marshal(dc)
+	doc["declaredSourceCommit"], _ = json.Marshal(commit)
+
+	// ── lintUnknownHostKeys ─────────────────────────────────────────────────
+	// #1292 (@copilot, PR #1296): the warning's MESSAGE is part of the port,
+	// and it quotes an author-controlled key with %q. Keys are chosen for the
+	// characters Go's %q and JSON.stringify escape differently: quote,
+	// backslash, control characters, DEL, a non-printing NBSP and soft hyphen,
+	// private use, and an astral code point. Inputs are authored here and
+	// upserted by name; findings come from Go.
+	uk := upsert(decodeOrEmpty(doc, "lintUnknownHostKeys"),
+		kase{"name": "the codex shape", "keys": []any{"codex"}},
+		kase{"name": "keys Go and JSON quote differently", "keys": []any{
+			"with\"quote", "back\\slash", "new\nline", "tab\there", "bell\a", "del\x7f",
+			"nbsp\u00a0", "soft\u00adhyphen", "caf\u00e9", "\ue000", "\U00010000", "emoji\U0001F600", "sp ace",
+			// Unicode space separators other than U+0020, and U+2028: %q
+			// ESCAPES them (measured, @copilot on PR #1296 read it the other way).
+			"en\u2000quad", "ideo\u3000space", "ogham\u1680mark", "line\u2028sep"}},
+	)
+	for _, c := range uk {
+		exports := map[string]any{"claudeSkill": map[string]any{"name": "x", "description": "d. Use when x."}}
+		for _, k := range c["keys"].([]any) {
+			exports[k.(string)] = true
+		}
+		n := skilldoc.Node{URN: "hrn:node:a.com:m:tasks:x", Loc: "tasks:x", MemoryURN: "hrn:mem:a.com:m",
+			IsRunnable: true, Content: "# b", Properties: map[string]any{"exports": exports}}
+		findings := []any{}
+		for _, f := range skilldoc.LintUnknownHostKeys(n) {
+			findings = append(findings, map[string]any{"rule": f.Rule, "severity": f.Severity, "message": f.Message})
+		}
+		c["findings"] = findings
+	}
+	doc["lintUnknownHostKeys"], _ = json.Marshal(uk)
+	doc["lintUnknownHostKeysSourceCommit"], _ = json.Marshal(commit)
 
 	// The commit is an ARGUMENT, never a literal. Hardcoding it meant the next
 	// regeneration at a newer revision would still stamp the old one, and

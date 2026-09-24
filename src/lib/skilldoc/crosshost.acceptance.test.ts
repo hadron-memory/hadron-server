@@ -3,9 +3,11 @@
  *
  * `__fixtures__/crosshost-acceptance.json` is VENDORED, not authored here:
  * copied byte-for-byte from hadron-cli `internal/skilldoc/testdata/
- * crosshost-acceptance.json` at 3c30a38 (hadron-cli PR #678: collisions
- * count enabled declarations only, #1289; previously 0894a9f from #671, first
- * vendored from #664 at 31d5f62). Its expectations
+ * crosshost-acceptance.json` at 36dac1b (hadron-cli PR #680: pending
+ * read-root/symlink cases P17-P21 only; the live cases are #679's, where an
+ * unknown `exports` key became a host-free warning, #1292; before that
+ * 3c30a38 from #678, 0894a9f from #671, first vendored from #664 at 31d5f62).
+ * Its expectations
  * are written from the cor:agt:030 rules, not from either implementation, so
  * it can disagree with this one. That is the point of running it here.
  *
@@ -32,16 +34,18 @@ import {
   declaredSkill,
   lintCollisions,
   lintNode,
+  lintUnknownHostKeys,
   normalizeDescription,
   parseFile,
   render,
   hash,
   SKILL_HOSTS,
+  unknownHostKeys,
   type SkillNode,
 } from './index.js';
 
 const FIXTURE = join(import.meta.dirname, '__fixtures__', 'crosshost-acceptance.json');
-const VENDORED_SHA256 = '3285c87c2e0adbbfd53065b8b4a1fdfbcde61a6915ecd46757bfe44118b17d3c';
+const VENDORED_SHA256 = '9c779fbf690bf0a55c75530a02aad146aefb6760d05316c8ddb26e915aed9d78';
 
 const raw = readFileSync(FIXTURE);
 const m = JSON.parse(raw.toString('utf8'));
@@ -70,6 +74,34 @@ describe('crosshost acceptance matrix (vendored from hadron-cli#622)', () => {
   it('POSITIVE CONTROL: every executable section is non-empty', () => {
     for (const section of ['declarations', 'lint', 'collisions', 'rendering']) {
       expect(m[section].length, section).toBeGreaterThan(0);
+    }
+  });
+
+  // #1292: an unknown `exports` key belongs to NO host, so these columns sit
+  // beside the per-host ones rather than inside them. Both are REQUIRED on
+  // every case: a missing column must fail here, not pass as "nothing
+  // reported" — which is the silent outcome #1292 exists to end.
+  describe('host-free columns (#1292)', () => {
+    it('POSITIVE CONTROL: both columns are present everywhere and exercised somewhere', () => {
+      for (const c of m.declarations) expect(Array.isArray(c.unknown), `${c.id} unknown`).toBe(true);
+      for (const c of m.lint) expect(Array.isArray(c.unhosted), `${c.id} unhosted`).toBe(true);
+      expect(m.declarations.some((c: { unknown: unknown[] }) => c.unknown.length > 0)).toBe(true);
+      expect(m.lint.some((c: { unhosted: unknown[] }) => c.unhosted.length > 0)).toBe(true);
+    });
+
+    for (const c of m.declarations) {
+      it(`${c.id} unknown keys: ${c.title}`, () => {
+        expect(unknownHostKeys(c.properties)).toEqual(c.unknown);
+      });
+    }
+
+    for (const c of m.lint) {
+      it(`${c.id} unhosted lint: ${c.title}`, () => {
+        const rules = lintUnknownHostKeys(node(`hrn:node:example.com:demo:tasks:${c.id}`, c.properties))
+          .map((f) => `${f.rule}:${f.severity}`)
+          .sort();
+        expect(rules).toEqual(c.unhosted);
+      });
     }
   });
 

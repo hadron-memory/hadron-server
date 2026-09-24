@@ -36,8 +36,8 @@ import { validName } from './name.js';
 import { hash } from './hash.js';
 import { render, SkillRenderError } from './render.js';
 import { isNodeUrn, parseFile, SkillFileParseError } from './parse.js';
-import { lintCollisions, lintNode, type SkillNode } from './lint.js';
-import { classifyDeclaration } from './declaration.js';
+import { lintCollisions, lintNode, lintUnknownHostKeys, type SkillNode } from './lint.js';
+import { classifyDeclaration, unknownHostKeys } from './declaration.js';
 
 interface Fixtures {
   sourceCommit: string;
@@ -85,6 +85,15 @@ interface Fixtures {
       name?: string; nameSet: boolean; enable: boolean; enableSet: boolean;
     };
     malformed: string[];
+    /** #1292 — Go's UnknownHostKeys, in UTF-8 byte order. */
+    unknown: string[];
+  }[];
+  /** #1292 — Go's LintUnknownHostKeys over authored keys (message + %q quoting). */
+  lintUnknownHostKeysSourceCommit: string;
+  lintUnknownHostKeys: {
+    name: string;
+    keys: string[];
+    findings: { rule: string; severity: string; message: string }[];
   }[];
 }
 
@@ -97,6 +106,7 @@ function loadFixtures(): Fixtures {
     'normalizeDescription', 'normalizeBody',
     'validName', 'hash', 'render', 'parseFile',
     'isNodeUrn', 'renderParseRoundTrip', 'lint', 'lintCollisions', 'declared',
+    'lintUnknownHostKeys',
   ];
   for (const s of sections) {
     const v = f[s];
@@ -446,6 +456,10 @@ describe('#1177 D12 — the declaration reader agrees with Go', () => {
   it.each(F.declared.map((c) => [c.name, c] as const))('declared: %s', (_n, c) => {
     const { declaration, malformed } = classifyDeclaration(c.properties);
     expect(malformed).toEqual(c.malformed);
+    // REQUIRED, not optional: a case generated without it would otherwise
+    // pass as "no unknown keys" (#1292).
+    expect(Array.isArray(c.unknown)).toBe(true);
+    expect(unknownHostKeys(c.properties)).toEqual(c.unknown);
     if (!c.declared.found) {
       expect(declaration).toBeNull();
       return;
@@ -468,5 +482,27 @@ describe('#1177 D12 — the declaration reader agrees with Go', () => {
       enable: c.declared.enable,
       enableSet: c.declared.enableSet,
     });
+  });
+});
+
+describe('#1292 — the unknown-host-key warning agrees with Go, word for word', () => {
+  it('POSITIVE CONTROL: the section is generated and exercises the awkward keys', () => {
+    expect(F.lintUnknownHostKeysSourceCommit).toBeTruthy();
+    const awkward = F.lintUnknownHostKeys.find((c) => c.name === 'keys Go and JSON quote differently');
+    expect(awkward?.findings.length).toBeGreaterThan(10);
+  });
+
+  it.each(F.lintUnknownHostKeys.map((c) => [c.name, c] as const))('%s', (_n, c) => {
+    const exports: Record<string, unknown> = { claudeSkill: { name: 'x', description: 'd. Use when x.' } };
+    for (const k of c.keys) exports[k] = true;
+    const got = lintUnknownHostKeys({
+      urn: 'hrn:node:a.com:m:tasks:x',
+      loc: 'tasks:x',
+      memoryUrn: 'hrn:mem:a.com:m',
+      isRunnable: true,
+      content: '# b',
+      properties: { exports },
+    }).map((f) => ({ rule: f.rule, severity: f.severity, message: f.message }));
+    expect(got).toEqual(c.findings);
   });
 });

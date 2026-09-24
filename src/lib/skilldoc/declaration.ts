@@ -35,7 +35,7 @@ export const EXPORTS_KEY = 'exports';
  * entry is shape-checked here whatever its host; which one BECOMES the
  * declaration is the caller's `host` argument.
  */
-import { HOST_CLAUDE_SKILL, requireSkillHost } from './hosts.js';
+import { HOST_CLAUDE_SKILL, requireSkillHost, skillHost } from './hosts.js';
 export { HOST_CLAUDE_SKILL };
 
 /**
@@ -187,6 +187,12 @@ export function classifyDeclaration(
       // code units and orders an astral key against U+E000 the other way
       // round. A fixture generated from Go pins this.
       for (const entryHost of Object.keys(raw).sort(compareUtf8)) {
+        // Only a KNOWN host's entry is shape-checked (cor:agt:030:06; #1292).
+        // An unknown key belongs to no host, so a broken one must not become
+        // an ERROR on every host and block an unrelated, valid export — which
+        // is what checking it here did. `unknownHostKeys` reports it instead,
+        // as a warning attributed to no host, whatever its shape.
+        if (skillHost(entryHost) === null) continue;
         const path = `${EXPORTS_KEY}.${entryHost}`;
         const entry = raw[entryHost];
         if (!isPlainObject(entry)) {
@@ -241,6 +247,61 @@ export function declaredSkill(properties: unknown, host: string = HOST_CLAUDE_SK
  */
 export function malformedDeclarationPaths(properties: unknown, host: string = HOST_CLAUDE_SKILL): string[] {
   return classifyDeclaration(properties, host).malformed;
+}
+
+/**
+ * The keys under `properties.exports` that name no host this server knows
+ * (cor:agt:030:06; #1292), in UTF-8 byte order.
+ *
+ * Host-independent by construction: the key belongs to none of the hosts, so
+ * the caller reports it once per node rather than once per host — tagging it
+ * with every host would claim it for hosts it was never written for. Never
+ * read as an alias for a known host (`codex` is not `codexSkill`).
+ *
+ * Its VALUE is not inspected: a malformed unknown entry is still just an
+ * unknown key, and `classifyDeclaration` no longer shape-checks one.
+ */
+export function unknownHostKeys(properties: unknown): string[] {
+  if (!isPlainObject(properties) || !own(properties, EXPORTS_KEY)) return [];
+  const raw = ownValue(properties, EXPORTS_KEY);
+  if (!isPlainObject(raw)) return [];
+  return Object.keys(raw)
+    .filter((key) => skillHost(key) === null)
+    .sort(compareUtf8);
+}
+
+/**
+ * `unknownHostKeys`, bounded for a caller that lists only some of them: the
+ * total count, plus the first `limit` keys of at most `maxBytes` UTF-8 bytes,
+ * in the SAME UTF-8 byte order (@copilot, PR #1296).
+ *
+ * One pass, keeping a sorted window of `limit` keys: O(n × limit), and it
+ * never materializes or sorts the full list. `properties` is writer-controlled,
+ * so a report that bounded only its OUTPUT still let one huge `exports` object
+ * make every plan sort all of it. Defined to equal
+ * `unknownHostKeys(p).filter(fits).slice(0, limit)`; a property test pins that.
+ */
+export function unknownHostKeysBounded(
+  properties: unknown,
+  limit: number,
+  maxBytes: number,
+): { total: number; keys: string[] } {
+  if (!isPlainObject(properties) || !own(properties, EXPORTS_KEY)) return { total: 0, keys: [] };
+  const raw = ownValue(properties, EXPORTS_KEY);
+  if (!isPlainObject(raw)) return { total: 0, keys: [] };
+  let total = 0;
+  const window: string[] = [];
+  for (const key of Object.keys(raw)) {
+    if (skillHost(key) !== null) continue;
+    total += 1;
+    if (limit <= 0 || Buffer.byteLength(key, 'utf8') > maxBytes) continue;
+    if (window.length === limit && compareUtf8(key, window[limit - 1]!) >= 0) continue;
+    let i = window.length;
+    while (i > 0 && compareUtf8(key, window[i - 1]!) < 0) i -= 1;
+    window.splice(i, 0, key);
+    if (window.length > limit) window.pop();
+  }
+  return { total, keys: window };
 }
 
 /**

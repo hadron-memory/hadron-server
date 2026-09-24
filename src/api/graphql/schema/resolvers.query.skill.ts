@@ -63,6 +63,9 @@ import {
   render,
   hash,
   storedName,
+  unknownHostKeyFinding,
+  unknownHostKeysBounded,
+  unknownHostKeysOmittedFinding,
   type Finding,
   type FileFacts,
   type DriftClass,
@@ -137,6 +140,28 @@ const DISCOVERY_OR = DECLARATION_KEYS.map((key) => ({
  * read dropped.
  */
 const SKILL_PLAN_MAX_BODY_BYTES = BATCH_READ_MAX_BYTES;
+
+/**
+ * Bounds on the unrecognised-`exports`-key REPORT (#1292): at most this many
+ * keys LISTED per node, and none longer than this many UTF-8 bytes.
+ *
+ * `properties` is arbitrary JSON a writer controls, and the body ceiling above
+ * counts only `content`, so an unbounded report let one node carrying a huge
+ * `exports` object of tiny keys make every plan build a warning per key, at
+ * about 25× the stored size (@codex P1, PR #1296).
+ *
+ * The bound is on the report, NEVER on the plan (@copilot, PR #1296): the first
+ * fix refused the whole plan past a ceiling, which made an unknown key block
+ * every valid entry beside it, the one thing cor:agt:030:06 rules out. Nothing
+ * is dropped silently either: `keyCount` is the true total, and every key not
+ * listed is counted in one summary warning.
+ *
+ * Worst case, bounded: 500 nodes × 10 keys × (128 bytes listed + a warning).
+ * A real node carries one stray key (the `codex` shape), so neither bound is
+ * reached by data anyone meant to write.
+ */
+const SKILL_PLAN_UNRECOGNIZED_KEYS_LISTED = 10;
+const SKILL_PLAN_UNRECOGNIZED_KEY_MAX_BYTES = 128;
 
 /** Classes whose §5 action writes a file. */
 const WRITES_A_FILE = new Set(['never-exported', 'stale', 'unhashed', 'renamed']);
@@ -498,6 +523,9 @@ export const skillQueries = {
       select: {
         id: true,
         loc: true,
+        // #1292: only `unrecognized` reads it, so an item for a node with no
+        // entry anywhere can still be labelled by name rather than by URN.
+        name: true,
         content: true,
         isRunnable: true,
         properties: true,
@@ -797,6 +825,51 @@ export const skillQueries = {
       recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(returnedContent), ctx);
     }
 
+    // ── Unrecognised exports keys (#1292) ────────────────────────────────
+    //
+    // Over EVERY scanned row, not `skillNodes`: a node declaring only an
+    // unknown key has no declaration for this host and so no entry, which is
+    // exactly the node this report exists for (a portal cannot find it by
+    // scanning page rows, which are capped). Host-independent, so identical
+    // in every host's plan. Judges `properties` only, which is never
+    // encrypted, so a locked memory's node is still reported truthfully.
+    const unrecognized = declaredRows
+      .map((r) => {
+        // Bounded SELECTION, not sort-then-slice: never sorts the full,
+        // writer-controlled key list (@copilot, PR #1296).
+        const { total, keys } = unknownHostKeysBounded(
+          r.properties,
+          SKILL_PLAN_UNRECOGNIZED_KEYS_LISTED,
+          SKILL_PLAN_UNRECOGNIZED_KEY_MAX_BYTES,
+        );
+        if (total === 0) return null;
+        const urn = safeNodeUrnV2(r.memory.urn, r.loc);
+        const node = {
+          urn,
+          loc: r.loc,
+          memoryUrn: r.memory.urn,
+          isRunnable: r.isRunnable === true,
+          content: '',
+          properties: r.properties,
+        };
+        // Bounded LISTING, never a refusal and never a silent drop: see
+        // SKILL_PLAN_UNRECOGNIZED_KEYS_LISTED.
+        const omitted = total - keys.length;
+        return {
+          urn,
+          nodeId: r.id,
+          name: r.name,
+          memory: r.memory.urn,
+          keyCount: total,
+          keys,
+          findings: [
+            ...keys.map((k) => unknownHostKeyFinding(node, k)),
+            ...(omitted > 0 ? [unknownHostKeysOmittedFinding(node, omitted)] : []),
+          ],
+        };
+      })
+      .filter((u): u is NonNullable<typeof u> => u !== null);
+
     // ── Orphans: files that paired with nothing ──────────────────────────
     const orphans = files
       .filter((f) => !selectedDirs.has(f.dirName))
@@ -823,6 +896,7 @@ export const skillQueries = {
       // a fact about the corpus rather than a discrepancy in the report.
       scanned: declaredRows.length,
       judged: skillNodes.length,
+      unrecognized,
     };
   },
 };
