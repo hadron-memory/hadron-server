@@ -1166,10 +1166,11 @@ export async function createServer(): Promise<Express> {
         const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
         if (surfaceRefusal) {
           // #1303: `code` and prose unchanged; `reason` & co. are additive.
-          // The HTTP status is still Apollo's context-failure 500 — changing
-          // it is a separate, asked-for decision (team chat #1292).
+          // `http.status: 403` replaces Apollo's context-failure 500 for THIS
+          // error only (no global mapping change). The CLI keys on the envelope,
+          // not the status, so the move is safe (hadron-cli, team chat #1313).
           throw new GraphQLError('This OAuth credential is limited to the MCP surface.', {
-            extensions: { code: 'FORBIDDEN', ...surfaceRefusal },
+            extensions: { code: 'FORBIDDEN', ...surfaceRefusal, http: { status: 403 } },
           });
         }
         // Stage caller-held unlock keys from the request header. Every

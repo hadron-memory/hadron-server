@@ -7,8 +7,9 @@
  * `UserApiKey` per scope. No key material is asserted or printed.
  *
  * What is deliberately NOT changed, and pinned so a change is a visible act:
- * the prose, `code: FORBIDDEN`, and the HTTP 500 that Apollo gives any error
- * thrown from its context function (a separate decision, team chat #1292).
+ * the prose and `code: FORBIDDEN`. The HTTP status moved from Apollo's
+ * context-failure 500 to 403 (hadron-cli agreed, team chat #1313), and the
+ * envelope a client classifies by is kept.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
@@ -58,8 +59,8 @@ afterAll(async () => {
 describe('#1303 — POST /graphql', () => {
   it('an mcp-only key: FORBIDDEN as before, plus a matchable reason and the scopes', async () => {
     const r = await gql(keys.mcp!, '{ me { id } }');
-    // Unchanged on purpose (see header): Apollo's context-failure status.
-    expect(r.status).toBe(500);
+    // 403, set on this error (was Apollo's context-failure 500; #1303).
+    expect(r.status).toBe(403);
     expect(r.body.errors).toHaveLength(1);
     const e = r.body.errors![0]!;
     expect(e.message).toContain(PROSE);
