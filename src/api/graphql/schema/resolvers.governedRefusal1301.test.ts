@@ -252,3 +252,23 @@ describe('MCP advertises a door only when it could replay the refused call (@cod
     expect(text).not.toContain('hadron_update_task');
   });
 });
+
+describe('GraphQL-side cases from review round 4 (@copilot, PR #1305)', () => {
+  it('updateObject on a governed node offers no node-surface route', async () => {
+    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:obj', name: 'o', content: 'x', isRunnable: true } }, ctx());
+    const r = await refusal(M.updateObject({}, { ref: t.id, fields: { a: 1 } }, ctx()));
+    expect(r.code).toBe('ROLE_GOVERNED');
+    expect(r.ext.mcpDoor).toBeNull();
+    expect(r.message).not.toMatch(/hadron node update|Over MCP|no door merges/);
+  });
+
+  it('updateNode on a TOMBSTONED governed node offers no route', async () => {
+    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:tomb', name: 't', content: 'x', isRunnable: true } }, ctx());
+    await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
+    const r = await refusal(M.updateNode({}, { input: { memoryId, loc: 'tasks:tomb', content: 'y' } }, ctx()));
+    // Either the plain not-found or a refusal with no route: never a door
+    // that would itself answer NODE_NOT_FOUND.
+    expect(r.message).not.toMatch(/routes to it by itself|Over MCP/);
+    expect(r.ext.mcpDoor ?? null).toBeNull();
+  });
+});

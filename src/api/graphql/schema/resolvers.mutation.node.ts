@@ -440,7 +440,14 @@ export async function writeNodeCore(
         mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
         mode === 'update' ? 'update' : 'create',
         opts?.ownsKind,
-        { context: opts?.governedContext, merge: opts?.governedMerge },
+        {
+          // No route for an UPDATE of a tombstone: every door answers it
+          // NODE_NOT_FOUND too, and this gate runs before that check (@copilot,
+          // PR #1305). A create over a LIVE row never gets here — the
+          // collision check above refuses it first.
+          context: mode === 'update' && existing?.deletedAt ? undefined : opts?.governedContext,
+          merge: opts?.governedMerge,
+        },
       );
 
       // Mode gate (spec 039 Phase 0 D1). Create: reject if a **live** node
@@ -1546,7 +1553,11 @@ async function updateNodeCore(
 export async function updateNodePropertiesWith(
   { nodeRef, properties, reason }: { nodeRef: string; properties: unknown; reason?: string | null },
   ctx: Context,
-  opts: { mergeExports: boolean },
+  // `governedContext`: set by `updateNodeProperties` only. `updateObject`
+  // shares this body but its refusal must not send a reader to the NODE
+  // surface, which skips the object contract's reserved-key checks (@copilot,
+  // PR #1305).
+  opts: { mergeExports: boolean; governedContext?: GovernedContext },
 ) {
   // The patch must be a JSON object — the operation merges keys, so an
   // array / scalar / null has no sensible "apply onto existing properties"
@@ -1655,7 +1666,7 @@ export async function updateNodePropertiesWith(
       },
       ctx,
       'update',
-      { targetNodeId: meta.id, governedMerge: 'properties', governedContext: 'node-write' },
+      { targetNodeId: meta.id, governedMerge: 'properties', governedContext: opts.governedContext },
     );
   });
 }
@@ -1867,7 +1878,7 @@ export const nodeMutations = {
       _: unknown,
       args: { nodeRef: string; properties: unknown; reason?: string | null },
       ctx: Context,
-    ) => updateNodePropertiesWith(args, ctx, { mergeExports: true }),
+    ) => updateNodePropertiesWith(args, ctx, { mergeExports: true, governedContext: 'node-write' }),
 
     // Bulk literal/regex search-and-replace across selected nodes. Reuses the
     // single-write invariants from upsertNode (per-memory write auth,
