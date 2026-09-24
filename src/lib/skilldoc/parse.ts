@@ -150,12 +150,12 @@ function machineHeader(line: string): { source: string; hash: string; id: string
   // either of ours — or carrying a source that is not a node URN, or a hash
   // that is not exactly 16 hex — is a comment that merely looks like one.
   if (!isNodeUrn(source) || !SAFE_SOURCE_RE.test(source) || !HASH_RE.test(h)) return null;
-  // An ABSENT id is fine — a header generation that predates it is still ours,
-  // and it classifies `unhashed`, whose action is "rewrite" (§4a: widen the
-  // existing class rather than invent one). A PRESENT id that could not have
-  // been written by `render` is a different thing entirely: the line has been
-  // hand-edited, and an id like `a-->` closes the comment so the remainder is
-  // agent-visible text. Read and write share one allow-list, so the parser
+  // An ABSENT id is fine — a header generation that predates it is still ours
+  // and can pair by source. The export planner preserves that file unless its
+  // one-invocation force override is explicit. A PRESENT id that could not
+  // have been written by `render` is a different thing entirely: the line has
+  // been hand-edited, and an id like `a-->` closes the comment so the remainder
+  // is agent-visible text. Read and write share one allow-list, so the parser
   // cannot accept a header the renderer forbids.
   if (id !== '' && !SAFE_ID_RE.test(id)) return null;
   return { source, hash: h, id };

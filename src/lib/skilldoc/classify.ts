@@ -150,9 +150,9 @@ export function classifySkill(node: NodeFacts, file: FileFacts | null): Classifi
 
   if (file === null) return { urn, class: 'never-exported' };
 
-  // A header with a source and no hash is the pre-#580 generation. Its action
-  // is "rewrite with hash", which is also how a header gains the §4a `id` —
-  // widening this class rather than inventing one for the id's absence.
+  // A header with a source and no hash is the pre-#580 generation. This class
+  // describes only the hash relationship; the export planner separately uses
+  // the id's absence to require an explicit override before rewrite or move.
   if (file.headerHash === '') return { urn, class: 'unhashed' };
 
   const storedName = node.declaration?.name ?? '';

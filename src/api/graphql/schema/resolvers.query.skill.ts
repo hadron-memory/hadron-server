@@ -140,6 +140,7 @@ const SKILL_PLAN_MAX_BODY_BYTES = BATCH_READ_MAX_BYTES;
 
 /** Classes whose §5 action writes a file. */
 const WRITES_A_FILE = new Set(['never-exported', 'stale', 'unhashed', 'renamed']);
+const FORCEABLE_MISSING_ID_CLASSES = new Set<DriftClass>(['current', 'stale', 'unhashed', 'renamed']);
 
 export type SkillExportAction = 'WRITE' | 'MOVE' | 'REMOVE' | 'SKIP' | 'REFUSE' | 'FAIL';
 
@@ -170,8 +171,10 @@ function buildExportPlan(args: {
   targetOccupied: boolean;
   ambiguousFilesystemAlias: boolean;
   unhashedMove: boolean;
+  missingProvenanceId: boolean;
   protectsLocalEdit: boolean;
   forceLocalEdit: boolean;
+  forceMissingProvenance: boolean;
   forcedAction: 'WRITE' | 'MOVE' | 'REMOVE' | null;
   findings: Finding[];
   renderedBody: string | null;
@@ -184,8 +187,10 @@ function buildExportPlan(args: {
     targetOccupied,
     ambiguousFilesystemAlias,
     unhashedMove,
+    missingProvenanceId,
     protectsLocalEdit,
     forceLocalEdit,
+    forceMissingProvenance,
     forcedAction,
     findings,
     renderedBody,
@@ -272,7 +277,26 @@ function buildExportPlan(args: {
     };
   }
 
-  if (driftClass === 'current') {
+  // cor:agt:030:01: a file without the stable node id is paired only through
+  // its mutable source URN. Preserve it by default even when its hash is
+  // current; an explicit one-invocation override is required to regenerate
+  // it or move it to a renamed declaration. Disabled removal is deliberately
+  // handled above, after the local-edit guard: disabling generated output is
+  // actionable without force, but never erases evidence of a hand edit.
+  if (missingProvenanceId && !forceMissingProvenance && !forceLocalEdit) {
+    return {
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [
+        reason(
+          'missing-node-id',
+          'The installed skill has no provenance node id. This export preserves it; use an explicit one-invocation override only if replacing or moving it is intended.',
+        ),
+      ],
+    };
+  }
+
+  if (driftClass === 'current' && !forceMissingProvenance) {
     return {
       action: 'SKIP',
       preservesExistingFile: true,
@@ -322,12 +346,12 @@ function buildExportPlan(args: {
     };
   }
 
-  if (forceLocalEdit && forcedAction !== null) {
+  if ((forceLocalEdit || forceMissingProvenance) && forcedAction !== null) {
     if (forcedAction !== 'REMOVE' && renderedBody === null) {
       return {
         action: 'FAIL',
         preservesExistingFile: true,
-        reasons: [reason('export-action-unresolved', 'The local-edit override could not produce a safe replacement body.')],
+        reasons: [reason('export-action-unresolved', 'The explicit override could not produce a safe replacement body.')],
       };
     }
     return {
@@ -335,8 +359,10 @@ function buildExportPlan(args: {
       preservesExistingFile: false,
       reasons: [
         reason(
-          'locally-edited-override',
-          'This invocation explicitly overrides the local edit; the client may apply the planned replacement, move, or removal.',
+          forceLocalEdit ? 'locally-edited-override' : 'missing-node-id-override',
+          forceLocalEdit
+            ? 'This invocation explicitly overrides the local edit; the client may apply the planned replacement, move, or removal.'
+            : 'This invocation explicitly overrides the missing provenance node id; the client may apply the planned replacement or move.',
         ),
       ],
     };
@@ -655,13 +681,20 @@ export const skillQueries = {
       const protectsLocalEdit =
         verdict.class === 'locally-edited' ||
         (selectedFile?.headerHash === '' && selectedFile.hasExtraFrontmatter === true);
+      const missingProvenanceId = selectedFile !== null && selectedFile.headerId === '';
       // `force` may override an actionable local edit, but it must never turn
       // an unavailable/colliding source into a renderable one. In particular,
       // an encrypted node without a session key still contains ciphertext.
       const forceEligibleClass =
         verdict.class === 'locally-edited' || verdict.class === 'unhashed' || verdict.class === 'disabled';
       const forceLocalEdit = input.force === true && protectsLocalEdit && forceEligibleClass;
-      const forcedAction = forceLocalEdit
+      const forceMissingProvenance =
+        input.force === true &&
+        missingProvenanceId &&
+        !protectsLocalEdit &&
+        verdict.class !== undefined &&
+        FORCEABLE_MISSING_ID_CLASSES.has(verdict.class);
+      const forcedAction = forceLocalEdit || forceMissingProvenance
         ? nf.declaration?.enable !== true
           ? 'REMOVE' as const
           : selectedFile !== null && !filesystemNamesEquivalent(selectedFile.dirName, name)
@@ -677,8 +710,8 @@ export const skillQueries = {
       const wantsBody =
         input.intent === 'EXPORT' &&
         verdict.class !== undefined &&
-        ((WRITES_A_FILE.has(verdict.class) && !protectsLocalEdit) ||
-          (forceLocalEdit && forcedAction !== 'REMOVE')) &&
+        ((WRITES_A_FILE.has(verdict.class) && !protectsLocalEdit && !missingProvenanceId) ||
+          ((forceLocalEdit || forceMissingProvenance) && forcedAction !== 'REMOVE')) &&
         !hasError &&
         !ambiguousFilesystemAlias &&
         !targetOccupied;
@@ -717,8 +750,10 @@ export const skillQueries = {
                 selectedFile !== null &&
                 selectedFile.dirName !== name &&
                 !selectedOccupiesTarget,
+              missingProvenanceId,
               protectsLocalEdit,
               forceLocalEdit,
+              forceMissingProvenance,
               forcedAction,
               findings,
               renderedBody,
@@ -732,10 +767,10 @@ export const skillQueries = {
         name,
         class: verdict.class ?? null,
         parseFailure: verdict.parseFailure === true,
-        // Forced local-edit MOVE/REMOVE actions are selected by the planner
-        // rather than by classifySkill, so their source directory comes from
-        // the paired file. Clients must not have to reproduce server pairing
-        // policy to execute the server-owned action.
+        // Forced MOVE/REMOVE actions are selected by the planner rather than
+        // by classifySkill, so their source directory comes from the paired
+        // file. Clients must not have to reproduce server pairing policy to
+        // execute the server-owned action.
         movedFrom:
           exportPlan?.action === 'MOVE' || exportPlan?.action === 'REMOVE'
             ? selectedFile?.dirName ?? verdict.movedFrom ?? null
