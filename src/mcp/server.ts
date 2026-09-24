@@ -360,6 +360,9 @@ export function mcpDoorCanReplay(
     if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
     if ((key === 'content' || key === 'abstract') && value === null) return false;
   }
+  // The create doors require a non-blank name (callGovernedDoor), which the
+  // generic create tool does not (@codex, PR #1305).
+  if (op === 'create' && (typeof fields.name !== 'string' || fields.name.trim() === '')) return false;
   return true;
 }
 

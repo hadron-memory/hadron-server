@@ -288,9 +288,9 @@ describe('kind signals are door-specific (@copilot + @codex, PR #1305 round 5)',
     expect(mcpDoorCanReplay({ role: null }, 'review', 'update')).toBe(true);
     expect(mcpDoorCanReplay({ isRunnable: false }, 'review', 'update')).toBe(false);
     // create doors SET their signal: only that value replays
-    expect(mcpDoorCanReplay({ isRunnable: true }, 'task', 'create')).toBe(true);
+    expect(mcpDoorCanReplay({ name: 'n', isRunnable: true }, 'task', 'create')).toBe(true);
     expect(mcpDoorCanReplay({ isRunnable: true, role: 'note' }, 'task', 'create')).toBe(false);
-    expect(mcpDoorCanReplay({ role: 'review' }, 'review', 'create')).toBe(true);
+    expect(mcpDoorCanReplay({ name: 'n', role: 'review' }, 'review', 'create')).toBe(true);
     expect(mcpDoorCanReplay({ role: 'review', isRunnable: false }, 'review', 'create')).toBe(false);
   });
 
@@ -403,6 +403,12 @@ describe('review round 11 (@codex + @copilot, PR #1305)', () => {
     expect(mcpDoorCanReplay({ role: 'spec' }, 'review', 'update')).toBe(false);
     expect(mcpDoorCanReplay({ role: null }, 'review', 'update')).toBe(true);
     expect(mcpDoorCanReplay({ role: 'note' }, 'review', 'update')).toBe(true);
+  });
+
+  it('a create door needs a non-blank name, so a blank-named create is not replayable (@codex, round 12)', () => {
+    expect(mcpDoorCanReplay({ name: '  ', isRunnable: true }, 'task', 'create')).toBe(false);
+    expect(mcpDoorCanReplay({ isRunnable: true }, 'task', 'create')).toBe(false);
+    expect(mcpDoorCanReplay({ name: 'n', isRunnable: true }, 'task', 'create')).toBe(true);
   });
 
   it('the door tools accept comma-separated tags, as the generic tools do, so an advertised replay works', () => {
