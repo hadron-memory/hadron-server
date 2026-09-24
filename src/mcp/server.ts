@@ -4482,6 +4482,7 @@ export function createMcpServerInstance(
             ? {}
             : {
                 context: 'node-write',
+                surface: 'mcp',
                 canReplay: (kind) =>
                   mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }, kind, 'create'),
               },
@@ -4970,6 +4971,7 @@ export function createMcpServerInstance(
           existing && existing.deletedAt == null
             ? {
                 context: 'node-write',
+                surface: 'mcp',
                 canReplay: (kind) =>
                   mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }, kind, 'update'),
               }

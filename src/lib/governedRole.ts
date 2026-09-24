@@ -126,6 +126,14 @@ export interface GovernedRefusalOptions {
    * supplies it, and `false` withdraws every route (@copilot + @codex, #1305).
    */
   canReplay?: (kind: GovernedKind) => boolean;
+  /**
+   * The surface the refused call arrived on. A route is only named on the
+   * surface that can replay the call (@codex, PR #1305 round 7): the MCP door
+   * tools carry fewer fields than the GraphQL input, so a GraphQL refusal
+   * names the GraphQL door and the CLI route, never an MCP tool. Default:
+   * `graphql`.
+   */
+  surface?: 'graphql' | 'mcp';
 }
 
 /**
@@ -206,7 +214,7 @@ export class RoleGovernedError extends GraphQLError {
     public readonly refusal: GovernedRefusal = 'produces',
     opts: GovernedRefusalOptions = {},
   ) {
-    const { merge, context, kinds, canReplay } = opts;
+    const { merge, context, kinds, canReplay, surface = 'graphql' } = opts;
     const door = entry.doors[op];
     const mcpDoor = entry.mcpDoors?.[op] ?? null;
     const subject =
@@ -247,6 +255,7 @@ export class RoleGovernedError extends GraphQLError {
       !multi &&
       !(op === 'create' && refusal === 'removes') &&
       (canReplay?.(entry.kind) ?? true);
+    const onMcp = surface === 'mcp';
     const message = multi
       ? // No single door owns every kind the node carries, so none can write it.
         `${act}, and the node is governed as more than one kind (${multi.map((k) => k.kind).join(' and ')}). ` +
@@ -257,11 +266,15 @@ export class RoleGovernedError extends GraphQLError {
         : routable && merge
           ? // A merge cannot be redirected to the door as-is: the door REPLACES.
             `This ${merge} MERGE edits ${subject}, and no door merges: ${door} REPLACES ${merge} instead, so send the whole object, including the keys it already has. ` +
-            `From the CLI, \`hadron node update <ref> --${merge} '<object>'\` routes to ${door} by itself. ` +
-            (mcpDoor ? `Over MCP, pass ${merge} to ${mcpDoor}.` : `No MCP tool writes a ${kindWord} node.`)
+            // Merges arrive over GraphQL only (MCP's merge tool delegates), so
+            // the route named is the GraphQL/CLI one.
+            `From the CLI, \`hadron node update <ref> --${merge} '<object>'\` routes to ${door} by itself.`
           : routable
-            ? `${base} ${cli} ${mcp}`
-            : base;
+            ? `${base} ${cli}${onMcp ? ` ${mcp}` : ''}`
+            : // No route for THIS operation: name no door as if it were one
+              // (@copilot, PR #1305 round 7). `extensions.door` still says
+              // which door governs the kind, for tooling that wants it.
+              `${act}. ${tail} There is no route to suggest for this operation.`;
     super(message, {
       extensions: {
         code: 'ROLE_GOVERNED',
@@ -270,7 +283,7 @@ export class RoleGovernedError extends GraphQLError {
         door,
         // Only where the message offers it (see `routable`). `door` is the
         // pre-existing field and keeps its meaning: the kind's GraphQL door.
-        mcpDoor: routable ? mcpDoor : null,
+        mcpDoor: routable && onMcp ? mcpDoor : null,
         op,
         refusal,
         ...(merge ? { merge } : {}),

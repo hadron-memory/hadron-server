@@ -63,7 +63,9 @@ describe('a data MERGE on a spec node (what `hadron node update --data-merge` se
     expect(r.message).toContain('updateSpecNode REPLACES data');
     expect(r.message).toContain('including the keys it already has');
     expect(r.message).toContain("`hadron node update <ref> --data '<object>'`");
-    expect(r.message).toContain('No MCP tool writes a spec node');
+    // A GraphQL refusal names no MCP tool: the MCP doors carry fewer fields
+    // than this input, so they could not replay it (@codex, #1305 round 7).
+    expect(r.message).not.toContain('MCP');
   });
 
   it('TRUTHFUL: the route it names works for the same caller, and keeps what was resent', async () => {
@@ -98,18 +100,19 @@ describe('a generic (non-merge) write on a spec node', () => {
     expect(r.message).toContain('which only updateSpecNode may update');
     expect(r.message).toContain('`hadron node update` routes to it by itself');
     expect(r.message).toContain('`hadron spec new` and `hadron spec edit` are the spec commands');
-    expect(r.message).toContain('No MCP tool writes a spec node');
+    expect(r.message).not.toContain('MCP');
   });
 });
 
-describe('a data MERGE on a TASK names the MCP door, which accepts data', () => {
-  it('points an agent at hadron_update_task', async () => {
+describe('a data MERGE on a TASK, over GraphQL', () => {
+  it('names the GraphQL/CLI replace route and no MCP tool', async () => {
     // The GraphQL door exempts the kind but does not SET the flag: pass it.
     const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:t', name: 't', content: 'Do it.', isRunnable: true } }, ctx());
     const r = await refusal(M.updateNodeData({}, { nodeRef: t.id, data: { a: 1 } }, ctx()));
 
-    expect(r.ext).toMatchObject({ kind: 'task', door: 'updateTaskNode', mcpDoor: 'hadron_update_task', merge: 'data' });
-    expect(r.message).toContain('Over MCP, pass data to hadron_update_task');
+    expect(r.ext).toMatchObject({ kind: 'task', door: 'updateTaskNode', mcpDoor: null, merge: 'data' });
+    expect(r.message).toContain('updateTaskNode REPLACES data');
+    expect(r.message).not.toContain('MCP');
   });
 });
 
@@ -168,7 +171,10 @@ describe('a refusal offers only routes that perform the refused operation (@code
     const spec = GOVERNED_KINDS.find((k) => k.kind === 'spec')!;
     for (const context of ['bulk', undefined] as const) {
       const e = new RoleGovernedError(spec, 'update', 'edits', { context });
-      expect(e.message).toBe('This write edits a node with role "spec", which only updateSpecNode may update. The generic node surface does not reach it.');
+      // Names no door as a remedy (@copilot, #1305 round 7); extensions.door
+      // still identifies the kind's door for tooling.
+      expect(e.message).toBe('This write edits a node with role "spec". The generic node surface does not reach it. There is no route to suggest for this operation.');
+      expect(e.extensions.door).toBe('updateSpecNode');
     }
   });
 });
