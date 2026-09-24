@@ -2776,9 +2776,11 @@ export const typeDefs = `#graphql
     The message node's canonical URN, hrn:node:<memory>:<loc> (#1209), so a
     client can cite a message in a CLI call, an MCP tool or a reply. Composed
     server-side: a message loc carries a random component, so the chat root and
-    the seq do not reconstruct it. Null only when the host memory's stored URN
-    or the message loc cannot be emitted in the flat grammar-v2 shape; a client
-    shows nothing then, never a guessed address (the Worker.urn contract).
+    the seq do not reconstruct it. Null when the address would not resolve back
+    to this message: the host memory's stored URN or the loc cannot be emitted
+    in the flat grammar-v2 shape, or the memory URN is a pre-v2 compound one
+    (e.g. a legacy team space). A client shows nothing then, never a guessed
+    address (the Worker.urn / Channel.urn contract).
     """
     urn: String
     "Ordering key, unique per chat, allocated atomically (ascending from 1)."

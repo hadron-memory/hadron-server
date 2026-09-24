@@ -1236,3 +1236,18 @@ describe('#1209 — TeamChatMessage.urn', () => {
     expect(m).toMatchObject({ nodeId: posted.nodeId, body: 'still readable' });
   });
 });
+
+describe('#1209 review (@codex P2): a COMPOUND host memory URN yields null, not an unresolvable address', () => {
+  it('the legacy team-space shape <org>:<app>:<agent>:shared emits a flat string that does not resolve back — so urn is null', async () => {
+    const posted = await post(ctx(appMember.id), { body: 'legacy space' });
+    const node = await db.node.findUniqueOrThrow({ where: { id: posted.nodeId } });
+    // A stored pre-v2 COMPOUND memory urn: emission succeeds (no fallback) but
+    // resolveNodeRef splits two atoms of memory, so the URN would name nothing.
+    await db.memory.update({ where: { id: node.memoryId }, data: { urn: `${org.urn}:team:agent-${generateId().slice(0, 8)}:shared` } });
+
+    const { items } = await read(ctx(appMember.id));
+    const m = items.find((x: { nodeId: string }) => x.nodeId === posted.nodeId);
+    expect(m.urn).toBeNull();
+    expect(m.body).toBe('legacy space');
+  });
+});

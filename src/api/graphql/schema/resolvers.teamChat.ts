@@ -63,7 +63,7 @@ import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channe
 import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
-import { safeNodeUrnV2Result } from '../../../lib/urnEmit.js';
+import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
 // listing and the shared chat-loc gate both have to exclude `chats:team`, and
@@ -338,14 +338,16 @@ async function hostMemoryUrn(ctx: Context, memoryId: string): Promise<string | n
 /**
  * A message's canonical URN (#1209), composed server-side because no client can:
  * a message loc carries a random component, so the root and the seq do not
- * reconstruct it. Null — never a best-effort guess — when the stored memory URN
- * or loc is not emittable as a v2 URN: a fallback form is not safe to cite or to
- * build a link from (`safeNodeUrnV2Result`), which is `Worker.urn`'s contract.
+ * reconstruct it. Null — never a best-effort guess — unless the emitted URN
+ * RESOLVES BACK to this node. Emitting is not enough: a stored pre-v2 COMPOUND
+ * memory urn (the legacy team space `<org>:<app>:<agent>:shared`, a common chat
+ * host) emits a flat string without falling back, yet the resolver splits it
+ * as a different memory and loc, so it would name nothing (@codex, PR #1317).
+ * Same predicate and shape as `Channel.urn`; `Worker.urn`'s nullable contract.
  */
 function messageUrn(memBareUrn: string | null, loc: string | null): string | null {
   if (!memBareUrn || !loc) return null;
-  const emitted = safeNodeUrnV2Result(memBareUrn, loc);
-  return emitted.fellBack ? null : emitted.urn;
+  return nodeUrnRoundTrips(memBareUrn, loc) ? safeNodeUrnV2(memBareUrn, loc) : null;
 }
 
 /** Decrypt a message row and project it onto the GraphQL shape. */
