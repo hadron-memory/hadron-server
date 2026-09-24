@@ -2845,8 +2845,8 @@ export function createMcpServerInstance(
           parentGovernedProbe,
           mergedGovernedState(parentGovernedProbe, {}),
           'update',
-          undefined,
-          { context: 'node-write' },
+          // No route: a parent (section) write is not an edit the kind's
+          // door performs.
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
@@ -4417,7 +4417,7 @@ export function createMcpServerInstance(
       // the lock. What this closes is the ordinary, unraced case.
       const governedProbe = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId } },
-        select: { role: true, isRunnable: true },
+        select: { role: true, isRunnable: true, deletedAt: true },
       });
       try {
         assertGovernedWrite(
@@ -4425,7 +4425,10 @@ export function createMcpServerInstance(
           mergedGovernedState(governedProbe, { role, isRunnable }),
           'create',
           undefined,
-          { context: 'node-write' },
+          // A LIVE node at this loc makes any create a NODE_LOC_CONFLICT, the
+          // create doors included, so a route is offered only when the loc is
+          // free or holds a tombstone to resurrect (@codex, PR #1305).
+          governedProbe && governedProbe.deletedAt == null ? {} : { context: 'node-write' },
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);

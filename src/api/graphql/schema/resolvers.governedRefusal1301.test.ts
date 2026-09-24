@@ -184,3 +184,32 @@ describe('a CREATE that would un-govern the node it resurrects (@codex, PR #1305
     expect(r.message).not.toMatch(/hadron_create_task|routes to it by itself/);
   });
 });
+
+describe('callers whose refused operation no node-write route performs (@codex, PR #1305)', () => {
+  it('a CLONE of a governed node offers no route: node create does not perform a clone', async () => {
+    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:src', name: 's', content: 'x', isRunnable: true } }, ctx());
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+
+    const r = await refusal(M.cloneNode({}, { sourceRef: t.id, targetUrn: `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:tasks:copy` }, ctx()));
+
+    expect(r.code).toBe('ROLE_GOVERNED');
+    expect(r.ext.mcpDoor).toBeNull();
+    expect(r.message).not.toMatch(/routes to it by itself|Over MCP/);
+  });
+
+  it('MCP hadron_create_node on a LIVE governed loc offers no create door: it would hit NODE_LOC_CONFLICT', async () => {
+    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:live', name: 'l', content: 'x', isRunnable: true } }, ctx());
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const urn = `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:tasks:live`;
+    // Platform ADMIN, as the #1201 MCP tests drive it: the MCP write gate is
+    // not what this case is about, only the refusal's route guidance.
+    const text = await createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never).callToolText(
+      'hadron_create_node',
+      { urn, name: 'again', content: 'y' },
+    );
+    expect(text).toMatch(/role_governed/);
+    expect(text).not.toContain('hadron_create_task');
+    // CONTROL: the loc really is live, so a create door would be refused too.
+    expect((await db.node.findUniqueOrThrow({ where: { id: t.id } })).deletedAt).toBeNull();
+  });
+});

@@ -16,6 +16,7 @@ import {
   governedKindsOf,
   GOVERNED_KINDS,
   type GovernedKind,
+  type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
@@ -233,6 +234,15 @@ export async function writeNodeCore(
      * decides exactly as it would without it.
      */
     governedMerge?: GovernedMerge;
+    /**
+     * #1301 — set ONLY by the direct node mutations (createNode, updateNode,
+     * the kind doors, the two merges), whose refusal can honestly name a
+     * node-write route. Every other caller (clone, import, run tools, session
+     * handoffs, asset references…) leaves it unset and its refusal offers no
+     * route: "use hadron node create" does not perform a clone or a run step
+     * (@codex, PR #1305).
+     */
+    governedContext?: GovernedContext;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -430,7 +440,7 @@ export async function writeNodeCore(
         mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
         mode === 'update' ? 'update' : 'create',
         opts?.ownsKind,
-        { context: 'node-write', merge: opts?.governedMerge },
+        { context: opts?.governedContext, merge: opts?.governedMerge },
       );
 
       // Mode gate (spec 039 Phase 0 D1). Create: reject if a **live** node
@@ -952,7 +962,7 @@ export async function writeNodeCore(
           // The AUTHORITATIVE check, under the lock: a merge that loses the
           // promotion race must still get the merge wording, or the refusal
           // sends it to a replacing door without saying so (@codex P1, #1305).
-          { context: 'node-write', merge: opts?.governedMerge },
+          { context: opts?.governedContext, merge: opts?.governedMerge },
         );
 
         if (current.deletedAt) {
@@ -1458,7 +1468,7 @@ async function updateNodeCore(
   input: UpdateNodeInput,
   ctx: Context,
   op: string,
-  opts?: { ownsKind?: GovernedKind },
+  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext },
 ) {
   const { id, memoryId, loc, ...fields } = input;
   const hasId = id != null && id !== '';
@@ -1516,6 +1526,7 @@ async function updateNodeCore(
   return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
     targetNodeId,
     ownsKind: opts?.ownsKind,
+    governedContext: opts?.governedContext,
   });
 }
 
@@ -1644,7 +1655,7 @@ export async function updateNodePropertiesWith(
       },
       ctx,
       'update',
-      { targetNodeId: meta.id, governedMerge: 'properties' },
+      { targetNodeId: meta.id, governedMerge: 'properties', governedContext: 'node-write' },
     );
   });
 }
@@ -1662,7 +1673,7 @@ export const nodeMutations = {
     // soft-deleted one is resurrected. `input.id` is a forced create-PK
     // (importer/sync), never a selector.
     createNode: async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-      writeNodeCore(input, ctx, 'create'),
+      writeNodeCore(input, ctx, 'create', { governedContext: 'node-write' }),
 
     // #1201 — THE KIND-SPECIFIC AUTHORING DOORS. One create + one update per
     // governed kind, generated from the register so a kind cannot ship with a
@@ -1696,12 +1707,12 @@ export const nodeMutations = {
         [
           entry.doors.create,
           async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-            writeNodeCore(input, ctx, 'create', { ownsKind: entry.kind }),
+            writeNodeCore(input, ctx, 'create', { ownsKind: entry.kind, governedContext: 'node-write' }),
         ],
         [
           entry.doors.update,
           async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
-            updateNodeCore(input, ctx, entry.doors.update, { ownsKind: entry.kind }),
+            updateNodeCore(input, ctx, entry.doors.update, { ownsKind: entry.kind, governedContext: 'node-write' }),
         ],
       ]),
     ),
@@ -1710,7 +1721,7 @@ export const nodeMutations = {
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
     // never moves. All content fields preserve-on-omit.
     updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
-      updateNodeCore(input, ctx, 'updateNode'),
+      updateNodeCore(input, ctx, 'updateNode', { governedContext: 'node-write' }),
 
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
@@ -1835,7 +1846,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
-        { targetNodeId: meta.id, governedMerge: 'data' },
+        { targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
       );
     },
 
