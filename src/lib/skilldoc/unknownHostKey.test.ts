@@ -29,7 +29,7 @@ describe('an unknown exports key (#1292)', () => {
         rule: RULE_UNKNOWN_HOST_KEY,
         severity: 'warning',
         message:
-          'properties.exports.codex names no host (known: claudeSkill, codexSkill) — nothing exports it; rename it to a host key or remove it',
+          'properties.exports key "codex" names no skill host (supported: claudeSkill, codexSkill) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it',
       },
     ]);
   });

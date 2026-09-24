@@ -38,6 +38,7 @@ import {
   storedName,
   unknownHostKeys,
 } from './declaration.js';
+import { goQuote } from './goQuote.js';
 import { requireSkillHost, SKILL_HOSTS } from './hosts.js';
 import { validName } from './name.js';
 import { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
@@ -234,7 +235,10 @@ export function lintUnknownHostKeys(node: SkillNode): Finding[] {
     memory: node.memoryUrn,
     rule: RULE_UNKNOWN_HOST_KEY,
     severity: 'warning' as const,
-    message: `properties.${EXPORTS_KEY}.${key} names no host (known: ${known}) — nothing exports it; rename it to a host key or remove it`,
+    // Word for word Go's LintUnknownHostKeys (@copilot, PR #1296), with the
+    // key quoted as Go's %q quotes it: the key is author-controlled, so it can
+    // carry exactly the characters JSON.stringify and Go escape differently.
+    message: `properties.${EXPORTS_KEY} key ${goQuote(key)} names no skill host (supported: ${known}) — nothing exports it, and it is not read as an alias for any host; rename it to a supported key or remove it`,
   }));
 }
 

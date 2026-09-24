@@ -87,6 +87,10 @@ instead of the thing is the mistake this file keeps being about.
 `collisionCases()` and upserted by name; `declared` keeps its inputs. Only the
 verdicts come from Go, including each `declared` case's `unknown` list
 (`UnknownHostKeys`, so the generator needs hadron-cli#679 or later to build).
+Also since #1292, `lintUnknownHostKeys` (stamping
+`lintUnknownHostKeysSourceCommit`): authored keys chosen for the characters Go's
+`%q` and `JSON.stringify` quote differently, so the warning's MESSAGE is pinned
+word for word, quoting included.
 
 It does NOT touch `lint`, which stays at `lintSourceCommit`. Regenerating that
 wholesale mixes a re-measurement into a port.
