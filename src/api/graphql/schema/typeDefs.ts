@@ -2772,6 +2772,15 @@ export const typeDefs = `#graphql
   type TeamChatMessage {
     "The message node's id."
     nodeId: ID!
+    """
+    The message node's canonical URN, hrn:node:<memory>:<loc> (#1209), so a
+    client can cite a message in a CLI call, an MCP tool or a reply. Composed
+    server-side: a message loc carries a random component, so the chat root and
+    the seq do not reconstruct it. Null only when the host memory's stored URN
+    or the message loc cannot be emitted in the flat grammar-v2 shape; a client
+    shows nothing then, never a guessed address (the Worker.urn contract).
+    """
+    urn: String
     "Ordering key, unique per chat, allocated atomically (ascending from 1)."
     seq: Int!
     body: String!

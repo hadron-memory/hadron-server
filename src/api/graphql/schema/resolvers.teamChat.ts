@@ -63,6 +63,7 @@ import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channe
 import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
+import { safeNodeUrnV2Result } from '../../../lib/urnEmit.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
 // listing and the shared chat-loc gate both have to exclude `chats:team`, and
@@ -301,6 +302,8 @@ function decryptOrSessionExpired<T extends { content?: string | null; data?: unk
  * exported from resolvers.ts cannot use a non-exported interface.) */
 export interface TeamChatMessageOut {
   nodeId: string;
+  /** The message node's canonical URN (#1209); null only when it cannot be emitted. See `messageUrn`. */
+  urn: string | null;
   seq: number;
   body: string;
   at: Date;
@@ -316,18 +319,42 @@ export interface TeamChatMessageOut {
 
 type MessageRow = {
   id: string;
+  loc: string;
   seq: number | null;
   content: string | null;
   data: unknown;
   createdAt: Date;
 };
 
+/**
+ * The host memory's stored URN, loaded ONCE per read or post (#1209): every
+ * message on a Channel root lives in that one memory.
+ */
+async function hostMemoryUrn(ctx: Context, memoryId: string): Promise<string | null> {
+  const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+  return memory?.urn ?? null;
+}
+
+/**
+ * A message's canonical URN (#1209), composed server-side because no client can:
+ * a message loc carries a random component, so the root and the seq do not
+ * reconstruct it. Null — never a best-effort guess — when the stored memory URN
+ * or loc is not emittable as a v2 URN: a fallback form is not safe to cite or to
+ * build a link from (`safeNodeUrnV2Result`), which is `Worker.urn`'s contract.
+ */
+function messageUrn(memBareUrn: string | null, loc: string | null): string | null {
+  if (!memBareUrn || !loc) return null;
+  const emitted = safeNodeUrnV2Result(memBareUrn, loc);
+  return emitted.fellBack ? null : emitted.urn;
+}
+
 /** Decrypt a message row and project it onto the GraphQL shape. */
-function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo): TeamChatMessageOut {
+function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBareUrn: string | null): TeamChatMessageOut {
   const dec = decryptOrSessionExpired({ content: row.content, data: row.data }, memEncInfo);
   const env = (dec.data as Record<string, unknown> | null) ?? {};
   return {
     nodeId: row.id,
+    urn: messageUrn(memBareUrn, row.loc),
     seq: row.seq ?? 0,
     body: dec.content ?? '',
     at: row.createdAt,
@@ -926,6 +953,7 @@ async function postToChannelRoot(
 
   return {
     nodeId: messageId,
+    urn: messageUrn(await hostMemoryUrn(ctx, root.memoryId), messageLoc),
     seq,
     body,
     at: createdAt,
@@ -960,6 +988,7 @@ async function readChannelRoot(
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
   const { sinceSeq, beforeSeq, mentionsRef, limit, offset } = args;
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
+  const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
   const take = clampListTake(limit);
   const skip = Math.max(0, offset ?? 0);
   const where: Prisma.NodeWhereInput = {
@@ -1007,9 +1036,10 @@ async function readChannelRoot(
         { loc: 'desc' as const },
       ]
     : orderBy;
-  // `loc` is selected for the #1061 usage attribution only — the projection
-  // itself doesn't use it, but a UsageEvent without a loc is far less legible
-  // in the raw event feed.
+  // `loc` feeds two things: the #1061 usage attribution (a UsageEvent without
+  // a loc is far less legible in the raw event feed) and, since #1209, the
+  // message's own URN — which no client can compose, because the loc carries a
+  // random component.
   const select = {
     id: true, loc: true, seq: true, content: true, data: true, createdAt: true,
   };
@@ -1034,7 +1064,7 @@ async function readChannelRoot(
     // filters in memory, so the direction is applied to the RESULT below.
     const rows = await ctx.db.node.findMany({ where, orderBy, select });
     const matching = rows
-      .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo) }))
+      .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn) }))
       .filter((m) => m.msg.mentions.some((t) => tokens.includes(t)));
     const page =
       take === 0
@@ -1062,7 +1092,7 @@ async function readChannelRoot(
   // SESSION_EXPIRED — so recording first would count reads for a transcript
   // the caller never received. The mentions branch above already projects
   // first; this makes the two branches agree.
-  const items = rows.map((r) => projectMessage(r, memEncInfo));
+  const items = rows.map((r) => projectMessage(r, memEncInfo, memBareUrn));
   recordRead(rows);
   return { items, total };
 }
