@@ -1,6 +1,6 @@
 {
-  "$comment": "hadron-cli#622 slice 2: the cross-host acceptance matrix for the #621 writer and server#1254. Expected outcomes are written from the contracts cited on each case, never generated from an implementation. crosshost_acceptance_test.go runs BOTH host columns of every live section against internal/skilldoc (#665), and hadron-server runs both against its host registry from a sha256-pinned vendored copy (src/lib/skilldoc/crosshost.acceptance.test.ts). `pending` cases have no implementation yet and are skipped by name, never passed.",
-  "version": 1,
+  "$comment": "hadron-cli#622 slice 2: the cross-host acceptance matrix for the #621 writer and server#1254. Expected outcomes are written from the contracts cited on each case, never generated from an implementation. crosshost_acceptance_test.go runs BOTH host columns of every live section against internal/skilldoc (#665), and hadron-server runs both against its host registry from a sha256-pinned vendored copy (src/lib/skilldoc/crosshost.acceptance.test.ts). `writer` cases (version 2) are executed by the named Go test against the real `hadron skill export` command, which asserts the CLIENT half (what is sent, what is done with the contract's plan, what is reported); the planner half is the server's resolver suite. A runner that does not execute `writer` must still decode it. `pending` cases have no executing test yet and are skipped by name, never passed.",
+  "version": 2,
   "hosts": [
     "claudeSkill",
     "codexSkill"
@@ -1351,17 +1351,188 @@
       "sameFile": false
     }
   ],
-  "pending": [
+  "writer": [
     {
       "id": "P01",
       "layer": "resolver",
-      "pendingOn": "hadron-cli#621 (the CLI calling skillPlan per host; the server side is covered by hadron-server#1283 resolver tests)",
       "contracts": [
         "cor:agt:030:06"
       ],
       "given": "skillPlan(host: codexSkill) over a node carrying D01's properties",
-      "expect": "accepted; the node is judged for codexSkill with name hadron-demo and enable true"
+      "expect": "accepted; the node is judged for codexSkill with name hadron-demo and enable true",
+      "test": "internal/cmd TestSkillExportAcceptance/P01"
     },
+    {
+      "id": "P03",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:02"
+      ],
+      "given": "export over D01, on a machine with no Codex installed",
+      "expect": "writes ~/.claude/skills/hadron-demo/SKILL.md AND ~/.agents/skills/hadron-demo/SKILL.md (not the deprecated ~/.codex/skills); no detection, no prompt — including when ~/.agents/skills, or ~/.agents itself, does not exist yet (cor:agt:030:02: a location whose host is absent is written anyway)",
+      "test": "internal/cmd TestSkillExportAcceptance/P03"
+    },
+    {
+      "id": "P04",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:06",
+        "cor:agt:030:01"
+      ],
+      "given": "export over D03, with an unedited Codex file from an earlier export on disk",
+      "expect": "Claude file written; the Codex file is REMOVED and the removal is in the report",
+      "test": "internal/cmd TestSkillExportAcceptance/P04"
+    },
+    {
+      "id": "P05",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:06",
+        "cor:agt:030:01"
+      ],
+      "given": "export over D03, with a HAND-EDITED Codex file on disk",
+      "expect": "Codex file refused (not removed) and reported; Claude file written; --force removes it",
+      "test": "internal/cmd TestSkillExportAcceptance/P05"
+    },
+    {
+      "id": "P06",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:00",
+        "cor:agt:030:02"
+      ],
+      "given": "~/.agents/skills/hadron-demo is a symlink to ~/.claude/skills/hadron-demo; export over D06",
+      "expect": "the Codex write is refused and reported (remove the link): writing through it would put Codex's declaration in CLAUDE's destination (cor:agt:030:02: a destination per host), and an item that cannot be written safely fails without stopping the rest (cor:agt:030:00). The Claude file is byte-identical to a Claude-only export, never the Codex rendering.",
+      "test": "internal/cmd TestSkillExportAcceptance/P06"
+    },
+    {
+      "id": "P07",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:00",
+        "cor:agt:030:02"
+      ],
+      "given": "the server reports a host the CLI has no root for",
+      "expect": "That host's items FAIL and each is named in the end-of-run report; every other host's items are still written; the run never prompts (cor:agt:030:00, D-2026-09-23-D). The exit status of a run with failed items is not decided by any contract.",
+      "test": "internal/cmd/skill TestExportHostWithNoRootFailsAndNamesEveryItem"
+    },
+    {
+      "id": "P08",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "given": "a file whose provenance header carries NO id= (e.g. the legacy `Generated from` line) in EITHER host's root, paired to D01's enabled node whose content has changed. The rule is not host-specific, and the predicate is the id's ABSENCE, not a missing hash",
+      "expect": "rewrite SKIPPED and reported, not regenerated; --force in that invocation regenerates it with a full header (cor:agt:030:01, D-2026-09-23-A)",
+      "test": "internal/cmd TestSkillExportAcceptance/P08"
+    },
+    {
+      "id": "P09",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:05"
+      ],
+      "given": "export over L01, with an earlier Codex file on disk",
+      "expect": "Claude written; Codex skipped as out of export naming the 1,024 limit; the earlier Codex file is left in place",
+      "test": "internal/cmd TestSkillExportAcceptance/P09"
+    },
+    {
+      "id": "P12",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "given": "the same no-id file, and D01's node renames its skill (a new stored name)",
+      "expect": "the MOVE is skipped and reported: the no-id file stays at the old name and no new file is written; --force writes the new file and removes the old one",
+      "test": "internal/cmd TestSkillExportAcceptance/P12"
+    },
+    {
+      "id": "P13",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:01",
+        "cor:agt:030:06"
+      ],
+      "given": "the same no-id file, showing NO evidence of a hand edit, and D01's declaration switched to enable: false",
+      "expect": "REMOVED without --force, and the removal is in the report (switching the declaration off says the skill should go)",
+      "test": "internal/cmd TestSkillExportAcceptance/P13"
+    },
+    {
+      "id": "P14",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:01"
+      ],
+      "given": "a no-id file that DOES show evidence of a hand edit (a frontmatter key the renderer never writes)",
+      "expect": "treated as hand-edited: rewrite, move AND removal are each REFUSED and reported unless --force is given in that invocation",
+      "test": "internal/cmd TestSkillExportAcceptance/P14"
+    },
+    {
+      "id": "P15",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:05",
+        "cor:agt:030:06"
+      ],
+      "given": "a no-id file whose node's declaration is disabled AND whose node is over its host's limit",
+      "expect": "left in place and reported: an over-limit node is skipped, and skipping never deletes",
+      "test": "internal/cmd TestSkillExportAcceptance/P15"
+    },
+    {
+      "id": "P16",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:00",
+        "cor:agt:030:06"
+      ],
+      "given": "export over D02 (a valid Claude declaration and an `exports.codex` entry)",
+      "expect": "the Claude file is written; the `codex` key is named ONCE in the end-of-run report as a declaration nothing can export, attributed to no host; the run continues and never prompts",
+      "test": "internal/cmd TestSkillExportAcceptance/P16"
+    },
+    {
+      "id": "P17",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:00",
+        "cor:agt:030:02"
+      ],
+      "given": "~/.agents/skills is ITSELF a symlink to ~/.claude/skills (the root, not one skill directory); export over D01",
+      "expect": "every Codex item FAILS and is named in the report; every Claude item is written unchanged. Writing through the link would put Codex's declaration in Claude's destination (cor:agt:030:02: a destination per host), and an item that cannot be written safely fails without stopping the rest (cor:agt:030:00).",
+      "test": "internal/cmd TestSkillExportAcceptance/P17"
+    },
+    {
+      "id": "P18",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:00",
+        "cor:agt:030:02"
+      ],
+      "given": "an ANCESTOR of the Codex root is a symlink (~/.agents -> ~/.claude), so ~/.agents/skills resolves into Claude's root; export over D01",
+      "expect": "same outcome as P17: every Codex item fails and is named in the report; every Claude item is written unchanged",
+      "test": "internal/cmd TestSkillExportAcceptance/P18"
+    },
+    {
+      "id": "P20",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:02"
+      ],
+      "given": "the codexSkill host only: a Hadron-generated SKILL.md for D01's node sits in the DEPRECATED ~/.codex/skills, which Codex 0.153 still reads",
+      "expect": "for codexSkill the export WRITES only ~/.agents/skills, never ~/.codex/skills (cor:agt:030:02: one destination per host). (Reporting that copy, and whether an export may remove or migrate it, are plan-only: Q4 and Q7.)",
+      "test": "internal/cmd TestSkillExportAcceptance/P20"
+    },
+    {
+      "id": "P21",
+      "layer": "writer",
+      "contracts": [
+        "cor:agt:030:02"
+      ],
+      "given": "the codexSkill host only: the same skill name exists in BOTH ~/.agents/skills (current export) and ~/.codex/skills (an older copy)",
+      "expect": "for codexSkill the export WRITES only ~/.agents/skills, never ~/.codex/skills (cor:agt:030:02: one destination per host). (Reporting the duplicate, and cleanup of the older copy, are plan-only: Q5 and Q7.)",
+      "test": "internal/cmd TestSkillExportAcceptance/P21"
+    }
+  ],
+  "pending": [
     {
       "id": "P02",
       "layer": "resolver",
@@ -1372,175 +1543,6 @@
       ],
       "given": "skillPlan(host: codex), a key no host owns",
       "expect": "Two different things, kept apart. PLANNING: skillPlan(host: codex) is refused with a typed error naming the supported hosts (hadron-server#1283) — an implementation choice, NOT a contract (Holger via Vera, team chat #1184). EXPORT RUN: a requested host the exporting tool does not support is an ITEM failure named in the end-of-run report, and every other item still runs (cor:agt:030:00). Never judged as Claude, never an empty plan read as success."
-    },
-    {
-      "id": "P03",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:02"
-      ],
-      "given": "export over D01, on a machine with no Codex installed",
-      "expect": "writes ~/.claude/skills/hadron-demo/SKILL.md AND ~/.agents/skills/hadron-demo/SKILL.md (not the deprecated ~/.codex/skills); no detection, no prompt — including when ~/.agents/skills, or ~/.agents itself, does not exist yet (cor:agt:030:02: a location whose host is absent is written anyway)"
-    },
-    {
-      "id": "P04",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:06",
-        "cor:agt:030:01"
-      ],
-      "given": "export over D03, with an unedited Codex file from an earlier export on disk",
-      "expect": "Claude file written; the Codex file is REMOVED and the removal is in the report"
-    },
-    {
-      "id": "P05",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:06",
-        "cor:agt:030:01"
-      ],
-      "given": "export over D03, with a HAND-EDITED Codex file on disk",
-      "expect": "Codex file refused (not removed) and reported; Claude file written; --force removes it"
-    },
-    {
-      "id": "P06",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:00",
-        "cor:agt:030:02"
-      ],
-      "given": "~/.agents/skills/hadron-demo is a symlink to ~/.claude/skills/hadron-demo; export over D06",
-      "expect": "the Codex write is refused and reported (remove the link): writing through it would put Codex's declaration in CLAUDE's destination (cor:agt:030:02: a destination per host), and an item that cannot be written safely fails without stopping the rest (cor:agt:030:00). The Claude file is byte-identical to a Claude-only export, never the Codex rendering."
-    },
-    {
-      "id": "P07",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:00",
-        "cor:agt:030:02"
-      ],
-      "given": "the server reports a host the CLI has no root for",
-      "expect": "That host's items FAIL and each is named in the end-of-run report; every other host's items are still written; the run never prompts (cor:agt:030:00, D-2026-09-23-D). The exit status of a run with failed items is not decided by any contract."
-    },
-    {
-      "id": "P08",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:01"
-      ],
-      "given": "a file whose provenance header carries NO id= (e.g. the legacy `Generated from` line) in EITHER host's root, paired to D01's enabled node whose content has changed. The rule is not host-specific, and the predicate is the id's ABSENCE, not a missing hash",
-      "expect": "rewrite SKIPPED and reported, not regenerated; --force in that invocation regenerates it with a full header (cor:agt:030:01, D-2026-09-23-A)"
-    },
-    {
-      "id": "P09",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:05"
-      ],
-      "given": "export over L01, with an earlier Codex file on disk",
-      "expect": "Claude written; Codex skipped as out of export naming the 1,024 limit; the earlier Codex file is left in place"
-    },
-    {
-      "id": "P12",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:01"
-      ],
-      "given": "the same no-id file, and D01's node renames its skill (a new stored name)",
-      "expect": "the MOVE is skipped and reported: the no-id file stays at the old name and no new file is written; --force writes the new file and removes the old one"
-    },
-    {
-      "id": "P13",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:01",
-        "cor:agt:030:06"
-      ],
-      "given": "the same no-id file, showing NO evidence of a hand edit, and D01's declaration switched to enable: false",
-      "expect": "REMOVED without --force, and the removal is in the report (switching the declaration off says the skill should go)"
-    },
-    {
-      "id": "P14",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:01"
-      ],
-      "given": "a no-id file that DOES show evidence of a hand edit (a frontmatter key the renderer never writes)",
-      "expect": "treated as hand-edited: rewrite, move AND removal are each REFUSED and reported unless --force is given in that invocation"
-    },
-    {
-      "id": "P15",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:05",
-        "cor:agt:030:06"
-      ],
-      "given": "a no-id file whose node's declaration is disabled AND whose node is over its host's limit",
-      "expect": "left in place and reported: an over-limit node is skipped, and skipping never deletes"
-    },
-    {
-      "id": "P16",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621 (consuming hadron-server#1292's SkillPlan.unrecognized)",
-      "contracts": [
-        "cor:agt:030:00",
-        "cor:agt:030:06"
-      ],
-      "given": "export over D02 (a valid Claude declaration and an `exports.codex` entry)",
-      "expect": "the Claude file is written; the `codex` key is named ONCE in the end-of-run report as a declaration nothing can export, attributed to no host; the run continues and never prompts"
-    },
-    {
-      "id": "P17",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:00",
-        "cor:agt:030:02"
-      ],
-      "given": "~/.agents/skills is ITSELF a symlink to ~/.claude/skills (the root, not one skill directory); export over D01",
-      "expect": "every Codex item FAILS and is named in the report; every Claude item is written unchanged. Writing through the link would put Codex's declaration in Claude's destination (cor:agt:030:02: a destination per host), and an item that cannot be written safely fails without stopping the rest (cor:agt:030:00)."
-    },
-    {
-      "id": "P18",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:00",
-        "cor:agt:030:02"
-      ],
-      "given": "an ANCESTOR of the Codex root is a symlink (~/.agents -> ~/.claude), so ~/.agents/skills resolves into Claude's root; export over D01",
-      "expect": "same outcome as P17: every Codex item fails and is named in the report; every Claude item is written unchanged"
-    },
-    {
-      "id": "P20",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:02"
-      ],
-      "given": "the codexSkill host only: a Hadron-generated SKILL.md for D01's node sits in the DEPRECATED ~/.codex/skills, which Codex 0.153 still reads",
-      "expect": "for codexSkill the export WRITES only ~/.agents/skills, never ~/.codex/skills (cor:agt:030:02: one destination per host). (Reporting that copy, and whether an export may remove or migrate it, are plan-only: Q4 and Q7.)"
-    },
-    {
-      "id": "P21",
-      "layer": "writer",
-      "pendingOn": "hadron-cli#621",
-      "contracts": [
-        "cor:agt:030:02"
-      ],
-      "given": "the codexSkill host only: the same skill name exists in BOTH ~/.agents/skills (current export) and ~/.codex/skills (an older copy)",
-      "expect": "for codexSkill the export WRITES only ~/.agents/skills, never ~/.codex/skills (cor:agt:030:02: one destination per host). (Reporting the duplicate, and cleanup of the older copy, are plan-only: Q5 and Q7.)"
     }
   ]
 }

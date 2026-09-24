@@ -3,10 +3,11 @@
  *
  * `__fixtures__/crosshost-acceptance.json` is VENDORED, not authored here:
  * copied byte-for-byte from hadron-cli `internal/skilldoc/testdata/
- * crosshost-acceptance.json` at 36dac1b (hadron-cli PR #680: pending
- * read-root/symlink cases P17-P21 only; the live cases are #679's, where an
- * unknown `exports` key became a host-free warning, #1292; before that
- * 3c30a38 from #678, 0894a9f from #671, first vendored from #664 at 31d5f62).
+ * crosshost-acceptance.json` at d58c279 (hadron-cli PR #699, #621's
+ * acceptance: format `version: 2`, the writer cases moved out of `pending`
+ * into a `writer` section; the live sections are byte-identical to 36dac1b
+ * from #680; before that e67ff80 from #679, 3c30a38 from #678, 0894a9f from
+ * #671, first vendored from #664 at 31d5f62).
  * Its expectations
  * are written from the cor:agt:030 rules, not from either implementation, so
  * it can disagree with this one. That is the point of running it here.
@@ -19,11 +20,14 @@
  * hadron-cli, re-vendor the file, and update the digest and the commit above
  * in the same change.
  *
- * The `pending` section is not run here. Its resolver cases (P01, P02) and
- * P08's server-owned no-ID action matrix are covered through `skillPlan` in
- * resolvers.skillPlan.test.ts; filesystem execution and the remaining cases
- * wait on the hadron-cli#621 writer. (P11, `skill lint` over Codex, left
- * pending when hadron-cli#665 made it a command-level test there.)
+ * Neither `writer` nor `pending` is EXECUTED here. `writer` cases run against
+ * the real `hadron skill export` in hadron-cli (each names its `test`), with a
+ * two-way guard there holding the subtests to this list; this runner pins only
+ * that the section is present and well-formed, so a re-vendor that dropped it
+ * fails here rather than passing as "nothing to check". The planner half of
+ * the no-ID cases (P08, P12-P14) is the server's and runs through `skillPlan`
+ * in resolvers.skillPlan.test.ts, including every legacy URN spelling (#1309).
+ * `pending` holds what neither repo executes yet.
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'crypto';
@@ -45,7 +49,7 @@ import {
 } from './index.js';
 
 const FIXTURE = join(import.meta.dirname, '__fixtures__', 'crosshost-acceptance.json');
-const VENDORED_SHA256 = '9c779fbf690bf0a55c75530a02aad146aefb6760d05316c8ddb26e915aed9d78';
+const VENDORED_SHA256 = '6f81e1fdb3c63f047c20e0feaa3398250e97f721f8408faa4de0ba44e9004572';
 
 const raw = readFileSync(FIXTURE);
 const m = JSON.parse(raw.toString('utf8'));
@@ -63,6 +67,28 @@ const node = (urn: string, properties: unknown): SkillNode => ({
 describe('crosshost acceptance matrix (vendored from hadron-cli#622)', () => {
   it('is the vendored bytes, unedited', () => {
     expect(createHash('sha256').update(raw).digest('hex')).toBe(VENDORED_SHA256);
+  });
+
+  it('is the matrix format this runner understands', () => {
+    // A format this runner does not know may carry a section it would silently
+    // skip. Fail loudly instead, and teach the runner the new format.
+    expect(m.version).toBe(2);
+  });
+
+  it('carries the writer section, well-formed and disjoint from pending (format 2)', () => {
+    // Not executed here: the writer is hadron-cli's. Pinned so a re-vendor that
+    // lost the section, or a case that lost its `test`, fails here.
+    expect(Array.isArray(m.writer)).toBe(true);
+    expect(m.writer.length).toBeGreaterThan(0);
+    for (const c of m.writer) {
+      expect(Object.keys(c).sort(), c.id).toEqual(['contracts', 'expect', 'given', 'id', 'layer', 'test']);
+      for (const k of ['id', 'layer', 'given', 'expect', 'test']) expect(typeof c[k], `${c.id}.${k}`).toBe('string');
+      expect(Array.isArray(c.contracts) && c.contracts.length > 0, `${c.id}.contracts`).toBe(true);
+    }
+    const writerIds = m.writer.map((c: { id: string }) => c.id);
+    const pendingIds = (m.pending ?? []).map((c: { id: string }) => c.id);
+    expect(new Set(writerIds).size, 'duplicate writer ids').toBe(writerIds.length);
+    expect(writerIds.filter((id: string) => pendingIds.includes(id)), 'in both writer and pending').toEqual([]);
   });
 
   it('names exactly the hosts this registry serves', () => {
