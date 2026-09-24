@@ -193,7 +193,7 @@ describe('Query.agent(ref) — the uniform single-agent read', () => {
         { input: { memoryId: memA.id, loc: 'uni:write-check-2', name: 'w2' } },
         ctx(member.id),
       ),
-    ).rejects.toThrow(/Forbidden|no write access/);
+    ).rejects.toThrow(/MEMORY_NOT_FOUND/);
   });
 });
 

@@ -71,10 +71,10 @@ describe('Query.memory(id:) — PUBLIC visibility (issue #362)', () => {
     expect(nodes.map((n: any) => n.loc)).toContain('pub-node');
   });
 
-  it('still forbids a non-member on a non-PUBLIC (ORGANIZATION) memory', async () => {
+  it('conceals a non-PUBLIC (ORGANIZATION) memory from a non-member', async () => {
     await expect(
       resolvers.Query.memory(null, { ref: orgMem.id }, asOutsider()),
-    ).rejects.toThrow('Forbidden');
+    ).resolves.toBeNull();
   });
 
   it('an org member still reads an ORGANIZATION-visibility memory (no regression)', async () => {
@@ -84,7 +84,7 @@ describe('Query.memory(id:) — PUBLIC visibility (issue #362)', () => {
 
   it('an unauthenticated caller can read a PUBLIC memory but not an ORGANIZATION one', async () => {
     expect((await resolvers.Query.memory(null, { ref: publicMem.id }, ctx()))?.id).toBe(publicMem.id);
-    await expect(resolvers.Query.memory(null, { ref: orgMem.id }, ctx())).rejects.toThrow('Forbidden');
+    await expect(resolvers.Query.memory(null, { ref: orgMem.id }, ctx())).resolves.toBeNull();
   });
 
   it('resolves the memory when given a URN, not just an id', async () => {
@@ -105,7 +105,7 @@ describe('Query.memory(id:) — PUBLIC visibility (issue #362)', () => {
     });
     await expect(
       resolvers.Query.memory(null, { ref: orgMem.id }, asMember()),
-    ).rejects.toThrow('Forbidden');
+    ).resolves.toBeNull();
     // The same revoked member can still read a PUBLIC memory (shared gate).
     expect((await resolvers.Query.memory(null, { ref: publicMem.id }, asMember()))?.id).toBe(publicMem.id);
   });

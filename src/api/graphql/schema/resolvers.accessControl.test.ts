@@ -239,14 +239,14 @@ describe('Mutation.createNode access control', () => {
     ).rejects.toThrow('Forbidden');
   });
 
-  it('App cannot write to memory outside its AppAgent rows', async () => {
+  it('conceals a memory outside the App\'s readable AppAgent rows', async () => {
     await expect(
       resolvers.Mutation.createNode(
         null,
         { input: { memoryId: graphB.id, loc: 'org-b.repo.hack', name: 'hack' } },
         ctx({ appId: appContributor.id }),
       ),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow('MEMORY_NOT_FOUND');
   });
 
   it('user with CONTRIBUTOR org role can write', async () => {

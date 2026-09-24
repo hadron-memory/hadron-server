@@ -418,11 +418,11 @@ describe('Query.resolveUrn — the memory gate matches Query.memory (#1104)', ()
     // The narrowing control: the fix must admit the grantee WITHOUT admitting
     // every org member, or it trades one direction of the bug for the other.
     const ctx = ctxFor(bystander);
-    // Query.memory THROWS Forbidden on a denied record (resolveUrn collapses
-    // the same refusal to null, deliberately — it must not disclose existence).
+    // Both point-read surfaces collapse denial to null so neither discloses
+    // whether the named memory exists (#1316).
     await expect(
       resolvers.Query.memory({}, { ref: userOwnedPersonal.id }, ctx),
-    ).rejects.toThrow(/Forbidden/);
+    ).resolves.toBeNull();
     const r = await resolvers.Query.resolveUrn(
       {},
       { urn: `urn:memory:${userOwnedPersonal.urn}` },
@@ -443,7 +443,7 @@ describe('Query.resolveUrn — the memory gate matches Query.memory (#1104)', ()
     const ctx = ctxFor(bystander);
     await expect(
       resolvers.Query.memory({}, { ref: orgOwnedPersonal.id }, ctx),
-    ).rejects.toThrow(/Forbidden/);
+    ).resolves.toBeNull();
     const r = await resolvers.Query.resolveUrn(
       {},
       { urn: `urn:memory:${orgOwnedPersonal.urn}` },

@@ -566,7 +566,7 @@ describe('org-scope: the impersonated context sees only the shared org', () => {
     const memoryQuery = resolvers.Query.memory as never as (
       p: unknown, a: { ref: string }, c: Context,
     ) => Promise<unknown>;
-    await expect(memoryQuery({}, { ref: personalMike.id }, impCtx)).rejects.toThrow();
+    await expect(memoryQuery({}, { ref: personalMike.id }, impCtx)).resolves.toBeNull();
     // ...but resolves the shared-org knowledge memory.
     const ok = await memoryQuery({}, { ref: knowledgeA.id }, impCtx);
     expect((ok as { id: string }).id).toBe(knowledgeA.id);

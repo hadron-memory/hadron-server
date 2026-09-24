@@ -105,22 +105,22 @@ describe('private/personal access is owner-only', () => {
 
   it('another org member cannot read, list, open, or write it', async () => {
     const mem = await createPrivate();
-    await expect(resolvers.Query.memory(null, { ref: mem.id }, asOther())).rejects.toThrow('Forbidden');
+    await expect(resolvers.Query.memory(null, { ref: mem.id }, asOther())).resolves.toBeNull();
     const mine = (await resolvers.Query.memories(null, {}, asOther())).items;
     expect(mine.map((m: any) => m.id)).not.toContain(mem.id);
     const nodes = await listNodes({}, asOther());
     expect(nodes.some((n: any) => n.memoryId === mem.id)).toBe(false);
     await expect(
       resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.hack', name: 'h' } } as any, asOther()),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow('MEMORY_NOT_FOUND');
   });
 
   it('a platform OWNER/ADMIN cannot read or write it (no role bypass)', async () => {
     const mem = await createPrivate();
-    await expect(resolvers.Query.memory(null, { ref: mem.id }, asAdmin())).rejects.toThrow('Forbidden');
+    await expect(resolvers.Query.memory(null, { ref: mem.id }, asAdmin())).resolves.toBeNull();
     await expect(
       resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.adminedit', name: 'x' } } as any, asAdmin()),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow('MEMORY_NOT_FOUND');
   });
 });
 

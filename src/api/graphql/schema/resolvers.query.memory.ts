@@ -278,7 +278,11 @@ export const memoryQueries = {
       // rationale (personal/private share carve-out #778, spec-047 user-owned
       // strictness ahead of the admin path #676, and the #362 fallback that
       // keeps record reads in step with node reads).
-      if (!(await canReadMemoryRecord(ctx, memory))) throw new Error('Forbidden');
+      // #1316: unreadable and missing are the same bare-null response. Memory
+      // URNs are guessable, so an error only on the existing branch is a
+      // cross-tenant name oracle. Malformed refs and DB faults still propagate
+      // normally; only the shared record gate's ordinary denial is concealed.
+      if (!(await canReadMemoryRecord(ctx, memory))) return null;
       return memory;
     },
 
@@ -704,4 +708,3 @@ export const memoryQueries = {
       return { total, edges };
     },
 };
-

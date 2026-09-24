@@ -5503,6 +5503,9 @@ export const typeDefs = `#graphql
 
     """
     Fetch a single Memory (org member, shared-read gate, or platform ADMIN).
+    Missing and unreadable refs both return null without an error, so a caller
+    cannot use this field to test whether a private memory exists. Malformed
+    refs still fail as caller errors, and operational faults still propagate.
 
     'ref' accepts the entity's ID or URN.
     """
