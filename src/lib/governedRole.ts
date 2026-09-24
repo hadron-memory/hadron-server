@@ -227,19 +227,29 @@ export class RoleGovernedError extends GraphQLError {
       : `No MCP tool writes a ${kindWord} node.`;
     const base = `${act}, which only ${door} may ${op}. ${tail}`;
     const multi = kinds && kinds.length > 1 ? kinds : null;
+    // Whether ONE door, reached from the CLI or MCP, can perform exactly the
+    // refused write. Not for a multi-kind node (every door fails on the other
+    // kind), not outside a node write, and not for a CREATE that un-governs a
+    // node it resurrects: the MCP create doors force the signal back ON, and
+    // `hadron node create` routes by the input, which here names no kind
+    // (@codex, PR #1305). Where false, no route is offered in the prose OR in
+    // `extensions.mcpDoor`: a client routing from extensions must not be sent
+    // where the message declined to send a reader.
+    const routable = context === 'node-write' && !multi && !(op === 'create' && refusal === 'removes');
     const message = multi
       ? // No single door owns every kind the node carries, so none can write it.
         `${act}, and the node is governed as more than one kind (${multi.map((k) => k.kind).join(' and ')}). ` +
         `Each door is exempt from its own kind only (${multi.map((k) => k.doors[op]).join(', ')}), so no current route can write it. ${tail}`
-      : context === 'node-write' && merge
-        ? // A merge cannot be redirected to the door as-is: the door REPLACES.
-          `This ${merge} MERGE edits ${subject}, and no door merges: ${door} REPLACES ${merge} instead, so send the whole object, including the keys it already has. ` +
-          `From the CLI, \`hadron node update <ref> --${merge} '<object>'\` routes to ${door} by itself. ` +
-          (mcpDoor ? `Over MCP, pass ${merge} to ${mcpDoor}.` : `No MCP tool writes a ${kindWord} node.`)
-        : context === 'node-write'
-          ? `${base} ${cli} ${mcp}`
-          : context === 'restore'
-            ? `${base} But no door restores a revision: a governed node's history cannot be restored through any surface yet (tracked with deletes in #1204).`
+      : context === 'restore'
+        ? // Not `base`: "only updateX may update" is not a route to a RESTORE.
+          `${act}, and no door restores a revision: a governed node's history cannot be restored through any surface yet (tracked with deletes in #1204). ${tail}`
+        : routable && merge
+          ? // A merge cannot be redirected to the door as-is: the door REPLACES.
+            `This ${merge} MERGE edits ${subject}, and no door merges: ${door} REPLACES ${merge} instead, so send the whole object, including the keys it already has. ` +
+            `From the CLI, \`hadron node update <ref> --${merge} '<object>'\` routes to ${door} by itself. ` +
+            (mcpDoor ? `Over MCP, pass ${merge} to ${mcpDoor}.` : `No MCP tool writes a ${kindWord} node.`)
+          : routable
+            ? `${base} ${cli} ${mcp}`
             : base;
     super(message, {
       extensions: {
@@ -247,7 +257,9 @@ export class RoleGovernedError extends GraphQLError {
         kind: entry.kind,
         strength: entry.strength,
         door,
-        mcpDoor,
+        // Only where the message offers it (see `routable`). `door` is the
+        // pre-existing field and keeps its meaning: the kind's GraphQL door.
+        mcpDoor: routable ? mcpDoor : null,
         op,
         refusal,
         ...(merge ? { merge } : {}),

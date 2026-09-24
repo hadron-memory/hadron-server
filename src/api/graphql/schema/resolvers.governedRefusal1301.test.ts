@@ -142,6 +142,8 @@ describe('a node governed as MORE THAN ONE kind (@copilot + @codex, PR #1305)', 
     expect(r.message).toContain('governed as more than one kind (task and review)');
     expect(r.message).toContain('no current route can write it');
     expect(r.message).not.toMatch(/hadron_update_task|hadron_update_review|routes to it by itself/);
+    // …and neither do the extensions, for a client routing from them.
+    expect(r.ext.mcpDoor).toBeNull();
 
     // TRUTHFUL: each door the message declines to recommend does fail.
     expect((await refusal(M.updateTaskNode({}, { input: { id: n.id, content: 'y' } }, ctx()))).code).toBe('ROLE_GOVERNED');
@@ -158,7 +160,8 @@ describe('a refusal offers only routes that perform the refused operation (@code
     const r = await refusal(M.restoreNodeRevision({}, { revisionId: rev.id }, ctx()));
     expect(r.code).toBe('ROLE_GOVERNED');
     expect(r.message).toContain('no door restores a revision');
-    expect(r.message).not.toMatch(/routes to it by itself|Over MCP/);
+    expect(r.message).not.toMatch(/routes to it by itself|Over MCP|may update/);
+    expect(r.ext.mcpDoor).toBeNull();
   });
 
   it('a BULK refusal and an unlabelled caller offer no route at all', () => {
@@ -167,5 +170,17 @@ describe('a refusal offers only routes that perform the refused operation (@code
       const e = new RoleGovernedError(spec, 'update', 'edits', { context });
       expect(e.message).toBe('This write edits a node with role "spec", which only updateSpecNode may update. The generic node surface does not reach it.');
     }
+  });
+});
+
+describe('a CREATE that would un-govern the node it resurrects (@codex, PR #1305)', () => {
+  it('offers no MCP or CLI create route: both would force the signal back on', async () => {
+    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:gone', name: 'g', content: 'x', isRunnable: true } }, ctx());
+    await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
+
+    const r = await refusal(M.createNode({}, { input: { memoryId, loc: 'tasks:gone', name: 'g', isRunnable: false } }, ctx()));
+
+    expect(r.ext).toMatchObject({ code: 'ROLE_GOVERNED', kind: 'task', op: 'create', refusal: 'removes', mcpDoor: null });
+    expect(r.message).not.toMatch(/hadron_create_task|routes to it by itself/);
   });
 });
