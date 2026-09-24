@@ -18,7 +18,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import { GOVERNED_KINDS } from '../../../lib/governedRole.js';
+import { GOVERNED_KINDS, RoleGovernedError } from '../../../lib/governedRole.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -126,5 +126,46 @@ describe('the register names only MCP tools that exist', () => {
     }
     // And the kind with no MCP door really has none by any name.
     expect([...tools].filter((t) => /spec/.test(t) && /create|update/.test(t))).toEqual([]);
+  });
+});
+
+describe('a node governed as MORE THAN ONE kind (@copilot + @codex, PR #1305)', () => {
+  it('names no single door, because every door fails on the other kind — and they really do', async () => {
+    // A runnable review. No door can create one (each owns one kind), so it is
+    // seeded directly: it is the state the refusal has to describe honestly.
+    const n = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'checks:rr', name: 'rr', role: 'review', isRunnable: true, content: 'x' },
+    });
+
+    const r = await refusal(M.updateNode({}, { input: { id: n.id, content: 'y' } }, ctx()));
+    expect(r.ext).toMatchObject({ code: 'ROLE_GOVERNED', kinds: ['task', 'review'] });
+    expect(r.message).toContain('governed as more than one kind (task and review)');
+    expect(r.message).toContain('no current route can write it');
+    expect(r.message).not.toMatch(/hadron_update_task|hadron_update_review|routes to it by itself/);
+
+    // TRUTHFUL: each door the message declines to recommend does fail.
+    expect((await refusal(M.updateTaskNode({}, { input: { id: n.id, content: 'y' } }, ctx()))).code).toBe('ROLE_GOVERNED');
+    expect((await refusal(M.updateReviewNode({}, { input: { id: n.id, content: 'y' } }, ctx()))).code).toBe('ROLE_GOVERNED');
+  });
+});
+
+describe('a refusal offers only routes that perform the refused operation (@codex, PR #1305)', () => {
+  it('a revision RESTORE says no door restores, and offers no node-update route', async () => {
+    const n = await spec();
+    await M.updateSpecNode({}, { input: { id: n.id, content: 'second' } }, ctx());
+    const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id }, orderBy: { createdAt: 'asc' } });
+
+    const r = await refusal(M.restoreNodeRevision({}, { revisionId: rev.id }, ctx()));
+    expect(r.code).toBe('ROLE_GOVERNED');
+    expect(r.message).toContain('no door restores a revision');
+    expect(r.message).not.toMatch(/routes to it by itself|Over MCP/);
+  });
+
+  it('a BULK refusal and an unlabelled caller offer no route at all', () => {
+    const spec = GOVERNED_KINDS.find((k) => k.kind === 'spec')!;
+    for (const context of ['bulk', undefined] as const) {
+      const e = new RoleGovernedError(spec, 'update', 'edits', { context });
+      expect(e.message).toBe('This write edits a node with role "spec", which only updateSpecNode may update. The generic node surface does not reach it.');
+    }
   });
 });

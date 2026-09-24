@@ -2845,6 +2845,8 @@ export function createMcpServerInstance(
           parentGovernedProbe,
           mergedGovernedState(parentGovernedProbe, {}),
           'update',
+          undefined,
+          { context: 'node-write' },
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
@@ -4422,6 +4424,8 @@ export function createMcpServerInstance(
           governedProbe,
           mergedGovernedState(governedProbe, { role, isRunnable }),
           'create',
+          undefined,
+          { context: 'node-write' },
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
@@ -4901,6 +4905,8 @@ export function createMcpServerInstance(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
           'update',
+          undefined,
+          { context: 'node-write' },
         );
       } catch (e) {
         if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);

@@ -101,6 +101,27 @@ export interface GovernedKindEntry {
 export type GovernedMerge = 'data' | 'properties';
 
 /**
+ * WHICH operation was refused, so the refusal offers only routes that perform
+ * THAT operation (@codex, PR #1305). A node write can be retried through the
+ * kind's door; a revision restore has no door at all (#1204); a bulk merge or
+ * extract is not completed by editing one node. Omitted means "offer no
+ * route": the safe default for any caller not listed here.
+ */
+export type GovernedContext = 'node-write' | 'restore' | 'bulk';
+
+export interface GovernedRefusalOptions {
+  merge?: GovernedMerge;
+  context?: GovernedContext;
+  /**
+   * Every governed kind the node matches, when there is more than one (a
+   * runnable review). Each door is exempt from its OWN kind only, so no single
+   * door can write such a node, and naming one would name a route that fails
+   * (@copilot + @codex, PR #1305).
+   */
+  kinds?: readonly GovernedKindEntry[];
+}
+
+/**
  * THE REGISTER. Small on purpose — @Holger: *"We have < 5 types of protected
  * nodes. Giving them each the door they need is the simplest path. This does
  * not have to scale to 100."* So: no plugin mechanism, no dynamic registration,
@@ -176,8 +197,9 @@ export class RoleGovernedError extends GraphQLError {
     public readonly entry: GovernedKindEntry,
     public readonly op: 'create' | 'update',
     public readonly refusal: GovernedRefusal = 'produces',
-    public readonly merge?: GovernedMerge,
+    opts: GovernedRefusalOptions = {},
   ) {
+    const { merge, context, kinds } = opts;
     const door = entry.doors[op];
     const mcpDoor = entry.mcpDoors?.[op] ?? null;
     const subject =
@@ -203,12 +225,22 @@ export class RoleGovernedError extends GraphQLError {
     const mcp = mcpDoor
       ? `Over MCP, use ${mcpDoor}.`
       : `No MCP tool writes a ${kindWord} node.`;
-    const message = merge
-      ? // A merge cannot be redirected to the door as-is: the door REPLACES.
-        `This ${merge} MERGE edits ${subject}, and no door merges: ${door} REPLACES ${merge} instead, so send the whole object, including the keys it already has. ` +
-        `From the CLI, \`hadron node update <ref> --${merge} '<object>'\` routes to ${door} by itself. ` +
-        (mcpDoor ? `Over MCP, pass ${merge} to ${mcpDoor}.` : `No MCP tool writes a ${kindWord} node.`)
-      : `${act}, which only ${door} may ${op}. ${tail} ${cli} ${mcp}`;
+    const base = `${act}, which only ${door} may ${op}. ${tail}`;
+    const multi = kinds && kinds.length > 1 ? kinds : null;
+    const message = multi
+      ? // No single door owns every kind the node carries, so none can write it.
+        `${act}, and the node is governed as more than one kind (${multi.map((k) => k.kind).join(' and ')}). ` +
+        `Each door is exempt from its own kind only (${multi.map((k) => k.doors[op]).join(', ')}), so no current route can write it. ${tail}`
+      : context === 'node-write' && merge
+        ? // A merge cannot be redirected to the door as-is: the door REPLACES.
+          `This ${merge} MERGE edits ${subject}, and no door merges: ${door} REPLACES ${merge} instead, so send the whole object, including the keys it already has. ` +
+          `From the CLI, \`hadron node update <ref> --${merge} '<object>'\` routes to ${door} by itself. ` +
+          (mcpDoor ? `Over MCP, pass ${merge} to ${mcpDoor}.` : `No MCP tool writes a ${kindWord} node.`)
+        : context === 'node-write'
+          ? `${base} ${cli} ${mcp}`
+          : context === 'restore'
+            ? `${base} But no door restores a revision: a governed node's history cannot be restored through any surface yet (tracked with deletes in #1204).`
+            : base;
     super(message, {
       extensions: {
         code: 'ROLE_GOVERNED',
@@ -219,6 +251,7 @@ export class RoleGovernedError extends GraphQLError {
         op,
         refusal,
         ...(merge ? { merge } : {}),
+        ...(multi ? { kinds: multi.map((k) => k.kind) } : {}),
       },
     });
     this.name = 'RoleGovernedError';
@@ -260,7 +293,7 @@ export function assertGovernedWrite(
   next: GovernedState,
   op: 'create' | 'update',
   owns?: GovernedKind,
-  merge?: GovernedMerge,
+  opts: Omit<GovernedRefusalOptions, 'kinds'> = {},
 ): void {
   // BEFORE **union** AFTER, and the union is the whole correction.
   //
@@ -287,7 +320,10 @@ export function assertGovernedWrite(
       : !after.has(entry.kind)
         ? 'removes'
         : 'edits';
-    throw new RoleGovernedError(entry, op, refusal, merge);
+    throw new RoleGovernedError(entry, op, refusal, {
+      ...opts,
+      ...(affected.size > 1 ? { kinds: [...affected.values()] } : {}),
+    });
   }
 }
 

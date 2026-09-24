@@ -430,7 +430,7 @@ export async function writeNodeCore(
         mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
         mode === 'update' ? 'update' : 'create',
         opts?.ownsKind,
-        opts?.governedMerge,
+        { context: 'node-write', merge: opts?.governedMerge },
       );
 
       // Mode gate (spec 039 Phase 0 D1). Create: reject if a **live** node
@@ -949,6 +949,10 @@ export async function writeNodeCore(
           mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
           'update',
           opts?.ownsKind,
+          // The AUTHORITATIVE check, under the lock: a merge that loses the
+          // promotion race must still get the merge wording, or the refusal
+          // sends it to a replacing door without saying so (@codex P1, #1305).
+          { context: 'node-write', merge: opts?.governedMerge },
         );
 
         if (current.deletedAt) {
@@ -3603,6 +3607,8 @@ export const nodeMutations = {
           isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
         }),
         'update',
+        undefined,
+        { context: 'restore' },
       );
 
       // #725/#737 — a restored snapshot must satisfy the CURRENT schema. Validate
