@@ -1668,3 +1668,29 @@ describe('#1310 review round 3 (@copilot): a collision finding reaches ONLY the 
     expect(e(twin.id).exportPlan).toMatchObject({ action: 'WRITE' });
   });
 });
+
+// ── #1315: a host-reserved name is kept out of export for that host only ─
+describe('#1315 — `synced` is refused for claudeSkill, and only there', () => {
+  it('EXPORT for claudeSkill plans SKIP with the reason, renders nothing, and PRESERVES a file already there', async () => {
+    const node = await mkNode('tasks:reserved', { properties: declaration({ name: 'synced' }) });
+    const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName: 'synced', sourceUrn: '' }] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings.map((f: { rule: string }) => f.rule)).toContain('skill-name-reserved');
+    expect(e.renderedBody).toBeNull();
+    expect(e.exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-name-reserved' }],
+    });
+  });
+
+  it('the SAME name exports normally for codexSkill', async () => {
+    const node = await mkNode('tasks:reserved-codex', {
+      properties: { exports: { codexSkill: { name: 'synced', description: 'Does a thing. Use when you need it.', enable: true } } },
+    });
+    const got = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings.map((f: { rule: string }) => f.rule)).not.toContain('skill-name-reserved');
+    expect(e.exportPlan).toMatchObject({ action: 'WRITE' });
+  });
+});

@@ -168,6 +168,15 @@ export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Fin
       'error',
       `skill name "${declaration.name}" is not a valid skill name (kebab-case, ≤${hostRow.maxNameLength} chars) — it is stored at properties.${declaration.key}.name, so that is what to change`,
     );
+  } else if (hostRow.reservedNames.includes(declaration.name.toLowerCase())) {
+    // #1315: a name the HOST refuses to load from the export root. An error,
+    // so the planner's lint gate keeps it out of export and preserves any file
+    // already there — the host would ignore the file anyway.
+    add(
+      'skill-name-reserved',
+      'error',
+      `skill name "${declaration.name}" is reserved by ${declaration.host}: the host keeps its own skills in a folder of that name and skips a skill authored there, so the exported file would never load — rename properties.${declaration.key}.name`,
+    );
   }
 
   if (!node.isRunnable) {

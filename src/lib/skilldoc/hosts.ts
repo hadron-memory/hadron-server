@@ -43,12 +43,26 @@ export interface SkillHost {
    * to a host nobody chose.
    */
   legacyAliases: boolean;
+  /**
+   * Skill names this host will not load from the root an export writes to,
+   * compared case-insensitively (#1315). Claude Code reserves `synced`: it keeps
+   * skills downloaded from claude.ai in `<root>/synced/` and SKIPS a skill
+   * authored at that name "in any capitalization" in the personal, project and
+   * enterprise roots (code.claude.com/docs/en/skills). An export of that name
+   * would land inside Claude's own sync folder and never load.
+   *
+   * Only names the HOST reserves belong here. The `anthropic`/`claude` words the
+   * Claude platform bans are an UPLOAD-surface rule (Skills API, claude.ai), not
+   * a Claude Code one — Claude Code 2.1.143 loads such names — so they are not
+   * listed: refusing them would turn a working skill into a refused one.
+   */
+  reservedNames: readonly string[];
 }
 
 /** Every supported host, in a stable order (Claude first, as the original). */
 export const SKILL_HOSTS: readonly SkillHost[] = Object.freeze([
-  Object.freeze({ key: HOST_CLAUDE_SKILL, maxNameLength: 64, maxDescriptionLength: 1024, legacyAliases: true }),
-  Object.freeze({ key: HOST_CODEX_SKILL, maxNameLength: 64, maxDescriptionLength: 1024, legacyAliases: false }),
+  Object.freeze({ key: HOST_CLAUDE_SKILL, maxNameLength: 64, maxDescriptionLength: 1024, legacyAliases: true, reservedNames: Object.freeze(['synced']) }),
+  Object.freeze({ key: HOST_CODEX_SKILL, maxNameLength: 64, maxDescriptionLength: 1024, legacyAliases: false, reservedNames: Object.freeze([]) }),
 ]);
 
 /** The host row for `key`, or null when the server has no renderer for it. */
