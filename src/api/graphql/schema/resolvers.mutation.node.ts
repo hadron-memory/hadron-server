@@ -441,11 +441,12 @@ export async function writeNodeCore(
         mode === 'update' ? 'update' : 'create',
         opts?.ownsKind,
         {
-          // No route for an UPDATE of a tombstone: every door answers it
+          // No route for an UPDATE of a tombstone or of a missing row: every door answers it
           // NODE_NOT_FOUND too, and this gate runs before that check (@copilot,
           // PR #1305). A create over a LIVE row never gets here — the
           // collision check above refuses it first.
-          context: mode === 'update' && existing?.deletedAt ? undefined : opts?.governedContext,
+          // …nor for an UPDATE of a loc with no row at all (@copilot, #1305).
+          context: mode === 'update' && (!existing || existing.deletedAt) ? undefined : opts?.governedContext,
           merge: opts?.governedMerge,
         },
       );

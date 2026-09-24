@@ -325,3 +325,11 @@ describe('MCP create over a TOMBSTONE offers no door (@codex, PR #1305 round 6)'
     expect(text).toContain('Over MCP, use hadron_create_task');
   });
 });
+
+describe('an UPDATE of a loc with no row at all (@copilot, PR #1305)', () => {
+  it('offers no route, whichever refusal comes first', async () => {
+    const r = await refusal(M.updateNode({}, { input: { memoryId, loc: 'tasks:nowhere', role: 'spec', content: 'y' } }, ctx()));
+    expect(r.message).not.toMatch(/routes to it by itself|Over MCP/);
+    expect(r.ext.mcpDoor ?? null).toBeNull();
+  });
+});
