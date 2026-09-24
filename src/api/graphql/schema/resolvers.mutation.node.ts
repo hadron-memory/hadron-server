@@ -1725,9 +1725,11 @@ export const nodeMutations = {
     // this split exists to remove. Each door here is exempt from its own kind
     // and subject to every other, Channel protection included.
     //
-    // NONE of them is exposed as an MCP tool, and that absence is the mechanism
-    // rather than an oversight: an agent's node surface is hadron_create_node /
-    // hadron_update_node, which now refuse. Pinned per door by a test that
+    // None of these MUTATIONS is itself an MCP tool: an agent's generic node
+    // surface is hadron_create_node / hadron_update_node, which refuse. Tasks
+    // and reviews have separate, deliberate MCP door tools (hadron_create_task,
+    // hadron_update_review, …) that delegate here; specs have none, by design.
+    // That no mutation is an MCP tool is pinned per door by a test that
     // iterates this same register.
     ...Object.fromEntries(
       GOVERNED_KINDS.flatMap((entry) => [

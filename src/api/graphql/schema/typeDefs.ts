@@ -6534,15 +6534,16 @@ export const typeDefs = `#graphql
 
     Exempt from its OWN kind only — it is fully subject to every other kind and
     to Channel address protection, so it cannot forge a chat message.
-    Deliberately NOT an MCP tool: an agent's node surface is hadron_create_node,
-    which refuses, and that absence is the mechanism rather than an oversight.
+    This mutation is not itself an MCP tool; its MCP counterpart is the
+    deliberate hadron_create_review tool, separate from hadron_create_node,
+    which refuses (#1301 names it in the refusal).
     """
     createReviewNode(input: CreateNodeInput!): Node!
 
     """
     #1201 — the UPDATE door for the review kind, and the counterpart of
-    createReviewNode. Same posture: pure routing, exempt from its own kind only,
-    not an MCP tool.
+    createReviewNode. Same posture: pure routing, exempt from its own kind only;
+    its MCP counterpart is hadron_update_review.
 
     It is needed because the gate reads the RESULTING state: editing a node that
     already carries this kind still produces one, so the generic updateNode
@@ -6568,15 +6569,16 @@ export const typeDefs = `#graphql
 
     Exempt from its OWN kind only — it is fully subject to every other kind and
     to Channel address protection, so it cannot forge a chat message.
-    Deliberately NOT an MCP tool: an agent's node surface is hadron_create_node,
-    which refuses, and that absence is the mechanism rather than an oversight.
+    This mutation is not itself an MCP tool; its MCP counterpart is the
+    deliberate hadron_create_task tool, separate from hadron_create_node,
+    which refuses (#1301 names it in the refusal).
     """
     createTaskNode(input: CreateNodeInput!): Node!
 
     """
     #1201 — the UPDATE door for the task kind, and the counterpart of
-    createTaskNode. Same posture: pure routing, exempt from its own kind only,
-    not an MCP tool.
+    createTaskNode. Same posture: pure routing, exempt from its own kind only;
+    its MCP counterpart is hadron_update_task.
 
     It is needed because the gate reads the RESULTING state: editing a node that
     already carries this kind still produces one, so the generic updateNode
