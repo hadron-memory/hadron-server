@@ -93,6 +93,11 @@ function ctx(over: Partial<Context> = {}): Context {
     roles: ['ADMIN'],
     appId: 'app-1',
     userId: 'u1',
+    // #1300 / PR #1307: the edge mutations now check the NODE-CONTENT read set
+    // first (a non-reader gets not-found, so a refusal is no existence oracle).
+    // These tests target condition validation, so pre-seed the per-request
+    // read cache the check consults rather than mock the whole read-set query.
+    memoryReadCache: new Map([['mem-1', Promise.resolve(true)]]),
     ...over,
   };
 }

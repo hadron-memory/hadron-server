@@ -91,9 +91,11 @@ describe('createEdge endpoint refs accept PK or URN (#322)', () => {
   });
 
   it('rejects a caller without write access to the source memory (PR-348 gate)', async () => {
-    // A CONTRIBUTOR-role user who is NOT a member of the memory's org has no
-    // write access. Pre-PR-348 createEdge only checked the global role and
-    // would have created the edge anyway.
+    // A user who is NOT a member of the memory's org has no write access.
+    // Pre-PR-348 createEdge only checked the global role and would have
+    // created the edge anyway. Since #1300 (PR #1307) such a caller, who cannot
+    // even READ the source's memory, is told NODE_NOT_FOUND — the same answer a
+    // missing ref gets — so the refusal is not a cross-tenant existence oracle.
     const outsider: Context = { db, roles: ['CONTRIBUTOR'], userId: 'outsider-263' };
     await expect(
       resolvers.Mutation.createEdge(
@@ -101,7 +103,7 @@ describe('createEdge endpoint refs accept PK or URN (#322)', () => {
         { sourceRef: nodeA.id, targetRef: nodeB.id, name: 'nope' },
         outsider,
       ),
-    ).rejects.toThrow(/no write access/);
+    ).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
     expect(await db.edge.count({ where: { sourceId: nodeA.id } })).toBe(0);
   });
 });

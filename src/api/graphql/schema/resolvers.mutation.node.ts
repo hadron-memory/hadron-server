@@ -115,7 +115,6 @@ import {
   type Context,
   getAccessibleMemoryIds,
   mapToolDriveFile,
-  requireRole,
   runOwnedEmailOperation,
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
@@ -2538,7 +2537,12 @@ export const nodeMutations = {
       },
       ctx: Context,
     ) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
+      // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
+      // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
+      // of the memory, while inline `edges` and MCP hadron_create_edge gated on
+      // memory access alone. Authorization is the memory gate below, before
+      // any write.
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
@@ -2552,6 +2556,14 @@ export const nodeMutations = {
       // UrnNotQualifiedError propagate so server.ts formatError surfaces the
       // spec-022 URN_NOT_QUALIFIED code/message GraphQL callers rely on
       // (PR-348 review: previously both were collapsed into NODE_NOT_FOUND).
+      // ORDER IS THE AUTHORIZATION (#1300; @codex + @copilot, PR #1307).
+      // The SOURCE is resolved and fully authorized before the target is even
+      // looked up: resolving both first let a caller who cannot see the
+      // source's memory learn, pair by pair, whether either ref exists
+      // ("Target node not found" vs "Source node not found"). Same shape as
+      // cloneNode. A caller who cannot READ the source's memory gets exactly
+      // what a missing source gets; only a reader who may not write is told
+      // Forbidden (the source's existence is theirs to see already).
       let resolvedSourceId: string;
       let resolvedTargetId: string;
       try {
@@ -2561,6 +2573,18 @@ export const nodeMutations = {
           throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
         throw e;
       }
+      // Spec 037: an edge carries a memory-unique `loc` (its identity + URN
+      // suffix), with `memoryId` denormalized from the source node.
+      const src = await ctx.db.node.findUnique({ where: { id: resolvedSourceId }, select: { loc: true, memoryId: true } });
+      if (!src || !(await isMemoryReadableCached(ctx, src.memoryId))) {
+        throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+      }
+      // PR-348 (Gemini, critical): write access to the SOURCE memory is the
+      // authorization — since #1300 there is no platform-role gate in front.
+      await requireMemoryWriteAccess(ctx, src.memoryId);
+
+      // Only now the target, and at least READ on it. Its denial is the same
+      // NODE_NOT_FOUND as a genuine miss, so it is no cross-memory oracle.
       try {
         ({ id: resolvedTargetId } = await resolveNodeRef(ctx.db, targetRef));
       } catch (e) {
@@ -2568,25 +2592,8 @@ export const nodeMutations = {
           throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
         throw e;
       }
-      // Spec 037: an edge carries a memory-unique `loc` (its identity + URN
-      // suffix), with `memoryId` denormalized from the source node. Fetch
-      // both endpoints to compose/derive the loc + gate access.
-      const [src, tgt] = await Promise.all([
-        ctx.db.node.findUnique({ where: { id: resolvedSourceId }, select: { loc: true, memoryId: true } }),
-        ctx.db.node.findUnique({ where: { id: resolvedTargetId }, select: { loc: true, memoryId: true } }),
-      ]);
-      if (!src) throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
-      if (!tgt) throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
-
-      // PR-348 review (Gemini, critical): the global CONTRIBUTOR role gate
-      // above is not memory-scoped. Mirror the MCP addEdge posture (and the
-      // sibling upsertNode/moveNode mutations): require write access to the
-      // SOURCE memory, and at least read on the TARGET. Without this any
-      // CONTRIBUTOR could write an edge into a memory they can't touch. The
-      // target denial returns the same NODE_NOT_FOUND wording as a genuine
-      // miss so it can't be used as a cross-memory existence oracle.
-      await requireMemoryWriteAccess(ctx, src.memoryId);
-      if (!(await canReadMemory(ctx.db, ctx, tgt.memoryId))) {
+      const tgt = await ctx.db.node.findUnique({ where: { id: resolvedTargetId }, select: { loc: true, memoryId: true } });
+      if (!tgt || !(await canReadMemory(ctx.db, ctx, tgt.memoryId))) {
         throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
@@ -2665,7 +2672,12 @@ export const nodeMutations = {
       },
       ctx: Context,
     ) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
+      // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
+      // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
+      // of the memory, while inline `edges` and MCP hadron_create_edge gated on
+      // memory access alone. Authorization is the memory gate below, before
+      // any write.
       if (condition !== undefined && condition !== null) {
         throwOnInvalidCondition(condition);
       }
@@ -2710,16 +2722,24 @@ export const nodeMutations = {
         }
         throw e;
       }
-      // PR-348 parity (Codex #554): the global CONTRIBUTOR gate above is not
-      // memory-scoped. With edgeRef now accepting a cross-memory URN, a
-      // contributor could otherwise update an edge in a memory they can't
-      // write. Gate on write access to the edge's (denormalized) memory —
-      // matching createEdge / deleteNode / moveNode.
+      // PR-348 parity (Codex #554): gate on write access to the edge's
+      // (denormalized) memory, before the update — matching createEdge /
+      // deleteNode / moveNode. Since #1300 this is the only gate, and with
+      // edgeRef accepting a cross-memory URN it is what stops an update in a
+      // memory the caller cannot write.
       const edgeMem = await ctx.db.edge.findUnique({
         where: { id: resolvedEdgeId },
         select: { memoryId: true },
       });
       if (!edgeMem) {
+        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        });
+      }
+      // #1300 / @codex P2 on PR #1307: a caller who cannot READ the edge's
+      // memory gets the same EDGE_NOT_FOUND as a missing edge, so the refusal
+      // is not an existence oracle; a reader who may not write gets Forbidden.
+      if (!(await isMemoryReadableCached(ctx, edgeMem.memoryId))) {
         throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
           extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
         });
@@ -2749,7 +2769,12 @@ export const nodeMutations = {
       { edgeRef }: { edgeRef: string },
       ctx: Context,
     ) => {
-      requireRole(ctx, 'CONTRIBUTOR');
+      // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
+      // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
+      // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
+      // of the memory, while inline `edges` and MCP hadron_create_edge gated on
+      // memory access alone. Authorization is the memory gate below, before
+      // any write.
       // #542: resolve edgeRef (ID or fully-qualified edge URN) via the shared
       // resolveEdgeRef (Tier 2 — was PK-only). A miss → EDGE_NOT_FOUND instead
       // of an unwrapped Prisma P2025.
@@ -2765,7 +2790,8 @@ export const nodeMutations = {
         throw e;
       }
       // PR-348 parity (Codex #554): gate on write access to the edge's memory
-      // before deleting — the global CONTRIBUTOR role gate is not memory-scoped.
+      // before deleting. Since #1300 this is the only gate, and it runs before
+      // the delete.
       // `source` rides along for the #1061 usage attribution below; it is read
       // here rather than after the delete, when the row is gone.
       const edgeMem = await ctx.db.edge.findUnique({
@@ -2776,6 +2802,14 @@ export const nodeMutations = {
         },
       });
       if (!edgeMem) {
+        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        });
+      }
+      // #1300 / @codex P2 on PR #1307: a caller who cannot READ the edge's
+      // memory gets the same EDGE_NOT_FOUND as a missing edge, so the refusal
+      // is not an existence oracle; a reader who may not write gets Forbidden.
+      if (!(await isMemoryReadableCached(ctx, edgeMem.memoryId))) {
         throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
           extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
         });
