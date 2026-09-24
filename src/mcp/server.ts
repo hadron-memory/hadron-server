@@ -3,6 +3,7 @@ import { createHmac, randomUUID } from 'crypto';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
+  GOVERNED_ROLES,
   type GovernedKind,
   mergedGovernedState,
   RoleGovernedError,
@@ -299,6 +300,8 @@ export interface TestableMcpServer {
    * a renamed tool fails the assertion loudly instead of vacuously passing.
    */
   toolDescription(name: string): string;
+  /** A parameter's registered zod schema — see the implementation (#1301). */
+  toolParamSchema(name: string, param: string): { parse: (v: unknown) => unknown };
   toolParamDescription(name: string, param: string): string;
   /**
    * Every registered tool name (#1141).
@@ -348,6 +351,10 @@ export function mcpDoorCanReplay(
     }
     if (key === 'role') {
       if (kind !== 'review' || (op === 'create' && value !== 'review')) return false;
+      // The review door refuses ANOTHER governed value ("spec" has its own
+      // door), so only null, 'review' or an ordinary role replays (@copilot,
+      // PR #1305).
+      if (typeof value === 'string' && value !== 'review' && GOVERNED_ROLES.includes(value)) return false;
       continue;
     }
     if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
@@ -443,6 +450,20 @@ export function createTestableMcpServer(
       const entry = shape?.[param];
       if (!entry) throw new Error(`Tool "${name}" has no parameter "${param}"`);
       return entry.description ?? '';
+    },
+    /**
+     * A single parameter's registered zod SCHEMA. `callTool` invokes the
+     * handler directly and skips the SDK's argument parsing, so a test that
+     * needs to know what a tool ACCEPTS (a preprocessed shape such as
+     * comma-separated tags) asks the schema instead (#1301).
+     */
+    toolParamSchema(name: string, param: string): { parse: (v: unknown) => unknown } {
+      const tool = tools[name] as unknown as { inputSchema?: { shape?: Record<string, unknown> } & Record<string, unknown> };
+      if (!tool) throw new Error(`Tool not registered: ${name}`);
+      const shape = (tool.inputSchema?.shape ?? tool.inputSchema) as Record<string, { parse: (v: unknown) => unknown }> | undefined;
+      const entry = shape?.[param];
+      if (!entry) throw new Error(`Tool "${name}" has no parameter "${param}"`);
+      return entry;
     },
     async callToolText(name: string, args: unknown = {}) {
       const result = await this.callTool(name, args);
@@ -5325,7 +5346,10 @@ export function createMcpServerInstance(
     description: z.string().optional().describe('Short description'),
     abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars).'),
     content: z.string().optional().describe('Markdown content'),
-    tags: z.array(z.string()).optional().describe('Tags'),
+    // The same lenient schema as the generic node tools ("a,b" or an array),
+    // so a call the generic tool accepted replays through the door
+    // unchanged (@codex, PR #1305).
+    tags: tagsInputSchema.optional().describe('Tags'),
     nodeType: z.string().optional().describe('Node classification. Distinct from the governed kind — see Node.role.'),
     seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
     properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),

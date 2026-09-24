@@ -397,3 +397,20 @@ describe('a GraphQL create that RESURRECTS a governed tombstone (@codex, PR #130
     expect(r.message).toContain('`hadron node create` routes to it by itself');
   });
 });
+
+describe('review round 11 (@codex + @copilot, PR #1305)', () => {
+  it('the review door cannot replay a role set to ANOTHER governed value', () => {
+    expect(mcpDoorCanReplay({ role: 'spec' }, 'review', 'update')).toBe(false);
+    expect(mcpDoorCanReplay({ role: null }, 'review', 'update')).toBe(true);
+    expect(mcpDoorCanReplay({ role: 'note' }, 'review', 'update')).toBe(true);
+  });
+
+  it('the door tools accept comma-separated tags, as the generic tools do, so an advertised replay works', () => {
+    // Asked of the registered schema: the test harness's callTool skips the
+    // SDK's argument parsing, which is where the preprocessing happens.
+    const srv = createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never);
+    for (const tool of ['hadron_create_task', 'hadron_update_task', 'hadron_create_review', 'hadron_update_review', 'hadron_update_node']) {
+      expect(srv.toolParamSchema(tool, 'tags').parse('a, b'), tool).toEqual(['a', 'b']);
+    }
+  });
+});
