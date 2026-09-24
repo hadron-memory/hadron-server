@@ -33,6 +33,8 @@
  * which is exactly the protection the class vocabulary gives everything else.
  */
 import type { Declaration } from './declaration.js';
+import { splitNodeUrn } from '../urn.js';
+import { safeNodeUrnV2 } from '../urnEmit.js';
 
 /**
  * The ten classes. Nine from §5 plus `disabled` (D12).
@@ -174,7 +176,10 @@ export function classifySkill(node: NodeFacts, file: FileFacts | null): Classifi
  * between memories after its export.
  *
  * Pairing is by **id first** (§4a), falling back to the URN for a header
- * generation that predates the id. #1235 shipped the write side and the hash
+ * generation that predates the id. The URN fallback accepts any spelling the shared
+ * parser does (`::` grammar, a `urn:node:` prefix): D-2026-09-24-A pairs the
+ * file with the node AT that URN, and the spelling is not part of the address
+ * (#1309). #1235 shipped the write side and the hash
  * change it required, so files gain the key as installations re-export; until
  * `hadron skill export` ships (hadron-cli#621) the fallback is still what
  * every file takes. That fallback is what makes a `loc` rename
@@ -197,5 +202,29 @@ export function pairFileToNode(
   }
   const bySource = file.headerSource ?? '';
   if (bySource === '') return null;
-  return declaredNodes.find((n) => n.urn === bySource) ?? null;
+  const exact = declaredNodes.find((n) => n.urn === bySource);
+  if (exact) return exact;
+  // D-2026-09-24-A (#1309): the file pairs with the node AT its source URN,
+  // and a URN has more than one accepted spelling. A pre-§4a header can carry
+  // the `::` grammar or a `urn:node:` prefix (hadron-cli's legacyHeaderRE takes
+  // both and submits the token verbatim), so an exact string compare refused a
+  // file that names its own node — the file was reported orphaned while it
+  // blocked that node's write as `target-occupied` (#1346). Canonicalize
+  // through the shared parser and the same emitter that built `n.urn`, then
+  // compare again. This widens the SPELLING only: the identity rule is
+  // unchanged, an id-bearing file never reaches this line, and anything the
+  // parser rejects stays unpaired — an orphan, as before.
+  const canonical = canonicalNodeUrn(bySource);
+  if (canonical === null) return null;
+  return declaredNodes.find((n) => n.urn === canonical) ?? null;
+}
+
+/** A node reference in any spelling the shared parser accepts, as the canonical v2 URN; null if it is not one. */
+function canonicalNodeUrn(ref: string): string | null {
+  try {
+    const { memoryUrn, loc } = splitNodeUrn(ref);
+    return safeNodeUrnV2(memoryUrn, loc);
+  } catch {
+    return null;
+  }
 }

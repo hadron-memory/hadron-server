@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { splitNodeUrn } from '../../../lib/urn.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -1434,5 +1435,135 @@ describe('hosts (#1254)', () => {
     expect(codex.entries[0].findings).toEqual([
       expect.objectContaining({ rule: 'skill-declaration-malformed', severity: 'error' }),
     ]);
+  });
+});
+
+// ── #1309 — the CLI's REAL legacy payload, in every accepted spelling ─────
+//
+// D-2026-09-24-A (cor:agt:030:01, Holger via Vera, team chat #1368): a file
+// with no `id=` pairs with the node AT its header's source URN; an id-bearing
+// file pairs by id only; a URN that no longer resolves is an orphan; one file
+// reported as both refused and orphaned is invalid.
+//
+// The P08 table above submits the CANONICAL spelling, which is why it was
+// green while production refused Tove's legacy file (team chat #1346/#1366):
+// hadron-cli's `legacyHeaderRE` accepts the `::` grammar and `status.go` sends
+// the token verbatim, with no nodeId and — for a no-id file — no hashes at all.
+// These cases send exactly that payload.
+describe('#1309 — a no-id legacy file pairs by its source URN in every accepted spelling (D-2026-09-24-A)', () => {
+  /** The spellings a legacy `<!-- Generated from <urn> -->` header can carry. */
+  const spellings = (canonical: string) => {
+    const { memoryUrn, loc } = splitNodeUrn(canonical);
+    const doubleColon = `${memoryUrn.replace(':', '::')}::${loc}`;
+    return {
+      canonical,
+      'double-colon': doubleColon,
+      'v1-prefixed': `urn:node:${doubleColon}`,
+    } as Record<string, string>;
+  };
+  const SPELLINGS = ['canonical', 'double-colon', 'v1-prefixed'] as const;
+
+  /** A declared node, and its canonical URN as the planner states it. */
+  const declared = async (loc: string) => {
+    const node = await mkNode(loc, { properties: declaration() });
+    const urn = (await plan({ intent: 'LINT' })).entries.find((e: { nodeId: string }) => e.nodeId === node.id).urn as string;
+    return { node, urn };
+  };
+
+  it.each(SPELLINGS)('P08 (%s): preserved and reported — never an orphan, never target-occupied', async (spelling) => {
+    const { urn } = await declared('tasks:legacy-p08');
+    const file = { dirName: 'my-skill', sourceUrn: spellings(urn)[spelling] };
+
+    const got = await plan({ intent: 'EXPORT', files: [file] });
+    expect(got.orphans).toEqual([]);
+    expect(got.entries[0]).toMatchObject({
+      urn,
+      class: 'unhashed',
+      renderedBody: null,
+      exportPlan: { action: 'SKIP', preservesExistingFile: true, reasons: [{ code: 'missing-node-id' }] },
+    });
+
+    const forced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(forced.orphans).toEqual([]);
+    expect(forced.entries[0].exportPlan).toMatchObject({ action: 'WRITE', reasons: [{ code: 'missing-node-id-override' }] });
+    expect(forced.entries[0].renderedBody).toContain('# Body');
+  });
+
+  it.each(SPELLINGS)('P12 (%s): a rename is SKIPPED; --force MOVES it from the legacy directory', async (spelling) => {
+    const { node, urn } = await declared('tasks:legacy-p12');
+    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ name: 'new-name' }) } });
+    const file = { dirName: 'my-skill', sourceUrn: spellings(urn)[spelling] };
+
+    const got = await plan({ intent: 'EXPORT', files: [file] });
+    expect(got.orphans).toEqual([]);
+    expect(got.entries[0].exportPlan).toMatchObject({ action: 'SKIP', reasons: [{ code: 'missing-node-id' }] });
+
+    const forced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(forced.entries[0]).toMatchObject({
+      movedFrom: 'my-skill',
+      exportPlan: { action: 'MOVE', reasons: [{ code: 'missing-node-id-override' }] },
+    });
+  });
+
+  it.each(SPELLINGS)('P13 (%s): a disabled declaration REMOVES it without --force', async (spelling) => {
+    const { node, urn } = await declared('tasks:legacy-p13');
+    await db.node.update({ where: { id: node.id }, data: { properties: declaration({ enable: false }) } });
+
+    const got = await plan({ intent: 'EXPORT', files: [{ dirName: 'my-skill', sourceUrn: spellings(urn)[spelling] }] });
+    expect(got.orphans).toEqual([]);
+    expect(got.entries[0]).toMatchObject({
+      movedFrom: 'my-skill',
+      exportPlan: { action: 'REMOVE', reasons: [{ code: 'disabled' }] },
+    });
+  });
+
+  it.each(SPELLINGS)('P14 (%s): evidence of a hand edit REFUSES without --force', async (spelling) => {
+    const { urn } = await declared('tasks:legacy-p14');
+    const file = { dirName: 'my-skill', sourceUrn: spellings(urn)[spelling], hasExtraFrontmatter: true };
+
+    const got = await plan({ intent: 'EXPORT', files: [file] });
+    expect(got.orphans).toEqual([]);
+    expect(got.entries[0].exportPlan).toMatchObject({ action: 'REFUSE', reasons: [{ code: 'locally-edited' }] });
+
+    const forced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    expect(forced.entries[0].exportPlan).toMatchObject({ action: 'WRITE', reasons: [{ code: 'locally-edited-override' }] });
+  });
+
+  describe('controls: the fallback widens only the SPELLING, never the identity rule', () => {
+    it('an id-bearing file still pairs by id ONLY: a dead id with a live `::` source is an orphan', async () => {
+      const { urn } = await declared('tasks:legacy-id-first');
+      const got = await plan({
+        intent: 'EXPORT',
+        files: [{ dirName: 'elsewhere', nodeId: generateId(), sourceUrn: spellings(urn)['double-colon'] }],
+      });
+      expect(got.orphans.map((o: { dirName: string }) => o.dirName)).toEqual(['elsewhere']);
+      expect(got.entries[0].class).toBe('never-exported');
+    });
+
+    it('a URN that no longer resolves is an orphan, in any spelling', async () => {
+      const { urn } = await declared('tasks:legacy-live');
+      const gone = urn.replace(/tasks:legacy-live$/, 'tasks:moved-away');
+      const got = await plan({
+        intent: 'EXPORT',
+        files: SPELLINGS.map((s, i) => ({ dirName: `gone-${i}`, sourceUrn: spellings(gone)[s] })),
+      });
+      expect(got.orphans.map((o: { dirName: string }) => o.dirName).sort()).toEqual(['gone-0', 'gone-1', 'gone-2']);
+      expect(got.entries[0].class).toBe('never-exported');
+    });
+
+    it('a source that is not a node URN at all is an orphan, and never throws', async () => {
+      await declared('tasks:legacy-garbage');
+      for (const sourceUrn of ['not a urn', 'tasks:legacy-garbage', 'hrn:memory:x:y', generateId(), '::::']) {
+        const got = await plan({ intent: 'EXPORT', files: [{ dirName: 'junk', sourceUrn }] });
+        expect(got.orphans.map((o: { dirName: string }) => o.dirName), sourceUrn).toEqual(['junk']);
+      }
+    });
+
+    it('the orphan report keeps the spelling the client SENT, so a client can find its own file', async () => {
+      const { urn } = await declared('tasks:legacy-echo');
+      const sent = spellings(urn.replace(/legacy-echo$/, 'nope'))['double-colon'];
+      const got = await plan({ intent: 'EXPORT', files: [{ dirName: 'x', sourceUrn: sent }] });
+      expect(got.orphans).toEqual([{ dirName: 'x', sourceUrn: sent, nodeId: null }]);
+    });
   });
 });

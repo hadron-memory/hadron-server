@@ -195,6 +195,25 @@ describe('pairing a file to a node (§4a)', () => {
     expect(pairFileToNode(file({ headerId: '', headerSource: '' }), [a, b])).toBeNull();
   });
 
+  it.each([
+    ['the `::` grammar', 'acme.com::mem::tasks:b'],
+    ['a v1 `urn:node:` prefix', 'urn:node:acme.com::mem::tasks:b'],
+    ['a mixed `hrn:node:` + `::` form', 'hrn:node:acme.com::mem::tasks:b'],
+  ])('D-2026-09-24-A (#1309): the URN fallback accepts %s', (_label, headerSource) => {
+    // A pre-§4a header names its node in whatever spelling the exporter of the
+    // day wrote; the spelling is not part of the address.
+    expect(pairFileToNode(file({ headerId: '', headerSource }), [a, b])?.id).toBe('id-b');
+  });
+
+  it('…widening the spelling never widens the identity rule', () => {
+    // An id-bearing file still pairs by id alone, whatever its source says.
+    expect(pairFileToNode(file({ headerId: 'id-gone', headerSource: 'acme.com::mem::tasks:a' }), [a, b])).toBeNull();
+    // Not a node URN at all: unpaired, and no throw.
+    for (const headerSource of ['not a urn', 'tasks:b', 'hrn:memory:acme.com:mem', '::::']) {
+      expect(pairFileToNode(file({ headerId: '', headerSource }), [a, b]), headerSource).toBeNull();
+    }
+  });
+
   it('CONTROL: the pairer can return both answers over one node set', () => {
     // Otherwise every assertion above would hold for a function that always
     // returns null.
