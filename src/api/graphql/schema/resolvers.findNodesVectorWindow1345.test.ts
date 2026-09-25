@@ -19,6 +19,7 @@ import type { EmbeddingClient } from '../../../lib/embedding/index.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
 import { embedNode } from '../../../jobs/embedNodes.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
+import { vectorWindowExhausted } from '../../../services/embedding/vectors.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -126,6 +127,16 @@ describe('@codex P2 — the vector window widens until the filtered page fills',
     await db.node.deleteMany({ where: { memoryId: memId } });
     await seed(memId, 'many', Array.from({ length: 400 }, (_, i) => `near${i}`).join(' '));
     expect(await exhausted('node', 5)).toBe(false);
+  });
+
+  it('exhaustion is judged against an INDEPENDENT eligible count, never a short scan (@codex round 6)', () => {
+    // The HNSW case the tiny test DB cannot produce (it seq-scans): a filtered
+    // index scan visits ef_search candidates, returns 40 of a 50-row window,
+    // while 1000 eligible rows exist. Short is not exhausted.
+    expect(vectorWindowExhausted({ windowRows: 40, eligibleRows: 1000, truncated: false })).toBe(false);
+    expect(vectorWindowExhausted({ windowRows: 9, eligibleRows: 9, truncated: false })).toBe(true);
+    // Everything fetched but the final LIMIT cut some: not exhausted.
+    expect(vectorWindowExhausted({ windowRows: 9, eligibleRows: 9, truncated: true })).toBe(false);
   });
 
   it('CONTROL: with no filter the nearest node wins and nothing widens', async () => {

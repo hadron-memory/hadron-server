@@ -234,6 +234,21 @@ export async function deleteMemoryVectors(db: PrismaClient, memoryId: string): P
   await db.$executeRaw`DELETE FROM node_embeddings WHERE memory_id = ${memoryId}`;
 }
 
+/**
+ * #1345 review (@codex round 6) — is a vector window PROVABLY complete?
+ *
+ * Only when it returned every eligible row — measured against an INDEPENDENT
+ * count, because a short ANN result is not evidence: when the planner uses the
+ * HNSW index, pgvector applies `memory_id IN (…)` to the candidates the scan
+ * visits (at most `hnsw.ef_search`; iterative scans are not enabled here), so a
+ * selective filter can return fewer rows than LIMIT with matches still deeper —
+ * and the final LIMIT truncated nothing. Anything else is "not exhausted",
+ * which only costs a wider (bounded) retry.
+ */
+export function vectorWindowExhausted(w: { windowRows: number; eligibleRows: number; truncated: boolean }): boolean {
+  return !w.truncated && w.windowRows >= w.eligibleRows;
+}
+
 export interface VectorHit {
   nodeId: string;
   score: number; // cosine similarity in [0,1]-ish (1 - distance)
@@ -262,11 +277,9 @@ export async function vectorSearchNodes(
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
   const candidateK = Math.max(k, k * (opts.candidateFactor ?? 10));
-  // `ann_rows` is the RAW candidate count, before the node dedup: fewer than
-  // candidateK means the index has nothing deeper. The deduped node count
-  // cannot say that — a window full of one node's chunks dedupes to one hit
-  // (#1345 review, @codex/@copilot). Carried on every row; an empty result
-  // re-counts below rather than guessing.
+  // `ann_rows` is the RAW candidate count, before the node dedup (a window full
+  // of one node's chunks dedupes to one hit, #1345 review). Exhaustion compares
+  // it with an independent eligible count — see vectorWindowExhausted.
   const rows = await db.$queryRaw<{ node_id: string; distance: number; ann_rows: number }[]>`
     WITH ann AS (
       SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
@@ -283,19 +296,19 @@ export async function vectorSearchNodes(
     LIMIT ${k}
   `;
   if (opts.onWindow) {
-    let annRows = rows[0]?.ann_rows;
-    if (annRows === undefined) {
+    const truncated = rows.length >= k;
+    // No row carries ann_rows when the join left nothing; the window count is
+    // unknown then, so only an empty scope can be called exhausted.
+    const windowRows = rows.length > 0 ? Number(rows[0].ann_rows) : 0;
+    let exhausted = false;
+    if (!truncated && (rows.length === 0 || windowRows < candidateK)) {
       const [c] = await db.$queryRaw<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM (
-          SELECT 1 FROM node_embeddings ne
-          WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)})
-          LIMIT ${candidateK}
-        ) w`;
-      annRows = c?.n ?? 0;
+        SELECT count(*)::int AS n FROM node_embeddings ne
+        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)})`;
+      const eligibleRows = Number(c?.n ?? 0);
+      exhausted = rows.length === 0 ? eligibleRows === 0 : vectorWindowExhausted({ windowRows, eligibleRows, truncated });
     }
-    // Exhausted = the raw window held EVERYTHING (fewer rows than it asked for)
-    // AND the final LIMIT truncated nothing: a full `k` may have cut nodes off.
-    opts.onWindow({ exhausted: Number(annRows) < candidateK && rows.length < k });
+    opts.onWindow({ exhausted });
   }
   return rows.map((r) => ({ nodeId: r.node_id, score: 1 - Number(r.distance) }));
 }
@@ -360,9 +373,20 @@ export async function vectorSearchChunks(
     ORDER BY ne.embedding <=> ${qvec}::vector
     LIMIT ${candidateK}
   `;
-  // Exhausted = every eligible chunk was fetched AND fits in the returned `k`
-  // (the slice below truncates nothing).
-  opts.onWindow?.({ exhausted: rows.length < candidateK && rows.length <= k });
+  // Exhausted = every eligible chunk (independent count; see
+  // vectorWindowExhausted) was fetched AND fits in `k` (the slice truncates nothing).
+  if (opts.onWindow) {
+    const truncated = rows.length > k;
+    let exhausted = false;
+    if (!truncated && rows.length < candidateK) {
+      const [c] = await db.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM node_embeddings ne
+        JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL
+        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk'`;
+      exhausted = vectorWindowExhausted({ windowRows: rows.length, eligibleRows: Number(c?.n ?? 0), truncated });
+    }
+    opts.onWindow({ exhausted });
+  }
   return rows.slice(0, k).map((r) => ({
     nodeId: r.node_id,
     chunkIndex: Number(r.chunk_index),
