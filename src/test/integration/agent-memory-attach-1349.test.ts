@@ -121,6 +121,14 @@ beforeAll(async () => {
   await mkMem('appScoped', { urnRoot: victimOrg.urn, organizationId: victimOrg.id, class: 'knowledge', visibility: 'ORGANIZATION', appId: victimApp.id });
   // The victim's personal memory.
   await mkMem('personal', { urnRoot: victimOrg.urn, class: 'personal', visibility: null, userId: victim.id, ownerUserId: victim.id });
+  // The SAME-TENANT shape: another App's app-scoped knowledge memory in the
+  // attacker's own org. #653 isolates it from every org-wide gate, so even the
+  // org's admins can neither read nor write it (measured) — yet they pass the
+  // agent gate for agents in this org.
+  const siblingApp = await db.app.create({
+    data: { id: generateId(), organizationId: attackerOrg.id, urn: `${attackerOrg.urn}:sibling`, name: 'sibling app' } as never,
+  });
+  await mkMem('siblingAppScoped', { urnRoot: attackerOrg.urn, organizationId: attackerOrg.id, class: 'knowledge', visibility: 'ORGANIZATION', appId: siblingApp.id });
   // The attacker's OWN knowledge memory — the legitimate case.
   await mkMem('ownKnowledge', { urnRoot: attackerOrg.urn, organizationId: attackerOrg.id, class: 'knowledge', visibility: 'ORGANIZATION' });
 
@@ -197,6 +205,22 @@ describe('#1349 — an attach cannot grant what the caller does not hold', () =>
     const r = await gql(key.dual!, ATTACH, { g: agentId, m: mem.orgKnowledge!.urn, r: 'read-write' });
     expect(r.errors).toHaveLength(1);
     expect(await writes(appKey, 'orgKnowledge')).toBe(false);
+  });
+
+  it('same tenant: an org admin cannot amplify a sibling App\'s isolated memory to their own agent', async () => {
+    // Preconditions, measured rather than assumed: the caller can neither read
+    // nor write this memory directly, so any access the attachment confers is
+    // amplification, not a capability they already hold. A tenancy filter (C1)
+    // cannot see this case — memory and agent share an org.
+    const directRead = await gql(key.attacker!, READ, { r: mem.siblingAppScoped!.nodeId });
+    expect(directRead.data?.node ?? null, 'precondition: no direct read').toBeNull();
+    const directWrite = await gql(key.attacker!, WRITE, { i: { id: mem.siblingAppScoped!.nodeId, content: 'direct' } });
+    expect(directWrite.errors, 'precondition: no direct write').toHaveLength(1);
+    const { agentId, appKey } = await agentWithApp(attackerOrgId, 'sibling-rw');
+    const r = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.siblingAppScoped!.urn, r: 'read-write' });
+    expect(r.errors).toHaveLength(1);
+    expect(await readsContent(appKey, 'siblingAppScoped')).toBeNull();
+    expect(await writes(appKey, 'siblingAppScoped')).toBe(false);
   });
 
   it('a PUBLIC memory attached read-only cannot be escalated to read-write', async () => {
