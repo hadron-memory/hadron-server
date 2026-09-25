@@ -366,6 +366,9 @@ export async function mergeMemoryGraph(
       // row-locked and reconciled (drift as its OWN revision) in id order
       // before anything is computed from it, then re-read — so the fold works
       // from the rows as they are under the lock, not as first fetched.
+      // The loc pair each fold was CLASSIFIED on; a row that moved before its
+      // lock no longer forms that collision (@copilot, PR #1339).
+      const classifiedLoc = new Map([...srcRows, ...tgtRows].map((row) => [row.id, row.loc]));
       const foldIds = [...new Set([...srcRows, ...tgtRows].map((row) => row.id))].sort();
       for (const id of foldIds) await ensureCurrentNodeRevisionInTransaction(tx, id);
       srcRows = await tx.node.findMany({
@@ -378,6 +381,11 @@ export async function mergeMemoryGraph(
           deletedAt: null,
         },
       });
+      for (const row of [...srcRows, ...tgtRows]) {
+        if (row.loc !== classifiedLoc.get(row.id)) {
+          throw new Error(`merge node ${row.id} moved during the fold; retry the merge`);
+        }
+      }
       const tgtById = new Map(tgtRows.map((t) => [t.id, t]));
       // The AUTHORITATIVE gate for this batch — both endpoints' rows, read
       // inside this transaction, under the Channel-memory locks. The Phase-1

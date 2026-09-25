@@ -1584,6 +1584,14 @@ export const sessionMutations = {
             if (prior) {
               await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
               const current = await tx.node.findUniqueOrThrow({ where: { id: prior.id } });
+              // Found by (loc, memory), locked by id: a row that moved in
+              // between aborts the restore (it is atomic) rather than being
+              // snapshotted while the upsert creates a duplicate at the old
+              // address (@copilot, PR #1339). Its deletedAt was just set by the
+              // soft-delete above, so liveness is not part of this check.
+              if (current.loc !== loc || current.memoryId !== sysMemId) {
+                throw new Error(`restoreRevision: "${loc}" moved during the restore; retry.`);
+              }
               const changes = diffNodeChanges(current, nodeData);
               if (changes.length > 0) {
                 await createNodeRevision(

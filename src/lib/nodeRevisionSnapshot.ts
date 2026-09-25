@@ -205,11 +205,23 @@ export async function ensureCurrentNodeRevision(
 export async function ensureCurrentNodeRevisionInTransaction(
   tx: Prisma.TransactionClient,
   nodeId: string,
+  opts?: {
+    /**
+     * The memory the caller AUTHORIZED this node in. A READ that selected the
+     * node in one memory must never reconcile it after a concurrent relocation
+     * into another — that would write a revision (and possibly prune history)
+     * in a tenant the reader may not even see (@codex P1, PR #1339). When the
+     * locked row is elsewhere this returns null WITHOUT writing; the caller
+     * treats it as not found.
+     */
+    expectedMemoryId?: string;
+  },
 ): Promise<number | null> {
   const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "nodes" WHERE "id" = ${nodeId} FOR UPDATE`;
   if (locked.length === 0) return null;
   const node = await tx.node.findUnique({ where: { id: nodeId } });
   if (!node) return null;
+  if (opts?.expectedMemoryId !== undefined && node.memoryId !== opts.expectedMemoryId) return null;
 
   const actual = await computeRevisionStateHash(tx, node.id);
   if (actual == null) return null;

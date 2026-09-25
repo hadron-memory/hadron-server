@@ -146,3 +146,21 @@ describe('#1339 review — hadron_update_node re-checks the address after its ro
   });
 });
 
+describe('#1339 review round 5 — MCP reads never reconcile into another memory', () => {
+  it('hadron_get_node on a row relocated in its window writes nothing and reads as not found', async () => {
+    const other = await resolvers.Mutation.createMemory({}, { orgId: (await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId!, name: 'other-tenant' }, {
+      db, roles: ['ADMIN'], userId: admin.id,
+    } as Context);
+    const node = await seed('drift:read-leaver');
+    writeJustBeforeNextTransaction(() =>
+      db.node.update({ where: { id: node.id }, data: { memoryId: other.id, content: 'drifted elsewhere' } }),
+    );
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_get_node', {
+      urn: `hrn:node:${memory.urn}:${node.loc}`,
+    });
+    expect(text).not.toContain('drifted elsewhere');
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(1);
+  });
+});
+

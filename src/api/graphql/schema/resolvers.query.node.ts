@@ -640,7 +640,7 @@ export const nodeQueries = {
         // holding its row lock so Node.revision and every sibling field come
         // from one database state (never old body + new counter).
         const current = await ctx.db.$transaction(async (tx) => {
-          if ((await ensureCurrentNodeRevisionInTransaction(tx, selected.id)) == null) return null;
+          if ((await ensureCurrentNodeRevisionInTransaction(tx, selected.id, { expectedMemoryId: selected.memoryId })) == null) return null;
           return tx.node.findUnique({ where: { id: selected.id }, include });
         });
         if (
@@ -1726,7 +1726,7 @@ export const nodeQueries = {
       const liveIds: string[] = [];
       for (const id of [...selectedById.keys()].sort()) {
         const live = await ctx.db.$transaction(
-          (tx) => ensureCurrentNodeRevisionInTransaction(tx, id),
+          (tx) => ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: selectedById.get(id)!.memoryId }),
           { timeout: 60_000, maxWait: 15_000 },
         );
         if (live != null) liveIds.push(id);

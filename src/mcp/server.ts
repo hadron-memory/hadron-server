@@ -1135,9 +1135,14 @@ const readProjectionInclude = {
 } as const;
 
 /** Reconcile and fetch the complete projection while the node row stays locked. */
-async function loadCurrentReadProjection(nodeId: string): Promise<ReadProjectionNode | null> {
+async function loadCurrentReadProjection(
+  nodeId: string,
+  authorizedMemoryId: string,
+): Promise<ReadProjectionNode | null> {
   return db.$transaction(async (tx) => {
-    if ((await ensureCurrentNodeRevisionInTransaction(tx, nodeId)) == null) return null;
+    // Reconcile only while the row is still in the memory the caller
+    // authorized (@codex P1, PR #1339); a relocated row reads as not found.
+    if ((await ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: authorizedMemoryId })) == null) return null;
     return tx.node.findFirst({
       where: { id: nodeId, deletedAt: null },
       include: readProjectionInclude,
@@ -3607,7 +3612,7 @@ export function createMcpServerInstance(
       // Reconcile + fetch under one row lock. The first lookup selects the
       // address and authorizes its memory; it must not supply the body after a
       // reconciliation advanced the counter.
-      const current = await loadCurrentReadProjection(node.id);
+      const current = await loadCurrentReadProjection(node.id, node.memoryId);
       if (
         !current ||
         current.memoryId !== node.memoryId ||
@@ -3927,7 +3932,7 @@ export function createMcpServerInstance(
       let bytes = 0;
       let truncated = false;
       for (const selected of ordered) {
-        const n = await loadCurrentReadProjection(selected.id);
+        const n = await loadCurrentReadProjection(selected.id, selected.memoryId);
         if (
           !n ||
           n.memoryId !== selected.memoryId ||

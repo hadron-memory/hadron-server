@@ -345,7 +345,9 @@ export const typeResolvers = {
       // matches the parent object. If a concurrent supported write changed the
       // row, the parent's own number remains the only self-consistent answer.
       return ctx.db.$transaction(async (tx) => {
-        if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id)) == null) return n.revSeq;
+        // Only while the row is still in the memory the parent was read from
+        // (@codex P1, PR #1339): never reconcile into another tenant.
+        if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return n.revSeq;
         const current = await tx.node.findUnique({ where: { id: n.id } });
         if (!current) return n.revSeq;
         const key = sessionKeyCache.getByMemoryId(current.memoryId);

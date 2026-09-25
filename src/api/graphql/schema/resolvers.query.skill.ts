@@ -550,10 +550,14 @@ export const skillQueries = {
       // that node's lock: a bypass writer landing after reconciliation must not
       // pair newer fields with the older revSeq in one exported artifact.
       const liveRows: typeof candidates = [];
+      const candidateMemory = new Map(candidates.map((r) => [r.id, r.memoryId]));
       for (const id of candidates.map((r) => r.id).sort()) {
         const live = await ctx.db.$transaction(
           async (tx) => {
-            if ((await ensureCurrentNodeRevisionInTransaction(tx, id)) == null) return null;
+            // Never reconcile a row that left the memory it was discovered in
+            // (@codex P1, PR #1339) — the refetch below would drop it anyway,
+            // but only after a revision had been written into another tenant.
+            if ((await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: candidateMemory.get(id)! })) == null) return null;
             return tx.node.findFirst({
               // Reapply BOTH discovery and access/scope predicates after
               // waiting for the lock. The id can move into another tenant's

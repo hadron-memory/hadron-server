@@ -69,15 +69,27 @@ export const createNode = async (
     // (@copilot, PR #1339), then the authoritative re-read it is built from.
     if (prior) await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
     const existing = prior ? await tx.node.findUnique({ where: { id: prior.id } }) : null;
+    // The upsert below targets (loc, memory); the lock was taken by id. A row
+    // that moved in between must refuse, not be snapshotted here while a
+    // duplicate lands at the old address (@copilot, PR #1339).
+    if (prior && (!existing || existing.loc !== loc || existing.memoryId !== node.memoryId)) {
+      throw new Error(`createNode: the node at "${loc}" moved during the write; retry.`);
+    }
     if (existing) {
-      await createNodeRevision(
-        tx,
-        buildNodeRevisionSnapshot(
-          existing,
-          { userId: null, info: 'controller:createNode' },
-          { changes: diffNodeChanges(existing, fields) },
-        ),
-      );
+      const changes = diffNodeChanges(existing, fields);
+      // An identical re-save is not a revision (@codex P2, PR #1339): a
+      // snapshot here would manufacture history on every idempotent save and
+      // evict real revisions under maxRevCount.
+      if (changes.length > 0) {
+        await createNodeRevision(
+          tx,
+          buildNodeRevisionSnapshot(
+            existing,
+            { userId: null, info: 'controller:createNode' },
+            { changes },
+          ),
+        );
+      }
     }
 
     return tx.node.upsert({

@@ -2208,7 +2208,9 @@ export const nodeMutations = {
         }
         for (const p of plans) {
           const locked = await tx.node.findUnique({ where: { id: p.raw.id } });
-          if (!locked || !revisionStateMatches(p.raw, locked)) {
+          // deletedAt is not a revisioned field, so a delete that committed
+          // before this lock must be refused explicitly (@copilot, PR #1339).
+          if (!locked || locked.deletedAt || !revisionStateMatches(p.raw, locked)) {
             throw new GraphQLError(
               `Node at loc "${p.raw.loc}" changed while this replace was running — re-run it.`,
               { extensions: { code: 'NODE_WRITE_CONFLICT', loc: p.raw.loc, memoryId: p.raw.memoryId } },
@@ -3324,6 +3326,8 @@ export const nodeMutations = {
         const lockedTarget = await tx.node.findUnique({ where: { id: target.id } });
         if (
           !lockedSource || !lockedTarget ||
+          // deletedAt is not revisioned; a delete landing first must refuse.
+          lockedSource.deletedAt || lockedTarget.deletedAt ||
           !revisionStateMatches(source, lockedSource) ||
           !revisionStateMatches(target, lockedTarget)
         ) {

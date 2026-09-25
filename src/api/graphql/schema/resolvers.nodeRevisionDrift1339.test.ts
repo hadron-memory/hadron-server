@@ -180,3 +180,52 @@ describe('#1339 review — multi-row writers reconcile drift before their snapsh
   });
 });
 
+// Round 5 (PR #1339 review).
+describe('#1339 review round 5', () => {
+  it('Node.revision never reconciles a row that left the parent memory (@codex P1)', async () => {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'dr-org' } });
+    const other = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'dr-org:other-tenant', name: 'other', class: 'knowledge' },
+    });
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:leaver', name: 'n', content: 'x' } });
+    const parent = await db.node.findUniqueOrThrow({ where: { id: node.id } }); // read in memory A
+    // An unrevisioned relocation into another memory, with drift, lands before the field resolves.
+    await db.node.update({ where: { id: node.id }, data: { memoryId: other.id, content: 'drifted elsewhere' } });
+    expect(await resolvers.Node.revision(parent as never, {}, ctx())).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(1);
+  });
+
+  it('an identical controller re-save takes no revision (@codex P2)', async () => {
+    const first = await controllerCreateNode({ memoryId, loc: 'drift:idempotent', name: 'n', content: 'same' });
+    await controllerCreateNode({ memoryId, loc: 'drift:idempotent', name: 'n', content: 'same' });
+    expect((await db.node.findUniqueOrThrow({ where: { id: first.id } })).revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: first.id } })).toBe(0);
+  });
+
+  it('searchReplaceInNodes refuses a row deleted after it was planned (@copilot)', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:deleted', name: 'n', content: 'hello' } });
+    const original = db.$transaction.bind(db);
+    let fired = false;
+    vi.spyOn(db, '$transaction').mockImplementation((async (arg: unknown, opts?: unknown) => {
+      if (!fired && typeof arg === 'function') {
+        fired = true;
+        await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
+      }
+      return (original as any)(arg, opts);
+    }) as never);
+    try {
+      await expect(
+        resolvers.Mutation.searchReplaceInNodes({}, {
+          input: { oldText: 'hello', newText: 'bye', nodeIds: [node.id], fields: ['content'] },
+        } as never, ctx()),
+      ).rejects.toSatisfy((e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT');
+    } finally {
+      vi.restoreAllMocks();
+    }
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.content).toBe('hello');
+    expect(after.deletedAt).not.toBeNull();
+  });
+});
+
