@@ -1,13 +1,15 @@
 /**
  * #1177 §6 — the corpus lint rules, server-side.
  *
- * FOURTEEN rules over a node's declaration and body: twelve per node and per
+ * FIFTEEN rules over a node's declaration and body: thirteen per node and per
  * host (`lintNode`), `skill-name-collision`, which is corpus-wide and per host
  * (`lintCollisions`), and `skill-unknown-host-key`, which is per node and
  * attributed to NO host (`lintUnknownHostKeys`, #1292). The twelfth per-node
  * rule, `skill-name-reserved` (#1315), was server-only until hadron-cli#712
  * ported it; the Go-generated parity fixtures now pin it in their `lintReserved`
- * section, word for word. They answer *is this node
+ * section, word for word. The thirteenth, `skill-description-markup` (#1341),
+ * is mirrored in Go by hadron-cli#722 and pinned the same way, per host, in
+ * `lintMarkup`. They answer *is this node
  * exportable, and will the host do what its author expects* — judgment over
  * corpus inputs alone, with no file and no disk, which is what makes this half
  * of the split (A3) pure.
@@ -19,7 +21,8 @@
  * a node it does not have. Said here rather than left as an off-by-one,
  * because counting it in this header would misstate what the port covers
  * (@copilot, PR #1233). (The count above reached thirteen in #1292 with a
- * rule of its own, and fourteen in #1315; the spec's §6 figure predates both.)
+ * rule of its own, fourteen in #1315 and fifteen in #1341; the spec's §6 figure
+ * predates all three.)
  *
  * Ported from `internal/skilldoc`'s `Lint` / `LintCollisions`. The message text
  * is part of the port: an operator reading `hadron skill lint` and a portal
@@ -91,6 +94,15 @@ const FRONTMATTER_RE = /^---\n(?:[\s\S]*?\n)?---\n?[\s\S]*$/;
 const TEMPLATE_RE = /\{\{[^}]*\}\}/;
 
 /**
+ * The measured Cowork predicate (#1341): a `<`, then at least one character
+ * that is not `>`, then a `>`. Of the two predicates that fit all 20 probe
+ * cases, this is the broader one: it refuses a nested `<<>`, which the narrower
+ * `<[^<>]+>` would accept and which was not measured. Refusing the superset errs
+ * toward a plugin that uploads. Same pattern as hadron-cli#722's Go mirror.
+ */
+const DESCRIPTION_MARKUP_RE = /<[^>]+>/;
+
+/**
  * The per-node rules.
  *
  * A node with no declaration and no malformed key yields nothing: **not
@@ -148,6 +160,19 @@ export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Fin
       'skill-description-too-long',
       'error',
       `description is ${descLen} characters; the host caps it at ${hostRow.maxDescriptionLength} and TRUNCATES the rest in the skill listing, so trigger phrases past the cut never fire — shorten by ${descLen - hostRow.maxDescriptionLength}`,
+    );
+  }
+  // #1341: what Cowork's validator refuses as an XML tag ("cannot contain XML
+  // tags"): `<memory>`, `</end>`, `1 < 2 and 3 > 2`, an email in angle brackets.
+  // A lone `<` or `>`, `<>`, `<3` and `a<b` pass. An error, so the planner's
+  // lint gate keeps the node out of export for this host and preserves any
+  // file already there; checked independently of the length rule.
+  const markup = hostRow.rejectsDescriptionMarkup ? DESCRIPTION_MARKUP_RE.exec(desc) : null;
+  if (markup !== null) {
+    add(
+      'skill-description-markup',
+      'error',
+      `description contains ${goQuote(markup[0])}, which ${hostRow.key}'s upload validator refuses as an XML tag (a "<" followed later by a ">", with at least one character between) — reword it in plain words, e.g. "a memory" for "<memory>"`,
     );
   }
   if (desc !== '' && !TRIGGER_RE.test(desc)) {
