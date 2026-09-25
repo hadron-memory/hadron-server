@@ -20,6 +20,7 @@ fi
 H=src/api/graphql/schema/resolvers.helpers.ts
 M=src/api/graphql/schema/resolvers.mutation.memory.ts
 A=src/lib/agentPublicCongruence.ts
+AG=src/api/graphql/schema/resolvers.mutation.agent.ts
 SPEC=src/test/integration/agent-memory-attach-1349.test.ts
 
 run() { # name file old new
@@ -71,3 +72,19 @@ run "13 revocation also drops same-tenant links" "$A" \
 run "14 re-role actor stamp dropped" "$M" \
   "        data: { role: grantedRole, updatedBy: ctx.userId ?? ctx.clientId ?? null }," \
   "        data: { role: grantedRole },"
+
+# --- P1 round 2 (@codex on 7af8a4d6): each check serialized with its write ---
+run "15 revocation skips org transfer" "$M" \
+  "        if (visibility !== undefined || newOrgId !== undefined) {" \
+  "        if (visibility !== undefined) {"
+run "16 revocation classifies from the PRE-update row" "$M" \
+  "          await revokeLinksForeignToTenant(tx, row, ctx.userId ?? ctx.clientId ?? null);" \
+  "          await revokeLinksForeignToTenant(tx, { ...memory, visibility: visibility ?? memory.visibility }, ctx.userId ?? ctx.clientId ?? null);"
+run "17 attach lock dropped (memory row)" "$M" \
+  "  await tx.\$queryRaw\`SELECT id FROM memories WHERE id = \${memoryId} FOR UPDATE\`;" "  "
+run "18 attach lock dropped (agent row)" "$M" \
+  "  await tx.\$queryRaw\`SELECT id FROM agents WHERE id = \${agentId} FOR UPDATE\`;" "  "
+run "19 publication check back outside the lock" "$AG" \
+  "        if (visibility === 'PUBLIC') {
+          await assertAgentPublicAllowed(tx, id);
+        }" "        "

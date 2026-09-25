@@ -367,9 +367,11 @@ export const agentMutations = {
       // cor:acl:080:03 — congruence invariant: an agent may become PUBLIC only
       // if every knowledge memory it links (excluding per-user personal/private)
       // is itself PUBLIC. Checked against the CURRENT links before persisting.
-      if (visibility === 'PUBLIC') {
-        await assertAgentPublicAllowed(ctx.db, id);
-      }
+      // #1349 (@codex, PR #1357): the CHECK moved into the same transaction as
+      // the write, below — checking here and writing there let an
+      // `updateAgentMemoryRole(read-write)` interleave: this query saw no
+      // writable item while that one saw a non-PUBLIC agent, and both
+      // committed, leaving a PUBLIC agent holding read-write knowledge.
       let newUrn: string | undefined;
       if (urn !== undefined) {
         if (!agent.organizationId) {
@@ -547,6 +549,15 @@ export const agentMutations = {
         const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
           SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
         `;
+        // cor:acl:080:03 — congruence invariant: an agent may become PUBLIC
+        // only if every knowledge memory it links (excluding per-user
+        // personal/private) is itself PUBLIC, and (#1349) only if it holds no
+        // read-write knowledge. Run under the row lock taken just above, so an
+        // attach or re-role racing this publication serializes behind it
+        // instead of both observing a state the other is about to change.
+        if (visibility === 'PUBLIC') {
+          await assertAgentPublicAllowed(tx, id);
+        }
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
             entityType: 'AGENT',

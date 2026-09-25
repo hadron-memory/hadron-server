@@ -356,6 +356,97 @@ describe('#1349 — the agent\'s AUDIENCE, not just the memory\'s tenancy (@code
   });
 });
 
+describe('#1349 — the checks are serialized with the writes they depend on (@codex, PR #1357)', () => {
+  it('an org TRANSFER revokes the links that belonged to the source tenant', async () => {
+    // The revocation used to fire only on a visibility change, and classified
+    // tenancy from the PRE-update row — so a transfer left the source tenant's
+    // links looking same-tenant against the org the memory had just left.
+    //
+    // Self-contained: a transfer needs ADMIN on BOTH orgs, so this builds its
+    // own pair rather than borrowing the suite's principals.
+    const srcOrg = await db.organization.create({ data: { id: generateId(), name: 'src', urn: `src-${suffix}` } });
+    const dstOrg = await db.organization.create({ data: { id: generateId(), name: 'dst', urn: `dst-${suffix}` } });
+    const mover = await db.user.create({ data: { id: generateId(), handle: `mover-${suffix}`, githubUsername: `mover-${suffix}` } });
+    await db.orgMember.create({ data: { organizationId: srcOrg.id, userId: mover.id, role: 'ADMIN' } });
+    await db.orgMember.create({ data: { organizationId: dstOrg.id, userId: mover.id, role: 'ADMIN' } });
+    const moverKey = (await mintUserApiKey(db, { userId: mover.id, label: 'k', createdBy: mover.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+
+    const moving = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: srcOrg.id, urn: `${srcOrg.urn}:moving`,
+        name: 'moving', class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const movingNode = await db.node.create({ data: { id: generateId(), memoryId: moving.id, loc: 'payroll', name: 'p', content: 'MOVING SECRET' } });
+    mem.moving = { id: moving.id, urn: `hrn:mem:${srcOrg.urn}:moving`, nodeId: movingNode.id };
+
+    const { agentId, appKey } = await agentWithApp(srcOrg.id, 'transfer-src');
+    const attach = await gql(moverKey, ATTACH, { g: agentId, m: mem.moving.urn, r: 'read' });
+    expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
+    expect(await readsContent(appKey, 'moving')).toBe('MOVING SECRET');
+
+    // Transfer to the other org. Visibility is NOT supplied — the trigger the
+    // first version of this sweep missed entirely.
+    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: moving.id, o: dstOrg.id });
+    expect(moved.errors, JSON.stringify(moved.errors)).toBeUndefined();
+    expect(await readsContent(appKey, 'moving')).toBeNull();
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } })).deletedAt).not.toBeNull();
+  });
+
+  it('a concurrent attach and narrowing cannot both win', async () => {
+    // The race: the attach reads the memory while PUBLIC, the narrowing finds
+    // no link to revoke, and the attach then persists a grant from its stale
+    // snapshot. Run repeatedly with no delay between the two calls so the
+    // interleaving actually occurs; the row lock makes either order safe.
+    for (let i = 0; i < 6; i++) {
+      const pub = await db.memory.create({
+        data: {
+          id: generateId(), organizationId: victimOrgId, urn: `victim-${suffix}:race-${i}`,
+          name: `race-${i}`, class: 'knowledge', visibility: 'PUBLIC',
+        } as never,
+      });
+      const node = await db.node.create({ data: { id: generateId(), memoryId: pub.id, loc: 'payroll', name: 'p', content: 'RACE SECRET' } });
+      mem[`race${i}`] = { id: pub.id, urn: `hrn:mem:victim-${suffix}:race-${i}`, nodeId: node.id };
+      const { agentId, appKey } = await agentWithApp(dualOrgId, `race-${i}`);
+
+      await Promise.allSettled([
+        gql(key.dual!, ATTACH, { g: agentId, m: mem[`race${i}`]!.urn, r: 'read' }),
+        gql(key.victim!, `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id } }`, { id: pub.id }),
+      ]);
+
+      const finalVisibility = (await db.memory.findUniqueOrThrow({ where: { id: pub.id } })).visibility;
+      const link = await db.agentMemoryItem.findFirst({ where: { agentId, deletedAt: null } });
+      // The invariant, whichever order won: a live foreign link implies the
+      // memory is still PUBLIC. A non-public memory must have no live foreign
+      // link, and the foreign App must not read it.
+      if (finalVisibility !== 'PUBLIC') {
+        expect(link, `iteration ${i}: live foreign link on a non-public memory`).toBeNull();
+        expect(await readsContent(appKey, `race${i}`)).toBeNull();
+      }
+    }
+  });
+
+  it('a concurrent read-write re-role and agent publication cannot both win', async () => {
+    for (let i = 0; i < 6; i++) {
+      const { agentId } = await agentWithApp(attackerOrgId, `pubrace-${i}`);
+      const attach = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownPublic!.urn, r: 'read' });
+      expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
+
+      await Promise.allSettled([
+        gql(key.attacker!, SET_ROLE, { g: agentId, m: mem.ownPublic!.urn, r: 'read-write' }),
+        gql(key.attacker!, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { id } }`, { r: agentId }),
+      ]);
+
+      const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      const link = await db.agentMemoryItem.findFirst({ where: { agentId, deletedAt: null } });
+      // The invariant: a PUBLIC agent never holds a read-write item.
+      if (agentRow.visibility === 'PUBLIC') {
+        expect(link?.role, `iteration ${i}: PUBLIC agent holding read-write knowledge`).not.toBe('read-write');
+      }
+    }
+  });
+});
+
 describe('#1349 — containment: pre-existing rows are STILL LIVE (residual exposure)', () => {
   // These two pin the EXPOSURE, not a desired behaviour, and they are the
   // reason this PR is `Refs #1349`, not `Closes`. The write gate above stops

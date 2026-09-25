@@ -119,8 +119,14 @@ export async function assertMemoryVisibilityChangeAllowed(
 }
 
 /**
- * Narrowing a memory out of PUBLIC revokes the FOREIGN-tenant agent links that
- * only PUBLIC ever justified (#1349, @codex on PR #1357).
+ * Revoke the agent links that are FOREIGN to a memory's CURRENT tenant, when
+ * the memory is no longer PUBLIC (#1349, @codex on PR #1357).
+ *
+ * Two things make a live link foreign: the memory leaving PUBLIC (the
+ * cross-tenant read exception that justified it is gone), and the memory moving
+ * to a DIFFERENT tenant (links to the source tenant are now outsiders'). Both
+ * are evaluated from the post-write row, so either trigger is handled by the
+ * same predicate.
  *
  * `requireAgentMemoryGrant` lets another tenant attach a PUBLIC memory
  * read-only, because a public audience is exactly what PUBLIC means. That
@@ -140,13 +146,19 @@ export async function assertMemoryVisibilityChangeAllowed(
  * existed, and `addMemoryToAgent` resurrects it if the memory becomes PUBLIC
  * again and someone re-attaches deliberately.
  */
-export async function revokeForeignLinksOnVisibilityNarrowing(
+export async function revokeLinksForeignToTenant(
   db: Db,
-  memory: { id: string; organizationId: string | null; ownerUserId: string | null },
-  nextVisibility: string | null | undefined,
+  memory: { id: string; organizationId: string | null; ownerUserId: string | null; visibility: string | null },
   actor: string | null,
 ): Promise<number> {
-  if (nextVisibility === 'PUBLIC') return 0;
+  // Takes the memory's state AFTER the write (@codex, PR #1357). Classifying
+  // "foreign" against the pre-update row read tenancy from the OLD
+  // organization, so a memory TRANSFERRED to another tenant kept its source
+  // tenant's links alive — they looked same-tenant against the org it had just
+  // left. This is also why the caller must fire on an org change, not only on
+  // a visibility change: a transfer makes existing links foreign without
+  // touching visibility at all.
+  if (memory.visibility === 'PUBLIC') return 0;
   const links = await db.agentMemoryItem.findMany({
     where: { memoryId: memory.id, deletedAt: null },
     select: { id: true, agent: { select: { organizationId: true, ownerUserId: true } } },
