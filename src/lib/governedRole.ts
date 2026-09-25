@@ -249,27 +249,59 @@ export function roleRuleCandidates(role: string): string[] {
 }
 
 /**
- * Resolve the nearest enabled rule for a node role.
+ * What a node role resolves to in a config (#1322 lookup, #1325 H1).
+ *
+ * A DISCRIMINATED result rather than `T | null`, so no enforcement consumer
+ * (#1328/#1330) can mistake a strict refusal for "the parent's rule applies"
+ * or for "no rule, the role is free" — the compiler makes it handle all three
+ * (#1345 review, @copilot).
+ *   - `RULE`: the nearest enabled rule governs the role.
+ *   - `UNDECLARED_UNDER_STRICT`: Holger's H1 — the nearest enabled ancestor
+ *     sets `strictSubRoles`, and the role is not declared, so it is REFUSED;
+ *     `ancestor` is the strict rule, for the refusal message.
+ *   - `NONE`: no rule applies; the role is free.
+ */
+export type NodeRoleResolution<T> =
+  | { kind: 'RULE'; rule: T }
+  | { kind: 'UNDECLARED_UNDER_STRICT'; ancestor: T }
+  | { kind: 'NONE' };
+
+const NO_RULE = { kind: 'NONE' } as const;
+
+/**
+ * Resolve a node role against a config's rules.
  *
  * An exact enabled row wins. Otherwise the lookup removes one dot segment at a
  * time (`spec.rule.detail` -> `spec.rule` -> `spec`). Disabled rows are skipped
  * and the walk continues outward. The INPUT role is intentionally not grammar-
  * validated: `Node.role` is open, while every stored rule key is validated at
  * its own write boundary.
+ *
+ * Strict sub-roles (H1): a role is DECLARED when the config has a row for it,
+ * enabled or not (the rows are the declared-sub-role list). When the walk
+ * lands on an ANCESTOR whose `strictSubRoles` is set and the role itself is
+ * undeclared, the answer is `UNDECLARED_UNDER_STRICT`, never that ancestor's
+ * rule. Strictness is read from the enabled rule the walk reaches: a disabled
+ * rule governs nothing, strictness included.
  */
-export function resolveNodeRoleRule<T extends { role: string; enabled: boolean }>(
+export function resolveNodeRoleRule<T extends { role: string; enabled: boolean; strictSubRoles?: boolean }>(
   role: string | null | undefined,
   rules: readonly T[],
-): T | null {
-  if (!role) return null;
+): NodeRoleResolution<T> {
+  if (!role) return NO_RULE;
+  const declared = new Set(rules.map((rule) => rule.role));
   const enabledByRole = new Map(
     rules.filter((rule) => rule.enabled).map((rule) => [rule.role, rule] as const),
   );
   for (const candidate of roleRuleCandidates(role)) {
     const rule = enabledByRole.get(candidate);
-    if (rule) return rule;
+    if (!rule) continue;
+    if (candidate !== role && rule.strictSubRoles === true && !declared.has(role)) {
+      return { kind: 'UNDECLARED_UNDER_STRICT', ancestor: rule };
+    }
+    return { kind: 'RULE', rule };
   }
-  return null;
+  return NO_RULE;
 }
 
 /**
@@ -283,8 +315,8 @@ export async function resolveMemoryNodeRoleRule(
   db: Pick<PrismaClient, 'memoryConfig'>,
   memoryId: string,
   role: string | null | undefined,
-): Promise<NodeRoleRule | null> {
-  if (!role) return null;
+): Promise<NodeRoleResolution<NodeRoleRule>> {
+  if (!role) return NO_RULE;
   const config = await db.memoryConfig.findUnique({
     where: { memoryId },
     include: { rules: true },

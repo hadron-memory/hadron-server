@@ -172,11 +172,24 @@ describe('#1325 — NodeRoleRule: one row per role, task references fail closed'
       ],
     });
 
-    expect((await resolveMemoryNodeRoleRule(db, memoryId, 'spec.rule.detail'))?.role).toBe(
-      'spec.rule.detail',
-    );
-    expect((await resolveMemoryNodeRoleRule(db, memoryId, 'spec.rule.other'))?.role).toBe('spec');
-    expect(await resolveMemoryNodeRoleRule(db, memoryId, 'special')).toBeNull();
+    const resolved = async (role: string) => {
+      const r = await resolveMemoryNodeRoleRule(db, memoryId, role);
+      return r.kind === 'RULE' ? r.rule.role : r.kind;
+    };
+    expect(await resolved('spec.rule.detail')).toBe('spec.rule.detail');
+    expect(await resolved('spec.rule.other')).toBe('spec');
+    expect(await resolved('special')).toBe('NONE');
+  });
+
+  it('a strict parent refuses an undeclared sub-role from the stored config (#1345 review, H1)', async () => {
+    await db.nodeRoleRule.createMany({
+      data: [
+        { id: generateId(), configId, role: 'review', enabled: true, strictSubRoles: true },
+        { id: generateId(), configId, role: 'review.security', enabled: true },
+      ],
+    });
+    expect((await resolveMemoryNodeRoleRule(db, memoryId, 'review.perf')).kind).toBe('UNDECLARED_UNDER_STRICT');
+    expect(await resolved2(db, memoryId, 'review.security')).toBe('review.security');
   });
 
   it('refuses a task reference without its required marker', async () => {
@@ -252,3 +265,8 @@ describe('#1325 — MemoryConfigTemplateRule: the same reference semantics', () 
     });
   });
 });
+
+async function resolved2(db: Parameters<typeof resolveMemoryNodeRoleRule>[0], memoryId: string, role: string) {
+  const r = await resolveMemoryNodeRoleRule(db, memoryId, role);
+  return r.kind === 'RULE' ? r.rule.role : r.kind;
+}

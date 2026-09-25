@@ -38,13 +38,57 @@ describe('#1322 — dotted role primitives', () => {
       { role: 'review', enabled: true, marker: 'review' },
     ];
 
-    expect(resolveNodeRoleRule('spec.rule', rules)?.marker).toBe('rule');
-    expect(resolveNodeRoleRule('spec.rule.detail', rules)?.marker).toBe('rule');
-    expect(resolveNodeRoleRule('spec.rule.detail.extra', rules)?.marker).toBe('rule');
-    expect(resolveNodeRoleRule('spec.unknown', rules)?.marker).toBe('base');
-    expect(resolveNodeRoleRule('spec..detail', rules)?.marker).toBe('base');
-    expect(resolveNodeRoleRule('special', rules)).toBeNull();
-    expect(resolveNodeRoleRule(null, rules)).toBeNull();
+    const marker = (role: string | null) => {
+      const r = resolveNodeRoleRule(role, rules);
+      return r.kind === 'RULE' ? r.rule.marker : r.kind;
+    };
+    expect(marker('spec.rule')).toBe('rule');
+    expect(marker('spec.rule.detail')).toBe('rule');
+    expect(marker('spec.rule.detail.extra')).toBe('rule');
+    expect(marker('spec.unknown')).toBe('base');
+    expect(marker('spec..detail')).toBe('base');
+    expect(marker('special')).toBe('NONE');
+    expect(marker(null)).toBe('NONE');
+  });
+
+  // #1345 review (@copilot) — Holger's H1: a strict parent REFUSES undeclared
+  // sub-roles instead of lending them its rule.
+  describe('strictSubRoles (H1)', () => {
+    const rules = [
+      { role: 'spec', enabled: true, strictSubRoles: true, marker: 'base' },
+      { role: 'spec.rule', enabled: true, strictSubRoles: false, marker: 'rule' },
+      { role: 'spec.draft', enabled: false, strictSubRoles: false, marker: 'draft-off' },
+      { role: 'review', enabled: true, strictSubRoles: false, marker: 'review' },
+    ];
+    const resolve = (role: string) => resolveNodeRoleRule(role, rules);
+
+    it('an undeclared sub-role of a strict parent is refused, naming the parent', () => {
+      expect(resolve('spec.unknown')).toEqual({ kind: 'UNDECLARED_UNDER_STRICT', ancestor: rules[0] });
+      expect(resolve('spec.a.b')).toEqual({ kind: 'UNDECLARED_UNDER_STRICT', ancestor: rules[0] });
+    });
+
+    it('the strict parent itself, and its declared sub-roles, resolve normally', () => {
+      expect(resolve('spec')).toEqual({ kind: 'RULE', rule: rules[0] });
+      expect(resolve('spec.rule')).toEqual({ kind: 'RULE', rule: rules[1] });
+    });
+
+    it('strictness is the NEAREST enabled rule\'s: a non-strict declared child governs its own descendants', () => {
+      expect(resolve('spec.rule.x')).toEqual({ kind: 'RULE', rule: rules[1] });
+    });
+
+    it('a declared-but-disabled sub-role is declared: it falls back to the strict parent\'s rule, not a refusal', () => {
+      expect(resolve('spec.draft')).toEqual({ kind: 'RULE', rule: rules[0] });
+    });
+
+    it('a disabled strict rule governs nothing, strictness included', () => {
+      const off = [{ role: 'spec', enabled: false, strictSubRoles: true }];
+      expect(resolveNodeRoleRule('spec.unknown', off)).toEqual({ kind: 'NONE' });
+    });
+
+    it('unrelated roles stay free, and a non-strict parent still lends its rule', () => {
+      expect(resolve('special')).toEqual({ kind: 'NONE' });
+      expect(resolve('review.x')).toEqual({ kind: 'RULE', rule: rules[3] });
+    });
   });
 
   it('validates only rule keys: lower-case alphanumeric/dash segments, max 64', () => {
