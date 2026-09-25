@@ -307,6 +307,24 @@ describe('#1316 — controls: what concealment must not change', () => {
     }
   });
 
+  it('a non-denial failure inside the authorization itself propagates, never as not-found', async () => {
+    // The authorization step's OWN fault (here the org-membership lookup) is
+    // not a denial, so it must reach the caller as itself — classifying every
+    // error would turn an outage into a silent "no such memory".
+    const failure = vi
+      .spyOn(db.orgMember, 'findFirst')
+      .mockRejectedValueOnce(new Error('injected authorization db failure'));
+    try {
+      const before = await sideEffects();
+      const result = await gql(key.outsider!, RETRY, { m: mem.knowledge!.urn });
+      expect(code(result)).toBe('INTERNAL_SERVER_ERROR');
+      expect(result.errors![0]!.message).toContain('injected authorization db failure');
+      expect(await sideEffects()).toEqual(before);
+    } finally {
+      failure.mockRestore();
+    }
+  });
+
   it('a DB fault while resolving a read ref propagates as a fault, never as not-found', async () => {
     const failure = vi.spyOn(db.memory, 'findFirst').mockRejectedValueOnce(new Error('injected resolve db failure'));
     try {
