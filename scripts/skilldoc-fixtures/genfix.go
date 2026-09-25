@@ -152,6 +152,39 @@ func collisionCases() []kase {
 	}
 }
 
+// reservedCases are the `lintReserved` inputs (#1315), authored here and
+// upserted by name. Plain spellings only: Go folds with x/text/collate and the
+// server with ICU, and the two differ on exotic code points that the name
+// grammar already refuses (hadron-cli#712), so an exotic case would pin a
+// table-version difference rather than the rule.
+func reservedCases() []kase {
+	node := func(exports map[string]any) map[string]any {
+		return map[string]any{
+			"urn": "hrn:node:acme.com:mem:tasks:x", "loc": "tasks:x", "memoryUrn": "hrn:mem:acme.com:mem",
+			"isRunnable": true, "content": "# Do the thing\n\nSteps.",
+			"properties": map[string]any{"exports": exports},
+		}
+	}
+	decl := func(name string) map[string]any {
+		return map[string]any{"name": name, "description": "Do the thing. Use when you must do the thing.", "enable": true}
+	}
+	return []kase{
+		{"name": "synced is reserved for claudeSkill", "node": node(map[string]any{"claudeSkill": decl("synced")})},
+		{"name": "the reservation folds case", "node": node(map[string]any{"claudeSkill": decl("Synced")}),
+			"why": "both sides fold at primary strength (ICU / x/text/collate); the grammar also refuses the capital, so both rules fire"},
+		{"name": "a padded synced is judged on the trimmed name", "node": node(map[string]any{"claudeSkill": decl(" synced ")}),
+			"why": "the planner exports under the trimmed name, so the reservation is checked against what it writes (#1318)"},
+		{"name": "synced is not reserved for codexSkill", "node": node(map[string]any{"codexSkill": decl("synced")}),
+			"why": "the reservation is Claude's, not a global ban"},
+		{"name": "both hosts declare synced, only Claude refuses", "node": node(map[string]any{
+			"claudeSkill": decl("synced"), "codexSkill": decl("synced")})},
+		{"name": "codex evaluates the name but does not reserve it", "node": node(map[string]any{"codexSkill": decl("Synced")}),
+			"why": "a POSITIVE control that the Codex column is evaluated: the capital trips skill-name-invalid there, the reservation does not"},
+		{"name": "a name containing synced is not reserved", "node": node(map[string]any{"claudeSkill": decl("synced-notes")}),
+			"why": "the whole name is matched, never a substring"},
+	}
+}
+
 // collisionFindings runs Go's LintCollisions over a case's nodes and writes
 // the findings in the fixture's lower-camel shape. `memory` is omitted, as it
 // always was in this section: every input shares one memory.
@@ -326,6 +359,46 @@ func main() {
 	}
 	doc["lintUnknownHostKeys"], _ = json.Marshal(uk)
 	doc["lintUnknownHostKeysSourceCommit"], _ = json.Marshal(commit)
+
+	// ── lintReserved ────────────────────────────────────────────────────────
+	// #1315: a host-reserved skill name (Claude's `synced`). A section of its
+	// own rather than cases upserted into `lint`, which stays at
+	// `lintSourceCommit`: one stamp for cases generated at two revisions would
+	// misstate one of them. Inputs are authored in reservedCases(); findings
+	// come PER HOST from Go's LintFor over every row of skilldoc.Hosts — never
+	// skilldoc.Lint, the Claude-only wrapper, under which a codexSkill
+	// declaration is not evaluated at all (PR #1343 review). Needs
+	// hadron-cli#712 or later for the rule to exist.
+	var lr []kase
+	rb, _ := json.Marshal(upsert(decodeOrEmpty(doc, "lintReserved"), reservedCases()...))
+	if err := json.Unmarshal(rb, &lr); err != nil {
+		panic(err)
+	}
+	// Findings PER HOST, from LintFor over every row of Go's host table. The
+	// first version called skilldoc.Lint, which is the Claude-only wrapper, so
+	// a codexSkill declaration was never evaluated by the reference at all and
+	// its "clean" verdict was an undeclared-node result — a parity control that
+	// could not fail (@codex / @copilot, PR #1343).
+	for _, c := range lr {
+		n := c["node"].(map[string]any)
+		props, _ := n["properties"].(map[string]any)
+		node := skilldoc.Node{
+			URN: n["urn"].(string), Loc: n["loc"].(string), MemoryURN: n["memoryUrn"].(string),
+			IsRunnable: n["isRunnable"].(bool), Content: n["content"].(string), Properties: props,
+		}
+		byHost := map[string]any{}
+		for _, h := range skilldoc.Hosts {
+			findings := []any{}
+			for _, f := range skilldoc.LintFor(node, h) {
+				findings = append(findings, map[string]any{"rule": f.Rule, "severity": f.Severity, "message": f.Message})
+			}
+			byHost[h.Key] = findings
+		}
+		c["findingsByHost"] = byHost
+		delete(c, "findings") // the pre-review single-host shape
+	}
+	doc["lintReserved"], _ = json.Marshal(lr)
+	doc["lintReservedSourceCommit"], _ = json.Marshal(commit)
 
 	// The commit is an ARGUMENT, never a literal. Hardcoding it meant the next
 	// regeneration at a newer revision would still stamp the old one, and
