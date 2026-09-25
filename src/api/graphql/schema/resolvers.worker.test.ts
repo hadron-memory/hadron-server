@@ -828,6 +828,234 @@ describe('worker / workers queries', () => {
   });
 });
 
+describe('#1344 — heldWorkers across readable Apps', () => {
+  let workerSeq = 0;
+
+  async function createHeld(
+    appId: string,
+    name: string,
+    heldByUserId: string | null,
+    over: { heldAt?: Date | null; retiredAt?: Date | null; createdAt?: Date } = {},
+  ) {
+    workerSeq += 1;
+    return db.worker.create({
+      data: {
+        id: generateId(),
+        appId,
+        agentId: roleAgent.id,
+        name,
+        slug: `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${workerSeq}`,
+        role: 'backend-engineer',
+        heldByUserId,
+        heldAt: over.heldAt === undefined ? new Date() : over.heldAt,
+        retiredAt: over.retiredAt ?? null,
+        ...(over.createdAt ? { createdAt: over.createdAt } : {}),
+      },
+    });
+  }
+
+  it('supports self and other-user refs, with App identity and deterministic pagination', async () => {
+    await db.user.update({
+      where: { id: admin.id },
+      data: { handle: 'held-self', email: 'held-self@example.com' },
+    });
+    await db.user.update({
+      where: { id: appMember.id },
+      data: { handle: 'held-other', email: 'held-other@example.com' },
+    });
+    const first = await createHeld(app.id, 'First', admin.id, {
+      createdAt: new Date('2026-01-01T00:00:00Z'),
+    });
+    const second = await createHeld(app.id, 'Second', appMember.id, {
+      createdAt: new Date('2026-01-02T00:00:00Z'),
+    });
+    await createHeld(app.id, 'Third', appMember.id, {
+      createdAt: new Date('2026-01-03T00:00:00Z'),
+    });
+
+    const self = await Q.heldWorkers({}, { userRef: 'hrn:user:held-self' }, ctx(admin.id));
+    expect(self.total).toBe(1);
+    expect(self.items[0].id).toBe(first.id);
+
+    const other = await Q.heldWorkers(
+      {},
+      { userRef: 'held-other@example.com', limit: 1, offset: 1 },
+      ctx(admin.id),
+    );
+    expect(other.total).toBe(2);
+    expect(other.items.map((row: { id: string }) => row.id)).not.toContain(second.id);
+    expect(other.items).toHaveLength(1);
+    expect(await W.appUrn(other.items[0], {}, ctx(admin.id))).toBe(app.urn);
+  });
+
+  it('unions org-owned and user-owned Apps, but only where the viewer passes the shared gate', async () => {
+    const personal = await db.app.create({
+      data: {
+        id: generateId(),
+        ownerUserId: admin.id,
+        name: 'Personal Team',
+        urn: `held-owner-${Date.now()}:personal`,
+      },
+    });
+    const orgWorker = await createHeld(app.id, 'Org Held', appMember.id);
+    const personalWorker = await createHeld(personal.id, 'Personal Held', appMember.id);
+
+    const ownerView = await Q.heldWorkers({}, { userRef: appMember.id }, ctx(admin.id));
+    expect(new Set(ownerView.items.map((row: { id: string }) => row.id))).toEqual(
+      new Set([orgWorker.id, personalWorker.id]),
+    );
+
+    // Direct App membership admits the org App, but never somebody else's
+    // strict-owner personal App.
+    const holderView = await Q.heldWorkers({}, { userRef: appMember.id }, ctx(appMember.id));
+    expect(holderView.items.map((row: { id: string }) => row.id)).toEqual([orgWorker.id]);
+
+    // Platform authority applies to org Apps, never to another user's
+    // strict-owner App (spec 047).
+    const platformAdmin: Context = { db, userId: outsider.id, roles: ['ADMIN'] };
+    const platformView = await Q.heldWorkers({}, { userRef: appMember.id }, platformAdmin);
+    expect(platformView.items.map((row: { id: string }) => row.id)).toEqual([orgWorker.id]);
+  });
+
+  it('a pure App key is bounded to its own App; a foreign key sees no relation', async () => {
+    const held = await createHeld(app.id, 'Key Scoped', admin.id);
+    const own = await Q.heldWorkers({}, { userRef: admin.id }, ctx(undefined, app.id));
+    expect(own.items.map((row: { id: string }) => row.id)).toEqual([held.id]);
+
+    const foreign = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Foreign Key', urn: `${org.urn}:foreign-key` },
+    });
+    expect(await Q.heldWorkers({}, { userRef: admin.id }, ctx(undefined, foreign.id))).toEqual({
+      items: [],
+      total: 0,
+    });
+  });
+
+  it('admits direct App participants and org contributors; outsiders and org readers see an empty page', async () => {
+    const worker = await createHeld(app.id, 'Shared', admin.id);
+    for (const viewer of [appReader.id, contrib.id]) {
+      const page = await Q.heldWorkers({}, { userRef: admin.id }, ctx(viewer));
+      expect(page.total).toBe(1);
+      expect(page.items[0].id).toBe(worker.id);
+    }
+    for (const viewer of [outsider.id, orgReader.id]) {
+      const page = await Q.heldWorkers({}, { userRef: admin.id }, ctx(viewer));
+      expect(page).toEqual({ items: [], total: 0 });
+    }
+  });
+
+  it('revoked org membership immediately removes rows, totals, and page membership', async () => {
+    await createHeld(app.id, 'Revoked Scope', admin.id);
+    expect((await Q.heldWorkers({}, { userRef: admin.id }, ctx(contrib.id))).total).toBe(1);
+    await db.orgMember.updateMany({
+      where: { organizationId: org.id, userId: contrib.id },
+      data: { deletedAt: new Date() },
+    });
+    expect(await Q.heldWorkers({}, { userRef: admin.id }, ctx(contrib.id))).toEqual({
+      items: [],
+      total: 0,
+    });
+  });
+
+  it('does not disclose private holder state through inclusion, even when Worker identity is otherwise reachable', async () => {
+    await db.user.update({ where: { id: admin.id }, data: { handle: 'visible-target' } });
+    const hidden = await createHeld(app.id, 'Visible Identity', admin.id);
+    // Worker identity fields are attribution-level and can be reached through
+    // the wider historical Session.worker surface; working state is not.
+    expect(await W.urn(hidden, {}, ctx(outsider.id))).toContain('visible-identity');
+    expect(await W.heldByUserId(hidden, {}, ctx(outsider.id))).toBeNull();
+    expect(await W.appUrn(hidden, {}, ctx(outsider.id))).toBeNull();
+    expect(await Q.heldWorkers({}, { userRef: 'visible-target' }, ctx(outsider.id))).toEqual({
+      items: [],
+      total: 0,
+    });
+    expect(await Q.heldWorkers({}, { userRef: 'missing-target' }, ctx(outsider.id))).toEqual({
+      items: [],
+      total: 0,
+    });
+  });
+
+  it('uses current holder only: released and reassigned workers do not match the former holder', async () => {
+    const released = await createHeld(app.id, 'Released', appMember.id);
+    const reassigned = await createHeld(app.id, 'Reassigned', appMember.id);
+    await db.worker.update({
+      where: { id: released.id },
+      data: { heldByUserId: null, heldAt: null },
+    });
+    await db.worker.update({
+      where: { id: reassigned.id },
+      data: { heldByUserId: admin.id, heldAt: new Date() },
+    });
+
+    expect(await Q.heldWorkers({}, { userRef: appMember.id }, ctx(admin.id))).toEqual({
+      items: [],
+      total: 0,
+    });
+    const current = await Q.heldWorkers({}, { userRef: admin.id }, ctx(admin.id));
+    expect(current.items.map((row: { id: string }) => row.id)).toContain(reassigned.id);
+  });
+
+  it('preserves null heldAt and retired lifecycle semantics', async () => {
+    const nullStamp = await createHeld(app.id, 'Null Stamp', appMember.id, { heldAt: null });
+    const retired = await createHeld(app.id, 'Retired Held', appMember.id, {
+      retiredAt: new Date(),
+    });
+    const active = await Q.heldWorkers({}, { userRef: appMember.id }, ctx(admin.id));
+    expect(active.items.map((row: { id: string }) => row.id)).toEqual([nullStamp.id]);
+    expect(await W.heldAt(active.items[0], {}, ctx(admin.id))).toBeNull();
+
+    const all = await Q.heldWorkers(
+      {},
+      { userRef: appMember.id, includeRetired: true },
+      ctx(admin.id),
+    );
+    expect(new Set(all.items.map((row: { id: string }) => row.id))).toEqual(
+      new Set([nullStamp.id, retired.id]),
+    );
+  });
+
+  it('preloads multiple-live-session activity once for the page, including held-but-idle workers', async () => {
+    const driven = await createHeld(app.id, 'Driven', appMember.id);
+    const idle = await createHeld(app.id, 'Idle', appMember.id);
+    const now = new Date();
+    await db.session.createMany({
+      data: [
+        {
+          id: generateId(), appId: app.id, workerId: driven.id, userId: appMember.id,
+          startedAt: now, updatedAt: now,
+        },
+        {
+          id: generateId(), appId: app.id, workerId: driven.id, userId: appMember.id,
+          startedAt: new Date(now.getTime() - 60_000),
+          updatedAt: new Date(now.getTime() - 30_000),
+        },
+        {
+          id: generateId(), appId: app.id, workerId: idle.id, userId: appMember.id,
+          startedAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+          updatedAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+          endedAt: null,
+        },
+      ],
+    });
+
+    const raw = vi.spyOn(db, '$queryRaw');
+    const appReads = vi.spyOn(db.app, 'findUnique');
+    const requestCtx = ctx(admin.id);
+    const page = await Q.heldWorkers({}, { userRef: appMember.id }, requestCtx);
+    expect(raw).toHaveBeenCalledTimes(1);
+    const byName = new Map(page.items.map((row: { name: string }) => [row.name, row]));
+    expect(await W.hasLiveSession(byName.get('Driven'), {}, requestCtx)).toBe(true);
+    expect(await W.lastActiveAt(byName.get('Driven'), {}, requestCtx)).toBeInstanceOf(Date);
+    expect(await W.hasLiveSession(byName.get('Idle'), {}, requestCtx)).toBe(false);
+    expect(await W.lastActiveAt(byName.get('Idle'), {}, requestCtx)).toBeInstanceOf(Date);
+    await W.appUrn(byName.get('Driven'), {}, requestCtx, { operation: { operation: 'query' } });
+    expect(raw).toHaveBeenCalledTimes(1);
+    expect(appReads).not.toHaveBeenCalled();
+    raw.mockRestore();
+    appReads.mockRestore();
+  });
+});
+
 describe('Worker field resolvers', () => {
   it('agent and app resolve the casting endpoints', async () => {
     const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });

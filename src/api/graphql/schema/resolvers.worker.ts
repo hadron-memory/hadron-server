@@ -46,9 +46,9 @@ import {
   type Context,
   requireOrgRole,
   requireOwnerOrOrgRole,
-  isAppParticipant,
   isNonReaderAppMember,
   clampListTake,
+  resolveUserRefArg,
 } from './resolvers.helpers.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
@@ -123,17 +123,66 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
  * bounded to the support session's single org (#876 class).
  */
 export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
-  if (ctx.impersonation) {
-    if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
-      throw forbidden();
-    }
-  }
+  const readable = await ctx.db.app.findFirst({
+    // AND, never object spread: the pure App-key predicate itself contains an
+    // `id`, and spreading it beside the target id would overwrite the target
+    // selector and authorize a foreign worker from the key's own App.
+    where: { AND: [{ id: app.id }, workerReadableAppWhere(ctx)] },
+    select: { id: true },
+  });
+  if (!readable) throw forbidden();
+}
+
+/**
+ * Database-filter form of the worker-read audience. This is shared by the
+ * point-read gate above and #1344's cross-App holder list so row membership,
+ * counts, and pagination cannot drift from the authorization applied to one
+ * worker.
+ *
+ * The branches mirror `isAppParticipant` exactly. User-owned Apps are strict
+ * owner-only and never flow through impersonation. Org-owned Apps admit a
+ * direct AppMember at any role, a live CONTRIBUTOR+ org member, or a platform
+ * ADMIN/OWNER. Pure App keys are restricted to their own App; hybrid
+ * user+selection principals are judged solely as users.
+ */
+export function workerReadableAppWhere(ctx: Context): Prisma.AppWhereInput {
   if (!ctx.userId) {
-    if (ctx.appId && ctx.appId === app.id) return;
-    throw forbidden();
+    return ctx.appId ? { id: ctx.appId } : { id: { in: [] } };
   }
-  if (await isAppParticipant(ctx, app)) return;
-  throw forbidden();
+
+  const userId = ctx.userId;
+  const orgScope: Prisma.AppWhereInput = ctx.impersonation
+    ? { organizationId: ctx.impersonation.orgId }
+    : { organizationId: { not: null } };
+  const orgAccess: Prisma.AppWhereInput =
+    ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')
+      ? orgScope
+      : {
+          ...orgScope,
+          OR: [
+            { members: { some: { userId } } },
+            {
+              organization: {
+                is: {
+                  members: {
+                    some: {
+                      userId,
+                      deletedAt: null,
+                      role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        };
+
+  return {
+    OR: [
+      ...(ctx.impersonation ? [] : [{ ownerUserId: userId }]),
+      orgAccess,
+    ],
+  };
 }
 
 type TeamAgentRow = {
@@ -370,9 +419,9 @@ export async function resolveWorkerIdByNameGated(
   } catch (e) {
     // NARROW catch (PR #1019 review, Copilot; review:narrow-catch-blocks, the
     // convention requireWorkerStaffAccess above already follows): collapse ONLY
-    // the expected denial. `requireWorkerReadAccess` reaches the database via
-    // `isAppParticipant`, so a blanket catch turns a connection failure inside
-    // that lookup into "no such worker" — an outage reported as a missing row,
+    // the expected denial. `requireWorkerReadAccess` evaluates its shared App
+    // predicate in the database, so a blanket catch turns a connection failure
+    // inside that lookup into "no such worker" — an outage reported as a missing row,
     // on the exact surface whose whole contract is that absence and denial look
     // identical. Deliberately opposite reasoning to the collapse this function
     // exists for: hiding WHY a caller was refused is the point; hiding THAT the
@@ -1391,6 +1440,72 @@ export const workerQueries = {
   },
 
   /**
+   * Workers CURRENTLY held by one user across every App this caller may read
+   * (#1344). App authorization is embedded in BOTH the item and count queries
+   * before the holder predicate can influence membership or pagination.
+   * Unknown users collapse to the same empty page as no visible holds, so the
+   * surface is not a cross-tenant account oracle.
+   */
+  heldWorkers: async (
+    _: unknown,
+    {
+      userRef,
+      includeRetired,
+      limit,
+      offset,
+    }: { userRef: string; includeRetired?: boolean | null; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => {
+    let heldByUserId: string;
+    try {
+      heldByUserId = await resolveUserRefArg(ctx.db, { ref: userRef });
+    } catch (err) {
+      if (err instanceof GraphQLError && err.extensions?.code === 'NOT_FOUND') {
+        return { items: [], total: 0 };
+      }
+      throw err;
+    }
+
+    const where: Prisma.WorkerWhereInput = {
+      heldByUserId,
+      ...(includeRetired ? {} : { retiredAt: null }),
+      app: {
+        is: {
+          // Explicit AND: workerReadableAppWhere may itself carry a selector
+          // (pure App key). Never let object spread replace lifecycle scope.
+          AND: [{ deletedAt: null }, workerReadableAppWhere(ctx)],
+        },
+      },
+    };
+    const [rows, total] = await Promise.all([
+      ctx.db.worker.findMany({
+        where,
+        include: { app: { select: { urn: true } } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: clampListTake(limit),
+        skip: offset ?? 0,
+      }),
+      ctx.db.worker.count({ where }),
+    ]);
+
+    const activity = await loadWorkersActivity(ctx, rows.map((row) => row.id));
+    primeHeldWorkerCaches(
+      ctx,
+      rows.map((row) => ({ appId: row.appId, appUrn: row.app.urn })),
+    );
+    return {
+      total,
+      items: rows.map((row) => ({
+        ...row,
+        __heldWorkerActivity: activity.get(row.id) ?? {
+          hasLiveSession: false,
+          lastActiveAt: null,
+        },
+      })),
+    };
+  },
+
+  /**
    * castWorkerPreview — #964: the dry-run for the one IRREVERSIBLE act in the
    * team feature (a cast name is permanent, cor:agt:020:02). A QUERY, not a
    * dryRun flag: a Boolean argument cannot switch a GraphQL return type, and
@@ -1456,7 +1571,108 @@ export const workerQueries = {
 export type WorkerActivity = { hasLiveSession: boolean; lastActiveAt: Date | null };
 
 /**
- * Driving state for EVERY worker of one App, in three queries (hadron-cli#487).
+ * Database-side activity fold shared by one-App rosters and the cross-App
+ * held-workers page. `scope` must constrain `w`; sessions remain unbounded but
+ * the output is one aggregate row per worker.
+ *
+ * This SQL is deliberately the database twin of `lib/sessionActivity.ts`:
+ * the differential matrix in resolvers.worker.test.ts pins them together. A
+ * live session is open AND inside its type-specific idle window; deleted
+ * sessions do not count; reaper writes are not genuine activity; and activity
+ * after an end is capped at the end instant.
+ */
+async function queryWorkerActivity(
+  ctx: Context,
+  scope: Prisma.Sql,
+  now: Date,
+): Promise<Map<string, WorkerActivity>> {
+  // AGGREGATED IN THE DATABASE, one row per worker (PR #1086 review, Codex
+  // P2). This SQL is a SECOND implementation of `lib/sessionActivity.ts`, and
+  // that is deliberate: one derivation aggregates unbounded history inside
+  // the query; the other works on rows already in hand for the takeover
+  // prompt. The differential test in resolvers.worker.test.ts pins them to the
+  // same answer.
+  //
+  // The first implementation fetched every session and folded in JavaScript.
+  // Session history is unbounded, so latency and heap grew with the App's
+  // lifetime. This query's output is O(workers), not O(sessions).
+  //
+  // Three rules are load-bearing:
+  //  - deleted sessions do not count, matching the bind gate;
+  //  - ANY recent open session makes the worker live (`force` permits several);
+  //  - auto-expiry's update is not genuine driver activity.
+  //
+  // #1114: bind naive-UTC literals. Prisma binds JS Date as timestamptz while
+  // these columns are timestamp WITHOUT time zone; a bare comparison coerces
+  // the column using the session timezone and is only accidentally correct on
+  // a UTC server (findings:prisma-naive-timestamp-raw-sql).
+  const cut = idleCutoffs(now);
+  const rows = await ctx.db.$queryRaw<
+    { workerId: string; live: boolean; lastActiveAt: Date | null }[]
+  >`
+    SELECT s.worker_id AS "workerId",
+           -- LIVE IS DERIVED, not stored. An open row proves only that nobody
+           -- closed it, so activity must also fall inside the type's idle
+           -- window (cor:agt:020:11 — reader and binder share one predicate).
+           bool_or(
+             s.ended_at IS NULL
+             AND GREATEST(
+                   s.started_at,
+                   CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
+                   ue.max_created
+                 ) >= (CASE s.type::text
+                         WHEN 'DEVELOPER'  THEN ${toNaiveUtc(cut.DEVELOPER)}::timestamp
+                         WHEN 'CHATBOT'    THEN ${toNaiveUtc(cut.CHATBOT)}::timestamp
+                         WHEN 'AUTOMATION' THEN ${toNaiveUtc(cut.AUTOMATION)}::timestamp
+                         WHEN 'EDGE'       THEN ${toNaiveUtc(cut.EDGE)}::timestamp
+                       END)
+           ) AS "live",
+           max(LEAST(GREATEST(
+             s.started_at,
+             -- The reaper advances updated_at while setting auto_expired_at.
+             -- Counting that maintenance write would make an abandoned worker
+             -- look recently driven; omit it and safely under-report instead.
+             CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
+             ue.max_created
+           -- Activity cannot postdate the end. updateSession and late usage
+           -- attribution may write after ended_at, but neither means someone
+           -- was still driving the worker. Postgres LEAST ignores a null end,
+           -- so an open session remains uncapped.
+           ), s.ended_at)) AS "lastActiveAt"
+    FROM sessions s
+    JOIN workers w ON w.id = s.worker_id
+    LEFT JOIN LATERAL (
+      SELECT max(e.created_at) AS max_created
+      FROM usage_events e
+      WHERE e.session_id = s.id
+    ) ue ON true
+    WHERE ${scope} AND s.deleted_at IS NULL
+    GROUP BY s.worker_id
+  `;
+  return new Map<string, WorkerActivity>(
+    rows.map((row) => [
+      row.workerId,
+      { hasLiveSession: row.live, lastActiveAt: row.lastActiveAt },
+    ]),
+  );
+}
+
+/** One aggregate query for the bounded #1344 page, never one per App/worker. */
+async function loadWorkersActivity(
+  ctx: Context,
+  workerIds: string[],
+  now = new Date(),
+): Promise<Map<string, WorkerActivity>> {
+  if (workerIds.length === 0) return new Map();
+  return queryWorkerActivity(
+    ctx,
+    Prisma.sql`w.id IN (${Prisma.join(workerIds)})`,
+    now,
+  );
+}
+
+/**
+ * Driving state for EVERY worker of one App (hadron-cli#487).
  *
  * Ada's finding is that a coordinator cannot tell "dispatched and pending" from
  * "dispatched into the void": ten issues went to a worker whose entire history
@@ -1486,107 +1702,7 @@ export async function loadAppWorkerActivity(
   const cached = cache?.get(appId);
   if (cached) return cached;
 
-  const pending = (async () => {
-    // AGGREGATED IN THE DATABASE, one row per worker (PR #1086 review, Codex
-    // P2).
-    //
-    // This SQL is a SECOND implementation of `lib/sessionActivity.ts`, and that
-    // is deliberate rather than an oversight: one derivation must aggregate
-    // inside the query (unbounded history), the other works on rows already in
-    // hand (the takeover prompt). Neither can be expressed as the other. What
-    // makes two copies survivable is that they are pinned to agree — see the
-    // differential test in resolvers.worker.test.ts, which runs a matrix of
-    // session shapes through both and requires the same instant. Every rule
-    // below therefore exists twice, and BOTH times in this PR a review finding
-    // had to be applied to both. The first draft fetched every non-deleted session of every worker in
-    // the App and folded them in JavaScript — session history is UNBOUNDED, so
-    // latency, heap and the `IN (…)` parameter count grew with the App's
-    // lifetime on every roster read, and a single-worker read paid the same
-    // price. The output here is O(workers), not O(sessions).
-    //
-    // Three points the SQL encodes, each of which is a rule rather than a
-    // detail:
-    //
-    //  - `deleted_at IS NULL` matches the predicate `startSession` refuses
-    //    WORKER_TAKEN on, exactly (PR #1000 review, Codex P2). Without it a
-    //    roster calls a worker busy whose only live session is soft-deleted,
-    //    while binding it actually succeeds. Liveness a reader SEES and
-    //    liveness the server ENFORCES must be one predicate.
-    //  - `bool_or(ended_at IS NULL)` — ANY open session makes the worker live.
-    //    `force` lets several coexist, and the most recent row is not
-    //    necessarily the open one.
-    //  - `CASE WHEN auto_expired_at IS NULL THEN updated_at END` — see below.
-    //    `GREATEST` ignores NULL arguments in Postgres, so a dropped term is
-    //    simply not considered rather than poisoning the row.
-    // #1114 — per-type cutoffs for the DERIVED liveness below, bound as
-    // naive-UTC literals rather than JS Dates. Prisma binds a Date as
-    // `timestamptz`, and these columns are `timestamp WITHOUT time zone`, so a
-    // bare comparison coerces the COLUMN using the session zone — silently
-    // correct on a UTC server and wrong everywhere else
-    // (findings:prisma-naive-timestamp-raw-sql).
-    const cut = idleCutoffs(now);
-    const rows = await ctx.db.$queryRaw<
-      { workerId: string; live: boolean; lastActiveAt: Date | null }[]
-    >`
-      SELECT s.worker_id AS "workerId",
-             -- #1114: LIVE IS DERIVED, not stored. It was bool_or(ended_at IS
-             -- NULL), which was only ever true because a reaper eventually
-             -- ended abandoned sessions — an inference from silence, written
-             -- into the record. With that rule gone, an open row proves only
-             -- that nobody CLOSED it, so the reader computes "is anyone
-             -- driving this" from the same three heartbeat inputs the takeover
-             -- gate uses (cor:agt:020:11 — one predicate, or the roster and
-             -- the binder disagree about the same worker in the same second).
-             bool_or(
-               s.ended_at IS NULL
-               AND GREATEST(
-                     s.started_at,
-                     CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
-                     ue.max_created
-                   ) >= (CASE s.type::text
-                           WHEN 'DEVELOPER'  THEN ${toNaiveUtc(cut.DEVELOPER)}::timestamp
-                           WHEN 'CHATBOT'    THEN ${toNaiveUtc(cut.CHATBOT)}::timestamp
-                           WHEN 'AUTOMATION' THEN ${toNaiveUtc(cut.AUTOMATION)}::timestamp
-                           WHEN 'EDGE'       THEN ${toNaiveUtc(cut.EDGE)}::timestamp
-                         END)
-             ) AS "live",
-             max(LEAST(GREATEST(
-               s.started_at,
-               -- The REAPER ends an idle session with an updateMany, and
-               -- Prisma's @updatedAt advances updated_at to the reaping
-               -- instant (#930). Folding that in would report the background
-               -- cleanup as the worker's last drive — shifting it forward by
-               -- the whole idle window, and making an ABANDONED worker read as
-               -- recently driven, which is the exact signal this field exists
-               -- to give (PR #1086 review, Codex P2). auto_expired_at is set
-               -- on precisely those rows, so they fall back to started_at and
-               -- their usage events. That UNDER-reports — the last genuine
-               -- heartbeat was overwritten by the reap and is unrecoverable —
-               -- and under-reporting is the safe direction here: it makes an
-               -- abandoned name look more idle, never less.
-               CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
-               ue.max_created
-             -- ACTIVITY CANNOT POSTDATE THE END (PR #1086 review, Codex P2).
-             -- updateSession deliberately permits writes after ended_at, so a
-             -- merge landing days later attributes a PR to a finished stint
-             -- and drags updated_at with it; usage events can be attributed
-             -- late for the same reason. Neither is someone driving the
-             -- worker. LEAST ignores NULL, so an OPEN session is uncapped.
-             ), s.ended_at)) AS "lastActiveAt"
-      FROM sessions s
-      JOIN workers w ON w.id = s.worker_id
-      LEFT JOIN LATERAL (
-        SELECT max(e.created_at) AS max_created
-        FROM usage_events e
-        WHERE e.session_id = s.id
-      ) ue ON true
-      WHERE w.app_id = ${appId} AND s.deleted_at IS NULL
-      GROUP BY s.worker_id
-    `;
-    return new Map<string, WorkerActivity>(
-      rows.map((r) => [r.workerId, { hasLiveSession: r.live, lastActiveAt: r.lastActiveAt }]),
-    );
-  })();
+  const pending = queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${appId}`, now);
 
   cache?.set(appId, pending);
   return pending;
@@ -1622,6 +1738,29 @@ async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boole
     cache.set(appId, pending);
   }
   return pending;
+}
+
+/**
+ * Seed request caches only with facts already proved by heldWorkers' shared
+ * authorization predicate. This removes per-App field-resolution queries from
+ * the cross-App page without changing what any other Worker surface may see.
+ */
+function primeHeldWorkerCaches(
+  ctx: Context,
+  apps: Array<{ appId: string; appUrn: string }>,
+): void {
+  type BoolCache = Map<string, Promise<boolean>>;
+  type UrnCache = Map<string, Promise<string | null>>;
+  const holder = ctx as Context & {
+    workerInternalsCache?: BoolCache;
+    workerAppUrnCache?: UrnCache;
+  };
+  const access = (holder.workerInternalsCache ??= new Map());
+  const urns = (holder.workerAppUrnCache ??= new Map());
+  for (const app of apps) {
+    access.set(app.appId, Promise.resolve(true));
+    urns.set(app.appId, Promise.resolve(app.appUrn));
+  }
 }
 
 /**
@@ -1754,6 +1893,24 @@ export const workerFieldResolvers = {
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.name ?? null) : null,
   },
   Worker: {
+    /**
+     * Scalar App identity for cross-App worker pages (#1344). Unlike
+     * `Worker.app`, this never returns an App object (and therefore cannot hand
+     * an AppMember-only caller App.keys/members through nested resolvers).
+     * Masked behind the worker read gate because historical Session.worker
+     * reaches this type through a wider audience.
+     */
+    appUrn: async (
+      worker: { appId: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      return loadAppUrnForWorker(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+    },
     /**
      * The worker's URN (#991). See `resolveWorkerUrnField`.
      *
@@ -1934,12 +2091,13 @@ export const workerFieldResolvers = {
      * and that conflation IS hadron-cli#487.
      */
     hasLiveSession: async (
-      worker: { id: string; appId: string },
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<boolean | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.hasLiveSession;
       const activity = await loadAppWorkerActivity(ctx, worker.appId, {
         memoize: info?.operation?.operation === 'query',
       });
@@ -1959,12 +2117,13 @@ export const workerFieldResolvers = {
      * shows and the one the reaper acts on. Masked on deny, as above.
      */
     lastActiveAt: async (
-      worker: { id: string; appId: string },
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<Date | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.lastActiveAt;
       const activity = await loadAppWorkerActivity(ctx, worker.appId, {
         memoize: info?.operation?.operation === 'query',
       });
