@@ -369,12 +369,23 @@ export const memoryConfigTemplateQueries = {
     };
     const take = clampListTake(limit);
     const skip = Math.max(0, offset ?? 0);
-    const [total, items] = await Promise.all([
+    const [total, page] = await Promise.all([
       ctx.db.memoryConfigTemplate.count({ where }),
       take === 0
         ? Promise.resolve([] as MemoryConfigTemplate[])
         : ctx.db.memoryConfigTemplate.findMany({ where, orderBy: [{ name: 'asc' }, { id: 'asc' }], take, skip }),
     ]);
+    // The page's rules in ONE query, not one per template (#1369 review): a
+    // 200-item page would otherwise be 200 round trips for `rules`.
+    const rules = page.length
+      ? await ctx.db.memoryConfigTemplateRule.findMany({
+          where: { templateId: { in: page.map((t) => t.id) } },
+          orderBy: [{ templateId: 'asc' }, { role: 'asc' }],
+        })
+      : [];
+    const byTemplate = new Map<string, MemoryConfigTemplateRule[]>(page.map((t) => [t.id, []]));
+    for (const r of rules) byTemplate.get(r.templateId)!.push(r);
+    const items: TemplateWithRules[] = page.map((t) => ({ ...t, rules: byTemplate.get(t.id)! }));
     return { items, total };
   },
 };
@@ -478,8 +489,9 @@ export const memoryConfigTemplateFieldResolvers = {
     // The server's row id is not exposed anywhere else, so a server-owned template has none here either.
     ownerId: (t: MemoryConfigTemplate) => t.organizationId ?? t.ownerUserId ?? t.appId ?? null,
     // Reached only through the manage gate; the rows are that template's. A
-    // mutation hands its in-transaction snapshot; a read queries afresh (its
-    // revision still guards any write made from it).
+    // mutation hands its in-transaction snapshot and the list its batched
+    // page; a single read queries afresh (its revision still guards any write
+    // made from it).
     rules: (t: TemplateWithRules, _: unknown, ctx: Context) =>
       t.rules ?? ctx.db.memoryConfigTemplateRule.findMany({ where: { templateId: t.id }, orderBy: { role: 'asc' } }),
   },

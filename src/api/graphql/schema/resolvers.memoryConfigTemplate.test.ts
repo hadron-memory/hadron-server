@@ -214,6 +214,21 @@ describe('reads: a template you do not manage does not exist', () => {
     expect(pa).toEqual(['app-one', 'elsewhere', 'org-one', 'server-one']);
   });
 
+  it('a page loads its templates\' rules in one query, each template keeping its own', async () => {
+    for (const n of ['t1', 't2', 't3', 't4', 't5']) await mkOrgTpl({ name: n, rules: [{ role: `${n}-a` }, { role: `${n}-b` }] });
+    const spy = vi.spyOn(db.memoryConfigTemplateRule, 'findMany');
+    try {
+      const q = `query { memoryConfigTemplates { items { name rules { role } } } }`;
+      const items = (await gql(as(orgAdmin), q)).data!.memoryConfigTemplates.items;
+      expect(items.map((t: { name: string; rules: { role: string }[] }) => [t.name, t.rules.map((r) => r.role)])).toEqual(
+        ['t1', 't2', 't3', 't4', 't5'].map((n) => [n, [`${n}-a`, `${n}-b`]]),
+      );
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('the filter narrows and never widens; an unresolvable owner ref matches nothing; limit 0 is the count', async () => {
     await mkOrgTpl({ name: 'org-one' });
     await create(as(orgAdmin), 'APP', orgApp.id, { name: 'app-one' });
