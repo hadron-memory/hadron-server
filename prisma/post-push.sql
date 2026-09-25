@@ -439,6 +439,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_agent_app_channel_uniq
 -- #1323 — every newly inserted Node gets an at-rest content baseline, including
 -- raw/createMany writers Prisma cannot route through an application helper.
 -- Keep in lockstep with 20260925010000_trustworthy_node_revisions.
+-- `prisma db push` adds the nullable column without running the migration, so
+-- baseline rows that already exist before the trigger is installed as well.
+UPDATE "nodes"
+SET "revision_content_hash" = md5(COALESCE("content", ''))
+WHERE "revision_content_hash" IS NULL;
+
 CREATE OR REPLACE FUNCTION hadron_initialize_node_revision_content_hash()
 RETURNS trigger
 LANGUAGE plpgsql AS $$

@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -128,6 +129,26 @@ describe('#1323 current revision contract', () => {
   it('initializes the at-rest content baseline for direct/raw inserts', async () => {
     const n = await makeNode('revision-insert-baseline', { content: 'fresh bytes' });
     expect(n.revisionContentHash).toBe('fd6f136535f2a7847d839a100f6b807f');
+  });
+
+  it('backfills existing rows during post-push before their first reconciled read', async () => {
+    const n = await makeNode('revision-post-push-backfill', { content: 'before db push' });
+    await db.node.update({ where: { id: n.id }, data: { revisionContentHash: null } });
+
+    const postPushSql = readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8');
+    expect(postPushSql).toContain(
+      'SET "revision_content_hash" = md5(COALESCE("content", \'\'))\nWHERE "revision_content_hash" IS NULL;',
+    );
+    await db.$executeRawUnsafe(`
+      UPDATE "nodes"
+      SET "revision_content_hash" = md5(COALESCE("content", ''))
+      WHERE "revision_content_hash" IS NULL
+    `);
+
+    await db.node.update({ where: { id: n.id }, data: { content: 'after raw writer' } });
+    const drifted = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    expect(await resolvers.Node.revision(drifted as never, {}, ctx())).toBe(2);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(1);
   });
 
   it('starts at 1, exposes the live revision, and snapshots the predecessor', async () => {
