@@ -16,6 +16,7 @@ import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { formatGraphQLError } from '../formatError.js';
+import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -33,7 +34,7 @@ async function gql(ctx: Partial<Context>, query: string, variables: Record<strin
 }
 const code = (r: Gql) => r.errors?.[0]?.extensions?.code;
 
-const RULE_FIELDS = `id role authorTask authorTaskState validationTask validationTaskState descriptionNode descriptionNodeState
+const RULE_FIELDS = `id role authorTask authorTaskId authorTaskState validationTask validationTaskId validationTaskState descriptionNode descriptionNodeId descriptionNodeState
   strictSubRoles writers validateBy enabled locked sourceTemplateId sourceTemplate { id name deleted } revision createdBy updatedBy`;
 const CONFIG = `query($m: ID!) { memoryConfig(memoryRef: $m) { id memoryId rules { ${RULE_FIELDS} } } }`;
 const CREATE = `mutation($m: ID!, $i: CreateNodeRoleRuleInput!) { createNodeRoleRule(memoryRef: $m, input: $i) { rule { ${RULE_FIELDS} } warnings { code } } }`;
@@ -348,5 +349,125 @@ describe('T9 — uniqueness and format', () => {
     await db.node.deleteMany({ where: { memoryId: kb.id } });
     await db.memory.delete({ where: { id: kb.id } });
     expect([await db.memoryConfig.count(), await db.nodeRoleRule.count()]).toEqual([0, 0]);
+  });
+});
+
+/** Resolve once `ms` has passed — long enough for a launched mutation to reach a lock wait. */
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe('#1360 review — gates, concurrency, audit, and unaddressable references', () => {
+  const mk = async (i: Record<string, unknown>) => (await gql(as(orgAdmin), CREATE, { m: kb.id, i: { role: 'spec', ...i } })).data!.createNodeRoleRule.rule;
+  const imp = (orgId: string) =>
+    ({ impersonation: { sessionId: 'imp', actorUserId: platformAdmin, orgId, expiresAt: new Date(Date.now() + 60_000) } }) as Partial<Context>;
+
+  it('impersonation reads an org memory config as its target would, only in the shared org, and never writes', async () => {
+    await mk({});
+    const read = await gql(as(orgAdmin, imp(org.id)), CONFIG, { m: kb.id });
+    expect(read.errors).toBeUndefined();
+    expect(read.data!.memoryConfig.rules).toHaveLength(1);
+    expect(code(await gql(as(orgAdmin, imp(otherOrg.id)), CONFIG, { m: kb.id }))).toBe('MEMORY_NOT_FOUND');
+    expect((await gql(as(orgAdmin, imp(org.id)), CREATE, { m: kb.id, i: { role: 'review' } })).errors).toBeDefined();
+    expect(await db.nodeRoleRule.count()).toBe(1);
+  });
+
+  it('an operational failure in the manage gate propagates instead of reading as a missing memory', async () => {
+    const spy = vi.spyOn(db.orgMember, 'findFirst').mockRejectedValue(new Error('connection timeout'));
+    try {
+      const r = await gql(as(orgAdmin), CONFIG, { m: kb.id });
+      expect(r.errors).toBeDefined();
+      expect(code(r)).not.toBe('MEMORY_NOT_FOUND');
+      const viaMemory = await gql(as(orgAdmin), `query($id: ID!) { memory(ref: $id) { config { id } } }`, { id: kb.id });
+      expect(viaMemory.errors).toBeDefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('OK gives the id; a node whose legacy memory URN cannot address it is OK with a null URN and its id', async () => {
+    const legacy = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'acme.com:team:team:shared', name: 'shared', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+    const lt = await db.node.create({ data: { id: generateId(), memoryId: legacy.id, loc: 'tasks:t', name: 'T', isRunnable: true } });
+    const rule = await mk({ authorTaskRef: lt.id, validationTaskRef: task.urn });
+    expect(rule).toMatchObject({
+      authorTask: null, authorTaskId: lt.id, authorTaskState: 'OK',
+      validationTask: task.urn, validationTaskId: task.id, validationTaskState: 'OK',
+      descriptionNodeId: null, descriptionNodeState: 'NONE',
+    });
+    // The id it hands out is a working ref: it round-trips into another rule.
+    expect((await gql(as(orgAdmin), CREATE, { m: kb.id, i: { role: 'review', authorTaskRef: rule.authorTaskId } })).errors).toBeUndefined();
+  });
+
+  it('UNREADABLE and BROKEN withhold the id as well as the URN', async () => {
+    const rule = await mk({ authorTaskRef: task.urn });
+    await db.nodeRoleRule.update({ where: { id: rule.id }, data: { validationTaskId: foreignTask.id, validationTaskRequired: true } });
+    await db.node.update({ where: { id: task.id }, data: { deletedAt: new Date() } });
+    const got = (await gql(as(orgAdmin), CONFIG, { m: kb.id })).data!.memoryConfig.rules[0];
+    expect(got).toMatchObject({
+      authorTask: null, authorTaskId: null, authorTaskState: 'BROKEN',
+      validationTask: null, validationTaskId: null, validationTaskState: 'UNREADABLE',
+    });
+  });
+
+  it('validateBy is judged on the row as it is when written: a clear that commits first is not overwritten into a taskless validateBy', async () => {
+    const rule = await mk({ validationTaskRef: task.urn });
+    let setting: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "node_role_rules" WHERE "id" = ${rule.id} FOR UPDATE`;
+      setting = gql(as(orgOwner), UPDATE, { r: rule.id, i: { validateBy: 'AGENT' } });
+      await pause(400);
+      await tx.nodeRoleRule.update({
+        where: { id: rule.id },
+        data: { validationTaskId: null, validationTaskRequired: false, validateBy: null, revision: { increment: 1 } },
+      });
+    });
+    const r = await setting!;
+    expect(r.errors?.[0]?.extensions).toMatchObject({ reason: 'VALIDATION_TASK_REQUIRED' });
+    const row = await db.nodeRoleRule.findUniqueOrThrow({ where: { id: rule.id } });
+    expect([row.validateBy, row.validationTaskId, row.validationTaskRequired]).toEqual([null, null, false]);
+  });
+
+  it('a task made non-runnable while the rule write is in flight is refused NOT_A_TASK', async () => {
+    let creating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.node.update({ where: { id: task.id }, data: { isRunnable: false } });
+      creating = gql(as(orgAdmin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: task.urn } });
+      await pause(400);
+    });
+    expect(code(await creating!)).toBe('NOT_A_TASK');
+    expect(await db.nodeRoleRule.count()).toBe(0);
+  });
+
+  it('each concurrent update returns its OWN write', async () => {
+    const rule = await mk({});
+    const writers = ['ALL', 'OWNER', 'ADMIN', 'ALL', 'OWNER', 'ADMIN', 'ALL', 'OWNER'];
+    const results = await Promise.all(writers.map((w) => gql(as(orgAdmin), UPDATE, { r: rule.id, i: { writers: w } })));
+    const got = results.map((r) => r.data!.updateNodeRoleRule.rule);
+    expect(got.map((g) => g.writers)).toEqual(writers);
+    expect(new Set(got.map((g) => g.revision)).size).toBe(writers.length);
+  });
+
+  it('every rule change stamps the config audit fields', async () => {
+    const Q = `query($m: ID!) { memoryConfig(memoryRef: $m) { updatedBy updatedAt } }`;
+    const cfg = async () => (await gql(as(orgAdmin), Q, { m: kb.id })).data!.memoryConfig;
+    const rule = await mk({});
+    const c1 = await cfg();
+    expect(c1.updatedBy).toBe(orgAdmin);
+    expect(c1.updatedAt).not.toBeNull();
+    await gql(as(orgOwner), UPDATE, { r: rule.id, i: { enabled: false } });
+    const c2 = await cfg();
+    expect(c2.updatedBy).toBe(orgOwner);
+    expect(new Date(c2.updatedAt).getTime()).toBeGreaterThanOrEqual(new Date(c1.updatedAt).getTime());
+    await gql(as(orgAdmin), DELETE, { r: rule.id });
+    expect((await cfg()).updatedBy).toBe(orgAdmin);
+  });
+
+  it('a user merge reassigns the config and rule audit stamps to the surviving account', async () => {
+    const survivor = await mkUser(8, org.id, 'ADMIN');
+    const rule = await mk({});
+    await mergeUsers(db, { sourceUserId: orgAdmin, targetUserId: survivor });
+    const row = await db.nodeRoleRule.findUniqueOrThrow({ where: { id: rule.id } });
+    const config = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId: kb.id } });
+    expect([row.createdBy, row.updatedBy, config.createdBy, config.updatedBy]).toEqual([survivor, survivor, survivor, survivor]);
   });
 });

@@ -2616,11 +2616,13 @@ export const typeDefs = `#graphql
   }
 
   """
-  #1325 — the state of one rule reference, next to its URN. NONE: not
-  configured. OK: the URN is given. BROKEN: configured, but the node was
-  deleted, so operations relying on the rule are refused until a manager
-  repoints it (fail-closed). UNREADABLE: the node exists but you may not read
-  it, so its URN is withheld.
+  #1325 — the state of one rule reference, next to its URN and id. NONE: not
+  configured. OK: the node is live and you can read it; its id is given, and
+  its URN too unless the node's memory has a legacy URN that cannot address it
+  (#697), when the URN is null and the id is the ref to use. BROKEN: configured,
+  but the node was deleted, so operations relying on the rule are refused until
+  a manager repoints it (fail-closed). UNREADABLE: the node exists but you may
+  not read it, so its URN and id are withheld.
   """
   enum NodeRoleRuleRefState {
     NONE
@@ -2631,7 +2633,8 @@ export const typeDefs = `#graphql
 
   """
   #1325 — one node-role rule. Task and description references are stored by
-  node id (they survive moves) and returned as URNs, each with its state.
+  node id (they survive moves) and returned as a URN and an id, each with its
+  state. Both are given only when the state is OK; see NodeRoleRuleRefState.
   """
   type NodeRoleRule {
     "The rule's id — its ref for updateNodeRoleRule / deleteNodeRoleRule (a rule has no URN)."
@@ -2639,11 +2642,14 @@ export const typeDefs = `#graphql
     "The dotted role or sub-role this rule governs, unique within the config."
     role: String!
     authorTask: String
+    authorTaskId: ID
     authorTaskState: NodeRoleRuleRefState!
     validationTask: String
+    validationTaskId: ID
     validationTaskState: NodeRoleRuleRefState!
     "Documentation, not procedure: a deleted description node reads as NONE, never BROKEN."
     descriptionNode: String
+    descriptionNodeId: ID
     descriptionNodeState: NodeRoleRuleRefState!
     "On a parent role: refuse its undeclared sub-roles instead of falling back to it."
     strictSubRoles: Boolean!
