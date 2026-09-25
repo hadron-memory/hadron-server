@@ -1433,11 +1433,16 @@ export const nodeQueries = {
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
 
-      // Chunk granularity (vector only) → passages, mirroring nodeSearch. The
-      // coarse structured node filters (nodeType/tags/…) are not applied to
-      // passage results in v1 (chunk-level, not node-level) — but a `where`
-      // predicate IS honored (#719): a passage from a parent that fails the
-      // predicate must not surface, so we drop it below.
+      // Chunk granularity (vector only) → passages, mirroring nodeSearch.
+      // #1345 review (@codex P2): every structured node filter applies to the
+      // passage's PARENT exactly as it does to a node hit — the same
+      // `structuredWhere` (nodeType, objectType, isRunnable, role, tags,
+      // locPrefix, createdBy, updated*, includeDeleted) plus the #719 `where`
+      // predicate. v1 applied only `where`, so `role` / `isRunnable` — which the
+      // MCP tool promises "in every mode" — silently returned passages from any
+      // parent. And the filters run BEFORE paging, with the same over-fetch the
+      // node path uses: a filtered-out passage must neither appear in nor
+      // consume the requested page.
       if (granularity === 'chunk') {
         if (effectiveMode !== 'vector') {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
@@ -1446,41 +1451,45 @@ export const nodeQueries = {
         // #497 — apply the minScore floor to the scored passages too (PR-569
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
-        const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit });
-        const chunkHits = (scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor))
-          .slice(off, off + finalLimit);
+        const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: fetchN });
+        const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
+        const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
         // #719 — honor `where` on chunk passages: keep only passages whose PARENT
         // node satisfies the predicate (also re-asserts the memory scope).
-        let allowedParents: Set<string> | null = null;
+        let whereAllowed: Set<string> | null = null;
         if (f.where != null) {
-          allowedParents = new Set(
+          whereAllowed = new Set(
             await provider.filterWhere({
-              db: ctx.db, ids: [...new Set(chunkHits.map((c) => c.nodeId))],
+              db: ctx.db, ids: candidateParentIds,
               memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
             }),
           );
         }
         const parents = await ctx.db.node.findMany({
-          where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },
+          where: {
+            id: { in: whereAllowed ? candidateParentIds.filter((id) => whereAllowed!.has(id)) : candidateParentIds },
+            ...structuredWhere,
+          },
           include: { memory: { select: { urn: true } } },
         });
+        const eligible = new Set(parents.map((p) => p.id));
+        const chunkHits = scoredChunks.filter((c) => eligible.has(c.nodeId)).slice(off, off + finalLimit);
+        const pageParentIds = new Set(chunkHits.map((c) => c.nodeId));
         const parentById = new Map(parents.map((p) => [p.id, p]));
         // #1061 — chunk granularity returns passages rather than whole nodes,
         // but the passage text IS node content, so each DISTINCT parent counts
         // once (not once per passage: three chunks of one node is one node's
         // content read, and per-chunk counting would make a node's read count
         // depend on how finely it happens to be chunked). Scoped to the parents
-        // that survive `allowedParents`, so a filtered-out node records nothing.
+        // on the returned PAGE, so a filtered-out or off-page node records nothing.
         recordNodeUsage(
           ctx.db,
           'read',
-          toUsageNodeRefs(
-            parents.filter((p) => allowedParents == null || allowedParents.has(p.id)),
-          ),
+          toUsageNodeRefs(parents.filter((p) => pageParentIds.has(p.id))),
           ctx,
         );
         const passages = chunkHits
-          .filter((c) => parentById.has(c.nodeId) && (allowedParents == null || allowedParents.has(c.nodeId)))
+          .filter((c) => parentById.has(c.nodeId))
           .map((c) => {
             const p = parentById.get(c.nodeId)! as { loc: string; memory: { urn: string } };
             // #697 Stage 2: emit the flat v2 node URN (matches Node.urn); fall
