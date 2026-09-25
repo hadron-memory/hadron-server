@@ -115,7 +115,10 @@ async function liveApp(ctx: Context, appId: string) {
 
 /** The MANAGE gate for a template's owner (H4). Boolean, so callers can conceal. */
 async function canManageOwner(ctx: Context, owner: OwnerColumns): Promise<boolean> {
-  if (owner.hadronServerId) return !ctx.impersonation && isPlatformAdmin(ctx);
+  if (owner.hadronServerId) {
+    if (ctx.impersonation || !isPlatformAdmin(ctx)) return false;
+    return !!(await ctx.db.hadronServer.findFirst({ where: { id: owner.hadronServerId, deletedAt: null }, select: { id: true } }));
+  }
   if (owner.organizationId) {
     const org = await ctx.db.organization.findFirst({ where: { id: owner.organizationId, deletedAt: null }, select: { id: true } });
     return !!org && (await allowed(() => requireOrgRole(ctx, org.id, 'ADMIN')));
@@ -276,7 +279,7 @@ async function lockTemplate(tx: Prisma.TransactionClient, id: string): Promise<M
 async function manageableWhere(ctx: Context): Promise<Prisma.MemoryConfigTemplateWhereInput> {
   const or: Prisma.MemoryConfigTemplateWhereInput[] = [];
   const platform = !ctx.impersonation && isPlatformAdmin(ctx);
-  if (platform) or.push({ hadronServerId: { not: null } }, { organization: { deletedAt: null } });
+  if (platform) or.push({ hadronServer: { deletedAt: null } }, { organization: { deletedAt: null } });
   let adminOrgIds: string[] = [];
   if (!platform && ctx.userId) {
     // requireOrgRole's own predicate, as a set: a LIVE membership at ADMIN or

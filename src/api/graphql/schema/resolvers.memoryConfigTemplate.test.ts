@@ -242,6 +242,14 @@ describe('a deleted owner owns nothing a manager can reach (#1369 review)', () =
     expect((await create(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'again' })).errors).toBeDefined();
   });
 
+  it('so does a soft-deleted server row, for a platform admin', async () => {
+    const t = (await create(admin(), 'HADRON_SERVER', null, { name: 's1' })).data!.createMemoryConfigTemplate.template;
+    await db.hadronServer.updateMany({ data: { deletedAt: new Date() } });
+    expect((await gql(admin(), ONE, { r: t.id })).data!.memoryConfigTemplate).toBeNull();
+    expect((await gql(admin(), LIST)).data!.memoryConfigTemplates.total).toBe(0);
+    expect(code(await gql(admin(), DELETE, { r: t.id }))).toBe('MEMORY_CONFIG_TEMPLATE_NOT_FOUND');
+  });
+
   it('so does an App whose organization is soft-deleted', async () => {
     const t = (await create(as(orgAdmin), 'APP', orgApp.id, { name: 'app-one' })).data!.createMemoryConfigTemplate.template;
     await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
