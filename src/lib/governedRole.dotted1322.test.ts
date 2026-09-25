@@ -80,6 +80,12 @@ describe('#1322 — dotted role primitives', () => {
       expect(resolve('spec.draft')).toEqual({ kind: 'RULE', rule: rules[0] });
     });
 
+    it('below a DISABLED declared sub-role, an undeclared role reaches the strict ancestor and is refused (Dara #1901, Ada #1902)', () => {
+      // spec.draft is declared (a row) but disabled, so it governs nothing:
+      // spec.draft.x is itself undeclared and falls through to strict `spec`.
+      expect(resolve('spec.draft.x')).toEqual({ kind: 'UNDECLARED_UNDER_STRICT', ancestor: rules[0] });
+    });
+
     it('a disabled strict rule governs nothing, strictness included', () => {
       const off = [{ role: 'spec', enabled: false, strictSubRoles: true }];
       expect(resolveNodeRoleRule('spec.unknown', off)).toEqual({ kind: 'NONE' });
