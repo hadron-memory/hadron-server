@@ -152,6 +152,37 @@ func collisionCases() []kase {
 	}
 }
 
+// reservedCases are the `lintReserved` inputs (#1315), authored here and
+// upserted by name. Plain spellings only: Go folds with x/text/collate and the
+// server with ICU, and the two differ on exotic code points that the name
+// grammar already refuses (hadron-cli#712), so an exotic case would pin a
+// table-version difference rather than the rule.
+func reservedCases() []kase {
+	node := func(exports map[string]any) map[string]any {
+		return map[string]any{
+			"urn": "hrn:node:acme.com:mem:tasks:x", "loc": "tasks:x", "memoryUrn": "hrn:mem:acme.com:mem",
+			"isRunnable": true, "content": "# Do the thing\n\nSteps.",
+			"properties": map[string]any{"exports": exports},
+		}
+	}
+	decl := func(name string) map[string]any {
+		return map[string]any{"name": name, "description": "Do the thing. Use when you must do the thing.", "enable": true}
+	}
+	return []kase{
+		{"name": "synced is reserved for claudeSkill", "node": node(map[string]any{"claudeSkill": decl("synced")})},
+		{"name": "the reservation folds case", "node": node(map[string]any{"claudeSkill": decl("Synced")}),
+			"why": "both sides fold at primary strength (ICU / x/text/collate); the grammar also refuses the capital, so both rules fire"},
+		{"name": "a padded synced is judged on the trimmed name", "node": node(map[string]any{"claudeSkill": decl(" synced ")}),
+			"why": "the planner exports under the trimmed name, so the reservation is checked against what it writes (#1318)"},
+		{"name": "synced is not reserved for codexSkill", "node": node(map[string]any{"codexSkill": decl("synced")}),
+			"why": "the reservation is Claude's, not a global ban"},
+		{"name": "both hosts declare synced, only Claude refuses", "node": node(map[string]any{
+			"claudeSkill": decl("synced"), "codexSkill": decl("synced")})},
+		{"name": "a name containing synced is not reserved", "node": node(map[string]any{"claudeSkill": decl("synced-notes")}),
+			"why": "the whole name is matched, never a substring"},
+	}
+}
+
 // collisionFindings runs Go's LintCollisions over a case's nodes and writes
 // the findings in the fixture's lower-camel shape. `memory` is omitted, as it
 // always was in this section: every input shares one memory.
@@ -326,6 +357,32 @@ func main() {
 	}
 	doc["lintUnknownHostKeys"], _ = json.Marshal(uk)
 	doc["lintUnknownHostKeysSourceCommit"], _ = json.Marshal(commit)
+
+	// ── lintReserved ────────────────────────────────────────────────────────
+	// #1315: a host-reserved skill name (Claude's `synced`). A section of its
+	// own rather than cases upserted into `lint`, which stays at
+	// `lintSourceCommit`: one stamp for cases generated at two revisions would
+	// misstate one of them. Inputs are authored in reservedCases(); findings
+	// come from Go's Lint, which needs hadron-cli#712 or later to emit the rule.
+	var lr []kase
+	rb, _ := json.Marshal(upsert(decodeOrEmpty(doc, "lintReserved"), reservedCases()...))
+	if err := json.Unmarshal(rb, &lr); err != nil {
+		panic(err)
+	}
+	for _, c := range lr {
+		n := c["node"].(map[string]any)
+		props, _ := n["properties"].(map[string]any)
+		findings := []any{}
+		for _, f := range skilldoc.Lint(skilldoc.Node{
+			URN: n["urn"].(string), Loc: n["loc"].(string), MemoryURN: n["memoryUrn"].(string),
+			IsRunnable: n["isRunnable"].(bool), Content: n["content"].(string), Properties: props,
+		}) {
+			findings = append(findings, map[string]any{"rule": f.Rule, "severity": f.Severity, "message": f.Message})
+		}
+		c["findings"] = findings
+	}
+	doc["lintReserved"], _ = json.Marshal(lr)
+	doc["lintReservedSourceCommit"], _ = json.Marshal(commit)
 
 	// The commit is an ARGUMENT, never a literal. Hardcoding it meant the next
 	// regeneration at a newer revision would still stamp the old one, and

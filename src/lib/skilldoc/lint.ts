@@ -5,9 +5,9 @@
  * host (`lintNode`), `skill-name-collision`, which is corpus-wide and per host
  * (`lintCollisions`), and `skill-unknown-host-key`, which is per node and
  * attributed to NO host (`lintUnknownHostKeys`, #1292). The twelfth per-node
- * rule, `skill-name-reserved` (#1315), is SERVER-ONLY for now: the Go port has
- * no host reservation yet, so the Go-generated parity fixtures cannot exercise
- * it (see `SERVER_ONLY_RULES` in skilldoc.parity.test.ts). They answer *is this node
+ * rule, `skill-name-reserved` (#1315), was server-only until hadron-cli#712
+ * ported it; the Go-generated parity fixtures now pin it in their `lintReserved`
+ * section, word for word. They answer *is this node
  * exportable, and will the host do what its author expects* — judgment over
  * corpus inputs alone, with no file and no disk, which is what makes this half
  * of the split (A3) pure.

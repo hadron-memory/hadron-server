@@ -95,6 +95,14 @@ interface Fixtures {
     keys: string[];
     findings: { rule: string; severity: string; message: string }[];
   }[];
+  /** #1315 — Go's Lint over authored nodes declaring a host-reserved name
+   *  (hadron-cli#712), stamped separately so `lint` keeps its own commit. */
+  lintReservedSourceCommit: string;
+  lintReserved: {
+    name: string;
+    node: { urn: string; loc: string; memoryUrn: string; isRunnable: boolean; content: string; properties: unknown };
+    findings: { rule: string; severity: string; message: string }[];
+  }[];
 }
 
 /** Loads the fixtures, refusing an empty or absent set rather than yielding []. */
@@ -106,7 +114,7 @@ function loadFixtures(): Fixtures {
     'normalizeDescription', 'normalizeBody',
     'validName', 'hash', 'render', 'parseFile',
     'isNodeUrn', 'renderParseRoundTrip', 'lint', 'lintCollisions', 'declared',
-    'lintUnknownHostKeys',
+    'lintUnknownHostKeys', 'lintReserved',
   ];
   for (const s of sections) {
     const v = f[s];
@@ -421,6 +429,24 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     expect(got).toEqual(c.findings);
   });
 
+  it.each(F.lintReserved.map((c) => [c.name, c] as const))('reserved: %s', (_n, c) => {
+    const got = lintNode(c.node as SkillNode).map((f) => ({
+      rule: f.rule, severity: f.severity, message: f.message,
+    }));
+    expect(got).toEqual(c.findings);
+  });
+
+  it('the reserved-name section carries both answers, per host (#1315)', () => {
+    // Otherwise a section where every case expected the rule, or none did,
+    // would pass against a port that always or never reserves.
+    expect(F.lintReservedSourceCommit).toBeTruthy();
+    const has = (name: string) =>
+      F.lintReserved.find((c) => c.name === name)?.findings.some((f) => f.rule === 'skill-name-reserved');
+    expect(has('synced is reserved for claudeSkill')).toBe(true);
+    expect(has('synced is not reserved for codexSkill')).toBe(false);
+    expect(has('a name containing synced is not reserved')).toBe(false);
+  });
+
   it.each(F.lintCollisions.map((c) => [c.name, c] as const))('collisions: %s', (_n, c) => {
     const got = lintCollisions(c.nodes as SkillNode[]).map((f) => ({
       urn: f.urn, rule: f.rule, severity: f.severity, message: f.message,
@@ -428,29 +454,16 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     expect(got).toEqual(c.findings);
   });
 
-  /**
-   * Rules this port emits that the Go reference does NOT have yet, so its
-   * generated fixtures cannot exercise them. Each is covered by its own tests
-   * instead, and listed here so the exhaustive list below stays true rather than
-   * silently omitting a rule (@copilot, PR #1318).
-   *
-   * - `skill-name-reserved` (#1315): Claude's reserved `synced` directory.
-   *   Covered by hosts.reserved.test.ts and the planner cases in
-   *   resolvers.skillPlan.test.ts. Parity follow-up for hadron-cli.
-   */
-  const SERVER_ONLY_RULES = ['skill-name-reserved'];
-
-  it('the fixture set exercises every rule this port can emit (server-only rules excepted, and named)', () => {
+  it('the fixture set exercises every rule this port can emit', () => {
     // Otherwise a rule could be unreachable, or misspelled, and every fixture
     // would still pass — the parity equivalent of a guard nobody proved fails.
+    // `skill-name-reserved` was server-only until hadron-cli#712 ported it; it
+    // is reached through `lintReserved`, not `lint`, which keeps its own commit.
     const emitted = new Set([
       ...F.lint.flatMap((c) => c.findings.map((f) => f.rule)),
+      ...F.lintReserved.flatMap((c) => c.findings.map((f) => f.rule)),
       ...F.lintCollisions.flatMap((c) => c.findings.map((f) => f.rule)),
     ]);
-    // Once Go gains a server-only rule and the fixtures are regenerated, it
-    // shows up here: then move it into the list below instead of keeping two
-    // records of one rule.
-    expect(SERVER_ONLY_RULES.filter((r) => emitted.has(r))).toEqual([]);
     expect([...emitted].sort()).toEqual([
       'skill-content-empty',
       'skill-content-has-frontmatter',
@@ -463,6 +476,7 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
       'skill-name-collision',
       'skill-name-invalid',
       'skill-name-missing',
+      'skill-name-reserved',
       'skill-not-runnable',
     ]);
   });
