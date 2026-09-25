@@ -537,6 +537,40 @@ describe('move-aware identity', () => {
     expect(rows[0].name).toBe('renamed task');
   });
 
+  it('records one committed revision per node when two files swap locs', async () => {
+    const aId = 'aaaa111100000000000000000000000021';
+    const bId = 'bbbb222200000000000000000000000022';
+    const aDir = join(repoRoot(), 'a');
+    const bDir = join(repoRoot(), 'b');
+    mkdirSync(aDir, { recursive: true });
+    mkdirSync(bDir, { recursive: true });
+    writeNodeFiles(aDir, { id: aId, name: 'A' });
+    writeNodeFiles(bDir, { id: bId, name: 'B' });
+    await syncGraphFromGithub(makeGraph());
+    await db.memory.update({ where: { id: dbGraphId }, data: { maxRevCount: 1 } });
+
+    rmSync(aDir, { recursive: true });
+    rmSync(bDir, { recursive: true });
+    mkdirSync(aDir, { recursive: true });
+    mkdirSync(bDir, { recursive: true });
+    writeNodeFiles(aDir, { id: bId, name: 'B' });
+    writeNodeFiles(bDir, { id: aId, name: 'A' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'b', revSeq: 2 });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'a', revSeq: 2 });
+    expect(
+      await db.nodeRevision.findMany({
+        where: { nodeId: { in: [aId, bId] } },
+        orderBy: { nodeId: 'asc' },
+        select: { nodeId: true, revNo: true, loc: true },
+      }),
+    ).toEqual([
+      { nodeId: aId, revNo: 1, loc: 'a' },
+      { nodeId: bId, revNo: 1, loc: 'b' },
+    ]);
+  });
+
   it('never steals a foreign memory\'s node id — mints a fresh id instead', async () => {
     const foreignId = 'bbbb222200000000000000000000000002';
     const { graph: otherGraph } = await createDbOrgAndGraph(db, {

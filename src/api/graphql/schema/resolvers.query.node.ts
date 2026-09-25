@@ -1717,21 +1717,24 @@ export const nodeQueries = {
         ordered = rows;
       }
 
-      // Lock every selected row in id order, reconcile it, then re-read the
-      // full batch before releasing any lock. That gives the response one
-      // internally consistent revision/body state per node and prevents an
-      // address move after the initial selection from widening the result.
+      // Reconcile each selected row in its OWN short transaction. Accumulating
+      // all FOR UPDATE locks until one batch transaction commits deadlocks
+      // against multi-node writers (notably Git sync) that necessarily visit
+      // rows in a different order. The final access-filtered refetch returns
+      // an atomic row state and rechecks the selected address.
       const selectedById = new Map(ordered.map((n) => [n.id, n]));
-      const currentRows = await ctx.db.$transaction(async (tx) => {
-        const liveIds: string[] = [];
-        for (const id of [...selectedById.keys()].sort()) {
-          if ((await ensureCurrentNodeRevisionInTransaction(tx, id)) != null) liveIds.push(id);
-        }
-        return tx.node.findMany({
-          where: { id: { in: liveIds }, deletedAt: null, ...access },
-          include,
-        });
-      }, { timeout: 60_000, maxWait: 15_000 });
+      const liveIds: string[] = [];
+      for (const id of [...selectedById.keys()].sort()) {
+        const live = await ctx.db.$transaction(
+          (tx) => ensureCurrentNodeRevisionInTransaction(tx, id),
+          { timeout: 60_000, maxWait: 15_000 },
+        );
+        if (live != null) liveIds.push(id);
+      }
+      const currentRows = await ctx.db.node.findMany({
+        where: { id: { in: liveIds }, deletedAt: null, ...access },
+        include,
+      });
       const currentById = new Map(currentRows.map((n) => [n.id, n]));
       ordered = ordered.flatMap((selected) => {
         const current = currentById.get(selected.id);

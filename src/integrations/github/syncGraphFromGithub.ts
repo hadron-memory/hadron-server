@@ -57,20 +57,25 @@ async function updateNodeFromGitSync(
   tx: Prisma.TransactionClient,
   current: Node,
   update: Record<string, unknown>,
+  revisionBase?: Node,
 ): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${current.id} FOR UPDATE`;
   const locked = await tx.node.findUniqueOrThrow({ where: { id: current.id } });
-  const changes = diffNodeChanges(locked, update);
+  // A swap can park this row at a temporary invalid loc earlier in the SAME
+  // transaction. History must describe committed states, so diff/snapshot the
+  // captured pre-sync row rather than that mechanical waypoint.
+  const before = revisionBase ?? locked;
+  const changes = diffNodeChanges(before, update);
   const contentDrifted =
-    locked.revisionContentHash != null &&
-    locked.revisionContentHash !== computeRevisionContentHash(locked.content);
+    before.revisionContentHash != null &&
+    before.revisionContentHash !== computeRevisionContentHash(before.content);
   if (contentDrifted && !changes.includes('content')) changes.push('content');
 
   if (changes.length > 0) {
     await createNodeRevision(
       tx,
       buildNodeRevisionSnapshot(
-        locked,
+        before,
         { userId: null, info: 'system:github-sync' },
         { revLabel: 'Synchronized from GitHub', changes },
       ),
@@ -360,6 +365,11 @@ export const syncGraphFromGithub = async (
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
       const claimedFileIds = new Set<string>();
+      // A loc swap temporarily parks an occupant so the first move can land.
+      // Preserve its committed pre-sync state; when its own file is processed,
+      // one revision spans original -> final and the parking loc never enters
+      // retained history (or consumes a maxRevCount slot).
+      const parkedRevisionBases = new Map<string, Node>();
       // Edge-endpoint remapping (PR-576 codex review): when a fresh id is
       // minted for a file (foreign-memory or duplicate frontmatter id), the
       // edges loadGraphFromFs captured still carry the file's ORIGINAL id.
@@ -479,8 +489,14 @@ export const syncGraphFromGithub = async (
               continue;
             }
             if (occupant && occupant.id !== byId.id) {
-              await updateNodeFromGitSync(tx, occupant, {
-                loc: `${loc}~displaced-${occupant.id}`,
+              await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${occupant.id} FOR UPDATE`;
+              const lockedOccupant = await tx.node.findUniqueOrThrow({ where: { id: occupant.id } });
+              if (!parkedRevisionBases.has(occupant.id)) {
+                parkedRevisionBases.set(occupant.id, lockedOccupant);
+              }
+              await tx.node.update({
+                where: { id: occupant.id },
+                data: { loc: `${loc}~displaced-${occupant.id}` },
               });
               console.warn(
                 `[syncGraphFromGithub] "${graphName}": move of ${byId.id} to occupied loc "${loc}" displaced node ${occupant.id}`,
@@ -488,7 +504,8 @@ export const syncGraphFromGithub = async (
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
           }
-          await updateNodeFromGitSync(tx, byId, update);
+          await updateNodeFromGitSync(tx, byId, update, parkedRevisionBases.get(byId.id));
+          parkedRevisionBases.delete(byId.id);
           rowId = byId.id;
         } else {
           if (byId) {
@@ -504,7 +521,13 @@ export const syncGraphFromGithub = async (
             where: { loc_memoryId: { loc, memoryId: graph.id } },
           });
           if (existingAtLoc) {
-            await updateNodeFromGitSync(tx, existingAtLoc, update);
+            await updateNodeFromGitSync(
+              tx,
+              existingAtLoc,
+              update,
+              parkedRevisionBases.get(existingAtLoc.id),
+            );
+            parkedRevisionBases.delete(existingAtLoc.id);
             // The SURVIVING id: an update keeps the existing row's id, which
             // may differ from the file's — recording the file id here would
             // make the notIn deletion pass below delete the row we just wrote.
