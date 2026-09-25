@@ -4385,9 +4385,26 @@ export const typeDefs = `#graphql
     fields: [SearchReplaceFieldResult!]!
   }
 
+  "Mutually exclusive reasons selected nodes were protected from bulk replacement."
+  type SearchReplaceSkipCounts {
+    "Governed nodes of any kind. This is not a spec-only count."
+    governed: Int!
+    "Nodes at or below a Channel address."
+    protectedAddress: Int!
+  }
+
   type SearchReplaceResult {
-    "Nodes the selection resolved to (after auth + prefix filtering)."
+    "Unique authorized nodes selected before bulk-write protections are applied."
+    nodesSelected: Int!
+    "Selected nodes whose requested text fields were actually inspected."
     nodesScanned: Int!
+    "Selected nodes protected from inspection and replacement."
+    nodesSkipped: Int!
+    """
+    Mutually exclusive skip reasons. Governance takes precedence over Channel
+    address protection, so a node carrying both signals counts once as governed.
+    """
+    skipCounts: SearchReplaceSkipCounts!
     "Nodes with at least one replacement."
     nodesChanged: Int!
     totalReplacements: Int!

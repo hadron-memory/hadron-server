@@ -13,6 +13,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { ensureChannelWithRoot } from '../lib/channels.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -106,6 +107,71 @@ describe('hadron_replace_text', () => {
     expect((await db.node.findUnique({ where: { id: a.id } }))?.content).toBe('dog');
   });
 
+  it.each([true, false])(
+    'reports an all-skipped governed selection without changing it (dryRun=%s)',
+    async (dryRun) => {
+      const governed = await makeNode('governed', { content: 'cat stays', role: 'review' });
+      const srv = createTestableMcpServer(adminAuth());
+      const text = await srv.callToolText('hadron_replace_text', {
+        oldText: 'cat',
+        newText: 'dog',
+        nodeUrns: [governed.id],
+        fields: ['content'],
+        dryRun,
+      });
+
+      expect(text).toContain('0 of 0 node(s) scanned');
+      expect(text).toContain(
+        'Coverage: 1 selected; 0 scanned; 1 skipped/protected (1 governed, 0 protected address).',
+      );
+      expect((await db.node.findUniqueOrThrow({ where: { id: governed.id } })).content).toBe(
+        'cat stays',
+      );
+      expect(await db.nodeRevision.count({ where: { nodeId: governed.id } })).toBe(0);
+    },
+  );
+
+  it('distinguishes a memory-prefix no-match scan from a governed skip', async () => {
+    await makeNode('scope:ordinary', { content: 'no match here' });
+    await makeNode('scope:governed', { content: 'cat stays', isRunnable: true });
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_replace_text', {
+      oldText: 'cat',
+      newText: 'dog',
+      memoryUrns: [memory.urn],
+      prefix: 'scope',
+      fields: ['content'],
+      dryRun: true,
+    });
+
+    expect(text).toContain('0 of 1 node(s) scanned');
+    expect(text).toContain(
+      'Coverage: 2 selected; 1 scanned; 1 skipped/protected (1 governed, 0 protected address).',
+    );
+  });
+
+  it('reports a protected Channel address separately', async () => {
+    const { rootId } = await ensureChannelWithRoot(db, {
+      memoryId: memory.id,
+      loc: 'protected',
+      name: 'protected',
+      createdBy: admin.id,
+    });
+    await db.node.update({ where: { id: rootId }, data: { content: 'cat stays' } });
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_replace_text', {
+      oldText: 'cat',
+      newText: 'dog',
+      nodeUrns: [rootId],
+      fields: ['content'],
+    });
+
+    expect(text).toContain(
+      'Coverage: 1 selected; 0 scanned; 1 skipped/protected (0 governed, 1 protected address).',
+    );
+    expect((await db.node.findUniqueOrThrow({ where: { id: rootId } })).content).toBe('cat stays');
+  });
+
   it('returns a graceful error (not a throw) when write access is denied', async () => {
     await makeNode('a', { content: 'cat' });
     const srv = createTestableMcpServer(viewerAuth());
@@ -117,6 +183,7 @@ describe('hadron_replace_text', () => {
     });
     expect(text).toMatch(/error/i);
     expect(text).toMatch(/forbidden|access/i);
+    expect(text).not.toMatch(/selected|skipped|governed/i);
   });
 
   it('surfaces an invalid-regex error as text', async () => {

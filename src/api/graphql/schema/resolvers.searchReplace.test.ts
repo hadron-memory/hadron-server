@@ -5,10 +5,13 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { ensureChannelWithRoot } from '../../../lib/channels.js';
+import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -30,6 +33,30 @@ async function makeNode(loc: string, fields: Record<string, unknown>) {
 
 function call(input: Record<string, unknown>) {
   return resolvers.Mutation.searchReplaceInNodes({}, { input } as never, ctx());
+}
+
+const gqlServer = new ApolloServer<Context>({ typeDefs, resolvers });
+
+async function gqlCall(input: Record<string, unknown>) {
+  const res = await gqlServer.executeOperation(
+    {
+      query: `mutation SearchReplace($input: SearchReplaceInNodesInput!) {
+        searchReplaceInNodes(input: $input) {
+          nodesSelected
+          nodesScanned
+          nodesSkipped
+          skipCounts { governed protectedAddress }
+          nodesChanged
+          totalReplacements
+          dryRun
+        }
+      }`,
+      variables: { input },
+    },
+    { contextValue: ctx() },
+  );
+  if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
+  return res.body.singleResult;
 }
 
 beforeEach(async () => {
@@ -212,5 +239,200 @@ describe('searchReplaceInNodes — guards', () => {
     await expect(
       call({ oldText: '(', newText: 'b', memoryIds: [memory.id], fields: ['content'], regex: true }),
     ).rejects.toThrow(/invalid search pattern/i);
+  });
+});
+
+describe('#1294 — truthful selected/scanned/skipped reporting', () => {
+  it('exposes the additive aggregate counters through the executable GraphQL schema', async () => {
+    const ordinary = await makeNode('wire:ordinary', { content: 'no match here' });
+    const governed = await makeNode('wire:governed', {
+      content: 'needle stays',
+      role: 'review',
+    });
+
+    const result = await gqlCall({
+      oldText: 'needle',
+      newText: 'changed',
+      nodeIds: [ordinary.id, governed.id],
+      fields: ['content'],
+      dryRun: true,
+    });
+
+    expect(result.errors).toBeUndefined();
+    expect(result.data?.searchReplaceInNodes).toEqual({
+      nodesSelected: 2,
+      nodesScanned: 1,
+      nodesSkipped: 1,
+      skipCounts: { governed: 1, protectedAddress: 0 },
+      nodesChanged: 0,
+      totalReplacements: 0,
+      dryRun: true,
+    });
+  });
+
+  it.each([true, false])(
+    'counts a multiply-governed explicit target once and preserves it (dryRun=%s)',
+    async (dryRun) => {
+      const ordinary = await makeNode('report:ordinary', { content: 'no match here' });
+      const governed = await makeNode('report:governed', {
+        content: 'needle stays',
+        role: 'review',
+        isRunnable: true,
+      });
+
+      const res = await call({
+        oldText: 'needle',
+        newText: 'changed',
+        nodeIds: [governed.id, ordinary.id, governed.id],
+        fields: ['content'],
+        dryRun,
+      });
+
+      expect(res).toMatchObject({
+        nodesSelected: 2,
+        nodesScanned: 1,
+        nodesSkipped: 1,
+        nodesChanged: 0,
+        totalReplacements: 0,
+        skipCounts: { governed: 1, protectedAddress: 0 },
+      });
+      expect((await db.node.findUniqueOrThrow({ where: { id: governed.id } })).content).toBe(
+        'needle stays',
+      );
+      expect(await db.nodeRevision.count({ where: { nodeId: governed.id } })).toBe(0);
+    },
+  );
+
+  it.each([true, false])(
+    'accounts for the complete memory-prefix selection (dryRun=%s)',
+    async (dryRun) => {
+      await makeNode('scope:ordinary', { content: 'no match here' });
+      const governed = await makeNode('scope:governed', {
+        content: 'needle stays governed',
+        role: 'review',
+        isRunnable: true,
+      });
+
+      const res = await call({
+        oldText: 'needle',
+        newText: 'changed',
+        memoryIds: [memory.id],
+        prefix: 'scope',
+        fields: ['content'],
+        dryRun,
+      });
+
+      expect(res).toMatchObject({
+        nodesSelected: 2,
+        nodesScanned: 1,
+        nodesSkipped: 1,
+        nodesChanged: 0,
+        totalReplacements: 0,
+        skipCounts: { governed: 1, protectedAddress: 0 },
+      });
+      expect((await db.node.findUniqueOrThrow({ where: { id: governed.id } })).content).toBe(
+        'needle stays governed',
+      );
+    },
+  );
+
+  it('reports protected addresses separately and gives governance deterministic precedence', async () => {
+    const { rootId } = await ensureChannelWithRoot(db, {
+      memoryId: memory.id,
+      loc: 'protected',
+      name: 'protected',
+      createdBy: admin.id,
+    });
+    await db.node.update({
+      where: { id: rootId },
+      data: { content: 'needle stays protected' },
+    });
+    const { rootId: governedRootId } = await ensureChannelWithRoot(db, {
+      memoryId: memory.id,
+      loc: 'protected-governed',
+      name: 'protected-governed',
+      createdBy: admin.id,
+    });
+    await db.node.update({
+      where: { id: governedRootId },
+      data: {
+        content: 'needle stays doubly protected',
+        role: 'review',
+        isRunnable: true,
+      },
+    });
+
+    const res = await call({
+      oldText: 'needle',
+      newText: 'changed',
+      nodeIds: [rootId, governedRootId],
+      fields: ['content'],
+    });
+
+    expect(res).toMatchObject({
+      nodesSelected: 2,
+      nodesScanned: 0,
+      nodesSkipped: 2,
+      nodesChanged: 0,
+      totalReplacements: 0,
+      skipCounts: { governed: 1, protectedAddress: 1 },
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: rootId } })).content).toBe(
+      'needle stays protected',
+    );
+    expect((await db.node.findUniqueOrThrow({ where: { id: governedRootId } })).content).toBe(
+      'needle stays doubly protected',
+    );
+  });
+
+  it('refuses an unauthorized target without returning selection or skip metadata', async () => {
+    const otherOrg = await db.organization.create({
+      data: { id: generateId(), name: 'other-org', urn: 'other-org' },
+    });
+    const otherMemory = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: otherOrg.id,
+        urn: `${otherOrg.urn}:private-corpus`,
+        name: 'private-corpus',
+        class: 'knowledge',
+      },
+    });
+    const hidden = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: otherMemory.id,
+        loc: 'hidden',
+        name: 'hidden',
+        content: 'needle',
+        role: 'review',
+      },
+    });
+    const contributor = await db.user.create({
+      data: { githubId: 7778, githubUsername: 'sr-contributor', roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { organizationId: org.id, userId: contributor.id, role: 'CONTRIBUTOR' },
+    });
+    let caught: unknown;
+    try {
+      await resolvers.Mutation.searchReplaceInNodes(
+        {},
+        {
+          input: {
+            oldText: 'needle',
+            newText: 'changed',
+            nodeIds: [hidden.id],
+            fields: ['content'],
+          },
+        } as never,
+        { db, roles: ['READER'], userId: contributor.id } as Context,
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(JSON.stringify(caught)).not.toMatch(/nodesSelected|nodesSkipped|governed/i);
+    expect((await db.node.findUniqueOrThrow({ where: { id: hidden.id } })).content).toBe('needle');
   });
 });
