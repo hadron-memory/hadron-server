@@ -92,6 +92,22 @@ describe('@codex P2 — the vector window widens until the filtered page fills',
     expect(res.hits.map((h: any) => h.node.id)).toEqual([matchId]);
   });
 
+  it('node granularity keeps widening when dedup makes a batch SHORT without exhausting the index (@codex round 3)', async () => {
+    // Two near review nodes with many small chunks each fill the whole ANN
+    // window, which dedupes to 2 node hits (< the 5 asked): "short batch" is
+    // duplicates, not exhaustion, and the farther spec match must still be found.
+    await db.memory.update({ where: { id: memId }, data: { chunkTokens: 8, chunkOverlap: 0 } });
+    await db.node.deleteMany({ where: { memoryId: memId } });
+    const words = Array.from({ length: 400 }, (_, i) => `near${i}`).join(' ');
+    await seed(memId, 'bulk1', words, { role: 'review' });
+    await seed(memId, 'bulk2', words, { role: 'review' });
+    const match = await seed(memId, 'match2', 'far body match', { role: 'spec' });
+    const chunkCount = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM node_embeddings WHERE memory_id = ${memId} AND kind = 'chunk'`;
+    expect(Number(chunkCount[0].n)).toBeGreaterThan(50); // more near vectors than the first window (10 x 5)
+    const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memId], role: 'spec' } });
+    expect(res.hits.map((h: any) => h.node.id)).toEqual([match]);
+  });
+
   it('CONTROL: with no filter the nearest node wins and nothing widens', async () => {
     const spy = vi.spyOn(getRetrievalProvider(), 'vectorSearch');
     const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memId] } });

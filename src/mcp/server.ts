@@ -4,6 +4,7 @@ import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
   governedKindsOf,
+  roleIsOrDescendsFrom,
   type GovernedKind,
   mergedGovernedState,
   RoleGovernedError,
@@ -353,7 +354,12 @@ export function mcpDoorCanReplay(
       continue;
     }
     if (key === 'role') {
-      if (kind !== 'review' || (op === 'create' && value !== 'review')) return false;
+      // #1345 review (@codex): the review CREATE door now sets any role in the
+      // review family it is asked for (`review` or a dotted `review.*`), so a
+      // generic create of `review.security` replays there.
+      if (kind !== 'review' || (op === 'create' && !(typeof value === 'string' && roleIsOrDescendsFrom(value, 'review')))) {
+        return false;
+      }
       // The review door refuses ANOTHER governed family ("spec" and every
       // `spec.*` sub-role have their own door), while `review.*` remains owned
       // by this door (#1322). Null and ordinary open roles also replay.
@@ -5510,12 +5516,26 @@ export function createMcpServerInstance(
     // that is legitimate — it just belongs to the task's own door rather than
     // to the generic surface, which is exactly what the before-union-after gate
     // now requires. Omitted still preserves, so an ordinary edit is unaffected.
-    const signal =
-      mode === 'create'
-        ? entry.signal.field === 'isRunnable'
-          ? { isRunnable: true }
-          : { role: entry.signal.value }
-        : {};
+    //
+    // #1345 review (@codex): a role-governed kind is a FAMILY since #1322, so
+    // the review create door sets the family member the caller names
+    // (`review.security`) — defaulting to the base `review` — and refuses one
+    // outside the family. Without this, `review.*` was governed away from the
+    // generic tool with no MCP route left to author it.
+    let signal: Record<string, unknown> = {};
+    if (mode === 'create') {
+      if (entry.signal.field === 'isRunnable') {
+        signal = { isRunnable: true };
+      } else {
+        const asked = fields.role;
+        if (asked != null && !(typeof asked === 'string' && roleIsOrDescendsFrom(asked, entry.signal.value))) {
+          return textResult(
+            `hadron_create_${kind}: "role" must be "${entry.signal.value}" or a dotted "${entry.signal.value}.<sub-role>" (got ${JSON.stringify(asked)}).`,
+          );
+        }
+        signal = { role: typeof asked === 'string' ? asked : entry.signal.value };
+      }
+    }
 
     try {
       const node = await (
@@ -5565,7 +5585,16 @@ export function createMcpServerInstance(
       .string()
       .nullable()
       .optional()
-      .describe('Set null to RETIRE this node from the review kind. Omit to preserve. This door is the only way to change it. Setting it to another GOVERNED value ("spec") is refused — that kind has its own door.'),
+      .describe('Set null to RETIRE this node from the review kind. Omit to preserve. This door is the only way to change it, including moving it between "review" and a dotted "review.<sub-role>" (#1322). Setting it to another GOVERNED family ("spec" / "spec.*") is refused — that kind has its own door.'),
+  };
+
+  // #1345 review (@codex): the review family is authored here, sub-roles included.
+  const reviewCreateArgs = {
+    ...governedDoorArgs,
+    role: z
+      .string()
+      .optional()
+      .describe('Which member of the review family to create: "review" (the default) or a dotted sub-role such as "review.security" (#1322). Anything outside the review family is refused.'),
   };
 
   server.tool(
@@ -5577,8 +5606,8 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_review',
-    'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool, so you do not pass it. Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
-    governedDoorArgs,
+    'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool: "review" by default, or pass a dotted review sub-role such as "review.security". Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
+    reviewCreateArgs,
     async (args) => callGovernedDoor('review', 'create', args),
   );
 

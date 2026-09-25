@@ -292,6 +292,10 @@ describe('kind signals are door-specific (@copilot + @codex, PR #1305 round 5)',
     expect(mcpDoorCanReplay({ isRunnable: true, role: 'note' }, 'task', 'create')).toBe(false);
     expect(mcpDoorCanReplay({ name: 'n', role: 'review' }, 'review', 'create')).toBe(true);
     expect(mcpDoorCanReplay({ role: 'review', isRunnable: false }, 'review', 'create')).toBe(false);
+    // #1345 round 3: the review create door sets any review-family role it is given.
+    expect(mcpDoorCanReplay({ name: 'n', role: 'review.security' }, 'review', 'create')).toBe(true);
+    expect(mcpDoorCanReplay({ name: 'n', role: 'spec.rule' }, 'review', 'create')).toBe(false);
+    expect(mcpDoorCanReplay({ name: 'n', role: 'reviewer' }, 'review', 'create')).toBe(false);
   });
 
   it('MCP: editing a live task while setting a role names no door; the control (content only) still does', async () => {

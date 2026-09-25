@@ -637,6 +637,29 @@ describe('the MCP handlers, driven for real — they are parity implementations,
     expect(await db.node.count({ where: { memoryId, loc: 'm:7' } })).toBe(0);
   });
 
+  // #1345 review (@codex round 3): `review.*` is governed away from the generic
+  // tool, so the review door must be able to author it, or no MCP route exists.
+  it('hadron_create_review authors a dotted review sub-role, defaults to "review", and refuses other families', async () => {
+    const sub = await mcp().callToolText('hadron_create_review', { urn: nodeUrn('m:rs'), name: 'sec', role: 'review.security' });
+    expect(sub).toContain('review node created');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'm:rs' } })).role).toBe('review.security');
+
+    await mcp().callToolText('hadron_create_review', { urn: nodeUrn('m:rd'), name: 'plain' });
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'm:rd' } })).role).toBe('review');
+
+    for (const role of ['spec', 'spec.rule', 'reviewer', 'note']) {
+      const text = await mcp().callToolText('hadron_create_review', { urn: nodeUrn(`m:bad-${role}`), name: 'x', role });
+      expect(text, role).toContain('"role" must be "review" or a dotted "review.<sub-role>"');
+      expect(await db.node.count({ where: { memoryId, loc: `m:bad-${role}` } }), role).toBe(0);
+    }
+  });
+
+  it('...and the generic tool\'s refusal of a review.* create now routes to that door', async () => {
+    const text = await mcp().callToolText('hadron_create_node', { urn: nodeUrn('m:rr'), name: 'sec', role: 'review.perf' });
+    expect(text).toContain('[role_governed]');
+    expect(text).toContain('hadron_create_review');
+  });
+
   it('...and an UPDATE without a name is fine, because it preserves', async () => {
     expect(await door('createReviewNode', { loc: 'm:8', name: 'keep me', role: 'review' })).toBe('OK');
     const text = await mcp().callToolText('hadron_update_review', {

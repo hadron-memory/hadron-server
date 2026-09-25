@@ -1183,16 +1183,22 @@ export const nodeQueries = {
        * over-fetch could leave the page empty when the matches rank past it —
        * `limit: 1` returned nothing when the five nearest nodes had other roles.
        * With filters present, widen the window (x4, to the same cap) until the
-       * filtered, floored hits fill the page or the index has no more to give.
+       * filtered, floored hits fill the page, or widening stops finding new hits.
        * Past the cap a page can still be short; it is never wrong.
        */
       const widenVectorWindow = async <T extends { nodeId: string; score: number }>(
         search: (limit: number) => Promise<T[]>,
       ): Promise<T[]> => {
         let limit = fetchN;
+        let previous = -1;
         for (;;) {
           const hits = await search(limit);
-          if (!hasStructuredFilters || hits.length < limit || limit >= VECTOR_FETCH_CAP) return hits;
+          // Exhaustion is "widening found nothing new", NOT "fewer hits than
+          // asked": node search dedupes chunk vectors to nodes, so a short batch
+          // can be duplicates with more of the index still unread (@codex,
+          // #1345 round 3). Costs one extra query when the index is spent.
+          if (!hasStructuredFilters || limit >= VECTOR_FETCH_CAP || hits.length <= previous) return hits;
+          previous = hits.length;
           const floored = scoreFloor == null ? hits : hits.filter((h) => h.score >= scoreFloor);
           const ok = await eligibleIds([...new Set(floored.map((h) => h.nodeId))]);
           if (floored.filter((h) => ok.has(h.nodeId)).length >= page) return hits;
