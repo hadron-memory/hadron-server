@@ -483,6 +483,138 @@ export async function concealUnreadableDenial(
 }
 
 /**
+ * The capability an `AgentMemoryItem` row confers (`cor:dmo:050:09`). `read`
+ * admits the memory's node CONTENT to the agent's audience; `read-write` is
+ * additionally the sole write cap for a knowledge memory.
+ *
+ * Validated rather than free-form (#1349): the column is a plain `String`, so
+ * an unrecognised value used to be stored silently and then read as "no grant"
+ * by every consumer — inert, but indistinguishable from a real denial, which
+ * is how a write bypass was first mis-measured as read-only.
+ */
+export const AGENT_MEMORY_ROLES = ['read', 'read-write'] as const;
+export type AgentMemoryRole = (typeof AGENT_MEMORY_ROLES)[number];
+
+/** Parse an `AgentMemoryItem.role` argument, defaulting to the narrower cap. */
+export function parseAgentMemoryRole(role?: string | null): AgentMemoryRole {
+  const value = role ?? 'read';
+  if (!(AGENT_MEMORY_ROLES as readonly string[]).includes(value)) {
+    throw new GraphQLError(
+      `Unknown role "${value}" — expected one of: ${AGENT_MEMORY_ROLES.join(', ')}.`,
+      { extensions: { code: 'BAD_USER_INPUT', role: value } },
+    );
+  }
+  return value as AgentMemoryRole;
+}
+
+/**
+ * The caller's OWN user principal, with every App-derived reach stripped
+ * (#1349).
+ *
+ * An attach is a grant TO an App audience, so the capability it hands over has
+ * to be one the human calling holds themselves. Evaluated on the request
+ * context as-is, an App-keyed or session-bound caller would have
+ * `getAccessibleMemoryIds` union in whatever THAT App already reaches — which
+ * is exactly how one App's grant would launder into another App's audience.
+ * Dropping `appId`/`sessionId` (and the caches primed under the wider
+ * principal) asks the narrower question the grant needs: what may this *user*
+ * reach?
+ */
+function userPrincipalOnly(ctx: Context): Context {
+  return {
+    db: ctx.db,
+    userId: ctx.userId,
+    clientId: ctx.clientId,
+    roles: ctx.roles,
+    organizationId: ctx.organizationId,
+    apiKeyId: ctx.apiKeyId,
+    oauthScopes: ctx.oauthScopes,
+    impersonation: ctx.impersonation,
+  };
+}
+
+/**
+ * Gate an agent-memory ATTACHMENT on the capability it grants (#1349).
+ *
+ * `addMemoryToAgent` / `updateAgentMemoryRole` authorize the AGENT (its owner
+ * or an org ADMIN). That is necessary and not sufficient: the row they write is
+ * the sole knowledge-memory write cap (`cor:dmo:050:09`) and folds into every
+ * App access map, so administering an agent used to be enough to hand that
+ * agent's audience read — and with `read-write`, WRITE — over a memory the
+ * caller could not touch themselves. `findings:installing-an-agent-is-a-read-grant`
+ * states the rule this restores: **an attach operation's gate is a read gate on
+ * the attached entity.**
+ *
+ * Two conditions, both required:
+ *
+ * 1. **Tenancy.** The memory must belong to the agent's own tenant (same org,
+ *    or the same owning user for a spec-047 user-owned agent), or be PUBLIC —
+ *    and PUBLIC only for `read`, since a public audience is a READ audience.
+ *    Holger's ruling (2026-09-25) refuses a cross-tenant non-public attach even
+ *    when the caller can read the memory, matching `attachMemoryToApp`'s
+ *    `ORGANIZATION_MISMATCH` and the PUBLIC-only cross-org subscription rule.
+ * 2. **Capability.** The caller must hold, on their own user principal, the
+ *    capability being granted: the node-CONTENT read gate for `read`, and the
+ *    memory write gate for `read-write`. The content gate (not the record gate)
+ *    is the right one because an attach grants node content: an org member may
+ *    open an app-scoped memory's RECORD while `getAccessibleMemoryIds`
+ *    deliberately excludes its nodes (#653), and that gap is a same-tenant
+ *    amplification a tenancy check alone cannot see.
+ *
+ * A caller who cannot read the memory at all is answered as if it did not exist
+ * (#1316) — the refusal itself must not disclose that a guessable URN names a
+ * real memory. A caller who CAN read it but may not grant what they asked for
+ * gets an actionable `FORBIDDEN`, since existence is not a secret from them.
+ */
+export async function requireAgentMemoryGrant(
+  ctx: Context,
+  agent: { organizationId: string | null; ownerUserId: string | null },
+  memory: {
+    id: string;
+    class: string;
+    visibility: string | null;
+    userId: string | null;
+    ownerUserId: string | null;
+    organizationId: string | null;
+    appId: string | null;
+    userMemoryOfAgentId: string | null;
+  },
+  role: AgentMemoryRole,
+  ref: string,
+): Promise<void> {
+  const self = userPrincipalOnly(ctx);
+  const canRead = await isMemoryReadableCached(self, memory.id);
+  // Existence-hiding first: every refusal below this line is addressed to
+  // someone who already knows the memory exists.
+  if (!canRead) throw new MemoryNotFoundError(ref);
+
+  const sameTenant =
+    (agent.organizationId != null && agent.organizationId === memory.organizationId) ||
+    (agent.ownerUserId != null && agent.ownerUserId === memory.ownerUserId);
+  const publicRead = role === 'read' && memory.visibility === 'PUBLIC';
+  if (!sameTenant && !publicRead) {
+    throw new GraphQLError(
+      memory.visibility === 'PUBLIC'
+        ? 'A PUBLIC memory from another tenant can only be attached read-only — its audience is a read audience.'
+        : "This memory belongs to another tenant; attach it to an agent in its own tenant, or share it with the agent's tenant first.",
+      { extensions: { code: 'FORBIDDEN', reason: 'CROSS_TENANT_ATTACH' } },
+    );
+  }
+
+  if (role === 'read-write') {
+    try {
+      await requireMemoryWriteAccess(self, memory.id);
+    } catch (error) {
+      if (!isAuthorizationDenial(error)) throw error;
+      throw new GraphQLError(
+        'Attaching a memory read-write grants the agent write access you do not hold on it yourself.',
+        { extensions: { code: 'FORBIDDEN', reason: 'INSUFFICIENT_MEMORY_CAPABILITY' } },
+      );
+    }
+  }
+}
+
+/**
  * The RECORD-level memory read gate — "may this caller open this memory's
  * record (its scalars: name, description, data)?", as distinct from
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".

@@ -102,6 +102,8 @@ import {
   requireOrgRole,
   requireOwnerOrOrgRole,
   concealUnreadableDenial,
+  requireAgentMemoryGrant,
+  parseAgentMemoryRole,
   requireMemoryWriteAccess,
   MEMORY_INCLUDE,
   AGENT_INCLUDE,
@@ -1463,13 +1465,30 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      // #1349: the role is validated BEFORE anything is stored. The column is a
+      // free String, so an unknown value used to persist as an inert grant.
+      const grantedRole = parseAgentMemoryRole(role);
       // System-class memories can only be linked via Agent.systemMemoryId.
       // Attaching them as regular memory items would allow access patterns
       // we don't want (e.g. another agent reading the linked agent's prompts).
       const memory = await ctx.db.memory.findUniqueOrThrow({
         where: { id: resolvedMemoryId },
-        select: { class: true, visibility: true, appId: true },
+        select: {
+          id: true,
+          class: true,
+          visibility: true,
+          appId: true,
+          userId: true,
+          ownerUserId: true,
+          organizationId: true,
+          userMemoryOfAgentId: true,
+        },
       });
+      // #1349 — THE MEMORY-SIDE GATE. The agent gate above says the caller may
+      // configure this agent; it says nothing about the memory they are handing
+      // it. Runs BEFORE the class checks below so a caller who cannot read the
+      // memory learns nothing about its class (that refusal names the class).
+      await requireAgentMemoryGrant(ctx, agent, memory, grantedRole, memoryRef);
       if (memory.class === 'system') {
         throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
       }
@@ -1559,11 +1578,11 @@ export const memoryMutations = {
         create: {
           agentId: resolvedAgentId,
           memoryId: resolvedMemoryId,
-          role: role ?? 'read',
+          role: grantedRole,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
         update: {
-          role: role ?? 'read',
+          role: grantedRole,
           deletedAt: null,
           deletedBy: null,
           updatedAt: new Date(),
@@ -1582,6 +1601,24 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      // #1349: re-role is its own escalation path — an existing `read` row
+      // becomes the write cap here — so the NEW role gets the same memory-side
+      // gate as a fresh attach, not merely the agent gate.
+      const grantedRole = parseAgentMemoryRole(role);
+      const memory = await ctx.db.memory.findUniqueOrThrow({
+        where: { id: resolvedMemoryId },
+        select: {
+          id: true,
+          class: true,
+          visibility: true,
+          appId: true,
+          userId: true,
+          ownerUserId: true,
+          organizationId: true,
+          userMemoryOfAgentId: true,
+        },
+      });
+      await requireAgentMemoryGrant(ctx, agent, memory, grantedRole, memoryRef);
       // #501: only a LIVE grant is updatable — updateMany + deletedAt:null
       // (findUnique on the composite PK can't filter soft-deletes; the
       // requireOrgRole-pattern rule from findings:revoked-membership-auth-
@@ -1590,7 +1627,11 @@ export const memoryMutations = {
       // addMemoryToAgent resurrects it.
       const updated = await ctx.db.agentMemoryItem.updateMany({
         where: { agentId: resolvedAgentId, memoryId: resolvedMemoryId, deletedAt: null },
-        data: { role },
+        // #1349: stamp the actor. Before this the row recorded WHO escalated it
+        // nowhere, so a later audit could not tell an original grant from a
+        // re-role — which is what made a delegator-attribution containment
+        // strategy unworkable.
+        data: { role: grantedRole, updatedBy: ctx.userId ?? ctx.clientId ?? null },
       });
       if (updated.count === 0) {
         throw new GraphQLError(

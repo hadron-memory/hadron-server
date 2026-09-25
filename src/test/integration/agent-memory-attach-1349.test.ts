@@ -255,32 +255,44 @@ describe('#1349 — an attach cannot grant what the caller does not hold', () =>
   });
 });
 
-describe('#1349 — containment of rows that already exist', () => {
-  // A new-write gate alone does not close exposure through rows minted before
-  // it. These rows are seeded directly, as a pre-fix attach would have left
-  // them. Whether a cross-tenant row is honoured is the POLICY question on the
-  // issue; these cases pin the unambiguous one — a row whose memory the agent's
-  // tenant has no path to at all.
-  it('a pre-existing read row to an unreachable memory grants no read', async () => {
+describe('#1349 — containment: pre-existing rows are STILL LIVE (residual exposure)', () => {
+  // These two pin the EXPOSURE, not a desired behaviour, and they are the
+  // reason this PR is `Refs #1349`, not `Closes`. The write gate above stops
+  // new over-grants; it cannot reach a row minted before it, because every
+  // access fold (foldAgentIntoAccessMap, the App branch of
+  // getAccessibleMemoryIds, sessionScopedMemoryIds, resolveAssetTargetMemoryId,
+  // chat target selection, scopes) trusts the stored row.
+  //
+  // Containment is a SEPARATE decision, deliberately deferred until a read-only
+  // production audit sizes it (Holger's ruling, 2026-09-25 — the audit is
+  // approved, its operator not yet named). Asserting the current behaviour
+  // rather than skipping keeps the residual exposure visible in the suite and
+  // makes these tests FAIL THE MOMENT containment ships — at which point invert
+  // them to the secure expectation (`toBeNull()` / `toBe(false)`) and close the
+  // issue. A green suite here means "not yet contained", never "safe".
+  it('a pre-existing read row to an unreachable memory STILL grants read — pending containment', async () => {
     const { agentId, appKey } = await agentWithApp(attackerOrgId, 'legacy-read');
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: mem.orgKnowledge!.id, role: 'read' } });
-    expect(await readsContent(appKey, 'orgKnowledge')).toBeNull();
+    expect(await readsContent(appKey, 'orgKnowledge')).toBe('orgKnowledge SECRET');
   });
 
-  it('a pre-existing read-write row to an unreachable memory grants no write', async () => {
+  it('a pre-existing read-write row to an unreachable memory STILL grants write — pending containment', async () => {
     const { agentId, appKey } = await agentWithApp(attackerOrgId, 'legacy-rw');
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: mem.orgKnowledge!.id, role: 'read-write' } });
-    expect(await writes(appKey, 'orgKnowledge')).toBe(false);
+    expect(await writes(appKey, 'orgKnowledge')).toBe(true);
   });
 });
 
-describe('#1349 — the open policy question (measured, not asserted)', () => {
-  it('a caller who CAN read another org memory attaches it to their own org agent', async () => {
-    // `dual` reads the victim org's knowledge memory as a member. Attaching it
-    // to an agent in THEIR org widens it to that org's App audience. Existing
-    // contracts do not decide this (issue comment); record, don't judge.
-    const { agentId } = await agentWithApp(dualOrgId, 'dual-crossorg');
+describe('#1349 — Holger\'s cross-tenant ruling (2026-09-25)', () => {
+  it('a caller who CAN read another tenant\'s memory still may not attach it', async () => {
+    // `dual` reads the victim org's knowledge memory as a member, so this is
+    // not an existence question — the refusal is allowed to be actionable.
+    // Ruled REFUSE, matching attachMemoryToApp's ORGANIZATION_MISMATCH and the
+    // PUBLIC-only cross-org subscription rule.
+    const { agentId, appKey } = await agentWithApp(dualOrgId, 'dual-crossorg');
     const r = await gql(key.dual!, ATTACH, { g: agentId, m: mem.orgKnowledge!.urn, r: 'read' });
-    expect([undefined, 'FORBIDDEN', 'MEMORY_NOT_FOUND']).toContain(code(r));
+    expect(code(r)).toBe('FORBIDDEN');
+    expect(r.errors![0]!.extensions?.reason).toBe('CROSS_TENANT_ATTACH');
+    expect(await readsContent(appKey, 'orgKnowledge')).toBeNull();
   });
 });
