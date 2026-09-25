@@ -96,7 +96,7 @@ interface Fixtures {
     keys: string[];
     findings: { rule: string; severity: string; message: string }[];
   }[];
-  /** #1315 — Go's Lint over authored nodes declaring a host-reserved name
+  /** #1315 — Go's LintFor PER HOST over authored nodes declaring a host-reserved name
    *  (hadron-cli#712), stamped separately so `lint` keeps its own commit. */
   lintReservedSourceCommit: string;
   lintReserved: {
