@@ -196,6 +196,8 @@ export const typeDefs = `#graphql
     objectType: String
     tags: [String!]
     isRunnable: Boolean
+    "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
+    role: String
     locPrefix: String
     createdBy: String
     updatedAfter: String
@@ -1149,7 +1151,8 @@ export const typeDefs = `#graphql
     property schema when it has one. NULL for an ordinary node.
 
     NOT 'nodeType' (the platform-kind axis, which drives retrieval) and NOT
-    'role' (what the node is for, which has no retrieval impact).
+    'role' (what the node is for; role can be filtered explicitly but does not
+    change default ranking or rendering).
     """
     objectType: String
     loc: String!
@@ -1233,13 +1236,14 @@ export const typeDefs = `#graphql
 
     NOT 'nodeType' (the platform-kind axis, load-bearing for retrieval) and NOT
     'objectType' (the collection discriminator, schema-validated). This field
-    has NO retrieval impact.
+    does not change default retrieval or ranking; NodeFilter.role explicitly
+    selects its exact dotted family (#1322).
 
-    A GOVERNED value routes the write to that kind's own authoring door, and the
-    generic node surface is refused: 'review' and 'spec' today, alongside the
-    task kind, which is gated on 'isRunnable' rather than on any label because a
-    label can be omitted and a capability cannot. 'role: \"weather-widget\"'
-    does nothing at all.
+    A GOVERNED family routes the write to that kind's own authoring door, and
+    the generic node surface is refused: 'review' / 'review.*' and 'spec' /
+    'spec.*' today, alongside the task kind, which is gated on 'isRunnable'
+    rather than on any label because a label can be omitted and a capability
+    cannot. Other values are inert unless a caller explicitly filters for them.
     """
     role: String
     llmModel: String
@@ -5845,7 +5849,7 @@ export const typeDefs = `#graphql
     The App's memory scope is authoritative, so the filter's memory-scope
     fields (memoryIds / memoryClasses) are rejected with BAD_USER_INPUT rather
     than silently ignored — use findNodes for cross-memory scoping. Only
-    node-level predicates (nodeType, tags, isRunnable, locPrefix, createdBy,
+    node-level predicates (nodeType, tags, isRunnable, role, locPrefix, createdBy,
     updatedAfter/Before, includeDeleted) apply. Unlike findNodes, system-memory
     nodes are NOT excluded by default.
     """
@@ -6538,7 +6542,7 @@ export const typeDefs = `#graphql
 
     """
     #1201 — the CREATE door for the spec kind. A write that would produce a
-    node with role: 'spec' must come through here; the generic createNode
+    node with role: 'spec' or a dotted 'spec.*' sub-role must come through here; the generic createNode
     refuses it.
 
     PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
@@ -6572,7 +6576,7 @@ export const typeDefs = `#graphql
 
     """
     #1201 — the CREATE door for the review kind. A write that would produce a
-    node with role: 'review' must come through here; the generic createNode
+    node with role: 'review' or a dotted 'review.*' sub-role must come through here; the generic createNode
     refuses it.
 
     PURE ROUTING: it validates nothing and knows nothing beyond which kind it is

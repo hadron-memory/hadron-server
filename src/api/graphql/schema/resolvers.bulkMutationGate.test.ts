@@ -106,7 +106,9 @@ describe('mergeMemories consults both gates (#1191)', () => {
     // operation could silently loosen the one that was never in the ruling.
     // #1218 named extract, clone and git sync. It did not name merge, and a
     // merge folds nodes into a memory rather than duplicating an approved one.
-    const review = await mkNode(srcMem.id, 'review:x', { role: 'review' });
+    // A dotted descendant is governed exactly like its base kind. This drives
+    // the SQL preflight, not only the in-memory `governedKindsOf` path.
+    const review = await mkNode(srcMem.id, 'review:x', { role: 'review.security' });
     expect(await codeOf(merge({ source: srcMem.id, target: tgtMem.id }))).toBe('ROLE_GOVERNED');
 
     // …and on the target side, keyed on the capability rather than the label:
