@@ -381,21 +381,19 @@ export const agentMutations = {
       // is itself PUBLIC. Checked against the CURRENT links before persisting.
       // cor:acl:080:03 — congruence: an agent may become PUBLIC only if every
       // knowledge memory it links is itself PUBLIC, and (#1349) only if it
-      // holds no read-write knowledge.
+      // holds no read-write knowledge. Checked ONCE, under the agent row lock
+      // in the transaction below.
       //
-      // Checked TWICE, deliberately (@codex P2, PR #1357). The authoritative
-      // check is under the agent row lock in the transaction below, because
-      // checking here and writing there let an `updateAgentMemoryRole(
-      // read-write)` interleave. But the locked check alone is too LATE for a
-      // call that also supplies a first `systemMemoryId`: the promotion below
-      // converts the target memory to class='system', clears its visibility and
-      // disables uploads in its OWN transaction, so a later rejection rolled
-      // that back nowhere and left a mutated orphan the agent never attached.
-      // This early pass is the fail-fast that keeps the refusal ahead of any
-      // externally visible mutation; the locked one still decides.
-      if (visibility === 'PUBLIC') {
-        await assertAgentPublicAllowed(ctx.db, id);
-      }
+      // There WAS an unlocked fail-fast here, added when the locked check was
+      // the only one and the systemMemoryId promotion still committed ahead of
+      // it: the fail-fast kept a refusal in front of that write. Deferring the
+      // promotion into the deciding transaction and moving the URN/name syncs
+      // after it removed every externally visible mutation that preceded the
+      // decision, which removed the fail-fast's last correctness role. It is
+      // deleted rather than kept as an optimisation: a duplicated
+      // authorization check that no test can distinguish is the drift
+      // `AGENTS.md` warns about, and its mutant went green the moment the last
+      // write moved out from behind it (@codex, PR #1357).
       let newUrn: string | undefined;
       if (urn !== undefined) {
         if (!agent.organizationId) {
@@ -451,6 +449,194 @@ export const agentMutations = {
           }
           promoteSystemMemoryId = incoming;
         }
+      }
+
+      // #1364 (@codex P2, PR #1357) — the system-memory URN and NAME syncs
+      // used to run HERE, each committing its own transaction BEFORE the
+      // deciding one below. A publication refused by the locked congruence
+      // check (an attach landing after the fail-fast) therefore left the system
+      // memory renamed or retitled under an agent that never changed. They are
+      // best-effort by design — a failure must not fail the agent update — so
+      // rather than fold them into the deciding transaction and change that,
+      // they now run AFTER it, where a refusal can no longer reach them.
+      // #1079 — the rename and its alias record commit together (see the App arm
+      // in resolvers.mutation.app.ts for why they cannot be separate).
+      // #1364 — bounded retry around the deciding transaction. The only thing
+      // that raises AgentLinkSetChangedError is the post-lock re-scan below,
+      // and once this transaction holds the agent lock no further link can be
+      // added, so a single retry is normally enough; the cap is there so a
+      // pathological loop fails loudly instead of spinning.
+      const MAX_PUBLISH_ATTEMPTS = 3;
+      let published: Awaited<ReturnType<typeof ctx.db.agent.update>> | undefined;
+      for (let attempt = 1; ; attempt++) {
+      try {
+      published = await ctx.db.$transaction(async (tx) => {
+        // Lock and RE-READ the urn inside the transaction (PR #1080 review,
+        // Codex + Copilot P2). The row above was read before the transaction
+        // opened, so two concurrent renames could both record the SAME old urn
+        // and the intermediate identity — committed, and returned to whoever
+        // made the first call — would never be aliased at all. Reading under
+        // FOR UPDATE serializes the renames and makes each one record the urn it
+        // actually superseded. `updateOrganization` already did this; the three
+        // single-entity paths did not.
+        // #1349 (@codex, PR #1357) — publication must serialize with a
+        // concurrent narrowing of the knowledge it links. `updateMemory` takes
+        // `FOR UPDATE` on the memory row, so locking the linked memories here
+        // makes the two contend: otherwise this check saw them still PUBLIC
+        // while the narrowing's own check saw no PUBLIC agent yet, and both
+        // committed — a PUBLIC agent referencing non-public knowledge.
+        //
+        // LOCKED BEFORE THE AGENT ROW, and ordered by id. The attach path locks
+        // memory-then-agent (see lockAttachmentPair), so taking them in the
+        // other order here would deadlock against it; ordering the memory set
+        // by id keeps two concurrent publications consistent with each other.
+        // An attach that adds a link to a memory outside this set still cannot
+        // slip past: it must take the agent lock below, which this transaction
+        // holds until it commits.
+        let lockedMemoryIds: string[] = [];
+        if (visibility === 'PUBLIC') {
+          const linked = await tx.agentMemoryItem.findMany({
+            where: { agentId: id, deletedAt: null },
+            select: { memoryId: true },
+            orderBy: { memoryId: 'asc' },
+          });
+          lockedMemoryIds = linked.map((l: { memoryId: string }) => l.memoryId);
+        }
+        // The promotion target belongs in the SAME ordered lock set (@codex P2,
+        // PR #1357). Its `tx.memory.update` below would otherwise wait for that
+        // row's lock AFTER this transaction has taken the agent lock — an
+        // agent-then-memory acquisition, inverting `lockAttachmentPair`'s
+        // memory-then-agent order and deadlocking against a concurrent attach
+        // of the same pair. Exactly the hazard the lock-order note warns about;
+        // taking it here, in id order, with the rest, is the fix.
+        if (promoteSystemMemoryId && !lockedMemoryIds.includes(promoteSystemMemoryId)) {
+          lockedMemoryIds = [...lockedMemoryIds, promoteSystemMemoryId].sort();
+        }
+        for (const memoryId of lockedMemoryIds) {
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+        }
+        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
+          SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
+        `;
+        if (visibility === 'PUBLIC') {
+          // Re-scan the link set now that the agent row is LOCKED (#1364,
+          // @codex on PR #1357). The scan above happened before this lock, so
+          // an attach could commit in between and add a link whose memory is
+          // therefore absent from `lockedMemoryIds` — and a concurrent
+          // narrowing of that memory would then be serialized against nothing.
+          //
+          // The repair is a RETRY, not a second round of locking: taking a
+          // memory lock while already holding the agent lock would be
+          // agent-then-memory, inverting the attach path's memory-then-agent
+          // order and deadlocking. Aborting releases both locks; the next
+          // attempt sees the new link in its snapshot and locks it properly.
+          // No attach can add a further link once this lock is held, so the
+          // retry converges.
+          // UNPROVEN BY TEST, and kept, for the same reason as the deferred
+          // promotion above: staging it needs THREE transactions to interleave
+          // (an attach committing between the snapshot and this lock, plus a
+          // narrowing of that new memory). The suite stays green without it;
+          // the hole it closes is a PUBLIC agent linked to non-public
+          // knowledge.
+          const afterLock = await tx.agentMemoryItem.findMany({
+            where: { agentId: id, deletedAt: null },
+            select: { memoryId: true },
+            orderBy: { memoryId: 'asc' },
+          });
+          const now = afterLock.map((l: { memoryId: string }) => l.memoryId);
+          // Compare against the LINK set, not the lock set: the lock set may
+          // additionally carry the promotion target, which is not a link.
+          if (now.some((m: string) => !lockedMemoryIds.includes(m))) {
+            throw new AgentLinkSetChangedError();
+          }
+        }
+        // cor:acl:080:03 — congruence invariant: an agent may become PUBLIC
+        // only if every knowledge memory it links (excluding per-user
+        // personal/private) is itself PUBLIC, and (#1349) only if it holds no
+        // read-write knowledge. Run under the row lock taken just above, so an
+        // attach or re-role racing this publication serializes behind it
+        // instead of both observing a state the other is about to change.
+        if (visibility === 'PUBLIC') {
+          await assertAgentPublicAllowed(tx, id);
+        }
+        // The deferred first-attach promotion (#1364): inside THIS transaction,
+        // after the congruence decision, so a refusal rolls it back with
+        // everything else instead of leaving a mutated orphan.
+        //
+        // UNPROVEN BY TEST, and kept. Moving this write back outside the
+        // transaction leaves the suite green, because reaching it needs the
+        // early fail-fast to PASS and this locked decision to REFUSE — i.e. a
+        // disqualifying link committing in between. 20 iterations of the paired
+        // race did not stage it. Per `review:a-green-mutation-indicts-the-test`
+        // that green indicts the test: without this placement, a publication
+        // refused by a link that landed in that window still promotes the
+        // memory, which is exactly the orphan #1364 was filed for.
+        if (promoteSystemMemoryId) {
+          await tx.memory.update({
+            where: { id: promoteSystemMemoryId },
+            data: {
+              // 035-visibility-enum-cleanup: mark via class; clear visibility
+              // (forbidden non-null on class='system'). Agent visibility no
+              // longer propagates onto the system memory.
+              class: 'system',
+              name: `${name ?? agent.name} System`,
+              visibility: null,
+              // system-class memories must opt out of uploads (schema.prisma,
+              // 006-asset-upload-redesign). #519 review.
+              acceptsUploads: false,
+            },
+          });
+        }
+        if (newUrn !== undefined) {
+          await recordUrnRename(tx, {
+            entityType: 'AGENT',
+            entityId: id,
+            // Recorded verbatim: the `urn` column already holds the normalized
+            // lookup form the resolvers query.
+            oldUrn: lockedRow?.urn ?? agent.urn,
+            newUrn,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          });
+        }
+        return tx.agent.update({
+        where: { id },
+        data: {
+          ...(name !== undefined ? { name } : {}),
+          ...(newUrn !== undefined ? { urn: newUrn } : {}),
+          ...(description !== undefined ? { description } : {}),
+          ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+          ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
+          ...(visibility !== undefined ? { visibility: visibility as AgentVisibility } : {}),
+          // cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement,
+          // not access; independent of visibility). NOT NULL column: an explicit
+          // null is treated like an omitted arg (no change), not a NULL write.
+          ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
+          ...(type !== undefined ? { type } : {}),
+          ...(surfaces !== undefined ? { surfaces } : {}),
+          // #928 persona dressing — pure metadata. An explicit null (or a
+          // blank-after-trim string) clears the field; omitted preserves.
+          ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
+          ...(personaPromptNorm !== undefined ? { personaPrompt: personaPromptNorm } : {}),
+          // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
+          // stored as given; null clears to the platform defaults.
+          ...(registerDefaults !== undefined
+            ? { registerDefaults: registerDefaults === null ? Prisma.JsonNull : { mentionOnly: registerDefaults.mentionOnly === true } }
+            : {}),
+        },
+        include: AGENT_INCLUDE,
+        });
+      });
+      } catch (err) {
+        if (err instanceof AgentLinkSetChangedError && attempt < MAX_PUBLISH_ATTEMPTS) continue;
+        if (err instanceof AgentLinkSetChangedError) {
+          throw new GraphQLError(
+            'The agent\'s knowledge links kept changing while publishing it; retry the request.',
+            { extensions: { code: 'CONFLICT', reason: 'AGENT_LINKS_CHANGED' } },
+          );
+        }
+        throw err;
+      }
+      break;
       }
 
       // ── URN sync for an auto-derived system memory.
@@ -558,171 +744,7 @@ export const agentMutations = {
         });
       }
 
-      // #1079 — the rename and its alias record commit together (see the App arm
-      // in resolvers.mutation.app.ts for why they cannot be separate).
-      // #1364 — bounded retry around the deciding transaction. The only thing
-      // that raises AgentLinkSetChangedError is the post-lock re-scan below,
-      // and once this transaction holds the agent lock no further link can be
-      // added, so a single retry is normally enough; the cap is there so a
-      // pathological loop fails loudly instead of spinning.
-      const MAX_PUBLISH_ATTEMPTS = 3;
-      for (let attempt = 1; ; attempt++) {
-      try {
-      return await ctx.db.$transaction(async (tx) => {
-        // Lock and RE-READ the urn inside the transaction (PR #1080 review,
-        // Codex + Copilot P2). The row above was read before the transaction
-        // opened, so two concurrent renames could both record the SAME old urn
-        // and the intermediate identity — committed, and returned to whoever
-        // made the first call — would never be aliased at all. Reading under
-        // FOR UPDATE serializes the renames and makes each one record the urn it
-        // actually superseded. `updateOrganization` already did this; the three
-        // single-entity paths did not.
-        // #1349 (@codex, PR #1357) — publication must serialize with a
-        // concurrent narrowing of the knowledge it links. `updateMemory` takes
-        // `FOR UPDATE` on the memory row, so locking the linked memories here
-        // makes the two contend: otherwise this check saw them still PUBLIC
-        // while the narrowing's own check saw no PUBLIC agent yet, and both
-        // committed — a PUBLIC agent referencing non-public knowledge.
-        //
-        // LOCKED BEFORE THE AGENT ROW, and ordered by id. The attach path locks
-        // memory-then-agent (see lockAttachmentPair), so taking them in the
-        // other order here would deadlock against it; ordering the memory set
-        // by id keeps two concurrent publications consistent with each other.
-        // An attach that adds a link to a memory outside this set still cannot
-        // slip past: it must take the agent lock below, which this transaction
-        // holds until it commits.
-        let lockedMemoryIds: string[] = [];
-        if (visibility === 'PUBLIC') {
-          const linked = await tx.agentMemoryItem.findMany({
-            where: { agentId: id, deletedAt: null },
-            select: { memoryId: true },
-            orderBy: { memoryId: 'asc' },
-          });
-          lockedMemoryIds = linked.map((l: { memoryId: string }) => l.memoryId);
-          for (const memoryId of lockedMemoryIds) {
-            await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
-          }
-        }
-        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
-          SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
-        `;
-        if (visibility === 'PUBLIC') {
-          // Re-scan the link set now that the agent row is LOCKED (#1364,
-          // @codex on PR #1357). The scan above happened before this lock, so
-          // an attach could commit in between and add a link whose memory is
-          // therefore absent from `lockedMemoryIds` — and a concurrent
-          // narrowing of that memory would then be serialized against nothing.
-          //
-          // The repair is a RETRY, not a second round of locking: taking a
-          // memory lock while already holding the agent lock would be
-          // agent-then-memory, inverting the attach path's memory-then-agent
-          // order and deadlocking. Aborting releases both locks; the next
-          // attempt sees the new link in its snapshot and locks it properly.
-          // No attach can add a further link once this lock is held, so the
-          // retry converges.
-          // UNPROVEN BY TEST, and kept, for the same reason as the deferred
-          // promotion above: staging it needs THREE transactions to interleave
-          // (an attach committing between the snapshot and this lock, plus a
-          // narrowing of that new memory). The suite stays green without it;
-          // the hole it closes is a PUBLIC agent linked to non-public
-          // knowledge.
-          const afterLock = await tx.agentMemoryItem.findMany({
-            where: { agentId: id, deletedAt: null },
-            select: { memoryId: true },
-            orderBy: { memoryId: 'asc' },
-          });
-          const now = afterLock.map((l: { memoryId: string }) => l.memoryId);
-          if (now.length !== lockedMemoryIds.length || now.some((m: string, i: number) => m !== lockedMemoryIds[i])) {
-            throw new AgentLinkSetChangedError();
-          }
-        }
-        // cor:acl:080:03 — congruence invariant: an agent may become PUBLIC
-        // only if every knowledge memory it links (excluding per-user
-        // personal/private) is itself PUBLIC, and (#1349) only if it holds no
-        // read-write knowledge. Run under the row lock taken just above, so an
-        // attach or re-role racing this publication serializes behind it
-        // instead of both observing a state the other is about to change.
-        if (visibility === 'PUBLIC') {
-          await assertAgentPublicAllowed(tx, id);
-        }
-        // The deferred first-attach promotion (#1364): inside THIS transaction,
-        // after the congruence decision, so a refusal rolls it back with
-        // everything else instead of leaving a mutated orphan.
-        //
-        // UNPROVEN BY TEST, and kept. Moving this write back outside the
-        // transaction leaves the suite green, because reaching it needs the
-        // early fail-fast to PASS and this locked decision to REFUSE — i.e. a
-        // disqualifying link committing in between. 20 iterations of the paired
-        // race did not stage it. Per `review:a-green-mutation-indicts-the-test`
-        // that green indicts the test: without this placement, a publication
-        // refused by a link that landed in that window still promotes the
-        // memory, which is exactly the orphan #1364 was filed for.
-        if (promoteSystemMemoryId) {
-          await tx.memory.update({
-            where: { id: promoteSystemMemoryId },
-            data: {
-              // 035-visibility-enum-cleanup: mark via class; clear visibility
-              // (forbidden non-null on class='system'). Agent visibility no
-              // longer propagates onto the system memory.
-              class: 'system',
-              name: `${name ?? agent.name} System`,
-              visibility: null,
-              // system-class memories must opt out of uploads (schema.prisma,
-              // 006-asset-upload-redesign). #519 review.
-              acceptsUploads: false,
-            },
-          });
-        }
-        if (newUrn !== undefined) {
-          await recordUrnRename(tx, {
-            entityType: 'AGENT',
-            entityId: id,
-            // Recorded verbatim: the `urn` column already holds the normalized
-            // lookup form the resolvers query.
-            oldUrn: lockedRow?.urn ?? agent.urn,
-            newUrn,
-            createdBy: ctx.userId ?? ctx.clientId ?? null,
-          });
-        }
-        return tx.agent.update({
-        where: { id },
-        data: {
-          ...(name !== undefined ? { name } : {}),
-          ...(newUrn !== undefined ? { urn: newUrn } : {}),
-          ...(description !== undefined ? { description } : {}),
-          ...(systemPrompt !== undefined ? { systemPrompt } : {}),
-          ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
-          ...(visibility !== undefined ? { visibility: visibility as AgentVisibility } : {}),
-          // cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement,
-          // not access; independent of visibility). NOT NULL column: an explicit
-          // null is treated like an omitted arg (no change), not a NULL write.
-          ...(listedOnMarketplace != null ? { listedOnMarketplace } : {}),
-          ...(type !== undefined ? { type } : {}),
-          ...(surfaces !== undefined ? { surfaces } : {}),
-          // #928 persona dressing — pure metadata. An explicit null (or a
-          // blank-after-trim string) clears the field; omitted preserves.
-          ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
-          ...(personaPromptNorm !== undefined ? { personaPrompt: personaPromptNorm } : {}),
-          // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
-          // stored as given; null clears to the platform defaults.
-          ...(registerDefaults !== undefined
-            ? { registerDefaults: registerDefaults === null ? Prisma.JsonNull : { mentionOnly: registerDefaults.mentionOnly === true } }
-            : {}),
-        },
-        include: AGENT_INCLUDE,
-        });
-      });
-      } catch (err) {
-        if (err instanceof AgentLinkSetChangedError && attempt < MAX_PUBLISH_ATTEMPTS) continue;
-        if (err instanceof AgentLinkSetChangedError) {
-          throw new GraphQLError(
-            'The agent\'s knowledge links kept changing while publishing it; retry the request.',
-            { extensions: { code: 'CONFLICT', reason: 'AGENT_LINKS_CHANGED' } },
-          );
-        }
-        throw err;
-      }
-      }
+      return published!;
     },
 
     deleteAgent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {

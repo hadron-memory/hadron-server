@@ -99,15 +99,10 @@ run "20 PUBLIC transfer keeps foreign writable links" "$A" \
 run "21 publication counts deleted-memory links" "$A" \
   "    where: { agentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } }," \
   "    where: { agentId, deletedAt: null, role: 'read-write' },"
-run "22 early congruence fail-fast removed" "$AG" \
-  "      if (visibility === 'PUBLIC') {
-        await assertAgentPublicAllowed(ctx.db, id);
-      }" "      "
-
 run "23 publication does not lock linked memories" "$AG" \
-  "          for (const memoryId of lockedMemoryIds) {
-            await tx.\$queryRaw\`SELECT id FROM memories WHERE id = \${memoryId} FOR UPDATE\`;
-          }" "          "
+  "        for (const memoryId of lockedMemoryIds) {
+          await tx.\$queryRaw\`SELECT id FROM memories WHERE id = \${memoryId} FOR UPDATE\`;
+        }" "        "
 # 24 SURVIVES by design — see the UNPROVEN BY TEST note at that line. Kept in
 # the harness so the fact stays visible in every run rather than being quietly
 # dropped once someone notices it is green.
@@ -123,9 +118,23 @@ run "25 promotion back outside the deciding transaction (expected survivor)" "$A
   "        if (promoteSystemMemoryId) {
           await ctx.db.memory.update({"
 run "26 post-lock link re-scan removed (expected survivor)" "$AG" \
-  "          if (now.length !== lockedMemoryIds.length || now.some((m: string, i: number) => m !== lockedMemoryIds[i])) {
+  "          if (now.some((m: string) => !lockedMemoryIds.includes(m))) {
             throw new AgentLinkSetChangedError();
           }" "          "
+
+run "27 syncs back before the deciding transaction" "$AG" \
+  "      const MAX_PUBLISH_ATTEMPTS = 3;" \
+  "      if (agent.systemMemoryId && name !== undefined) {
+        await ctx.db.memory.update({ where: { id: agent.systemMemoryId }, data: { name: \`\${name} System\` } }).catch(() => {});
+      }
+      const MAX_PUBLISH_ATTEMPTS = 3;"
+# 28 SURVIVES by design: a lock-order inversion shows up as a Postgres deadlock
+# abort under precise timing, not as a wrong result, so no assertion can catch
+# it. Kept because the inversion is real — see the lock-order note at that line.
+run "28 promotion target left out of the ordered lock set (expected survivor)" "$AG" \
+  "        if (promoteSystemMemoryId && !lockedMemoryIds.includes(promoteSystemMemoryId)) {
+          lockedMemoryIds = [...lockedMemoryIds, promoteSystemMemoryId].sort();
+        }" "        "
 
 # A stale pattern is a FAILED run, not a skipped line. Counting only
 # KILLED/SURVIVED lines once let two stale mutants — the attach gate and the

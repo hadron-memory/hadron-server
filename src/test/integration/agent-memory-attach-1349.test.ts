@@ -483,10 +483,15 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     const attach = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read-write' });
     expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
 
-    const before = (await db.memory.findUniqueOrThrow({ where: { id: sysMem.id } })).urn;
-    const r = await gql(key.attacker!, `mutation($r: ID!, $u: String!) { updateAgent(ref: $r, visibility: PUBLIC, urn: $u) { id } }`, { r: agentId, u: `renamed-${suffix}` });
+    const before = await db.memory.findUniqueOrThrow({ where: { id: sysMem.id } });
+    const r = await gql(key.attacker!, `mutation($r: ID!, $u: String!, $n: String!) { updateAgent(ref: $r, visibility: PUBLIC, urn: $u, name: $n) { id } }`, { r: agentId, u: `renamed-${suffix}`, n: 'Renamed Agent' });
     expect(JSON.stringify(r.errors)).toMatch(/read-write knowledge/i);
-    expect((await db.memory.findUniqueOrThrow({ where: { id: sysMem.id } })).urn).toBe(before);
+    const after = await db.memory.findUniqueOrThrow({ where: { id: sysMem.id } });
+    // Neither the URN sync nor the NAME sync may have run: both committed
+    // their own transactions BEFORE the deciding one, so a refused publication
+    // used to leave the system memory renamed under an unchanged agent.
+    expect(after.urn).toBe(before.urn);
+    expect(after.name).toBe(before.name);
   });
 
   it('a NEW attach racing publication cannot leave a mutated system memory behind', async () => {
