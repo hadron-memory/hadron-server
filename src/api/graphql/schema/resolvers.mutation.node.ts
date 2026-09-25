@@ -24,6 +24,7 @@ import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
   computeRevisionStateHash,
+  ensureCurrentNodeRevisionInTransaction,
   editorFromAuth,
   diffNodeChanges,
   restorableNodeFields,
@@ -1039,13 +1040,24 @@ export async function writeNodeCore(
             const candidate = await assertTargetStillWritable(tx);
             if (!candidate) return { conflict: false, node: null };
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${candidate.id} FOR UPDATE`;
-            const current = await assertTargetStillWritable(tx);
+            let current = await assertTargetStillWritable(tx);
             if (!current) return { conflict: false, node: null };
 
+            // Unreconciled drift (a raw writer changed tracked state without
+            // advancing revSeq) is reconciled as its OWN revision BEFORE the
+            // guard and the edit, exactly as an exposed read would have done.
+            // Folding it into this edit's revision let a caller guarding on
+            // the pre-drift number succeed over a change it never saw, and
+            // hid the drift transition once the fingerprint was refreshed
+            // (@codex P1, PR #1339). The row lock is already held.
+            if (current.revisionContentHash !== await computeRevisionStateHash(tx, current.id)) {
+              await ensureCurrentNodeRevisionInTransaction(tx, current.id);
+              current = await assertTargetStillWritable(tx);
+              if (!current) return { conflict: false, node: null };
+            }
+
             const changes = diffNodeChanges(current, suppliedForDiff);
-            const hashMismatch =
-              current.revisionContentHash !== await computeRevisionStateHash(tx, current.id);
-            const needsRevision = resolvedEdges !== null || changes.length > 0 || hashMismatch;
+            const needsRevision = resolvedEdges !== null || changes.length > 0;
             const changesUnversionedField =
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
             if (!needsRevision && !changesUnversionedField) {

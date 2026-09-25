@@ -1,0 +1,77 @@
+/**
+ * #1323 / PR #1339 review (@codex P1): an update that finds UNRECONCILED drift
+ * (a raw writer changed tracked state without advancing revSeq) must
+ * reconcile it as its OWN revision before the caller's guard and edit apply.
+ *
+ * Folding the drift into the edit's revision had two effects: a caller
+ * guarding on the pre-drift revision N succeeded although the node changed
+ * under it (an optimistic-concurrency bypass), and the drift transition and
+ * the edit shared one revision, after which the refreshed fingerprint hid the
+ * missed transition for good.
+ */
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { type Context } from './resolvers.js';
+import { writeNodeCore } from './resolvers.mutation.node.js';
+import { generateId } from '../../../lib/id.js';
+
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
+
+let admin: { id: string };
+let memoryId: string;
+const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: admin.id }) as Context;
+
+beforeEach(async () => {
+  await cleanDb(db);
+  const org = await db.organization.create({ data: { id: generateId(), name: 'dr-org', urn: 'dr-org' } });
+  admin = await db.user.create({ data: { githubId: 13390, githubUsername: 'dr-admin', handle: 'dr-admin', roles: ['ADMIN'] } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
+  memoryId = (await db.memory.create({
+    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:mem`, name: 'mem', class: 'knowledge' },
+  })).id;
+});
+
+/** A node at live revision 1, then changed by a raw writer that never advances revSeq. */
+async function driftedNode(loc: string) {
+  const node = await db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, content: 'original' } });
+  expect(node.revSeq).toBe(1);
+  await db.node.update({ where: { id: node.id }, data: { content: 'changed by a raw writer' } });
+  return node;
+}
+
+describe('#1339 review — drift is reconciled before the guard and the edit', () => {
+  it('a write guarded on the pre-drift revision is REFUSED, and writes nothing', async () => {
+    const node = await driftedNode('drift:guarded');
+    const attempt = writeNodeCore({ memoryId, loc: node.loc, content: 'blind overwrite' }, ctx(), 'update', {
+      guardRevSeq: 1,
+    });
+    await expect(attempt).rejects.toSatisfy(
+      (e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT',
+    );
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.content).toBe('changed by a raw writer');
+  });
+
+  it('an unguarded edit over drift yields TWO revisions: the reconcile, then the edit', async () => {
+    const node = await driftedNode('drift:plain');
+    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'the edit' }, ctx(), 'update');
+    expect(updated.revSeq).toBe(3);
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1, 2]);
+    // r1: the server's own reconcile of the drifted state; r2: the editor's predecessor.
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    expect(history[0]!.editedBy).toBeNull();
+    expect(history[1]!.editedBy).toBe(admin.id);
+    expect(history[1]!.content).toBe('changed by a raw writer');
+  });
+
+  it('control: a guarded write at the current revision with no drift still succeeds', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:none', name: 'n', content: 'x' } });
+    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'y' }, ctx(), 'update', { guardRevSeq: 1 });
+    expect(updated.revSeq).toBe(2);
+  });
+});
