@@ -122,6 +122,62 @@ describe('#386 nodeExport resolver', () => {
     expect(r.data).toBe('# Intro\n\nBody.\n');
   });
 
+  // #1340: a server export used to drop the node's kind, so re-importing a
+  // spec made an info node. The file now carries role/isRunnable/objectType as
+  // the git mirror and CLI codec do, and the loader reads them back. (Whether
+  // git-sync then PERSISTS objectType is #1348, a separate importer defect.)
+  it.each([
+    ['spec', { role: 'spec', isRunnable: null, objectType: null }],
+    ['review, explicitly not runnable', { role: 'review', isRunnable: false, objectType: null }],
+    ['runnable task with an objectType', { role: null, isRunnable: true, objectType: 'competitor' }],
+    ['custom dotted role', { role: 'acme.playbook', isRunnable: true, objectType: 'insight' }],
+  ] as const)('#1340 — %s: MD and JSON carry the kind, and the MD round-trips through the loader', async (_n, kind) => {
+    await db.node.update({ where: { id: fx.srcId }, data: kind });
+
+    const json = JSON.parse(
+      ((await nodeExport(null, { id: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
+    );
+    expect({ role: json.role, isRunnable: json.isRunnable, objectType: json.objectType }).toEqual({
+      ...kind, objectType: kind.objectType ?? '',
+    });
+
+    const md = ((await nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
+    const { dir, cleanup } = makeTmpDir();
+    try {
+      const mdPath = join(dir, 'intro.md');
+      writeFileSync(mdPath, md, 'utf-8');
+      // The loader returns the governed signals, but its declared type (the
+      // legacy `Partial<Node>`) predates them.
+      const { node } = (await loadNodeFromFs(mdPath, dir, 'org/repo')) as unknown as {
+        node: { role?: string | null; isRunnable?: boolean | null; objectType?: string | null };
+      };
+      expect({ role: node.role ?? null, isRunnable: node.isRunnable ?? null, objectType: node.objectType ?? null }).toEqual(kind);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('#1340 — an objectType stored as "" (not NULL) is omitted from MD and "" in JSON (@jonas, #1778)', async () => {
+    await db.node.update({ where: { id: fx.srcId }, data: { objectType: '' } });
+    const md = ((await nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
+    expect(md).not.toContain('objectType');
+    const json = JSON.parse(
+      ((await nodeExport(null, { id: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
+    );
+    expect(json.objectType).toBe('');
+  });
+
+  it('#1340 — an ordinary node carries no opinion: nothing in MD, null/"" in JSON', async () => {
+    const md = ((await nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
+    for (const key of ['\nrole:', '\nrunnable:', '\nobjectType:']) expect(md, key).not.toContain(key);
+    const json = JSON.parse(
+      ((await nodeExport(null, { id: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
+    );
+    expect({ role: json.role, isRunnable: json.isRunnable, objectType: json.objectType }).toEqual({
+      role: null, isRunnable: null, objectType: '',
+    });
+  });
+
   it('denies a caller who cannot read the node\'s memory (NOT_FOUND)', async () => {
     const strangerCtx: Context = { db, roles: ['READER'], userId: fx.strangerId };
     await expect(nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, strangerCtx)).rejects.toThrow(/not found/i);

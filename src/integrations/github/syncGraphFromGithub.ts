@@ -21,10 +21,17 @@ import { validateMemorySource } from '../../lib/gitSource.js';
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import type { Prisma } from '../../generated/prisma/index.js';
-import type { Memory, Organization } from '../../generated/prisma/index.js';
+import type { Memory, Node, Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
+import {
+  buildNodeRevisionSnapshot,
+  createNodeRevision,
+  diffNodeChanges,
+  ensureCurrentNodeRevisionInTransaction,
+  revisionStateHashRefreshMarker,
+} from '../../lib/nodeRevisionSnapshot.js';
 
 function decryptToken(ciphertext: string): string {
   const key = process.env.HADRON_ENCRYPTION_KEY;
@@ -45,6 +52,67 @@ export type MemoryWithOrg = Memory & { organization: Organization | null };
 
 class EdgeEndpointPreflightStale extends Error {}
 const MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES = 3;
+
+/**
+ * The row left the memory being synced between the preflight lookup and its
+ * row lock (a concurrent cross-memory move). Applying the repo's update by id
+ * would rewrite a node that now belongs to ANOTHER memory, so the sync aborts
+ * and the next run re-plans from fresh reads (@copilot, PR #1339).
+ */
+export class GitSyncTargetMovedError extends Error {
+  constructor(nodeId: string, expectedMemoryId: string) {
+    super(`Git sync target ${nodeId} left memory ${expectedMemoryId} while the sync ran; retry the sync.`);
+    this.name = 'GitSyncTargetMovedError';
+  }
+}
+
+/** Apply a Git-owned update without bypassing the live-revision contract. */
+export async function updateNodeFromGitSync(
+  tx: Prisma.TransactionClient,
+  current: Node,
+  update: Record<string, unknown>,
+  revisionBase: Node | undefined,
+  expectedMemoryId: string,
+): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${current.id} FOR UPDATE`;
+  const owner = await tx.node.findUnique({ where: { id: current.id }, select: { memoryId: true } });
+  if (!owner || owner.memoryId !== expectedMemoryId) {
+    throw new GitSyncTargetMovedError(current.id, expectedMemoryId);
+  }
+  // Unrevisioned drift gets its OWN revision before the Git edit's, never
+  // folded into it (@codex P1 / @copilot, PR #1339) — the same order as the
+  // GraphQL and MCP update paths. A swap base is exempt: its row was
+  // reconciled when the swap captured it, and the parked row is a
+  // mechanical waypoint, not a committed state.
+  if (revisionBase == null) {
+    await ensureCurrentNodeRevisionInTransaction(tx, current.id, { expectedMemoryId });
+  }
+  const locked = await tx.node.findUniqueOrThrow({ where: { id: current.id } });
+  // A swap can park this row at a temporary invalid loc earlier in the SAME
+  // transaction. History must describe committed states, so diff/snapshot the
+  // captured pre-sync row rather than that mechanical waypoint.
+  const before = revisionBase ?? locked;
+  const changes = diffNodeChanges(before, update);
+
+  if (changes.length > 0) {
+    await createNodeRevision(
+      tx,
+      buildNodeRevisionSnapshot(
+        before,
+        { userId: null, info: 'system:github-sync' },
+        { revLabel: 'Synchronized from GitHub', changes },
+      ),
+    );
+  }
+
+  await tx.node.update({
+    where: { id: locked.id },
+    data: {
+      ...(update as Prisma.NodeUncheckedUpdateInput),
+      revisionContentHash: revisionStateHashRefreshMarker(),
+    },
+  });
+}
 
 /**
  * Sync a memory from GitHub: clone/pull the repo, load nodes from filesystem,
@@ -317,6 +385,11 @@ export const syncGraphFromGithub = async (
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
       const claimedFileIds = new Set<string>();
+      // A loc swap temporarily parks an occupant so the first move can land.
+      // Preserve its committed pre-sync state; when its own file is processed,
+      // one revision spans original -> final and the parking loc never enters
+      // retained history (or consumes a maxRevCount slot).
+      const parkedRevisionBases = new Map<string, Node>();
       // Edge-endpoint remapping (PR-576 codex review): when a fresh id is
       // minted for a file (foreign-memory or duplicate frontmatter id), the
       // edges loadGraphFromFs captured still carry the file's ORIGINAL id.
@@ -394,7 +467,7 @@ export const syncGraphFromGithub = async (
         //   - no id / unknown id → loc-keyed upsert as before
         const fileId = node.id && !claimedFileIds.has(node.id) ? node.id : null;
         const byId = fileId
-          ? await tx.node.findUnique({ where: { id: fileId }, select: { id: true, memoryId: true, loc: true } })
+          ? await tx.node.findUnique({ where: { id: fileId } })
           : null;
         if (node.id) claimedFileIds.add(node.id);
 
@@ -415,7 +488,6 @@ export const syncGraphFromGithub = async (
             // it out of the way so the move can't collide.
             const occupant = await tx.node.findUnique({
               where: { loc_memoryId: { loc, memoryId: graph.id } },
-              select: { id: true },
             });
             if (occupant && skippedRowIds.has(occupant.id)) {
               // #1224 / @codex P2 on PR #1229 — the occupant's OWN file was
@@ -437,6 +509,12 @@ export const syncGraphFromGithub = async (
               continue;
             }
             if (occupant && occupant.id !== byId.id) {
+              await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${occupant.id} FOR UPDATE`;
+              await ensureCurrentNodeRevisionInTransaction(tx, occupant.id, { expectedMemoryId: graph.id });
+              const lockedOccupant = await tx.node.findUniqueOrThrow({ where: { id: occupant.id } });
+              if (!parkedRevisionBases.has(occupant.id)) {
+                parkedRevisionBases.set(occupant.id, lockedOccupant);
+              }
               await tx.node.update({
                 where: { id: occupant.id },
                 data: { loc: `${loc}~displaced-${occupant.id}` },
@@ -447,7 +525,8 @@ export const syncGraphFromGithub = async (
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
           }
-          await tx.node.update({ where: { id: byId.id }, data: update });
+          await updateNodeFromGitSync(tx, byId, update, parkedRevisionBases.get(byId.id), graph.id);
+          parkedRevisionBases.delete(byId.id);
           rowId = byId.id;
         } else {
           if (byId) {
@@ -459,17 +538,34 @@ export const syncGraphFromGithub = async (
           // (byId) or already claimed by an earlier file this run (!fileId).
           const idUnusable = byId !== null || (!!node.id && fileId === null);
           const createId = idUnusable ? generateId() : (node.id ?? generateId());
-          const row = await tx.node.upsert({
+          const existingAtLoc = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId: graph.id } },
-            create: { id: createId, memoryId: graph.id, ...update },
-            update,
-            select: { id: true },
           });
-          // The SURVIVING id: the update path keeps the existing row's id,
-          // which may differ from the file's — recording the file id here
-          // would make the notIn deletion pass below delete the row we just
-          // updated.
-          rowId = row.id;
+          if (existingAtLoc) {
+            await updateNodeFromGitSync(
+              tx,
+              existingAtLoc,
+              update,
+              parkedRevisionBases.get(existingAtLoc.id),
+              graph.id,
+            );
+            parkedRevisionBases.delete(existingAtLoc.id);
+            // The SURVIVING id: an update keeps the existing row's id, which
+            // may differ from the file's — recording the file id here would
+            // make the notIn deletion pass below delete the row we just wrote.
+            rowId = existingAtLoc.id;
+          } else {
+            const row = await tx.node.create({
+              data: {
+                id: createId,
+                memoryId: graph.id,
+                ...update,
+                revisionContentHash: revisionStateHashRefreshMarker(),
+              },
+              select: { id: true },
+            });
+            rowId = row.id;
+          }
         }
         upsertedIds.push(rowId);
         writtenNodes.push({ id: rowId, loc, memoryId: graph.id });

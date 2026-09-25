@@ -138,6 +138,7 @@ describe('restoreNodeRevision truncate (#617)', () => {
     // Node restored to v2.
     expect(restored.name).toBe('v2');
     expect(restored.content).toBe('body-2');
+    expect((restored as { revSeq: number }).revSeq).toBe(2);
     // History: v3 (newer) deleted, v2 (selected) + v1 (older) kept, NO
     // pre-restore snapshot added.
     const remaining = await db.nodeRevision.findMany({ where: { nodeId: node.id } });

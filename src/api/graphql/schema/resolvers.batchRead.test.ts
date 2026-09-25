@@ -192,8 +192,12 @@ describe('nodeBatch — prefix subtree', () => {
     expect(res.unavailable).toEqual([]);
   });
 
-  it('throws on a memory the caller cannot read', async () => {
-    await expect(nodeBatch({ memory: pmem.id, locPrefix: '' })).rejects.toThrow(/not accessible/i);
+  // #1316: an unreadable memory answers exactly like a missing one. The
+  // FORBIDDEN this used to pin disclosed that the memory exists.
+  it('throws on a memory the caller cannot read, indistinguishably from a missing one', async () => {
+    const missing = generateId();
+    await expect(nodeBatch({ memory: pmem.id, locPrefix: '' })).rejects.toThrow(`MEMORY_NOT_FOUND: ${pmem.id}`);
+    await expect(nodeBatch({ memory: missing, locPrefix: '' })).rejects.toThrow(`MEMORY_NOT_FOUND: ${missing}`);
   });
 });
 

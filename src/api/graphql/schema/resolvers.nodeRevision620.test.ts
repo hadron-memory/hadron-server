@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -121,6 +122,157 @@ describe('updateNode snapshot capture (#620)', () => {
     );
     const [v] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
     expect(v.changes).toEqual(['description']);
+  });
+});
+
+describe('#1323 current revision contract', () => {
+  it('initializes the complete at-rest state baseline for direct/raw inserts', async () => {
+    const n = await makeNode('revision-insert-baseline', { content: 'fresh bytes' });
+    expect(n.revisionContentHash).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('reconciles a metadata-only write that bypasses a revisioned writer', async () => {
+    const n = await makeNode('revision-metadata-drift', { data: { stage: 1 } });
+    await db.node.update({ where: { id: n.id }, data: { data: { stage: 2 } } });
+
+    const drifted = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    expect(await resolvers.Node.revision(drifted as never, {}, ctx())).toBe(2);
+    expect(await db.nodeRevision.findUniqueOrThrow({
+      where: { nodeId_revNo: { nodeId: n.id, revNo: 1 } },
+    })).toMatchObject({
+      data: { stage: 2 },
+      revLabel: 'Reconciled state changed outside a revisioned writer (#1323)',
+    });
+  });
+
+  it('applies an ownerRepo-only update without inventing a revision', async () => {
+    const n = await makeNode('revision-owner-repo-only', { ownerRepo: 'before/repo' });
+    const updated = await resolvers.Mutation.updateNode(
+      {},
+      { input: { id: n.id, ownerRepo: 'after/repo' } } as never,
+      ctx(),
+    );
+
+    expect(updated).toMatchObject({ ownerRepo: 'after/repo', revSeq: 1 });
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('upgrades existing counters and hashes once during post-push', async () => {
+    const fresh = await makeNode('revision-post-push-fresh', { content: 'before db push' });
+    await db.node.update({
+      where: { id: fresh.id },
+      data: { revSeq: 0, revisionContentHash: null },
+    });
+
+    const withHistory = await makeNode('revision-post-push-history', { content: 'current old live' });
+    await db.nodeRevision.create({
+      data: {
+        id: generateId(),
+        nodeId: withHistory.id,
+        memoryId: memory.id,
+        loc: withHistory.loc,
+        name: withHistory.name,
+        content: 'snapshot one',
+        tags: [],
+        revNo: 1,
+      },
+    });
+    await db.node.update({
+      where: { id: withHistory.id },
+      data: { revSeq: 1, revisionContentHash: null },
+    });
+
+    const postPushSql = readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8');
+    expect(postPushSql).toContain(
+      'SET "rev_seq" = "rev_seq" + 1,\n    "revision_content_hash" = hadron_node_revision_state_hash("nodes")',
+    );
+    await db.$executeRawUnsafe(`
+      UPDATE "nodes"
+      SET "rev_seq" = "rev_seq" + 1,
+          "revision_content_hash" = hadron_node_revision_state_hash("nodes")
+      WHERE "revision_content_hash" IS NULL
+    `);
+
+    expect(await db.node.findUniqueOrThrow({ where: { id: fresh.id } })).toMatchObject({ revSeq: 1 });
+    expect(await db.node.findUniqueOrThrow({ where: { id: withHistory.id } })).toMatchObject({ revSeq: 2 });
+
+    await db.node.update({ where: { id: fresh.id }, data: { content: 'after raw writer' } });
+    const drifted = await db.node.findUniqueOrThrow({ where: { id: fresh.id } });
+    expect(await resolvers.Node.revision(drifted as never, {}, ctx())).toBe(2);
+    expect(await db.nodeRevision.count({ where: { nodeId: fresh.id } })).toBe(1);
+
+    const updated = await resolvers.Mutation.updateNode(
+      {},
+      { input: { id: withHistory.id, content: 'next live' } } as never,
+      ctx(),
+    );
+    expect(updated.revSeq).toBe(3);
+    expect(
+      (await db.nodeRevision.findMany({ where: { nodeId: withHistory.id }, orderBy: { revNo: 'asc' } })).map(
+        (revision) => revision.revNo,
+      ),
+    ).toEqual([1, 2]);
+  });
+
+  it('starts at 1, exposes the live revision, and snapshots the predecessor', async () => {
+    const n = await makeNode('revision-contract', { content: 'v1' });
+    expect(await resolvers.Node.revision(n as never, {}, ctx())).toBe(1);
+
+    const updated = await resolvers.Mutation.updateNode(
+      {},
+      { input: { id: n.id, content: 'v2' } } as never,
+      ctx(),
+    );
+    expect(await resolvers.Node.revision(updated as never, {}, ctx())).toBe(2);
+    const [snapshot] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
+    expect(snapshot).toMatchObject({ revNo: 1, content: 'v1' });
+  });
+
+  it('serializes concurrent writes into unique predecessor snapshots', async () => {
+    const n = await makeNode('revision-race', { content: 'v1' });
+    await resolvers.Node.revision(n as never, {}, ctx());
+
+    await Promise.all([
+      resolvers.Mutation.updateNode({}, { input: { id: n.id, content: 'v2-a' } } as never, ctx()),
+      resolvers.Mutation.updateNode({}, { input: { id: n.id, content: 'v2-b' } } as never, ctx()),
+    ]);
+
+    const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    const snapshots = await db.nodeRevision.findMany({
+      where: { nodeId: n.id },
+      orderBy: { revNo: 'asc' },
+    });
+    expect(live.revSeq).toBe(3);
+    expect(snapshots.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(snapshots[0].content).toBe('v1');
+    expect(['v2-a', 'v2-b']).toContain(snapshots[1].content);
+    expect(['v2-a', 'v2-b']).toContain(live.content);
+    expect(live.content).not.toBe(snapshots[1].content);
+  });
+
+  it('returns reconciled content and revision from the same canonical read', async () => {
+    const n = await makeNode('revision-read-consistency', { content: 'v1' });
+    await resolvers.Query.node({}, { ref: n.id, raw: true }, ctx());
+    await db.node.update({ where: { id: n.id }, data: { content: 'off-road v2' } });
+
+    const read = await resolvers.Query.node({}, { ref: n.id, raw: true }, ctx());
+    expect(read?.content).toBe('off-road v2');
+    expect(await resolvers.Node.revision(read as never, {}, ctx())).toBe(2);
+  });
+
+  it('reconciles an off-road body returned by findNodes before exposing revision', async () => {
+    const n = await makeNode('revision-find-nodes', { content: 'v1' });
+    await db.node.update({ where: { id: n.id }, data: { content: 'off-road search body' } });
+
+    const result = await resolvers.Query.findNodes(
+      {},
+      { filter: { memoryIds: [memory.id] } },
+      ctx(),
+    );
+    const hit = result.hits.find((candidate) => candidate.node.id === n.id)!;
+    expect(hit.node.content).toBe('off-road search body');
+    expect(await resolvers.Node.revision(hit.node as never, {}, ctx())).toBe(2);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(1);
   });
 });
 

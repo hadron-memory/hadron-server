@@ -117,7 +117,8 @@ describe('hadron_get_node — URL line', () => {
     const lines = (await getNode(`${ORG}::${MEM}::placement`)).split('\n');
     const idIdx = lines.findIndex((l) => l.startsWith('ID: '));
     expect(idIdx).toBeGreaterThan(-1);
-    expect(lines[idIdx + 1]).toMatch(/^URL: https:\/\//);
+    expect(lines[idIdx + 1]).toMatch(/^Revision: \d+$/);
+    expect(lines[idIdx + 2]).toMatch(/^URL: https:\/\//);
   });
 
   it('carries the CANONICAL urn even when the caller addressed the node in the legacy :: form', async () => {

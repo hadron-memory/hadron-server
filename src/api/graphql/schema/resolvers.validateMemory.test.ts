@@ -267,12 +267,17 @@ describe('validateMemory — shape and access (#819)', () => {
     expect(r.memoryId).toBe(mem.id);
   });
 
+  // #1316: "indistinguishably" is now literal. This used to throw NOT_FOUND
+  // "Memory not found" while a real miss threw MEMORY_NOT_FOUND from ref
+  // resolution — two different answers, i.e. an existence oracle.
   it('a non-member is refused, indistinguishably from a miss', async () => {
-    await expect(validate(mem.id, undefined, ctx(stranger.id))).rejects.toThrow(/Memory not found/);
+    const missing = generateId();
+    await expect(validate(mem.id, undefined, ctx(stranger.id))).rejects.toThrow(`MEMORY_NOT_FOUND: ${mem.id}`);
+    await expect(validate(missing, undefined, ctx(stranger.id))).rejects.toThrow(`MEMORY_NOT_FOUND: ${missing}`);
   });
 
   it('an anonymous caller is refused', async () => {
-    await expect(validate(mem.id, undefined, ctx())).rejects.toThrow(/Memory not found/);
+    await expect(validate(mem.id, undefined, ctx())).rejects.toThrow(`MEMORY_NOT_FOUND: ${mem.id}`);
   });
 
   // PR #859 review (Codex P1). This query returns node ids, locs, counts and
@@ -294,7 +299,7 @@ describe('validateMemory — shape and access (#819)', () => {
     // The member CAN open the memory record (Query.memory admits them)…
     expect(await Q.memory(null, { ref: appMem.id }, ctx(member.id))).not.toBeNull();
     // …but must NOT be able to enumerate its nodes through the validator.
-    await expect(validate(appMem.id, undefined, ctx(member.id))).rejects.toThrow(/Memory not found/);
+    await expect(validate(appMem.id, undefined, ctx(member.id))).rejects.toThrow(`MEMORY_NOT_FOUND: ${appMem.id}`);
   });
 
   it('an org member CAN validate an ordinary org memory (no over-tightening)', async () => {

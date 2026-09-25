@@ -46,6 +46,7 @@ import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { requireWorkerReadAccess } from './resolvers.worker.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -80,6 +81,7 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
+import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
@@ -634,9 +636,24 @@ export const nodeQueries = {
       };
       // Decrypt + (unless raw) compile Mustache templates — shared tail of
       // every dispatch form. Generic so the full node row type flows through.
-      const finish = async <T extends { content: string | null; data: unknown; memoryId: string }>(
-        node: T,
+      const finish = async <T extends { id: string; loc: string; deletedAt: Date | null; content: string | null; data: unknown; memoryId: string }>(
+        selected: T,
       ) => {
+        // The lookup above selects the address. Reconcile and re-fetch while
+        // holding its row lock so Node.revision and every sibling field come
+        // from one database state (never old body + new counter).
+        const current = await ctx.db.$transaction(async (tx) => {
+          if ((await ensureCurrentNodeRevisionInTransaction(tx, selected.id, { expectedMemoryId: selected.memoryId })) == null) return null;
+          return tx.node.findUnique({ where: { id: selected.id }, include });
+        });
+        if (
+          !current ||
+          current.deletedAt ||
+          current.memoryId !== selected.memoryId ||
+          current.loc !== selected.loc ||
+          !allowed(current.memoryId)
+        ) return null;
+        const node = current;
         // #1061 — every dispatch form of this query funnels its ONE successful
         // return through `finish`, so this is the single place a `read` is
         // recorded for the canonical node read (and for `nextNode`, which
@@ -694,8 +711,14 @@ export const nodeQueries = {
       // 007-entity-id-or-urn). #335: scoping pins the lookup; the access
       // filter is still intersected so `memory` can never widen visibility.
       if (memoryRef != null && memoryRef !== '') {
+        // #1316: a missing `memory:` throws MEMORY_NOT_FOUND, so an unreadable
+        // one must too — the bare null it used to return disclosed that the
+        // memory exists. (The loc inside a READABLE memory still answers null
+        // when absent: that caller may already see the memory.) `allowed` is
+        // the node-content gate this resolver already computed, so the
+        // concealment costs no second authorization round (@copilot, #1350).
         const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-        if (!allowed(scopedMemoryId)) return null;
+        if (!allowed(scopedMemoryId)) throw new MemoryNotFoundError(memoryRef);
         const node = await ctx.db.node.findFirst({
           where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
           include,
@@ -818,6 +841,7 @@ export const nodeQueries = {
           loc: node.loc,
           name: node.name,
           nodeType: node.nodeType,
+          objectType: node.objectType,
           alias: node.alias,
           description: node.description,
           abstract: node.abstract,
@@ -825,6 +849,8 @@ export const nodeQueries = {
           content: node.content,
           tags: deserializeTags(node.tags) as string[],
           seq: node.seq,
+          role: node.role,
+          isRunnable: node.isRunnable,
           data: node.data,
           properties: node.properties,
           edges: node.outgoingEdges as unknown as EdgeForGit[],
@@ -1602,6 +1628,10 @@ export const nodeQueries = {
 
       let ordered: Array<{
         id: string;
+        loc: string;
+        memoryId: string;
+        deletedAt: Date | null;
+        revSeq: number;
         content: string | null;
         abstract: string | null;
         data?: unknown;
@@ -1679,7 +1709,6 @@ export const nodeQueries = {
           where: { id: { in: [...refByNodeId.keys()] }, deletedAt: null, ...access },
           include,
         });
-        await decryptNodesBatch(ctx.db, rows);
         const byId = new Map(rows.map((n) => [n.id, n]));
         for (const [id, ref] of refByNodeId) {
           const n = byId.get(id);
@@ -1687,11 +1716,13 @@ export const nodeQueries = {
           else unavailable.push(ref);
         }
       } else {
+        // #1316: an unreadable memory answers MEMORY_NOT_FOUND exactly like a
+        // missing one; the FORBIDDEN it used to throw disclosed existence.
+        // Gated on `access`, the node-content filter computed above, rather
+        // than a second authorization round (@copilot, #1350).
         const { id: memId } = await resolveMemoryRef(ctx.db, memory!);
-        const accessible = await getAccessibleMemoryIds(ctx);
-        if (accessible !== null && !accessible.includes(memId)) {
-          throw new GraphQLError('Memory not accessible.', { extensions: { code: 'FORBIDDEN' } });
-        }
+        const accessibleIds = access.memoryId as { in: string[] } | undefined;
+        if (accessibleIds && !accessibleIds.in.includes(memId)) throw new MemoryNotFoundError(memory!);
         // Count cap: take MAX+1 to detect overflow, then fail loud rather than
         // silently returning a truncated subtree.
         const rows = await ctx.db.node.findMany({
@@ -1706,9 +1737,41 @@ export const nodeQueries = {
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
-        await decryptNodesBatch(ctx.db, rows);
         ordered = rows;
       }
+
+      // Reconcile each selected row in its OWN short transaction. Accumulating
+      // all FOR UPDATE locks until one batch transaction commits deadlocks
+      // against multi-node writers (notably Git sync) that necessarily visit
+      // rows in a different order. The final access-filtered refetch returns
+      // an atomic row state and rechecks the selected address.
+      const selectedById = new Map(ordered.map((n) => [n.id, n]));
+      const liveIds: string[] = [];
+      for (const id of [...selectedById.keys()].sort()) {
+        const live = await ctx.db.$transaction(
+          (tx) => ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: selectedById.get(id)!.memoryId }),
+          { timeout: 60_000, maxWait: 15_000 },
+        );
+        if (live != null) liveIds.push(id);
+      }
+      const currentRows = await ctx.db.node.findMany({
+        where: { id: { in: liveIds }, deletedAt: null, ...access },
+        include,
+      });
+      const currentById = new Map(currentRows.map((n) => [n.id, n]));
+      ordered = ordered.flatMap((selected) => {
+        const current = currentById.get(selected.id);
+        if (
+          !current ||
+          current.memoryId !== selected.memoryId ||
+          current.loc !== selected.loc
+        ) {
+          unavailable.push(refByNodeId?.get(selected.id) ?? selected.id);
+          return [];
+        }
+        return [current];
+      });
+      await decryptNodesBatch(ctx.db, ordered);
 
       // Response-size cap (cor:api:040:02) — pack until the byte ceiling, then
       // stop and flag `truncated` with the omitted nodes. At least one node

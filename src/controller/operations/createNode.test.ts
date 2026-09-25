@@ -56,12 +56,14 @@ describe('createNode', () => {
     const first = await createNode({
       loc: 'org.g.n',
       name: 'Original',
+      content: 'before',
       memoryId,
     });
 
     const second = await createNode({
       loc: 'org.g.n',
       name: 'Updated',
+      content: 'after',
       memoryId,
     });
 
@@ -71,6 +73,12 @@ describe('createNode', () => {
     // Only one row in DB
     const count = await db.node.count({ where: { loc: 'org.g.n', memoryId } });
     expect(count).toBe(1);
+    const live = await db.node.findUniqueOrThrow({ where: { id: first.id } });
+    expect(live.revSeq).toBe(2);
+    expect(live.revisionContentHash).toMatch(/^[0-9a-f]{32}$/);
+    const revisions = await db.nodeRevision.findMany({ where: { nodeId: first.id } });
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]).toMatchObject({ revNo: 1, name: 'Original', content: 'before' });
   });
 
   it('persists tags correctly', async () => {

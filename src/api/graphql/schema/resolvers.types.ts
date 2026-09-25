@@ -18,6 +18,14 @@ import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../li
 import { parseRunRegisterSnapshot, resolveRegister, snapshotRowsAsEntries, toGqlRegisterRows } from '../../../lib/resolveRegister.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
+import {
+  ensureCurrentNodeRevisionInTransaction,
+  RECONCILE_EDITOR_INFO,
+  revisionStateMatches,
+  type SnapshotSourceNode,
+} from '../../../lib/nodeRevisionSnapshot.js';
+import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -323,6 +331,52 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
+    revision: async (
+      n: SnapshotSourceNode & {
+        revSeq: number;
+        revisionContentHash: string | null;
+      },
+      _args: unknown,
+      ctx: Context,
+    ) => {
+      // Raw writers are detected lazily. The canonical fingerprint is computed
+      // by PostgreSQL because the revision state includes JSON/array fields
+      // whose text encoding is not portable across runtimes. Reconcile + refetch under one lock,
+      // then use the new number ONLY when the complete revisioned state still
+      // matches the parent object. If a concurrent supported write changed the
+      // row, the parent's own number remains the only self-consistent answer.
+      return ctx.db.$transaction(async (tx) => {
+        // A NEWER number is only ever returned for this call's own reconcile
+        // of drift the parent already reflects. If any revisioned write landed
+        // since the parent was read — an edge-only update advances revSeq
+        // without touching a tracked field — the parent's edges/fields may be
+        // stale, and its own number is the only self-consistent answer
+        // (@codex P1, PR #1339).
+        await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;
+        const pre = await tx.node.findUnique({ where: { id: n.id }, select: { memoryId: true, revSeq: true } });
+        if (!pre || pre.memoryId !== n.memoryId || pre.revSeq < n.revSeq) return n.revSeq;
+        if (pre.revSeq > n.revSeq) {
+          // Advances since the parent was read are harmless ONLY if every one
+          // is a server reconcile (another reader's — reconciles never touch
+          // edges): the parent is then still current, and must get the SAME
+          // number that reader got (@codex P1, PR #1339). Any authoring or
+          // edge write in between, or pruned history we cannot see, keeps the
+          // parent's own number.
+          const reconciles = await tx.nodeRevision.count({
+            where: { nodeId: n.id, revNo: { gte: n.revSeq, lt: pre.revSeq }, editedByInfo: RECONCILE_EDITOR_INFO },
+          });
+          if (reconciles !== pre.revSeq - n.revSeq) return n.revSeq;
+        }
+        // Only while the row is still in the memory the parent was read from
+        // (@codex P1, PR #1339): never reconcile into another tenant.
+        if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return n.revSeq;
+        const current = await tx.node.findUnique({ where: { id: n.id } });
+        if (!current) return n.revSeq;
+        const key = sessionKeyCache.getByMemoryId(current.memoryId);
+        if (key) decryptNodeFieldsWithKey(current, key);
+        return revisionStateMatches(n, current) ? current.revSeq : n.revSeq;
+      });
+    },
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     // The referenced asset for a `reference` node carrying data.asset
     // (createAssetReferenceNode / hadron_store_file). Resolves the soft

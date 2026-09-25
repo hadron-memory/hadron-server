@@ -105,6 +105,15 @@ interface Fixtures {
     /** Go's LintFor per host key, over EVERY row of its host table. */
     findingsByHost: Record<string, { rule: string; severity: string; message: string }[]>;
   }[];
+  /** #1341 — Go's LintFor PER HOST over authored descriptions: the Cowork probe
+   *  upload's twenty, exactly as uploaded, plus the unmeasured cases genfix names
+   *  (hadron-cli#722). Same shape as lintReserved, stamped separately. */
+  lintMarkupSourceCommit: string;
+  lintMarkup: {
+    name: string;
+    node: { urn: string; loc: string; memoryUrn: string; isRunnable: boolean; content: string; properties: unknown };
+    findingsByHost: Record<string, { rule: string; severity: string; message: string }[]>;
+  }[];
 }
 
 /** Loads the fixtures, refusing an empty or absent set rather than yielding []. */
@@ -116,7 +125,7 @@ function loadFixtures(): Fixtures {
     'normalizeDescription', 'normalizeBody',
     'validName', 'hash', 'render', 'parseFile',
     'isNodeUrn', 'renderParseRoundTrip', 'lint', 'lintCollisions', 'declared',
-    'lintUnknownHostKeys', 'lintReserved',
+    'lintUnknownHostKeys', 'lintReserved', 'lintMarkup',
   ];
   for (const s of sections) {
     const v = f[s];
@@ -230,6 +239,27 @@ describe('#1177 — derivation and the grammars', () => {
 });
 
 describe('#1177 — render agrees SEMANTICALLY, and on the hash byte-for-byte', () => {
+  it('round-trips the optional live revision and preserves legacy omission', () => {
+    const args = ['node-1', 'skill', 'hrn:node:a.com:mem:tasks:x', 'Use when testing.', 'body'] as const;
+    expect(parseFile(render(...args, 7)).revision).toBe(7);
+    expect(parseFile(render(...args)).revision).toBeNull();
+  });
+
+  it('render refuses a revision the parser would void, at both edges (@copilot, PR #1339)', () => {
+    const args = ['node-1', 'skill', 'hrn:node:a.com:mem:tasks:x', 'Use when testing.', 'body'] as const;
+    expect(parseFile(render(...args, 2_147_483_647)).revision).toBe(2_147_483_647);
+    expect(() => render(...args, 2_147_483_648)).toThrow(/no larger than 2147483647/);
+    expect(() => render(...args, 0)).toThrow(/positive integer/);
+    expect(() => render(...args, 1.5)).toThrow(/positive integer/);
+  });
+
+  it('does not recognize a provenance header carrying an invalid revision', () => {
+    const rendered = render('node-1', 'skill', 'hrn:node:a.com:mem:tasks:x', 'Use when testing.', 'body', 7);
+    const parsed = parseFile(rendered.replace('rev=7', 'rev=0'));
+    expect(parsed.source).toBe('');
+    expect(parsed.revision).toBeNull();
+  });
+
   it.each(F.render.map((c) => [c.name, c] as const))('render %s', (_n, c) => {
     const got = render(c.id ?? '', c.skillName, c.source, c.description, c.content);
 
@@ -436,8 +466,9 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
   // its "clean" verdict was an undeclared-node result (@codex / @copilot,
   // PR #1343). Every host in the server's table must have a Go verdict.
   it.each(
-    F.lintReserved.flatMap((c) => SKILL_HOSTS.map((h) => [`${c.name} @ ${h.key}`, c, h.key] as const)),
-  )('reserved: %s', (_n, c, host) => {
+    [...F.lintReserved.map((c) => ['reserved', c] as const), ...F.lintMarkup.map((c) => ['markup', c] as const)]
+      .flatMap(([section, c]) => SKILL_HOSTS.map((h) => [`${section}: ${c.name} @ ${h.key}`, c, h.key] as const)),
+  )('%s', (_n, c, host) => {
     expect(Object.keys(c.findingsByHost).sort()).toEqual(SKILL_HOSTS.map((h) => h.key).sort());
     const got = lintNode(c.node as SkillNode, host).map((f) => ({
       rule: f.rule, severity: f.severity, message: f.message,
@@ -460,6 +491,22 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     expect(rules('codex evaluates the name but does not reserve it', 'codexSkill')).toEqual(['skill-name-invalid']);
   });
 
+  it('the markup section carries both measured answers, per host (#1341)', () => {
+    // The twenty probe cases carry Cowork's verdict in their names, so a
+    // section generated from a Go that refused everything, or nothing, reds
+    // here rather than passing both sides of a port that agrees with it.
+    expect(F.lintMarkupSourceCommit).toBeTruthy();
+    const probes = F.lintMarkup.filter((c) => /^p\d\d-/.test(c.name));
+    expect(probes).toHaveLength(20);
+    const fires = (c: (typeof probes)[number], host: string) =>
+      c.findingsByHost[host].some((f) => f.rule === 'skill-description-markup');
+    for (const c of probes) {
+      expect(fires(c, 'claudeSkill'), c.name).toBe(c.name.endsWith('(Cowork refused)'));
+      expect(fires(c, 'codexSkill'), c.name).toBe(false);
+    }
+    expect(probes.filter((c) => c.name.endsWith('(Cowork refused)'))).toHaveLength(12);
+  });
+
   it.each(F.lintCollisions.map((c) => [c.name, c] as const))('collisions: %s', (_n, c) => {
     const got = lintCollisions(c.nodes as SkillNode[]).map((f) => ({
       urn: f.urn, rule: f.rule, severity: f.severity, message: f.message,
@@ -471,10 +518,12 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     // Otherwise a rule could be unreachable, or misspelled, and every fixture
     // would still pass — the parity equivalent of a guard nobody proved fails.
     // `skill-name-reserved` was server-only until hadron-cli#712 ported it; it
-    // is reached through `lintReserved`, not `lint`, which keeps its own commit.
+    // is reached through `lintReserved`, not `lint`, which keeps its own commit;
+    // `skill-description-markup` (#1341) likewise through `lintMarkup`.
     const emitted = new Set([
       ...F.lint.flatMap((c) => c.findings.map((f) => f.rule)),
       ...F.lintReserved.flatMap((c) => Object.values(c.findingsByHost).flat().map((f) => f.rule)),
+      ...F.lintMarkup.flatMap((c) => Object.values(c.findingsByHost).flat().map((f) => f.rule)),
       ...F.lintCollisions.flatMap((c) => c.findings.map((f) => f.rule)),
     ]);
     expect([...emitted].sort()).toEqual([
@@ -482,6 +531,7 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
       'skill-content-has-frontmatter',
       'skill-content-has-template',
       'skill-declaration-malformed',
+      'skill-description-markup',
       'skill-description-missing',
       'skill-description-no-trigger',
       'skill-description-too-long',

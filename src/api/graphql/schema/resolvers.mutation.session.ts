@@ -1,5 +1,13 @@
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import {
+  buildNodeRevisionSnapshot,
+  createNodeRevision,
+  diffNodeChanges,
+  editorFromAuth,
+  ensureCurrentNodeRevisionInTransaction,
+  revisionStateHashRefreshMarker,
+} from '../../../lib/nodeRevisionSnapshot.js';
 import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -1549,7 +1557,16 @@ export const sessionMutations = {
 
           // Restore nodes from snapshot (upsert to handle soft-deleted rows
           // that still hold the unique (loc, memoryId) constraint).
-          for (const n of snapshot.nodes) {
+          //
+          // #1323 (@copilot, PR #1339): restoring OVER an existing row is an
+          // authoring write, so each takes the revision protocol — row lock,
+          // drift reconciled as its own revision, the real predecessor
+          // snapshotted, the fingerprint refreshed. Rows are taken in loc
+          // order so two concurrent restores lock in the same sequence.
+          const restoreOrder = [...snapshot.nodes].sort((a, b) =>
+            (a.loc as string) < (b.loc as string) ? -1 : (a.loc as string) > (b.loc as string) ? 1 : 0,
+          );
+          for (const n of restoreOrder) {
             const loc = n.loc as string;
             const nodeData = {
               name: n.name as string,
@@ -1560,10 +1577,36 @@ export const sessionMutations = {
               tags: (n.tags as string[]) ?? [],
               deletedAt: null,
             };
+            const prior = await tx.node.findUnique({
+              where: { loc_memoryId: { loc, memoryId: sysMemId } },
+              select: { id: true },
+            });
+            if (prior) {
+              await ensureCurrentNodeRevisionInTransaction(tx, prior.id, { expectedMemoryId: sysMemId });
+              const current = await tx.node.findUniqueOrThrow({ where: { id: prior.id } });
+              // Found by (loc, memory), locked by id: a row that moved in
+              // between aborts the restore (it is atomic) rather than being
+              // snapshotted while the upsert creates a duplicate at the old
+              // address (@copilot, PR #1339). Its deletedAt was just set by the
+              // soft-delete above, so liveness is not part of this check.
+              if (current.loc !== loc || current.memoryId !== sysMemId) {
+                throw new Error(`restoreRevision: "${loc}" moved during the restore; retry.`);
+              }
+              const changes = diffNodeChanges(current, nodeData);
+              if (changes.length > 0) {
+                await createNodeRevision(
+                  tx,
+                  buildNodeRevisionSnapshot(current, editorFromAuth(ctx), {
+                    revLabel: 'Restored from a published agent snapshot',
+                    changes,
+                  }),
+                );
+              }
+            }
             const upserted = await tx.node.upsert({
               where: { loc_memoryId: { loc, memoryId: sysMemId } },
               create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData },
-              update: nodeData,
+              update: { ...nodeData, revisionContentHash: revisionStateHashRefreshMarker() },
             });
             locToId.set(loc, upserted.id);
           }

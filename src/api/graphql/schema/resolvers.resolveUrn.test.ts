@@ -304,7 +304,7 @@ describe('Query.resolveUrn — #696 per-entity v2 shapes', () => {
     });
     expect(revs.map((r) => r.revNo)).toEqual([1, 2]);
     const refreshed = await db.node.findUniqueOrThrow({ where: { id: node.id }, select: { revSeq: true } });
-    expect(refreshed.revSeq).toBe(2);
+    expect(refreshed.revSeq).toBe(3);
 
     // Resolve r2 by its end-anchored URN, and confirm NodeRevision.urn round-trips.
     const urn = `hrn:noderev:${MEM_URN}:${NODE_LOC}:r2`;

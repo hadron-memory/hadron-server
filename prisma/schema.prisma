@@ -1184,11 +1184,15 @@ model Node {
   /// AI agent tool that created or last modified this node (e.g.
   /// "claude-code", "cursor", "hadron-portal").
   aiAgent            String?   @map("ai_agent")
-  /// #696: the per-node revision counter. Atomically incremented (the
-  /// QuotaCounter pattern) inside the tx that writes each NodeRevision, so the
-  /// value it yields is that snapshot's monotonic `revNo` — race-safe, unlike a
-  /// read-max-then-+1. Backfilled to the node's current revision count.
-  revSeq             Int       @default(0) @map("rev_seq")
+  /// #696/#1323: the live node's current revision. Creation is revision 1.
+  /// A revisioned edit snapshots the pre-edit state at this number, then
+  /// atomically advances the live row to the next number.
+  revSeq             Int       @default(1) @map("rev_seq")
+  /// #1323: host-independent MD5 of the complete at-rest revisioned state.
+  /// Internal safeguard only (never an artifact fingerprint): an exposed read
+  /// reconciles a mismatch by taking a server-authored revision. Included
+  /// partials/template data and operational fields are deliberately outside it.
+  revisionContentHash String?   @map("revision_content_hash")
   createdAt          DateTime  @default(now()) @map("created_at")
   createdBy          String?   @map("created_by")
   updatedAt          DateTime  @updatedAt @map("updated_at")

@@ -103,6 +103,8 @@ export interface SkillFile {
    * valid and pairs by URN.
    */
   id: string;
+  /** Live source revision from a generated header; null on older headers. */
+  revision: number | null;
   body: string;
   /**
    * Every frontmatter key other than name/description. `render` writes none, so
@@ -135,16 +137,29 @@ export function isNodeUrn(tok: string): boolean {
   return parts.every((p) => p.length > 0);
 }
 
-function machineHeader(line: string): { source: string; hash: string; id: string } | null {
+/**
+ * #1323 — the ONE rule for a `rev=` value, shared by render and parse so the
+ * renderer can never write a header the parser voids (@copilot, PR #1339): a
+ * positive integer that fits Node.revSeq's signed 32-bit column.
+ */
+export const MAX_SKILL_REVISION = 2_147_483_647;
+export function isValidSkillRevision(revision: number): boolean {
+  return Number.isSafeInteger(revision) && revision >= 1 && revision <= MAX_SKILL_REVISION;
+}
+
+function machineHeader(line: string): { source: string; hash: string; id: string; revision: number | null } | null {
   const m = MACHINE_RE.exec(line);
   if (!m) return null;
   let source = '';
   let h = '';
   let id = '';
+  let revision: number | null = null;
+  let rawRevision: string | null = null;
   for (const kv of m[1]!.matchAll(MACHINE_KV)) {
     if (kv[1] === 'source') source = kv[2]!;
     else if (kv[1] === 'hash') h = kv[2]!;
     else if (kv[1] === 'id') id = kv[2]!;
+    else if (kv[1] === 'rev') rawRevision = kv[2]!;
   }
   // Extra keys are allowed so a later host can add its own, but a line missing
   // either of ours — or carrying a source that is not a node URN, or a hash
@@ -158,7 +173,12 @@ function machineHeader(line: string): { source: string; hash: string; id: string
   // is agent-visible text. Read and write share one allow-list, so the parser
   // cannot accept a header the renderer forbids.
   if (id !== '' && !SAFE_ID_RE.test(id)) return null;
-  return { source, hash: h, id };
+  if (rawRevision !== null) {
+    if (!/^[1-9]\d*$/.test(rawRevision)) return null;
+    revision = Number(rawRevision);
+    if (!isValidSkillRevision(revision)) return null;
+  }
+  return { source, hash: h, id, revision };
 }
 
 function legacyHeader(line: string): string | null {
@@ -224,7 +244,7 @@ export function parseFile(data: string): SkillFile {
     throw new SkillFileParseError('frontmatter is not a mapping');
   }
 
-  const file: SkillFile = { name: '', description: '', source: '', hash: '', id: '', body: '' };
+  const file: SkillFile = { name: '', description: '', source: '', hash: '', id: '', revision: null, body: '' };
   for (const [k, v] of Object.entries(all as Record<string, unknown>)) {
     if (k === 'name' || k === 'description') {
       if (typeof v !== 'string') {
@@ -256,6 +276,7 @@ export function parseFile(data: string): SkillFile {
       file.source = mh.source;
       file.hash = mh.hash;
       file.id = mh.id;
+      file.revision = mh.revision;
       break;
     }
     const lh = legacyHeader(line);
