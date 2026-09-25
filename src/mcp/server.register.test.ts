@@ -186,6 +186,19 @@ describe('team-chat monitor (#1265)', () => {
       { workerId: [worker.id, mira.id].sort()[1], lastSeenSeq: 1 },
     ]);
     expect(await server(admin.id).callToolText('hadron_team_chat_read', { monitor: true })).toContain('No new registered team-chat attention');
+
+    await restarted.callToolText('hadron_team_chat_post', { body: '@all broadcast' });
+    await restarted.callToolText('hadron_team_chat_post', { body: '@team broadcast' });
+    await restarted.callToolText('hadron_team_chat_post', { body: '@someone unrelated' });
+    const broadcasts = await restarted.callToolText('hadron_team_chat_read', { monitor: true });
+    expect(broadcasts).toContain('2 messages need routing');
+    expect(broadcasts).toContain('@all broadcast');
+    expect(broadcasts).toContain('@team broadcast');
+    expect(broadcasts).not.toContain('@someone unrelated');
+    const routeLines = broadcasts.split('\n').filter((line) => line.startsWith('route to:'));
+    expect(routeLines).toHaveLength(2);
+    expect(routeLines.every((line) => line.includes(`hrn:worker:${org.urn}:app:iris`))).toBe(true);
+    expect(routeLines.every((line) => line.includes(`hrn:worker:${org.urn}:app:mira`))).toBe(true);
   });
 
   it('refuses manual cursors, App-key monitoring, non-live targets and impossible acknowledgements', async () => {

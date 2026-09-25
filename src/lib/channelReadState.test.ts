@@ -144,10 +144,12 @@ describe('read-state', () => {
     const section = await renderAttentionSection(db, run1);
     expect(section.text).toContain('nothing new for you (mention-only; channel is at 1)');
     await post('@iris look', ['iris']);
-    await post('@iris again', ['iris']);
-    expect((await renderAttentionSection(db, run1)).text).toContain('2 new mentions of you since seq 0 (channel is at 3)');
+    await post('@all look', ['all']);
+    await post('@team look', ['team']);
+    await post('@someone else', ['someone']);
+    expect((await renderAttentionSection(db, run1)).text).toContain('3 new mentions of you since seq 0 (channel is at 5)');
     await advanceReadState(db, { agentId: agent.id, appId: app.id }, channel.id, 2);
-    expect((await renderAttentionSection(db, run1)).text).toContain('1 new mention of you since seq 2 (channel is at 3)');
+    expect((await renderAttentionSection(db, run1)).text).toContain('2 new mentions of you since seq 2 (channel is at 5)');
   });
 
   it('a cleanly reused Channel has no phantom attention and its next message clears old cursors (#1226)', async () => {

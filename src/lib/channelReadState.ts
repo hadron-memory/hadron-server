@@ -24,7 +24,7 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { generateId } from './id.js';
-import { mentionTokenOf } from './mentionToken.js';
+import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from './mentionToken.js';
 import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegister.js';
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
 
@@ -70,13 +70,16 @@ export async function readStatesFor(db: Db, attendee: RegisterAttendee, channelI
   return new Map(rows.map((r) => [r.channelId, r.lastSeenSeq]));
 }
 
-/** The mention tokens that address an attendee — its own, or every Worker cast from the Agent in the App. */
+/** The mention tokens that address an attendee — broadcasts plus its own Worker token(s). */
 export async function attendeeMentionTokens(db: Db, attendee: RegisterAttendee): Promise<string[]> {
   const workers =
     'workerId' in attendee
       ? await db.worker.findMany({ where: { id: attendee.workerId }, select: { name: true } })
       : await db.worker.findMany({ where: { agentId: attendee.agentId, appId: attendee.appId, retiredAt: null }, select: { name: true } });
-  return [...new Set(workers.map((w) => mentionTokenOf(w.name)).filter((t): t is string => !!t))];
+  return [...new Set([
+    ...BROADCAST_MENTION_TOKENS,
+    ...workers.map((w) => mentionTokenOf(w.name)).filter((t): t is string => !!t),
+  ])];
 }
 
 export interface AttentionSection {
