@@ -236,6 +236,14 @@ describe('#1177 — render agrees SEMANTICALLY, and on the hash byte-for-byte', 
     expect(parseFile(render(...args)).revision).toBeNull();
   });
 
+  it('render refuses a revision the parser would void, at both edges (@copilot, PR #1339)', () => {
+    const args = ['node-1', 'skill', 'hrn:node:a.com:mem:tasks:x', 'Use when testing.', 'body'] as const;
+    expect(parseFile(render(...args, 2_147_483_647)).revision).toBe(2_147_483_647);
+    expect(() => render(...args, 2_147_483_648)).toThrow(/no larger than 2147483647/);
+    expect(() => render(...args, 0)).toThrow(/positive integer/);
+    expect(() => render(...args, 1.5)).toThrow(/positive integer/);
+  });
+
   it('does not recognize a provenance header carrying an invalid revision', () => {
     const rendered = render('node-1', 'skill', 'hrn:node:a.com:mem:tasks:x', 'Use when testing.', 'body', 7);
     const parsed = parseFile(rendered.replace('rev=7', 'rev=0'));

@@ -36,7 +36,7 @@
 
 import { stringify } from 'yaml';
 import { hash } from './hash.js';
-import { isNodeUrn, SAFE_ID_RE, SAFE_SOURCE_RE } from './parse.js';
+import { isNodeUrn, isValidSkillRevision, MAX_SKILL_REVISION, SAFE_ID_RE, SAFE_SOURCE_RE } from './parse.js';
 import { normalizeBody, normalizeDescription } from './normalize.js';
 
 /** The human note a generated file carries. Prose — nothing parses it. */
@@ -126,8 +126,8 @@ export function render(
   // about the line staying parseable; the hash rule is about the two
   // implementations having one shape to agree on.
   const idKey = id === '' ? '' : `id=${id} `;
-  if (revision !== undefined && (!Number.isInteger(revision) || revision < 1)) {
-    throw new SkillRenderError(`skill revision must be a positive integer: ${revision}`);
+  if (revision !== undefined && !isValidSkillRevision(revision)) {
+    throw new SkillRenderError(`skill revision must be a positive integer no larger than ${MAX_SKILL_REVISION}: ${revision}`);
   }
   const revisionKey = revision === undefined ? '' : `rev=${revision} `;
   return (

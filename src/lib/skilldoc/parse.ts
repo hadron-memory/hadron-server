@@ -137,6 +137,16 @@ export function isNodeUrn(tok: string): boolean {
   return parts.every((p) => p.length > 0);
 }
 
+/**
+ * #1323 — the ONE rule for a `rev=` value, shared by render and parse so the
+ * renderer can never write a header the parser voids (@copilot, PR #1339): a
+ * positive integer that fits Node.revSeq's signed 32-bit column.
+ */
+export const MAX_SKILL_REVISION = 2_147_483_647;
+export function isValidSkillRevision(revision: number): boolean {
+  return Number.isSafeInteger(revision) && revision >= 1 && revision <= MAX_SKILL_REVISION;
+}
+
 function machineHeader(line: string): { source: string; hash: string; id: string; revision: number | null } | null {
   const m = MACHINE_RE.exec(line);
   if (!m) return null;
@@ -166,7 +176,7 @@ function machineHeader(line: string): { source: string; hash: string; id: string
   if (rawRevision !== null) {
     if (!/^[1-9]\d*$/.test(rawRevision)) return null;
     revision = Number(rawRevision);
-    if (!Number.isSafeInteger(revision) || revision > 2_147_483_647) return null;
+    if (!isValidSkillRevision(revision)) return null;
   }
   return { source, hash: h, id, revision };
 }
