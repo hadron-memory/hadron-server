@@ -84,7 +84,9 @@ export async function updateNodeFromGitSync(
   // GraphQL and MCP update paths. A swap base is exempt: its row was
   // reconciled when the swap captured it, and the parked row is a
   // mechanical waypoint, not a committed state.
-  if (revisionBase == null) await ensureCurrentNodeRevisionInTransaction(tx, current.id);
+  if (revisionBase == null) {
+    await ensureCurrentNodeRevisionInTransaction(tx, current.id, { expectedMemoryId });
+  }
   const locked = await tx.node.findUniqueOrThrow({ where: { id: current.id } });
   // A swap can park this row at a temporary invalid loc earlier in the SAME
   // transaction. History must describe committed states, so diff/snapshot the
@@ -508,7 +510,7 @@ export const syncGraphFromGithub = async (
             }
             if (occupant && occupant.id !== byId.id) {
               await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${occupant.id} FOR UPDATE`;
-              await ensureCurrentNodeRevisionInTransaction(tx, occupant.id);
+              await ensureCurrentNodeRevisionInTransaction(tx, occupant.id, { expectedMemoryId: graph.id });
               const lockedOccupant = await tx.node.findUniqueOrThrow({ where: { id: occupant.id } });
               if (!parkedRevisionBases.has(occupant.id)) {
                 parkedRevisionBases.set(occupant.id, lockedOccupant);

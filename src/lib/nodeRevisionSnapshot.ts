@@ -176,28 +176,7 @@ export function revisionStateHashRefreshMarker(): string {
 }
 
 /**
- * #1323 — reconcile a tracked-field write that bypassed every revisioned authoring
- * seam before exposing the node's current revision.
- *
- * The row lock makes the comparison, snapshot, counter advance and baseline
- * update one serialization point. A NULL hash is a compatibility baseline
- * (old/unbackfilled row), not proof of an off-road edit; it is initialized
- * without inventing history. A mismatch takes a server-authored revision of
- * the state we can actually observe — the prior bytes are unrecoverable.
- */
-export async function ensureCurrentNodeRevision(
-  db: Pick<PrismaClient, '$transaction'>,
-  nodeId: string,
-): Promise<number> {
-  return db.$transaction(async (tx) => {
-    const revision = await ensureCurrentNodeRevisionInTransaction(tx, nodeId);
-    if (revision == null) throw new Error(`Node not found while reconciling revision: ${nodeId}`);
-    return revision;
-  });
-}
-
-/**
- * Transaction-scoped half of {@link ensureCurrentNodeRevision}. Callers that
+ * Row-lock and reconcile one node inside the caller's transaction. Callers that
  * render or hash node fields use this and then re-read those fields in the SAME
  * transaction: the row lock prevents a writer from pairing revision N+1 with
  * the body from the earlier, pre-lock query.
@@ -205,23 +184,23 @@ export async function ensureCurrentNodeRevision(
 export async function ensureCurrentNodeRevisionInTransaction(
   tx: Prisma.TransactionClient,
   nodeId: string,
-  opts?: {
+  opts: {
     /**
-     * The memory the caller AUTHORIZED this node in. A READ that selected the
+     * REQUIRED: the memory the caller AUTHORIZED this node in. A READ that selected the
      * node in one memory must never reconcile it after a concurrent relocation
      * into another — that would write a revision (and possibly prune history)
      * in a tenant the reader may not even see (@codex P1, PR #1339). When the
      * locked row is elsewhere this returns null WITHOUT writing; the caller
      * treats it as not found.
      */
-    expectedMemoryId?: string;
+    expectedMemoryId: string;
   },
 ): Promise<number | null> {
   const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "nodes" WHERE "id" = ${nodeId} FOR UPDATE`;
   if (locked.length === 0) return null;
   const node = await tx.node.findUnique({ where: { id: nodeId } });
   if (!node) return null;
-  if (opts?.expectedMemoryId !== undefined && node.memoryId !== opts.expectedMemoryId) return null;
+  if (node.memoryId !== opts.expectedMemoryId) return null;
 
   const actual = await computeRevisionStateHash(tx, node.id);
   if (actual == null) return null;

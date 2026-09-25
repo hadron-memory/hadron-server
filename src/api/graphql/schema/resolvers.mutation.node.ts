@@ -1032,6 +1032,14 @@ export async function writeNodeCore(
           // edges. A refusal or rollback therefore leaves neither a consumed
           // revision nor an orphan snapshot, and concurrent supported writers
           // serialize before their snapshot is built.
+          // A refusal is THROWN inside the transaction, never returned from it:
+          // a drift reconcile taken above must roll back with the refused write,
+          // or a refused guarded write would still have consumed a revision
+          // (@copilot, PR #1339).
+          const writeConflict = () =>
+            new GraphQLError(`Node at loc "${input.loc}" changed since it was read — re-read and retry.`, {
+              extensions: { code: 'NODE_WRITE_CONFLICT', loc: input.loc, memoryId: input.memoryId },
+            });
           const result = await ctx.db.$transaction(async (tx) => {
             await lockInlineEdgeMemories(tx);
             await lockLocForWrite(tx, input.memoryId, input.loc, {
@@ -1052,7 +1060,7 @@ export async function writeNodeCore(
             // hid the drift transition once the fingerprint was refreshed
             // (@codex P1, PR #1339). The row lock is already held.
             if (current.revisionContentHash !== await computeRevisionStateHash(tx, current.id)) {
-              await ensureCurrentNodeRevisionInTransaction(tx, current.id);
+              await ensureCurrentNodeRevisionInTransaction(tx, current.id, { expectedMemoryId: input.memoryId });
               current = await assertTargetStillWritable(tx);
               if (!current) return { conflict: false, node: null };
             }
@@ -1067,7 +1075,7 @@ export async function writeNodeCore(
               // idempotent write must not report success against a revision
               // the caller never saw (@copilot, PR #1339). Consumes nothing.
               if (opts?.guardRevSeq !== undefined && current.revSeq !== opts.guardRevSeq) {
-                return { conflict: true, node: null };
+                throw writeConflict();
               }
               const unchanged = await tx.node.findUniqueOrThrow({
                 where: { id: current.id },
@@ -1081,13 +1089,13 @@ export async function writeNodeCore(
             // snapshot uses the anchor and the live row advances to anchor+1.
             if (opts?.guardRevSeq !== undefined) {
               if (!needsRevision) {
-                if (current.revSeq !== opts.guardRevSeq) return { conflict: true, node: null };
+                if (current.revSeq !== opts.guardRevSeq) throw writeConflict();
               } else {
                 const claimed = await tx.node.updateMany({
                   where: { id: current.id, revSeq: opts.guardRevSeq },
                   data: { revSeq: { increment: 1 } },
                 });
-                if (claimed.count === 0) return { conflict: true, node: null };
+                if (claimed.count === 0) throw writeConflict();
               }
             }
 
@@ -1261,7 +1269,7 @@ export async function writeNodeCore(
               // above would otherwise be snapshotted stale, overwritten, and
               // hidden by the refreshed fingerprint. Same order as the update
               // path.
-              await ensureCurrentNodeRevisionInTransaction(tx, authoritative.id);
+              await ensureCurrentNodeRevisionInTransaction(tx, authoritative.id, { expectedMemoryId: input.memoryId });
               authoritative = await tx.node.findUniqueOrThrow({ where: { id: authoritative.id } });
               // Found by (loc, memory), locked by id: a row that moved in
               // between must refuse, not be snapshotted while the upsert
@@ -2219,8 +2227,9 @@ export const nodeMutations = {
         // replacement was computed from a read taken BEFORE this lock, so a row
         // whose tracked state changed since then refuses the whole batch
         // (all-or-nothing, as below) instead of overwriting the newer write.
-        for (const id of plans.map((p) => p.raw.id).sort()) {
-          await ensureCurrentNodeRevisionInTransaction(tx, id);
+        const planMemory = new Map(plans.map((p) => [p.raw.id, p.raw.memoryId]));
+        for (const id of [...planMemory.keys()].sort()) {
+          await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: planMemory.get(id)! });
         }
         for (const p of plans) {
           const locked = await tx.node.findUnique({ where: { id: p.raw.id } });
@@ -3335,8 +3344,9 @@ export const nodeMutations = {
         // before the snapshot. The merge was computed from reads taken BEFORE
         // these locks, so an endpoint whose tracked state changed since then
         // refuses instead of being overwritten with a stale fold.
+        const endpointMemory = new Map([[source.id, source.memoryId], [target.id, target.memoryId]]);
         for (const id of [source.id, target.id].sort()) {
-          await ensureCurrentNodeRevisionInTransaction(tx, id);
+          await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: endpointMemory.get(id)! });
         }
         const lockedSource = await tx.node.findUnique({ where: { id: source.id } });
         const lockedTarget = await tx.node.findUnique({ where: { id: target.id } });
@@ -3783,7 +3793,7 @@ export const nodeMutations = {
         // Row lock + drift reconciled as its own revision before the restore's
         // snapshot, as on every other revisioned writer (@copilot, PR #1339).
         // A missing row returns null here and falls to the conflict below.
-        await ensureCurrentNodeRevisionInTransaction(tx, node.id);
+        await ensureCurrentNodeRevisionInTransaction(tx, node.id, { expectedMemoryId: node.memoryId });
         const current = await tx.node.findUnique({ where: { id: node.id } });
         if (
           !current ||

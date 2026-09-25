@@ -290,7 +290,9 @@ export async function mergeMemoryGraph(
           // cannot lock-invert). Then re-read and re-validate: the snapshot
           // must describe the row as it is now, not as classified.
           const relocationIds = rows.map((row) => row.id).sort();
-          for (const id of relocationIds) await ensureCurrentNodeRevisionInTransaction(tx, id);
+          for (const id of relocationIds) {
+            await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: sourceMemoryId });
+          }
           rows = await tx.node.findMany({ where: { id: { in: relocationIds } }, orderBy: { id: 'asc' } });
           for (const row of rows) {
             if (row.memoryId !== sourceMemoryId || row.deletedAt || row.loc !== classifiedLocById.get(row.id)) {
@@ -370,7 +372,17 @@ export async function mergeMemoryGraph(
       // lock no longer forms that collision (@copilot, PR #1339).
       const classifiedLoc = new Map([...srcRows, ...tgtRows].map((row) => [row.id, row.loc]));
       const foldIds = [...new Set([...srcRows, ...tgtRows].map((row) => row.id))].sort();
-      for (const id of foldIds) await ensureCurrentNodeRevisionInTransaction(tx, id);
+      // Each row only within the memory it was classified in (@copilot, PR
+      // #1339): a row that moved out is neither reconciled nor silently
+      // dropped — the transaction refuses, so nothing commits in its new memory.
+      const foldMemory = new Map<string, string>([
+        ...srcRows.map((row) => [row.id, sourceMemoryId] as const),
+        ...tgtRows.map((row) => [row.id, targetMemoryId] as const),
+      ]);
+      for (const id of foldIds) {
+        const reconciled = await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: foldMemory.get(id)! });
+        if (reconciled == null) throw new Error(`merge node ${id} moved or vanished during the fold; retry the merge`);
+      }
       srcRows = await tx.node.findMany({
         where: { id: { in: srcRows.map((row) => row.id) }, memoryId: sourceMemoryId, deletedAt: null },
       });

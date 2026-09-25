@@ -56,6 +56,10 @@ describe('#1339 review — drift is reconciled before the guard and the edit', (
     );
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     expect(after.content).toBe('changed by a raw writer');
+    // The refusal rolls back EVERYTHING, the drift reconcile included: a refused
+    // write consumes no revision and leaves no history (@copilot, PR #1339).
+    expect(after.revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
   });
 
   it('an unguarded edit over drift yields TWO revisions: the reconcile, then the edit', async () => {

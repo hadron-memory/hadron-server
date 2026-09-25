@@ -1582,7 +1582,7 @@ export const sessionMutations = {
               select: { id: true },
             });
             if (prior) {
-              await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
+              await ensureCurrentNodeRevisionInTransaction(tx, prior.id, { expectedMemoryId: sysMemId });
               const current = await tx.node.findUniqueOrThrow({ where: { id: prior.id } });
               // Found by (loc, memory), locked by id: a row that moved in
               // between aborts the restore (it is atomic) rather than being

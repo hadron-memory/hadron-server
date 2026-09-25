@@ -67,7 +67,7 @@ export const createNode = async (
     });
     // Row lock + drift reconciled as its own revision before the snapshot
     // (@copilot, PR #1339), then the authoritative re-read it is built from.
-    if (prior) await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
+    if (prior) await ensureCurrentNodeRevisionInTransaction(tx, prior.id, { expectedMemoryId: node.memoryId });
     const existing = prior ? await tx.node.findUnique({ where: { id: prior.id } }) : null;
     // The upsert below targets (loc, memory); the lock was taken by id. A row
     // that moved in between must refuse, not be snapshotted here while a

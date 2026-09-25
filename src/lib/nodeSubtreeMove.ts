@@ -240,7 +240,9 @@ export async function moveNodeSubtree(
   // the rows as they are under their locks, and a source that moved or a
   // descendant set that changed in the meantime refuses as a retryable move.
   const reconcileIds = [source.id, ...firstDescendants.map((d) => d.id)].sort();
-  for (const id of reconcileIds) await ensureCurrentNodeRevisionInTransaction(tx, id);
+  for (const id of reconcileIds) {
+    await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: srcMemoryId });
+  }
   const lockedSource = await tx.node.findUnique({ where: { id: source.id } });
   if (
     !lockedSource ||

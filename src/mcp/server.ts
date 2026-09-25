@@ -4841,7 +4841,7 @@ export function createMcpServerInstance(
         if (!prior) return null;
         // Row lock + drift reconciled as its own revision before this snapshot
         // (@copilot, PR #1339), then the authoritative re-read.
-        await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
+        await ensureCurrentNodeRevisionInTransaction(tx, prior.id, { expectedMemoryId: memoryId });
         const pre = await tx.node.findUnique({ where: { id: prior.id } });
         if (!pre) return null;
         // Found by (loc, memory), locked by id (@copilot, PR #1339).
@@ -5304,7 +5304,7 @@ export function createMcpServerInstance(
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
             // Unreconciled drift becomes its OWN revision before this edit's,
             // as on the GraphQL path — never folded into the edit.
-            await ensureCurrentNodeRevisionInTransaction(tx, existing.id);
+            await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: memory.id });
             const current = await tx.node.findUnique({
               where: { id: existing.id },
             });
