@@ -23,8 +23,9 @@ A=src/lib/agentPublicCongruence.ts
 AG=src/api/graphql/schema/resolvers.mutation.agent.ts
 SPEC=src/test/integration/agent-memory-attach-1349.test.ts
 
+STALE=0
 run() { # name file old new
-  python3 - "$2" "$3" "$4" <<'PY' || { echo "$1: PATTERN NOT FOUND (stale mutation)"; return; }
+  python3 - "$2" "$3" "$4" <<'PY' || { echo "STALE     $1 — pattern no longer matches the implementation"; STALE=$((STALE+1)); return; }
 import sys
 p, old, new = sys.argv[1:4]
 s = open(p).read()
@@ -38,11 +39,15 @@ PY
 }
 
 run "1 attach gate removed" "$M" \
-  "      await requireAgentMemoryGrant(ctx, agent, memory, grantedRole, memoryRef);
-      if (memory.class === 'system')" "      if (memory.class === 'system')"
+  "      await requireAgentMemoryGrant(txCtx, lockedAgent, memory, grantedRole, memoryRef);" "      "
 run "2 re-role gate removed" "$M" \
-  "      await requireAgentMemoryGrant(ctx, agent, memory, grantedRole, memoryRef);
-      // #501" "      // #501"
+  "      await requireAgentMemoryGrant(
+        { ...ctx, db: tx } as Context,
+        lockedAgent,
+        memory,
+        grantedRole,
+        memoryRef,
+      );" "      "
 run "3 role validation disabled" "$H" \
   "  if (!(AGENT_MEMORY_ROLES as readonly string[]).includes(value)) {" "  if (false) {"
 run "4 content gate -> record gate" "$H" \
@@ -98,3 +103,28 @@ run "22 early congruence fail-fast removed" "$AG" \
   "      if (visibility === 'PUBLIC') {
         await assertAgentPublicAllowed(ctx.db, id);
       }" "      "
+
+run "23 publication does not lock linked memories" "$AG" \
+  "          for (const { memoryId } of linked) {
+            await tx.\$queryRaw\`SELECT id FROM memories WHERE id = \${memoryId} FOR UPDATE\`;
+          }" "          "
+# 24 SURVIVES by design — see the UNPROVEN BY TEST note at that line. Kept in
+# the harness so the fact stays visible in every run rather than being quietly
+# dropped once someone notices it is green.
+run "24 narrowing check not re-run under the lock (expected survivor)" "$M" \
+  "        if (visibility !== undefined) {
+          await assertMemoryVisibilityChangeAllowed(tx, memory, visibility);
+        }" "        "
+
+# A stale pattern is a FAILED run, not a skipped line. Counting only
+# KILLED/SURVIVED lines once let two stale mutants — the attach gate and the
+# re-role gate, the two that matter most — drop out of a reported total without
+# anything looking wrong (@codex P2, PR #1357).
+if [ "$STALE" -ne 0 ]; then
+  echo
+  echo "FAILED: $STALE mutation(s) no longer match the implementation."
+  echo "Every reported count is therefore incomplete. Fix the patterns and re-run."
+  exit 1
+fi
+echo
+echo "All mutations applied cleanly; the counts above cover every mutant."

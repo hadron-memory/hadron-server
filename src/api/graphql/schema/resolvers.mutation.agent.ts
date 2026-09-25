@@ -558,6 +558,30 @@ export const agentMutations = {
         // FOR UPDATE serializes the renames and makes each one record the urn it
         // actually superseded. `updateOrganization` already did this; the three
         // single-entity paths did not.
+        // #1349 (@codex, PR #1357) — publication must serialize with a
+        // concurrent narrowing of the knowledge it links. `updateMemory` takes
+        // `FOR UPDATE` on the memory row, so locking the linked memories here
+        // makes the two contend: otherwise this check saw them still PUBLIC
+        // while the narrowing's own check saw no PUBLIC agent yet, and both
+        // committed — a PUBLIC agent referencing non-public knowledge.
+        //
+        // LOCKED BEFORE THE AGENT ROW, and ordered by id. The attach path locks
+        // memory-then-agent (see lockAttachmentPair), so taking them in the
+        // other order here would deadlock against it; ordering the memory set
+        // by id keeps two concurrent publications consistent with each other.
+        // An attach that adds a link to a memory outside this set still cannot
+        // slip past: it must take the agent lock below, which this transaction
+        // holds until it commits.
+        if (visibility === 'PUBLIC') {
+          const linked = await tx.agentMemoryItem.findMany({
+            where: { agentId: id, deletedAt: null },
+            select: { memoryId: true },
+            orderBy: { memoryId: 'asc' },
+          });
+          for (const { memoryId } of linked) {
+            await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+          }
+        }
         const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
           SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
         `;

@@ -512,6 +512,67 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     }
   });
 
+  it('a NEW attach racing publication cannot slip a disqualifying link past it', async () => {
+    // The case the agent-row lock exists for, and the one the memory locks
+    // cannot cover: the memory being attached is not in the agent's link set
+    // when publication reads it, so publication never locks that row. Only the
+    // AGENT lock serializes them. (Without this case, dropping that lock left
+    // the suite green — the other race tests attach BEFORE racing, so the
+    // memory lock alone was enough. A green mutant indicts the test.)
+    for (let i = 0; i < 6; i++) {
+      const priv = await db.memory.create({
+        data: {
+          id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:newattach-${i}`,
+          name: `newattach-${i}`, class: 'knowledge', visibility: 'ORGANIZATION',
+        } as never,
+      });
+      await db.node.create({ data: { id: generateId(), memoryId: priv.id, loc: 'payroll', name: 'p', content: 'X' } });
+      const { agentId } = await agentWithApp(attackerOrgId, `newattach-${i}`);
+
+      await Promise.allSettled([
+        gql(key.attacker!, ATTACH, { g: agentId, m: `hrn:mem:attacker-${suffix}:newattach-${i}`, r: 'read' }),
+        gql(key.attacker!, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { id } }`, { r: agentId }),
+      ]);
+
+      const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      const link = await db.agentMemoryItem.findFirst({ where: { agentId, memoryId: priv.id, deletedAt: null } });
+      if (agentRow.visibility === 'PUBLIC') {
+        expect(link, `iteration ${i}: PUBLIC agent linking non-public knowledge attached mid-publication`).toBeNull();
+      }
+    }
+  });
+
+  it('a concurrent narrowing and agent publication cannot both win', async () => {
+    // cor:acl:080:03: a PUBLIC agent references only PUBLIC knowledge. The
+    // race: narrowing passes its "any PUBLIC agent linking this?" check while
+    // the publication passes its "is every linked memory PUBLIC?" check, and
+    // both commit — a PUBLIC agent holding non-public knowledge.
+    for (let i = 0; i < 6; i++) {
+      const pub = await db.memory.create({
+        data: {
+          id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:pubrace2-${i}`,
+          name: `pubrace2-${i}`, class: 'knowledge', visibility: 'PUBLIC',
+        } as never,
+      });
+      await db.node.create({ data: { id: generateId(), memoryId: pub.id, loc: 'payroll', name: 'p', content: 'X' } });
+      const { agentId } = await agentWithApp(attackerOrgId, `narrowpub-${i}`);
+      const attach = await gql(key.attacker!, ATTACH, { g: agentId, m: `hrn:mem:attacker-${suffix}:pubrace2-${i}`, r: 'read' });
+      expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
+
+      await Promise.allSettled([
+        gql(key.attacker!, `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id } }`, { id: pub.id }),
+        gql(key.attacker!, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { id } }`, { r: agentId }),
+      ]);
+
+      const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      const memRow = await db.memory.findUniqueOrThrow({ where: { id: pub.id } });
+      const link = await db.agentMemoryItem.findFirst({ where: { agentId, deletedAt: null } });
+      if (agentRow.visibility === 'PUBLIC' && link) {
+        expect(memRow.visibility, `iteration ${i}: PUBLIC agent linking non-public knowledge`).toBe('PUBLIC');
+      }
+    }
+  });
+
   it('a concurrent read-write re-role and agent publication cannot both win', async () => {
     for (let i = 0; i < 6; i++) {
       const { agentId } = await agentWithApp(attackerOrgId, `pubrace-${i}`);

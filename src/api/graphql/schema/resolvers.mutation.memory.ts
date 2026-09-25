@@ -772,6 +772,11 @@ export const memoryMutations = {
       // cor:acl:080:03 — un-PUBLIC-ing a COVERED memory that a PUBLIC agent
       // links would break the congruence invariant; reject before persisting.
       // The helper excludes per-user + app-scoped memories (never public).
+      // #1349 (@codex, PR #1357): the authoritative check moved INSIDE the
+      // transaction below, under the memory row lock, so a concurrent
+      // `updateAgent(visibility: PUBLIC)` cannot observe this memory as still
+      // PUBLIC while this call observes no PUBLIC agent. This early pass stays
+      // as the fail-fast, ahead of the URN/alias writes.
       if (visibility !== undefined) {
         await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
       }
@@ -961,6 +966,19 @@ export const memoryMutations = {
         // the pre-update row it read tenancy from the organization the memory
         // had just left; skipped on a transfer, it left the source tenant's
         // Apps reading a memory that had moved away from them.
+        // UNPROVEN BY TEST, and kept anyway. Mutating this line away leaves the
+        // suite green: the narrowing/publication race test cannot reliably
+        // stage the one interleaving it covers — a publication committing
+        // between the pre-transaction check above and this row lock. Per
+        // `review:a-green-mutation-indicts-the-test` that green indicts the
+        // test, not the guard. Without it, a publication that lands in exactly
+        // that window leaves a PUBLIC agent referencing knowledge this call is
+        // about to make non-public (cor:acl:080:03). The same reasoning, and
+        // the same explicit note, as the system-memory URN re-check in
+        // resolvers.mutation.agent.ts.
+        if (visibility !== undefined) {
+          await assertMemoryVisibilityChangeAllowed(tx, memory, visibility);
+        }
         if (visibility !== undefined || newOrgId !== undefined) {
           await revokeLinksForeignToTenant(tx, row, ctx.userId ?? ctx.clientId ?? null);
         }
