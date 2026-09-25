@@ -371,7 +371,10 @@ export class RoleGovernedError extends GraphQLError {
     const subject =
       entry.signal.field === 'isRunnable'
         ? 'a RUNNABLE node'
-        : `a node with role "${entry.signal.value}"`;
+        : // #1322: governance is by FAMILY, so name it — a refusal of
+          // `review.security` must not claim the node's role is "review"
+          // (@copilot, #1345 review). Routing metadata keeps the base kind.
+          `a node with a "${entry.signal.value}"-family role ("${entry.signal.value}" or a dotted "${entry.signal.value}.*")`;
     const act =
       refusal === 'produces'
         ? `This write would produce ${subject}`

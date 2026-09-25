@@ -1307,8 +1307,12 @@ export const nodeQueries = {
         // from deeper ranks — a floor returns fewer, never weaker, results).
         ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
+        // #1345 review (@copilot): the lexical/regex SQL applied scope and the
+        // structured filters when RANKING; re-assert them at hydration, as
+        // buildResult does, so a node whose role (or memory, or deletion) changed
+        // in between is not returned against the filter it no longer meets.
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: ranked.map((r) => r.nodeId) } },
+          where: { id: { in: ranked.map((r) => r.nodeId) }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);

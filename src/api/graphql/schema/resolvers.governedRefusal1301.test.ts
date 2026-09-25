@@ -173,7 +173,7 @@ describe('a refusal offers only routes that perform the refused operation (@code
       const e = new RoleGovernedError(spec, 'update', 'edits', { context });
       // Names no door as a remedy (@copilot, #1305 round 7); extensions.door
       // still identifies the kind's door for tooling.
-      expect(e.message).toBe('This write edits a node with role "spec". The generic node surface does not reach it. There is no route to suggest for this operation.');
+      expect(e.message).toBe('This write edits a node with a "spec"-family role ("spec" or a dotted "spec.*"). The generic node surface does not reach it. There is no route to suggest for this operation.');
       expect(e.extensions.door).toBe('updateSpecNode');
     }
   });

@@ -19,7 +19,7 @@ import type { EmbeddingClient } from '../../../lib/embedding/index.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
 import { embedNode } from '../../../jobs/embedNodes.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
-import { vectorWindowExhausted } from '../../../services/embedding/vectors.js';
+import { hnswEfSearchFor, vectorSearchChunks, vectorSearchNodes, vectorWindowExhausted } from '../../../services/embedding/vectors.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -160,5 +160,38 @@ describe('@copilot — hydration re-asserts the memory scope', () => {
     const chunk = await findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', filter: { memoryIds: [memId] } });
     expect(node.hits).toEqual([]);
     expect(chunk.passages).toEqual([]);
+  });
+});
+
+describe('@codex round 7 — a wider window is a deeper HNSW scan', () => {
+  it('ef_search tracks the window, never below the default 40, capped at 1000', () => {
+    expect([hnswEfSearchFor(10), hnswEfSearchFor(50), hnswEfSearchFor(200), hnswEfSearchFor(20000)]).toEqual([40, 50, 200, 1000]);
+  });
+
+  it('each vector query sets it for its own window, in its own transaction', async () => {
+    const sets: string[] = [];
+    const tx = { $executeRawUnsafe: async (sql: string) => { sets.push(sql); return 0; }, $queryRaw: async () => [] };
+    const fake = { $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx), $queryRaw: async () => [{ n: 0 }] } as any;
+    const q = new Array(768).fill(0); q[1] = 1;
+    await vectorSearchNodes(fake, { memoryIds: ['m'], queryEmbedding: q, limit: 5 }); // candidateK 50
+    await vectorSearchChunks(fake, { memoryIds: ['m'], queryEmbedding: q, limit: 20 }); // candidateK 200
+    expect(sets).toEqual(['SET LOCAL hnsw.ef_search = 50', 'SET LOCAL hnsw.ef_search = 200']);
+  });
+});
+
+describe('@copilot round 7 — lexical/regex hydration re-asserts scope and filters', () => {
+  it('a ranked node whose role no longer matches, or that left scope, is not returned', async () => {
+    const provider = getRetrievalProvider();
+    const reviewNode = await db.node.findFirstOrThrow({ where: { memoryId: memId, loc: 'near0' } }); // role review
+    const outside = await seed(otherMemId, 'lex-outside', 'near outside', { role: 'spec' });
+    // Simulate the race: ranking (scoped + filtered in SQL) returned rows that
+    // have since changed role / moved out of scope.
+    vi.spyOn(provider, 'lexicalSearch').mockResolvedValue([
+      { nodeId: reviewNode.id, score: 1 } as any,
+      { nodeId: outside, score: 0.9 } as any,
+      { nodeId: matchId, score: 0.8 } as any,
+    ]);
+    const res = await findNodes({ query: 'body', filter: { memoryIds: [memId], role: 'spec' } });
+    expect(res.hits.map((h: any) => h.node.id)).toEqual([matchId]);
   });
 });

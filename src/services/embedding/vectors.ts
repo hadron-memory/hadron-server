@@ -249,6 +249,27 @@ export function vectorWindowExhausted(w: { windowRows: number; eligibleRows: num
   return !w.truncated && w.windowRows >= w.eligibleRows;
 }
 
+/**
+ * #1345 review (@codex round 7) — the HNSW scan horizon for a window of
+ * `candidateK` rows. pgvector's HNSW visits at most `hnsw.ef_search`
+ * candidates (default 40), so without this a wider LIMIT never looked any
+ * deeper and filtered widening only repeated the same scan. Tracking the window
+ * (never below the default, capped at pgvector's max of 1000) makes a wider
+ * window a deeper scan. Beyond 1000, filtered recall stays approximate (iterative
+ * scans are the follow-up).
+ */
+export function hnswEfSearchFor(candidateK: number): number {
+  return Math.min(Math.max(Math.trunc(candidateK), 40), 1000);
+}
+
+/** Run a vector query with the HNSW horizon set for its window (SET LOCAL: this transaction only). */
+async function withEfSearch<T>(db: PrismaClient, candidateK: number, query: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  return db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${hnswEfSearchFor(candidateK)}`);
+    return query(tx);
+  });
+}
+
 export interface VectorHit {
   nodeId: string;
   score: number; // cosine similarity in [0,1]-ish (1 - distance)
@@ -280,7 +301,7 @@ export async function vectorSearchNodes(
   // `ann_rows` is the RAW candidate count, before the node dedup (a window full
   // of one node's chunks dedupes to one hit, #1345 review). Exhaustion compares
   // it with an independent eligible count — see vectorWindowExhausted.
-  const rows = await db.$queryRaw<{ node_id: string; distance: number; ann_rows: number }[]>`
+  const rows = await withEfSearch(db, candidateK, (tx) => tx.$queryRaw<{ node_id: string; distance: number; ann_rows: number }[]>`
     WITH ann AS (
       SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
@@ -294,7 +315,7 @@ export async function vectorSearchNodes(
     GROUP BY a.node_id
     ORDER BY distance ASC
     LIMIT ${k}
-  `;
+  `);
   if (opts.onWindow) {
     const truncated = rows.length >= k;
     // No row carries ann_rows when the join left nothing; the window count is
@@ -355,7 +376,7 @@ export async function vectorSearchChunks(
   // Over-fetch to absorb soft-deleted-node losses + reach the top-k
   // chunks even when same-node chunks cluster near the top.
   const candidateK = Math.max(k, k * (opts.candidateFactor ?? 10));
-  const rows = await db.$queryRaw<
+  const rows = await withEfSearch(db, candidateK, (tx) => tx.$queryRaw<
     {
       node_id: string;
       chunk_index: number;
@@ -372,7 +393,7 @@ export async function vectorSearchChunks(
     WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk'
     ORDER BY ne.embedding <=> ${qvec}::vector
     LIMIT ${candidateK}
-  `;
+  `);
   // Exhausted = every eligible chunk (independent count; see
   // vectorWindowExhausted) was fetched AND fits in `k` (the slice truncates nothing).
   if (opts.onWindow) {
