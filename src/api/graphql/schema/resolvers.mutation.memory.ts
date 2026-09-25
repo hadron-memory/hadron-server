@@ -98,6 +98,7 @@ import {
   requireRole,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  concealUnreadableDenial,
   requireMemoryWriteAccess,
   MEMORY_INCLUDE,
   AGENT_INCLUDE,
@@ -961,7 +962,11 @@ export const memoryMutations = {
     ) => {
       const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
-      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+      // #1316: a caller who cannot open the memory's record is denied as if
+      // it were missing (MEMORY_NOT_FOUND); one who can keeps the Forbidden.
+      await concealUnreadableDenial(ctx, memory.id, memoryRef, () =>
+        requireOwnerOrOrgRole(ctx, memory, 'ADMIN'),
+      );
       if (!memory.vectorIndexEnabled) return 0;
       return restampFailedEmbeddings(ctx.db, memory.id);
     },
@@ -1050,28 +1055,33 @@ export const memoryMutations = {
       // Source-side authz mirrors deleteMemory: personal/private are
       // owner-only; org-shared classes gate on the SOURCE org's ADMIN. Authz
       // runs first so unauthorized callers can't probe class/encryption state.
-      if (source.class === 'personal' || source.class === 'private') {
-        if (!ctx.userId || source.userId !== ctx.userId) {
-          throw new GraphQLError(
-            `Forbidden: only the owner can clone a ${source.class} memory`,
-            { extensions: { code: 'FORBIDDEN' } },
-          );
+      // #1316: and a caller who cannot even open the source's record is denied
+      // as if it were missing (MEMORY_NOT_FOUND), so the denial itself does not
+      // disclose that the memory exists; one who can keeps the Forbidden.
+      await concealUnreadableDenial(ctx, source.id, ref, async () => {
+        if (source.class === 'personal' || source.class === 'private') {
+          if (!ctx.userId || source.userId !== ctx.userId) {
+            throw new GraphQLError(
+              `Forbidden: only the owner can clone a ${source.class} memory`,
+              { extensions: { code: 'FORBIDDEN' } },
+            );
+          }
+        } else if (source.ownerUserId !== null) {
+          // spec 047: a user-owned source memory is cloneable only by its owner.
+          if (ctx.userId !== source.ownerUserId) {
+            throw new Error('Forbidden: only the owner can clone this memory');
+          }
+        } else {
+          // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
+          if (source.organizationId === null) {
+            throw new Error('Invariant: org-owned memory has no organizationId');
+          }
+          // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
+          // A memory.clone PrincipalGrant now lets a specific non-admin member
+          // clone; the cross-org DESTINATION gate below is unchanged (#604).
+          await requireOrgAction(ctx, source.organizationId, 'memory.clone');
         }
-      } else if (source.ownerUserId !== null) {
-        // spec 047: a user-owned source memory is cloneable only by its owner.
-        if (ctx.userId !== source.ownerUserId) {
-          throw new Error('Forbidden: only the owner can clone this memory');
-        }
-      } else {
-        // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
-        if (source.organizationId === null) {
-          throw new Error('Invariant: org-owned memory has no organizationId');
-        }
-        // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
-        // A memory.clone PrincipalGrant now lets a specific non-admin member
-        // clone; the cross-org DESTINATION gate below is unchanged (#604).
-        await requireOrgAction(ctx, source.organizationId, 'memory.clone');
-      }
+      });
       // system/app-class memories auto-provision via the agent/install
       // paths (same rationale as createMemory rejecting these classes) —
       // a free-standing clone would violate their pivot invariants

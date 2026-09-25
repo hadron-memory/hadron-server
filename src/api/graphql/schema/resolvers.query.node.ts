@@ -68,6 +68,7 @@ import {
   getAccessibleMemoryIds,
   memoryAccessFilter,
   isMemoryReadableCached,
+  resolveNodeReadableMemoryRef,
   loadMemoryUrn,
 } from './resolvers.helpers.js';
 import { getAppMemoryAccess, canReadMemory, getMemoryAccess } from '../../../mcp/access-control.js';
@@ -692,7 +693,11 @@ export const nodeQueries = {
       // 007-entity-id-or-urn). #335: scoping pins the lookup; the access
       // filter is still intersected so `memory` can never widen visibility.
       if (memoryRef != null && memoryRef !== '') {
-        const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+        // #1316: a missing `memory:` throws MEMORY_NOT_FOUND, so an unreadable
+        // one must too — the bare null it used to return disclosed that the
+        // memory exists. (The loc inside a READABLE memory still answers null
+        // when absent: that caller may already see the memory.)
+        const { id: scopedMemoryId } = await resolveNodeReadableMemoryRef(ctx, memoryRef);
         if (!allowed(scopedMemoryId)) return null;
         const node = await ctx.db.node.findFirst({
           where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
@@ -1676,11 +1681,9 @@ export const nodeQueries = {
           else unavailable.push(ref);
         }
       } else {
-        const { id: memId } = await resolveMemoryRef(ctx.db, memory!);
-        const accessible = await getAccessibleMemoryIds(ctx);
-        if (accessible !== null && !accessible.includes(memId)) {
-          throw new GraphQLError('Memory not accessible.', { extensions: { code: 'FORBIDDEN' } });
-        }
+        // #1316: an unreadable memory answers MEMORY_NOT_FOUND exactly like a
+        // missing one; the FORBIDDEN it used to throw disclosed existence.
+        const { id: memId } = await resolveNodeReadableMemoryRef(ctx, memory!);
         // Count cap: take MAX+1 to detect overflow, then fail loud rather than
         // silently returning a truncated subtree.
         const rows = await ctx.db.node.findMany({
