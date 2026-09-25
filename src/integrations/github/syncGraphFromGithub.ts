@@ -454,6 +454,15 @@ export const syncGraphFromGithub = async (
           // `create` path below the same absence yields the column default,
           // which is right: a new node whose file declares no signal has none.
           ...governedSignalsFromMirror(node),
+          // #1348 — the collection discriminator, by the same absent-means-
+          // preserve rule: `loadNodeFromFs` yields the key only for a
+          // non-blank value (a file never clears it — cor:int:020:01, CLI
+          // import #725), so an omitted key leaves a stored objectType alone
+          // on update and takes the unset default on create. Like the rest of
+          // this payload it is written raw: sync restores neither `properties`
+          // nor `data`, so the collection schema is not enforced here — it is
+          // audited after the fact by validateMemory's SCHEMA check.
+          ...('objectType' in node ? { objectType: node.objectType } : {}),
         };
 
         // Identity is ID-FIRST (repo wins): a file that kept its frontmatter
