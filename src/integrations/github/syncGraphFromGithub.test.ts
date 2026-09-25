@@ -323,6 +323,9 @@ describe('syncGraphFromGithub', () => {
 
     expect(second!.id).toBe(first!.id);
     expect(second!.description).toBe('v2');
+    expect(second!.revSeq).toBe(2);
+    expect(await db.nodeRevision.findMany({ where: { nodeId }, select: { revNo: true, description: true } }))
+      .toEqual([{ revNo: 1, description: 'v1' }]);
   });
 
   it('re-sync replaces old nodes with the new set', async () => {

@@ -131,6 +131,18 @@ describe('#1323 current revision contract', () => {
     expect(n.revisionContentHash).toBe('fd6f136535f2a7847d839a100f6b807f');
   });
 
+  it('applies an ownerRepo-only update without inventing a revision', async () => {
+    const n = await makeNode('revision-owner-repo-only', { ownerRepo: 'before/repo' });
+    const updated = await resolvers.Mutation.updateNode(
+      {},
+      { input: { id: n.id, ownerRepo: 'after/repo' } } as never,
+      ctx(),
+    );
+
+    expect(updated).toMatchObject({ ownerRepo: 'after/repo', revSeq: 1 });
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
   it('upgrades existing counters and hashes once during post-push', async () => {
     const fresh = await makeNode('revision-post-push-fresh', { content: 'before db push' });
     await db.node.update({

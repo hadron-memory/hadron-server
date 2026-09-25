@@ -21,10 +21,16 @@ import { validateMemorySource } from '../../lib/gitSource.js';
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import type { Prisma } from '../../generated/prisma/index.js';
-import type { Memory, Organization } from '../../generated/prisma/index.js';
+import type { Memory, Node, Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
+import {
+  buildNodeRevisionSnapshot,
+  computeRevisionContentHash,
+  createNodeRevision,
+  diffNodeChanges,
+} from '../../lib/nodeRevisionSnapshot.js';
 
 function decryptToken(ciphertext: string): string {
   const key = process.env.HADRON_ENCRYPTION_KEY;
@@ -45,6 +51,43 @@ export type MemoryWithOrg = Memory & { organization: Organization | null };
 
 class EdgeEndpointPreflightStale extends Error {}
 const MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES = 3;
+
+/** Apply a Git-owned update without bypassing the live-revision contract. */
+async function updateNodeFromGitSync(
+  tx: Prisma.TransactionClient,
+  current: Node,
+  update: Record<string, unknown>,
+): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${current.id} FOR UPDATE`;
+  const locked = await tx.node.findUniqueOrThrow({ where: { id: current.id } });
+  const changes = diffNodeChanges(locked, update);
+  const contentDrifted =
+    locked.revisionContentHash != null &&
+    locked.revisionContentHash !== computeRevisionContentHash(locked.content);
+  if (contentDrifted && !changes.includes('content')) changes.push('content');
+
+  if (changes.length > 0) {
+    await createNodeRevision(
+      tx,
+      buildNodeRevisionSnapshot(
+        locked,
+        { userId: null, info: 'system:github-sync' },
+        { revLabel: 'Synchronized from GitHub', changes },
+      ),
+    );
+  }
+
+  const postContent = Object.prototype.hasOwnProperty.call(update, 'content')
+    ? (update.content as string | null | undefined)
+    : locked.content;
+  await tx.node.update({
+    where: { id: locked.id },
+    data: {
+      ...(update as Prisma.NodeUncheckedUpdateInput),
+      revisionContentHash: computeRevisionContentHash(postContent),
+    },
+  });
+}
 
 /**
  * Sync a memory from GitHub: clone/pull the repo, load nodes from filesystem,
@@ -394,7 +437,7 @@ export const syncGraphFromGithub = async (
         //   - no id / unknown id → loc-keyed upsert as before
         const fileId = node.id && !claimedFileIds.has(node.id) ? node.id : null;
         const byId = fileId
-          ? await tx.node.findUnique({ where: { id: fileId }, select: { id: true, memoryId: true, loc: true } })
+          ? await tx.node.findUnique({ where: { id: fileId } })
           : null;
         if (node.id) claimedFileIds.add(node.id);
 
@@ -415,7 +458,6 @@ export const syncGraphFromGithub = async (
             // it out of the way so the move can't collide.
             const occupant = await tx.node.findUnique({
               where: { loc_memoryId: { loc, memoryId: graph.id } },
-              select: { id: true },
             });
             if (occupant && skippedRowIds.has(occupant.id)) {
               // #1224 / @codex P2 on PR #1229 — the occupant's OWN file was
@@ -437,9 +479,8 @@ export const syncGraphFromGithub = async (
               continue;
             }
             if (occupant && occupant.id !== byId.id) {
-              await tx.node.update({
-                where: { id: occupant.id },
-                data: { loc: `${loc}~displaced-${occupant.id}` },
+              await updateNodeFromGitSync(tx, occupant, {
+                loc: `${loc}~displaced-${occupant.id}`,
               });
               console.warn(
                 `[syncGraphFromGithub] "${graphName}": move of ${byId.id} to occupied loc "${loc}" displaced node ${occupant.id}`,
@@ -447,7 +488,7 @@ export const syncGraphFromGithub = async (
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
           }
-          await tx.node.update({ where: { id: byId.id }, data: update });
+          await updateNodeFromGitSync(tx, byId, update);
           rowId = byId.id;
         } else {
           if (byId) {
@@ -459,17 +500,27 @@ export const syncGraphFromGithub = async (
           // (byId) or already claimed by an earlier file this run (!fileId).
           const idUnusable = byId !== null || (!!node.id && fileId === null);
           const createId = idUnusable ? generateId() : (node.id ?? generateId());
-          const row = await tx.node.upsert({
+          const existingAtLoc = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId: graph.id } },
-            create: { id: createId, memoryId: graph.id, ...update },
-            update,
-            select: { id: true },
           });
-          // The SURVIVING id: the update path keeps the existing row's id,
-          // which may differ from the file's — recording the file id here
-          // would make the notIn deletion pass below delete the row we just
-          // updated.
-          rowId = row.id;
+          if (existingAtLoc) {
+            await updateNodeFromGitSync(tx, existingAtLoc, update);
+            // The SURVIVING id: an update keeps the existing row's id, which
+            // may differ from the file's — recording the file id here would
+            // make the notIn deletion pass below delete the row we just wrote.
+            rowId = existingAtLoc.id;
+          } else {
+            const row = await tx.node.create({
+              data: {
+                id: createId,
+                memoryId: graph.id,
+                ...update,
+                revisionContentHash: computeRevisionContentHash(update.content as string | null | undefined),
+              },
+              select: { id: true },
+            });
+            rowId = row.id;
+          }
         }
         upsertedIds.push(rowId);
         writtenNodes.push({ id: rowId, loc, memoryId: graph.id });

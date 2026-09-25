@@ -1035,6 +1035,9 @@ export async function writeNodeCore(
               owns: opts?.owns,
               op: 'update',
             });
+            const candidate = await assertTargetStillWritable(tx);
+            if (!candidate) return { conflict: false, node: null };
+            await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${candidate.id} FOR UPDATE`;
             const current = await assertTargetStillWritable(tx);
             if (!current) return { conflict: false, node: null };
 
@@ -1042,7 +1045,9 @@ export async function writeNodeCore(
             const hashMismatch =
               current.revisionContentHash !== computeRevisionContentHash(current.content);
             const needsRevision = resolvedEdges !== null || changes.length > 0 || hashMismatch;
-            if (!needsRevision) {
+            const changesUnversionedField =
+              input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
+            if (!needsRevision && !changesUnversionedField) {
               const unchanged = await tx.node.findUniqueOrThrow({
                 where: { id: current.id },
                 include,
@@ -1054,20 +1059,26 @@ export async function writeNodeCore(
             // this transaction. Since revSeq names the CURRENT state, the
             // snapshot uses the anchor and the live row advances to anchor+1.
             if (opts?.guardRevSeq !== undefined) {
-              const claimed = await tx.node.updateMany({
-                where: { id: current.id, revSeq: opts.guardRevSeq },
-                data: { revSeq: { increment: 1 } },
-              });
-              if (claimed.count === 0) return { conflict: true, node: null };
+              if (!needsRevision) {
+                if (current.revSeq !== opts.guardRevSeq) return { conflict: true, node: null };
+              } else {
+                const claimed = await tx.node.updateMany({
+                  where: { id: current.id, revSeq: opts.guardRevSeq },
+                  data: { revSeq: { increment: 1 } },
+                });
+                if (claimed.count === 0) return { conflict: true, node: null };
+              }
             }
 
-            await createNodeRevision(tx, {
-              ...buildNodeRevisionSnapshot(current, editorFromAuth(ctx), {
-                revLabel: input.reason,
-                changes,
-              }),
-              ...(opts?.guardRevSeq !== undefined ? { revNo: opts.guardRevSeq } : {}),
-            });
+            if (needsRevision) {
+              await createNodeRevision(tx, {
+                ...buildNodeRevisionSnapshot(current, editorFromAuth(ctx), {
+                  revLabel: input.reason,
+                  changes,
+                }),
+                ...(opts?.guardRevSeq !== undefined ? { revNo: opts.guardRevSeq } : {}),
+              });
+            }
 
             const postContent =
               Object.prototype.hasOwnProperty.call(updatePayload, 'content')
