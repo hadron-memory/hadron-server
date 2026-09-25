@@ -47,11 +47,14 @@ import { resolveMemoryRoot } from './chat-scope.js';
 import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
+import { participantAppIds } from '../../../lib/auth/appParticipation.js';
 import {
   type Context,
   requireOrgRole,
   requireOwnerOrOrgRole,
   isNonReaderAppMember,
+  isAppParticipant,
+  isPlatformAdmin,
   clampListTake,
 } from './resolvers.helpers.js';
 
@@ -127,66 +130,51 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
  * bounded to the support session's single org (#876 class).
  */
 export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
-  const readable = await ctx.db.app.findFirst({
-    // AND, never object spread: the pure App-key predicate itself contains an
-    // `id`, and spreading it beside the target id would overwrite the target
-    // selector and authorize a foreign worker from the key's own App.
-    where: { AND: [{ id: app.id }, workerReadableAppWhere(ctx)] },
-    select: { id: true },
-  });
-  if (!readable) throw forbidden();
+  if (ctx.impersonation) {
+    if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
+      throw forbidden();
+    }
+  }
+  if (!ctx.userId) {
+    if (ctx.appId && ctx.appId === app.id) return;
+    throw forbidden();
+  }
+  if (await isAppParticipant(ctx, app)) return;
+  throw forbidden();
 }
 
 /**
- * Database-filter form of the worker-read audience. This is shared by the
- * point-read gate above and #1344's cross-App holder list so row membership,
- * counts, and pagination cannot drift from the authorization applied to one
- * worker.
- *
- * The branches mirror `isAppParticipant` exactly. User-owned Apps are strict
- * owner-only and never flow through impersonation. Org-owned Apps admit a
- * direct AppMember at any role, a live CONTRIBUTOR+ org member, or a platform
- * ADMIN/OWNER. Pure App keys are restricted to their own App; hybrid
- * user+selection principals are judged solely as users.
+ * Batch form of the worker-read audience. Ordinary user principals delegate
+ * to the shared App-participation set (`participantAppIds`) rather than
+ * spelling its AppMember / org-CONTRIBUTOR / user-owner arms again. The two
+ * caller-specific arms stay here: a pure App key reaches only itself, while a
+ * platform admin reaches every live org App plus their own user-owned Apps.
  */
-export function workerReadableAppWhere(ctx: Context): Prisma.AppWhereInput {
+async function workerReadableAppIds(ctx: Context): Promise<string[]> {
   if (!ctx.userId) {
-    return ctx.appId ? { id: ctx.appId } : { id: { in: [] } };
+    return ctx.appId ? [ctx.appId] : [];
+  }
+  if (!isPlatformAdmin(ctx)) {
+    return participantAppIds(ctx.db, ctx, { includeMemberships: true });
   }
 
-  const userId = ctx.userId;
-  const orgScope: Prisma.AppWhereInput = ctx.impersonation
-    ? { organizationId: ctx.impersonation.orgId }
-    : { organizationId: { not: null } };
-  const orgAccess: Prisma.AppWhereInput =
-    ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')
-      ? orgScope
-      : {
-          ...orgScope,
-          OR: [
-            { members: { some: { userId } } },
-            {
-              organization: {
-                is: {
-                  members: {
-                    some: {
-                      userId,
-                      deletedAt: null,
-                      role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] },
-                    },
-                  },
-                },
-              },
-            },
-          ],
-        };
-
-  return {
-    OR: [
-      ...(ctx.impersonation ? [] : [{ ownerUserId: userId }]),
-      orgAccess,
-    ],
-  };
+  // `participantAppIds` deliberately omits the platform-role arm because its
+  // existing consumers answer admins above their fold. Supply that caller arm
+  // here while preserving strict ownership for user-owned Apps.
+  const apps = await ctx.db.app.findMany({
+    where: {
+      deletedAt: null,
+      uninstalledAt: null,
+      OR: [
+        ...(ctx.impersonation ? [] : [{ ownerUserId: ctx.userId }]),
+        ctx.impersonation
+          ? { organizationId: ctx.impersonation.orgId }
+          : { organizationId: { not: null } },
+      ],
+    },
+    select: { id: true },
+  });
+  return apps.map((app) => app.id);
 }
 
 type TeamAgentRow = {
@@ -1470,16 +1458,11 @@ export const workerQueries = {
       throw err;
     }
 
+    const readableAppIds = await workerReadableAppIds(ctx);
     const where: Prisma.WorkerWhereInput = {
       heldByUserId,
       ...(includeRetired ? {} : { retiredAt: null }),
-      app: {
-        is: {
-          // Explicit AND: workerReadableAppWhere may itself carry a selector
-          // (pure App key). Never let object spread replace lifecycle scope.
-          AND: [{ deletedAt: null }, workerReadableAppWhere(ctx)],
-        },
-      },
+      appId: { in: readableAppIds },
     };
     const [rows, total] = await Promise.all([
       ctx.db.worker.findMany({

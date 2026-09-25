@@ -756,20 +756,19 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
     });
 
     it('propagates a DB failure instead of reporting it as a missing worker', async () => {
-      // PR review (Copilot): the gate reaches the database, so a blanket catch
-      // turned a connection failure into "no such worker" — an outage reported
-      // as a missing row, on the one surface whose contract is that absence and
-      // denial look identical. Hiding WHY a caller was refused is the point;
-      // hiding THAT the database is down never is. #1344 moved the same gate to
-      // its batch-capable App predicate, so fail that query directly.
-      const iris = await worker('Iris', 'iris');
+      // PR review (Copilot): the gate reaches the database via isAppParticipant,
+      // so a blanket catch turned a connection failure into "no such worker" —
+      // an outage reported as a missing row, on the one surface whose contract
+      // is that absence and denial look identical. Hiding WHY a caller was
+      // refused is the point here; hiding THAT the database is down never is.
+      await worker('Iris', 'iris');
       const boom = new Error('connection terminated unexpectedly');
       const spy = vi
-        .spyOn(db.app, 'findFirst')
+        .spyOn(db.orgMember, 'findFirst')
         .mockRejectedValueOnce(boom as never);
       try {
         await expect(
-          resolvers.Query.worker({}, { ref: iris.id }, ctxFor()),
+          resolvers.Query.worker({}, { ref: 'Iris', appRef: app.id }, ctxFor()),
         ).rejects.toThrow(/connection terminated/);
       } finally {
         spy.mockRestore();
