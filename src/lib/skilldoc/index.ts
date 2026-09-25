@@ -21,6 +21,7 @@ export { mergePatch, mergePropertiesPatch } from './exportsMerge.js';
 export {
   HOST_CODEX_SKILL,
   requireSkillHost,
+  isHostReservedName,
   SKILL_HOSTS,
   skillHost,
   type SkillHost,

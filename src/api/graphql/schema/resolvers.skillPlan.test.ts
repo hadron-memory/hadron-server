@@ -1668,3 +1668,58 @@ describe('#1310 review round 3 (@copilot): a collision finding reaches ONLY the 
     expect(e(twin.id).exportPlan).toMatchObject({ action: 'WRITE' });
   });
 });
+
+// ── #1315: a host-reserved name is kept out of export for that host only ─
+describe('#1315 — `synced` is refused for claudeSkill, and only there', () => {
+  it('EXPORT for claudeSkill plans SKIP with the reason, renders nothing, and PRESERVES a file already there', async () => {
+    const node = await mkNode('tasks:reserved', { properties: declaration({ name: 'synced' }) });
+    const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName: 'synced', sourceUrn: '' }] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings.map((f: { rule: string }) => f.rule)).toContain('skill-name-reserved');
+    expect(e.renderedBody).toBeNull();
+    expect(e.exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-name-reserved' }],
+    });
+  });
+
+  it('the SAME name exports normally for codexSkill', async () => {
+    const node = await mkNode('tasks:reserved-codex', {
+      properties: { exports: { codexSkill: { name: 'synced', description: 'Does a thing. Use when you need it.', enable: true } } },
+    });
+    const got = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings.map((f: { rule: string }) => f.rule)).not.toContain('skill-name-reserved');
+    expect(e.exportPlan).toMatchObject({ action: 'WRITE' });
+  });
+});
+
+describe('#1318 review (@codex P1): a host-reserved directory is never offered for pruning', () => {
+  it('an unpaired `synced/` is NOT an orphan on claudeSkill — the plan does not say "preserve" and "prune" about one directory', async () => {
+    await mkNode('tasks:reserved-orphan', { properties: declaration({ name: 'synced' }) });
+    const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName: 'synced', sourceUrn: '' }] });
+    expect(got.orphans.map((o: { dirName: string }) => o.dirName)).not.toContain('synced');
+  });
+
+  it('…case-insensitively, since the host reserves it "in any capitalization"', async () => {
+    const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName: 'Synced', sourceUrn: '' }] });
+    expect(got.orphans).toEqual([]);
+  });
+
+  it('CONTROLS: an ordinary unpaired directory is still an orphan, and on codexSkill `synced` is an ordinary name', async () => {
+    const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName: 'stray', sourceUrn: '' }] });
+    expect(claude.orphans.map((o: { dirName: string }) => o.dirName)).toEqual(['stray']);
+    const codex = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [{ dirName: 'synced', sourceUrn: '' }] });
+    expect(codex.orphans.map((o: { dirName: string }) => o.dirName)).toEqual(['synced']);
+  });
+});
+
+describe('#1318 review (@copilot): reserved directories are matched with the planner\'s FILESYSTEM equivalence', () => {
+  it('a Unicode/case alias of `synced` (NFD accent, long s) is not offered to --prune on claudeSkill', async () => {
+    for (const dirName of ['SYNCED', 'sýnced'.normalize('NFD'), 'ſynced']) {
+      const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName, sourceUrn: '' }] });
+      expect(got.orphans, JSON.stringify(dirName)).toEqual([]);
+    }
+  });
+});

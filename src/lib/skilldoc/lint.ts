@@ -1,10 +1,13 @@
 /**
  * #1177 §6 — the corpus lint rules, server-side.
  *
- * THIRTEEN rules over a node's declaration and body: eleven per node and per
+ * FOURTEEN rules over a node's declaration and body: twelve per node and per
  * host (`lintNode`), `skill-name-collision`, which is corpus-wide and per host
  * (`lintCollisions`), and `skill-unknown-host-key`, which is per node and
- * attributed to NO host (`lintUnknownHostKeys`, #1292). They answer *is this node
+ * attributed to NO host (`lintUnknownHostKeys`, #1292). The twelfth per-node
+ * rule, `skill-name-reserved` (#1315), is SERVER-ONLY for now: the Go port has
+ * no host reservation yet, so the Go-generated parity fixtures cannot exercise
+ * it (see `SERVER_ONLY_RULES` in skilldoc.parity.test.ts). They answer *is this node
  * exportable, and will the host do what its author expects* — judgment over
  * corpus inputs alone, with no file and no disk, which is what makes this half
  * of the split (A3) pure.
@@ -16,7 +19,7 @@
  * a node it does not have. Said here rather than left as an off-by-one,
  * because counting it in this header would misstate what the port covers
  * (@copilot, PR #1233). (The count above reached thirteen in #1292 with a
- * rule of its own; the spec's §6 figure still predates that rule.)
+ * rule of its own, and fourteen in #1315; the spec's §6 figure predates both.)
  *
  * Ported from `internal/skilldoc`'s `Lint` / `LintCollisions`. The message text
  * is part of the port: an operator reading `hadron skill lint` and a portal
@@ -39,7 +42,7 @@ import {
   unknownHostKeys,
 } from './declaration.js';
 import { goQuote } from './goQuote.js';
-import { requireSkillHost, SKILL_HOSTS } from './hosts.js';
+import { isHostReservedName, requireSkillHost, SKILL_HOSTS } from './hosts.js';
 import { validName } from './name.js';
 import { goTrimSpace, normalizeBody, normalizeDescription, runeCount } from './normalize.js';
 
@@ -167,6 +170,19 @@ export function lintNode(node: SkillNode, host: string = HOST_CLAUDE_SKILL): Fin
       'skill-name-invalid',
       'error',
       `skill name "${declaration.name}" is not a valid skill name (kebab-case, ≤${hostRow.maxNameLength} chars) — it is stored at properties.${declaration.key}.name, so that is what to change`,
+    );
+  }
+  // #1315: a name the HOST refuses to load from the export root. An error, so
+  // the planner's lint gate keeps it out of export and preserves any file
+  // already there — the host would ignore the file anyway. Checked
+  // INDEPENDENTLY of the grammar check (@copilot, PR #1318): `Synced` fails
+  // both, and reporting only the grammar would reveal the reservation as a
+  // second error after the author fixed the case.
+  if (storedName(declaration) !== '' && isHostReservedName(hostRow, storedName(declaration))) {
+    add(
+      'skill-name-reserved',
+      'error',
+      `skill name "${declaration.name}" is reserved by ${declaration.host}: the host keeps its own skills in a folder of that name and skips a skill authored there, so the exported file would never load — rename properties.${declaration.key}.name`,
     );
   }
 

@@ -57,6 +57,8 @@ import {
   LEGACY_TOP_LEVEL_KEYS,
   SKILL_HOSTS,
   skillHost,
+  requireSkillHost,
+  isHostReservedName,
   lintCollisions,
   lintNode,
   pairFileToNode,
@@ -888,8 +890,17 @@ export const skillQueries = {
       .filter((u): u is NonNullable<typeof u> => u !== null);
 
     // ── Orphans: files that paired with nothing ──────────────────────────
+    //
+    // Never a HOST-RESERVED directory (#1315): that folder is the host's (Claude
+    // Code keeps claude.ai-synced skills in `synced/`), so `--prune` — which acts
+    // on this list — must not be offered it. Without this the plan said both
+    // "preserve" (the reserved-name entry) and "prune" about one directory
+    // (@codex P1, PR #1318). Matched by filesystem equivalence, not `toLowerCase`
+    // (`isHostReservedName`; @copilot, PR #1318): an alias of the name is the same directory.
+    const hostRow = requireSkillHost(host);
     const orphans = files
       .filter((f) => !selectedDirs.has(f.dirName))
+      .filter((f) => !isHostReservedName(hostRow, f.dirName))
       .map((f) => ({
         dirName: f.dirName,
         sourceUrn: f.sourceUrn ?? null,

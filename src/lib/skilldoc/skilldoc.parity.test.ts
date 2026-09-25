@@ -428,13 +428,29 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     expect(got).toEqual(c.findings);
   });
 
-  it('the fixture set exercises every rule this port can emit', () => {
+  /**
+   * Rules this port emits that the Go reference does NOT have yet, so its
+   * generated fixtures cannot exercise them. Each is covered by its own tests
+   * instead, and listed here so the exhaustive list below stays true rather than
+   * silently omitting a rule (@copilot, PR #1318).
+   *
+   * - `skill-name-reserved` (#1315): Claude's reserved `synced` directory.
+   *   Covered by hosts.reserved.test.ts and the planner cases in
+   *   resolvers.skillPlan.test.ts. Parity follow-up for hadron-cli.
+   */
+  const SERVER_ONLY_RULES = ['skill-name-reserved'];
+
+  it('the fixture set exercises every rule this port can emit (server-only rules excepted, and named)', () => {
     // Otherwise a rule could be unreachable, or misspelled, and every fixture
     // would still pass — the parity equivalent of a guard nobody proved fails.
     const emitted = new Set([
       ...F.lint.flatMap((c) => c.findings.map((f) => f.rule)),
       ...F.lintCollisions.flatMap((c) => c.findings.map((f) => f.rule)),
     ]);
+    // Once Go gains a server-only rule and the fixtures are regenerated, it
+    // shows up here: then move it into the list below instead of keeping two
+    // records of one rule.
+    expect(SERVER_ONLY_RULES.filter((r) => emitted.has(r))).toEqual([]);
     expect([...emitted].sort()).toEqual([
       'skill-content-empty',
       'skill-content-has-frontmatter',
