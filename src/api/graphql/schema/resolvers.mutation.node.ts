@@ -73,6 +73,7 @@ import { mirrorNodeMoveToGit } from '../../../integrations/github/mirrorNodeMove
 import {
   NodeLocConflictError,
   NodeNotFoundError,
+  MemoryNotFoundError,
   NodeAbstractTooLongError,
   EdgeNotFoundError,
 } from '../../../lib/entityRef/errors.js';
@@ -119,6 +120,7 @@ import {
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
   requireMemoryWriteAccess,
+  canReadMemoryRecord,
   isMemoryReadableCached,
   type NodeInput,
   type NodeEdgeInput,
@@ -142,6 +144,44 @@ import { type ToolDriveFile } from '../../../lib/emailClient.js';
 type NodeWriteMode = 'create' | 'update' | 'upsert';
 /** NodeInput with `name` optional — update mode preserves it on omit (D4). */
 type NodeWriteInput = Omit<NodeInput, 'name'> & { name?: string };
+
+/** Classify a denied direct write with the matching read surface's shared gate. */
+async function canReadNodeWriteTarget(
+  ctx: Context,
+  memoryId: string,
+  entity: 'memory' | 'node',
+): Promise<boolean> {
+  // Node contents have a deliberately narrower read set than Memory records:
+  // for example, an org member may open an app/system Memory record without
+  // being allowed to read its nodes. Keep update-by-node-id aligned with
+  // Query.node so that record readability cannot preserve a node oracle.
+  if (entity === 'node') return isMemoryReadableCached(ctx, memoryId);
+
+  // Read the complete record-gate shape; omitting one field can fail open.
+  const memory = await ctx.db.memory.findUnique({
+    where: { id: memoryId },
+    select: {
+      id: true,
+      class: true,
+      userId: true,
+      ownerUserId: true,
+      organizationId: true,
+      appId: true,
+      userMemoryOfAgentId: true,
+      deletedAt: true,
+    },
+  });
+  if (!memory || memory.deletedAt) return false;
+  return canReadMemoryRecord(ctx, memory);
+}
+
+/** Only ordinary authorization denials are eligible for #1316 concealment. */
+function isMemoryWriteDenial(error: unknown): boolean {
+  return (
+    (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') ||
+    (error instanceof Error && error.message === 'Unauthenticated')
+  );
+}
 
 /**
  * Why did an update-by-PK match no row? Extracted so the decision is testable
@@ -242,6 +282,12 @@ export async function writeNodeCore(
      * (@codex, PR #1305).
      */
     governedContext?: GovernedContext;
+    /**
+     * #1316 — direct node doors conceal an unreadable target exactly like a
+     * missing one. Internal callers omit this so the security fix does not
+     * redesign unrelated write surfaces while #1220 remains separately scoped.
+     */
+    concealUnreadable?: { entity: 'memory' | 'node'; ref: string };
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -257,9 +303,34 @@ export async function writeNodeCore(
       // The pre-022 fallback that walked all accessible memories looking
       // for a URN prefix of `input.loc` was the API-boundary loose-lookup
       // path the spec exists to close — removed.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, input.memoryId);
+      const rawMemoryRef = input.memoryId;
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, rawMemoryRef);
       input.memoryId = resolvedMemoryId;
-      await requireMemoryWriteAccess(ctx, input.memoryId);
+      try {
+        await requireMemoryWriteAccess(ctx, input.memoryId);
+      } catch (error) {
+        // Successful writers are never narrowed: some App-session principals
+        // legitimately write a private memory without record-read access. Only
+        // an ordinary denial enters the existence-concealment classification;
+        // malformed input and operational failures propagate unchanged.
+        if (
+          !opts?.concealUnreadable ||
+          !isMemoryWriteDenial(error) ||
+          (await canReadNodeWriteTarget(
+            ctx,
+            resolvedMemoryId,
+            opts.concealUnreadable.entity,
+          ))
+        ) {
+          throw error;
+        }
+        if (opts.concealUnreadable.entity === 'node') {
+          throw new GraphQLError(`Node not found: "${opts.concealUnreadable.ref}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: opts.concealUnreadable.ref },
+          });
+        }
+        throw new MemoryNotFoundError(opts.concealUnreadable.ref);
+      }
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. Since #1201 the ONLY source is the Channel table, and
       // only a Channel's own operations pass the bypass; every node-authoring
@@ -1526,9 +1597,13 @@ async function updateNodeCore(
     }
     const row = await ctx.db.node.findUnique({
       where: { id: targetNodeId },
-      select: { memoryId: true, loc: true },
+      select: { memoryId: true, loc: true, memory: { select: { deletedAt: true } } },
     });
-    if (!row) {
+    // Soft-deleting a memory leaves its node rows, so an id can still resolve
+    // a node whose memory is gone. That node is missing, as the URN form
+    // already says (it requires a live memory); falling through would answer
+    // MEMORY_NOT_FOUND with the memory's own id (#1316, @copilot PR #1319).
+    if (!row || row.memory.deletedAt) {
       throw new GraphQLError(`Node not found: "${id}"`, {
         extensions: { code: 'NODE_NOT_FOUND', ref: id },
       });
@@ -1549,6 +1624,10 @@ async function updateNodeCore(
     targetNodeId,
     ownsKind: opts?.ownsKind,
     governedContext: opts?.governedContext,
+    concealUnreadable: {
+      entity: hasId ? 'node' : 'memory',
+      ref: hasId ? (id as string) : (memoryId as string),
+    },
   });
 }
 
@@ -1699,7 +1778,10 @@ export const nodeMutations = {
     // soft-deleted one is resurrected. `input.id` is a forced create-PK
     // (importer/sync), never a selector.
     createNode: async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-      writeNodeCore(input, ctx, 'create', { governedContext: 'node-write' }),
+      writeNodeCore(input, ctx, 'create', {
+        governedContext: 'node-write',
+        concealUnreadable: { entity: 'memory', ref: input.memoryId },
+      }),
 
     // #1201 — THE KIND-SPECIFIC AUTHORING DOORS. One create + one update per
     // governed kind, generated from the register so a kind cannot ship with a
@@ -1735,7 +1817,11 @@ export const nodeMutations = {
         [
           entry.doors.create,
           async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-            writeNodeCore(input, ctx, 'create', { ownsKind: entry.kind, governedContext: 'node-write' }),
+            writeNodeCore(input, ctx, 'create', {
+              ownsKind: entry.kind,
+              governedContext: 'node-write',
+              concealUnreadable: { entity: 'memory', ref: input.memoryId },
+            }),
         ],
         [
           entry.doors.update,

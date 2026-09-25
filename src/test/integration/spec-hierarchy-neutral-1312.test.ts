@@ -6,6 +6,11 @@
  * updateSpecNode mutations the CLI routes through. The matrix covers the old
  * citation-looking shape, shallower and deeper shapes, and atoms that are
  * valid under the generic loc grammar without looking like a numbered tier.
+ *
+ * #1316 deliberately extends this same fixture: #1312 originally pinned an
+ * outsider's existing-target answer as FORBIDDEN, which exposed the memory's
+ * existence beside a missing-target control. The paired wire assertions below
+ * compare the complete response after replacing only the caller-supplied ref.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
@@ -32,11 +37,22 @@ const UPDATE_SPEC = `mutation($input: UpdateNodeInput!) {
 const CREATE_NODE = `mutation($input: CreateNodeInput!) {
   createNode(input: $input) { id }
 }`;
+const UPDATE_NODE = `mutation($input: UpdateNodeInput!) {
+  updateNode(input: $input) { id }
+}`;
+const READ_MEMORY = `query($ref: ID!) {
+  memory(ref: $ref) { id name }
+}`;
 
 let server: Server;
 let baseUrl: string;
 let memoryId: string;
+let memoryUrn: string;
+let missingMemoryUrn: string;
+let sharedMemoryId: string;
 let anchorId: string;
+let recordOnlyMemoryId: string;
+let recordOnlyNodeId: string;
 const key: Record<string, string> = {};
 
 async function gql(k: string, query: string, variables: Record<string, unknown>): Promise<Gql> {
@@ -70,6 +86,9 @@ beforeAll(async () => {
   const outsider = await db.user.create({
     data: { id: generateId(), handle: `outsider-${suffix}`, githubUsername: `outsider-${suffix}` },
   });
+  const grantee = await db.user.create({
+    data: { id: generateId(), handle: `grantee-${suffix}`, githubUsername: `grantee-${suffix}` },
+  });
   await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'OWNER' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'READER' } });
   const otherOrg = await db.organization.create({
@@ -82,6 +101,48 @@ beforeAll(async () => {
   key.owner = await mint(owner.id, 'owner', ['account']);
   key.reader = await mint(reader.id, 'reader', ['account']);
   key.outsider = await mint(outsider.id, 'outsider', ['account']);
+  key.grantee = await mint(grantee.id, 'grantee', ['account']);
+
+  const sharedMemory = await db.memory.create({
+    data: {
+      id: generateId(),
+      urn: `shared-${suffix}`,
+      name: 'writer-shared personal memory',
+      class: 'personal',
+      visibility: null,
+      userId: owner.id,
+      ownerUserId: owner.id,
+    },
+  });
+  sharedMemoryId = sharedMemory.id;
+  await db.memoryShare.create({
+    data: { memoryId: sharedMemory.id, granteeId: grantee.id, grantorId: owner.id, role: 'writer' },
+  });
+
+  // An org member may open this system Memory RECORD, but the shared
+  // node-content gate deliberately excludes its nodes. This pins the distinct
+  // gate update-by-id needs when classifying an ordinary write denial.
+  const recordOnlyMemory = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: org.id,
+      urn: `${org.urn}:record-only-system`,
+      name: 'record-readable, nodes-unreadable system memory',
+      class: 'system',
+      visibility: null,
+      acceptsUploads: false,
+    },
+  });
+  recordOnlyMemoryId = recordOnlyMemory.id;
+  const recordOnlyNode = await db.node.create({
+    data: {
+      id: generateId(),
+      memoryId: recordOnlyMemory.id,
+      loc: 'private:node',
+      name: 'must stay concealed',
+    },
+  });
+  recordOnlyNodeId = recordOnlyNode.id;
 
   const app = await createServer();
   server = createHttpServer(app);
@@ -90,11 +151,13 @@ beforeAll(async () => {
 
   const memory = await gql(
     key.owner!,
-    `mutation($orgId: ID!, $name: String!) { createMemory(orgId: $orgId, name: $name) { id } }`,
+    `mutation($orgId: ID!, $name: String!) { createMemory(orgId: $orgId, name: $name) { id urn } }`,
     { orgId: org.id, name: `spec-hierarchy-${suffix}` },
   );
   expect(memory.errors, JSON.stringify(memory.errors)).toBeUndefined();
   memoryId = memory.data!.createMemory.id;
+  memoryUrn = memory.data!.createMemory.urn;
+  missingMemoryUrn = `${memoryUrn}-missing`;
 
   const anchor = await gql(key.owner!, CREATE_SPEC, {
     input: { memoryId, loc: 'anchor', name: 'edge anchor', role: 'spec' },
@@ -167,23 +230,227 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
     });
   }
 
-  it('keeps authorization intact for both create and update', async () => {
-    for (const [caller, loc] of [
-      [key.reader!, 'denied:reader'],
-      [key.outsider!, 'denied:outsider'],
-    ] as const) {
-      const create = await gql(caller, CREATE_SPEC, {
-        input: { memoryId, loc, name: 'must not exist', role: 'spec' },
-      });
-      expectCode(create, 'FORBIDDEN');
-      expect(await db.node.findFirst({ where: { memoryId, loc } })).toBeNull();
+  it('keeps the ordinary denial for a reader who can see the memory but cannot write', async () => {
+    const loc = 'denied:reader';
+    const read = await gql(key.reader!, READ_MEMORY, { ref: memoryUrn });
+    expect(read.errors).toBeUndefined();
+    expect(read.data!.memory.id).toBe(memoryId);
 
-      const update = await gql(caller, UPDATE_SPEC, {
-        input: { id: anchorId, content: 'must not land' },
-      });
-      expectCode(update, 'FORBIDDEN');
-    }
+    const create = await gql(key.reader!, CREATE_SPEC, {
+      input: { memoryId: memoryUrn, loc, name: 'must not exist', role: 'spec' },
+    });
+    expectCode(create, 'FORBIDDEN');
+    expect(await db.node.findFirst({ where: { memoryId, loc } })).toBeNull();
+
+    const update = await gql(key.reader!, UPDATE_SPEC, {
+      input: { id: anchorId, content: 'must not land' },
+    });
+    expectCode(update, 'FORBIDDEN');
     expect((await db.node.findUniqueOrThrow({ where: { id: anchorId } })).content).toBeNull();
+  });
+
+  it('preserves legitimate writer-share read and write access', async () => {
+    const read = await gql(key.grantee!, READ_MEMORY, { ref: sharedMemoryId });
+    expect(read.errors).toBeUndefined();
+    expect(read.data!.memory.id).toBe(sharedMemoryId);
+
+    const create = await gql(key.grantee!, CREATE_NODE, {
+      input: { memoryId: sharedMemoryId, loc: 'shared:writer', name: 'allowed' },
+    });
+    expect(create.errors, JSON.stringify(create.errors)).toBeUndefined();
+    expect(await db.node.findUnique({ where: { id: create.data!.createNode.id } })).toEqual(
+      expect.objectContaining({ memoryId: sharedMemoryId, loc: 'shared:writer' }),
+    );
+  });
+
+  describe('#1316 — an outsider gets the same answer for unreadable and missing targets', () => {
+    const normalizeSentRef = (result: Gql, sentRef: string) =>
+      JSON.parse(JSON.stringify(result).replaceAll(sentRef, '<sent-ref>'));
+
+    it('memory(ref:) returns the same bare null for an unreadable URN and a missing URN', async () => {
+      const existing = await gql(key.outsider!, READ_MEMORY, { ref: memoryUrn });
+      const missing = await gql(key.outsider!, READ_MEMORY, { ref: missingMemoryUrn });
+
+      expect(existing).toEqual(missing);
+      expect(existing).toEqual({ status: 200, data: { memory: null }, errors: undefined });
+    });
+
+    for (const [surface, mutation, role] of [
+      ['createNode', CREATE_NODE, undefined],
+      ['createSpecNode', CREATE_SPEC, 'spec'],
+    ] as const) {
+      it(`${surface} conceals an unreadable memory exactly like a missing memory`, async () => {
+        const loc = `oracle:${surface.toLowerCase()}`;
+        const input = (ref: string) => ({
+          memoryId: ref,
+          loc,
+          name: 'must not exist',
+          ...(role ? { role } : {}),
+          edges: [{ targetId: anchorId, name: 'must-not-land' }],
+        });
+        const edgesBefore = await db.edge.count();
+        const existing = await gql(key.outsider!, mutation, { input: input(memoryUrn) });
+        const missing = await gql(key.outsider!, mutation, { input: input(missingMemoryUrn) });
+
+        expect(normalizeSentRef(existing, memoryUrn)).toEqual(
+          normalizeSentRef(missing, missingMemoryUrn),
+        );
+        expectCode(existing, 'MEMORY_NOT_FOUND');
+        expect(await db.node.findFirst({ where: { memoryId, loc } })).toBeNull();
+        expect(await db.edge.count()).toBe(edgesBefore);
+      });
+    }
+
+    for (const [surface, mutation] of [
+      ['updateNode', UPDATE_NODE],
+      ['updateSpecNode', UPDATE_SPEC],
+    ] as const) {
+      it(`${surface} conceals an unreadable node exactly like a missing node`, async () => {
+        const missingNodeId = generateId();
+        const input = (id: string) => ({
+          id,
+          content: 'must not land',
+          edges: [{ targetId: anchorId, name: 'must-not-land' }],
+        });
+        const edgesBefore = await db.edge.count();
+        const existing = await gql(key.outsider!, mutation, { input: input(anchorId) });
+        const missing = await gql(key.outsider!, mutation, { input: input(missingNodeId) });
+
+        expect(normalizeSentRef(existing, anchorId)).toEqual(
+          normalizeSentRef(missing, missingNodeId),
+        );
+        expectCode(existing, 'NODE_NOT_FOUND');
+        expect((await db.node.findUniqueOrThrow({ where: { id: anchorId } })).content).toBeNull();
+        expect(await db.edge.count()).toBe(edgesBefore);
+      });
+    }
+
+    // The (memoryId, loc) selector resolves the MEMORY first and runs the write
+    // gate before any node lookup, so its not-found is the memory's. A missing
+    // memory answers MEMORY_NOT_FOUND from resolveMemoryRef, before any gate;
+    // relabeling an unreadable one NODE_NOT_FOUND would make the two
+    // distinguishable, which is the oracle this PR closes (@copilot, PR #1319).
+    for (const [surface, mutation] of [
+      ['updateNode', UPDATE_NODE],
+      ['updateSpecNode', UPDATE_SPEC],
+    ] as const) {
+      it(`${surface} by (memoryId, loc) conceals an unreadable memory exactly like a missing one`, async () => {
+        const input = (ref: string, loc: string) => ({
+          memoryId: ref,
+          loc,
+          content: 'must not land',
+          edges: [{ targetId: anchorId, name: 'must-not-land' }],
+        });
+        const edgesBefore = await db.edge.count();
+        const existing = await gql(key.outsider!, mutation, { input: input(memoryUrn, 'anchor') });
+        const missing = await gql(key.outsider!, mutation, { input: input(missingMemoryUrn, 'anchor') });
+        const missingLoc = await gql(key.outsider!, mutation, {
+          input: input(memoryUrn, 'oracle:no-such-loc'),
+        });
+
+        expect(normalizeSentRef(existing, memoryUrn)).toEqual(
+          normalizeSentRef(missing, missingMemoryUrn),
+        );
+        // The loc is never looked up for a caller the gate refuses.
+        expect(existing).toEqual(missingLoc);
+        expectCode(existing, 'MEMORY_NOT_FOUND');
+        expect((await db.node.findUniqueOrThrow({ where: { id: anchorId } })).content).toBeNull();
+        expect(await db.edge.count()).toBe(edgesBefore);
+      });
+    }
+
+    it('update by (memoryId, loc) answers an existing and a missing loc alike when only the record is readable', async () => {
+      // This caller may read the Memory RECORD, so its existence is not a
+      // secret from them; what must not leak is which locs exist. The write
+      // gate refuses before the node lookup, so both answer the same.
+      const input = (loc: string) => ({ memoryId: recordOnlyMemoryId, loc, content: 'must not land' });
+      const existing = await gql(key.reader!, UPDATE_NODE, { input: input('private:node') });
+      const missing = await gql(key.reader!, UPDATE_NODE, { input: input('private:no-such-node') });
+
+      expect(existing).toEqual(missing);
+      expectCode(existing, 'FORBIDDEN');
+      expect((await db.node.findUniqueOrThrow({ where: { id: recordOnlyNodeId } })).content).toBeNull();
+    });
+
+    it('update by id answers a live node in a soft-deleted memory exactly like a missing node', async () => {
+      // Soft-deleting a memory leaves its Node rows in place, so the id resolves
+      // a node whose memory is gone. It must answer as the missing node it
+      // effectively is (as the URN form already does, since it requires a live
+      // memory), not MEMORY_NOT_FOUND with the memory's id (@copilot, PR #1319).
+      const tombstoned = await db.memory.create({
+        data: {
+          id: generateId(),
+          urn: `tombstoned-${generateId()}`,
+          name: 'soft-deleted memory',
+          class: 'personal',
+          visibility: null,
+          userId: (await db.user.findFirstOrThrow({ where: { handle: { startsWith: 'owner-' } } })).id,
+          ownerUserId: (await db.user.findFirstOrThrow({ where: { handle: { startsWith: 'owner-' } } })).id,
+          deletedAt: new Date(),
+        },
+      });
+      const orphan = await db.node.create({
+        data: { id: generateId(), memoryId: tombstoned.id, loc: 'left:behind', name: 'left behind' },
+      });
+      const missingNodeId = generateId();
+      for (const k of [key.outsider!, key.owner!]) {
+        const existing = await gql(k, UPDATE_NODE, { input: { id: orphan.id, content: 'must not land' } });
+        const missing = await gql(k, UPDATE_NODE, { input: { id: missingNodeId, content: 'must not land' } });
+
+        expect(normalizeSentRef(existing, orphan.id)).toEqual(normalizeSentRef(missing, missingNodeId));
+        expectCode(existing, 'NODE_NOT_FOUND');
+        expect(JSON.stringify(existing)).not.toContain(tombstoned.id);
+      }
+      expect((await db.node.findUniqueOrThrow({ where: { id: orphan.id } })).content).toBeNull();
+    });
+
+    it('uses the node-content gate when the Memory record is readable but its nodes are not', async () => {
+      const read = await gql(key.reader!, READ_MEMORY, { ref: recordOnlyMemoryId });
+      expect(read.errors).toBeUndefined();
+      expect(read.data!.memory.id).toBe(recordOnlyMemoryId);
+
+      const missingNodeId = generateId();
+      const existing = await gql(key.reader!, UPDATE_NODE, {
+        input: { id: recordOnlyNodeId, content: 'must not land' },
+      });
+      const missing = await gql(key.reader!, UPDATE_NODE, {
+        input: { id: missingNodeId, content: 'must not land' },
+      });
+
+      expect(normalizeSentRef(existing, recordOnlyNodeId)).toEqual(
+        normalizeSentRef(missing, missingNodeId),
+      );
+      expectCode(existing, 'NODE_NOT_FOUND');
+      expect((await db.node.findUniqueOrThrow({ where: { id: recordOnlyNodeId } })).content).toBeNull();
+    });
+
+    it('does not disguise malformed refs or internal DB faults as not-found', async () => {
+      const malformed = await gql(key.outsider!, CREATE_SPEC, {
+        input: { memoryId: 'relative-memory', loc: 'oracle:malformed', name: 'bad', role: 'spec' },
+      });
+      expectCode(malformed, 'URN_NOT_QUALIFIED');
+
+      const failure = vi.spyOn(db.memory, 'findUnique').mockRejectedValueOnce(new Error('injected db failure'));
+      try {
+        const fault = await gql(key.owner!, READ_MEMORY, { ref: memoryUrn });
+        expectCode(fault, 'INTERNAL_SERVER_ERROR');
+      } finally {
+        failure.mockRestore();
+      }
+
+      const writeFailure = vi
+        .spyOn(db.memory, 'findUnique')
+        .mockRejectedValueOnce(new Error('injected write-gate db failure'));
+      try {
+        const fault = await gql(key.outsider!, CREATE_SPEC, {
+          input: { memoryId: memoryUrn, loc: 'oracle:db-fault', name: 'must not exist', role: 'spec' },
+        });
+        expectCode(fault, 'INTERNAL_SERVER_ERROR');
+        expect(await db.node.findFirst({ where: { memoryId, loc: 'oracle:db-fault' } })).toBeNull();
+      } finally {
+        writeFailure.mockRestore();
+      }
+    });
   });
 
   it('keeps the role-governed boundary: generic createNode cannot mint a spec', async () => {

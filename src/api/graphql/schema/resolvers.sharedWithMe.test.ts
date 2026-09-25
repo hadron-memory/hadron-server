@@ -205,16 +205,16 @@ describe('Query.memory grantee read gate (#778)', () => {
     expect((await Q.memory(null, { ref: orgShared.id }, ctx(grantee.id)))?.id).toBe(orgShared.id);
   });
 
-  it('the owner opens their own; a stranger is Forbidden', async () => {
+  it('the owner opens their own; the record is concealed from a stranger', async () => {
     expect((await Q.memory(null, { ref: freeShared.id }, ctx(owner.id)))?.id).toBe(freeShared.id);
-    await expect(Q.memory(null, { ref: freeShared.id }, ctx(stranger.id))).rejects.toThrow('Forbidden');
+    await expect(Q.memory(null, { ref: freeShared.id }, ctx(stranger.id))).resolves.toBeNull();
   });
 
   it('a grantee loses read on an org-owned share after losing org membership', async () => {
     await db.orgMember.updateMany({
       where: { organizationId: org.id, userId: grantee.id }, data: { deletedAt: new Date() },
     });
-    await expect(Q.memory(null, { ref: orgShared.id }, ctx(grantee.id))).rejects.toThrow('Forbidden');
+    await expect(Q.memory(null, { ref: orgShared.id }, ctx(grantee.id))).resolves.toBeNull();
     // ...but the free-standing share is unaffected.
     expect((await Q.memory(null, { ref: freeShared.id }, ctx(grantee.id)))?.id).toBe(freeShared.id);
   });
@@ -283,7 +283,7 @@ describe('deleteMemoryShare — grantee self-removal (#785)', () => {
     const page = await Q.memories(null, { filter: { sharedWithMe: true } }, ctx(grantee.id));
     expect(page.items.map((m: { id: string }) => m.id).sort())
       .toEqual([orgShared.id, writerShared.id].sort());
-    await expect(Q.memory(null, { ref: freeShared.id }, ctx(grantee.id))).rejects.toThrow('Forbidden');
+    await expect(Q.memory(null, { ref: freeShared.id }, ctx(grantee.id))).resolves.toBeNull();
   });
 
   it('a grantee may also name THEMSELVES explicitly (granteeRef / granteeId)', async () => {

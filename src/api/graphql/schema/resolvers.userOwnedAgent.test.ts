@@ -130,7 +130,7 @@ describe('user-owned agent — read/list/audit surfaces are owner-only', () => {
 
     await expect(
       resolvers.Query.memory(null, { ref: memId }, ctx({ userId: otherId, roles: ['ADMIN'] })),
-    ).rejects.toThrow('Forbidden');
+    ).resolves.toBeNull();
   });
 
   it('Query.agents: the owner sees their user-owned agent; another user + admin-unscoped do not', async () => {
