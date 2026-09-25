@@ -186,17 +186,25 @@ describe('#1325 — NodeRoleRule: one row per role, task references fail closed'
 });
 
 describe('#1325 — MemoryConfigTemplateRule: the same reference semantics', () => {
-  it('refuses a task without its marker, and fails closed on a hard-deleted task', async () => {
+  it('refuses either task without its marker, and both fail closed on a hard-deleted task', async () => {
     const templateId = (await db.memoryConfigTemplate.create({ data: { name: 't', organizationId: org.id } })).id;
     await expect(
       db.memoryConfigTemplateRule.create({ data: { templateId, role: 'spec', authorTaskId: taskId } }),
     ).rejects.toThrow(/chk_memory_config_template_rule_task_markers/);
+    await expect(
+      db.memoryConfigTemplateRule.create({ data: { templateId, role: 'review', validationTaskId: taskId } }),
+    ).rejects.toThrow(/chk_memory_config_template_rule_task_markers/);
     const rule = await db.memoryConfigTemplateRule.create({
-      data: { templateId, role: 'spec', authorTaskId: taskId, authorTaskRequired: true },
+      data: {
+        templateId, role: 'spec',
+        authorTaskId: taskId, authorTaskRequired: true,
+        validationTaskId: taskId, validationTaskRequired: true,
+      },
     });
     await db.node.delete({ where: { id: taskId } });
     expect(await db.memoryConfigTemplateRule.findUniqueOrThrow({ where: { id: rule.id } })).toMatchObject({
       authorTaskId: null, authorTaskRequired: true,
+      validationTaskId: null, validationTaskRequired: true,
     });
   });
 });
