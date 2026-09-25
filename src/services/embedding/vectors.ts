@@ -251,13 +251,23 @@ export async function vectorSearchNodes(
     queryEmbedding: number[];
     limit: number;
     candidateFactor?: number;
+    /** #1345 — told whether the raw ANN window was exhausted (see below). */
+    onWindow?: (w: { exhausted: boolean }) => void;
   },
 ): Promise<VectorHit[]> {
-  if (opts.memoryIds.length === 0) return [];
+  if (opts.memoryIds.length === 0) {
+    opts.onWindow?.({ exhausted: true });
+    return [];
+  }
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
   const candidateK = Math.max(k, k * (opts.candidateFactor ?? 10));
-  const rows = await db.$queryRaw<{ node_id: string; distance: number }[]>`
+  // `ann_rows` is the RAW candidate count, before the node dedup: fewer than
+  // candidateK means the index has nothing deeper. The deduped node count
+  // cannot say that — a window full of one node's chunks dedupes to one hit
+  // (#1345 review, @codex/@copilot). Carried on every row; an empty result
+  // re-counts below rather than guessing.
+  const rows = await db.$queryRaw<{ node_id: string; distance: number; ann_rows: number }[]>`
     WITH ann AS (
       SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
@@ -265,13 +275,28 @@ export async function vectorSearchNodes(
       ORDER BY ne.embedding <=> ${qvec}::vector
       LIMIT ${candidateK}
     )
-    SELECT a.node_id, MIN(a.distance) AS distance
+    SELECT a.node_id, MIN(a.distance) AS distance, (SELECT count(*) FROM ann)::int AS ann_rows
     FROM ann a
     JOIN nodes n ON n.id = a.node_id AND n.deleted_at IS NULL
     GROUP BY a.node_id
     ORDER BY distance ASC
     LIMIT ${k}
   `;
+  if (opts.onWindow) {
+    let annRows = rows[0]?.ann_rows;
+    if (annRows === undefined) {
+      const [c] = await db.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM (
+          SELECT 1 FROM node_embeddings ne
+          WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)})
+          LIMIT ${candidateK}
+        ) w`;
+      annRows = c?.n ?? 0;
+    }
+    // Exhausted = the raw window held EVERYTHING (fewer rows than it asked for)
+    // AND the final LIMIT truncated nothing: a full `k` may have cut nodes off.
+    opts.onWindow({ exhausted: Number(annRows) < candidateK && rows.length < k });
+  }
   return rows.map((r) => ({ nodeId: r.node_id, score: 1 - Number(r.distance) }));
 }
 
@@ -304,9 +329,14 @@ export async function vectorSearchChunks(
     queryEmbedding: number[];
     limit: number;
     candidateFactor?: number;
+    /** #1345 — told whether the chunk window was exhausted (fewer rows than it asked for). */
+    onWindow?: (w: { exhausted: boolean }) => void;
   },
 ): Promise<ChunkHit[]> {
-  if (opts.memoryIds.length === 0) return [];
+  if (opts.memoryIds.length === 0) {
+    opts.onWindow?.({ exhausted: true });
+    return [];
+  }
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
   // Over-fetch to absorb soft-deleted-node losses + reach the top-k
@@ -330,6 +360,9 @@ export async function vectorSearchChunks(
     ORDER BY ne.embedding <=> ${qvec}::vector
     LIMIT ${candidateK}
   `;
+  // Exhausted = every eligible chunk was fetched AND fits in the returned `k`
+  // (the slice below truncates nothing).
+  opts.onWindow?.({ exhausted: rows.length < candidateK && rows.length <= k });
   return rows.slice(0, k).map((r) => ({
     nodeId: r.node_id,
     chunkIndex: Number(r.chunk_index),

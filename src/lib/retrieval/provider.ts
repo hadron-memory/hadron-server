@@ -118,6 +118,14 @@ export interface VectorSearchOpts {
   queryEmbedding: number[];
   memoryIds: string[];
   limit: number;
+  /**
+   * #1345 — called once per search with whether the provider's RAW candidate
+   * window was exhausted (the index has nothing deeper). A caller that widens a
+   * filtered window stops on this, not on a short result, which dedup can
+   * produce without exhaustion. A provider that never calls it is treated as
+   * not exhausted.
+   */
+  onWindow?: (w: { exhausted: boolean }) => void;
 }
 
 export interface NodeRetrievalProvider {

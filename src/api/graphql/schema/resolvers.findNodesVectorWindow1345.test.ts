@@ -92,20 +92,40 @@ describe('@codex P2 — the vector window widens until the filtered page fills',
     expect(res.hits.map((h: any) => h.node.id)).toEqual([matchId]);
   });
 
-  it('node granularity keeps widening when dedup makes a batch SHORT without exhausting the index (@codex round 3)', async () => {
-    // Two near review nodes with many small chunks each fill the whole ANN
-    // window, which dedupes to 2 node hits (< the 5 asked): "short batch" is
-    // duplicates, not exhaustion, and the farther spec match must still be found.
+  it('node granularity keeps widening across windows that dedupe to the SAME hits (@codex/@copilot rounds 3-4)', async () => {
+    // ONE near review node owns enough small chunks to fill two consecutive ANN
+    // windows (50, then 200 vectors for limit 1): both dedupe to the same single
+    // hit, which is neither a short-batch nor a no-progress exhaustion signal.
+    // Only the provider's raw window says the index is spent; the spec match lies
+    // beyond both windows and must still be found.
     await db.memory.update({ where: { id: memId }, data: { chunkTokens: 8, chunkOverlap: 0 } });
     await db.node.deleteMany({ where: { memoryId: memId } });
-    const words = Array.from({ length: 400 }, (_, i) => `near${i}`).join(' ');
-    await seed(memId, 'bulk1', words, { role: 'review' });
-    await seed(memId, 'bulk2', words, { role: 'review' });
+    await seed(memId, 'bulk', Array.from({ length: 2600 }, (_, i) => `near${i}`).join(' '), { role: 'review' });
     const match = await seed(memId, 'match2', 'far body match', { role: 'spec' });
-    const chunkCount = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM node_embeddings WHERE memory_id = ${memId} AND kind = 'chunk'`;
-    expect(Number(chunkCount[0].n)).toBeGreaterThan(50); // more near vectors than the first window (10 x 5)
+    const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM node_embeddings WHERE memory_id = ${memId} AND kind = 'chunk'`;
+    expect(Number(n)).toBeGreaterThan(200); // one node fills windows 1 (50) and 2 (200)
     const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memId], role: 'spec' } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([match]);
+  });
+
+  it('the provider reports exhaustion only when the window held everything AND nothing was truncated', async () => {
+    const provider = getRetrievalProvider();
+    const q = new Array(768).fill(0); q[1] = 1;
+    const exhausted = async (kind: 'node' | 'chunk', limit: number) => {
+      let flag: boolean | null = null;
+      const opts = { db, queryEmbedding: q, memoryIds: [memId], limit, onWindow: (w: { exhausted: boolean }) => { flag = w.exhausted; } };
+      await (kind === 'node' ? provider.vectorSearch(opts) : provider.vectorSearchChunks(opts));
+      return flag;
+    };
+    // 9 one-chunk nodes. limit 20: the window holds all 9, nothing is cut.
+    expect([await exhausted('node', 20), await exhausted('chunk', 20)]).toEqual([true, true]);
+    // limit 1: the window (10) still holds all 9, but LIMIT 1 truncates: NOT exhausted.
+    expect([await exhausted('node', 1), await exhausted('chunk', 1)]).toEqual([false, false]);
+    // One node whose chunks outnumber the window: node search dedupes to few hits, yet NOT exhausted.
+    await db.memory.update({ where: { id: memId }, data: { chunkTokens: 8, chunkOverlap: 0 } });
+    await db.node.deleteMany({ where: { memoryId: memId } });
+    await seed(memId, 'many', Array.from({ length: 400 }, (_, i) => `near${i}`).join(' '));
+    expect(await exhausted('node', 5)).toBe(false);
   });
 
   it('CONTROL: with no filter the nearest node wins and nothing widens', async () => {

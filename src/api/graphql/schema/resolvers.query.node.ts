@@ -1183,22 +1183,23 @@ export const nodeQueries = {
        * over-fetch could leave the page empty when the matches rank past it —
        * `limit: 1` returned nothing when the five nearest nodes had other roles.
        * With filters present, widen the window (x4, to the same cap) until the
-       * filtered, floored hits fill the page, or widening stops finding new hits.
+       * filtered, floored hits fill the page, or the provider reports its raw
+       * candidate window exhausted.
        * Past the cap a page can still be short; it is never wrong.
        */
       const widenVectorWindow = async <T extends { nodeId: string; score: number }>(
-        search: (limit: number) => Promise<T[]>,
+        search: (limit: number, onWindow: (w: { exhausted: boolean }) => void) => Promise<T[]>,
       ): Promise<T[]> => {
         let limit = fetchN;
-        let previous = -1;
         for (;;) {
-          const hits = await search(limit);
-          // Exhaustion is "widening found nothing new", NOT "fewer hits than
-          // asked": node search dedupes chunk vectors to nodes, so a short batch
-          // can be duplicates with more of the index still unread (@codex,
-          // #1345 round 3). Costs one extra query when the index is spent.
-          if (!hasStructuredFilters || limit >= VECTOR_FETCH_CAP || hits.length <= previous) return hits;
-          previous = hits.length;
+          // Exhaustion comes from the PROVIDER's raw window, never from the
+          // result size: node search dedupes chunk vectors to nodes, so a short
+          // or unchanged hit count can be duplicates with more of the index
+          // unread (@codex + @copilot, #1345 rounds 3-4). Unreported ⇒ not
+          // exhausted, so an unknown provider widens to the cap.
+          let exhausted = false;
+          const hits = await search(limit, (w) => { exhausted = w.exhausted; });
+          if (!hasStructuredFilters || limit >= VECTOR_FETCH_CAP || exhausted) return hits;
           const floored = scoreFloor == null ? hits : hits.filter((h) => h.score >= scoreFloor);
           const ok = await eligibleIds([...new Set(floored.map((h) => h.nodeId))]);
           if (floored.filter((h) => ok.has(h.nodeId)).length >= page) return hits;
@@ -1503,8 +1504,8 @@ export const nodeQueries = {
         // #497 — apply the minScore floor to the scored passages too (PR-569
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
-        const rawChunks = await widenVectorWindow((limit) =>
-          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit }),
+        const rawChunks = await widenVectorWindow((limit, onWindow) =>
+          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow }),
         );
         const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
         const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
@@ -1571,8 +1572,8 @@ export const nodeQueries = {
         return { hits: [], passages, total: null, reason: null, degraded: null };
       }
 
-      const vecHits = await widenVectorWindow((limit) =>
-        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit }),
+      const vecHits = await widenVectorWindow((limit, onWindow) =>
+        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow }),
       );
 
       if (effectiveMode === 'vector') {

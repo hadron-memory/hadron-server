@@ -232,6 +232,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       memoryIds: opts.memoryIds,
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
+      onWindow: opts.onWindow,
     });
   },
 
@@ -240,6 +241,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       memoryIds: opts.memoryIds,
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
+      onWindow: opts.onWindow,
     });
   },
 };
