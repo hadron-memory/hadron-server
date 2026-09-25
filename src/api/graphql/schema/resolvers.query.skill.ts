@@ -546,24 +546,30 @@ export const skillQueries = {
     if (candidates.length <= SKILL_PLAN_MAX_NODES) {
       // One short transaction per node: retaining every FOR UPDATE lock until
       // the whole plan commits can deadlock a Git sync that visits the same
-      // rows in filesystem order. The final refetch supplies atomic row states.
-      const liveIds: string[] = [];
+      // rows in filesystem order. Fetch the final projection BEFORE releasing
+      // that node's lock: a bypass writer landing after reconciliation must not
+      // pair newer fields with the older revSeq in one exported artifact.
+      const liveRows: typeof candidates = [];
       for (const id of candidates.map((r) => r.id).sort()) {
         const live = await ctx.db.$transaction(
-          (tx) => ensureCurrentNodeRevisionInTransaction(tx, id),
+          async (tx) => {
+            if ((await ensureCurrentNodeRevisionInTransaction(tx, id)) == null) return null;
+            return tx.node.findFirst({
+              // Reapply BOTH discovery and access/scope predicates after
+              // waiting for the lock. The id can move into another tenant's
+              // memory while we wait; id-only here would turn the locked
+              // refetch into a cross-tenant content read.
+              where: { AND: [declaredWhere, { id }] } as never,
+              select: declaredSelect,
+            });
+          },
           { timeout: 60_000, maxWait: 15_000 },
         );
-        if (live != null) liveIds.push(id);
+        if (live != null) liveRows.push(live);
       }
-      declaredRows = await ctx.db.node.findMany({
-        // Reapply BOTH discovery and access/scope predicates after waiting for
-        // reconciliation. An id can move into another tenant's memory while a
-        // transaction waits; id-only here would turn the final re-read into a
-        // cross-tenant content read.
-        where: { AND: [declaredWhere, { id: { in: liveIds } }] } as never,
-        select: declaredSelect,
-        orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
-      });
+      declaredRows = liveRows.sort(
+        (a, b) => a.memoryId.localeCompare(b.memoryId) || a.loc.localeCompare(b.loc),
+      );
     }
     if (declaredRows.length > SKILL_PLAN_MAX_NODES) {
       throw new GraphQLError(

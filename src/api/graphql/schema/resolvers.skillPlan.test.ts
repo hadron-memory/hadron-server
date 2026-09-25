@@ -666,6 +666,30 @@ describe('classes and bodies', () => {
     expect(got.entries[0].renderedBody).toContain(' rev=2 ');
   });
 
+  it('keeps rendered fields paired with their revision when a bypass write lands after the locked fetch', async () => {
+    const node = await mkNode('tasks:revision-pair-race', { properties: declaration() });
+    const runTransaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
+    let injected = false;
+    const transactionSpy = vi.spyOn(db, '$transaction').mockImplementation((async (...args: any[]) => {
+      const result = await runTransaction(...args);
+      if (!injected) {
+        injected = true;
+        await db.node.update({ where: { id: node.id }, data: { content: '# Raced body' } });
+      }
+      return result;
+    }) as never);
+
+    try {
+      const got = await plan({ intent: 'EXPORT', files: [] });
+      expect(got.entries[0].revision).toBe(1);
+      expect(got.entries[0].renderedBody).toContain('# Body');
+      expect(got.entries[0].renderedBody).not.toContain('# Raced body');
+      expect(got.entries[0].renderedBody).toContain(' rev=1 ');
+    } finally {
+      transactionSpy.mockRestore();
+    }
+  });
+
   it('a blocking lint finding outranks a current file relationship', async () => {
     const node = await mkNode('tasks:becomes-invalid', { properties: declaration() });
     const first = await plan({ intent: 'EXPORT', files: [] });
