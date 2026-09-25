@@ -438,6 +438,33 @@ describe('#1360 review — gates, concurrency, audit, and unaddressable referenc
     expect(await db.nodeRoleRule.count()).toBe(0);
   });
 
+  it('a task moved out of the saver\'s reach while the rule write is in flight is refused NODE_NOT_FOUND', async () => {
+    const foreignMemoryId = (await db.node.findUniqueOrThrow({ where: { id: foreignTask.id } })).memoryId;
+    let creating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.node.update({ where: { id: task.id }, data: { memoryId: foreignMemoryId, loc: 'tasks:moved' } });
+      creating = gql(as(orgAdmin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: task.id } });
+      await pause(400);
+    });
+    expect(code(await creating!)).toBe('NODE_NOT_FOUND');
+    expect(await db.nodeRoleRule.count()).toBe(0);
+  });
+
+  it('a task moved to another memory the saver CAN read while the write is in flight is still accepted', async () => {
+    const kb2 = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'acme.com:kb2', name: 'kb2', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+    let creating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.node.update({ where: { id: task.id }, data: { memoryId: kb2.id } });
+      creating = gql(as(orgAdmin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: task.id } });
+      await pause(400);
+    });
+    const r = await creating!;
+    expect(r.errors).toBeUndefined();
+    expect(r.data!.createNodeRoleRule.rule).toMatchObject({ authorTask: 'hrn:node:acme.com:kb2:tasks:author', authorTaskState: 'OK' });
+  });
+
   it('each concurrent update returns its OWN write', async () => {
     const rule = await mk({});
     const writers = ['ALL', 'OWNER', 'ADMIN', 'ALL', 'OWNER', 'ADMIN', 'ALL', 'OWNER'];

@@ -215,22 +215,32 @@ async function refWrites(
 /**
  * Re-assert inside the rule write's transaction, under a SHARE lock, what
  * `resolveRuleRef` judged before it: each referenced node still exists, is
- * not soft-deleted, and — for a task — is still runnable. The lock holds
- * until commit, so a concurrent edit cannot clear `isRunnable` between the
- * check and the write (#1360 review). Taken BEFORE the rule's row lock: a
- * hard node delete locks the node and then SET NULLs the rule, so the same
- * order here cannot deadlock against it.
+ * not soft-deleted, still lives in a memory the SAVER can read (a move
+ * rewrites `memory_id`, so the locked row is the one to judge), and — for a
+ * task — is still runnable. Readability is judged before runnability, as in
+ * `resolveRuleRef`. The lock holds until commit, so a concurrent edit cannot
+ * change the row between the check and the write (#1360 review). Taken
+ * BEFORE the rule's row lock: a hard node delete locks the node and then SET
+ * NULLs the rule, so the same order here cannot deadlock against it.
  */
-async function lockRuleRefs(tx: Prisma.TransactionClient, resolved: ResolvedRef[]): Promise<void> {
+async function lockRuleRefs(ctx: Context, tx: Prisma.TransactionClient, resolved: ResolvedRef[]): Promise<void> {
   if (resolved.length === 0) return;
   const ids = [...new Set(resolved.map((r) => r.id))].sort();
-  const rows = await tx.$queryRaw<{ id: string; is_runnable: boolean | null; deleted_at: Date | null }[]>`
-    SELECT "id", "is_runnable", "deleted_at" FROM "nodes"
+  // The node rows ALONE: a join here would be re-checked by Postgres against
+  // the memory row as fetched BEFORE a concurrent move, so a moved node would
+  // silently drop out of the result (EvalPlanQual) and read as missing.
+  const rows = await tx.$queryRaw<{ id: string; is_runnable: boolean | null; deleted_at: Date | null; memory_id: string }[]>`
+    SELECT "id", "is_runnable", "deleted_at", "memory_id" FROM "nodes"
     WHERE "id" IN (${Prisma.join(ids)}) ORDER BY "id" FOR SHARE`;
   const byId = new Map(rows.map((r) => [r.id, r]));
   for (const { kind, id, ref } of resolved) {
     const row = byId.get(id);
-    if (!row || row.deleted_at) throw new NodeNotFoundError(ref);
+    // The shared read gate also refuses a soft-deleted memory. It is memoized
+    // per request, and the MEMORY row is not locked: a host memory deleted in
+    // this window can still be saved, and then reads BROKEN (fail-closed, H5).
+    if (!row || row.deleted_at || !(await isMemoryReadableCached(ctx, row.memory_id))) {
+      throw new NodeNotFoundError(ref);
+    }
     if (kind !== 'descriptionNode' && row.is_runnable !== true) throw notATask(kind);
   }
 }
@@ -360,7 +370,7 @@ export const memoryConfigMutations = {
     assertValidateByHasTask(state);
     try {
       const rule = await ctx.db.$transaction(async (tx) => {
-        await lockRuleRefs(tx, resolved);
+        await lockRuleRefs(ctx, tx, resolved);
         const configId = await materializeConfig(tx, memory.id, actor);
         const created = await tx.nodeRoleRule.create({
           data: {
@@ -408,7 +418,7 @@ export const memoryConfigMutations = {
     // cannot strand validateBy without a task), the write and the result all
     // see the same row, and no other write lands between them (#1360 review).
     const rule = await ctx.db.$transaction(async (tx) => {
-      await lockRuleRefs(tx, resolved);
+      await lockRuleRefs(ctx, tx, resolved);
       const current = await lockRule(tx, id);
       if (!current) throw new NodeRoleRuleNotFoundError(ref);
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
