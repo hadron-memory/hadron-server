@@ -1271,6 +1271,26 @@ describe('appNodes', () => {
     expect(locs).not.toContain('prompts:hello');
   });
 
+  it('filter.role uses the same dotted-family boundary as findNodes (#1322)', async () => {
+    await db.node.createMany({
+      data: [
+        { id: generateId(), memoryId, loc: 'roles:spec', name: 'spec', role: 'spec' },
+        { id: generateId(), memoryId, loc: 'roles:rule', name: 'rule', role: 'spec.rule' },
+        { id: generateId(), memoryId, loc: 'roles:detail', name: 'detail', role: 'spec.rule.detail' },
+        { id: generateId(), memoryId, loc: 'roles:near-miss', name: 'near miss', role: 'specification' },
+      ],
+    });
+    const { app } = await createDbAppWithKey(db, 'app-role-filter', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+
+    const nodes = await resolvers.Query.appNodes(
+      {},
+      { appRef: app.id, filter: { role: 'spec.rule' } },
+      adminCtx(),
+    );
+    expect(nodes.map((n: { loc: string }) => n.loc)).toEqual(['roles:detail', 'roles:rule']);
+  });
+
   // #526 review — the App's memory scope is authoritative, so the NodeFilter's
   // memory-scope fields are rejected (fail fast) rather than silently ignored.
   it('rejects filter.memoryIds / filter.memoryClasses with BAD_USER_INPUT', async () => {

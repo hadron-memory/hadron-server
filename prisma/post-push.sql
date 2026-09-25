@@ -242,8 +242,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS scopes_app_name_uniq
   ON scopes (app_id, name) WHERE app_id IS NOT NULL AND deleted_at IS NULL;
 
 -- ─── #1325 — MemoryConfig templates: exactly one owner + per-owner live-name
--- uniqueness; rule task-reference markers (fail closed on a hard-deleted task).
--- Synced with the 20260925030000_memory_config migration and src/test/globalSetup.ts.
+-- uniqueness; rule task-reference markers (fail closed on a hard-deleted task);
+-- and #1322 dotted rule-key grammar. Synced with the
+-- 20260925030000_memory_config + 20260925100000_dotted_role_rules migrations
+-- and src/test/globalSetup.ts.
 ALTER TABLE memory_config_templates
   DROP CONSTRAINT IF EXISTS chk_memory_config_template_owner;
 ALTER TABLE memory_config_templates
@@ -263,12 +265,24 @@ ALTER TABLE node_role_rules
   ADD CONSTRAINT chk_node_role_rule_task_markers
   CHECK ((author_task_id IS NULL OR author_task_required)
      AND (validation_task_id IS NULL OR validation_task_required));
+ALTER TABLE node_role_rules
+  DROP CONSTRAINT IF EXISTS chk_node_role_rule_role_format;
+ALTER TABLE node_role_rules
+  ADD CONSTRAINT chk_node_role_rule_role_format
+  CHECK (char_length(role) BETWEEN 1 AND 64
+     AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$');
 ALTER TABLE memory_config_template_rules
   DROP CONSTRAINT IF EXISTS chk_memory_config_template_rule_task_markers;
 ALTER TABLE memory_config_template_rules
   ADD CONSTRAINT chk_memory_config_template_rule_task_markers
   CHECK ((author_task_id IS NULL OR author_task_required)
      AND (validation_task_id IS NULL OR validation_task_required));
+ALTER TABLE memory_config_template_rules
+  DROP CONSTRAINT IF EXISTS chk_memory_config_template_rule_role_format;
+ALTER TABLE memory_config_template_rules
+  ADD CONSTRAINT chk_memory_config_template_rule_role_format
+  CHECK (char_length(role) BETWEEN 1 AND 64
+     AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$');
 
 -- #974 Worker model (cor:dmo:050:11, cor:agt:020:02 v0.0.3): a worker's name
 -- is unique per App, case-insensitively — a functional unique, so it lives

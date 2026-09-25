@@ -65,6 +65,7 @@
  */
 
 import { GraphQLError } from 'graphql';
+import type { NodeRoleRule, PrismaClient } from '../generated/prisma/index.js';
 
 /** The closed governed subset of `Node.role` plus the capability-gated kind. */
 export type GovernedKind = 'task' | 'review' | 'spec';
@@ -174,6 +175,123 @@ export const GOVERNED_ROLES: readonly string[] = GOVERNED_KINDS.flatMap((e) =>
   e.signal.field === 'role' ? [e.signal.value] : [],
 );
 
+/** Maximum stored length of a {@link NodeRoleRule} lookup key (#1322). */
+export const RULE_ROLE_MAX_LENGTH = 64;
+
+/**
+ * Grammar for role RULE KEYS, not for `Node.role` itself.
+ *
+ * A node role deliberately remains an open string. A rule key is different:
+ * the platform resolves it one dot-delimited segment at a time, so accepting
+ * empty/mixed-case/punctuation segments would make the lookup ambiguous to
+ * clients. Each segment is lower-case alphanumeric plus internal dashes; the
+ * whole key is bounded to 64 characters.
+ */
+const RULE_ROLE_RE = /^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*$/;
+
+/** Whether `role` is a valid `NodeRoleRule.role` / template-rule key. */
+export function isValidRuleRole(role: string): boolean {
+  return role.length > 0 && role.length <= RULE_ROLE_MAX_LENGTH && RULE_ROLE_RE.test(role);
+}
+
+/** Typed rule-key refusal for the config mutation surface that consumes this helper. */
+export class InvalidNodeRoleError extends GraphQLError {
+  constructor(role: string) {
+    super(
+      `Invalid node-role rule key "${role}": use 1-${RULE_ROLE_MAX_LENGTH} characters as ` +
+        'lower-case letter/digit/dash segments joined by dots (for example "spec.rule").',
+      { extensions: { code: 'INVALID_NODE_ROLE', role, maxLength: RULE_ROLE_MAX_LENGTH } },
+    );
+    this.name = 'InvalidNodeRoleError';
+  }
+}
+
+/** Validate a stored rule key while leaving arbitrary `Node.role` values untouched. */
+export function assertValidRuleRole(role: string): void {
+  if (!isValidRuleRole(role)) throw new InvalidNodeRoleError(role);
+}
+
+/**
+ * `role` is `base` or one of its dotted descendants.
+ *
+ * The explicit dot boundary is load-bearing: `spec` matches `spec.rule`, but
+ * never `special` or `specification` (#1322).
+ */
+export function roleIsOrDescendsFrom(role: string | null | undefined, base: string): boolean {
+  return role === base || role?.startsWith(`${base}.`) === true;
+}
+
+/**
+ * Prisma predicates for every governed role family. Kept beside the in-memory
+ * predicate so bulk SQL/Prisma probes cannot drift back to exact-only matching.
+ */
+export function governedRoleWhereClauses(): Array<
+  { role: string } | { role: { startsWith: string } }
+> {
+  return GOVERNED_ROLES.flatMap((role) => [
+    { role },
+    { role: { startsWith: `${role}.` } },
+  ]);
+}
+
+/** Most-specific-first lookup candidates for an arbitrary open node role. */
+export function roleRuleCandidates(role: string): string[] {
+  if (role.length === 0) return [];
+  const candidates: string[] = [];
+  let candidate = role;
+  while (candidate.length > 0) {
+    candidates.push(candidate);
+    const dot = candidate.lastIndexOf('.');
+    if (dot < 0) break;
+    candidate = candidate.slice(0, dot);
+  }
+  return candidates;
+}
+
+/**
+ * Resolve the nearest enabled rule for a node role.
+ *
+ * An exact enabled row wins. Otherwise the lookup removes one dot segment at a
+ * time (`spec.rule.detail` -> `spec.rule` -> `spec`). Disabled rows are skipped
+ * and the walk continues outward. The INPUT role is intentionally not grammar-
+ * validated: `Node.role` is open, while every stored rule key is validated at
+ * its own write boundary.
+ */
+export function resolveNodeRoleRule<T extends { role: string; enabled: boolean }>(
+  role: string | null | undefined,
+  rules: readonly T[],
+): T | null {
+  if (!role) return null;
+  const enabledByRole = new Map(
+    rules.filter((rule) => rule.enabled).map((rule) => [rule.role, rule] as const),
+  );
+  for (const candidate of roleRuleCandidates(role)) {
+    const rule = enabledByRole.get(candidate);
+    if (rule) return rule;
+  }
+  return null;
+}
+
+/**
+ * Config-backed form of {@link resolveNodeRoleRule} for write enforcement.
+ *
+ * An absent `MemoryConfig` is the empty rulebook (#1325). The relation is
+ * loaded as one bounded set because a config has few rules; the actual choice
+ * stays in the pure helper so callers and tests share one lookup contract.
+ */
+export async function resolveMemoryNodeRoleRule(
+  db: Pick<PrismaClient, 'memoryConfig'>,
+  memoryId: string,
+  role: string | null | undefined,
+): Promise<NodeRoleRule | null> {
+  if (!role) return null;
+  const config = await db.memoryConfig.findUnique({
+    where: { memoryId },
+    include: { rules: true },
+  });
+  return resolveNodeRoleRule(role, config?.rules ?? []);
+}
+
 /**
  * The post-write state of a node, as far as this gate cares. Both fields are
  * the MERGED result — what the row will look like after the write lands — never
@@ -192,7 +310,7 @@ export function governedKindsOf(state: GovernedState): GovernedKindEntry[] {
   return GOVERNED_KINDS.filter((entry) =>
     entry.signal.field === 'isRunnable'
       ? state.isRunnable === true
-      : state.role === entry.signal.value,
+      : roleIsOrDescendsFrom(state.role, entry.signal.value),
   );
 }
 

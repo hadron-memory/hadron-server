@@ -37,6 +37,8 @@ export interface NodeSqlFilter {
   /** #725 — collection discriminator facet (which domain object; e.g. "competitor"). */
   objectType?: string | null;
   isRunnable?: boolean | null;
+  /** #1322 — exact role or a dotted descendant on a segment boundary. */
+  role?: string | null;
   tags?: string[] | null;
   locPrefix?: string | null;
   createdBy?: string | null;

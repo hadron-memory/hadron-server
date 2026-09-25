@@ -30,6 +30,7 @@ import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retri
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
+import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import {
   parseUrnInput,
   validateUrnType,
@@ -92,6 +93,7 @@ export interface FindNodesArgs {
     objectType?: string | null;
     tags?: string[] | null;
     isRunnable?: boolean | null;
+    role?: string | null;
     locPrefix?: string | null;
     createdBy?: string | null;
     updatedAfter?: string | null;
@@ -1010,6 +1012,14 @@ export const nodeQueries = {
         ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
         ...(f.objectType ? { objectType: f.objectType } : {}),
         ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+        ...(f.role != null
+          ? {
+              OR: [
+                { role: f.role },
+                { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
+              ],
+            }
+          : {}),
         ...(f.tags?.length ? tagsFilter(f.tags) : {}),
         ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
         ...(f.createdBy ? { createdBy: f.createdBy } : {}),
@@ -1035,6 +1045,7 @@ export const nodeQueries = {
         nodeType: f.nodeType ?? null,
         objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
+        role: f.role ?? null,
         tags: f.tags ?? null,
         locPrefix: f.locPrefix ?? null,
         createdBy: f.createdBy ?? null,
@@ -1114,7 +1125,7 @@ export const nodeQueries = {
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
-        f.nodeType || f.objectType || f.isRunnable != null || f.tags?.length || f.locPrefix ||
+        f.nodeType || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where
       );
       const page = off + finalLimit;
@@ -1888,6 +1899,7 @@ export const nodeQueries = {
           objectType?: string | null;
           tags?: string[] | null;
           isRunnable?: boolean | null;
+          role?: string | null;
           locPrefix?: string | null;
           createdBy?: string | null;
           updatedAfter?: string | null;
@@ -2174,6 +2186,14 @@ export const nodeQueries = {
           ...(f.nodeType ? { nodeType: f.nodeType } : {}),
           ...(f.objectType ? { objectType: f.objectType } : {}),
           ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+          ...(f.role != null
+            ? {
+                OR: [
+                  { role: f.role },
+                  { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
+                ],
+              }
+            : {}),
           ...(f.tags?.length ? tagsFilter(f.tags) : {}),
           ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
           ...(f.createdBy ? { createdBy: f.createdBy } : {}),
@@ -2201,4 +2221,3 @@ export const nodeQueries = {
     },
 
 };
-

@@ -401,6 +401,8 @@ describe('a GraphQL create that RESURRECTS a governed tombstone (@codex, PR #130
 describe('review round 11 (@codex + @copilot, PR #1305)', () => {
   it('the review door cannot replay a role set to ANOTHER governed value', () => {
     expect(mcpDoorCanReplay({ role: 'spec' }, 'review', 'update')).toBe(false);
+    expect(mcpDoorCanReplay({ role: 'spec.rule' }, 'review', 'update')).toBe(false);
+    expect(mcpDoorCanReplay({ role: 'review.security' }, 'review', 'update')).toBe(true);
     expect(mcpDoorCanReplay({ role: null }, 'review', 'update')).toBe(true);
     expect(mcpDoorCanReplay({ role: 'note' }, 'review', 'update')).toBe(true);
   });

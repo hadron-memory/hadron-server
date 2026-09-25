@@ -11,6 +11,8 @@
  *   `*_task_required` marker a delete cannot clear: a hard-deleted task leaves
  *   the rule failing CLOSED (#1325 H5, Holger 2026-09-25). The CHECK keeps the
  *   marker set whenever a reference is.
+ * - #1322: role RULE KEYS follow the lower-case dotted grammar; Node.role
+ *   itself remains open and has no matching CHECK.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -18,6 +20,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbNode, createDbOrgAndGraph } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
+import { resolveMemoryNodeRoleRule } from '../../lib/governedRole.js';
 
 let org: { id: string };
 let memoryId: string;
@@ -50,11 +53,15 @@ describe('#1325 — MemoryConfigTemplate: exactly one owner', () => {
     const rows = await db.$queryRawUnsafe<{ conname: string }[]>(
       `SELECT conname FROM pg_constraint WHERE conname IN
          ('chk_memory_config_template_owner', 'chk_node_role_rule_task_markers',
-          'chk_memory_config_template_rule_task_markers') ORDER BY conname`,
+          'chk_memory_config_template_rule_task_markers',
+          'chk_node_role_rule_role_format',
+          'chk_memory_config_template_rule_role_format') ORDER BY conname`,
     );
     expect(rows.map((r) => r.conname)).toEqual([
       'chk_memory_config_template_owner',
+      'chk_memory_config_template_rule_role_format',
       'chk_memory_config_template_rule_task_markers',
+      'chk_node_role_rule_role_format',
       'chk_node_role_rule_task_markers',
     ]);
   });
@@ -145,6 +152,33 @@ describe('#1325 — NodeRoleRule: one row per role, task references fail closed'
     });
   });
 
+  it('accepts valid dotted rule keys and refuses invalid ones below the API', async () => {
+    await expect(
+      db.nodeRoleRule.create({ data: { configId, role: 'spec.rule-detail' } }),
+    ).resolves.toMatchObject({ role: 'spec.rule-detail' });
+    for (const role of ['Spec.rule', 'spec..rule', 'spec_rule', 'spec.', '']) {
+      await expect(
+        db.nodeRoleRule.create({ data: { configId, role } }),
+      ).rejects.toThrow(/chk_node_role_rule_role_format/);
+    }
+  });
+
+  it('resolves the most-specific enabled rule and walks past a disabled row (#1322)', async () => {
+    await db.nodeRoleRule.createMany({
+      data: [
+        { id: generateId(), configId, role: 'spec', enabled: true },
+        { id: generateId(), configId, role: 'spec.rule', enabled: false },
+        { id: generateId(), configId, role: 'spec.rule.detail', enabled: true },
+      ],
+    });
+
+    expect((await resolveMemoryNodeRoleRule(db, memoryId, 'spec.rule.detail'))?.role).toBe(
+      'spec.rule.detail',
+    );
+    expect((await resolveMemoryNodeRoleRule(db, memoryId, 'spec.rule.other'))?.role).toBe('spec');
+    expect(await resolveMemoryNodeRoleRule(db, memoryId, 'special')).toBeNull();
+  });
+
   it('refuses a task reference without its required marker', async () => {
     await expect(
       db.nodeRoleRule.create({ data: { configId, role: 'spec', authorTaskId: taskId } }),
@@ -186,6 +220,16 @@ describe('#1325 — NodeRoleRule: one row per role, task references fail closed'
 });
 
 describe('#1325 — MemoryConfigTemplateRule: the same reference semantics', () => {
+  it('enforces the same dotted role-key grammar', async () => {
+    const templateId = (await db.memoryConfigTemplate.create({ data: { name: 'grammar', organizationId: org.id } })).id;
+    await expect(
+      db.memoryConfigTemplateRule.create({ data: { templateId, role: 'spec.rule-detail' } }),
+    ).resolves.toMatchObject({ role: 'spec.rule-detail' });
+    await expect(
+      db.memoryConfigTemplateRule.create({ data: { templateId, role: 'spec..rule' } }),
+    ).rejects.toThrow(/chk_memory_config_template_rule_role_format/);
+  });
+
   it('refuses either task without its marker, and both fail closed on a hard-deleted task', async () => {
     const templateId = (await db.memoryConfigTemplate.create({ data: { name: 't', organizationId: org.id } })).id;
     await expect(

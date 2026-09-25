@@ -40,6 +40,11 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   else parts.push(`node_type <> 'system'`);
   if (flt.objectType) parts.push(`object_type = ${bind(flt.objectType)}`); // #725 collection facet
   if (flt.isRunnable != null) parts.push(`is_runnable = ${bind(flt.isRunnable)}`);
+  if (flt.role != null) {
+    const exact = bind(flt.role);
+    const descendantPrefix = bind(`${flt.role}.`);
+    parts.push(`(role = ${exact} OR starts_with(role, ${descendantPrefix}))`);
+  }
   if (flt.tags && flt.tags.length) parts.push(`tags @> ARRAY[${flt.tags.map((t) => bind(t)).join(', ')}]::text[]`);
   if (flt.locPrefix) parts.push(`starts_with(loc, ${bind(flt.locPrefix)})`);
   if (flt.createdBy) parts.push(`created_by = ${bind(flt.createdBy)}`);

@@ -106,8 +106,16 @@ describe('the register — small, closed, and unequal on purpose', () => {
 
   it('leaves every UNgoverned role inert — the field is open', () => {
     expect(governedKindsOf({ role: 'weather-widget' })).toEqual([]);
+    expect(governedKindsOf({ role: 'special' })).toEqual([]);
+    expect(governedKindsOf({ role: 'specification' })).toEqual([]);
     expect(governedKindsOf({ role: null })).toEqual([]);
     expect(governedKindsOf({})).toEqual([]);
+  });
+
+  it('governs dotted descendants by the base role, on a dot boundary', () => {
+    expect(governedKindsOf({ role: 'spec.rule' }).map((k) => k.kind)).toEqual(['spec']);
+    expect(governedKindsOf({ role: 'spec.rule.detail' }).map((k) => k.kind)).toEqual(['spec']);
+    expect(governedKindsOf({ role: 'review.security' }).map((k) => k.kind)).toEqual(['review']);
   });
 
   it('matches BOTH kinds for a runnable review — governance is not exclusive', () => {
@@ -122,6 +130,12 @@ describe('the generic surface is refused, per kind', () => {
   it('refuses a create that would produce a governed node', async () => {
     expect(await genericCreate({ loc: 'a:1', name: 'n', role: 'review' })).toBe('ERR:ROLE_GOVERNED');
     expect(await genericCreate({ loc: 'a:2', name: 'n', role: 'spec' })).toBe('ERR:ROLE_GOVERNED');
+    expect(await genericCreate({ loc: 'a:2:rule', name: 'n', role: 'spec.rule' })).toBe(
+      'ERR:ROLE_GOVERNED',
+    );
+    expect(await genericCreate({ loc: 'a:2:detail', name: 'n', role: 'spec.rule.detail' })).toBe(
+      'ERR:ROLE_GOVERNED',
+    );
     expect(await genericCreate({ loc: 'a:3', name: 'n', isRunnable: true })).toBe(
       'ERR:ROLE_GOVERNED',
     );
@@ -181,12 +195,34 @@ describe('the generic surface is refused, per kind', () => {
 describe('the doors', () => {
   it('each writes its own kind where the generic surface is refused', async () => {
     expect(await door('createSpecNode', { loc: 'e:1', name: 'n', role: 'spec' })).toBe('OK');
+    expect(await door('createSpecNode', { loc: 'e:1:rule', name: 'n', role: 'spec.rule' })).toBe('OK');
+    expect(await door('createSpecNode', { loc: 'e:1:detail', name: 'n', role: 'spec.rule.detail' })).toBe('OK');
     expect(await door('createReviewNode', { loc: 'e:2', name: 'n', role: 'review' })).toBe('OK');
     expect(await door('createTaskNode', { loc: 'e:3', name: 'n', isRunnable: true })).toBe('OK');
 
     expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'e:1' } })).role).toBe('spec');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'e:1:rule' } })).role).toBe('spec.rule');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'e:1:detail' } })).role).toBe('spec.rule.detail');
     expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'e:3' } })).isRunnable).toBe(
       true,
+    );
+  });
+
+  it('the owning door can move within its dotted family; generic edits still cannot', async () => {
+    expect(await door('createSpecNode', { loc: 'e:4', name: 'n', role: 'spec.rule' })).toBe('OK');
+    expect(await genericUpdate({ memoryId, loc: 'e:4', content: 'generic edit' })).toBe(
+      'ERR:ROLE_GOVERNED',
+    );
+    expect(
+      await door('updateSpecNode', {
+        memoryId,
+        loc: 'e:4',
+        role: 'spec.rule.detail',
+        content: 'door edit',
+      }),
+    ).toBe('OK');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'e:4' } })).role).toBe(
+      'spec.rule.detail',
     );
   });
 
