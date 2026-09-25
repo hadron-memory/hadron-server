@@ -83,6 +83,7 @@ export function render(
   source: string,
   description: string,
   content: string,
+  revision?: number,
 ): string {
   // BOTH: the charset a one-line comment can carry, AND the shape the parser
   // will accept back (@copilot round 4). Charset alone still let `render` write
@@ -125,11 +126,15 @@ export function render(
   // about the line staying parseable; the hash rule is about the two
   // implementations having one shape to agree on.
   const idKey = id === '' ? '' : `id=${id} `;
+  if (revision !== undefined && (!Number.isInteger(revision) || revision < 1)) {
+    throw new SkillRenderError(`skill revision must be a positive integer: ${revision}`);
+  }
+  const revisionKey = revision === undefined ? '' : `rev=${revision} `;
   return (
     '---\n' +
     fm +
     '\n---\n\n' +
-    `<!-- hadron-skill ${idKey}source=${source} hash=${h} -->\n` +
+    `<!-- hadron-skill ${idKey}${revisionKey}source=${source} hash=${h} -->\n` +
     HUMAN_LINE +
     '\n\n' +
     c +

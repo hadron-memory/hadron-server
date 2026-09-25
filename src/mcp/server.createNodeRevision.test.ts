@@ -7,10 +7,10 @@
  * history, while every sibling write surface snapshots the pre-edit state:
  * hadron_update_node, hadron_replace_text / hadron_update_node_data (via the
  * GraphQL resolver), hadron_move_node, and writeNodeCore's own `if (existing)`
- * branch. The tell in production was `Node.revSeq = 0` on a node with a
+ * branch. The tell in production was a node still at its creation revision on a node with a
  * post-creation write in usage_events — revSeq is bumped inside the same tx as
  * each revision insert (#696), so a pruned or cleared history would still leave
- * it > 0.
+ * it above its creation value.
  *
  * WHAT #1181 CHANGED, and why most of this file moved: hadron_create_node no
  * longer overwrites a LIVE loc at all — it refuses, matching the GraphQL
@@ -132,7 +132,7 @@ describe('hadron_create_node over an existing loc — revision history (#976/#11
     // editedBy is the user PK; the #696 counter agrees with the revision.
     expect(rev.editedBy).toBe(fx.admin.id);
     const after = await db.node.findUnique({ where: { id: node.id } });
-    expect(after?.revSeq).toBe(1);
+    expect(after?.revSeq).toBe(2);
     expect(after?.content).toBe('Corrected content');
   });
 
@@ -194,7 +194,7 @@ describe('hadron_create_node over an existing loc — revision history (#976/#11
     });
     expect(created).not.toBeNull();
     expect(await db.nodeRevision.count({ where: { nodeId: created!.id } })).toBe(0);
-    expect(created?.revSeq).toBe(0);
+    expect(created?.revSeq).toBe(1);
   });
 
   it('resurrecting a soft-deleted node still snapshots it (#543 path)', async () => {
@@ -276,7 +276,7 @@ describe('hadron_create_node over an existing loc — revision history (#976/#11
     // The winner's content stands, untouched, and no revision was cut because
     // nothing was ever overwritten.
     expect(['content from A', 'content from B']).toContain(rows[0].content);
-    expect(rows[0].revSeq).toBe(0);
+    expect(rows[0].revSeq).toBe(1);
     expect(await db.nodeRevision.count({ where: { nodeId: rows[0].id } })).toBe(0);
   });
 
@@ -318,5 +318,34 @@ describe('hadron_create_node over an existing loc — revision history (#976/#11
       changes: [...r.changes].sort(),
     });
     expect(comparable(createRev)).toEqual(comparable(updateRev));
+  });
+
+  it('rolls back both the revision claim and visible MCP update when snapshot insertion fails', async () => {
+    const node = await seedNode('ops:rollback');
+    // Occupy r1 so the update's predecessor snapshot collides after revSeq is
+    // advanced inside the transaction. This forces a failure at the exact seam
+    // that used to run outside the visible update and swallow its error.
+    await db.nodeRevision.create({
+      data: {
+        id: generateId(),
+        nodeId: node.id,
+        memoryId: fx.memory.id,
+        loc: node.loc,
+        name: 'occupied r1',
+        revNo: 1,
+      },
+    });
+
+    await expect(
+      createTestableMcpServer(adminAuth()).callToolText('hadron_update_node', {
+        urn: `hrn:node:${fx.memory.urn}:${node.loc}`,
+        content: 'must not land',
+      }),
+    ).rejects.toThrow();
+
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.content).toBe('Original content');
+    expect(after.revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
   });
 });

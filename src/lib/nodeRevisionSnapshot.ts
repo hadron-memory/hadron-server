@@ -19,6 +19,8 @@
 
 import { Prisma } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { createHash } from 'crypto';
+import { generateId } from './id.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -140,6 +142,65 @@ export function buildNodeRevisionSnapshot(
 export const DEFAULT_MAX_REV_COUNT = 10;
 
 /**
+ * #1323 — internal fingerprint of the exact AT-REST content column.
+ *
+ * This is intentionally not Node.contentHash (external-producer provenance),
+ * not the skill artifact hash, and not a hash of included partials. PostgreSQL
+ * backfills the same `md5(COALESCE(content, ''))` expression in the migration.
+ */
+export function computeRevisionContentHash(content: string | null | undefined): string {
+  return createHash('md5').update(content ?? '', 'utf8').digest('hex');
+}
+
+/**
+ * #1323 — reconcile a content write that bypassed every revisioned authoring
+ * seam before exposing the node's current revision.
+ *
+ * The row lock makes the comparison, snapshot, counter advance and baseline
+ * update one serialization point. A NULL hash is a compatibility baseline
+ * (old/unbackfilled row), not proof of an off-road edit; it is initialized
+ * without inventing history. A mismatch takes a server-authored revision of
+ * the state we can actually observe — the prior bytes are unrecoverable.
+ */
+export async function ensureCurrentNodeRevision(
+  db: Pick<PrismaClient, '$transaction'>,
+  nodeId: string,
+): Promise<number> {
+  return db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${nodeId} FOR UPDATE`;
+    const node = await tx.node.findUnique({ where: { id: nodeId } });
+    if (!node) throw new Error(`Node not found while reconciling revision: ${nodeId}`);
+
+    const actual = computeRevisionContentHash(node.content);
+    if (node.revisionContentHash === actual) return node.revSeq;
+    if (node.revisionContentHash == null) {
+      await tx.node.update({
+        where: { id: node.id },
+        data: { revisionContentHash: actual },
+      });
+      return node.revSeq;
+    }
+
+    await createNodeRevision(
+      tx,
+      buildNodeRevisionSnapshot(
+        node,
+        { userId: null, info: 'system:revision-reconcile' },
+        {
+          revLabel: 'Reconciled content changed outside a revisioned writer (#1323)',
+          changes: ['content'],
+        },
+      ),
+    );
+    await tx.node.update({
+      where: { id: node.id },
+      data: { revisionContentHash: actual },
+    });
+    return node.revSeq + 1;
+  });
+}
+
+/**
  * Create a NodeRevision and prune the node's history to `Memory.maxRevCount`
  * (#621). Every revision-write site goes through here (not a bare
  * `nodeRevision.create`) so the cap is enforced in ONE place. After the insert,
@@ -154,11 +215,11 @@ export async function createNodeRevision(
   db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node'>,
   data: Prisma.NodeRevisionUncheckedCreateInput,
 ): Promise<void> {
-  // #696: mint the per-node MONOTONIC revNo race-safely — an atomic increment of
-  // Node.revSeq (the QuotaCounter pattern), so concurrent revisions of the same
-  // node get distinct, gap-free numbers (the (nodeId, revNo) unique is the DB
-  // backstop). This runs inside the caller's tx alongside the insert. Skip when
-  // a caller already supplied a number (none do today).
+  // #696/#1323: Node.revSeq names the LIVE state. Snapshot the pre-edit state
+  // at its current number, then atomically advance the live row. The increment
+  // remains the race-safe allocator; subtracting one from the returned value
+  // gives the snapshot number. Skip when a guarded caller already claimed and
+  // supplied the pre-edit number.
   let revNo = data.revNo ?? null;
   if (revNo == null) {
     const bumped = await db.node.update({
@@ -166,7 +227,7 @@ export async function createNodeRevision(
       data: { revSeq: { increment: 1 } },
       select: { revSeq: true },
     });
-    revNo = bumped.revSeq;
+    revNo = bumped.revSeq - 1;
   }
   await db.nodeRevision.create({ data: { ...data, revNo } });
 

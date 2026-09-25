@@ -945,6 +945,8 @@ export const typeDefs = `#graphql
     headerHash: String
     """The hash the client computed over the file itself."""
     fileHash: String
+    "The positive rev=N value from provenance. Null means an older artifact omitted it."
+    revision: Int
     """True when the file exists and could not be parsed."""
     parseFailed: Boolean
     """True when the file carries frontmatter keys the renderer never writes."""
@@ -1007,6 +1009,8 @@ export const typeDefs = `#graphql
   type SkillPlanEntry {
     urn: String!
     nodeId: String!
+    "Authoritative current node revision used in rendered provenance."
+    revision: Int!
     """The stored skill name (D12 retired derivation)."""
     name: String!
     """
@@ -1126,6 +1130,8 @@ export const typeDefs = `#graphql
 
   type Node {
     id: ID!
+    "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
+    revision: Int!
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -6762,8 +6768,9 @@ export const typeDefs = `#graphql
     every NodeRevision NEWER than the selected one (createdAt strictly greater),
     WITHOUT creating a pre-restore snapshot. Boundary is EXCLUSIVE of the
     selected row: the selected revision is KEPT and becomes the new baseline
-    (the most-recent snapshot afterward); its era and older survive. Restore +
-    truncate run in one transaction (atomic).
+    (the most-recent snapshot afterward); its era and older survive. The live
+    revision counter still advances monotonically for the restore itself.
+    Restore + truncate run in one transaction (atomic).
     """
     restoreNodeRevision(revisionId: ID!, truncate: Boolean = false): Node!
 

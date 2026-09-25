@@ -23,6 +23,7 @@ import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
+  computeRevisionContentHash,
   editorFromAuth,
   diffNodeChanges,
   restorableNodeFields,
@@ -663,40 +664,6 @@ export async function writeNodeCore(
         input.properties !== undefined ? input.properties : existing?.properties,
       );
 
-      // #989 — the guarded revNo claim, the FIRST node write of a guarded
-      // update: an atomic increment conditioned on revSeq still holding the
-      // caller's anchor. Count 0 ⇒ a revisioned write (any surface) landed
-      // since the caller read the node ⇒ typed refusal, before any
-      // side effect. The claimed number is handed to createNodeRevision so
-      // it skips its own (unconditional) bump, and the main update below is
-      // then guarded on the claimed value — so an interleaver in the
-      // claim-to-write window is caught there.
-      let claimedRevNo: number | undefined;
-      if (mode === 'update' && opts?.guardRevSeq !== undefined && existing) {
-        claimedRevNo = opts.guardRevSeq + 1;
-        // Inline edge writes claim inside the same endpoint-locked transaction
-        // as the source mutation and edge replacement. Otherwise a vanished
-        // target could roll back the visible edit while leaving revSeq bumped.
-        if (resolvedEdges === null) {
-          const claimed = await ctx.db.node.updateMany({
-            where: { id: existing.id, revSeq: opts.guardRevSeq },
-            data: { revSeq: { increment: 1 } },
-          });
-          if (claimed.count === 0) {
-            throw new GraphQLError(
-              `Node at loc "${input.loc}" changed since it was read — re-read and retry.`,
-              {
-                extensions: {
-                  code: 'NODE_WRITE_CONFLICT',
-                  loc: input.loc,
-                  memoryId: input.memoryId,
-                },
-              },
-            );
-          }
-        }
-      }
-
       // The fields this write will change, in the shape diffNodeChanges wants.
       // Hoisted out of the snapshot block below because the create/upsert path
       // now snapshots inside its own transaction and needs the same value.
@@ -705,38 +672,6 @@ export async function writeNodeCore(
       const suppliedForDiff: Record<string, unknown> = { ...input };
       if (input.tags !== undefined) {
         suppliedForDiff.tags = serializeTags(input.tags ?? []);
-      }
-
-      // Snapshot the PRE-edit state (#620: shared builder — editedBy holds
-      // the user PK, the #88 `reason` rationale lands in revLabel, and
-      // `changes` records which fields this update is about to modify).
-      //
-      // #1183 — UPDATE MODES ONLY. This runs before the transaction and off the
-      // stale `existing` probe, which is safe enough here because an update's
-      // target is required to exist and its own gate already refused a missing
-      // one. It is NOT safe for create/upsert, where `existing` may be null
-      // while a row is committed moments later: the overwrite would then be
-      // recorded nowhere. That path therefore takes its own snapshot inside its
-      // transaction, from the row it actually observes under the loc lock —
-      // the #977 pattern, which fixed this exact shape for the MCP surface and
-      // was never applied here.
-      //
-      // The remaining pre-transaction snapshot on the update path has its own
-      // smaller defect (a failed write can leave an orphan revision, since the
-      // snapshot does not commit with it). Out of scope here and filed
-      // separately rather than restructured inside a concurrency fix.
-      const updateRevisionData = existing && mode === 'update'
-        ? {
-          ...buildNodeRevisionSnapshot(existing, editorFromAuth(ctx), {
-            revLabel: input.reason,
-            changes: diffNodeChanges(existing, suppliedForDiff),
-          }),
-          // #989: a guarded update already claimed its number atomically.
-          ...(claimedRevNo !== undefined ? { revNo: claimedRevNo } : {}),
-        }
-        : null;
-      if (updateRevisionData && resolvedEdges === null) {
-        await createNodeRevision(ctx.db, updateRevisionData);
       }
 
       // Tags partial-update semantics (hadron-cli#37). A create always
@@ -1021,17 +956,16 @@ export async function writeNodeCore(
 
       async function assertTargetStillWritable(
         tx: Pick<Prisma.TransactionClient, 'node'>,
-      ): Promise<void> {
+      ) {
         const current = await tx.node.findUnique({
           where: opts?.targetNodeId
             ? { id: opts.targetNodeId }
             : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-          select: { memoryId: true, loc: true, deletedAt: true, role: true, isRunnable: true },
         });
         // A row that vanished entirely is left to the write below, which maps
         // Prisma's P2025 to the typed NODE_NOT_FOUND. Refusing here would swap
         // one typed error for an identical one.
-        if (!current) return;
+        if (!current) return null;
 
         // #1201 governed state, RE-CHECKED under the lock (@codex P2, PR #1203).
         // The gate far above decides from an UNLOCKED read, so a kind door
@@ -1070,7 +1004,7 @@ export async function writeNodeCore(
           );
         }
 
-        if (current.memoryId === input.memoryId && current.loc === input.loc) return;
+        if (current.memoryId === input.memoryId && current.loc === input.loc) return current;
         // NODE_WRITE_CONFLICT rather than a new code: "the target changed since
         // it was read, re-read and retry" is exactly what that code already
         // says on the revSeq compare-and-swap next door.
@@ -1089,77 +1023,76 @@ export async function writeNodeCore(
       } as Prisma.NodeUncheckedUpdateInput;
       let node;
       try {
-        if (mode === 'update' && claimedRevNo !== undefined) {
-          // #989 — the write half of the compare-and-swap: guarded on the
-          // revSeq value the claim above just installed, so a revisioned
-          // write interleaving between claim and write is caught here
-          // (its own claim bumps revSeq past ours). This is what makes a
-          // caller-level precondition hold against writers that do NOT share
-          // the caller's lock (#1050 retired the first such caller,
-          // updateTeamRole's expectedNames; the primitive is unchanged) — the
-          // generic node surfaces write this row unguarded, so an
-          // application-level compare alone has a TOCTOU window between it
-          // and this write. updateMany because a unique `where` can't carry
-          // the extra predicate; the row is then re-read for the include
-          // shape.
-          // The ADDRESS and LIVENESS travel in the write's own predicate, not
-          // only in the re-check above it (@copilot, PR #1198). A check inside
-          // this transaction is not atomic with the statement after it: a
-          // relocation that does NOT take our lock — `mergeMemoryGraph` moves
-          // rows with a bulk `updateMany` on memoryId, taking none — can commit
-          // in between, and the write would land at the new address with
-          // authorization, schema and `owns` all decided for the old one.
-          // Carrying the predicate here closes that window instead of narrowing
-          // it; the re-check survives because it produces the accurate typed
-          // error, while this produces the correctness.
-          const guardWhere: Prisma.NodeWhereInput = opts?.targetNodeId
-            ? {
-                id: opts.targetNodeId,
-                revSeq: claimedRevNo,
-                memoryId: input.memoryId,
-                loc: input.loc,
-                deletedAt: null,
-              }
-            : {
-                loc: input.loc,
-                memoryId: input.memoryId,
-                revSeq: claimedRevNo,
-                deletedAt: null,
-              };
-          // Spec 049 S4: the write holds the address lock, and the
-          // protected-loc gate runs under it — the early check above is the
-          // fast typed refusal, this is the authoritative one (a Channel can
-          // be created, or the node moved under one, in between; Copilot on
-          // PR #1165).
-          const guarded = await ctx.db.$transaction(async (tx) => {
+        if (mode === 'update') {
+          // #1072/#1185/#1323 — ONE transaction owns the authoritative
+          // pre-state, optional OCC claim, snapshot, visible update and inline
+          // edges. A refusal or rollback therefore leaves neither a consumed
+          // revision nor an orphan snapshot, and concurrent supported writers
+          // serialize before their snapshot is built.
+          const result = await ctx.db.$transaction(async (tx) => {
             await lockInlineEdgeMemories(tx);
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
-              op: mode === 'update' ? 'update' : 'create',
+              op: 'update',
             });
-            await assertTargetStillWritable(tx);
-            if (resolvedEdges !== null) {
+            const current = await assertTargetStillWritable(tx);
+            if (!current) return { conflict: false, node: null };
+
+            const changes = diffNodeChanges(current, suppliedForDiff);
+            const hashMismatch =
+              current.revisionContentHash !== computeRevisionContentHash(current.content);
+            const needsRevision = resolvedEdges !== null || changes.length > 0 || hashMismatch;
+            if (!needsRevision) {
+              const unchanged = await tx.node.findUniqueOrThrow({
+                where: { id: current.id },
+                include,
+              });
+              return { conflict: false, node: unchanged };
+            }
+
+            // A guarded claim happens only after the no-op decision and inside
+            // this transaction. Since revSeq names the CURRENT state, the
+            // snapshot uses the anchor and the live row advances to anchor+1.
+            if (opts?.guardRevSeq !== undefined) {
               const claimed = await tx.node.updateMany({
-                where: { id: existing!.id, revSeq: opts!.guardRevSeq },
+                where: { id: current.id, revSeq: opts.guardRevSeq },
                 data: { revSeq: { increment: 1 } },
               });
-              if (claimed.count === 0) return { count: 0, node: null };
-              await createNodeRevision(tx, updateRevisionData!);
+              if (claimed.count === 0) return { conflict: true, node: null };
             }
-            const result = await tx.node.updateMany({
-              where: guardWhere,
-              data: updatePayload as Prisma.NodeUncheckedUpdateManyInput,
+
+            await createNodeRevision(tx, {
+              ...buildNodeRevisionSnapshot(current, editorFromAuth(ctx), {
+                revLabel: input.reason,
+                changes,
+              }),
+              ...(opts?.guardRevSeq !== undefined ? { revNo: opts.guardRevSeq } : {}),
             });
-            if (result.count === 0) return { count: 0, node: null };
-            const updated = await tx.node.findUniqueOrThrow({
-              where: opts?.targetNodeId
-                ? { id: opts.targetNodeId }
-                : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
-              include,
-            });
-            return { count: result.count, node: await replaceInlineEdges(tx, updated) };
+
+            const postContent =
+              Object.prototype.hasOwnProperty.call(updatePayload, 'content')
+                ? (updatePayload.content as string | null | undefined)
+                : current.content;
+            const data = {
+              ...updatePayload,
+              revisionContentHash: computeRevisionContentHash(postContent),
+            } as Prisma.NodeUncheckedUpdateInput;
+
+            const where = opts?.targetNodeId
+              ? {
+                  id: opts.targetNodeId,
+                  memoryId: input.memoryId,
+                  loc: input.loc,
+                  deletedAt: null,
+                }
+              : {
+                  loc_memoryId: { loc: input.loc, memoryId: input.memoryId },
+                  deletedAt: null,
+                };
+            const updated = await tx.node.update({ where, data, include });
+            return { conflict: false, node: await replaceInlineEdges(tx, updated) };
           });
-          if (guarded.count === 0) {
+          if (result.conflict) {
             throw new GraphQLError(
               `Node at loc "${input.loc}" changed since it was read — re-read and retry.`,
               {
@@ -1171,42 +1104,13 @@ export async function writeNodeCore(
               },
             );
           }
-          node = guarded.node!;
-        } else if (mode === 'update') {
-          // Same lock-then-gate discipline as the guarded branch above, and the
-          // same reason for the extra `where` terms: the re-check is not atomic
-          // with this statement against a relocator that takes no lock, so the
-          // address and liveness ride in the write's own predicate. Prisma's
-          // extended-where-unique (5.0+) is what lets a unique `update` carry
-          // them; a no-match raises P2025, which the catch below maps to the
-          // typed NODE_NOT_FOUND.
-          node = await ctx.db.$transaction(async (tx) => {
-            await lockInlineEdgeMemories(tx);
-            await lockLocForWrite(tx, input.memoryId, input.loc, {
-              owns: opts?.owns,
-              op: mode === 'update' ? 'update' : 'create',
-            });
-            await assertTargetStillWritable(tx);
-            if (updateRevisionData && resolvedEdges !== null) {
-              await createNodeRevision(tx, updateRevisionData);
-            }
-            const updated = await tx.node.update({
-              where: opts?.targetNodeId
-                ? {
-                    id: opts.targetNodeId,
-                    memoryId: input.memoryId,
-                    loc: input.loc,
-                    deletedAt: null,
-                  }
-                : {
-                    loc_memoryId: { loc: input.loc, memoryId: input.memoryId },
-                    deletedAt: null,
-                  },
-              data: updatePayload,
-              include,
-            });
-            return replaceInlineEdges(tx, updated);
-          });
+          if (!result.node) {
+            throw new GraphQLError(
+              `Node not found at loc "${input.loc}" in memory "${input.memoryId}".`,
+              { extensions: { code: 'NODE_NOT_FOUND', loc: input.loc, memoryId: input.memoryId } },
+            );
+          }
+          node = result.node;
         } else {
           // Create/upsert. A new node placed into a subtree must be serialized
           // against a concurrent ancestor-delete's descendant count, or the
@@ -1234,6 +1138,9 @@ export async function writeNodeCore(
               tags,
               createdBy,
               ...hashPayload,
+              revisionContentHash: computeRevisionContentHash(
+                (nodeFieldsClean as { content?: string | null }).content,
+              ),
               ...(seqForCreate != null ? { seq: seqForCreate } : {}),
             } as Prisma.NodeUncheckedCreateInput,
             update: updatePayload,
@@ -1343,6 +1250,11 @@ export async function writeNodeCore(
               ...upsertArgs,
               update: {
                 ...upsertArgs.update,
+                revisionContentHash: computeRevisionContentHash(
+                  Object.prototype.hasOwnProperty.call(upsertArgs.update, 'content')
+                    ? (upsertArgs.update.content as string | null | undefined)
+                    : authoritative?.content,
+                ),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted
                 // node merely by writing to its loc — a behaviour change this
@@ -2303,6 +2215,11 @@ export const nodeMutations = {
           if (p.abstractChanged) {
             data.abstractOriginHash = computeContentHash(p.plaintext.content);
           }
+          data.revisionContentHash = computeRevisionContentHash(
+            Object.prototype.hasOwnProperty.call(data, 'content')
+              ? (data.content as string | null | undefined)
+              : raw.content,
+          );
 
           await tx.node.update({ where: { id: raw.id }, data });
         }
@@ -3322,6 +3239,11 @@ export const nodeMutations = {
       if (abstractChanged) {
         writeData.abstractOriginHash = computeContentHash(postMergeContent);
       }
+      writeData.revisionContentHash = computeRevisionContentHash(
+        Object.prototype.hasOwnProperty.call(writeData, 'content')
+          ? (writeData.content as string | null | undefined)
+          : target.content,
+      );
       writeData.updatedBy = ctx.userId ?? ctx.clientId ?? null;
 
       // #725/#737 — the merged target must still satisfy its collection's schema.
@@ -3790,8 +3712,15 @@ export const nodeMutations = {
           // #617 truncate: collapse the history so the selected revision becomes
           // the new baseline. Delete every snapshot NEWER than the selected one
           // (createdAt strictly greater — EXCLUSIVE of the selected row, which
-          // is kept), and skip the pre-restore snapshot. Ties on createdAt are
-          // kept (never deletes the selected row); an over-keep is safe.
+          // is kept). #1323: the restore is still an authoring write, so advance
+          // the live monotonic counter inside this transaction even though the
+          // caller explicitly asked not to retain a pre-restore undo snapshot.
+          // Missing NodeRevision rows are valid after pruning/truncation; the
+          // live revision must never move backwards or stay unchanged.
+          await tx.node.update({
+            where: { id: node.id },
+            data: { revSeq: { increment: 1 } },
+          });
           await tx.nodeRevision.deleteMany({
             where: { nodeId: node.id, createdAt: { gt: revision.createdAt } },
           });
@@ -3830,6 +3759,11 @@ export const nodeMutations = {
         if ('data' in writeData) {
           writeData.data = jsonOrDbNull(writeData.data as never);
         }
+        writeData.revisionContentHash = computeRevisionContentHash(
+          Object.prototype.hasOwnProperty.call(writeData, 'content')
+            ? (writeData.content as string | null | undefined)
+            : node.content,
+        );
         return tx.node.update({
           where: { id: node.id },
           data: writeData,

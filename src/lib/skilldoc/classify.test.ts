@@ -29,6 +29,7 @@ const node = (over: Partial<NodeFacts> = {}): NodeFacts => ({
   loc: 'tasks:x',
   declaration: decl(),
   nodeHash: 'aaaaaaaaaaaaaaaa',
+  revision: 4,
   ...over,
 });
 
@@ -36,6 +37,7 @@ const file = (over: Partial<FileFacts> = {}): FileFacts => ({
   dirName: 'my-skill',
   headerHash: 'aaaaaaaaaaaaaaaa',
   fileHash: 'aaaaaaaaaaaaaaaa',
+  headerRevision: 4,
   ...over,
 });
 
@@ -46,6 +48,14 @@ describe('each class, produced in isolation', () => {
 
   it('stale — the node moved on, the file still matches its own header', () => {
     expect(classifySkill(node({ nodeHash: 'bbbbbbbbbbbbbbbb' }), file()).class).toBe('stale');
+  });
+
+  it('stale — provenance names an older node revision even when hashes agree', () => {
+    expect(classifySkill(node(), file({ headerRevision: 3 })).class).toBe('stale');
+  });
+
+  it('current — an older artifact without rev remains hash-compatible', () => {
+    expect(classifySkill(node(), file({ headerRevision: undefined })).class).toBe('current');
   });
 
   it('locally-edited — the file no longer matches its own header', () => {

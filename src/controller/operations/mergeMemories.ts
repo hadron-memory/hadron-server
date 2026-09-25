@@ -4,6 +4,7 @@ import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
+  computeRevisionContentHash,
   createNodeRevision,
   type SnapshotEditor,
 } from '../../lib/nodeRevisionSnapshot.js';
@@ -36,11 +37,11 @@ import type { MemorySchema } from '../../lib/memorySchema.js';
  *
  * The work splits into three phases, each safe to commit on its own:
  *
- *   1. **Classify + relocate** — keyset-page the source nodes (id+loc
- *      projection only) against the target by loc. Colliding nodes (the small
- *      set) are recorded for Phase 2; the rest RELOCATE in a bulk `updateMany`
- *      per page. Ids are preserved, so inbound edges keep resolving, and every
- *      SQL id/loc list stays bounded by the page size (no unbounded `notIn`).
+ *   1. **Classify + relocate** — keyset-page source addresses against the
+ *      target by loc. Colliding nodes (the small set) are recorded for Phase 2;
+ *      the rest RELOCATE in bounded transactions, snapshotting each pre-move
+ *      state. Ids are preserved, so inbound edges keep resolving, and every SQL
+ *      id/loc list stays bounded by the page size (no unbounded `notIn`).
  *   2. **Fold** — fold colliding nodes in batches; per node: snapshot the
  *      target counterpart (`NodeRevision`), merge the selected fields,
  *      recompute `abstractOriginHash`, repoint/transfer its incident edges
@@ -180,10 +181,10 @@ export async function mergeMemoryGraph(
   await assertMemoryBulkMutable(db, targetMemoryId, 'merge into');
 
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
-  // Page the live source nodes by id (id+loc projection only — never the full
-  // rows) and match each page against the target by loc. A source node whose
+  // Page the live source node addresses by id and match each page against the
+  // target by loc. A source node whose
   // loc already exists in the target FOLDS into that counterpart (Phase 2 below);
-  // the rest RELOCATE here, one bulk `updateMany` per page. Folding and
+  // the rest RELOCATE here in revisioned batches. Folding and
   // relocating in the same scan means the colliding set is the ONLY id list
   // we hold in memory, and every SQL `IN (...)`/`updateMany` list is bounded
   // by the page size — a giant source memory never builds an unbounded
@@ -235,18 +236,27 @@ export async function mergeMemoryGraph(
       // can hold the Channel-memory locks across the check and the write. It
       // was a bare `updateMany` before, which left nothing for the gate to be
       // authoritative inside.
-      const relocate = await db.$transaction(async (tx) => {
-        const rows = await tx.node.findMany({
-          where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
-          select: { loc: true, role: true, isRunnable: true },
-        });
-        await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
-        return tx.node.updateMany({
-          where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
-          data: { memoryId: targetMemoryId },
-        });
-      });
-      relocatedCount += relocate.count;
+      for (let i = 0; i < relocateIds.length; i += batchSize) {
+        const ids = relocateIds.slice(i, i + batchSize);
+        const moved = await db.$transaction(async (tx) => {
+          const rows = await tx.node.findMany({
+            where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
+          });
+          await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          for (const row of rows) {
+            await createNodeRevision(
+              tx,
+              buildNodeRevisionSnapshot(row, editor, { changes: ['memoryId'] }),
+            );
+            await tx.node.update({
+              where: { id: row.id },
+              data: { memoryId: targetMemoryId, updatedBy: actorId },
+            });
+          }
+          return rows.length;
+        }, BATCH_TX_OPTS);
+        relocatedCount += moved;
+      }
     }
     if (page.length < classifyPage) break;
   }
@@ -329,6 +339,11 @@ export async function mergeMemoryGraph(
               merged.contentChanged ? (merged.changed.content as string | null) : tgt.content,
             );
           }
+          writeData.revisionContentHash = computeRevisionContentHash(
+            Object.prototype.hasOwnProperty.call(writeData, 'content')
+              ? (writeData.content as string | null | undefined)
+              : tgt.content,
+          );
           await tx.node.update({ where: { id: tgt.id }, data: writeData });
         }
         foldedIds.push(src.id);

@@ -3,7 +3,10 @@ import { generateId } from '../../../lib/id.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
-import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
+import {
+  computeRevisionContentHash,
+  editorFromAuth,
+} from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import {
   assertMemoryVisibilityChangeAllowed,
@@ -1845,6 +1848,7 @@ export const memoryMutations = {
               where: { id: node.id },
               data: {
                 content: encrypted.content ?? null,
+                revisionContentHash: computeRevisionContentHash(encrypted.content),
                 abstract: encrypted.abstract ?? null,
                 data: (encrypted.data ?? null) as InputJsonValue,
               },
@@ -2032,6 +2036,7 @@ export const memoryMutations = {
               where: { id: node.id },
               data: {
                 content: encrypted.content ?? null,
+                revisionContentHash: computeRevisionContentHash(encrypted.content),
                 abstract: encrypted.abstract ?? null,
                 data: (encrypted.data ?? null) as InputJsonValue,
               },
@@ -2361,4 +2366,3 @@ export const memoryMutations = {
     // 008-agent-installation: AgentImport bundling. Per spec FR-005 +
     // contracts/agent-app-graphql.md "publishAgentImport".
 };
-

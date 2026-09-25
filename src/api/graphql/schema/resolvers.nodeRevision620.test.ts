@@ -124,6 +124,44 @@ describe('updateNode snapshot capture (#620)', () => {
   });
 });
 
+describe('#1323 current revision contract', () => {
+  it('starts at 1, exposes the live revision, and snapshots the predecessor', async () => {
+    const n = await makeNode('revision-contract', { content: 'v1' });
+    expect(await resolvers.Node.revision(n as never, {}, ctx())).toBe(1);
+
+    const updated = await resolvers.Mutation.updateNode(
+      {},
+      { input: { id: n.id, content: 'v2' } } as never,
+      ctx(),
+    );
+    expect(await resolvers.Node.revision(updated as never, {}, ctx())).toBe(2);
+    const [snapshot] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
+    expect(snapshot).toMatchObject({ revNo: 1, content: 'v1' });
+  });
+
+  it('serializes concurrent writes into unique predecessor snapshots', async () => {
+    const n = await makeNode('revision-race', { content: 'v1' });
+    await resolvers.Node.revision(n as never, {}, ctx());
+
+    await Promise.all([
+      resolvers.Mutation.updateNode({}, { input: { id: n.id, content: 'v2-a' } } as never, ctx()),
+      resolvers.Mutation.updateNode({}, { input: { id: n.id, content: 'v2-b' } } as never, ctx()),
+    ]);
+
+    const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    const snapshots = await db.nodeRevision.findMany({
+      where: { nodeId: n.id },
+      orderBy: { revNo: 'asc' },
+    });
+    expect(live.revSeq).toBe(3);
+    expect(snapshots.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(snapshots[0].content).toBe('v1');
+    expect(['v2-a', 'v2-b']).toContain(snapshots[1].content);
+    expect(['v2-a', 'v2-b']).toContain(live.content);
+    expect(live.content).not.toBe(snapshots[1].content);
+  });
+});
+
 describe('restoreNodeRevision round-trip (#620)', () => {
   it('restores the new curated fields verbatim', async () => {
     const n = await makeNode('rt', {

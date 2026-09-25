@@ -66,6 +66,8 @@ export interface FileFacts {
   headerId?: string;
   /** The `source=` URN from the header. */
   headerSource?: string;
+  /** `rev=` from provenance; null means an older generated header omitted it. */
+  headerRevision?: number | null;
   /** True when the file exists and could not be parsed — see the header. */
   parseFailed?: boolean;
   /** Frontmatter keys `render` never writes; their presence IS a hand edit. */
@@ -88,6 +90,8 @@ export interface NodeFacts {
   declaration: Declaration | null;
   /** The hash of the node as it would be rendered. */
   nodeHash: string;
+  /** Current authoritative node revision. */
+  revision?: number;
   /** True when the node was listed but could not be read (§5's `unavailable`). */
   unavailable?: boolean;
   /** True when another declared node stores the same skill name. */
@@ -167,7 +171,10 @@ export function classifySkill(node: NodeFacts, file: FileFacts | null): Classifi
     return { urn, class: 'renamed', movedFrom: file.dirName };
   }
 
-  if (node.nodeHash !== file.headerHash) return { urn, class: 'stale' };
+  if (
+    node.nodeHash !== file.headerHash ||
+    (file.headerRevision !== undefined && file.headerRevision !== node.revision)
+  ) return { urn, class: 'stale' };
   return { urn, class: 'current' };
 }
 

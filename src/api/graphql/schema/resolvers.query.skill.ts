@@ -48,6 +48,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { isCiphertext } from '../../../lib/crypto.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
+import { ensureCurrentNodeRevision } from '../../../lib/nodeRevisionSnapshot.js';
 import {
   classifyDeclaration,
   classifySkill,
@@ -84,6 +85,7 @@ export interface SkillFileFactsInput {
   sourceUrn?: string | null;
   headerHash?: string | null;
   fileHash?: string | null;
+  revision?: number | null;
   parseFailed?: boolean | null;
   hasExtraFrontmatter?: boolean | null;
 }
@@ -533,6 +535,7 @@ export const skillQueries = {
         properties: true,
         memoryId: true,
         memory: { select: { urn: true } },
+        revSeq: true,
       },
       take: SKILL_PLAN_MAX_NODES + 1,
       orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
@@ -542,6 +545,9 @@ export const skillQueries = {
         `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
+    }
+    for (const row of declaredRows) {
+      row.revSeq = await ensureCurrentNodeRevision(ctx.db, row.id);
     }
     await decryptNodesBatch(ctx.db, declaredRows);
 
@@ -593,6 +599,7 @@ export const skillQueries = {
         isRunnable: r.isRunnable === true,
         content: r.content ?? '',
         properties: r.properties,
+        revSeq: r.revSeq,
         _id: r.id,
       }))
       // A MALFORMED declaration has no Declaration object and must still be
@@ -603,7 +610,7 @@ export const skillQueries = {
       .filter((n) => {
         const { declaration, malformed } = classifyDeclaration(n.properties, host);
         return declaration !== null || malformed.length > 0;
-      }) as (SkillNode & { _id: string })[];
+    }) as (SkillNode & { _id: string; revSeq: number })[];
 
     // ── Lint: per node, plus the corpus-wide collision rule ──────────────
     // Keyed by node ID, never URN: two DIFFERENT nodes can emit one URN (the
@@ -658,6 +665,7 @@ export const skillQueries = {
           declaration?.description ?? '',
           n.content,
         ),
+        revision: n.revSeq,
         collides: collidingIds.has((n as SkillNode & { _id: string })._id),
         unavailable: lockedIds.has((n as SkillNode & { _id: string })._id),
         _id: (n as SkillNode & { _id: string })._id,
@@ -678,6 +686,7 @@ export const skillQueries = {
         fileHash: f.fileHash ?? '',
         headerId: f.nodeId ?? '',
         headerSource: f.sourceUrn ?? '',
+        ...(f.revision !== undefined ? { headerRevision: f.revision } : {}),
         ...(f.parseFailed ? { parseFailed: true } : {}),
         ...(f.hasExtraFrontmatter ? { hasExtraFrontmatter: true } : {}),
       };
@@ -776,6 +785,7 @@ export const skillQueries = {
             nf.urn,
             nf.declaration?.description ?? '',
             findContent(skillNodes, nf.id),
+            nf.revision,
           );
         } catch (error) {
           renderedBody = null;
@@ -811,6 +821,7 @@ export const skillQueries = {
       return {
         urn: nf.urn,
         nodeId: nf.id,
+        revision: nf.revision,
         name,
         class: verdict.class ?? null,
         parseFailure: verdict.parseFailure === true,

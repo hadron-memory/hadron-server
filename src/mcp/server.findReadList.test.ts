@@ -496,6 +496,32 @@ describe('#322 — read tools surface the node PK', () => {
   });
 });
 
+describe('#1323 — read tools surface and reconcile the current revision', () => {
+  it('emits revision 1 for a new node', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_get_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.nodes.witness.loc}`,
+    });
+    expect(text).toMatch(/^Revision: 1$/m);
+  });
+
+  it('takes exactly one revision when content bypassed a revisioned writer', async () => {
+    const srv = createTestableMcpServer(adminAuth());
+    const urn = `urn:node:${fx.memory.urn}:${fx.nodes.witness.loc}`;
+    await srv.callToolText('hadron_get_node', { urn }); // establish the compatibility baseline
+    await db.node.update({
+      where: { id: fx.nodes.witness.id },
+      data: { content: 'off-road content' },
+    });
+
+    const first = await srv.callToolText('hadron_get_node', { urn });
+    const second = await srv.callToolText('hadron_get_node', { urn });
+    expect(first).toMatch(/^Revision: 2$/m);
+    expect(second).toMatch(/^Revision: 2$/m);
+    expect(await db.nodeRevision.count({ where: { nodeId: fx.nodes.witness.id } })).toBe(1);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // #186 — Type: meta line in read tools
 // ---------------------------------------------------------------------------

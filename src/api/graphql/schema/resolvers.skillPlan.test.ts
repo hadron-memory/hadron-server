@@ -586,10 +586,12 @@ describe('classes and bodies', () => {
     const urn = exported.entries[0].urn as string;
     const body = exported.entries[0].renderedBody as string;
     const headerHash = /hash=([0-9a-f]{16})/.exec(body)![1]!;
+    expect(exported.entries[0].revision).toBe(1);
+    expect(body).toContain(' rev=1 ');
 
     const got = await plan({
       intent: 'EXPORT',
-      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, revision: 1, headerHash, fileHash: headerHash }],
     });
 
     expect(got.entries[0].class).toBe('current');
@@ -600,6 +602,29 @@ describe('classes and bodies', () => {
       reasons: [{ code: 'current' }],
     });
     expect(got.orphans).toHaveLength(0);
+  });
+
+  it('classifies a hash-equal artifact from an older revision as stale', async () => {
+    const node = await mkNode('tasks:revision-stale', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const entry = first.entries[0];
+    const headerHash = /hash=([0-9a-f]{16})/.exec(entry.renderedBody as string)![1]!;
+
+    await db.node.update({ where: { id: node.id }, data: { description: 'off-road metadata' } });
+    await db.node.update({ where: { id: node.id }, data: { revSeq: { increment: 1 } } });
+    const got = await plan({
+      intent: 'STATUS',
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: entry.urn,
+        nodeId: node.id,
+        revision: entry.revision,
+        headerHash,
+        fileHash: headerHash,
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({ revision: 2, class: 'stale' });
   });
 
   it('a blocking lint finding outranks a current file relationship', async () => {

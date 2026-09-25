@@ -142,7 +142,7 @@ describe('hadron_create_node — a LIVE loc is refused, not overwritten (#1181)'
     expect(row?.content).toBe('the original rule text');
     expect(row?.tags).toEqual(['spec']);
     // No revision was cut either — nothing was overwritten to snapshot.
-    expect(row?.revSeq).toBe(0);
+    expect(row?.revSeq).toBe(1);
   });
 
   it('names the remedy the caller can actually perform', async () => {

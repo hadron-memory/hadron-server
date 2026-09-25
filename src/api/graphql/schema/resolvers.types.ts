@@ -18,6 +18,7 @@ import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../li
 import { parseRunRegisterSnapshot, resolveRegister, snapshotRowsAsEntries, toGqlRegisterRows } from '../../../lib/resolveRegister.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
+import { ensureCurrentNodeRevision } from '../../../lib/nodeRevisionSnapshot.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -323,6 +324,8 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
+    revision: (n: { id: string }, _: unknown, ctx: Context) =>
+      ensureCurrentNodeRevision(ctx.db, n.id),
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     // The referenced asset for a `reference` node carrying data.asset
     // (createAssetReferenceNode / hadron_store_file). Resolves the soft

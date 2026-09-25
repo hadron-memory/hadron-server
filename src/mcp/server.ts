@@ -20,6 +20,8 @@ import {
 } from '../lib/usageRecorder.js';
 import {
   buildNodeRevisionSnapshot,
+  computeRevisionContentHash,
+  ensureCurrentNodeRevision,
   createNodeRevision,
   editorFromAuth,
   diffNodeChanges,
@@ -1152,6 +1154,7 @@ async function renderNodeReadProjection(
   scope: 'content' | 'abstract' | 'all',
   opts: { locked?: boolean } = {},
 ): Promise<string> {
+  const revision = await ensureCurrentNodeRevision(db, node.id);
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
   const outgoingLines = await Promise.all(
     node.outgoingEdges.map(async (e) => {
@@ -1210,6 +1213,7 @@ async function renderNodeReadProjection(
     // loc), so edges/replies created against a URN break when it changes;
     // the id never does. Surfaced so callers can prefer it as the reference.
     `ID: ${node.id}`,
+    `Revision: ${revision}`,
     portalUrl ? `URL: ${portalUrl}` : '',
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
@@ -4690,6 +4694,7 @@ export function createMcpServerInstance(
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
           content: storedContent,
+          revisionContentHash: computeRevisionContentHash(storedContent),
           seq: createSeq,
           tags: tags ?? [],
           properties: properties as any ?? undefined,
@@ -4708,6 +4713,7 @@ export function createMcpServerInstance(
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
           content: storedContent,
+          revisionContentHash: computeRevisionContentHash(storedContent),
           // seq is structural ordering, not content: preserve it on update when
           // omitted (parity with the upsertNode resolver) so a content-only
           // re-write doesn't wipe a node out of its ordered list (PR #309 review).
@@ -5093,24 +5099,6 @@ export function createMcpServerInstance(
         );
       }
 
-      // Snapshot current state for revision history.
-      // Spec 032 — capture existing.abstractOriginHash so the revision
-      // history round-trips the staleness signal. On an encrypted memory
-      // `existing` still holds CIPHERTEXT here — revisions store the
-      // at-rest form, deliberately (the decrypt happens just below), so the
-      // AT-REST image is captured now and the row is written further down,
-      // once the abstractOriginHash matrix has run.
-      //
-      // #1127 review (@codex P2): the write is DEFERRED rather than done here
-      // because `changes` must be able to report `abstractOriginHash`, and
-      // that value does not exist until after the decrypt. Leaving it out is
-      // what made `abstractStillAccurate` used alone record an EMPTY `changes`
-      // on a revision that really did change restorable state — a suppression
-      // of a correctness check, invisible in history. Diffing still runs
-      // against this at-rest image, so nothing else about the comparison
-      // moves.
-      const preAtRest = { ...existing };
-
       // Spec 041 (PR-517 review, Codex P2): decrypt `existing` in place NOW
       // — everything below (the abstractOriginHash matrix, the embedding
       // enqueue's fallback plaintext) treats existing.content/abstract as
@@ -5163,38 +5151,8 @@ export function createMcpServerInstance(
         nextAbstractOriginHash = computeContentHash(nextContent ?? null);
       }
 
-      // #620 — shared builder: editedBy carries the user PK (when the MCP
-      // caller is a user token), `reason` rides in revLabel, and `changes`
-      // records the fields this update supplies with a different value.
-      // Written HERE (not before the decrypt) so `abstractOriginHash` can be
-      // part of that delta — see the preAtRest comment above.
-      const revisionData = {
-        id: generateId(),
-        ...buildNodeRevisionSnapshot(preAtRest, editorFromAuth(auth), {
-          revLabel: reason,
-          changes: diffNodeChanges(preAtRest, {
-            name,
-            nodeType,
-            objectType,
-            isRunnable,
-            role,
-            description,
-            abstract: normalizedAbstract,
-            content,
-            abstractOriginHash: nextAbstractOriginHash,
-            seq,
-            tags,
-            properties,
-            data: nodeData,
-            llmModel,
-            aiAgent,
-          }),
-        }),
-      };
-      if (resolvedEdges === null) {
-        await createNodeRevision(db, revisionData).catch(() => {});
-      }
-
+      // The authoritative at-rest snapshot and its #620 diff are built under
+      // the address lock below, after this plaintext-derived hash is known.
       // Build partial update — only fields that were provided
       const data: Record<string, unknown> = {};
       if (name !== undefined) data.name = name;
@@ -5241,9 +5199,42 @@ export function createMcpServerInstance(
               await lockOutgoingEdgeMemories(tx, existing.memoryId, resolvedEdges);
             }
             await lockLocForWrite(tx, memory.id, loc);
-            if (resolvedEdges !== null) {
-              await createNodeRevision(tx, revisionData);
-            }
+            // #1072/#1185/#1323 — read and snapshot only after the address
+            // lock, in the SAME transaction as the visible update. The old
+            // no-edge branch snapshotted on the base client and swallowed any
+            // failure, leaving phantom/consumed revisions and stale concurrent
+            // pre-states.
+            const current = await tx.node.findUniqueOrThrow({
+              where: { id: existing.id },
+            });
+            await createNodeRevision(tx, {
+              id: generateId(),
+              ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
+                revLabel: reason,
+                changes: diffNodeChanges(current, {
+                  name,
+                  nodeType,
+                  objectType,
+                  isRunnable,
+                  role,
+                  description,
+                  abstract: normalizedAbstract,
+                  content: data.content,
+                  abstractOriginHash: nextAbstractOriginHash,
+                  seq,
+                  tags,
+                  properties,
+                  data: data.data,
+                  llmModel,
+                  aiAgent,
+                }),
+              }),
+            });
+            data.revisionContentHash = computeRevisionContentHash(
+              Object.prototype.hasOwnProperty.call(data, 'content')
+                ? (data.content as string | null | undefined)
+                : current.content,
+            );
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
               : existing;
