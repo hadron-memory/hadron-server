@@ -20,6 +20,8 @@ import {
 } from '../lib/usageRecorder.js';
 import {
   buildNodeRevisionSnapshot,
+  revisionStateHashRefreshMarker,
+  ensureCurrentNodeRevisionInTransaction,
   createNodeRevision,
   editorFromAuth,
   diffNodeChanges,
@@ -769,6 +771,8 @@ export async function replaceOutgoingEdges(args: {
 }
 
 class InlineEdgeEndpointError extends Error {}
+/** The target moved, was deleted or changed memory while this write waited for its row lock (PR #1339 review). */
+class NodeMovedDuringWriteError extends Error {}
 
 async function lockOutgoingEdgeMemories(
   tx: Prisma.TransactionClient,
@@ -1103,6 +1107,7 @@ async function resolveMemoryByUrn(
  */
 type ReadProjectionNode = {
   id: string;
+  revSeq: number;
   name: string;
   loc: string;
   memoryId: string;
@@ -1122,6 +1127,28 @@ type ReadProjectionNode = {
   outgoingEdges: Array<{ name: string | null; loc: string; target: { id: string; loc: string; memoryId: string; name: string } }>;
   incomingEdges: Array<{ name: string | null; loc: string; source: { id: string; loc: string; memoryId: string; name: string } }>;
 };
+
+const readProjectionInclude = {
+  outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
+  incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
+  memory: { select: { isEncrypted: true } },
+} as const;
+
+/** Reconcile and fetch the complete projection while the node row stays locked. */
+async function loadCurrentReadProjection(
+  nodeId: string,
+  authorizedMemoryId: string,
+): Promise<ReadProjectionNode | null> {
+  return db.$transaction(async (tx) => {
+    // Reconcile only while the row is still in the memory the caller
+    // authorized (@codex P1, PR #1339); a relocated row reads as not found.
+    if ((await ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: authorizedMemoryId })) == null) return null;
+    return tx.node.findFirst({
+      where: { id: nodeId, deletedAt: null },
+      include: readProjectionInclude,
+    }) as Promise<ReadProjectionNode | null>;
+  });
+}
 
 /**
  * Spec 041 (PR-2, #206): decrypt a fetched node in place when this process
@@ -1152,6 +1179,7 @@ async function renderNodeReadProjection(
   scope: 'content' | 'abstract' | 'all',
   opts: { locked?: boolean } = {},
 ): Promise<string> {
+  const revision = node.revSeq;
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
   const outgoingLines = await Promise.all(
     node.outgoingEdges.map(async (e) => {
@@ -1210,6 +1238,7 @@ async function renderNodeReadProjection(
     // loc), so edges/replies created against a URN break when it changes;
     // the id never does. Surfaced so callers can prefer it as the reference.
     `ID: ${node.id}`,
+    `Revision: ${revision}`,
     portalUrl ? `URL: ${portalUrl}` : '',
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
@@ -2956,11 +2985,46 @@ export function createMcpServerInstance(
       try {
         sectionId = await db.$transaction(async (tx) => {
           await lockAncestorsForCreate(tx, memoryId, loc);
-          const row = await tx.node.upsert(upsertArgs);
+          // #1323 (@copilot, PR #1339): re-saving an EXISTING live section is
+          // an authoring write of name/description/content/tags, so it takes
+          // the same revision protocol as hadron_update_node — row lock,
+          // drift reconciled as its own revision, the real predecessor
+          // snapshotted — instead of a bare upsert whose change the next read
+          // would misattribute to a raw writer. A new row is baselined by the
+          // insert trigger; a tombstone is left as the upsert leaves it.
+          const prior = await tx.node.findUnique({
+            where: { loc_memoryId: { loc, memoryId } },
+            select: { id: true, deletedAt: true },
+          });
+          if (prior && !prior.deletedAt) {
+            await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
+            // Reconcile only while the row is still in this memory.
+            await ensureCurrentNodeRevisionInTransaction(tx, prior.id, { expectedMemoryId: memoryId });
+            const current = await tx.node.findUniqueOrThrow({ where: { id: prior.id } });
+            // Found by (loc, memory), locked by id: a row that moved or was
+            // deleted in between refuses (@copilot, PR #1339).
+            if (current.loc !== loc || current.memoryId !== memoryId || current.deletedAt) {
+              throw new NodeMovedDuringWriteError(
+                `[write_conflict] the section at "${loc}" moved while this write waited — re-read and retry.`,
+              );
+            }
+            const changes = diffNodeChanges(current, upsertArgs.update);
+            if (changes.length > 0) {
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
+              });
+            }
+          }
+          const row = await tx.node.upsert({
+            ...upsertArgs,
+            update: { ...upsertArgs.update, revisionContentHash: revisionStateHashRefreshMarker() },
+          });
           return row.id;
         });
       } catch (e) {
         if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         throw e;
       }
 
@@ -3554,12 +3618,24 @@ export function createMcpServerInstance(
         return textResult(err.message);
       }
       const scope = contentScope ?? 'content';
+      // Reconcile + fetch under one row lock. The first lookup selects the
+      // address and authorizes its memory; it must not supply the body after a
+      // reconciliation advanced the counter.
+      const current = await loadCurrentReadProjection(node.id, node.memoryId);
+      if (
+        !current ||
+        current.memoryId !== node.memoryId ||
+        current.loc !== node.loc ||
+        !(await canReadMemory(db, auth, current.memoryId))
+      ) {
+        return textResult(`Node "${rawUrn}" not found.`);
+      }
       // Spec 041: decrypt when this session holds the key; mark locked
       // otherwise (blanked fields + Locked meta line, never raw ciphertext).
-      const lockState = mcpDecryptOrMark(node);
+      const lockState = mcpDecryptOrMark(current);
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      const projection = await renderNodeReadProjection(node, scope, {
+      const projection = await renderNodeReadProjection(current, scope, {
         locked: lockState === 'locked',
       });
 
@@ -3590,7 +3666,7 @@ export function createMcpServerInstance(
       //
       // A LOCKED node still records: the projection is what crossed the
       // boundary, and the caller did read this node's addressable state.
-      recordNodeRead(db, { id: node.id, loc, memoryId: node.memoryId }, auth);
+      recordNodeRead(db, { id: current.id, loc, memoryId: current.memoryId }, auth);
 
       // #696: `#data` addresses the node's DATA, not the node — and before the
       // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
@@ -3658,6 +3734,8 @@ export function createMcpServerInstance(
       const ordered: Array<ReadProjectionNode & { id: string }> = [];
       /** node id -> the fragment its ref named, for the shared notice below. */
       const fragmentByNodeId = new Map<string, string>();
+      /** resolved node id -> caller ref; prefix reads naturally fall back to id. */
+      const echoByNodeId = new Map<string, string>();
       const unavailable: string[] = [];
 
       if (hasPrefix) {
@@ -3673,11 +3751,7 @@ export function createMcpServerInstance(
           where: { memoryId: mem.id, loc: { startsWith: locPrefix! }, deletedAt: null },
           orderBy: { loc: 'asc' },
           take: BATCH_READ_MAX_NODES + 1,
-          include: {
-            outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
-            incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
-            memory: { select: { isEncrypted: true } },
-          },
+          include: readProjectionInclude,
         });
         if (rows.length > BATCH_READ_MAX_NODES) {
           return textResult(
@@ -3749,11 +3823,7 @@ export function createMcpServerInstance(
         // The per-node projection every fetch below must produce, identical to
         // hadron_get_node's (cor:api:040:01) — kept in one place so the PK and
         // URN paths cannot drift apart.
-        const projectionInclude = {
-          outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
-          incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
-          memory: { select: { isEncrypted: true } },
-        } as const;
+        const projectionInclude = readProjectionInclude;
 
         const nodeByRef = new Map<string, ReadProjectionNode & { id: string }>();
 
@@ -3855,6 +3925,7 @@ export function createMcpServerInstance(
           if (frag && !fragmentByNodeId.has(n.id)) fragmentByNodeId.set(n.id, frag);
           if (seenIds.has(n.id)) continue;
           seenIds.add(n.id);
+          echoByNodeId.set(n.id, raw);
           ordered.push(n);
         }
       }
@@ -3869,7 +3940,17 @@ export function createMcpServerInstance(
       const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
-      for (const n of ordered) {
+      for (const selected of ordered) {
+        const n = await loadCurrentReadProjection(selected.id, selected.memoryId);
+        if (
+          !n ||
+          n.memoryId !== selected.memoryId ||
+          n.loc !== selected.loc ||
+          !(await canReadMemory(db, auth, n.memoryId))
+        ) {
+          unavailable.push(echoByNodeId.get(selected.id) ?? selected.id);
+          continue;
+        }
         if (truncated) {
           omitted.push(await nodeUrn(n.loc, n.memoryId));
           continue;
@@ -4690,6 +4771,7 @@ export function createMcpServerInstance(
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
           content: storedContent,
+          revisionContentHash: revisionStateHashRefreshMarker(),
           seq: createSeq,
           tags: tags ?? [],
           properties: properties as any ?? undefined,
@@ -4708,6 +4790,7 @@ export function createMcpServerInstance(
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
           content: storedContent,
+          revisionContentHash: revisionStateHashRefreshMarker(),
           // seq is structural ordering, not content: preserve it on update when
           // omitted (parity with the upsertNode resolver) so a content-only
           // re-write doesn't wipe a node out of its ordered list (PR #309 review).
@@ -4751,8 +4834,22 @@ export function createMcpServerInstance(
        * resolved `?? null` / `?? []` value, not the raw argument.
        */
       const snapshotOverwrittenNode = async (tx: Prisma.TransactionClient) => {
-        const pre = await tx.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
+        const prior = await tx.node.findUnique({
+          where: { loc_memoryId: { loc, memoryId } },
+          select: { id: true },
+        });
+        if (!prior) return null;
+        // Row lock + drift reconciled as its own revision before this snapshot
+        // (@copilot, PR #1339), then the authoritative re-read.
+        await ensureCurrentNodeRevisionInTransaction(tx, prior.id, { expectedMemoryId: memoryId });
+        const pre = await tx.node.findUnique({ where: { id: prior.id } });
         if (!pre) return null;
+        // Found by (loc, memory), locked by id (@copilot, PR #1339).
+        if (pre.loc !== loc || pre.memoryId !== memoryId) {
+          throw new NodeMovedDuringWriteError(
+            `[write_conflict] the node at "${loc}" moved while this write waited — re-read and retry.`,
+          );
+        }
         await createNodeRevision(tx, {
           id: generateId(),
           ...buildNodeRevisionSnapshot(pre, editorFromAuth(auth), {
@@ -4972,6 +5069,7 @@ export function createMcpServerInstance(
         await assertLocWritable(db, memory.id, loc, 'update');
       } catch (e) {
         if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         throw e;
       }
 
@@ -5093,24 +5191,6 @@ export function createMcpServerInstance(
         );
       }
 
-      // Snapshot current state for revision history.
-      // Spec 032 — capture existing.abstractOriginHash so the revision
-      // history round-trips the staleness signal. On an encrypted memory
-      // `existing` still holds CIPHERTEXT here — revisions store the
-      // at-rest form, deliberately (the decrypt happens just below), so the
-      // AT-REST image is captured now and the row is written further down,
-      // once the abstractOriginHash matrix has run.
-      //
-      // #1127 review (@codex P2): the write is DEFERRED rather than done here
-      // because `changes` must be able to report `abstractOriginHash`, and
-      // that value does not exist until after the decrypt. Leaving it out is
-      // what made `abstractStillAccurate` used alone record an EMPTY `changes`
-      // on a revision that really did change restorable state — a suppression
-      // of a correctness check, invisible in history. Diffing still runs
-      // against this at-rest image, so nothing else about the comparison
-      // moves.
-      const preAtRest = { ...existing };
-
       // Spec 041 (PR-517 review, Codex P2): decrypt `existing` in place NOW
       // — everything below (the abstractOriginHash matrix, the embedding
       // enqueue's fallback plaintext) treats existing.content/abstract as
@@ -5163,38 +5243,8 @@ export function createMcpServerInstance(
         nextAbstractOriginHash = computeContentHash(nextContent ?? null);
       }
 
-      // #620 — shared builder: editedBy carries the user PK (when the MCP
-      // caller is a user token), `reason` rides in revLabel, and `changes`
-      // records the fields this update supplies with a different value.
-      // Written HERE (not before the decrypt) so `abstractOriginHash` can be
-      // part of that delta — see the preAtRest comment above.
-      const revisionData = {
-        id: generateId(),
-        ...buildNodeRevisionSnapshot(preAtRest, editorFromAuth(auth), {
-          revLabel: reason,
-          changes: diffNodeChanges(preAtRest, {
-            name,
-            nodeType,
-            objectType,
-            isRunnable,
-            role,
-            description,
-            abstract: normalizedAbstract,
-            content,
-            abstractOriginHash: nextAbstractOriginHash,
-            seq,
-            tags,
-            properties,
-            data: nodeData,
-            llmModel,
-            aiAgent,
-          }),
-        }),
-      };
-      if (resolvedEdges === null) {
-        await createNodeRevision(db, revisionData).catch(() => {});
-      }
-
+      // The authoritative at-rest snapshot and its #620 diff are built under
+      // the address lock below, after this plaintext-derived hash is known.
       // Build partial update — only fields that were provided
       const data: Record<string, unknown> = {};
       if (name !== undefined) data.name = name;
@@ -5241,9 +5291,57 @@ export function createMcpServerInstance(
               await lockOutgoingEdgeMemories(tx, existing.memoryId, resolvedEdges);
             }
             await lockLocForWrite(tx, memory.id, loc);
-            if (resolvedEdges !== null) {
-              await createNodeRevision(tx, revisionData);
+            // #1072/#1185/#1323 — read and snapshot only after the address
+            // lock, in the SAME transaction as the visible update. The old
+            // no-edge branch snapshotted on the base client and swallowed any
+            // failure, leaving phantom/consumed revisions and stale concurrent
+            // pre-states.
+            // Row lock BEFORE the authoritative read (@codex P1, PR #1339): the
+            // address lock above binds only writers that take it, so without
+            // this a non-participating writer could commit between this read
+            // and the update, and the refreshed fingerprint would then hide it.
+            // Same order as the GraphQL update path.
+            await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
+            // Unreconciled drift becomes its OWN revision before this edit's,
+            // as on the GraphQL path — never folded into the edit.
+            await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: memory.id });
+            const current = await tx.node.findUnique({
+              where: { id: existing.id },
+            });
+            // The address lock above guards (memory, loc), but this write goes
+            // by id: a move that committed between the pre-lock probe and the
+            // row lock would otherwise have this edit — authorized, encrypted
+            // and schema-checked for the OLD address — land wherever the row
+            // went (@copilot, PR #1339). Same re-check as the GraphQL path.
+            if (!current || current.deletedAt || current.memoryId !== memory.id || current.loc !== loc) {
+              throw new NodeMovedDuringWriteError(
+                `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
+              );
             }
+            await createNodeRevision(tx, {
+              id: generateId(),
+              ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
+                revLabel: reason,
+                changes: diffNodeChanges(current, {
+                  name,
+                  nodeType,
+                  objectType,
+                  isRunnable,
+                  role,
+                  description,
+                  abstract: normalizedAbstract,
+                  content: data.content,
+                  abstractOriginHash: nextAbstractOriginHash,
+                  seq,
+                  tags,
+                  properties,
+                  data: data.data,
+                  llmModel,
+                  aiAgent,
+                }),
+              }),
+            });
+            data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
               : existing;
@@ -5260,6 +5358,7 @@ export function createMcpServerInstance(
           });
         } catch (e) {
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+          if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           throw e;
         }
@@ -6201,15 +6300,36 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // name that is already normalized.
             const newName = toLoc.split(':').pop()!;
             if (renameToLeaf === true && existing.name !== newName) {
+              // Row lock + drift reconciled as its own revision, then the
+              // authoritative re-read the snapshot is built from — the rule on
+              // every single-row revisioned writer (PR #1339 review).
+              // Re-validate BEFORE reconciling (@copilot, PR #1339): the row
+              // must still be the live node at the authorized (memory, loc),
+              // or this would reconcile — and then rename — a row that moved.
+              await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
+              const still = await tx.node.findUnique({
+                where: { id: existing.id },
+                select: { memoryId: true, loc: true, deletedAt: true },
+              });
+              if (!still || still.deletedAt || still.memoryId !== fromMemory.id || still.loc !== fromLoc) {
+                throw new SubtreeMoveSourceChangedError(existing.id);
+              }
+              await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
+              const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
               await createNodeRevision(tx, {
                 id: generateId(),
-                ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
-                  changes: diffNodeChanges(existing, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+                ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
+                  changes: diffNodeChanges(locked, { loc: toLoc, name: newName, memoryId: toMemory.id }),
                 }),
               });
               await tx.node.update({
                 where: { id: existing.id },
-                data: { loc: toLoc, name: newName, memoryId: toMemory.id },
+                data: {
+                  loc: toLoc,
+                  name: newName,
+                  memoryId: toMemory.id,
+                  revisionContentHash: revisionStateHashRefreshMarker(),
+                },
               });
             }
           } else {

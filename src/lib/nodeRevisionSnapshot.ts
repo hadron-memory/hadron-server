@@ -19,6 +19,7 @@
 
 import { Prisma } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { generateId } from './id.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -140,6 +141,100 @@ export function buildNodeRevisionSnapshot(
 export const DEFAULT_MAX_REV_COUNT = 10;
 
 /**
+ * #1323 — internal fingerprint of every AT-REST field NodeRevision captures.
+ *
+ * This is intentionally not Node.contentHash (external-producer provenance)
+ * or the skill artifact hash. PostgreSQL owns the canonical encoding through
+ * `hadron_node_revision_state_hash(nodes)`: JSON/array formatting differs
+ * between runtimes, so both reconciliation and sanctioned writers ask the DB
+ * for the fingerprint rather than trying to duplicate it in JavaScript.
+ *
+ * The column retains its original `revisionContentHash` name because it is an
+ * internal implementation detail introduced in the same unreleased change;
+ * semantically it now covers the complete curated revision state.
+ */
+export async function computeRevisionStateHash(
+  db: Pick<PrismaClient, '$queryRaw'>,
+  nodeId: string,
+): Promise<string | null> {
+  const [row] = await db.$queryRaw<Array<{ hash: string }>>`
+    SELECT hadron_node_revision_state_hash(n) AS hash
+    FROM nodes n
+    WHERE n.id = ${nodeId}
+  `;
+  return row?.hash ?? null;
+}
+
+/**
+ * Value a sanctioned writer assigns to request a fingerprint refresh. The DB
+ * trigger replaces it with the canonical hash of NEW before the row is stored.
+ * A bypass writer does not touch the marker, so its tracked-field change leaves
+ * the old hash behind and is detectable on the next exposed read.
+ */
+export function revisionStateHashRefreshMarker(): string {
+  return 'refresh';
+}
+
+/** `NodeRevision.editedByInfo` of a server-authored drift reconcile — one spelling for writer and reader. */
+export const RECONCILE_EDITOR_INFO = 'system:revision-reconcile';
+
+/**
+ * Row-lock and reconcile one node inside the caller's transaction. Callers that
+ * render or hash node fields use this and then re-read those fields in the SAME
+ * transaction: the row lock prevents a writer from pairing revision N+1 with
+ * the body from the earlier, pre-lock query.
+ */
+export async function ensureCurrentNodeRevisionInTransaction(
+  tx: Prisma.TransactionClient,
+  nodeId: string,
+  opts: {
+    /**
+     * REQUIRED: the memory the caller AUTHORIZED this node in. A READ that selected the
+     * node in one memory must never reconcile it after a concurrent relocation
+     * into another — that would write a revision (and possibly prune history)
+     * in a tenant the reader may not even see (@codex P1, PR #1339). When the
+     * locked row is elsewhere this returns null WITHOUT writing; the caller
+     * treats it as not found.
+     */
+    expectedMemoryId: string;
+  },
+): Promise<number | null> {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "nodes" WHERE "id" = ${nodeId} FOR UPDATE`;
+  if (locked.length === 0) return null;
+  const node = await tx.node.findUnique({ where: { id: nodeId } });
+  if (!node) return null;
+  if (node.memoryId !== opts.expectedMemoryId) return null;
+
+  const actual = await computeRevisionStateHash(tx, node.id);
+  if (actual == null) return null;
+  if (node.revisionContentHash === actual) return node.revSeq;
+  if (node.revisionContentHash == null) {
+    await tx.node.update({
+      where: { id: node.id },
+      data: { revisionContentHash: actual },
+    });
+    return node.revSeq;
+  }
+
+  await createNodeRevision(
+    tx,
+    buildNodeRevisionSnapshot(
+      node,
+      { userId: null, info: RECONCILE_EDITOR_INFO },
+      {
+        revLabel: 'Reconciled state changed outside a revisioned writer (#1323)',
+        changes: [],
+      },
+    ),
+  );
+  await tx.node.update({
+    where: { id: node.id },
+    data: { revisionContentHash: actual },
+  });
+  return node.revSeq + 1;
+}
+
+/**
  * Create a NodeRevision and prune the node's history to `Memory.maxRevCount`
  * (#621). Every revision-write site goes through here (not a bare
  * `nodeRevision.create`) so the cap is enforced in ONE place. After the insert,
@@ -154,11 +249,11 @@ export async function createNodeRevision(
   db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node'>,
   data: Prisma.NodeRevisionUncheckedCreateInput,
 ): Promise<void> {
-  // #696: mint the per-node MONOTONIC revNo race-safely — an atomic increment of
-  // Node.revSeq (the QuotaCounter pattern), so concurrent revisions of the same
-  // node get distinct, gap-free numbers (the (nodeId, revNo) unique is the DB
-  // backstop). This runs inside the caller's tx alongside the insert. Skip when
-  // a caller already supplied a number (none do today).
+  // #696/#1323: Node.revSeq names the LIVE state. Snapshot the pre-edit state
+  // at its current number, then atomically advance the live row. The increment
+  // remains the race-safe allocator; subtracting one from the returned value
+  // gives the snapshot number. Skip when a guarded caller already claimed and
+  // supplied the pre-edit number.
   let revNo = data.revNo ?? null;
   if (revNo == null) {
     const bumped = await db.node.update({
@@ -166,7 +261,7 @@ export async function createNodeRevision(
       data: { revSeq: { increment: 1 } },
       select: { revSeq: true },
     });
-    revNo = bumped.revSeq;
+    revNo = bumped.revSeq - 1;
   }
   await db.nodeRevision.create({ data: { ...data, revNo } });
 
@@ -306,6 +401,15 @@ export function diffNodeChanges(
     if (!fieldEquals(existing[field], updates[field])) changed.push(field);
   }
   return changed;
+}
+
+/** Whether two rows describe the same revisioned Node state. */
+export function revisionStateMatches(
+  left: Partial<SnapshotSourceNode>,
+  right: Partial<SnapshotSourceNode>,
+): boolean {
+  if (left.id !== right.id) return false;
+  return TRACKED_NODE_FIELDS.every((field) => fieldEquals(left[field], right[field]));
 }
 
 /**

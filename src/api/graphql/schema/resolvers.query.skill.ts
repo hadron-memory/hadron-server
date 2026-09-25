@@ -48,6 +48,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { isCiphertext } from '../../../lib/crypto.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
+import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import {
   classifyDeclaration,
   classifySkill,
@@ -84,6 +85,7 @@ export interface SkillFileFactsInput {
   sourceUrn?: string | null;
   headerHash?: string | null;
   fileHash?: string | null;
+  revision?: number | null;
   parseFailed?: boolean | null;
   hasExtraFrontmatter?: boolean | null;
 }
@@ -509,8 +511,7 @@ export const skillQueries = {
     // report — filtering it out would make the corpus look clean by hiding
     // the nodes the rule exists for.
     // Declared is the opt-in (§4.1: "declared, not merely runnable").
-    const declaredRows = await ctx.db.node.findMany({
-      where: {
+    const declaredWhere = {
         deletedAt: null,
         OR: DISCOVERY_OR,
         // INTERSECTED, not spread (@copilot, PR #1240). `memoryAccessFilter`
@@ -521,8 +522,8 @@ export const skillQueries = {
         // than the one asked for, which a client running `--prune` against a
         // single memory would act on for files it never meant to touch.
         AND: [access, ...(memoryIds ? [{ memoryId: { in: memoryIds } }] : [])],
-      } as never,
-      select: {
+    } as never;
+    const declaredSelect = {
         id: true,
         loc: true,
         // #1292: only `unrecognized` reads it, so an item for a node with no
@@ -533,10 +534,47 @@ export const skillQueries = {
         properties: true,
         memoryId: true,
         memory: { select: { urn: true } },
-      },
+        revSeq: true,
+    } as const;
+    const candidates = await ctx.db.node.findMany({
+      where: declaredWhere,
+      select: declaredSelect,
       take: SKILL_PLAN_MAX_NODES + 1,
       orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
     });
+    let declaredRows = candidates;
+    if (candidates.length <= SKILL_PLAN_MAX_NODES) {
+      // One short transaction per node: retaining every FOR UPDATE lock until
+      // the whole plan commits can deadlock a Git sync that visits the same
+      // rows in filesystem order. Fetch the final projection BEFORE releasing
+      // that node's lock: a bypass writer landing after reconciliation must not
+      // pair newer fields with the older revSeq in one exported artifact.
+      const liveRows: typeof candidates = [];
+      const candidateMemory = new Map(candidates.map((r) => [r.id, r.memoryId]));
+      for (const id of candidates.map((r) => r.id).sort()) {
+        const live = await ctx.db.$transaction(
+          async (tx) => {
+            // Never reconcile a row that left the memory it was discovered in
+            // (@codex P1, PR #1339) — the refetch below would drop it anyway,
+            // but only after a revision had been written into another tenant.
+            if ((await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: candidateMemory.get(id)! })) == null) return null;
+            return tx.node.findFirst({
+              // Reapply BOTH discovery and access/scope predicates after
+              // waiting for the lock. The id can move into another tenant's
+              // memory while we wait; id-only here would turn the locked
+              // refetch into a cross-tenant content read.
+              where: { AND: [declaredWhere, { id }] } as never,
+              select: declaredSelect,
+            });
+          },
+          { timeout: 60_000, maxWait: 15_000 },
+        );
+        if (live != null) liveRows.push(live);
+      }
+      declaredRows = liveRows.sort(
+        (a, b) => a.memoryId.localeCompare(b.memoryId) || a.loc.localeCompare(b.loc),
+      );
+    }
     if (declaredRows.length > SKILL_PLAN_MAX_NODES) {
       throw new GraphQLError(
         `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
@@ -593,6 +631,7 @@ export const skillQueries = {
         isRunnable: r.isRunnable === true,
         content: r.content ?? '',
         properties: r.properties,
+        revSeq: r.revSeq,
         _id: r.id,
       }))
       // A MALFORMED declaration has no Declaration object and must still be
@@ -603,7 +642,7 @@ export const skillQueries = {
       .filter((n) => {
         const { declaration, malformed } = classifyDeclaration(n.properties, host);
         return declaration !== null || malformed.length > 0;
-      }) as (SkillNode & { _id: string })[];
+    }) as (SkillNode & { _id: string; revSeq: number })[];
 
     // ── Lint: per node, plus the corpus-wide collision rule ──────────────
     // Keyed by node ID, never URN: two DIFFERENT nodes can emit one URN (the
@@ -658,6 +697,7 @@ export const skillQueries = {
           declaration?.description ?? '',
           n.content,
         ),
+        revision: n.revSeq,
         collides: collidingIds.has((n as SkillNode & { _id: string })._id),
         unavailable: lockedIds.has((n as SkillNode & { _id: string })._id),
         _id: (n as SkillNode & { _id: string })._id,
@@ -678,6 +718,7 @@ export const skillQueries = {
         fileHash: f.fileHash ?? '',
         headerId: f.nodeId ?? '',
         headerSource: f.sourceUrn ?? '',
+        ...(typeof f.revision === 'number' ? { headerRevision: f.revision } : {}),
         ...(f.parseFailed ? { parseFailed: true } : {}),
         ...(f.hasExtraFrontmatter ? { hasExtraFrontmatter: true } : {}),
       };
@@ -776,6 +817,7 @@ export const skillQueries = {
             nf.urn,
             nf.declaration?.description ?? '',
             findContent(skillNodes, nf.id),
+            nf.revision,
           );
         } catch (error) {
           renderedBody = null;
@@ -811,6 +853,7 @@ export const skillQueries = {
       return {
         urn: nf.urn,
         nodeId: nf.id,
+        revision: nf.revision,
         name,
         class: verdict.class ?? null,
         parseFailure: verdict.parseFailure === true,

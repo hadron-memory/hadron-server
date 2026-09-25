@@ -3,7 +3,9 @@ import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } f
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
+  ensureCurrentNodeRevisionInTransaction,
   buildNodeRevisionSnapshot,
+  revisionStateHashRefreshMarker,
   createNodeRevision,
   type SnapshotEditor,
 } from '../../lib/nodeRevisionSnapshot.js';
@@ -16,6 +18,7 @@ import { GraphQLError } from 'graphql';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from '../../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType } from '../../lib/enforceNodeSchema.js';
 import type { MemorySchema } from '../../lib/memorySchema.js';
+import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -36,11 +39,11 @@ import type { MemorySchema } from '../../lib/memorySchema.js';
  *
  * The work splits into three phases, each safe to commit on its own:
  *
- *   1. **Classify + relocate** — keyset-page the source nodes (id+loc
- *      projection only) against the target by loc. Colliding nodes (the small
- *      set) are recorded for Phase 2; the rest RELOCATE in a bulk `updateMany`
- *      per page. Ids are preserved, so inbound edges keep resolving, and every
- *      SQL id/loc list stays bounded by the page size (no unbounded `notIn`).
+ *   1. **Classify + relocate** — keyset-page source addresses against the
+ *      target by loc. Colliding nodes (the small set) are recorded for Phase 2;
+ *      the rest RELOCATE in bounded transactions, snapshotting each pre-move
+ *      state. Ids are preserved, so inbound edges keep resolving, and every SQL
+ *      id/loc list stays bounded by the page size (no unbounded `notIn`).
  *   2. **Fold** — fold colliding nodes in batches; per node: snapshot the
  *      target counterpart (`NodeRevision`), merge the selected fields,
  *      recompute `abstractOriginHash`, repoint/transfer its incident edges
@@ -180,10 +183,10 @@ export async function mergeMemoryGraph(
   await assertMemoryBulkMutable(db, targetMemoryId, 'merge into');
 
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
-  // Page the live source nodes by id (id+loc projection only — never the full
-  // rows) and match each page against the target by loc. A source node whose
+  // Page the live source node addresses by id and match each page against the
+  // target by loc. A source node whose
   // loc already exists in the target FOLDS into that counterpart (Phase 2 below);
-  // the rest RELOCATE here, one bulk `updateMany` per page. Folding and
+  // the rest RELOCATE here in revisioned batches. Folding and
   // relocating in the same scan means the colliding set is the ONLY id list
   // we hold in memory, and every SQL `IN (...)`/`updateMany` list is bounded
   // by the page size — a giant source memory never builds an unbounded
@@ -219,6 +222,10 @@ export async function mergeMemoryGraph(
       }
     }
     if (relocateIds.length > 0) {
+      const relocateIdSet = new Set(relocateIds);
+      const classifiedLocById = new Map(
+        page.filter((row) => relocateIdSet.has(row.id)).map((row) => [row.id, row.loc]),
+      );
       // Enforce the target schema on the collection members relocating in (only
       // when the target IS schema'd — page rows are id/loc-only, so fetch the
       // typed subset's discriminator/properties for validation). Re-read the
@@ -235,18 +242,84 @@ export async function mergeMemoryGraph(
       // can hold the Channel-memory locks across the check and the write. It
       // was a bare `updateMany` before, which left nothing for the gate to be
       // authoritative inside.
-      const relocate = await db.$transaction(async (tx) => {
-        const rows = await tx.node.findMany({
-          where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
-          select: { loc: true, role: true, isRunnable: true },
-        });
-        await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
-        return tx.node.updateMany({
-          where: { id: { in: relocateIds }, memoryId: sourceMemoryId, deletedAt: null },
-          data: { memoryId: targetMemoryId },
-        });
-      });
-      relocatedCount += relocate.count;
+      for (let i = 0; i < relocateIds.length; i += batchSize) {
+        const ids = relocateIds.slice(i, i + batchSize);
+        const moved = await db.$transaction(async (tx) => {
+          let rows = await tx.node.findMany({
+            where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
+          });
+          // Memory-scope locks precede every loc-scope lock in the global
+          // protocol. This first gate acquires them and gives a fast refusal;
+          // the second gate below rechecks the authoritative post-loc-lock rows.
+          await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          await acquireLockSet(
+            tx,
+            ids.flatMap((id) => {
+              const loc = classifiedLocById.get(id)!;
+              return [
+                { memoryId: sourceMemoryId, loc },
+                { memoryId: targetMemoryId, loc },
+              ];
+            }),
+          );
+          rows = await tx.node.findMany({
+            where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
+          });
+          for (const row of rows) {
+            if (row.loc !== classifiedLocById.get(row.id)) {
+              throw new Error(`merge source node ${row.id} moved during classification; retry the merge`);
+            }
+          }
+          const lateCollision = await tx.node.findFirst({
+            where: {
+              memoryId: targetMemoryId,
+              deletedAt: null,
+              loc: { in: rows.map((row) => row.loc) },
+            },
+            select: { loc: true },
+          });
+          if (lateCollision) {
+            throw new Error(`merge target loc ${lateCollision.loc} appeared during classification; retry the merge`);
+          }
+          // Reentrant memory locks; fresh governed/protected facts for the rows
+          // now serialized by their source + destination address locks.
+          await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          // #1323 (@codex P1, PR #1339): reconcile unrevisioned drift as each
+          // row's OWN revision before its relocation snapshot, under the row
+          // lock, in id order (one global order, so two multi-row operations
+          // cannot lock-invert). Then re-read and re-validate: the snapshot
+          // must describe the row as it is now, not as classified.
+          const relocationIds = rows.map((row) => row.id).sort();
+          for (const id of relocationIds) {
+            await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: sourceMemoryId });
+          }
+          rows = await tx.node.findMany({ where: { id: { in: relocationIds } }, orderBy: { id: 'asc' } });
+          for (const row of rows) {
+            if (row.memoryId !== sourceMemoryId || row.deletedAt || row.loc !== classifiedLocById.get(row.id)) {
+              throw new Error(`merge source node ${row.id} changed during the merge; retry the merge`);
+            }
+          }
+          if (rows.length !== relocationIds.length) {
+            throw new Error('a merge source node was deleted during the merge; retry the merge');
+          }
+          for (const row of rows) {
+            await createNodeRevision(
+              tx,
+              buildNodeRevisionSnapshot(row, editor, { changes: ['memoryId'] }),
+            );
+            await tx.node.update({
+              where: { id: row.id },
+              data: {
+                memoryId: targetMemoryId,
+                updatedBy: actorId,
+                revisionContentHash: revisionStateHashRefreshMarker(),
+              },
+            });
+          }
+          return rows.length;
+        }, BATCH_TX_OPTS);
+        relocatedCount += moved;
+      }
     }
     if (page.length < classifyPage) break;
   }
@@ -281,16 +354,50 @@ export async function mergeMemoryGraph(
       // rows whose target counterpart is still live get folded; a vanished
       // counterpart leaves its source row untouched for a later pass (the
       // merge is resumable), never silently deleted.
-      const srcRows = await tx.node.findMany({
+      let srcRows = await tx.node.findMany({
         where: { id: { in: batchIds }, memoryId: sourceMemoryId, deletedAt: null },
       });
-      const tgtRows = await tx.node.findMany({
+      let tgtRows = await tx.node.findMany({
         where: {
           id: { in: srcRows.map((s) => survivor.get(s.id)!) },
           memoryId: targetMemoryId,
           deletedAt: null,
         },
       });
+      // #1323 (@codex P1, PR #1339): every row this fold reads or snapshots is
+      // row-locked and reconciled (drift as its OWN revision) in id order
+      // before anything is computed from it, then re-read — so the fold works
+      // from the rows as they are under the lock, not as first fetched.
+      // The loc pair each fold was CLASSIFIED on; a row that moved before its
+      // lock no longer forms that collision (@copilot, PR #1339).
+      const classifiedLoc = new Map([...srcRows, ...tgtRows].map((row) => [row.id, row.loc]));
+      const foldIds = [...new Set([...srcRows, ...tgtRows].map((row) => row.id))].sort();
+      // Each row only within the memory it was classified in (@copilot, PR
+      // #1339): a row that moved out is neither reconciled nor silently
+      // dropped — the transaction refuses, so nothing commits in its new memory.
+      const foldMemory = new Map<string, string>([
+        ...srcRows.map((row) => [row.id, sourceMemoryId] as const),
+        ...tgtRows.map((row) => [row.id, targetMemoryId] as const),
+      ]);
+      for (const id of foldIds) {
+        const reconciled = await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: foldMemory.get(id)! });
+        if (reconciled == null) throw new Error(`merge node ${id} moved or vanished during the fold; retry the merge`);
+      }
+      srcRows = await tx.node.findMany({
+        where: { id: { in: srcRows.map((row) => row.id) }, memoryId: sourceMemoryId, deletedAt: null },
+      });
+      tgtRows = await tx.node.findMany({
+        where: {
+          id: { in: srcRows.map((s) => survivor.get(s.id)!) },
+          memoryId: targetMemoryId,
+          deletedAt: null,
+        },
+      });
+      for (const row of [...srcRows, ...tgtRows]) {
+        if (row.loc !== classifiedLoc.get(row.id)) {
+          throw new Error(`merge node ${row.id} moved during the fold; retry the merge`);
+        }
+      }
       const tgtById = new Map(tgtRows.map((t) => [t.id, t]));
       // The AUTHORITATIVE gate for this batch — both endpoints' rows, read
       // inside this transaction, under the Channel-memory locks. The Phase-1
@@ -329,6 +436,7 @@ export async function mergeMemoryGraph(
               merged.contentChanged ? (merged.changed.content as string | null) : tgt.content,
             );
           }
+          writeData.revisionContentHash = revisionStateHashRefreshMarker();
           await tx.node.update({ where: { id: tgt.id }, data: writeData });
         }
         foldedIds.push(src.id);

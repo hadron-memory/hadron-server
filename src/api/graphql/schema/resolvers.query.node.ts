@@ -79,6 +79,7 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
+import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
@@ -632,9 +633,24 @@ export const nodeQueries = {
       };
       // Decrypt + (unless raw) compile Mustache templates — shared tail of
       // every dispatch form. Generic so the full node row type flows through.
-      const finish = async <T extends { content: string | null; data: unknown; memoryId: string }>(
-        node: T,
+      const finish = async <T extends { id: string; loc: string; deletedAt: Date | null; content: string | null; data: unknown; memoryId: string }>(
+        selected: T,
       ) => {
+        // The lookup above selects the address. Reconcile and re-fetch while
+        // holding its row lock so Node.revision and every sibling field come
+        // from one database state (never old body + new counter).
+        const current = await ctx.db.$transaction(async (tx) => {
+          if ((await ensureCurrentNodeRevisionInTransaction(tx, selected.id, { expectedMemoryId: selected.memoryId })) == null) return null;
+          return tx.node.findUnique({ where: { id: selected.id }, include });
+        });
+        if (
+          !current ||
+          current.deletedAt ||
+          current.memoryId !== selected.memoryId ||
+          current.loc !== selected.loc ||
+          !allowed(current.memoryId)
+        ) return null;
+        const node = current;
         // #1061 — every dispatch form of this query funnels its ONE successful
         // return through `finish`, so this is the single place a `read` is
         // recorded for the canonical node read (and for `nextNode`, which
@@ -1591,6 +1607,10 @@ export const nodeQueries = {
 
       let ordered: Array<{
         id: string;
+        loc: string;
+        memoryId: string;
+        deletedAt: Date | null;
+        revSeq: number;
         content: string | null;
         abstract: string | null;
         data?: unknown;
@@ -1668,7 +1688,6 @@ export const nodeQueries = {
           where: { id: { in: [...refByNodeId.keys()] }, deletedAt: null, ...access },
           include,
         });
-        await decryptNodesBatch(ctx.db, rows);
         const byId = new Map(rows.map((n) => [n.id, n]));
         for (const [id, ref] of refByNodeId) {
           const n = byId.get(id);
@@ -1695,9 +1714,41 @@ export const nodeQueries = {
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
-        await decryptNodesBatch(ctx.db, rows);
         ordered = rows;
       }
+
+      // Reconcile each selected row in its OWN short transaction. Accumulating
+      // all FOR UPDATE locks until one batch transaction commits deadlocks
+      // against multi-node writers (notably Git sync) that necessarily visit
+      // rows in a different order. The final access-filtered refetch returns
+      // an atomic row state and rechecks the selected address.
+      const selectedById = new Map(ordered.map((n) => [n.id, n]));
+      const liveIds: string[] = [];
+      for (const id of [...selectedById.keys()].sort()) {
+        const live = await ctx.db.$transaction(
+          (tx) => ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: selectedById.get(id)!.memoryId }),
+          { timeout: 60_000, maxWait: 15_000 },
+        );
+        if (live != null) liveIds.push(id);
+      }
+      const currentRows = await ctx.db.node.findMany({
+        where: { id: { in: liveIds }, deletedAt: null, ...access },
+        include,
+      });
+      const currentById = new Map(currentRows.map((n) => [n.id, n]));
+      ordered = ordered.flatMap((selected) => {
+        const current = currentById.get(selected.id);
+        if (
+          !current ||
+          current.memoryId !== selected.memoryId ||
+          current.loc !== selected.loc
+        ) {
+          unavailable.push(refByNodeId?.get(selected.id) ?? selected.id);
+          return [];
+        }
+        return [current];
+      });
+      await decryptNodesBatch(ctx.db, ordered);
 
       // Response-size cap (cor:api:040:02) — pack until the byte ceiling, then
       // stop and flag `truncated` with the omitted nodes. At least one node
@@ -2201,4 +2252,3 @@ export const nodeQueries = {
     },
 
 };
-

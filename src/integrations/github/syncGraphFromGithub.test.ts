@@ -5,7 +5,7 @@ import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
 import { splitGitArgv } from '../../test/gitArgv.js';
 import { GIT_TRANSPORT_GUARD } from './execGit.js';
-import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
+import { syncGraphFromGithub, updateNodeFromGitSync, GitSyncTargetMovedError, type MemoryWithOrg } from './syncGraphFromGithub.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/channels.js';
 import { generateId } from '../../lib/id.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
@@ -323,6 +323,44 @@ describe('syncGraphFromGithub', () => {
 
     expect(second!.id).toBe(first!.id);
     expect(second!.description).toBe('v2');
+    expect(second!.revSeq).toBe(2);
+    expect(await db.nodeRevision.findMany({ where: { nodeId }, select: { revNo: true, description: true } }))
+      .toEqual([{ revNo: 1, description: 'v1' }]);
+  });
+
+  it('a sync over unrevisioned drift takes the reconcile AND its own revision (#1339 review)', async () => {
+    // @codex P1: a raw write between two syncs used to be folded into the
+    // sync's single revision, and the refreshed fingerprint then hid it.
+    const nodeId = 'aaaa000000000000000000000000001339';
+    const nodeA = join(mockSources, 'test-org', 'test/repo', 'nodeD');
+    mkdirSync(nodeA, { recursive: true });
+    writeNodeFiles(nodeA, { id: nodeId, name: 'nodeD', description: 'v1' });
+    await syncGraphFromGithub(makeGraph());
+    await db.node.update({ where: { id: nodeId }, data: { content: 'raw writer' } });
+
+    writeNodeFiles(nodeA, { id: nodeId, name: 'nodeD', description: 'v2' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq).toBe(3);
+    const history = await db.nodeRevision.findMany({ where: { nodeId }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    expect(history[1]!.revLabel).toBe('Synchronized from GitHub');
+    expect(history[1]!.description).toBe('v1');
+  });
+
+  it('refuses to apply a sync update to a row that has left the synced memory (#1339 review)', async () => {
+    // @copilot: the row lock must re-validate ownership — a concurrent
+    // cross-memory move between the preflight lookup and the lock would
+    // otherwise have the repo's update rewrite a FOREIGN memory's node.
+    const nodeId = 'aaaa000000000000000000000000001340';
+    const row = await db.node.create({ data: { id: nodeId, memoryId: dbGraphId, loc: 'moved:away', name: 'n', content: 'mine' } });
+    await expect(
+      db.$transaction((tx) => updateNodeFromGitSync(tx, row, { content: 'from git' }, undefined, 'some-other-memory')),
+    ).rejects.toBeInstanceOf(GitSyncTargetMovedError);
+    const after = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(after.content).toBe('mine');
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
   });
 
   it('re-sync replaces old nodes with the new set', async () => {
@@ -532,6 +570,40 @@ describe('move-aware identity', () => {
     expect(rows[0].id).toBe(nodeId);
     expect(rows[0].loc).toBe('tasks:add-platform-spec');
     expect(rows[0].name).toBe('renamed task');
+  });
+
+  it('records one committed revision per node when two files swap locs', async () => {
+    const aId = 'aaaa111100000000000000000000000021';
+    const bId = 'bbbb222200000000000000000000000022';
+    const aDir = join(repoRoot(), 'a');
+    const bDir = join(repoRoot(), 'b');
+    mkdirSync(aDir, { recursive: true });
+    mkdirSync(bDir, { recursive: true });
+    writeNodeFiles(aDir, { id: aId, name: 'A' });
+    writeNodeFiles(bDir, { id: bId, name: 'B' });
+    await syncGraphFromGithub(makeGraph());
+    await db.memory.update({ where: { id: dbGraphId }, data: { maxRevCount: 1 } });
+
+    rmSync(aDir, { recursive: true });
+    rmSync(bDir, { recursive: true });
+    mkdirSync(aDir, { recursive: true });
+    mkdirSync(bDir, { recursive: true });
+    writeNodeFiles(aDir, { id: bId, name: 'B' });
+    writeNodeFiles(bDir, { id: aId, name: 'A' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'b', revSeq: 2 });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'a', revSeq: 2 });
+    expect(
+      await db.nodeRevision.findMany({
+        where: { nodeId: { in: [aId, bId] } },
+        orderBy: { nodeId: 'asc' },
+        select: { nodeId: true, revNo: true, loc: true },
+      }),
+    ).toEqual([
+      { nodeId: aId, revNo: 1, loc: 'a' },
+      { nodeId: bId, revNo: 1, loc: 'b' },
+    ]);
   });
 
   it('never steals a foreign memory\'s node id — mints a fresh id instead', async () => {

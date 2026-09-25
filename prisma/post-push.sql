@@ -464,3 +464,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_worker_channel_uniq
   ON channel_read_states (worker_id, channel_id) WHERE worker_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_agent_app_channel_uniq
   ON channel_read_states (agent_id, app_id, channel_id) WHERE agent_id IS NOT NULL;
+
+-- #1323 — every newly inserted Node gets a complete at-rest state baseline, including
+-- raw/createMany writers Prisma cannot route through an application helper.
+-- Keep in lockstep with 20260925010000_trustworthy_node_revisions.
+-- `prisma db push` adds the nullable column without running the migration, so
+-- upgrade every row still carrying that one-time marker to the new LIVE-state
+-- counter semantics before clearing it. Re-running post-push is then a no-op.
+CREATE OR REPLACE FUNCTION hadron_node_revision_state_hash(node_row "nodes")
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE AS $$
+  SELECT md5(jsonb_build_array(
+    node_row."memory_id", node_row."loc", node_row."name", node_row."alias",
+    node_row."description", node_row."abstract", node_row."abstract_origin_hash",
+    node_row."content", to_jsonb(node_row."tags"), node_row."node_type",
+    node_row."object_type", node_row."is_link", node_row."properties",
+    node_row."data", node_row."seq", node_row."is_runnable", node_row."role",
+    node_row."llm_model", node_row."ai_agent"
+  )::text)
+$$;
+
+UPDATE "nodes"
+SET "rev_seq" = "rev_seq" + 1,
+    "revision_content_hash" = hadron_node_revision_state_hash("nodes")
+WHERE "revision_content_hash" IS NULL;
+
+CREATE OR REPLACE FUNCTION hadron_initialize_node_revision_content_hash()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' OR NEW."revision_content_hash" = 'refresh' THEN
+    NEW."revision_content_hash" := hadron_node_revision_state_hash(NEW);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS nodes_initialize_revision_content_hash ON "nodes";
+CREATE TRIGGER nodes_initialize_revision_content_hash
+BEFORE INSERT OR UPDATE ON "nodes"
+FOR EACH ROW EXECUTE FUNCTION hadron_initialize_node_revision_content_hash();
