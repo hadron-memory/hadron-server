@@ -145,11 +145,18 @@ describe('memoryUsageSummary access control (#250)', () => {
     expect(result).toHaveLength(3);
   });
 
-  it('a non-member is denied with [] (no existence leak)', async () => {
-    const result = await resolvers.Query.memoryUsageSummary(
-      null, { memoryRef: memory.id }, { db, userId: userOutsider.id, roles: ['READER'] } as Context,
-    );
-    expect(result).toEqual([]);
+  // #1316: a non-member used to get [] while a missing memory threw
+  // MEMORY_NOT_FOUND, so the [] itself disclosed existence. Both now throw the
+  // same error, carrying only the caller's own ref.
+  it('a non-member is denied exactly like a missing memory (no existence leak)', async () => {
+    const outsider = { db, userId: userOutsider.id, roles: ['READER'] } as Context;
+    const missing = generateId();
+    await expect(
+      resolvers.Query.memoryUsageSummary(null, { memoryRef: memory.id }, outsider),
+    ).rejects.toThrow(`MEMORY_NOT_FOUND: ${memory.id}`);
+    await expect(
+      resolvers.Query.memoryUsageSummary(null, { memoryRef: missing }, outsider),
+    ).rejects.toThrow(`MEMORY_NOT_FOUND: ${missing}`);
   });
 
   it('a caller with no role is rejected by the READER gate', async () => {
