@@ -265,3 +265,15 @@ describe('#1339 review round 7', () => {
   });
 });
 
+describe('#1339 review round 9', () => {
+  it('two readers of the same drifted parent get the SAME reconciled number (@codex P1)', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:two-readers', name: 'n', content: 'x' } });
+    await db.node.update({ where: { id: node.id }, data: { content: 'changed by a raw writer' } });
+    const readerA = await db.node.findUniqueOrThrow({ where: { id: node.id } }); // both see revSeq 1, drifted body
+    const readerB = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(await resolvers.Node.revision(readerA as never, {}, ctx())).toBe(2); // reconciles
+    expect(await resolvers.Node.revision(readerB as never, {}, ctx())).toBe(2); // same body, same number
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
+  });
+});
+

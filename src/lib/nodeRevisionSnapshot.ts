@@ -175,6 +175,9 @@ export function revisionStateHashRefreshMarker(): string {
   return 'refresh';
 }
 
+/** `NodeRevision.editedByInfo` of a server-authored drift reconcile — one spelling for writer and reader. */
+export const RECONCILE_EDITOR_INFO = 'system:revision-reconcile';
+
 /**
  * Row-lock and reconcile one node inside the caller's transaction. Callers that
  * render or hash node fields use this and then re-read those fields in the SAME
@@ -217,7 +220,7 @@ export async function ensureCurrentNodeRevisionInTransaction(
     tx,
     buildNodeRevisionSnapshot(
       node,
-      { userId: null, info: 'system:revision-reconcile' },
+      { userId: null, info: RECONCILE_EDITOR_INFO },
       {
         revLabel: 'Reconciled state changed outside a revisioned writer (#1323)',
         changes: [],

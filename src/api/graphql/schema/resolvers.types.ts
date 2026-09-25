@@ -20,6 +20,7 @@ import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
+  RECONCILE_EDITOR_INFO,
   revisionStateMatches,
   type SnapshotSourceNode,
 } from '../../../lib/nodeRevisionSnapshot.js';
@@ -353,7 +354,19 @@ export const typeResolvers = {
         // (@codex P1, PR #1339).
         await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;
         const pre = await tx.node.findUnique({ where: { id: n.id }, select: { memoryId: true, revSeq: true } });
-        if (!pre || pre.memoryId !== n.memoryId || pre.revSeq !== n.revSeq) return n.revSeq;
+        if (!pre || pre.memoryId !== n.memoryId || pre.revSeq < n.revSeq) return n.revSeq;
+        if (pre.revSeq > n.revSeq) {
+          // Advances since the parent was read are harmless ONLY if every one
+          // is a server reconcile (another reader's — reconciles never touch
+          // edges): the parent is then still current, and must get the SAME
+          // number that reader got (@codex P1, PR #1339). Any authoring or
+          // edge write in between, or pruned history we cannot see, keeps the
+          // parent's own number.
+          const reconciles = await tx.nodeRevision.count({
+            where: { nodeId: n.id, revNo: { gte: n.revSeq, lt: pre.revSeq }, editedByInfo: RECONCILE_EDITOR_INFO },
+          });
+          if (reconciles !== pre.revSeq - n.revSeq) return n.revSeq;
+        }
         // Only while the row is still in the memory the parent was read from
         // (@codex P1, PR #1339): never reconcile into another tenant.
         if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return n.revSeq;
