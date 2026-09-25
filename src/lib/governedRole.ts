@@ -296,7 +296,8 @@ export function resolveNodeRoleRule<T extends { role: string; enabled: boolean; 
   for (const candidate of roleRuleCandidates(role)) {
     const rule = enabledByRole.get(candidate);
     if (!rule) continue;
-    if (candidate !== role && rule.strictSubRoles === true && !declared.has(role)) {
+    // No `candidate !== role` test is needed: the exact role, if it has a row, is declared.
+    if (rule.strictSubRoles === true && !declared.has(role)) {
       return { kind: 'UNDECLARED_UNDER_STRICT', ancestor: rule };
     }
     return { kind: 'RULE', rule };
