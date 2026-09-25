@@ -191,7 +191,7 @@ describe('@copilot round 7 — lexical/regex hydration re-asserts scope and filt
       { nodeId: outside, score: 0.9 } as any,
       { nodeId: matchId, score: 0.8 } as any,
     ]);
-    const res = await findNodes({ query: 'body', filter: { memoryIds: [memId], role: 'spec' } });
+    const res = await findNodes({ query: 'body', mode: 'keyword', filter: { memoryIds: [memId], role: 'spec' } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([matchId]);
   });
 });
