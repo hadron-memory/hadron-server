@@ -325,6 +325,53 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
       });
     }
 
+    // The (memoryId, loc) selector resolves the MEMORY first and runs the write
+    // gate before any node lookup, so its not-found is the memory's. A missing
+    // memory answers MEMORY_NOT_FOUND from resolveMemoryRef, before any gate;
+    // relabeling an unreadable one NODE_NOT_FOUND would make the two
+    // distinguishable, which is the oracle this PR closes (@copilot, PR #1319).
+    for (const [surface, mutation] of [
+      ['updateNode', UPDATE_NODE],
+      ['updateSpecNode', UPDATE_SPEC],
+    ] as const) {
+      it(`${surface} by (memoryId, loc) conceals an unreadable memory exactly like a missing one`, async () => {
+        const input = (ref: string, loc: string) => ({
+          memoryId: ref,
+          loc,
+          content: 'must not land',
+          edges: [{ targetId: anchorId, name: 'must-not-land' }],
+        });
+        const edgesBefore = await db.edge.count();
+        const existing = await gql(key.outsider!, mutation, { input: input(memoryUrn, 'anchor') });
+        const missing = await gql(key.outsider!, mutation, { input: input(missingMemoryUrn, 'anchor') });
+        const missingLoc = await gql(key.outsider!, mutation, {
+          input: input(memoryUrn, 'oracle:no-such-loc'),
+        });
+
+        expect(normalizeSentRef(existing, memoryUrn)).toEqual(
+          normalizeSentRef(missing, missingMemoryUrn),
+        );
+        // The loc is never looked up for a caller the gate refuses.
+        expect(existing).toEqual(missingLoc);
+        expectCode(existing, 'MEMORY_NOT_FOUND');
+        expect((await db.node.findUniqueOrThrow({ where: { id: anchorId } })).content).toBeNull();
+        expect(await db.edge.count()).toBe(edgesBefore);
+      });
+    }
+
+    it('update by (memoryId, loc) answers an existing and a missing loc alike when only the record is readable', async () => {
+      // This caller may read the Memory RECORD, so its existence is not a
+      // secret from them; what must not leak is which locs exist. The write
+      // gate refuses before the node lookup, so both answer the same.
+      const input = (loc: string) => ({ memoryId: recordOnlyMemoryId, loc, content: 'must not land' });
+      const existing = await gql(key.reader!, UPDATE_NODE, { input: input('private:node') });
+      const missing = await gql(key.reader!, UPDATE_NODE, { input: input('private:no-such-node') });
+
+      expect(existing).toEqual(missing);
+      expectCode(existing, 'FORBIDDEN');
+      expect((await db.node.findUniqueOrThrow({ where: { id: recordOnlyNodeId } })).content).toBeNull();
+    });
+
     it('uses the node-content gate when the Memory record is readable but its nodes are not', async () => {
       const read = await gql(key.reader!, READ_MEMORY, { ref: recordOnlyMemoryId });
       expect(read.errors).toBeUndefined();
