@@ -157,6 +157,16 @@ describe('#386 nodeExport resolver', () => {
     }
   });
 
+  it('#1340 — an objectType stored as "" (not NULL) is omitted from MD and "" in JSON (@jonas, #1778)', async () => {
+    await db.node.update({ where: { id: fx.srcId }, data: { objectType: '' } });
+    const md = ((await nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
+    expect(md).not.toContain('objectType');
+    const json = JSON.parse(
+      ((await nodeExport(null, { id: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
+    );
+    expect(json.objectType).toBe('');
+  });
+
   it('#1340 — an ordinary node carries no opinion: nothing in MD, null/"" in JSON', async () => {
     const md = ((await nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
     for (const key of ['\nrole:', '\nrunnable:', '\nobjectType:']) expect(md, key).not.toContain(key);

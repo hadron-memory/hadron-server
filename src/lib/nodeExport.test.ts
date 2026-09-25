@@ -244,6 +244,15 @@ describe('#1340 — role, isRunnable and objectType', () => {
     expect(keys.slice(keys.indexOf('seq'), keys.indexOf('seq') + 4)).toEqual(['seq', 'role', 'isRunnable', 'data']);
   });
 
+  it('an objectType stored as "" is omitted from MD like NULL, and is "" in JSON (@jonas, #1778)', () => {
+    // The CLI's `objectType,omitempty` drops "", so `objectType: ""` in a file
+    // would be the one divergence from its codec.
+    const n = kind({ nodeType: 'task', objectType: '' });
+    expect(renderCanonicalMarkdown(n)).not.toContain('objectType');
+    expect(renderSectionedMarkdown(n, sec('METADATA'))).not.toContain('objectType');
+    expect(JSON.parse(renderCanonicalJson(n)).objectType).toBe('');
+  });
+
   it('JSON: objectType right after type, "" when unset', () => {
     const set = JSON.parse(renderCanonicalJson(kind({ nodeType: 'task', objectType: 'insight' })));
     const keys = Object.keys(set);
