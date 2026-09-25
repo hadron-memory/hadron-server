@@ -1062,6 +1062,13 @@ export async function writeNodeCore(
             const changesUnversionedField =
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
             if (!needsRevision && !changesUnversionedField) {
+              // A stale guard is refused even when the write is a no-op: the
+              // compare-and-swap protects the caller's merge base, and an
+              // idempotent write must not report success against a revision
+              // the caller never saw (@copilot, PR #1339). Consumes nothing.
+              if (opts?.guardRevSeq !== undefined && current.revSeq !== opts.guardRevSeq) {
+                return { conflict: true, node: null };
+              }
               const unchanged = await tx.node.findUniqueOrThrow({
                 where: { id: current.id },
                 include,

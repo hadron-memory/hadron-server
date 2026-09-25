@@ -246,3 +246,18 @@ describe('#1339 review round 6', () => {
   });
 });
 
+describe('#1339 review round 7', () => {
+  it('a no-op write with a STALE guard is refused and consumes nothing (@copilot)', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:stale-guard', name: 'n', content: 'v1' } });
+    await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update'); // live revision 2
+    const attempt = writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update', { guardRevSeq: 1 });
+    await expect(attempt).rejects.toSatisfy(
+      (e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT',
+    );
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(2);
+    // Control: the same no-op at the CURRENT revision still succeeds, unchanged.
+    const ok = await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update', { guardRevSeq: 2 });
+    expect(ok.revSeq).toBe(2);
+  });
+});
+

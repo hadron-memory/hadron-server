@@ -2998,10 +2998,12 @@ export function createMcpServerInstance(
           });
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
-            await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
+            // Reconcile only while the row is still in this memory.
+            await ensureCurrentNodeRevisionInTransaction(tx, prior.id, { expectedMemoryId: memoryId });
             const current = await tx.node.findUniqueOrThrow({ where: { id: prior.id } });
-            // Found by (loc, memory), locked by id (@copilot, PR #1339).
-            if (current.loc !== loc || current.memoryId !== memoryId) {
+            // Found by (loc, memory), locked by id: a row that moved or was
+            // deleted in between refuses (@copilot, PR #1339).
+            if (current.loc !== loc || current.memoryId !== memoryId || current.deletedAt) {
               throw new NodeMovedDuringWriteError(
                 `[write_conflict] the section at "${loc}" moved while this write waited — re-read and retry.`,
               );
@@ -6301,7 +6303,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               // Row lock + drift reconciled as its own revision, then the
               // authoritative re-read the snapshot is built from — the rule on
               // every single-row revisioned writer (PR #1339 review).
-              await ensureCurrentNodeRevisionInTransaction(tx, existing.id);
+              // Re-validate BEFORE reconciling (@copilot, PR #1339): the row
+              // must still be the live node at the authorized (memory, loc),
+              // or this would reconcile — and then rename — a row that moved.
+              await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
+              const still = await tx.node.findUnique({
+                where: { id: existing.id },
+                select: { memoryId: true, loc: true, deletedAt: true },
+              });
+              if (!still || still.deletedAt || still.memoryId !== fromMemory.id || still.loc !== fromLoc) {
+                throw new SubtreeMoveSourceChangedError(existing.id);
+              }
+              await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
               const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
               await createNodeRevision(tx, {
                 id: generateId(),
