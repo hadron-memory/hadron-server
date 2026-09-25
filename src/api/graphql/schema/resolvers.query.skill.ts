@@ -536,33 +536,35 @@ export const skillQueries = {
         memory: { select: { urn: true } },
         revSeq: true,
     } as const;
-    const declaredRows = await ctx.db.$transaction(async (tx) => {
-      const candidates = await tx.node.findMany({
-        where: declaredWhere,
-        select: declaredSelect,
-        take: SKILL_PLAN_MAX_NODES + 1,
-        orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
-      });
-      if (candidates.length > SKILL_PLAN_MAX_NODES) return candidates;
-
-      // Lock in a stable order, reconcile every counter, then re-read the
-      // fields the planner hashes/renders before releasing any lock. A
-      // sequential `ensure...` loop over an earlier projection could label old
-      // content with the newly reconciled revision.
+    const candidates = await ctx.db.node.findMany({
+      where: declaredWhere,
+      select: declaredSelect,
+      take: SKILL_PLAN_MAX_NODES + 1,
+      orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
+    });
+    let declaredRows = candidates;
+    if (candidates.length <= SKILL_PLAN_MAX_NODES) {
+      // One short transaction per node: retaining every FOR UPDATE lock until
+      // the whole plan commits can deadlock a Git sync that visits the same
+      // rows in filesystem order. The final refetch supplies atomic row states.
       const liveIds: string[] = [];
       for (const id of candidates.map((r) => r.id).sort()) {
-        if ((await ensureCurrentNodeRevisionInTransaction(tx, id)) != null) liveIds.push(id);
+        const live = await ctx.db.$transaction(
+          (tx) => ensureCurrentNodeRevisionInTransaction(tx, id),
+          { timeout: 60_000, maxWait: 15_000 },
+        );
+        if (live != null) liveIds.push(id);
       }
-      return tx.node.findMany({
+      declaredRows = await ctx.db.node.findMany({
         // Reapply BOTH discovery and access/scope predicates after waiting for
-        // the row locks. An id can move into another tenant's memory while the
-        // transaction waits; id-only here would turn the locked re-read into a
+        // reconciliation. An id can move into another tenant's memory while a
+        // transaction waits; id-only here would turn the final re-read into a
         // cross-tenant content read.
         where: { AND: [declaredWhere, { id: { in: liveIds } }] } as never,
         select: declaredSelect,
         orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
       });
-    }, { timeout: 60_000, maxWait: 15_000 });
+    }
     if (declaredRows.length > SKILL_PLAN_MAX_NODES) {
       throw new GraphQLError(
         `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
