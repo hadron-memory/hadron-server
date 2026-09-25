@@ -1155,7 +1155,50 @@ export const nodeQueries = {
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where
       );
       const page = off + finalLimit;
-      const fetchN = hasStructuredFilters ? Math.min(page * 5, 2000) : page;
+      const VECTOR_FETCH_CAP = 2000;
+      const fetchN = hasStructuredFilters ? Math.min(page * 5, VECTOR_FETCH_CAP) : page;
+
+      /**
+       * The ids among `ids` that pass every structured filter and `where`, in
+       * the caller's scope — the same predicate `buildResult` and the chunk
+       * branch apply on hydration.
+       */
+      const eligibleIds = async (ids: string[]): Promise<Set<string>> => {
+        let candidates = ids;
+        if (f.where != null) {
+          candidates = await provider.filterWhere({
+            db: ctx.db, ids, memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+          });
+        }
+        const rows = await ctx.db.node.findMany({
+          where: { id: { in: candidates }, memoryId: { in: scopeIds }, ...structuredWhere },
+          select: { id: true },
+        });
+        return new Set(rows.map((r) => r.id));
+      };
+
+      /**
+       * #1345 review (@codex P2): a vector candidate window is selected WITHOUT
+       * the structured filters (the ANN scan is index-driven), so a fixed
+       * over-fetch could leave the page empty when the matches rank past it —
+       * `limit: 1` returned nothing when the five nearest nodes had other roles.
+       * With filters present, widen the window (x4, to the same cap) until the
+       * filtered, floored hits fill the page or the index has no more to give.
+       * Past the cap a page can still be short; it is never wrong.
+       */
+      const widenVectorWindow = async <T extends { nodeId: string; score: number }>(
+        search: (limit: number) => Promise<T[]>,
+      ): Promise<T[]> => {
+        let limit = fetchN;
+        for (;;) {
+          const hits = await search(limit);
+          if (!hasStructuredFilters || hits.length < limit || limit >= VECTOR_FETCH_CAP) return hits;
+          const floored = scoreFloor == null ? hits : hits.filter((h) => h.score >= scoreFloor);
+          const ok = await eligibleIds([...new Set(floored.map((h) => h.nodeId))]);
+          if (floored.filter((h) => ok.has(h.nodeId)).length >= page) return hits;
+          limit = Math.min(limit * 4, VECTOR_FETCH_CAP);
+        }
+      };
 
       // Hydrate a ranked (nodeId, score) list into hits: enforce the structured
       // filters via a Prisma re-fetch, order (by rank, or by an explicit sort),
@@ -1187,8 +1230,11 @@ export const nodeQueries = {
           );
           candidateIds = candidateIds.filter((id) => allowed.has(id));
         }
+        // #1345 review (@copilot): re-assert the memory scope at hydration. The
+        // candidates were scoped when RANKED, in a separate query; a node moved
+        // to another memory in between must not come back from outside scope.
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: candidateIds }, ...structuredWhere },
+          where: { id: { in: candidateIds }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
@@ -1451,7 +1497,9 @@ export const nodeQueries = {
         // #497 — apply the minScore floor to the scored passages too (PR-569
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
-        const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: fetchN });
+        const rawChunks = await widenVectorWindow((limit) =>
+          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit }),
+        );
         const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
         const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
         // #719 — honor `where` on chunk passages: keep only passages whose PARENT
@@ -1468,6 +1516,8 @@ export const nodeQueries = {
         const parents = await ctx.db.node.findMany({
           where: {
             id: { in: whereAllowed ? candidateParentIds.filter((id) => whereAllowed!.has(id)) : candidateParentIds },
+            // @copilot: re-assert scope at hydration, as buildResult does.
+            memoryId: { in: scopeIds },
             ...structuredWhere,
           },
           include: { memory: { select: { urn: true } } },
@@ -1515,7 +1565,9 @@ export const nodeQueries = {
         return { hits: [], passages, total: null, reason: null, degraded: null };
       }
 
-      const vecHits = await provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: fetchN });
+      const vecHits = await widenVectorWindow((limit) =>
+        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit }),
+      );
 
       if (effectiveMode === 'vector') {
         const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
@@ -1532,7 +1584,9 @@ export const nodeQueries = {
       const fused = reciprocalRankFusionScored(
         [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
         (id) => id,
-      ).slice(0, fetchN);
+        // Keep at least the (possibly widened) vector window: truncating to the
+        // original fetchN would drop the matches widening went out to find.
+      ).slice(0, Math.max(fetchN, vecHits.length));
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
       return await buildResult(
         fused.map((r) => ({ nodeId: r.item, score: r.score })),
