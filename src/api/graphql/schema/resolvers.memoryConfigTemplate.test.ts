@@ -230,6 +230,29 @@ describe('reads: a template you do not manage does not exist', () => {
   });
 });
 
+describe('a deleted owner owns nothing a manager can reach (#1369 review)', () => {
+  it('a soft-deleted organization takes its templates out of reach — read, list, update, create', async () => {
+    const t = await mkOrgTpl();
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    for (const ctx of [as(orgAdmin), admin()]) {
+      expect((await gql(ctx, ONE, { r: t.id })).data!.memoryConfigTemplate).toBeNull();
+      expect((await gql(ctx, LIST)).data!.memoryConfigTemplates.total).toBe(0);
+    }
+    expect(code(await gql(as(orgAdmin), UPDATE, { r: t.id, i: { required: true } }))).toBe('MEMORY_CONFIG_TEMPLATE_NOT_FOUND');
+    expect((await create(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'again' })).errors).toBeDefined();
+  });
+
+  it('so does an App whose organization is soft-deleted', async () => {
+    const t = (await create(as(orgAdmin), 'APP', orgApp.id, { name: 'app-one' })).data!.createMemoryConfigTemplate.template;
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    for (const ctx of [as(orgAdmin), admin()]) {
+      expect((await gql(ctx, ONE, { r: t.id })).data!.memoryConfigTemplate).toBeNull();
+      expect((await gql(ctx, LIST)).data!.memoryConfigTemplates.total).toBe(0);
+    }
+    expect((await create(as(orgAdmin), 'APP', orgApp.id, { name: 'app-two' })).errors).toBeDefined();
+  });
+});
+
 describe('names', () => {
   it.each(['', 'Base', 'has space', '-lead', 'x'.repeat(65)])('name %j is BAD_USER_INPUT on field name', async (name) => {
     const r = await create(as(orgAdmin), 'ORGANIZATION', org.id, { name });
@@ -354,6 +377,17 @@ describe('update and delete: wholesale rules, optimistic concurrency, soft delet
     expect(row.deletedBy).toBe(orgAdmin);
     expect(await db.memoryConfigTemplateRule.count({ where: { templateId: t.id } })).toBe(1);
     expect(code(await gql(as(orgAdmin), UPDATE, { r: t.id, i: { required: true } }))).toBe('MEMORY_CONFIG_TEMPLATE_NOT_FOUND');
+  });
+
+  it('each concurrent replacement returns its OWN rules beside its own revision', async () => {
+    const t = await mkOrgTpl();
+    const roles = ['r-a', 'r-b', 'r-c', 'r-d', 'r-e', 'r-f', 'r-g', 'r-h'];
+    const out = await Promise.all(roles.map((role) => gql(as(orgAdmin), UPDATE, { r: t.id, i: { rules: [{ role }], description: role } })));
+    for (const [i, r] of out.entries()) {
+      const got = r.data!.updateMemoryConfigTemplate.template;
+      expect(got.description).toBe(roles[i]);
+      expect(got.rules.map((x: { role: string }) => x.role)).toEqual([roles[i]]);
+    }
   });
 
   it('concurrent updates serialize: each returns its own write and a distinct revision', async () => {

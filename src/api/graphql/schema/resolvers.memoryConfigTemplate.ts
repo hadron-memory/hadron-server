@@ -34,7 +34,7 @@
  * `revision` covers its rules (cli#716 Q1).
  */
 import { GraphQLError } from 'graphql';
-import { Prisma, type MemoryConfigTemplate } from '../../../generated/prisma/index.js';
+import { Prisma, type MemoryConfigTemplate, type MemoryConfigTemplateRule } from '../../../generated/prisma/index.js';
 import { type Context, clampListTake, isPlatformAdmin, requireOrgRole, requireOwnerOrOrgRole } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -98,9 +98,17 @@ async function allowed(check: () => Promise<void>): Promise<boolean> {
   }
 }
 
+/**
+ * An owner that is gone owns nothing a manager can reach. An organization's
+ * soft delete keeps its membership rows (`softDeleteOrganizationCore` stamps
+ * the org only), so `requireOrgRole` alone would go on admitting its former
+ * admins — to the org's own templates and to its Apps' (#1369 review).
+ */
+const LIVE_ORG_OR_NONE: Prisma.AppWhereInput = { OR: [{ organizationId: null }, { organization: { deletedAt: null } }] };
+
 async function liveApp(ctx: Context, appId: string) {
   return ctx.db.app.findFirst({
-    where: { id: appId, deletedAt: null, uninstalledAt: null },
+    where: { id: appId, deletedAt: null, uninstalledAt: null, ...LIVE_ORG_OR_NONE },
     select: { id: true, organizationId: true, ownerUserId: true },
   });
 }
@@ -108,7 +116,10 @@ async function liveApp(ctx: Context, appId: string) {
 /** The MANAGE gate for a template's owner (H4). Boolean, so callers can conceal. */
 async function canManageOwner(ctx: Context, owner: OwnerColumns): Promise<boolean> {
   if (owner.hadronServerId) return !ctx.impersonation && isPlatformAdmin(ctx);
-  if (owner.organizationId) return allowed(() => requireOrgRole(ctx, owner.organizationId!, 'ADMIN'));
+  if (owner.organizationId) {
+    const org = await ctx.db.organization.findFirst({ where: { id: owner.organizationId, deletedAt: null }, select: { id: true } });
+    return !!org && (await allowed(() => requireOrgRole(ctx, org.id, 'ADMIN')));
+  }
   if (owner.ownerUserId) return !ctx.impersonation && !!ctx.userId && ctx.userId === owner.ownerUserId;
   const app = await liveApp(ctx, owner.appId!);
   return !!app && (await allowed(() => requireOwnerOrOrgRole(ctx, app, 'ADMIN')));
@@ -243,6 +254,18 @@ function translateNameTaken(e: unknown, name: string): never {
   throw e;
 }
 
+type TemplateWithRules = MemoryConfigTemplate & { rules?: MemoryConfigTemplateRule[] };
+
+/**
+ * The rules read INSIDE the write's transaction, so a mutation's payload pairs
+ * its own revision with its own rules. Resolved after commit, a concurrent
+ * replacement could land in between and answer with another write's rules
+ * (#1369 review).
+ */
+async function withRules(tx: Prisma.TransactionClient, t: MemoryConfigTemplate): Promise<TemplateWithRules> {
+  return { ...t, rules: await tx.memoryConfigTemplateRule.findMany({ where: { templateId: t.id }, orderBy: { role: 'asc' } }) };
+}
+
 /** Lock a template's row for the rest of the transaction and read it, or null when it is gone. */
 async function lockTemplate(tx: Prisma.TransactionClient, id: string): Promise<MemoryConfigTemplate | null> {
   await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${id} FOR UPDATE`;
@@ -253,7 +276,7 @@ async function lockTemplate(tx: Prisma.TransactionClient, id: string): Promise<M
 async function manageableWhere(ctx: Context): Promise<Prisma.MemoryConfigTemplateWhereInput> {
   const or: Prisma.MemoryConfigTemplateWhereInput[] = [];
   const platform = !ctx.impersonation && isPlatformAdmin(ctx);
-  if (platform) or.push({ hadronServerId: { not: null } }, { organizationId: { not: null } });
+  if (platform) or.push({ hadronServerId: { not: null } }, { organization: { deletedAt: null } });
   let adminOrgIds: string[] = [];
   if (!platform && ctx.userId) {
     // requireOrgRole's own predicate, as a set: a LIVE membership at ADMIN or
@@ -263,6 +286,7 @@ async function manageableWhere(ctx: Context): Promise<Prisma.MemoryConfigTemplat
         userId: ctx.userId,
         deletedAt: null,
         role: { in: ['ADMIN', 'OWNER'] },
+        organization: { deletedAt: null },
         ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
       },
       select: { organizationId: true },
@@ -275,9 +299,9 @@ async function manageableWhere(ctx: Context): Promise<Prisma.MemoryConfigTemplat
   // impersonation), or an admin of the App's org.
   const appOr: Prisma.AppWhereInput[] = [];
   if (ctx.userId && !ctx.impersonation) appOr.push({ ownerUserId: ctx.userId });
-  if (platform) appOr.push({ organizationId: { not: null } });
+  if (platform) appOr.push({ organization: { deletedAt: null } });
   else if (adminOrgIds.length) appOr.push({ organizationId: { in: adminOrgIds } });
-  if (appOr.length) or.push({ app: { deletedAt: null, uninstalledAt: null, OR: appOr } });
+  if (appOr.length) or.push({ app: { deletedAt: null, uninstalledAt: null, AND: [LIVE_ORG_OR_NONE, { OR: appOr }] } });
   return or.length ? { OR: or } : { id: { in: [] } };
 }
 
@@ -378,7 +402,7 @@ export const memoryConfigTemplateMutations = {
           },
         });
         if (rules.length) await tx.memoryConfigTemplateRule.createMany({ data: rules.map((r) => ({ ...r.data, templateId: id })) });
-        return created;
+        return withRules(tx, created);
       });
       return { template, warnings: [] };
     } catch (e) {
@@ -416,7 +440,7 @@ export const memoryConfigTemplateMutations = {
           await tx.memoryConfigTemplateRule.deleteMany({ where: { templateId: id } });
           if (rules.length) await tx.memoryConfigTemplateRule.createMany({ data: rules.map((r) => ({ ...r.data, templateId: id })) });
         }
-        return updated;
+        return withRules(tx, updated);
       });
       return { template, warnings: [] };
     } catch (e) {
@@ -450,9 +474,11 @@ export const memoryConfigTemplateFieldResolvers = {
     ownerType: (t: MemoryConfigTemplate) => ownerTypeOf(t),
     // The server's row id is not exposed anywhere else, so a server-owned template has none here either.
     ownerId: (t: MemoryConfigTemplate) => t.organizationId ?? t.ownerUserId ?? t.appId ?? null,
-    // Reached only through the manage gate; the rows are that template's.
-    rules: (t: MemoryConfigTemplate, _: unknown, ctx: Context) =>
-      ctx.db.memoryConfigTemplateRule.findMany({ where: { templateId: t.id }, orderBy: { role: 'asc' } }),
+    // Reached only through the manage gate; the rows are that template's. A
+    // mutation hands its in-transaction snapshot; a read queries afresh (its
+    // revision still guards any write made from it).
+    rules: (t: TemplateWithRules, _: unknown, ctx: Context) =>
+      t.rules ?? ctx.db.memoryConfigTemplateRule.findMany({ where: { templateId: t.id }, orderBy: { role: 'asc' } }),
   },
   MemoryConfigTemplateRule: ruleRefFieldResolvers,
 };
