@@ -1110,8 +1110,11 @@ export const nodeQueries = {
           // re-scoping here means a concurrent cross-memory move (cf. #409) can
           // never surface an out-of-scope node — cross-tenant reads are the
           // first-class invariant, not a cosmetic one.
+          // #1345 review (@copilot): the structured filters too, not only scope,
+          // so a node that stopped matching (e.g. its role changed) between the
+          // SQL filter and this read is not returned against the filter.
           const rows = await ctx.db.node.findMany({
-            where: { id: { in: ids }, memoryId: { in: scopeIds } },
+            where: { id: { in: ids }, memoryId: { in: scopeIds }, ...structuredWhere },
             include: nodeInclude,
           });
           await decryptNodesBatch(ctx.db, rows);
@@ -1273,8 +1276,12 @@ export const nodeQueries = {
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
           )).filter((id) => !shown.has(id));
           if (neighbourIds.length > 0) {
+            // Neighbours are deliberately UNFILTERED (appended context), but
+            // never out of scope: re-assert it here, like every other hydration
+            // in findNodes (#1345 review) — expandWithNeighbors scoped them in a
+            // separate query.
             const nRows = await ctx.db.node.findMany({
-              where: { id: { in: neighbourIds }, deletedAt: null },
+              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null },
               include: nodeInclude,
             });
             await decryptNodesBatch(ctx.db, nRows);
@@ -1333,7 +1340,7 @@ export const nodeQueries = {
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
           )).filter((id) => !shown.has(id));
           if (neighbourIds.length > 0) {
-            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, deletedAt: null }, include: nodeInclude });
+            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null }, include: nodeInclude });
             await decryptNodesBatch(ctx.db, nRows);
             const nById = new Map(nRows.map((n) => [n.id, n]));
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
