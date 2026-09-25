@@ -1800,6 +1800,37 @@ describe('#1341 — a `<…>` description is refused for claudeSkill, and only t
     });
   });
 
+  it('a PAIRED, unedited export whose description later gains markup is kept, not rewritten or removed', async () => {
+    // The real shape of this regression (Chip's QA probe on #1354): the skill
+    // exported cleanly, the installed file carries the node's id and hash, and
+    // then the author edited the description. The plan must keep the file the
+    // host already loads rather than overwrite it with an unloadable one.
+    const node = await mkNode('tasks:markup-paired', {
+      properties: declaration({ name: 'markup-paired', description: 'Does a thing. Use when you need it.' }),
+    });
+    const first = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+    const exported = first.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    const headerHash = /hash=([0-9a-f]{16})/.exec(exported.renderedBody as string)![1]!;
+
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ name: 'markup-paired', description: 'Use when adding a node to <memory>.' }) },
+    });
+    const got = await plan({
+      intent: 'EXPORT',
+      host: 'claudeSkill',
+      files: [{ dirName: 'markup-paired', sourceUrn: exported.urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+    });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.renderedBody).toBeNull();
+    expect(e.exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-description-markup' }],
+    });
+    expect(got.orphans.map((o: { dirName: string }) => o.dirName)).not.toContain('markup-paired');
+  });
+
   it('the SAME description exports normally for codexSkill', async () => {
     const node = await mkNode('tasks:markup-codex', {
       properties: { exports: { codexSkill: { name: 'markup-skill', description: 'Use when adding a node to <memory>.', enable: true } } },

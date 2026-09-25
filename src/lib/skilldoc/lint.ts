@@ -8,7 +8,8 @@
  * rule, `skill-name-reserved` (#1315), was server-only until hadron-cli#712
  * ported it; the Go-generated parity fixtures now pin it in their `lintReserved`
  * section, word for word. The thirteenth, `skill-description-markup` (#1341),
- * is mirrored in Go by hadron-cli#722. They answer *is this node
+ * is mirrored in Go by hadron-cli#722 and pinned the same way, per host, in
+ * `lintMarkup`. They answer *is this node
  * exportable, and will the host do what its author expects* — judgment over
  * corpus inputs alone, with no file and no disk, which is what makes this half
  * of the split (A3) pure.

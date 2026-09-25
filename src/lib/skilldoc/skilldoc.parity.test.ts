@@ -105,6 +105,15 @@ interface Fixtures {
     /** Go's LintFor per host key, over EVERY row of its host table. */
     findingsByHost: Record<string, { rule: string; severity: string; message: string }[]>;
   }[];
+  /** #1341 — Go's LintFor PER HOST over authored descriptions: the Cowork probe
+   *  upload's twenty, exactly as uploaded, plus the unmeasured cases genfix names
+   *  (hadron-cli#722). Same shape as lintReserved, stamped separately. */
+  lintMarkupSourceCommit: string;
+  lintMarkup: {
+    name: string;
+    node: { urn: string; loc: string; memoryUrn: string; isRunnable: boolean; content: string; properties: unknown };
+    findingsByHost: Record<string, { rule: string; severity: string; message: string }[]>;
+  }[];
 }
 
 /** Loads the fixtures, refusing an empty or absent set rather than yielding []. */
@@ -116,7 +125,7 @@ function loadFixtures(): Fixtures {
     'normalizeDescription', 'normalizeBody',
     'validName', 'hash', 'render', 'parseFile',
     'isNodeUrn', 'renderParseRoundTrip', 'lint', 'lintCollisions', 'declared',
-    'lintUnknownHostKeys', 'lintReserved',
+    'lintUnknownHostKeys', 'lintReserved', 'lintMarkup',
   ];
   for (const s of sections) {
     const v = f[s];
@@ -457,8 +466,9 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
   // its "clean" verdict was an undeclared-node result (@codex / @copilot,
   // PR #1343). Every host in the server's table must have a Go verdict.
   it.each(
-    F.lintReserved.flatMap((c) => SKILL_HOSTS.map((h) => [`${c.name} @ ${h.key}`, c, h.key] as const)),
-  )('reserved: %s', (_n, c, host) => {
+    [...F.lintReserved.map((c) => ['reserved', c] as const), ...F.lintMarkup.map((c) => ['markup', c] as const)]
+      .flatMap(([section, c]) => SKILL_HOSTS.map((h) => [`${section}: ${c.name} @ ${h.key}`, c, h.key] as const)),
+  )('%s', (_n, c, host) => {
     expect(Object.keys(c.findingsByHost).sort()).toEqual(SKILL_HOSTS.map((h) => h.key).sort());
     const got = lintNode(c.node as SkillNode, host).map((f) => ({
       rule: f.rule, severity: f.severity, message: f.message,
@@ -481,6 +491,22 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     expect(rules('codex evaluates the name but does not reserve it', 'codexSkill')).toEqual(['skill-name-invalid']);
   });
 
+  it('the markup section carries both measured answers, per host (#1341)', () => {
+    // The twenty probe cases carry Cowork's verdict in their names, so a
+    // section generated from a Go that refused everything, or nothing, reds
+    // here rather than passing both sides of a port that agrees with it.
+    expect(F.lintMarkupSourceCommit).toBeTruthy();
+    const probes = F.lintMarkup.filter((c) => /^p\d\d-/.test(c.name));
+    expect(probes).toHaveLength(20);
+    const fires = (c: (typeof probes)[number], host: string) =>
+      c.findingsByHost[host].some((f) => f.rule === 'skill-description-markup');
+    for (const c of probes) {
+      expect(fires(c, 'claudeSkill'), c.name).toBe(c.name.endsWith('(Cowork refused)'));
+      expect(fires(c, 'codexSkill'), c.name).toBe(false);
+    }
+    expect(probes.filter((c) => c.name.endsWith('(Cowork refused)'))).toHaveLength(12);
+  });
+
   it.each(F.lintCollisions.map((c) => [c.name, c] as const))('collisions: %s', (_n, c) => {
     const got = lintCollisions(c.nodes as SkillNode[]).map((f) => ({
       urn: f.urn, rule: f.rule, severity: f.severity, message: f.message,
@@ -488,36 +514,24 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     expect(got).toEqual(c.findings);
   });
 
-  /**
-   * Rules this port emits that the vendored Go fixtures do NOT exercise yet, so
-   * the exhaustive list below stays true rather than silently omitting one.
-   * Each is covered by its own tests meanwhile.
-   *
-   * - `skill-description-markup` (#1341): Cowork's `<…>` description refusal,
-   *   Claude only. Covered by hosts.markup.test.ts and the planner cases in
-   *   resolvers.skillPlan.test.ts. The Go mirror is hadron-cli#722 (PR #730);
-   *   re-vendor once genfix emits a section for it.
-   */
-  const NOT_YET_IN_GO_FIXTURES = ['skill-description-markup'];
-
-  it('the fixture set exercises every rule this port can emit (not-yet-vendored rules excepted, and named)', () => {
+  it('the fixture set exercises every rule this port can emit', () => {
     // Otherwise a rule could be unreachable, or misspelled, and every fixture
     // would still pass — the parity equivalent of a guard nobody proved fails.
     // `skill-name-reserved` was server-only until hadron-cli#712 ported it; it
-    // is reached through `lintReserved`, not `lint`, which keeps its own commit.
+    // is reached through `lintReserved`, not `lint`, which keeps its own commit;
+    // `skill-description-markup` (#1341) likewise through `lintMarkup`.
     const emitted = new Set([
       ...F.lint.flatMap((c) => c.findings.map((f) => f.rule)),
       ...F.lintReserved.flatMap((c) => Object.values(c.findingsByHost).flat().map((f) => f.rule)),
+      ...F.lintMarkup.flatMap((c) => Object.values(c.findingsByHost).flat().map((f) => f.rule)),
       ...F.lintCollisions.flatMap((c) => c.findings.map((f) => f.rule)),
     ]);
-    // Once the regenerated fixtures reach one of these, it shows up here: move
-    // it into the list below instead of keeping two records of one rule.
-    expect(NOT_YET_IN_GO_FIXTURES.filter((r) => emitted.has(r))).toEqual([]);
     expect([...emitted].sort()).toEqual([
       'skill-content-empty',
       'skill-content-has-frontmatter',
       'skill-content-has-template',
       'skill-declaration-malformed',
+      'skill-description-markup',
       'skill-description-missing',
       'skill-description-no-trigger',
       'skill-description-too-long',
