@@ -393,6 +393,68 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } })).deletedAt).not.toBeNull();
   });
 
+  it('transferring a PUBLIC memory revokes the now-foreign WRITABLE link but keeps foreign reads', async () => {
+    // PUBLIC justifies a cross-tenant READ and nothing more. A PUBLIC memory
+    // carrying a same-tenant read-write item and then transferred left that
+    // item live and writable from what had become a foreign tenant, because
+    // the sweep returned early on "still PUBLIC".
+    const srcOrg = await db.organization.create({ data: { id: generateId(), name: 'psrc', urn: `psrc-${suffix}` } });
+    const dstOrg = await db.organization.create({ data: { id: generateId(), name: 'pdst', urn: `pdst-${suffix}` } });
+    const mover = await db.user.create({ data: { id: generateId(), handle: `pmv-${suffix}`, githubUsername: `pmv-${suffix}` } });
+    await db.orgMember.create({ data: { organizationId: srcOrg.id, userId: mover.id, role: 'ADMIN' } });
+    await db.orgMember.create({ data: { organizationId: dstOrg.id, userId: mover.id, role: 'ADMIN' } });
+    const moverKey = (await mintUserApiKey(db, { userId: mover.id, label: 'k', createdBy: mover.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+
+    const pub = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: srcOrg.id, urn: `${srcOrg.urn}:pubmove`,
+        name: 'pubmove', class: 'knowledge', visibility: 'PUBLIC',
+      } as never,
+    });
+    const node = await db.node.create({ data: { id: generateId(), memoryId: pub.id, loc: 'payroll', name: 'p', content: 'PUBLIC MOVING' } });
+    mem.pubmove = { id: pub.id, urn: `hrn:mem:${srcOrg.urn}:pubmove`, nodeId: node.id };
+
+    // A writable link from the memory's own tenant — legitimate today.
+    const { agentId: writer, appKey: writerKey } = await agentWithApp(srcOrg.id, 'pub-writer');
+    expect((await gql(moverKey, ATTACH, { g: writer, m: mem.pubmove.urn, r: 'read-write' })).errors).toBeUndefined();
+    // And a foreign READ link, justified by PUBLIC.
+    const { agentId: reader, appKey: readerKey } = await agentWithApp(dualOrgId, 'pub-reader');
+    expect((await gql(key.dual!, ATTACH, { g: reader, m: mem.pubmove.urn, r: 'read' })).errors).toBeUndefined();
+    expect(await writes(writerKey, 'pubmove')).toBe(true);
+
+    // Transfer. The memory stays PUBLIC; only its tenant changes.
+    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id visibility } }`, { id: pub.id, o: dstOrg.id });
+    expect(moved.errors, JSON.stringify(moved.errors)).toBeUndefined();
+    expect(moved.data!.updateMemory.visibility).toBe('PUBLIC');
+
+    // The writable link is now foreign and must be gone…
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: writer } })).deletedAt).not.toBeNull();
+    expect(await writes(writerKey, 'pubmove')).toBe(false);
+    // …while the foreign READ link is still justified by PUBLIC.
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: reader } })).deletedAt).toBeNull();
+    // Non-null rather than the original bytes: the legitimate write above
+    // changed them, and what matters here is that the read link survived.
+    expect(await readsContent(readerKey, 'pubmove')).not.toBeNull();
+  });
+
+  it('a read-write link to a SOFT-DELETED memory does not block publishing the agent', async () => {
+    // Such an item grants nothing — every access fold excludes deleted
+    // memories — so counting it permanently refused publication.
+    const doomed = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:doomed`,
+        name: 'doomed', class: 'knowledge', visibility: 'PUBLIC',
+      } as never,
+    });
+    const { agentId } = await agentWithApp(attackerOrgId, 'deleted-mem');
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: doomed.id, role: 'read-write' } });
+    await db.memory.update({ where: { id: doomed.id }, data: { deletedAt: new Date() } });
+
+    const r = await gql(key.attacker!, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { id visibility } }`, { r: agentId });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(r.data!.updateAgent.visibility).toBe('PUBLIC');
+  });
+
   it('a concurrent attach and narrowing cannot both win', async () => {
     // The race: the attach reads the memory while PUBLIC, the narrowing finds
     // no link to revoke, and the attach then persists a grant from its stale

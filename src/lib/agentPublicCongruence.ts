@@ -66,7 +66,11 @@ export async function assertAgentPublicAllowed(db: Db, agentId: string): Promise
   // either side can move: an agent with read-write knowledge must not become
   // PUBLIC, just as a PUBLIC agent must not be given read-write knowledge.
   const writable = await db.agentMemoryItem.findMany({
-    where: { agentId, deletedAt: null, role: 'read-write' },
+    // `memory.deletedAt: null` matches nonPublicLinkedMemories and every App
+    // access fold (@codex P2, PR #1357): an item pointing at a soft-deleted
+    // memory grants no capability, so counting it here would permanently
+    // refuse publication over a link that cannot confer anything.
+    where: { agentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
     select: { memory: { select: { name: true } } },
   });
   if (writable.length > 0) {
@@ -158,9 +162,20 @@ export async function revokeLinksForeignToTenant(
   // left. This is also why the caller must fire on an org change, not only on
   // a visibility change: a transfer makes existing links foreign without
   // touching visibility at all.
-  if (memory.visibility === 'PUBLIC') return 0;
+  // PUBLIC justifies a cross-tenant READ link and nothing more — that is
+  // exactly the exception `requireAgentMemoryGrant` grants. So a still-PUBLIC
+  // memory keeps its foreign READ links, but a foreign WRITABLE one is never
+  // justified by PUBLIC and must go (@codex P1, PR #1357): a PUBLIC memory
+  // carrying a same-tenant read-write item and then TRANSFERRED to another
+  // organization left that item live and writable from what is now a foreign
+  // tenant, because this early return skipped the sweep entirely.
+  const writableOnly = memory.visibility === 'PUBLIC';
   const links = await db.agentMemoryItem.findMany({
-    where: { memoryId: memory.id, deletedAt: null },
+    where: {
+      memoryId: memory.id,
+      deletedAt: null,
+      ...(writableOnly ? { role: 'read-write' } : {}),
+    },
     select: { id: true, agent: { select: { organizationId: true, ownerUserId: true } } },
   });
   const foreign = links.filter((l: { agent: { organizationId: string | null; ownerUserId: string | null } }) => {

@@ -88,3 +88,9 @@ run "19 publication check back outside the lock" "$AG" \
   "        if (visibility === 'PUBLIC') {
           await assertAgentPublicAllowed(tx, id);
         }" "        "
+run "20 PUBLIC transfer keeps foreign writable links" "$A" \
+  "  const writableOnly = memory.visibility === 'PUBLIC';" \
+  "  const writableOnly = false; if (memory.visibility === 'PUBLIC') return 0;"
+run "21 publication counts deleted-memory links" "$A" \
+  "    where: { agentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } }," \
+  "    where: { agentId, deletedAt: null, role: 'read-write' },"
