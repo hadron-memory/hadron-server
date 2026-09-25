@@ -488,7 +488,19 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     expect(got).toEqual(c.findings);
   });
 
-  it('the fixture set exercises every rule this port can emit', () => {
+  /**
+   * Rules this port emits that the vendored Go fixtures do NOT exercise yet, so
+   * the exhaustive list below stays true rather than silently omitting one.
+   * Each is covered by its own tests meanwhile.
+   *
+   * - `skill-description-markup` (#1341): Cowork's `<…>` description refusal,
+   *   Claude only. Covered by hosts.markup.test.ts and the planner cases in
+   *   resolvers.skillPlan.test.ts. The Go mirror is hadron-cli#722 (PR #730);
+   *   re-vendor once genfix emits a section for it.
+   */
+  const NOT_YET_IN_GO_FIXTURES = ['skill-description-markup'];
+
+  it('the fixture set exercises every rule this port can emit (not-yet-vendored rules excepted, and named)', () => {
     // Otherwise a rule could be unreachable, or misspelled, and every fixture
     // would still pass — the parity equivalent of a guard nobody proved fails.
     // `skill-name-reserved` was server-only until hadron-cli#712 ported it; it
@@ -498,6 +510,9 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
       ...F.lintReserved.flatMap((c) => Object.values(c.findingsByHost).flat().map((f) => f.rule)),
       ...F.lintCollisions.flatMap((c) => c.findings.map((f) => f.rule)),
     ]);
+    // Once the regenerated fixtures reach one of these, it shows up here: move
+    // it into the list below instead of keeping two records of one rule.
+    expect(NOT_YET_IN_GO_FIXTURES.filter((r) => emitted.has(r))).toEqual([]);
     expect([...emitted].sort()).toEqual([
       'skill-content-empty',
       'skill-content-has-frontmatter',
