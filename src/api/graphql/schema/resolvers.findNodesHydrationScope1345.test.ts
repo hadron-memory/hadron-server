@@ -75,4 +75,14 @@ describe('expand neighbours stay in scope', () => {
     expect(ids).toContain(review); // unfiltered by role, by design
     expect(ids).not.toContain(outside);
   });
+
+  it('the same through buildResult (hybrid on an unindexed memory degrades to keyword there)', async () => {
+    neighbours.extra = [outside];
+    const res = await findNodes({ query: 'zebracontent', mode: 'hybrid', filter: { memoryIds: [memId], role: 'spec' }, expand: 1 });
+    expect(res.degraded ?? res.reason ?? '').toMatch(/no_vector_index/); // proves the buildResult path ran
+    const ids = res.hits.map((h: any) => h.node.id);
+    expect(ids).toContain(spec);
+    expect(ids).toContain(review);
+    expect(ids).not.toContain(outside);
+  });
 });
