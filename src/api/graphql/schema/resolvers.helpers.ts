@@ -2798,6 +2798,8 @@ export interface UpdateNodeInput
   id?: string;
   memoryId?: string;
   loc?: string;
+  /** Optional positive Node.revision compare-and-swap precondition (#937). */
+  expectedRevision?: number | null;
   name?: string;
 }
 

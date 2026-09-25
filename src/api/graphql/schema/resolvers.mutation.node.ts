@@ -1522,7 +1522,18 @@ async function updateNodeCore(
   op: string,
   opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext },
 ) {
-  const { id, memoryId, loc, ...fields } = input;
+  const { id, memoryId, loc, expectedRevision, ...fields } = input;
+  // GraphQL guarantees a signed 32-bit integer on the wire, but resolver tests
+  // and internal delegates call this function directly. Keep the public
+  // contract true at the shared seam rather than relying on one transport.
+  if (
+    expectedRevision != null &&
+    (!Number.isInteger(expectedRevision) || expectedRevision <= 0 || expectedRevision > 2_147_483_647)
+  ) {
+    throw new GraphQLError('expectedRevision must be a positive 32-bit integer.', {
+      extensions: { code: 'BAD_USER_INPUT', field: 'expectedRevision' },
+    });
+  }
   const hasId = id != null && id !== '';
   if (hasId && (memoryId != null || loc != null)) {
     throw new GraphQLError(
@@ -1581,6 +1592,7 @@ async function updateNodeCore(
   // write hit a different node.
   return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
     targetNodeId,
+    guardRevSeq: expectedRevision ?? undefined,
     ownsKind: opts?.ownsKind,
     governedContext: opts?.governedContext,
     concealUnreadable: {
