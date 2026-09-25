@@ -178,6 +178,8 @@ func reservedCases() []kase {
 			"why": "the reservation is Claude's, not a global ban"},
 		{"name": "both hosts declare synced, only Claude refuses", "node": node(map[string]any{
 			"claudeSkill": decl("synced"), "codexSkill": decl("synced")})},
+		{"name": "codex evaluates the name but does not reserve it", "node": node(map[string]any{"codexSkill": decl("Synced")}),
+			"why": "a POSITIVE control that the Codex column is evaluated: the capital trips skill-name-invalid there, the reservation does not"},
 		{"name": "a name containing synced is not reserved", "node": node(map[string]any{"claudeSkill": decl("synced-notes")}),
 			"why": "the whole name is matched, never a substring"},
 	}
@@ -369,17 +371,28 @@ func main() {
 	if err := json.Unmarshal(rb, &lr); err != nil {
 		panic(err)
 	}
+	// Findings PER HOST, from LintFor over every row of Go's host table. The
+	// first version called skilldoc.Lint, which is the Claude-only wrapper, so
+	// a codexSkill declaration was never evaluated by the reference at all and
+	// its "clean" verdict was an undeclared-node result — a parity control that
+	// could not fail (@codex / @copilot, PR #1343).
 	for _, c := range lr {
 		n := c["node"].(map[string]any)
 		props, _ := n["properties"].(map[string]any)
-		findings := []any{}
-		for _, f := range skilldoc.Lint(skilldoc.Node{
+		node := skilldoc.Node{
 			URN: n["urn"].(string), Loc: n["loc"].(string), MemoryURN: n["memoryUrn"].(string),
 			IsRunnable: n["isRunnable"].(bool), Content: n["content"].(string), Properties: props,
-		}) {
-			findings = append(findings, map[string]any{"rule": f.Rule, "severity": f.Severity, "message": f.Message})
 		}
-		c["findings"] = findings
+		byHost := map[string]any{}
+		for _, h := range skilldoc.Hosts {
+			findings := []any{}
+			for _, f := range skilldoc.LintFor(node, h) {
+				findings = append(findings, map[string]any{"rule": f.Rule, "severity": f.Severity, "message": f.Message})
+			}
+			byHost[h.Key] = findings
+		}
+		c["findingsByHost"] = byHost
+		delete(c, "findings") // the pre-review single-host shape
 	}
 	doc["lintReserved"], _ = json.Marshal(lr)
 	doc["lintReservedSourceCommit"], _ = json.Marshal(commit)

@@ -93,7 +93,9 @@ Also since #1292, `lintUnknownHostKeys` (stamping
 word for word, quoting included.
 Since #1315, `lintReserved` (stamping `lintReservedSourceCommit`): nodes
 authored in `reservedCases()` that declare Claude's reserved `synced` name, with
-findings from Go's `Lint`. It is a section of its own, not cases upserted into
+findings PER HOST from Go's `LintFor` over every row of its host table
+(`findingsByHost`). Not `Lint`: that is the Claude-only wrapper, and with it a
+`codexSkill` declaration is never evaluated at all (PR #1343 review). It is a section of its own, not cases upserted into
 `lint`, for the reason below. The generator still BUILDS at a commit older than
 hadron-cli#712, but Go emits no `skill-name-reserved` there, so the TypeScript
 side reds against the result. Use plain spellings in these cases: Go folds with

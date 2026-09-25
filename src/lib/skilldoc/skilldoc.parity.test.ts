@@ -37,6 +37,7 @@ import { hash } from './hash.js';
 import { render, SkillRenderError } from './render.js';
 import { isNodeUrn, parseFile, SkillFileParseError } from './parse.js';
 import { lintCollisions, lintNode, lintUnknownHostKeys, type SkillNode } from './lint.js';
+import { SKILL_HOSTS } from './hosts.js';
 import { classifyDeclaration, unknownHostKeys } from './declaration.js';
 
 interface Fixtures {
@@ -101,7 +102,8 @@ interface Fixtures {
   lintReserved: {
     name: string;
     node: { urn: string; loc: string; memoryUrn: string; isRunnable: boolean; content: string; properties: unknown };
-    findings: { rule: string; severity: string; message: string }[];
+    /** Go's LintFor per host key, over EVERY row of its host table. */
+    findingsByHost: Record<string, { rule: string; severity: string; message: string }[]>;
   }[];
 }
 
@@ -429,22 +431,33 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     expect(got).toEqual(c.findings);
   });
 
-  it.each(F.lintReserved.map((c) => [c.name, c] as const))('reserved: %s', (_n, c) => {
-    const got = lintNode(c.node as SkillNode).map((f) => ({
+  // Per HOST. The first version compared lintNode's default (Claude) host
+  // only, so a codexSkill declaration was never evaluated on either side and
+  // its "clean" verdict was an undeclared-node result (@codex / @copilot,
+  // PR #1343). Every host in the server's table must have a Go verdict.
+  it.each(
+    F.lintReserved.flatMap((c) => SKILL_HOSTS.map((h) => [`${c.name} @ ${h.key}`, c, h.key] as const)),
+  )('reserved: %s', (_n, c, host) => {
+    expect(Object.keys(c.findingsByHost).sort()).toEqual(SKILL_HOSTS.map((h) => h.key).sort());
+    const got = lintNode(c.node as SkillNode, host).map((f) => ({
       rule: f.rule, severity: f.severity, message: f.message,
     }));
-    expect(got).toEqual(c.findings);
+    expect(got).toEqual(c.findingsByHost[host]);
   });
 
   it('the reserved-name section carries both answers, per host (#1315)', () => {
     // Otherwise a section where every case expected the rule, or none did,
     // would pass against a port that always or never reserves.
     expect(F.lintReservedSourceCommit).toBeTruthy();
-    const has = (name: string) =>
-      F.lintReserved.find((c) => c.name === name)?.findings.some((f) => f.rule === 'skill-name-reserved');
-    expect(has('synced is reserved for claudeSkill')).toBe(true);
-    expect(has('synced is not reserved for codexSkill')).toBe(false);
-    expect(has('a name containing synced is not reserved')).toBe(false);
+    const rules = (name: string, host: string) =>
+      (F.lintReserved.find((c) => c.name === name)?.findingsByHost[host] ?? []).map((f) => f.rule);
+    expect(rules('synced is reserved for claudeSkill', 'claudeSkill')).toContain('skill-name-reserved');
+    expect(rules('both hosts declare synced, only Claude refuses', 'claudeSkill')).toContain('skill-name-reserved');
+    expect(rules('both hosts declare synced, only Claude refuses', 'codexSkill')).toEqual([]);
+    expect(rules('a name containing synced is not reserved', 'claudeSkill')).toEqual([]);
+    // The positive control that the Codex column is EVALUATED, not merely
+    // undeclared: the capital trips the grammar there, the reservation does not.
+    expect(rules('codex evaluates the name but does not reserve it', 'codexSkill')).toEqual(['skill-name-invalid']);
   });
 
   it.each(F.lintCollisions.map((c) => [c.name, c] as const))('collisions: %s', (_n, c) => {
@@ -461,7 +474,7 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     // is reached through `lintReserved`, not `lint`, which keeps its own commit.
     const emitted = new Set([
       ...F.lint.flatMap((c) => c.findings.map((f) => f.rule)),
-      ...F.lintReserved.flatMap((c) => c.findings.map((f) => f.rule)),
+      ...F.lintReserved.flatMap((c) => Object.values(c.findingsByHost).flat().map((f) => f.rule)),
       ...F.lintCollisions.flatMap((c) => c.findings.map((f) => f.rule)),
     ]);
     expect([...emitted].sort()).toEqual([
