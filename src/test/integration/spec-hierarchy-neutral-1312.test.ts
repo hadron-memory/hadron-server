@@ -372,6 +372,38 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
       expect((await db.node.findUniqueOrThrow({ where: { id: recordOnlyNodeId } })).content).toBeNull();
     });
 
+    it('update by id answers a live node in a soft-deleted memory exactly like a missing node', async () => {
+      // Soft-deleting a memory leaves its Node rows in place, so the id resolves
+      // a node whose memory is gone. It must answer as the missing node it
+      // effectively is (as the URN form already does, since it requires a live
+      // memory), not MEMORY_NOT_FOUND with the memory's id (@copilot, PR #1319).
+      const tombstoned = await db.memory.create({
+        data: {
+          id: generateId(),
+          urn: `tombstoned-${generateId()}`,
+          name: 'soft-deleted memory',
+          class: 'personal',
+          visibility: null,
+          userId: (await db.user.findFirstOrThrow({ where: { handle: { startsWith: 'owner-' } } })).id,
+          ownerUserId: (await db.user.findFirstOrThrow({ where: { handle: { startsWith: 'owner-' } } })).id,
+          deletedAt: new Date(),
+        },
+      });
+      const orphan = await db.node.create({
+        data: { id: generateId(), memoryId: tombstoned.id, loc: 'left:behind', name: 'left behind' },
+      });
+      const missingNodeId = generateId();
+      for (const k of [key.outsider!, key.owner!]) {
+        const existing = await gql(k, UPDATE_NODE, { input: { id: orphan.id, content: 'must not land' } });
+        const missing = await gql(k, UPDATE_NODE, { input: { id: missingNodeId, content: 'must not land' } });
+
+        expect(normalizeSentRef(existing, orphan.id)).toEqual(normalizeSentRef(missing, missingNodeId));
+        expectCode(existing, 'NODE_NOT_FOUND');
+        expect(JSON.stringify(existing)).not.toContain(tombstoned.id);
+      }
+      expect((await db.node.findUniqueOrThrow({ where: { id: orphan.id } })).content).toBeNull();
+    });
+
     it('uses the node-content gate when the Memory record is readable but its nodes are not', async () => {
       const read = await gql(key.reader!, READ_MEMORY, { ref: recordOnlyMemoryId });
       expect(read.errors).toBeUndefined();

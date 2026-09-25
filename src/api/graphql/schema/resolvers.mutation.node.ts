@@ -1597,9 +1597,13 @@ async function updateNodeCore(
     }
     const row = await ctx.db.node.findUnique({
       where: { id: targetNodeId },
-      select: { memoryId: true, loc: true },
+      select: { memoryId: true, loc: true, memory: { select: { deletedAt: true } } },
     });
-    if (!row) {
+    // Soft-deleting a memory leaves its node rows, so an id can still resolve
+    // a node whose memory is gone. That node is missing, as the URN form
+    // already says (it requires a live memory); falling through would answer
+    // MEMORY_NOT_FOUND with the memory's own id (#1316, @copilot PR #1319).
+    if (!row || row.memory.deletedAt) {
       throw new GraphQLError(`Node not found: "${id}"`, {
         extensions: { code: 'NODE_NOT_FOUND', ref: id },
       });
