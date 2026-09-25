@@ -43,6 +43,9 @@ const mem: Record<string, { id: string; urn: string; nodeId: string }> = {};
 let victimOrgId: string;
 let attackerOrgId: string;
 let dualOrgId: string;
+let attackerUserId: string;
+let attacker2UserId: string;
+let publicAgentId: string;
 
 async function gql(k: string, query: string, variables: Record<string, unknown>): Promise<Gql> {
   const response = await fetch(`${baseUrl}/graphql`, {
@@ -102,6 +105,11 @@ beforeAll(async () => {
     (await mintUserApiKey(db, { userId, label: 'k', createdBy: userId, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
   key.victim = await mint(victim.id);
   key.attacker = await mint(attacker.id);
+  const attacker2 = await mkUser('attacker2');
+  await db.orgMember.create({ data: { organizationId: attackerOrg.id, userId: attacker2.id, role: 'ADMIN' } });
+  key.attacker2 = await mint(attacker2.id);
+  attackerUserId = attacker.id;
+  attacker2UserId = attacker2.id;
   key.dual = await mint(dual.id);
 
   const victimApp = await db.app.create({
@@ -132,6 +140,10 @@ beforeAll(async () => {
   // The attacker's OWN knowledge memory — the legitimate case.
   await mkMem('ownKnowledge', { urnRoot: attackerOrg.urn, organizationId: attackerOrg.id, class: 'knowledge', visibility: 'ORGANIZATION' });
 
+  await mkMem('ownPublic', { urnRoot: attackerOrg.urn, organizationId: attackerOrg.id, class: 'knowledge', visibility: 'PUBLIC' });
+  publicAgentId = (await db.agent.create({
+    data: { id: generateId(), organizationId: attackerOrg.id, name: 'published', urn: `${attackerOrg.urn}:published`, visibility: 'PUBLIC' } as never,
+  })).id;
   const app = await createServer();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -264,6 +276,83 @@ describe('#1349 — an attach cannot grant what the caller does not hold', () =>
     const r = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'write' });
     expect(code(r)).toBe('BAD_USER_INPUT');
     expect(await db.agentMemoryItem.count({ where: { agentId } })).toBe(0);
+  });
+});
+
+describe('#1349 — the actor stamp on a re-role (@Ada, chat #1825)', () => {
+  it('a successful re-role stamps the acting user, and a refused one leaves the row untouched', async () => {
+    const { agentId } = await agentWithApp(attackerOrgId, 'actor-stamp');
+    const attach = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read' });
+    expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
+    const created = await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } });
+    expect(created.createdBy).toBe(attackerUserId);
+
+    // A SUCCESSFUL re-role, performed by a DIFFERENT user (the org's second
+    // admin), must name that user — not the original creator. Asserting the
+    // source assignment alone would pass even if the stamp recorded the wrong
+    // principal, which is the point of using a second actor here.
+    const ok = await gql(key.attacker2!, SET_ROLE, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read-write' });
+    expect(ok.errors, JSON.stringify(ok.errors)).toBeUndefined();
+    const escalated = await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } });
+    expect(escalated.role).toBe('read-write');
+    expect(escalated.updatedBy).toBe(attacker2UserId);
+    expect(escalated.createdBy).toBe(attackerUserId);
+
+    // A REFUSED re-role must leave role AND actor exactly as they were — a
+    // rejected escalation that still stamped an actor would misattribute the
+    // row to whoever last tried.
+    const refused = await gql(key.dual!, SET_ROLE, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read' });
+    expect(refused.errors).toHaveLength(1);
+    const after = await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } });
+    expect(after.role).toBe('read-write');
+    expect(after.updatedBy).toBe(attacker2UserId);
+    expect(after.updatedAt).toEqual(escalated.updatedAt);
+  });
+});
+
+describe('#1349 — the agent\'s AUDIENCE, not just the memory\'s tenancy (@codex, PR #1357)', () => {
+  it('P1: a PUBLIC agent may not hold read-write knowledge, even its owner\'s own', async () => {
+    // A PUBLIC agent's audience is every org that installs it, and PUBLIC is a
+    // READ audience. Measured before this guard: a foreign App key holding only
+    // an AgentOrgGrant overwrote the publisher's own node.
+    const r = await gql(key.attacker!, ATTACH, { g: publicAgentId, m: mem.ownPublic!.urn, r: 'read-write' });
+    expect(code(r)).toBe('FORBIDDEN');
+    expect(r.errors![0]!.extensions?.reason).toBe('PUBLIC_AGENT_READ_WRITE');
+    expect(await db.agentMemoryItem.count({ where: { agentId: publicAgentId } })).toBe(0);
+  });
+
+  it('P1: an agent holding read-write knowledge may not BECOME public', async () => {
+    // The same rule from the other side — either end can move.
+    const { agentId } = await agentWithApp(attackerOrgId, 'becomes-public');
+    const attach = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read-write' });
+    expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
+    const r = await gql(key.attacker!, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { id visibility } }`, { r: agentId });
+    expect(JSON.stringify(r.errors)).toMatch(/read-write knowledge/i);
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agentId } })).visibility).not.toBe('PUBLIC');
+  });
+
+  it('P1: narrowing a memory out of PUBLIC revokes the foreign links it justified', async () => {
+    // The cross-tenant PUBLIC exception is evaluated once, at attach time. When
+    // the owner later narrows visibility, every access fold would keep trusting
+    // the stored row — measured before this sweep, the foreign App read the
+    // content unchanged afterwards.
+    const { agentId, appKey } = await agentWithApp(dualOrgId, 'public-narrow');
+    const attach = await gql(key.dual!, ATTACH, { g: agentId, m: mem.publicKnowledge!.urn, r: 'read' });
+    expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
+    expect(await readsContent(appKey, 'publicKnowledge')).toBe('publicKnowledge SECRET');
+
+    const narrow = await gql(key.victim!, `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id visibility } }`, { id: mem.publicKnowledge!.id });
+    expect(narrow.errors, JSON.stringify(narrow.errors)).toBeUndefined();
+    expect(await readsContent(appKey, 'publicKnowledge')).toBeNull();
+    const row = await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } });
+    expect(row.deletedAt).not.toBeNull();
+
+    // The owner's OWN links survive — they never depended on PUBLIC.
+    const { agentId: ownAgent } = await agentWithApp(victimOrgId, 'victim-own');
+    const ownAttach = await gql(key.victim!, ATTACH, { g: ownAgent, m: mem.publicKnowledge!.urn, r: 'read' });
+    expect(ownAttach.errors, JSON.stringify(ownAttach.errors)).toBeUndefined();
+    await gql(key.victim!, `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id } }`, { id: mem.publicKnowledge!.id });
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: ownAgent } })).deletedAt).toBeNull();
   });
 });
 

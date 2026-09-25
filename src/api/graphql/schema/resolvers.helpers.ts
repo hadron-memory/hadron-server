@@ -568,7 +568,7 @@ function userPrincipalOnly(ctx: Context): Context {
  */
 export async function requireAgentMemoryGrant(
   ctx: Context,
-  agent: { organizationId: string | null; ownerUserId: string | null },
+  agent: { organizationId: string | null; ownerUserId: string | null; visibility: string | null },
   memory: {
     id: string;
     class: string;
@@ -602,6 +602,19 @@ export async function requireAgentMemoryGrant(
   }
 
   if (role === 'read-write') {
+    // A PUBLIC agent's audience is EVERY org that installs it (@codex, PR
+    // #1357). `cor:acl:080:03` already keeps such an agent's knowledge public;
+    // the missing half is that PUBLIC is a READ audience, so a read-write item
+    // on a public agent hands every installer the write cap. Measured before
+    // this guard: a foreign App key, holding only an AgentOrgGrant on the
+    // published agent, overwrote the publisher's node. Same-tenant ownership
+    // does not make that safe — the audience, not the tenancy, is what widens.
+    if (agent.visibility === 'PUBLIC') {
+      throw new GraphQLError(
+        'A PUBLIC agent may hold read-only knowledge only — publishing it would grant write access to every organization that installs it.',
+        { extensions: { code: 'FORBIDDEN', reason: 'PUBLIC_AGENT_READ_WRITE' } },
+      );
+    }
     try {
       await requireMemoryWriteAccess(self, memory.id);
     } catch (error) {

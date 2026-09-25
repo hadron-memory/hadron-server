@@ -59,6 +59,25 @@ export async function nonPublicLinkedMemories(
  * PUBLIC. Call before persisting `visibility = PUBLIC`.
  */
 export async function assertAgentPublicAllowed(db: Db, agentId: string): Promise<void> {
+  // #1349 (@codex, PR #1357) — the WRITE half of congruence. A PUBLIC agent's
+  // audience is every org that installs it, and PUBLIC is a READ audience, so a
+  // `read-write` item would hand each installer the write cap on the
+  // publisher's own memory. Checked here as well as at attach time, because
+  // either side can move: an agent with read-write knowledge must not become
+  // PUBLIC, just as a PUBLIC agent must not be given read-write knowledge.
+  const writable = await db.agentMemoryItem.findMany({
+    where: { agentId, deletedAt: null, role: 'read-write' },
+    select: { memory: { select: { name: true } } },
+  });
+  if (writable.length > 0) {
+    const names = writable.map((w: { memory: { name: string } }) => w.memory.name).join(', ');
+    throw badInput(
+      `Cannot make this agent PUBLIC: it holds read-write knowledge (${names}). ` +
+        `A PUBLIC agent may hold read-only knowledge only — every organization that ` +
+        `installs it would receive that write access. Downgrade the link to read, or ` +
+        `unlink it first (cor:acl:080:03).`,
+    );
+  }
   const bad = await nonPublicLinkedMemories(db, agentId);
   if (bad.length === 0) return;
   const names = bad.map((m) => m.name).join(', ');
@@ -97,6 +116,53 @@ export async function assertMemoryVisibilityChangeAllowed(
         `(cor:acl:080:03).`,
     );
   }
+}
+
+/**
+ * Narrowing a memory out of PUBLIC revokes the FOREIGN-tenant agent links that
+ * only PUBLIC ever justified (#1349, @codex on PR #1357).
+ *
+ * `requireAgentMemoryGrant` lets another tenant attach a PUBLIC memory
+ * read-only, because a public audience is exactly what PUBLIC means. That
+ * permission is evaluated once, at attach time — so when the owner later makes
+ * the memory ORGANIZATION-visible, every access fold keeps trusting the stored
+ * row and the foreign App keeps reading nodes that are no longer public.
+ * Measured before this sweep: a foreign App key read the content unchanged
+ * after the owner narrowed it.
+ *
+ * The owner's change WINS rather than being blocked: refusing the narrowing
+ * would hand a foreign tenant a veto over the publisher's own visibility
+ * setting. (That is why this is not simply another clause in
+ * `assertMemoryVisibilityChangeAllowed`, whose PUBLIC-agent rule is a genuine
+ * refusal.) Same-tenant links are untouched — they never depended on PUBLIC.
+ *
+ * Soft-delete, not hard: the row is an audit record of a grant that once
+ * existed, and `addMemoryToAgent` resurrects it if the memory becomes PUBLIC
+ * again and someone re-attaches deliberately.
+ */
+export async function revokeForeignLinksOnVisibilityNarrowing(
+  db: Db,
+  memory: { id: string; organizationId: string | null; ownerUserId: string | null },
+  nextVisibility: string | null | undefined,
+  actor: string | null,
+): Promise<number> {
+  if (nextVisibility === 'PUBLIC') return 0;
+  const links = await db.agentMemoryItem.findMany({
+    where: { memoryId: memory.id, deletedAt: null },
+    select: { id: true, agent: { select: { organizationId: true, ownerUserId: true } } },
+  });
+  const foreign = links.filter((l: { agent: { organizationId: string | null; ownerUserId: string | null } }) => {
+    const sameTenant =
+      (l.agent.organizationId != null && l.agent.organizationId === memory.organizationId) ||
+      (l.agent.ownerUserId != null && l.agent.ownerUserId === memory.ownerUserId);
+    return !sameTenant;
+  });
+  if (foreign.length === 0) return 0;
+  const result = await db.agentMemoryItem.updateMany({
+    where: { id: { in: foreign.map((f: { id: string }) => f.id) }, deletedAt: null },
+    data: { deletedAt: new Date(), deletedBy: actor },
+  });
+  return result.count;
 }
 
 /**

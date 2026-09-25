@@ -10,6 +10,7 @@ import {
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import {
   assertMemoryVisibilityChangeAllowed,
+  revokeForeignLinksOnVisibilityNarrowing,
   assertLinkAllowedForPublicAgent,
 } from '../../../lib/agentPublicCongruence.js';
 import {
@@ -722,6 +723,10 @@ export const memoryMutations = {
       if (visibility !== undefined) {
         await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
       }
+      // #1349 (@codex, PR #1357): narrowing out of PUBLIC also REVOKES the
+      // foreign-tenant agent links that only PUBLIC ever justified. Deferred
+      // until after the update below, so a failed write leaves the grants as
+      // they were.
       // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
       // The column is NOT NULL, so explicit `null` is rejected (omit the arg to
       // leave the cap unchanged); only `undefined` (omitted) or >= 1 passes.
@@ -849,7 +854,7 @@ export const memoryMutations = {
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           });
         }
-        return tx.memory.update({
+        const row = await tx.memory.update({
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -896,6 +901,18 @@ export const memoryMutations = {
         },
         include: MEMORY_INCLUDE,
         });
+        // #1349 (@codex, PR #1357) — inside the SAME transaction as the
+        // visibility write, so a memory can never be non-PUBLIC while the
+        // foreign links that only PUBLIC justified are still live.
+        if (visibility !== undefined) {
+          await revokeForeignLinksOnVisibilityNarrowing(
+            tx,
+            memory,
+            visibility,
+            ctx.userId ?? ctx.clientId ?? null,
+          );
+        }
+        return row;
       });
 
       // 033 — react to vector-index config changes (FR-004/FR-008/FR-026):
