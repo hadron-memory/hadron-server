@@ -119,3 +119,64 @@ describe('#1339 review — drift is reconciled first on upsert, controller creat
   });
 });
 
+// Round 4 (@codex P1 / @copilot, PR #1339): the multi-row writers reconcile
+// every row they snapshot, under its row lock and in id order.
+describe('#1339 review — multi-row writers reconcile drift before their snapshots', () => {
+  const labels = async (nodeId: string) =>
+    (await db.nodeRevision.findMany({ where: { nodeId }, orderBy: { revNo: 'asc' } })).map((r) => r.revLabel ?? '');
+  const RECONCILE = /Reconciled state changed outside a revisioned writer/;
+
+  it('searchReplaceInNodes over a drifted row', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:replace', name: 'n', content: 'hello world' } });
+    await db.node.update({ where: { id: node.id }, data: { description: 'drifted' } });
+    await resolvers.Mutation.searchReplaceInNodes({}, {
+      input: { oldText: 'hello', newText: 'bye', nodeIds: [node.id], fields: ['content'] },
+    } as never, ctx());
+    const got = await labels(node.id);
+    expect(got).toHaveLength(2);
+    expect(got[0]).toMatch(RECONCILE);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(3);
+  });
+
+  it('moveNode over a drifted row', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:move-me', name: 'n', content: 'x' } });
+    await db.node.update({ where: { id: node.id }, data: { description: 'drifted' } });
+    await resolvers.Mutation.moveNode({}, { sourceRef: node.id, targetUrn: 'hrn:node:dr-org:mem:drift:moved' } as never, ctx());
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.loc).toBe('drift:moved');
+    const got = await labels(node.id);
+    expect(got).toHaveLength(2);
+    expect(got[0]).toMatch(RECONCILE);
+    expect(after.revSeq).toBe(3);
+  });
+
+  it('mergeNodes over a drifted target', async () => {
+    const source = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:src', name: 's', content: 'from source' } });
+    const target = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:tgt', name: 't', content: 'target' } });
+    await db.node.update({ where: { id: target.id }, data: { description: 'drifted' } });
+    await resolvers.Mutation.mergeNodes({}, {
+      input: { source: source.id, target: target.id, include: ['CONTENT'] },
+    } as never, ctx());
+    const got = await labels(target.id);
+    expect(got).toHaveLength(2);
+    expect(got[0]).toMatch(RECONCILE);
+    expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).revSeq).toBe(3);
+  });
+
+  it('mergeMemories relocating a drifted row', async () => {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'dr-org' } });
+    const dest = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'dr-org:dest', name: 'dest', class: 'knowledge' },
+    });
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:relocate', name: 'n', content: 'x' } });
+    await db.node.update({ where: { id: node.id }, data: { description: 'drifted' } });
+    await resolvers.Mutation.mergeMemories({}, { input: { source: memoryId, target: dest.id } } as never, ctx());
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.memoryId).toBe(dest.id);
+    const got = await labels(node.id);
+    expect(got).toHaveLength(2);
+    expect(got[0]).toMatch(RECONCILE);
+    expect(after.revSeq).toBe(3);
+  });
+});
+

@@ -29,6 +29,7 @@ import {
   diffNodeChanges,
   restorableNodeFields,
   revisionStateHashRefreshMarker,
+  revisionStateMatches,
   jsonOrDbNull,
   REV_LABEL_MAX_LEN,
 } from '../../../lib/nodeRevisionSnapshot.js';
@@ -2196,6 +2197,24 @@ export const nodeMutations = {
 
       // ── Write pass: revision snapshot + node update, all-or-nothing ──
       await ctx.db.$transaction(async (tx) => {
+        // #1323 (@codex/@copilot, PR #1339): each planned row is row-locked and
+        // its unrevisioned drift reconciled as its OWN revision (id order, one
+        // global order for multi-row writers) before its snapshot. The
+        // replacement was computed from a read taken BEFORE this lock, so a row
+        // whose tracked state changed since then refuses the whole batch
+        // (all-or-nothing, as below) instead of overwriting the newer write.
+        for (const id of plans.map((p) => p.raw.id).sort()) {
+          await ensureCurrentNodeRevisionInTransaction(tx, id);
+        }
+        for (const p of plans) {
+          const locked = await tx.node.findUnique({ where: { id: p.raw.id } });
+          if (!locked || !revisionStateMatches(p.raw, locked)) {
+            throw new GraphQLError(
+              `Node at loc "${p.raw.loc}" changed while this replace was running — re-run it.`,
+              { extensions: { code: 'NODE_WRITE_CONFLICT', loc: p.raw.loc, memoryId: p.raw.memoryId } },
+            );
+          }
+        }
         for (const p of plans) {
           const raw = p.raw;
           // #88: the bulk-edit rationale rides in revLabel (#620); `changes`
@@ -3292,6 +3311,25 @@ export const nodeMutations = {
         await lockLocForWrite(tx, target.memoryId, target.loc);
         if (takesSource) {
           await lockNodeForDelete(tx, source.memoryId, source.loc);
+        }
+        // #1323 (@codex/@copilot, PR #1339): both endpoints are row-locked and
+        // their unrevisioned drift reconciled as their OWN revisions (id order)
+        // before the snapshot. The merge was computed from reads taken BEFORE
+        // these locks, so an endpoint whose tracked state changed since then
+        // refuses instead of being overwritten with a stale fold.
+        for (const id of [source.id, target.id].sort()) {
+          await ensureCurrentNodeRevisionInTransaction(tx, id);
+        }
+        const lockedSource = await tx.node.findUnique({ where: { id: source.id } });
+        const lockedTarget = await tx.node.findUnique({ where: { id: target.id } });
+        if (
+          !lockedSource || !lockedTarget ||
+          !revisionStateMatches(source, lockedSource) ||
+          !revisionStateMatches(target, lockedTarget)
+        ) {
+          throw new GraphQLError('mergeNodes: the source or target changed while the merge was running — re-run it.', {
+            extensions: { code: 'NODE_WRITE_CONFLICT' },
+          });
         }
         await createNodeRevision(
           tx,

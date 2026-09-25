@@ -53,14 +53,32 @@ export type MemoryWithOrg = Memory & { organization: Organization | null };
 class EdgeEndpointPreflightStale extends Error {}
 const MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES = 3;
 
+/**
+ * The row left the memory being synced between the preflight lookup and its
+ * row lock (a concurrent cross-memory move). Applying the repo's update by id
+ * would rewrite a node that now belongs to ANOTHER memory, so the sync aborts
+ * and the next run re-plans from fresh reads (@copilot, PR #1339).
+ */
+export class GitSyncTargetMovedError extends Error {
+  constructor(nodeId: string, expectedMemoryId: string) {
+    super(`Git sync target ${nodeId} left memory ${expectedMemoryId} while the sync ran; retry the sync.`);
+    this.name = 'GitSyncTargetMovedError';
+  }
+}
+
 /** Apply a Git-owned update without bypassing the live-revision contract. */
-async function updateNodeFromGitSync(
+export async function updateNodeFromGitSync(
   tx: Prisma.TransactionClient,
   current: Node,
   update: Record<string, unknown>,
-  revisionBase?: Node,
+  revisionBase: Node | undefined,
+  expectedMemoryId: string,
 ): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${current.id} FOR UPDATE`;
+  const owner = await tx.node.findUnique({ where: { id: current.id }, select: { memoryId: true } });
+  if (!owner || owner.memoryId !== expectedMemoryId) {
+    throw new GitSyncTargetMovedError(current.id, expectedMemoryId);
+  }
   // Unrevisioned drift gets its OWN revision before the Git edit's, never
   // folded into it (@codex P1 / @copilot, PR #1339) — the same order as the
   // GraphQL and MCP update paths. A swap base is exempt: its row was
@@ -505,7 +523,7 @@ export const syncGraphFromGithub = async (
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
           }
-          await updateNodeFromGitSync(tx, byId, update, parkedRevisionBases.get(byId.id));
+          await updateNodeFromGitSync(tx, byId, update, parkedRevisionBases.get(byId.id), graph.id);
           parkedRevisionBases.delete(byId.id);
           rowId = byId.id;
         } else {
@@ -527,6 +545,7 @@ export const syncGraphFromGithub = async (
               existingAtLoc,
               update,
               parkedRevisionBases.get(existingAtLoc.id),
+              graph.id,
             );
             parkedRevisionBases.delete(existingAtLoc.id);
             // The SURVIVING id: an update keeps the existing row's id, which

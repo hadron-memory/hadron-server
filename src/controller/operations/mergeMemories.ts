@@ -3,6 +3,7 @@ import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } f
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
+  ensureCurrentNodeRevisionInTransaction,
   buildNodeRevisionSnapshot,
   revisionStateHashRefreshMarker,
   createNodeRevision,
@@ -283,6 +284,22 @@ export async function mergeMemoryGraph(
           // Reentrant memory locks; fresh governed/protected facts for the rows
           // now serialized by their source + destination address locks.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          // #1323 (@codex P1, PR #1339): reconcile unrevisioned drift as each
+          // row's OWN revision before its relocation snapshot, under the row
+          // lock, in id order (one global order, so two multi-row operations
+          // cannot lock-invert). Then re-read and re-validate: the snapshot
+          // must describe the row as it is now, not as classified.
+          const relocationIds = rows.map((row) => row.id).sort();
+          for (const id of relocationIds) await ensureCurrentNodeRevisionInTransaction(tx, id);
+          rows = await tx.node.findMany({ where: { id: { in: relocationIds } }, orderBy: { id: 'asc' } });
+          for (const row of rows) {
+            if (row.memoryId !== sourceMemoryId || row.deletedAt || row.loc !== classifiedLocById.get(row.id)) {
+              throw new Error(`merge source node ${row.id} changed during the merge; retry the merge`);
+            }
+          }
+          if (rows.length !== relocationIds.length) {
+            throw new Error('a merge source node was deleted during the merge; retry the merge');
+          }
           for (const row of rows) {
             await createNodeRevision(
               tx,
@@ -335,10 +352,26 @@ export async function mergeMemoryGraph(
       // rows whose target counterpart is still live get folded; a vanished
       // counterpart leaves its source row untouched for a later pass (the
       // merge is resumable), never silently deleted.
-      const srcRows = await tx.node.findMany({
+      let srcRows = await tx.node.findMany({
         where: { id: { in: batchIds }, memoryId: sourceMemoryId, deletedAt: null },
       });
-      const tgtRows = await tx.node.findMany({
+      let tgtRows = await tx.node.findMany({
+        where: {
+          id: { in: srcRows.map((s) => survivor.get(s.id)!) },
+          memoryId: targetMemoryId,
+          deletedAt: null,
+        },
+      });
+      // #1323 (@codex P1, PR #1339): every row this fold reads or snapshots is
+      // row-locked and reconciled (drift as its OWN revision) in id order
+      // before anything is computed from it, then re-read — so the fold works
+      // from the rows as they are under the lock, not as first fetched.
+      const foldIds = [...new Set([...srcRows, ...tgtRows].map((row) => row.id))].sort();
+      for (const id of foldIds) await ensureCurrentNodeRevisionInTransaction(tx, id);
+      srcRows = await tx.node.findMany({
+        where: { id: { in: srcRows.map((row) => row.id) }, memoryId: sourceMemoryId, deletedAt: null },
+      });
+      tgtRows = await tx.node.findMany({
         where: {
           id: { in: srcRows.map((s) => survivor.get(s.id)!) },
           memoryId: targetMemoryId,

@@ -130,3 +130,19 @@ describe('#1339 review — hadron_move_node same-slot rename over drift', () => 
   });
 });
 
+describe('#1339 review — hadron_update_node re-checks the address after its row lock', () => {
+  it('a row moved in the read→lock window is refused, not written by id', async () => {
+    const node = await seed('drift:about-to-move');
+    writeJustBeforeNextTransaction(() => db.node.update({ where: { id: node.id }, data: { loc: 'drift:elsewhere' } }));
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_update_node', {
+      urn: `hrn:node:${memory.urn}:${node.loc}`,
+      content: 'must not land',
+    });
+    expect(text).toMatch(/\[write_conflict\]/);
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.loc).toBe('drift:elsewhere');
+    expect(after.content).toBe('A');
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+  });
+});
+

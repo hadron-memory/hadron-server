@@ -5,7 +5,7 @@ import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
 import { splitGitArgv } from '../../test/gitArgv.js';
 import { GIT_TRANSPORT_GUARD } from './execGit.js';
-import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
+import { syncGraphFromGithub, updateNodeFromGitSync, GitSyncTargetMovedError, type MemoryWithOrg } from './syncGraphFromGithub.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/channels.js';
 import { generateId } from '../../lib/id.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
@@ -347,6 +347,20 @@ describe('syncGraphFromGithub', () => {
     expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
     expect(history[1]!.revLabel).toBe('Synchronized from GitHub');
     expect(history[1]!.description).toBe('v1');
+  });
+
+  it('refuses to apply a sync update to a row that has left the synced memory (#1339 review)', async () => {
+    // @copilot: the row lock must re-validate ownership — a concurrent
+    // cross-memory move between the preflight lookup and the lock would
+    // otherwise have the repo's update rewrite a FOREIGN memory's node.
+    const nodeId = 'aaaa000000000000000000000000001340';
+    const row = await db.node.create({ data: { id: nodeId, memoryId: dbGraphId, loc: 'moved:away', name: 'n', content: 'mine' } });
+    await expect(
+      db.$transaction((tx) => updateNodeFromGitSync(tx, row, { content: 'from git' }, undefined, 'some-other-memory')),
+    ).rejects.toBeInstanceOf(GitSyncTargetMovedError);
+    const after = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(after.content).toBe('mine');
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
   });
 
   it('re-sync replaces old nodes with the new set', async () => {

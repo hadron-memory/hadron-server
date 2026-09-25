@@ -771,6 +771,8 @@ export async function replaceOutgoingEdges(args: {
 }
 
 class InlineEdgeEndpointError extends Error {}
+/** The target moved, was deleted or changed memory while this write waited for its row lock (PR #1339 review). */
+class NodeMovedDuringWriteError extends Error {}
 
 async function lockOutgoingEdgeMemories(
   tx: Prisma.TransactionClient,
@@ -5282,9 +5284,19 @@ export function createMcpServerInstance(
             // Unreconciled drift becomes its OWN revision before this edit's,
             // as on the GraphQL path — never folded into the edit.
             await ensureCurrentNodeRevisionInTransaction(tx, existing.id);
-            const current = await tx.node.findUniqueOrThrow({
+            const current = await tx.node.findUnique({
               where: { id: existing.id },
             });
+            // The address lock above guards (memory, loc), but this write goes
+            // by id: a move that committed between the pre-lock probe and the
+            // row lock would otherwise have this edit — authorized, encrypted
+            // and schema-checked for the OLD address — land wherever the row
+            // went (@copilot, PR #1339). Same re-check as the GraphQL path.
+            if (!current || current.deletedAt || current.memoryId !== memory.id || current.loc !== loc) {
+              throw new NodeMovedDuringWriteError(
+                `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
+              );
+            }
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -5325,6 +5337,7 @@ export function createMcpServerInstance(
           });
         } catch (e) {
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+          if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           throw e;
         }
