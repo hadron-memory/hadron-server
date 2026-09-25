@@ -1189,3 +1189,86 @@ describe('teamChatMessages beforeSeq (#1116)', () => {
     ]);
   });
 });
+
+// ── #1209 — a message carries its own address ─────────────────────────────
+//
+// No client can compose it: a message loc is `<root>:messages:<seq>-<rand>-…`,
+// so the root and the seq reconstruct nothing. These pin that the server hands
+// back the node's real canonical URN on BOTH producers (the post result and the
+// read page, which are built separately), and null — never a guess — when the
+// host memory's stored URN cannot be emitted.
+describe('#1209 — TeamChatMessage.urn', () => {
+  it('the post result and the read page carry the SAME urn, and it resolves to that very node', async () => {
+    const posted = await post(ctx(appMember.id), { body: 'address me' });
+    expect(posted.urn).toMatch(/^hrn:node:/);
+
+    const page = await read(ctx(appMember.id));
+    const readBack = page.items.find((m: { nodeId: string }) => m.nodeId === posted.nodeId);
+    expect(readBack.urn).toBe(posted.urn);
+
+    // Round trip through the platform's own resolver: the URN addresses THIS
+    // message node, not merely something URN-shaped.
+    const resolved = await Q.resolveUrn({}, { urn: posted.urn }, ctx(appMember.id));
+    expect(resolved).toMatchObject({ kind: 'node', id: posted.nodeId });
+  });
+
+  it('is the stored node\'s canonical address, and differs per message', async () => {
+    await post(ctx(appMember.id), { body: 'one' });
+    await post(ctx(appMember.id), { body: 'two' });
+    const { items } = await read(ctx(appMember.id));
+    expect(items).toHaveLength(2);
+    for (const m of items) {
+      const node = await db.node.findUniqueOrThrow({ where: { id: m.nodeId }, include: { memory: { select: { urn: true } } } });
+      expect(m.urn).toBe(`hrn:node:${node.memory.urn}:${node.loc}`);
+    }
+    expect(new Set(items.map((m: { urn: string }) => m.urn)).size).toBe(2);
+  });
+
+  it('is NULL — not a best-effort guess — when the host memory URN cannot be emitted, and the rest of the message is intact', async () => {
+    const posted = await post(ctx(appMember.id), { body: 'still readable' });
+    const node = await db.node.findUniqueOrThrow({ where: { id: posted.nodeId } });
+    // A stored memory URN the v2 emitter rejects (an empty root).
+    await db.memory.update({ where: { id: node.memoryId }, data: { urn: `::${generateId()}::legacy` } });
+
+    const { items } = await read(ctx(appMember.id));
+    const m = items.find((x: { nodeId: string }) => x.nodeId === posted.nodeId);
+    expect(m.urn).toBeNull();
+    expect(m).toMatchObject({ nodeId: posted.nodeId, body: 'still readable' });
+  });
+});
+
+describe('#1209 review (@codex P2): a COMPOUND host memory URN yields null, not an unresolvable address', () => {
+  it('the legacy team-space shape <org>:<app>:<agent>:shared emits a flat string that does not resolve back — so urn is null', async () => {
+    const posted = await post(ctx(appMember.id), { body: 'legacy space' });
+    const node = await db.node.findUniqueOrThrow({ where: { id: posted.nodeId } });
+    // A stored pre-v2 COMPOUND memory urn: emission succeeds (no fallback) but
+    // resolveNodeRef splits two atoms of memory, so the URN would name nothing.
+    await db.memory.update({ where: { id: node.memoryId }, data: { urn: `${org.urn}:team:agent-${generateId().slice(0, 8)}:shared` } });
+
+    const { items } = await read(ctx(appMember.id));
+    const m = items.find((x: { nodeId: string }) => x.nodeId === posted.nodeId);
+    expect(m.urn).toBeNull();
+    expect(m.body).toBe('legacy space');
+  });
+});
+
+describe('#1317 review (@codex P1): no fallible work after the message commits', () => {
+  it('a failing host-URN lookup fails the post BEFORE anything is written, so a retry cannot duplicate', async () => {
+    const first = await post(ctx(appMember.id), { body: 'bootstrap the chat' });
+    // Scoped to the chat's own memory: a loc is unique per memory, not globally.
+    const { memoryId } = await db.node.findUniqueOrThrow({ where: { id: first.nodeId }, select: { memoryId: true } });
+    const messages = () => db.node.count({ where: { memoryId, loc: { contains: ':messages:' } } });
+    const before = await messages();
+    const real = db.memory.findUnique.bind(db.memory);
+    const spy = vi.spyOn(db.memory, 'findUnique').mockImplementation(((args: any) =>
+      args?.select?.urn === true && Object.keys(args.select).length === 1
+        ? Promise.reject(new Error('transient: connection reset'))
+        : real(args)) as any);
+    try {
+      await expect(post(ctx(appMember.id), { body: 'must not half-land' })).rejects.toThrow(/connection reset/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await messages()).toBe(before);
+  });
+});
