@@ -239,6 +239,37 @@ async function applyTemplateConstraints(client: Client) {
       ON scopes (app_id, name) WHERE app_id IS NOT NULL AND deleted_at IS NULL;
   `);
 
+  // #1325 — MemoryConfig templates: exactly one owner + per-owner live-name
+  // uniqueness; rule task-reference markers. Synced with prisma/post-push.sql
+  // + the 20260925010000_memory_config migration.
+  await client.query(`
+    ALTER TABLE memory_config_templates
+      DROP CONSTRAINT IF EXISTS chk_memory_config_template_owner;
+    ALTER TABLE memory_config_templates
+      ADD CONSTRAINT chk_memory_config_template_owner
+      CHECK (num_nonnulls(hadron_server_id, organization_id, owner_user_id, app_id) = 1);
+    CREATE UNIQUE INDEX IF NOT EXISTS memory_config_templates_server_name_uniq
+      ON memory_config_templates (hadron_server_id, name) WHERE hadron_server_id IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS memory_config_templates_org_name_uniq
+      ON memory_config_templates (organization_id, name) WHERE organization_id IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS memory_config_templates_user_name_uniq
+      ON memory_config_templates (owner_user_id, name) WHERE owner_user_id IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS memory_config_templates_app_name_uniq
+      ON memory_config_templates (app_id, name) WHERE app_id IS NOT NULL AND deleted_at IS NULL;
+    ALTER TABLE node_role_rules
+      DROP CONSTRAINT IF EXISTS chk_node_role_rule_task_markers;
+    ALTER TABLE node_role_rules
+      ADD CONSTRAINT chk_node_role_rule_task_markers
+      CHECK ((author_task_id IS NULL OR author_task_required)
+         AND (validation_task_id IS NULL OR validation_task_required));
+    ALTER TABLE memory_config_template_rules
+      DROP CONSTRAINT IF EXISTS chk_memory_config_template_rule_task_markers;
+    ALTER TABLE memory_config_template_rules
+      ADD CONSTRAINT chk_memory_config_template_rule_task_markers
+      CHECK ((author_task_id IS NULL OR author_task_required)
+         AND (validation_task_id IS NULL OR validation_task_required));
+  `);
+
   // Spec 049 Phase 5 — the register: exactly one owner, at most one
   // attendee, and the (owner, channel, attendee) natural keys among LIVE rows
   // (the install insert's ON CONFLICT target). Synced with

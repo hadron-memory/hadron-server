@@ -444,6 +444,9 @@ model User {
   principal                     Principal?                 @relation("UserPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
 
   @@unique([externalAppId, externalId])
+  /// #1325 — MemoryConfig templates this user owns (user-owned owner branch).
+  memoryConfigTemplates MemoryConfigTemplate[] @relation("MemoryConfigTemplateOwnerUser")
+
   @@map("users")
 }
 
@@ -575,6 +578,8 @@ model Organization {
   // read source-of-truth, kept in sync at mint).
   principalId            String?                 @unique @map("principal_id")
   principal              Principal?              @relation("OrgPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
+
+  memoryConfigTemplates MemoryConfigTemplate[]
 
   @@map("organizations")
 }
@@ -927,6 +932,12 @@ model Memory {
   @@index([appId])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  /// #1325 — this memory's rulebook, at most one row. ABSENT reads as the
+  /// empty config: it is materialized on the first rule write, never at memory
+  /// creation (there is no shared creation helper to hang that on —
+  /// hadron-server findings:memory-creation-has-no-shared-helper).
+  config MemoryConfig?
+
   @@map("memories")
 }
 
@@ -1206,6 +1217,15 @@ model Node {
   // facet). objectType is NULL for most nodes; the composite seeks a memory's
   // typed rows directly.
   @@index([memoryId, objectType])
+  /// #1325 — rules and template rules that reference this node as their
+  /// author task, validation task or description node (node-id FKs, SET NULL).
+  authorTaskOfRules              NodeRoleRule[]             @relation("NodeRoleRuleAuthorTask")
+  validationTaskOfRules          NodeRoleRule[]             @relation("NodeRoleRuleValidationTask")
+  descriptionNodeOfRules         NodeRoleRule[]             @relation("NodeRoleRuleDescriptionNode")
+  authorTaskOfTemplateRules      MemoryConfigTemplateRule[] @relation("TemplateRuleAuthorTask")
+  validationTaskOfTemplateRules  MemoryConfigTemplateRule[] @relation("TemplateRuleValidationTask")
+  descriptionNodeOfTemplateRules MemoryConfigTemplateRule[] @relation("TemplateRuleDescriptionNode")
+
   @@map("nodes")
 }
 
@@ -1902,6 +1922,8 @@ model HadronServer {
 
   logEntries       ServerLogEntry[]
   aiServiceConfigs AiServiceConfig[]
+
+  memoryConfigTemplates MemoryConfigTemplate[]
 
   @@map("hadron_server")
 }
@@ -2853,6 +2875,8 @@ model App {
   @@index([urn])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  memoryConfigTemplates MemoryConfigTemplate[]
+
   @@map("apps")
 }
 
@@ -4347,4 +4371,158 @@ model ChannelReadState {
   @@index([workerId])
   @@index([agentId, appId])
   @@map("channel_read_states")
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// #1325 (concept#74 L1.1, D-2026-09-24-002) — node kinds are PROCEDURE, held in
+// a per-memory MemoryConfig; the object store (Memory.schema) keeps SHAPE.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Who may write nodes of a role (D-2026-09-24-005). Enforced in the
+/// authorization layer, never in a door (#1331 ALL/ADMIN, #1333 OWNER).
+enum NodeRoleWriters {
+  ALL
+  OWNER
+  ADMIN
+}
+
+/// Who runs a rule's validation task (D-2026-09-24-004): an agent in a
+/// separate context, or the platform on a node-written trigger (#1332/#1335).
+enum ContentValidator {
+  AGENT
+  PLATFORM
+}
+
+/// A memory's complete rulebook: exactly one per memory, by construction.
+/// `memoryId @unique` makes it at most one; an ABSENT row reads as the empty
+/// config, so every memory has one without a backfill or a creation hook, and
+/// the first rule write materializes it. Not shared between memories —
+/// templates are the shared, owned thing, and they are COPIED in (Holger,
+/// 2026-09-25, #1325 H4). Read and managed only by the memory's managers;
+/// enforcement loads it internally for any writer.
+model MemoryConfig {
+  id        String    @id @default(cuid())
+  memoryId  String    @unique @map("memory_id")
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @updatedAt @map("updated_at")
+  updatedBy String?   @map("updated_by")
+
+  memory Memory         @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  rules  NodeRoleRule[]
+
+  @@map("memory_configs")
+}
+
+/// One row per role or dotted sub-role (`spec`, `spec.rule`): the rows ARE
+/// the config's declared roles, and a row may carry no tasks at all
+/// (#1325 H1). `strictSubRoles` on a parent row refuses its undeclared
+/// sub-roles; off, an undeclared sub-role falls back to the nearest declared
+/// ancestor (#1322's lookup).
+///
+/// Task references are node-id FKs — accepted and shown as URNs — so moving a
+/// task keeps the rule (moveNode keeps ids, even across memories). A HARD
+/// delete of the task (replaceSubtree, git sync of a removed file, memory
+/// deletion) nulls the FK; the `*TaskRequired` marker survives it, so the rule
+/// FAILS CLOSED instead of silently ceasing to require the task (#1325 H5).
+/// Cascade and Restrict were rejected: the first drops governance, the second
+/// lets whoever references a public task veto its owner's own deletes.
+model NodeRoleRule {
+  id                     String            @id @default(cuid())
+  configId               String            @map("config_id")
+  role                   String
+  authorTaskId           String?           @map("author_task_id")
+  authorTaskRequired     Boolean           @default(false) @map("author_task_required")
+  validationTaskId       String?           @map("validation_task_id")
+  validationTaskRequired Boolean           @default(false) @map("validation_task_required")
+  descriptionNodeId      String?           @map("description_node_id")
+  strictSubRoles         Boolean           @default(false) @map("strict_sub_roles")
+  writers                NodeRoleWriters   @default(ALL)
+  validateBy             ContentValidator? @map("validate_by")
+  enabled                Boolean           @default(true)
+  /// #1334 — the template this rule was copied from. Provenance only, no FK:
+  /// a template is copied in, never live-linked, so deleting one must not
+  /// rewrite the configs it was applied to.
+  sourceTemplateId       String?           @map("source_template_id")
+  /// #1334 — set by a REQUIRED template; only org admins may change the rule.
+  locked                 Boolean           @default(false)
+  createdAt              DateTime          @default(now()) @map("created_at")
+  createdBy              String?           @map("created_by")
+  updatedAt              DateTime?         @updatedAt @map("updated_at")
+  updatedBy              String?           @map("updated_by")
+
+  config          MemoryConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  authorTask      Node?        @relation("NodeRoleRuleAuthorTask", fields: [authorTaskId], references: [id], onDelete: SetNull)
+  validationTask  Node?        @relation("NodeRoleRuleValidationTask", fields: [validationTaskId], references: [id], onDelete: SetNull)
+  descriptionNode Node?        @relation("NodeRoleRuleDescriptionNode", fields: [descriptionNodeId], references: [id], onDelete: SetNull)
+
+  @@unique([configId, role])
+  @@index([authorTaskId])
+  @@index([validationTaskId])
+  @@index([descriptionNodeId])
+  @@map("node_role_rules")
+}
+
+/// A reusable rulebook owned by EXACTLY ONE of HadronServer / Organization /
+/// User / App — nullable FKs with a CHECK (`chk_memory_config_template_owner`,
+/// `num_nonnulls(...) = 1`), never an owner-kind string (the Scope /
+/// AiServiceConfig mechanism, plus a User owner AiServiceConfig does not
+/// have). Applied by COPYING its rules into a memory's config (#1334); editing
+/// a template changes no memory until it is re-applied. `required` templates
+/// arrive locked. `name` is unique per owner among live rows (partial unique
+/// indexes in post-push.sql / the migration).
+model MemoryConfigTemplate {
+  id             String    @id @default(cuid())
+  name           String
+  description    String?
+  required       Boolean   @default(false)
+  hadronServerId String?   @map("hadron_server_id")
+  organizationId String?   @map("organization_id")
+  ownerUserId    String?   @map("owner_user_id")
+  appId          String?   @map("app_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
+
+  hadronServer HadronServer?              @relation(fields: [hadronServerId], references: [id], onDelete: Cascade)
+  organization Organization?              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ownerUser    User?                      @relation("MemoryConfigTemplateOwnerUser", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  app          App?                       @relation(fields: [appId], references: [id], onDelete: Cascade)
+  rules        MemoryConfigTemplateRule[]
+
+  @@index([hadronServerId])
+  @@index([organizationId])
+  @@index([ownerUserId])
+  @@index([appId])
+  @@map("memory_config_templates")
+}
+
+/// A template's rule: NodeRoleRule's columns minus the per-memory provenance
+/// and lock, with the same node-id FK + fail-closed marker semantics.
+model MemoryConfigTemplateRule {
+  id                     String            @id @default(cuid())
+  templateId             String            @map("template_id")
+  role                   String
+  authorTaskId           String?           @map("author_task_id")
+  authorTaskRequired     Boolean           @default(false) @map("author_task_required")
+  validationTaskId       String?           @map("validation_task_id")
+  validationTaskRequired Boolean           @default(false) @map("validation_task_required")
+  descriptionNodeId      String?           @map("description_node_id")
+  strictSubRoles         Boolean           @default(false) @map("strict_sub_roles")
+  writers                NodeRoleWriters   @default(ALL)
+  validateBy             ContentValidator? @map("validate_by")
+  enabled                Boolean           @default(true)
+
+  template        MemoryConfigTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  authorTask      Node?                @relation("TemplateRuleAuthorTask", fields: [authorTaskId], references: [id], onDelete: SetNull)
+  validationTask  Node?                @relation("TemplateRuleValidationTask", fields: [validationTaskId], references: [id], onDelete: SetNull)
+  descriptionNode Node?                @relation("TemplateRuleDescriptionNode", fields: [descriptionNodeId], references: [id], onDelete: SetNull)
+
+  @@unique([templateId, role])
+  @@index([authorTaskId])
+  @@index([validationTaskId])
+  @@index([descriptionNodeId])
+  @@map("memory_config_template_rules")
 }
