@@ -365,7 +365,10 @@ func main() {
 	// own rather than cases upserted into `lint`, which stays at
 	// `lintSourceCommit`: one stamp for cases generated at two revisions would
 	// misstate one of them. Inputs are authored in reservedCases(); findings
-	// come from Go's Lint, which needs hadron-cli#712 or later to emit the rule.
+	// come PER HOST from Go's LintFor over every row of skilldoc.Hosts — never
+	// skilldoc.Lint, the Claude-only wrapper, under which a codexSkill
+	// declaration is not evaluated at all (PR #1343 review). Needs
+	// hadron-cli#712 or later for the rule to exist.
 	var lr []kase
 	rb, _ := json.Marshal(upsert(decodeOrEmpty(doc, "lintReserved"), reservedCases()...))
 	if err := json.Unmarshal(rb, &lr); err != nil {
