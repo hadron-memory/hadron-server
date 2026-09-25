@@ -183,6 +183,29 @@ describe('GraphQL expectedRevision (#937)', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
   });
 
+  it('consumes the guard for an ownerRepo-only change so the baseline cannot be reused', async () => {
+    const node = await seed('occ:owner-repo', { ownerRepo: 'before/repo' });
+    await update('updateNode', {
+      id: node.id,
+      expectedRevision: 1,
+      ownerRepo: 'writer-b/repo',
+    });
+
+    await expect(
+      update('updateNode', {
+        id: node.id,
+        expectedRevision: 1,
+        ownerRepo: 'stale-writer-a/repo',
+      }),
+    ).rejects.toSatisfy(isConflict);
+
+    expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({
+      ownerRepo: 'writer-b/repo',
+      revSeq: 2,
+    });
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
+  });
+
   it('keeps omission backward-compatible', async () => {
     const node = await seed('occ:omitted');
     await update('updateNode', { id: node.id, content: 'unguarded edit' });

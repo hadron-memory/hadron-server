@@ -1066,9 +1066,17 @@ export async function writeNodeCore(
             }
 
             const changes = diffNodeChanges(current, suppliedForDiff);
-            const needsRevision = resolvedEdges !== null || changes.length > 0;
             const changesUnversionedField =
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
+            // ownerRepo deliberately remains outside restorable node history,
+            // so an unguarded ownerRepo-only update keeps its legacy
+            // revision-free behaviour. A guarded update is different: every
+            // successful state change must consume the claimed token or the
+            // same expectedRevision could be reused to overwrite it (#937).
+            const needsRevision =
+              resolvedEdges !== null ||
+              changes.length > 0 ||
+              (opts?.guardRevSeq !== undefined && changesUnversionedField);
             if (!needsRevision && !changesUnversionedField) {
               // A stale guard is refused even when the write is a no-op: the
               // compare-and-swap protects the caller's merge base, and an
