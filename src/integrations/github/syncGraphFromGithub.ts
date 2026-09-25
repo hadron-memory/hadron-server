@@ -1,5 +1,7 @@
 import { createDecipheriv } from 'crypto';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
+import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
+import type { MemorySchema } from '../../lib/memorySchema.js';
 // Spec 049 S4 — a Channel's address is skipped and reported, never overwritten from git.
 import {
   protectedLocsIn,
@@ -73,6 +75,12 @@ export async function updateNodeFromGitSync(
   update: Record<string, unknown>,
   revisionBase: Node | undefined,
   expectedMemoryId: string,
+  /**
+   * #1348 — fields decided against the LOCKED row rather than the caller's
+   * earlier read (the objectType schema check needs the properties the row
+   * has at write time, not before the lock).
+   */
+  extra?: (locked: Node) => Record<string, unknown>,
 ): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${current.id} FOR UPDATE`;
   const owner = await tx.node.findUnique({ where: { id: current.id }, select: { memoryId: true } });
@@ -92,6 +100,7 @@ export async function updateNodeFromGitSync(
   // transaction. History must describe committed states, so diff/snapshot the
   // captured pre-sync row rather than that mechanical waypoint.
   const before = revisionBase ?? locked;
+  if (extra) update = { ...update, ...extra(locked) };
   const changes = diffNodeChanges(before, update);
 
   if (changes.length > 0) {
@@ -135,6 +144,12 @@ export const syncGraphFromGithub = async (
   writtenNodes?: { id: string; loc: string; memoryId: string }[];
   /** Spec 049 S4 — file locs that overlap a Channel's address; skipped, never written. */
   skippedProtected?: string[];
+  /**
+   * #1348 — files whose objectType was NOT written because the resulting
+   * record would violate the memory's property schema (`loc (objectType):
+   * reason`). The node itself is still synced; its stored objectType is kept.
+   */
+  skippedObjectTypes?: string[];
 }> => {
   try {
     const graphName = graph.urn;
@@ -225,6 +240,7 @@ export const syncGraphFromGithub = async (
     // and can be returned to the caller.
     const writtenNodes: { id: string; loc: string; memoryId: string }[] = [];
     const skippedProtected: string[] = [];
+    const skippedObjectTypes: string[] = [];
 
     // #1226 / PR #1257 — collect every memory whose node may become an edge
     // endpoint in this transaction BEFORE taking any Channel-memory key. Git
@@ -303,6 +319,9 @@ export const syncGraphFromGithub = async (
       // (#1047). Skipped and reported, never a failed sync.
       const protectedLocs = await protectedLocsIn(tx, graph.id);
       const isProtected = (loc: string) => protectedLocs.some((p) => protectedLocCovers(p, loc));
+      // #1348 — the property schema a restored objectType must satisfy.
+      const memorySchema = ((await tx.memory.findUnique({ where: { id: graph.id }, select: { schema: true } }))
+        ?.schema ?? null) as MemorySchema | null;
       const writableLocs = fsGraph.nodes
         .map((n) => n.loc)
         .filter((l): l is string => typeof l === 'string' && l !== '' && !isProtected(l));
@@ -454,15 +473,35 @@ export const syncGraphFromGithub = async (
           // `create` path below the same absence yields the column default,
           // which is right: a new node whose file declares no signal has none.
           ...governedSignalsFromMirror(node),
-          // #1348 — the collection discriminator, by the same absent-means-
-          // preserve rule: `loadNodeFromFs` yields the key only for a
-          // non-blank value (a file never clears it — cor:int:020:01, CLI
-          // import #725), so an omitted key leaves a stored objectType alone
-          // on update and takes the unset default on create. Like the rest of
-          // this payload it is written raw: sync restores neither `properties`
-          // nor `data`, so the collection schema is not enforced here — it is
-          // audited after the fact by validateMemory's SCHEMA check.
-          ...('objectType' in node ? { objectType: node.objectType } : {}),
+        };
+
+        // #1348 — the collection discriminator, by the same absent-means-
+        // preserve rule: `loadNodeFromFs` yields the key only for a non-blank
+        // value (a file never clears it — cor:int:020:01, CLI import #725), so
+        // an omitted key leaves a stored objectType alone on update and takes
+        // the unset default on create.
+        //
+        // A present one is written only if the RESULTING record satisfies the
+        // memory's property schema (#725: a structured record must satisfy its
+        // collection — the invariant every GraphQL/MCP write enforces through
+        // validateNodeAgainstSchema). Sync restores neither `properties` nor
+        // `data`, so the record is judged with the properties the row already
+        // has (none, for a new node). A violation does NOT fail the sync — one
+        // bad file must not block the memory — and does not write a
+        // nonconforming record either: the stored objectType is kept and the
+        // file is reported in `skippedObjectTypes`, like a protected loc.
+        const fileObjectType = 'objectType' in node ? node.objectType : undefined;
+        const objectTypeFor = (properties: unknown): { objectType?: string | null } => {
+          if (fileObjectType == null) return {};
+          if (memorySchema == null) return { objectType: fileObjectType };
+          try {
+            validateNodeAgainstSchema(memorySchema, fileObjectType, (properties ?? null) as Record<string, unknown> | null);
+            return { objectType: fileObjectType };
+          } catch (e) {
+            if (!(e instanceof NodeSchemaViolation)) throw e;
+            skippedObjectTypes.push(`${loc} (${fileObjectType}): ${e.message}`);
+            return {};
+          }
         };
 
         // Identity is ID-FIRST (repo wins): a file that kept its frontmatter
@@ -534,7 +573,9 @@ export const syncGraphFromGithub = async (
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
           }
-          await updateNodeFromGitSync(tx, byId, update, parkedRevisionBases.get(byId.id), graph.id);
+          await updateNodeFromGitSync(tx, byId, update, parkedRevisionBases.get(byId.id), graph.id, (locked) =>
+            objectTypeFor(locked.properties),
+          );
           parkedRevisionBases.delete(byId.id);
           rowId = byId.id;
         } else {
@@ -557,6 +598,7 @@ export const syncGraphFromGithub = async (
               update,
               parkedRevisionBases.get(existingAtLoc.id),
               graph.id,
+              (locked) => objectTypeFor(locked.properties),
             );
             parkedRevisionBases.delete(existingAtLoc.id);
             // The SURVIVING id: an update keeps the existing row's id, which
@@ -569,6 +611,7 @@ export const syncGraphFromGithub = async (
                 id: createId,
                 memoryId: graph.id,
                 ...update,
+                ...objectTypeFor(null),
                 revisionContentHash: revisionStateHashRefreshMarker(),
               },
               select: { id: true },
@@ -784,7 +827,12 @@ export const syncGraphFromGithub = async (
       console.warn(`Sync of "${graphName}": skipped ${skippedProtected.length} file(s) under a Channel's address: ${skippedProtected.join(', ')}`);
     }
     console.log(`Synced memory "${graphName}": ${fsGraph.nodes.length} nodes, ${edges.length} edges`);
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected };
+    if (skippedObjectTypes.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": kept the stored objectType of ${skippedObjectTypes.length} node(s) whose file's value would violate the memory schema: ${skippedObjectTypes.join('; ')}`,
+      );
+    }
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({

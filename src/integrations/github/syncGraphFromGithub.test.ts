@@ -1207,6 +1207,63 @@ describe('#1348 — objectType through git sync', () => {
     expect((await stored('padded'))?.objectType).toBe(' competitor ');
   });
 
+  // #725: a structured record must satisfy its collection. Sync restores no
+  // properties, so the record is judged with the properties the row already has.
+  describe('on a memory with a property schema (@codex P1, PR #1358)', () => {
+    const schema = {
+      objectTypes: {
+        competitor: { fields: { url: { type: 'text', required: true } } },
+        note: { fields: { topic: { type: 'text' } } },
+      },
+    };
+    beforeEach(async () => {
+      await db.memory.update({ where: { id: dbGraphId }, data: { schema } });
+    });
+    const syncResult = async () => {
+      const result = await syncGraphFromGithub(makeGraph());
+      expect(result.error).toBeUndefined();
+      return result;
+    };
+
+    it('a value whose record conforms IS written — on update and on create', async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'c', name: 'C', objectType: 'note', properties: { url: 'https://x' }, ownerRepo: 'test/repo' } });
+      frontmatter('c', { id, name: 'C', objectType: 'competitor' });
+      frontmatter('n', { name: 'N', objectType: 'note' });
+      const result = await syncResult();
+      expect((await stored('c'))?.objectType).toBe('competitor');
+      expect((await stored('n'))?.objectType).toBe('note');
+      expect(result.skippedObjectTypes).toEqual([]);
+    });
+
+    it('an UNDECLARED collection is not written: the stored value is kept and the file is reported', async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'u', name: 'U', objectType: 'note', ownerRepo: 'test/repo' } });
+      frontmatter('u', { id, name: 'U-renamed', objectType: 'bogus' });
+      const result = await syncResult();
+      const row = await db.node.findFirst({ where: { loc: 'u', memoryId: dbGraphId } });
+      expect([row?.objectType, row?.name]).toEqual(['note', 'U-renamed']); // the rest of the file still applied
+      expect(result.skippedObjectTypes).toEqual([expect.stringMatching(/^u \(bogus\): /)]);
+    });
+
+    it('a collection whose REQUIRED field the row lacks is not written — a fresh restore creates the node without it', async () => {
+      frontmatter('fresh', { name: 'F', objectType: 'competitor' });
+      frontmatter('other', { name: 'O' });
+      const result = await syncResult();
+      expect((await stored('fresh'))?.objectType).toBeNull();
+      expect(await stored('other')).not.toBeNull(); // one bad file never fails the memory's sync
+      expect(result.skippedObjectTypes).toEqual([expect.stringMatching(/^fresh \(competitor\): /)]);
+    });
+
+    it('judges the properties the row already has (sync restores none): a conforming row takes the collection', async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'l', name: 'L', properties: { url: 'https://y' }, ownerRepo: 'test/repo' } });
+      frontmatter('l', { id, name: 'L', objectType: 'competitor' });
+      await syncResult();
+      expect((await stored('l'))?.objectType).toBe('competitor');
+    });
+  });
+
   it('#1218 governed signals are untouched: an objectType-only file keeps a stored role, and a file role still sets it', async () => {
     const id = generateId();
     await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'r', name: 'R', role: 'review', ownerRepo: 'test/repo' } });
