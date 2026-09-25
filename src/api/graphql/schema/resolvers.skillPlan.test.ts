@@ -1783,6 +1783,44 @@ describe('#1315 — `synced` is refused for claudeSkill, and only there', () => 
   });
 });
 
+// ── #1341: a description Cowork refuses is kept out of export for Claude only ─
+describe('#1341 — a `<…>` description is refused for claudeSkill, and only there', () => {
+  it('EXPORT for claudeSkill plans SKIP with the actionable reason, renders nothing, and PRESERVES a file already there', async () => {
+    const node = await mkNode('tasks:markup', {
+      properties: declaration({ name: 'markup-skill', description: 'Use when adding a node to <memory>.' }),
+    });
+    const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName: 'markup-skill', sourceUrn: '' }] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings.map((f: { rule: string }) => f.rule)).toContain('skill-description-markup');
+    expect(e.renderedBody).toBeNull();
+    expect(e.exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-description-markup', message: expect.stringContaining('"<memory>"') }],
+    });
+  });
+
+  it('the SAME description exports normally for codexSkill', async () => {
+    const node = await mkNode('tasks:markup-codex', {
+      properties: { exports: { codexSkill: { name: 'markup-skill', description: 'Use when adding a node to <memory>.', enable: true } } },
+    });
+    const got = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings.map((f: { rule: string }) => f.rule)).not.toContain('skill-description-markup');
+    expect(e.exportPlan).toMatchObject({ action: 'WRITE' });
+  });
+
+  it('CONTROL: a lone `<` (measured as accepted) exports normally for claudeSkill', async () => {
+    const node = await mkNode('tasks:markup-control', {
+      properties: declaration({ name: 'markup-control', description: 'Use when a < b.' }),
+    });
+    const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings).toEqual([]);
+    expect(e.exportPlan).toMatchObject({ action: 'WRITE' });
+  });
+});
+
 describe('#1318 review (@codex P1): a host-reserved directory is never offered for pruning', () => {
   it('an unpaired `synced/` is NOT an orphan on claudeSkill — the plan does not say "preserve" and "prune" about one directory', async () => {
     await mkNode('tasks:reserved-orphan', { properties: declaration({ name: 'synced' }) });

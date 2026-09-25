@@ -57,12 +57,21 @@ export interface SkillHost {
    * listed: refusing them would turn a working skill into a refused one.
    */
   reservedNames: readonly string[];
+  /**
+   * Whether this host's upload validator refuses a description containing what
+   * it calls an XML tag (#1341, hadron-cli#722). Measured on Cowork by Holger's
+   * upload of a 20-case probe (2026-09-25): every refused case matches
+   * `DESCRIPTION_MARKUP_RE` in lint.ts and every accepted one does not. Claude
+   * only: Codex's loader has no such check (rust-v0.153.0 source) and loads a
+   * `<worker>` description (team chat #1127); the probe was not run on Codex.
+   */
+  rejectsDescriptionMarkup: boolean;
 }
 
 /** Every supported host, in a stable order (Claude first, as the original). */
 export const SKILL_HOSTS: readonly SkillHost[] = Object.freeze([
-  Object.freeze({ key: HOST_CLAUDE_SKILL, maxNameLength: 64, maxDescriptionLength: 1024, legacyAliases: true, reservedNames: Object.freeze(['synced']) }),
-  Object.freeze({ key: HOST_CODEX_SKILL, maxNameLength: 64, maxDescriptionLength: 1024, legacyAliases: false, reservedNames: Object.freeze([]) }),
+  Object.freeze({ key: HOST_CLAUDE_SKILL, maxNameLength: 64, maxDescriptionLength: 1024, legacyAliases: true, reservedNames: Object.freeze(['synced']), rejectsDescriptionMarkup: true }),
+  Object.freeze({ key: HOST_CODEX_SKILL, maxNameLength: 64, maxDescriptionLength: 1024, legacyAliases: false, reservedNames: Object.freeze([]), rejectsDescriptionMarkup: false }),
 ]);
 
 /**
