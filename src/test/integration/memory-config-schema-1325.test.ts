@@ -79,6 +79,8 @@ describe('#1325 — MemoryConfigTemplate: exactly one owner', () => {
       await db.memoryConfigTemplate.create({ data: { name: 'specs', ...owner } });
     }
     expect(await db.memoryConfigTemplate.count()).toBe(4);
+    // The optimistic-concurrency counter starts at 1 (cli#716 Q1).
+    expect((await db.memoryConfigTemplate.findMany()).map((t) => t.revision)).toEqual([1, 1, 1, 1]);
   });
 
   it('a name is unique per owner among LIVE templates, and a soft-deleted one frees it', async () => {
@@ -138,7 +140,9 @@ describe('#1325 — NodeRoleRule: one row per role, task references fail closed'
 
   it('a row may declare a role with no tasks at all (H1)', async () => {
     const rule = await db.nodeRoleRule.create({ data: { configId, role: 'spec.rule' } });
-    expect(rule).toMatchObject({ authorTaskId: null, authorTaskRequired: false, writers: 'ALL', enabled: true });
+    expect(rule).toMatchObject({
+      authorTaskId: null, authorTaskRequired: false, writers: 'ALL', enabled: true, revision: 1,
+    });
   });
 
   it('refuses a task reference without its required marker', async () => {

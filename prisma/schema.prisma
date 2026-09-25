@@ -4445,6 +4445,10 @@ model NodeRoleRule {
   sourceTemplateId       String?           @map("source_template_id")
   /// #1334 — set by a REQUIRED template; only org admins may change the rule.
   locked                 Boolean           @default(false)
+  /// Optimistic-concurrency counter (#1325, cli#716 Q1): starts at 1, +1 on
+  /// every update; a mutation passing `expectedRevision` refuses CONFLICT when
+  /// it no longer matches, so a stale read can never overwrite a newer write.
+  revision               Int               @default(1)
   createdAt              DateTime          @default(now()) @map("created_at")
   createdBy              String?           @map("created_by")
   updatedAt              DateTime?         @updatedAt @map("updated_at")
@@ -4475,6 +4479,9 @@ model MemoryConfigTemplate {
   name           String
   description    String?
   required       Boolean   @default(false)
+  /// Optimistic-concurrency counter, as on NodeRoleRule. Rules are replaced
+  /// wholesale with the template, so the template's revision covers them.
+  revision       Int       @default(1)
   hadronServerId String?   @map("hadron_server_id")
   organizationId String?   @map("organization_id")
   ownerUserId    String?   @map("owner_user_id")
