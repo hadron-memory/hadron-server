@@ -2978,7 +2978,33 @@ export function createMcpServerInstance(
       try {
         sectionId = await db.$transaction(async (tx) => {
           await lockAncestorsForCreate(tx, memoryId, loc);
-          const row = await tx.node.upsert(upsertArgs);
+          // #1323 (@copilot, PR #1339): re-saving an EXISTING live section is
+          // an authoring write of name/description/content/tags, so it takes
+          // the same revision protocol as hadron_update_node — row lock,
+          // drift reconciled as its own revision, the real predecessor
+          // snapshotted — instead of a bare upsert whose change the next read
+          // would misattribute to a raw writer. A new row is baselined by the
+          // insert trigger; a tombstone is left as the upsert leaves it.
+          const prior = await tx.node.findUnique({
+            where: { loc_memoryId: { loc, memoryId } },
+            select: { id: true, deletedAt: true },
+          });
+          if (prior && !prior.deletedAt) {
+            await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
+            await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
+            const current = await tx.node.findUniqueOrThrow({ where: { id: prior.id } });
+            const changes = diffNodeChanges(current, upsertArgs.update);
+            if (changes.length > 0) {
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
+              });
+            }
+          }
+          const row = await tx.node.upsert({
+            ...upsertArgs,
+            update: { ...upsertArgs.update, revisionContentHash: revisionStateHashRefreshMarker() },
+          });
           return row.id;
         });
       } catch (e) {
@@ -5239,6 +5265,15 @@ export function createMcpServerInstance(
             // no-edge branch snapshotted on the base client and swallowed any
             // failure, leaving phantom/consumed revisions and stale concurrent
             // pre-states.
+            // Row lock BEFORE the authoritative read (@codex P1, PR #1339): the
+            // address lock above binds only writers that take it, so without
+            // this a non-participating writer could commit between this read
+            // and the update, and the refreshed fingerprint would then hide it.
+            // Same order as the GraphQL update path.
+            await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
+            // Unreconciled drift becomes its OWN revision before this edit's,
+            // as on the GraphQL path — never folded into the edit.
+            await ensureCurrentNodeRevisionInTransaction(tx, existing.id);
             const current = await tx.node.findUniqueOrThrow({
               where: { id: existing.id },
             });
