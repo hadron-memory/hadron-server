@@ -440,9 +440,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_agent_app_channel_uniq
 -- raw/createMany writers Prisma cannot route through an application helper.
 -- Keep in lockstep with 20260925010000_trustworthy_node_revisions.
 -- `prisma db push` adds the nullable column without running the migration, so
--- baseline rows that already exist before the trigger is installed as well.
+-- upgrade every row still carrying that one-time marker to the new LIVE-state
+-- counter semantics before clearing it. Re-running post-push is then a no-op.
 UPDATE "nodes"
-SET "revision_content_hash" = md5(COALESCE("content", ''))
+SET "rev_seq" = "rev_seq" + 1,
+    "revision_content_hash" = md5(COALESCE("content", ''))
 WHERE "revision_content_hash" IS NULL;
 
 CREATE OR REPLACE FUNCTION hadron_initialize_node_revision_content_hash()

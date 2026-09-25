@@ -131,24 +131,61 @@ describe('#1323 current revision contract', () => {
     expect(n.revisionContentHash).toBe('fd6f136535f2a7847d839a100f6b807f');
   });
 
-  it('backfills existing rows during post-push before their first reconciled read', async () => {
-    const n = await makeNode('revision-post-push-backfill', { content: 'before db push' });
-    await db.node.update({ where: { id: n.id }, data: { revisionContentHash: null } });
+  it('upgrades existing counters and hashes once during post-push', async () => {
+    const fresh = await makeNode('revision-post-push-fresh', { content: 'before db push' });
+    await db.node.update({
+      where: { id: fresh.id },
+      data: { revSeq: 0, revisionContentHash: null },
+    });
+
+    const withHistory = await makeNode('revision-post-push-history', { content: 'current old live' });
+    await db.nodeRevision.create({
+      data: {
+        id: generateId(),
+        nodeId: withHistory.id,
+        memoryId: memory.id,
+        loc: withHistory.loc,
+        name: withHistory.name,
+        content: 'snapshot one',
+        tags: [],
+        revNo: 1,
+      },
+    });
+    await db.node.update({
+      where: { id: withHistory.id },
+      data: { revSeq: 1, revisionContentHash: null },
+    });
 
     const postPushSql = readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8');
     expect(postPushSql).toContain(
-      'SET "revision_content_hash" = md5(COALESCE("content", \'\'))\nWHERE "revision_content_hash" IS NULL;',
+      'SET "rev_seq" = "rev_seq" + 1,\n    "revision_content_hash" = md5(COALESCE("content", \'\'))',
     );
     await db.$executeRawUnsafe(`
       UPDATE "nodes"
-      SET "revision_content_hash" = md5(COALESCE("content", ''))
+      SET "rev_seq" = "rev_seq" + 1,
+          "revision_content_hash" = md5(COALESCE("content", ''))
       WHERE "revision_content_hash" IS NULL
     `);
 
-    await db.node.update({ where: { id: n.id }, data: { content: 'after raw writer' } });
-    const drifted = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: fresh.id } })).toMatchObject({ revSeq: 1 });
+    expect(await db.node.findUniqueOrThrow({ where: { id: withHistory.id } })).toMatchObject({ revSeq: 2 });
+
+    await db.node.update({ where: { id: fresh.id }, data: { content: 'after raw writer' } });
+    const drifted = await db.node.findUniqueOrThrow({ where: { id: fresh.id } });
     expect(await resolvers.Node.revision(drifted as never, {}, ctx())).toBe(2);
-    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: fresh.id } })).toBe(1);
+
+    const updated = await resolvers.Mutation.updateNode(
+      {},
+      { input: { id: withHistory.id, content: 'next live' } } as never,
+      ctx(),
+    );
+    expect(updated.revSeq).toBe(3);
+    expect(
+      (await db.nodeRevision.findMany({ where: { nodeId: withHistory.id }, orderBy: { revNo: 'asc' } })).map(
+        (revision) => revision.revNo,
+      ),
+    ).toEqual([1, 2]);
   });
 
   it('starts at 1, exposes the live revision, and snapshots the predecessor', async () => {
