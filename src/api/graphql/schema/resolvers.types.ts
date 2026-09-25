@@ -345,6 +345,15 @@ export const typeResolvers = {
       // matches the parent object. If a concurrent supported write changed the
       // row, the parent's own number remains the only self-consistent answer.
       return ctx.db.$transaction(async (tx) => {
+        // A NEWER number is only ever returned for this call's own reconcile
+        // of drift the parent already reflects. If any revisioned write landed
+        // since the parent was read — an edge-only update advances revSeq
+        // without touching a tracked field — the parent's edges/fields may be
+        // stale, and its own number is the only self-consistent answer
+        // (@codex P1, PR #1339).
+        await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;
+        const pre = await tx.node.findUnique({ where: { id: n.id }, select: { memoryId: true, revSeq: true } });
+        if (!pre || pre.memoryId !== n.memoryId || pre.revSeq !== n.revSeq) return n.revSeq;
         // Only while the row is still in the memory the parent was read from
         // (@codex P1, PR #1339): never reconcile into another tenant.
         if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return n.revSeq;

@@ -1256,6 +1256,15 @@ export async function writeNodeCore(
               // path.
               await ensureCurrentNodeRevisionInTransaction(tx, authoritative.id);
               authoritative = await tx.node.findUniqueOrThrow({ where: { id: authoritative.id } });
+              // Found by (loc, memory), locked by id: a row that moved in
+              // between must refuse, not be snapshotted while the upsert
+              // writes the old address (@copilot, PR #1339).
+              if (authoritative.loc !== input.loc || authoritative.memoryId !== input.memoryId) {
+                throw new GraphQLError(
+                  `Node at loc "${input.loc}" moved while this write waited — re-read and retry.`,
+                  { extensions: { code: 'NODE_WRITE_CONFLICT', loc: input.loc, memoryId: input.memoryId } },
+                );
+              }
               await createNodeRevision(tx, {
                 ...buildNodeRevisionSnapshot(authoritative, editorFromAuth(ctx), {
                   revLabel: input.reason,

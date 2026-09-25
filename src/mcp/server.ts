@@ -3000,6 +3000,12 @@ export function createMcpServerInstance(
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
             const current = await tx.node.findUniqueOrThrow({ where: { id: prior.id } });
+            // Found by (loc, memory), locked by id (@copilot, PR #1339).
+            if (current.loc !== loc || current.memoryId !== memoryId) {
+              throw new NodeMovedDuringWriteError(
+                `[write_conflict] the section at "${loc}" moved while this write waited — re-read and retry.`,
+              );
+            }
             const changes = diffNodeChanges(current, upsertArgs.update);
             if (changes.length > 0) {
               await createNodeRevision(tx, {
@@ -3016,6 +3022,7 @@ export function createMcpServerInstance(
         });
       } catch (e) {
         if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         throw e;
       }
 
@@ -4835,6 +4842,12 @@ export function createMcpServerInstance(
         await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
         const pre = await tx.node.findUnique({ where: { id: prior.id } });
         if (!pre) return null;
+        // Found by (loc, memory), locked by id (@copilot, PR #1339).
+        if (pre.loc !== loc || pre.memoryId !== memoryId) {
+          throw new NodeMovedDuringWriteError(
+            `[write_conflict] the node at "${loc}" moved while this write waited — re-read and retry.`,
+          );
+        }
         await createNodeRevision(tx, {
           id: generateId(),
           ...buildNodeRevisionSnapshot(pre, editorFromAuth(auth), {
@@ -5054,6 +5067,7 @@ export function createMcpServerInstance(
         await assertLocWritable(db, memory.id, loc, 'update');
       } catch (e) {
         if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         throw e;
       }
 

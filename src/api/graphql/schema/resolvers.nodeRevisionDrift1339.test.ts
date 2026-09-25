@@ -229,3 +229,20 @@ describe('#1339 review round 5', () => {
   });
 });
 
+describe('#1339 review round 6', () => {
+  it('Node.revision never hands a stale parent the number of a newer edge-only write (@codex P1)', async () => {
+    const anchor = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:anchor', name: 'a' } });
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:edgy', name: 'n', content: 'x' } });
+    const parent = await db.node.findUniqueOrThrow({ where: { id: node.id } }); // revision 1, no edges
+    await writeNodeCore(
+      { memoryId, loc: node.loc, edges: [{ targetId: anchor.id, name: 'links-to' }] } as never,
+      ctx(),
+      'update',
+    );
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(2);
+    // The parent's fields still match (edges are not tracked fields), but its
+    // edges are stale: its own number is the only self-consistent answer.
+    expect(await resolvers.Node.revision(parent as never, {}, ctx())).toBe(1);
+  });
+});
+
