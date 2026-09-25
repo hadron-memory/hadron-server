@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'crypto';
+import { createHash, createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
@@ -216,9 +216,9 @@ import { GraphQLError as ScopeGraphQLError } from 'graphql';
 import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchScopeResolution } from '../lib/scopes.js';
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
-import { attendeeMentionTokens } from '../lib/channelReadState.js';
+import { advanceWorkerReadStates, attendeeMentionTokens } from '../lib/channelReadState.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
-import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient, type SessionType } from '../generated/prisma/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -237,6 +237,77 @@ interface TeamChatMonitorCheckpoint {
   channelId: string;
   workerId: string;
   seq: number;
+}
+
+interface TeamChatAggregateCheckpoint {
+  v: 2;
+  action: 'monitor' | 'baseline';
+  userId: string;
+  appId: string;
+  channelId: string;
+  seq: number;
+  scopeHash: string;
+}
+
+type TeamChatCheckpointScope = Array<{
+  workerId: string;
+  seen: number;
+  sessionIds: string[];
+  policy: {
+    entryId: string;
+    ownerType: 'ORGANIZATION' | 'APP';
+    ownerId: string;
+    role: 'WATCH' | 'BOTH';
+    mentionOnly: boolean;
+    namedBy: 'WORKER' | 'AGENT' | 'EVERYONE';
+  };
+}>;
+
+/** Stable digest of the exact Worker set, optionally including its preview cursors. */
+function teamChatCheckpointScopeHash(scope: TeamChatCheckpointScope, includeSeen: boolean): string {
+  const normalized = [...scope]
+    .sort((a, b) => a.workerId.localeCompare(b.workerId))
+    .map((entry) => ({
+      workerId: entry.workerId,
+      ...(includeSeen ? { seen: entry.seen } : {}),
+      sessionIds: [...entry.sessionIds].sort(),
+      policy: entry.policy,
+    }));
+  return createHash('sha256').update(JSON.stringify(normalized)).digest('base64url');
+}
+
+function signTeamChatAggregateCheckpoint(payload: TeamChatAggregateCheckpoint): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET is required for team-chat monitor checkpoints.');
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = createHmac('sha256', secret).update(body).digest('base64url');
+  return `${body}.${signature}`;
+}
+
+function verifyTeamChatAggregateCheckpoint(token: string): TeamChatAggregateCheckpoint | null {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET is required for team-chat monitor checkpoints.');
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [body, suppliedSignature] = parts;
+  const expectedSignature = createHmac('sha256', secret).update(body).digest('base64url');
+  if (!safeEqual(suppliedSignature, expectedSignature)) return null;
+  try {
+    const value = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Partial<TeamChatAggregateCheckpoint>;
+    if (
+      value.v !== 2 ||
+      !['monitor', 'baseline'].includes(value.action ?? '') ||
+      typeof value.userId !== 'string' ||
+      typeof value.appId !== 'string' ||
+      typeof value.channelId !== 'string' ||
+      !Number.isInteger(value.seq) ||
+      (value.seq ?? -1) < 0 ||
+      typeof value.scopeHash !== 'string'
+    ) return null;
+    return value as TeamChatAggregateCheckpoint;
+  } catch {
+    return null;
+  }
 }
 
 /** Sign the exact attendee/Channel watermark the server scanned and returned. */
@@ -7810,6 +7881,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     channel?: string;
     monitorFor?: string;
     acknowledge?: Array<{ worker: string; channel: string; seq: number; proof: string }>;
+    acknowledgeCombined?: string;
+    checkpointMode?: 'perWorker' | 'combined';
+    route?: 'register' | 'mentions';
+    baseline?: { action: 'preview' | 'apply'; proof?: string };
     limit?: number;
   }) => {
     if (!auth.userId || auth.impersonation) {
@@ -7853,46 +7928,70 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return textResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
       }
 
-      // A monitor is an operator-owned relay, not a presence board. Enumerate
-      // only this user's live, Worker-bound sessions in this App. The +1 makes
-      // the resource cap fail closed instead of silently omitting a Worker.
-      const now = new Date();
-      const open = await db.session.findMany({
-        where: {
-          userId: auth.userId,
-          workerId: requestedWorker ? requestedWorker.id : { not: null },
-          endedAt: null,
-          deletedAt: null,
-          worker: { appId: app.id, retiredAt: null },
-          ...recentlyTouchedFilter(now),
-        },
-        orderBy: [{ updatedAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
-        select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
-        take: requestedWorker ? OPEN_SESSION_SCAN_CAP : OPEN_SESSION_SCAN_CAP + 1,
-      });
-      if (!requestedWorker && open.length > OPEN_SESSION_SCAN_CAP) {
+      type ScopeDb = PrismaClient | Prisma.TransactionClient;
+      type LiveScope = {
+        workerIds: string[];
+        workerSet: Set<string>;
+        sessionIdsByWorker: Map<string, string[]>;
+      };
+      type LiveScopeResult =
+        | { kind: 'ok'; scope: LiveScope }
+        | { kind: 'scan-cap' }
+        | { kind: 'worker-cap' }
+        | { kind: 'target-not-live' };
+
+      // A monitor is an operator-owned relay, not a presence board. This is
+      // the ONE live-scope derivation used both when issuing a proof and inside
+      // the transaction that accepts it. Session ids are the liveness epoch:
+      // replacing/restarting a session changes the signed scope even when the
+      // Worker id stays the same.
+      const loadLiveScope = async (scopeDb: ScopeDb, now: Date): Promise<LiveScopeResult> => {
+        const open = await scopeDb.session.findMany({
+          where: {
+            userId: auth.userId,
+            workerId: requestedWorker ? requestedWorker.id : { not: null },
+            endedAt: null,
+            deletedAt: null,
+            worker: { appId: app.id, retiredAt: null },
+            ...recentlyTouchedFilter(now),
+          },
+          orderBy: [{ updatedAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
+          select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+          take: requestedWorker ? OPEN_SESSION_SCAN_CAP : OPEN_SESSION_SCAN_CAP + 1,
+        });
+        if (!requestedWorker && open.length > OPEN_SESSION_SCAN_CAP) return { kind: 'scan-cap' };
+        const lastEvents = await loadLastEventBySession(scopeDb as never, open.map((session) => session.id));
+        const live = open.filter((session) => session.workerId && isSessionLive(session, lastEvents.get(session.id), now));
+        const sessionIdsByWorker = new Map<string, string[]>();
+        for (const session of live) {
+          const workerId = session.workerId as string;
+          sessionIdsByWorker.set(workerId, [...(sessionIdsByWorker.get(workerId) ?? []), session.id]);
+        }
+        for (const [workerId, sessionIds] of sessionIdsByWorker) {
+          sessionIdsByWorker.set(workerId, sessionIds.sort());
+        }
+        const workerIds = [...sessionIdsByWorker.keys()].sort();
+        const workerSet = new Set(workerIds);
+        if (!requestedWorker && workerIds.length > TEAM_CHAT_MONITOR_MAX_TARGETS) return { kind: 'worker-cap' };
+        if (requestedWorker && !workerSet.has(requestedWorker.id)) return { kind: 'target-not-live' };
+        return { kind: 'ok', scope: { workerIds, workerSet, sessionIdsByWorker } };
+      };
+
+      const initialLive = await loadLiveScope(db, new Date());
+      if (initialLive.kind === 'scan-cap') {
         return textResult(`[monitor_scope_too_large] More than ${OPEN_SESSION_SCAN_CAP} recent Worker sessions match. Pass monitorFor to narrow the monitor.`);
       }
-      const lastEvents = await loadLastEventBySession(db as never, open.map((s) => s.id));
-      const liveWorkerIds = [...new Set(
-        open
-          .filter((s) => s.workerId && isSessionLive(s, lastEvents.get(s.id), now))
-          .map((s) => s.workerId as string),
-      )];
-      const liveWorkerSet = new Set(liveWorkerIds);
-      if (!requestedWorker && liveWorkerIds.length > TEAM_CHAT_MONITOR_MAX_TARGETS) {
+      if (initialLive.kind === 'worker-cap') {
         return textResult(
           `[monitor_scope_too_large] More than ${TEAM_CHAT_MONITOR_MAX_TARGETS} live Workers match. Pass monitorFor to narrow the monitor.`,
         );
       }
-
-      let targetWorkerIds = liveWorkerIds;
-      if (requestedWorker) {
-        if (!liveWorkerSet.has(requestedWorker.id)) {
-          return textResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
-        }
-        targetWorkerIds = [requestedWorker.id];
+      if (initialLive.kind === 'target-not-live') {
+        return textResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
       }
+      const liveScope = initialLive.scope;
+      const liveWorkerSet = liveScope.workerSet;
+      const targetWorkerIds = liveScope.workerIds;
       if (targetWorkerIds.length === 0) {
         return textResult('No live Worker sessions of yours need team-chat monitoring in this App.');
       }
@@ -7906,6 +8005,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         select: { id: true, name: true, loc: true, lastSeq: true },
       });
       if (!selectedChannel) return textResult('[channel_not_found] No matching Channel.');
+
+      if (args.acknowledge?.length && args.acknowledgeCombined) {
+        return textResult('[bad_user_input] Pass either acknowledge or acknowledgeCombined, not both.');
+      }
+      if (args.baseline && (args.acknowledge?.length || args.acknowledgeCombined)) {
+        return textResult('[bad_user_input] Baseline preview/apply cannot be combined with an acknowledgement.');
+      }
+      if (args.baseline?.action === 'preview' && args.baseline.proof !== undefined) {
+        return textResult('[bad_user_input] Baseline preview does not accept a proof.');
+      }
+      if (args.baseline?.action === 'apply' && !args.baseline.proof) {
+        return textResult('[bad_user_input] Baseline apply requires the proof returned by baseline preview.');
+      }
 
       if ((args.acknowledge?.length ?? 0) > TEAM_CHAT_MONITOR_MAX_TARGETS) {
         return textResult(`[bad_user_input] acknowledge accepts at most ${TEAM_CHAT_MONITOR_MAX_TARGETS} checkpoints.`);
@@ -7943,7 +8055,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
       // One checkpoint is one act. If any entry is invalid or a write fails,
       // roll all of them back rather than partially silencing the monitor.
-      const acknowledged = resolvedAcks.length
+      let acknowledged = resolvedAcks.length
         ? await db.$transaction(async (tx) => {
             const receipts: string[] = [];
             const txCtx = { ...ctx, db: tx as unknown as PrismaClient };
@@ -7959,64 +8071,255 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           })
         : [];
 
-      const views = await Promise.all(targetWorkerIds.map(async (workerId) => ({
-        workerId,
-        view: await resolveRegister(db, { attendee: { workerId }, actor: ctx }),
-      })));
-      const statuses: string[] = [];
-      const watchers: Array<{
+      type MonitorWatcher = {
         workerId: string;
         urn: string;
         seen: number;
+        sessionIds: string[];
+        policy: TeamChatCheckpointScope[number]['policy'];
         mentionOnly: boolean;
         disclosure: string | null;
         mentionTokens: Set<string>;
-      }> = [];
-      let registeredTargets = 0;
-
-      for (const { workerId, view } of views) {
-        const urn = view?.attendeeUrn ?? workerId;
-        const row = view?.rows.find((candidate) => candidate.channel.id === selectedChannel.id);
-        if (!row) {
-          statuses.push(`- ${urn}: not registered for this Channel`);
-          continue;
-        }
-        registeredTargets += 1;
-        if (row.entry.role === 'POST') {
-          statuses.push(`- ${urn}: role POST does not watch${row.disclosure ? ` (${row.disclosure})` : ''}`);
-          continue;
-        }
-        if (!row.canRead) {
-          statuses.push(`- ${urn}: ${row.disclosure ?? 'HOST_MEMORY_NOT_READABLE'}`);
-          continue;
-        }
-        const tokens = row.entry.mentionOnly
-          ? await attendeeMentionTokens(db, { workerId })
-          : [];
-        watchers.push({
+      };
+      type WatcherScope = { watchers: MonitorWatcher[]; statuses: string[]; registeredTargets: number };
+      const loadWatcherScope = async (scopeDb: ScopeDb, currentLive: LiveScope): Promise<WatcherScope> => {
+        const scopeCtx = { ...ctx, db: scopeDb as unknown as PrismaClient };
+        const views = await Promise.all(currentLive.workerIds.map(async (workerId) => ({
           workerId,
-          urn,
-          seen: row.readState?.lastSeenSeq ?? 0,
-          mentionOnly: row.entry.mentionOnly,
-          disclosure: row.disclosure,
-          mentionTokens: new Set(tokens),
-        });
-        if (row.disclosure) statuses.push(`- ${urn}: watching with ${row.disclosure}`);
-      }
+          view: await resolveRegister(scopeDb as unknown as PrismaClient, { attendee: { workerId }, actor: scopeCtx }),
+        })));
+        const statuses: string[] = [];
+        const watchers: MonitorWatcher[] = [];
+        let registeredTargets = 0;
+        for (const { workerId, view } of views) {
+          const urn = view?.attendeeUrn ?? workerId;
+          const row = view?.rows.find((candidate) => candidate.channel.id === selectedChannel.id);
+          if (!row) {
+            statuses.push(`- ${urn}: not registered for this Channel`);
+            continue;
+          }
+          registeredTargets += 1;
+          if (row.entry.role === 'POST') {
+            statuses.push(`- ${urn}: role POST does not watch${row.disclosure ? ` (${row.disclosure})` : ''}`);
+            continue;
+          }
+          if (!row.canRead) {
+            statuses.push(`- ${urn}: ${row.disclosure ?? 'HOST_MEMORY_NOT_READABLE'}`);
+            continue;
+          }
+          const tokens = row.entry.mentionOnly || args.route === 'mentions'
+            ? await attendeeMentionTokens(scopeDb, { workerId })
+            : [];
+          watchers.push({
+            workerId,
+            urn,
+            seen: row.readState?.lastSeenSeq ?? 0,
+            sessionIds: currentLive.sessionIdsByWorker.get(workerId) ?? [],
+            policy: {
+              entryId: row.entry.id,
+              ownerType: row.entry.ownerType,
+              ownerId: row.entry.ownerId,
+              role: row.entry.role,
+              mentionOnly: row.entry.mentionOnly,
+              namedBy: row.entry.namedBy,
+            },
+            mentionOnly: row.entry.mentionOnly,
+            disclosure: row.disclosure,
+            mentionTokens: new Set(tokens),
+          });
+          if (row.disclosure) statuses.push(`- ${urn}: watching with ${row.disclosure}`);
+        }
+        return { watchers, statuses, registeredTargets };
+      };
+
+      const initialWatcherScope = await loadWatcherScope(db, liveScope);
+      const { watchers, statuses, registeredTargets } = initialWatcherScope;
 
       // No applicable register row means the monitor has no legitimate route
       // to this Channel. Collapse that with absence, matching every other
       // Channel read surface instead of becoming an id-existence oracle.
       if (registeredTargets === 0) return textResult('[channel_not_found] No matching Channel.');
 
+      if (watchers.length === 0 && !args.acknowledgeCombined && args.baseline?.action !== 'apply') {
+        const ackLine = acknowledged.length ? `Acknowledged ${acknowledged.join('; ')}.\n` : '';
+        return textResult(`${ackLine}No readable WATCH/BOTH register entry applies to your live Worker sessions.${statuses.length ? `\n\nStatus:\n${statuses.join('\n')}` : ''}`);
+      }
+
+      const checkpointScope = watchers.map((watcher) => ({
+        workerId: watcher.workerId,
+        seen: watcher.seen,
+        sessionIds: watcher.sessionIds,
+        policy: watcher.policy,
+      }));
+
+      type AggregateAdvanceResult =
+        | { kind: 'applied'; states: Map<string, number>; watchers: MonitorWatcher[]; channelLastSeq: number }
+        | { kind: 'stale' };
+      class AggregateScopeChangedError extends Error {}
+      const revalidateAndAdvanceAggregate = async (
+        checkpoint: TeamChatAggregateCheckpoint,
+        includeSeen: boolean,
+      ): Promise<AggregateAdvanceResult> => {
+        // Validate and advance in one transaction, then validate AGAIN after
+        // the write. READ COMMITTED deliberately gives the second validation
+        // a fresh statement snapshot: if a session/register revocation lands
+        // in the narrow window between the first check and the bulk advance,
+        // the sentinel aborts and rolls the cursor writes back. The final
+        // validation is the operation's linearization point.
+        for (let attempt = 1; ; attempt++) {
+          try {
+            return await db.$transaction(async (tx) => {
+              const currentChannel = await tx.channel.findFirst({
+                where: { id: selectedChannel.id, deletedAt: null },
+                select: { lastSeq: true },
+              });
+              if (!currentChannel || checkpoint.seq > currentChannel.lastSeq) return { kind: 'stale' } as const;
+              const freshLive = await loadLiveScope(tx, new Date());
+              if (freshLive.kind !== 'ok') return { kind: 'stale' } as const;
+              const freshScope = await loadWatcherScope(tx, freshLive.scope);
+              const descriptor = freshScope.watchers.map((watcher) => ({
+                workerId: watcher.workerId,
+                seen: watcher.seen,
+                sessionIds: watcher.sessionIds,
+                policy: watcher.policy,
+              }));
+              if (checkpoint.scopeHash !== teamChatCheckpointScopeHash(descriptor, includeSeen)) {
+                return { kind: 'stale' } as const;
+              }
+              const policyHash = teamChatCheckpointScopeHash(descriptor, false);
+              const states = await advanceWorkerReadStates(
+                tx,
+                freshScope.watchers.map((watcher) => watcher.workerId),
+                selectedChannel.id,
+                checkpoint.seq,
+              );
+
+              const finalChannel = await tx.channel.findFirst({
+                where: { id: selectedChannel.id, deletedAt: null },
+                select: { lastSeq: true },
+              });
+              const finalLive = await loadLiveScope(tx, new Date());
+              if (!finalChannel || finalLive.kind !== 'ok') throw new AggregateScopeChangedError();
+              const finalScope = await loadWatcherScope(tx, finalLive.scope);
+              const finalDescriptor = finalScope.watchers.map((watcher) => ({
+                workerId: watcher.workerId,
+                seen: watcher.seen,
+                sessionIds: watcher.sessionIds,
+                policy: watcher.policy,
+              }));
+              if (teamChatCheckpointScopeHash(finalDescriptor, false) !== policyHash) {
+                throw new AggregateScopeChangedError();
+              }
+              if (includeSeen) {
+                const expected = new Map(descriptor.map((entry) => [entry.workerId, Math.max(entry.seen, checkpoint.seq)]));
+                if (finalDescriptor.some((entry) => entry.seen !== expected.get(entry.workerId))) {
+                  throw new AggregateScopeChangedError();
+                }
+              }
+              return {
+                kind: 'applied',
+                states,
+                watchers: finalScope.watchers,
+                channelLastSeq: finalChannel.lastSeq,
+              } as const;
+            });
+          } catch (error) {
+            if (error instanceof AggregateScopeChangedError) return { kind: 'stale' };
+            const serializationAbort =
+              error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034';
+            if (!serializationAbort || attempt >= 3) throw error;
+          }
+        }
+      };
+
+      // #1353: baselining is always an explicit preview then apply. The proof
+      // pins the operator, App, Channel, exact eligible Worker set, every shown
+      // starting cursor and the captured head. A message posted after preview
+      // remains pending because apply advances only to the signed seq.
+      if (args.baseline) {
+        if (args.baseline.action === 'preview') {
+          const proof = signTeamChatAggregateCheckpoint({
+            v: 2,
+            action: 'baseline',
+            userId: auth.userId,
+            appId: app.id,
+            channelId: selectedChannel.id,
+            seq: selectedChannel.lastSeq,
+            scopeHash: teamChatCheckpointScopeHash(checkpointScope, true),
+          });
+          const lines = [...watchers]
+            .sort((a, b) => a.urn.localeCompare(b.urn))
+            .map((watcher) => `- ${watcher.urn}: #${watcher.seen} → #${selectedChannel.lastSeq}`);
+          return textResult(
+            `Baseline preview only — stored read state was not changed. ` +
+            `${watchers.length} Worker${watchers.length === 1 ? '' : 's'} would advance to the captured Channel head #${selectedChannel.lastSeq}:\n` +
+            `${lines.join('\n')}\n\nTo apply exactly this preview, call again with baseline action apply and this proof:\n${proof}`,
+          );
+        }
+
+        const baseline = args.baseline.proof
+          ? verifyTeamChatAggregateCheckpoint(args.baseline.proof)
+          : null;
+        if (
+          !baseline ||
+          baseline.action !== 'baseline' ||
+          baseline.userId !== auth.userId ||
+          baseline.appId !== app.id ||
+          baseline.channelId !== selectedChannel.id
+        ) {
+          return textResult(
+            '[baseline_stale] The baseline preview no longer matches this operator, App, Channel, Worker set or current cursors. Run baseline preview again; no read state was changed.',
+          );
+        }
+        const applied = await revalidateAndAdvanceAggregate(baseline, true);
+        if (applied.kind === 'stale') {
+          return textResult(
+            '[baseline_stale] The baseline preview no longer matches this operator, App, Channel, Worker set or current cursors. Run baseline preview again; no read state was changed.',
+          );
+        }
+        const lines = [...applied.watchers]
+          .sort((a, b) => a.urn.localeCompare(b.urn))
+          .map((watcher) => `- ${watcher.urn}: verified at #${applied.states.get(watcher.workerId) ?? watcher.seen}`);
+        return textResult(
+          `Baseline applied atomically to the captured head #${baseline.seq}; ` +
+          `the Channel is now at #${applied.channelLastSeq}.\n${lines.join('\n')}`,
+        );
+      }
+
+      // The combined proof carries a digest rather than the Worker ids, so its
+      // request/response size does not grow with the monitored set. Recompute
+      // the live, readable set before accepting it. Legacy per-Worker proofs
+      // remain available for callers that need a partial acknowledgement.
+      if (args.acknowledgeCombined) {
+        const combined = verifyTeamChatAggregateCheckpoint(args.acknowledgeCombined);
+        if (
+          !combined ||
+          combined.action !== 'monitor' ||
+          combined.userId !== auth.userId ||
+          combined.appId !== app.id ||
+          combined.channelId !== selectedChannel.id
+        ) {
+          return textResult(
+            '[invalid_checkpoint] The combined acknowledgement no longer matches this operator, App, Channel or exact live Worker set. Poll again.',
+          );
+        }
+        const applied = await revalidateAndAdvanceAggregate(combined, false);
+        if (applied.kind === 'stale') {
+          return textResult(
+            '[invalid_checkpoint] The combined acknowledgement no longer matches this operator, App, Channel or exact live Worker set. Poll again.',
+          );
+        }
+        acknowledged = applied.watchers.map((freshWatcher) => {
+          const watcher = watchers.find((candidate) => candidate.workerId === freshWatcher.workerId) ?? freshWatcher;
+          watcher.seen = applied.states.get(watcher.workerId) ?? freshWatcher.seen;
+          return `${watcher.urn} through #${watcher.seen}`;
+        });
+      }
+
       const ackLine = acknowledged.length ? `Acknowledged ${acknowledged.join('; ')}.\n` : '';
       const pollStateLine = acknowledged.length
         ? 'Acknowledgements were applied; polling made no further read-state changes.'
         : 'Stored read state was not changed.';
-      if (watchers.length === 0) {
-        return textResult(`${ackLine}No readable WATCH/BOTH register entry applies to your live Worker sessions.${statuses.length ? `\n\nStatus:\n${statuses.join('\n')}` : ''}`);
-      }
-
       if (watchers.every((watcher) => watcher.seen >= selectedChannel.lastSeq)) {
         return textResult(
           `${ackLine}No new registered team-chat attention. Channel is at #${selectedChannel.lastSeq}; ${watchers.length} live Worker${watchers.length === 1 ? '' : 's'} monitored. ${pollStateLine}` +
@@ -8038,43 +8341,89 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         ? selectedChannel.lastSeq
         : page.items.reduce((max, message) => Math.max(max, message.seq), sinceSeq);
       const routed: string[] = [];
+      const routeNotes: string[] = [];
       for (const message of page.items) {
-        const routes = watchers.filter((watcher) => {
-          if (message.seq <= watcher.seen) return false;
-          if (!watcher.mentionOnly) return true;
-          return message.mentions.some((mention) => watcher.mentionTokens.has(mention));
-        });
+        let routes: typeof watchers;
+        const notRouted: string[] = [];
+        if (args.route === 'mentions') {
+          const selected = new Map<string, (typeof watchers)[number]>();
+          for (const mention of message.mentions) {
+            const matches = watchers.filter((watcher) => watcher.mentionTokens.has(mention));
+            if (matches.length === 0) {
+              // Collapse unknown, inaccessible, unregistered and non-live.
+              // A monitor is not a roster/discovery oracle.
+              notRouted.push(`@${mention} (no eligible live target)`);
+              continue;
+            }
+            for (const watcher of matches) {
+              if (watcher.workerId === message.authorWorkerId) {
+                notRouted.push(`${watcher.urn} (author)`);
+              } else if (message.seq <= watcher.seen) {
+                notRouted.push(`${watcher.urn} (already past #${message.seq})`);
+              } else {
+                selected.set(watcher.workerId, watcher);
+              }
+            }
+          }
+          routes = [...selected.values()];
+        } else {
+          routes = watchers.filter((watcher) => {
+            if (message.seq <= watcher.seen) return false;
+            if (!watcher.mentionOnly) return true;
+            return message.mentions.some((mention) => watcher.mentionTokens.has(mention));
+          });
+        }
+        if (args.route === 'mentions' && notRouted.length > 0) {
+          routeNotes.push(`#${message.seq} not routed: ${notRouted.join(', ')}`);
+        }
         if (routes.length === 0) continue;
         const reply = message.replyToSeq != null ? ` (reply to #${message.replyToSeq})` : '';
         const cross = message.authorAppId ? ' [cross-App]' : '';
         const mentionLine = message.mentions.length ? `\nmentions: ${message.mentions.map((mention) => `@${mention}`).join(', ')}` : '';
+        const notRoutedLine = notRouted.length ? `\nnot routed: ${notRouted.join(', ')}` : '';
         routed.push(
           `#${message.seq} [${message.authorName ?? 'unknown'}]${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
-          `${mentionLine}\nroute to: ${routes.map((route) => route.urn).join(', ')}`,
+          `${mentionLine}\nroute to: ${routes.map((route) => route.urn).join(', ')}${notRoutedLine}`,
         );
       }
 
-      const checkpoints = watchers
-        .map((watcher) => ({ worker: watcher, seq: Math.min(scannedThrough, selectedChannel.lastSeq) }))
-        .filter(({ worker, seq }) => seq > worker.seen)
-        .map(({ worker, seq }) => ({
-          worker: worker.workerId,
-          channel: selectedChannel.id,
-          seq,
-          proof: signTeamChatMonitorCheckpoint({ v: 1, appId: app.id, channelId: selectedChannel.id, workerId: worker.workerId, seq }),
-        }));
+      const checkpointSeq = Math.min(scannedThrough, selectedChannel.lastSeq);
+      const hasCheckpoint = watchers.some((watcher) => checkpointSeq > watcher.seen);
       const more = page.total > page.items.length
         ? `\nMore messages remain after this page (${page.items.length} of ${page.total} scanned from the oldest stored cursor).`
         : '';
       const routing = routed.length
         ? `${routed.length} message${routed.length === 1 ? '' : 's'} need${routed.length === 1 ? 's' : ''} routing:\n\n${routed.join('\n\n')}`
         : 'No messages in the scanned window need routing to these attendees.';
-      const checkpoint = checkpoints.length
-        ? `\n\nAfter routing/action succeeds, deliberately acknowledge this checkpoint:\n${JSON.stringify(checkpoints)}`
-        : '';
+      const routeNoteText = routeNotes.length ? `\n\nMention routing notes:\n${routeNotes.join('\n')}` : '';
+      let checkpoint = '';
+      if (hasCheckpoint && args.checkpointMode === 'combined') {
+        const proof = signTeamChatAggregateCheckpoint({
+          v: 2,
+          action: 'monitor',
+          userId: auth.userId,
+          appId: app.id,
+          channelId: selectedChannel.id,
+          seq: checkpointSeq,
+          scopeHash: teamChatCheckpointScopeHash(checkpointScope, false),
+        });
+        checkpoint =
+          '\n\nAfter routing/action succeeds for the whole monitored set, deliberately acknowledge ' +
+          `this combined checkpoint with acknowledgeCombined:\n${proof}`;
+      } else if (hasCheckpoint) {
+        const checkpoints = watchers
+          .filter((watcher) => checkpointSeq > watcher.seen)
+          .map((watcher) => ({
+            worker: watcher.workerId,
+            channel: selectedChannel.id,
+            seq: checkpointSeq,
+            proof: signTeamChatMonitorCheckpoint({ v: 1, appId: app.id, channelId: selectedChannel.id, workerId: watcher.workerId, seq: checkpointSeq }),
+          }));
+        checkpoint = `\n\nAfter routing/action succeeds, deliberately acknowledge this checkpoint:\n${JSON.stringify(checkpoints)}`;
+      }
       const status = statuses.length ? `\n\nStatus:\n${statuses.join('\n')}` : '';
       return textResult(
-        `${ackLine}Team-chat monitor: ${selectedChannel.name} (${selectedChannel.loc}), Channel at #${selectedChannel.lastSeq}. ${pollStateLine}\n\n${routing}${more}${checkpoint}${status}`,
+        `${ackLine}Team-chat monitor: ${selectedChannel.name} (${selectedChannel.loc}), Channel at #${selectedChannel.lastSeq}. ${pollStateLine}\n\n${routing}${routeNoteText}${more}${checkpoint}${status}`,
       );
     } catch (e) {
       return scopeErrorText(e);
@@ -8203,7 +8552,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_read',
-    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
+    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned checkpoint. checkpointMode:combined returns one fixed-size proof for all-or-nothing acknowledgement; the default perWorker form preserves partial acknowledgement. route:mentions asks the server for canonical pending mention recipients and excludes the author. baseline preview/apply deliberately advances the exact shown Worker set to a pinned Channel head without replaying history. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
@@ -8221,10 +8570,24 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         seq: z.number().int().min(0).describe('Exact sequence from the returned checkpoint.'),
         proof: z.string().describe('Opaque server proof from the returned checkpoint; binds Worker + Channel + sequence.'),
       })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
+      checkpointMode: z.enum(['perWorker', 'combined']).optional().describe('Monitor checkpoint format. perWorker (default) preserves partial acknowledgement; combined returns one proof for the exact monitored set.'),
+      acknowledgeCombined: z.string().optional().describe('With monitor:true, atomically acknowledge the exact set and sequence bound into a returned combined checkpoint.'),
+      route: z.enum(['register', 'mentions']).optional().describe('Recipient policy in monitor mode. register (default) preserves register/mentionOnly routing. mentions selects canonical stored mentions among pending eligible live Workers, excluding the author; no token has implicit broadcast meaning.'),
+      baseline: z.object({
+        action: z.enum(['preview', 'apply']).describe('preview writes nothing and returns a pinned proof; apply requires that proof.'),
+        proof: z.string().optional().describe('Exact proof returned by baseline preview. Required only for apply.'),
+      }).optional().describe('Consent-friendly first-run baseline for monitor mode. Preview first, then explicitly apply the pinned Worker set and Channel head.'),
     },
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel, monitor, monitorFor, acknowledge }) => {
-      if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
-        return textResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel, monitor, monitorFor, acknowledge, checkpointMode, acknowledgeCombined, route, baseline }) => {
+      if (!monitor && (
+        monitorFor !== undefined ||
+        acknowledge !== undefined ||
+        checkpointMode !== undefined ||
+        acknowledgeCombined !== undefined ||
+        route !== undefined ||
+        baseline !== undefined
+      )) {
+        return textResult('[bad_user_input] monitorFor, checkpoints, route and baseline require monitor:true.');
       }
       if (monitor && (sinceSeq !== undefined || beforeSeq !== undefined || mentions !== undefined || offset !== undefined)) {
         return textResult('[bad_user_input] monitor:true owns the cursor and mention routing; do not pass sinceSeq, beforeSeq, mentions or offset.');
@@ -8254,7 +8617,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
       }
       if (monitor) {
-        return monitorTeamChat({ appRef, channel, monitorFor, acknowledge, limit });
+        return monitorTeamChat({
+          appRef,
+          channel,
+          monitorFor,
+          acknowledge,
+          checkpointMode,
+          acknowledgeCombined,
+          route,
+          baseline,
+          limit,
+        });
       }
 
       try {

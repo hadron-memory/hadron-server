@@ -20,7 +20,7 @@
  * (mentions name Workers, never Agents — plan §4.4, proposed).
  */
 
-import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { generateId } from './id.js';
@@ -55,6 +55,43 @@ export async function advanceReadState(db: Db, attendee: RegisterAttendee, chann
             DO UPDATE SET last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
           RETURNING last_seen_seq`;
   return rows[0]?.last_seen_seq ?? target;
+}
+
+/**
+ * Advance one Channel cursor for a bounded set of Workers in ONE statement.
+ * The aggregate monitor checkpoint and baseline are one act: a row-level loop
+ * would be atomic inside a transaction, but would still pay one round trip per
+ * Worker. ON CONFLICT preserves the same monotonic GREATEST rule as
+ * advanceReadState. The returned map is a read-back receipt, not an assumed
+ * echo of the requested target.
+ */
+export async function advanceWorkerReadStates(
+  db: Db,
+  workerIds: readonly string[],
+  channelId: string,
+  seq: number,
+): Promise<Map<string, number>> {
+  const ids = [...new Set(workerIds)].sort();
+  if (ids.length === 0) return new Map();
+  const target = Math.max(0, Math.floor(seq));
+  const values = ids.map((workerId) => Prisma.sql`
+    (${generateId()}, ${workerId}, ${channelId}, CAST(${target} AS integer), now())
+  `);
+  await db.$executeRaw(Prisma.sql`
+    INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, updated_at)
+    VALUES ${Prisma.join(values)}
+    ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
+      DO UPDATE SET
+        last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq),
+        updated_at = now()
+  `);
+  const rows = await db.channelReadState.findMany({
+    where: { channelId, workerId: { in: ids } },
+    select: { workerId: true, lastSeenSeq: true },
+  });
+  return new Map(
+    rows.flatMap((row) => (row.workerId ? [[row.workerId, row.lastSeenSeq] as const] : [])),
+  );
 }
 
 /** The attendee's cursors on a set of Channels; a Channel with no row reads 0. */

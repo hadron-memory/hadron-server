@@ -17,6 +17,7 @@ import { ensureChannelWithRoot } from '../lib/channels.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { idleWindowMsFor } from '../lib/sessionActivity.js';
+import * as channelReadState from '../lib/channelReadState.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -125,6 +126,16 @@ describe('team-chat monitor (#1265)', () => {
     expect(raw).toBeTruthy();
     return JSON.parse(raw!) as MonitorCheckpoint[];
   };
+  const combinedCheckpointOf = (text: string): string => {
+    const proof = text.match(/combined checkpoint with acknowledgeCombined:\n([^\n]+)/)?.[1];
+    expect(proof).toBeTruthy();
+    return proof!;
+  };
+  const baselineProofOf = (text: string): string => {
+    const proof = text.match(/baseline action apply and this proof:\n([^\n]+)/)?.[1];
+    expect(proof).toBeTruthy();
+    return proof!;
+  };
 
   it('routes mention-only attention for this operator\'s live Workers and advances only on deliberate acknowledgement', async () => {
     const mira = await db.worker.create({
@@ -186,6 +197,257 @@ describe('team-chat monitor (#1265)', () => {
       { workerId: [worker.id, mira.id].sort()[1], lastSeenSeq: 1 },
     ]);
     expect(await server(admin.id).callToolText('hadron_team_chat_read', { monitor: true })).toContain('No new registered team-chat attention');
+  });
+
+  it('uses one fixed-size combined proof for 1 or 20 Workers and replays the acknowledgement safely', async () => {
+    const asAdmin = server(admin.id);
+    await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: 'Iris' });
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'fan this out' });
+
+    const oneProof = combinedCheckpointOf(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      checkpointMode: 'combined',
+    }));
+    expect(await db.channelReadState.count()).toBe(0);
+
+    const extraWorkers = [];
+    for (let index = 2; index <= 20; index += 1) {
+      const extra = await db.worker.create({
+        data: { id: generateId(), appId: app.id, agentId: agent.id, name: `Worker ${index}`, slug: `worker-${index}` },
+      });
+      extraWorkers.push(extra);
+      expect(await asAdmin.callToolText('hadron_start_session', {
+        description: `Worker ${index} stint`,
+        workerRef: extra.id,
+      })).toContain('Session started:');
+    }
+
+    const twentyProof = combinedCheckpointOf(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      checkpointMode: 'combined',
+    }));
+    expect(Buffer.byteLength(twentyProof)).toBe(Buffer.byteLength(oneProof));
+    expect(Buffer.byteLength(JSON.stringify({ monitor: true, acknowledgeCombined: twentyProof }))).toBe(
+      Buffer.byteLength(JSON.stringify({ monitor: true, acknowledgeCombined: oneProof })),
+    );
+    expect(await db.channelReadState.count()).toBe(0);
+
+    const applied = await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      acknowledgeCombined: twentyProof,
+    });
+    expect(applied).toContain('Acknowledged');
+    expect(await db.channelReadState.count({ where: { channelId: channel.id, lastSeenSeq: 1 } })).toBe(20);
+
+    const replayed = await server(admin.id).callToolText('hadron_team_chat_read', {
+      monitor: true,
+      acknowledgeCombined: twentyProof,
+    });
+    expect(replayed).toContain('Acknowledged');
+    expect(replayed).toContain('No new registered team-chat attention');
+    expect(await db.channelReadState.count({ where: { channelId: channel.id, lastSeenSeq: 1 } })).toBe(20);
+
+    // A caller that cannot deliver to one recipient uses the explicit
+    // per-Worker fallback: acknowledge the other 19, restart, and only the
+    // failed recipient remains pending. No all-or-nothing proof is consumed.
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'one recipient will fail' });
+    const partial = checkpointsOf(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      checkpointMode: 'perWorker',
+    }));
+    expect(partial).toHaveLength(20);
+    const failed = partial[19];
+    const acknowledgedNineteen = await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      acknowledge: partial.slice(0, 19),
+    });
+    expect(acknowledgedNineteen).toContain('Acknowledged');
+    const afterPartialRestart = await server(admin.id).callToolText('hadron_team_chat_read', { monitor: true });
+    expect(afterPartialRestart).toContain('one recipient will fail');
+    const remaining = checkpointsOf(afterPartialRestart);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].worker).toBe(failed.worker);
+    expect(extraWorkers).toHaveLength(19);
+  });
+
+  it('rejects combined proofs after a session epoch or effective WATCH policy changes', async () => {
+    const asAdmin = server(admin.id);
+    await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: 'Iris' });
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'scope-bound attention' });
+    const combinedPage = await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      checkpointMode: 'combined',
+    });
+    expect(combinedPage.match(/acknowledgeCombined:/g)).toHaveLength(1);
+    const beforeSession = combinedCheckpointOf(combinedPage);
+    const tampered = `${beforeSession.slice(0, -1)}${beforeSession.endsWith('a') ? 'b' : 'a'}`;
+    expect(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      acknowledgeCombined: tampered,
+    })).toMatch(/^\[invalid_checkpoint\]/);
+    expect(await db.channelReadState.count()).toBe(0);
+
+    await db.session.create({
+      data: { id: generateId(), type: 'DEVELOPER', appId: app.id, userId: admin.id, agentId: agent.id, workerId: worker.id },
+    });
+    expect(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      acknowledgeCombined: beforeSession,
+    })).toMatch(/^\[invalid_checkpoint\]/);
+    expect(await db.channelReadState.count()).toBe(0);
+
+    const beforePolicy = combinedCheckpointOf(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      checkpointMode: 'combined',
+    }));
+    await db.registerEntry.updateMany({
+      where: { appId: app.id, channelId: channel.id, deletedAt: null },
+      data: { mentionOnly: true },
+    });
+    expect(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      acknowledgeCombined: beforePolicy,
+    })).toMatch(/^\[invalid_checkpoint\]/);
+    expect(await db.channelReadState.count()).toBe(0);
+  });
+
+  it('rolls back every cursor when watch permission is revoked between validation and advance', async () => {
+    const asAdmin = server(admin.id);
+    await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: 'Iris' });
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'must not be skipped' });
+    const proof = combinedCheckpointOf(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      checkpointMode: 'combined',
+    }));
+    const register = await db.registerEntry.findFirstOrThrow({
+      where: { appId: app.id, channelId: channel.id, deletedAt: null },
+      select: { id: true },
+    });
+    const actualAdvance = channelReadState.advanceWorkerReadStates;
+    const advance = vi.spyOn(channelReadState, 'advanceWorkerReadStates').mockImplementationOnce(
+      async (...advanceArgs: Parameters<typeof actualAdvance>) => {
+        await db.registerEntry.update({ where: { id: register.id }, data: { deletedAt: new Date() } });
+        return actualAdvance(...advanceArgs);
+      },
+    );
+
+    try {
+      expect(await asAdmin.callToolText('hadron_team_chat_read', {
+        monitor: true,
+        acknowledgeCombined: proof,
+      })).toMatch(/^\[invalid_checkpoint\]/);
+    } finally {
+      advance.mockRestore();
+    }
+    expect(await db.channelReadState.count()).toBe(0);
+  });
+
+  it('previews an exact baseline without writing, applies only its pinned head, and refuses cursor drift', async () => {
+    const asAdmin = server(admin.id);
+    await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: 'Iris' });
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'old history' });
+
+    const preview = await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      baseline: { action: 'preview' },
+    });
+    expect(preview).toContain('Baseline preview only');
+    expect(preview).toContain('#0 → #1');
+    expect(await db.channelReadState.count()).toBe(0);
+    const proof = baselineProofOf(preview);
+
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'arrived after preview' });
+    const applied = await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      baseline: { action: 'apply', proof },
+    });
+    expect(applied).toContain('captured head #1');
+    expect(applied).toContain('Channel is now at #2');
+    expect(await db.channelReadState.findFirstOrThrow({
+      where: { workerId: worker.id, channelId: channel.id },
+      select: { lastSeenSeq: true },
+    })).toEqual({ lastSeenSeq: 1 });
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true })).toContain('arrived after preview');
+
+    const stalePreview = await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      baseline: { action: 'preview' },
+    });
+    const staleProof = baselineProofOf(stalePreview);
+    await db.channelReadState.updateMany({
+      where: { workerId: worker.id, channelId: channel.id },
+      data: { lastSeenSeq: 2 },
+    });
+    expect(await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      baseline: { action: 'apply', proof: staleProof },
+    })).toMatch(/^\[baseline_stale\]/);
+    expect(await db.channelReadState.findFirstOrThrow({
+      where: { workerId: worker.id, channelId: channel.id },
+      select: { lastSeenSeq: true },
+    })).toEqual({ lastSeenSeq: 2 });
+  });
+
+  it('routes canonical pending mentions, excludes the author, and gives all/team no reserved broadcast meaning', async () => {
+    const mira = await db.worker.create({
+      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' },
+    });
+    const cora = await db.worker.create({
+      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Cora', slug: 'cora' },
+    });
+    const asAdmin = server(admin.id);
+    const irisStarted = await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: worker.id });
+    const irisSession = irisStarted.match(/Session started: (\S+)/)![1];
+    await asAdmin.callToolText('hadron_start_session', { description: 'Mira stint', workerRef: mira.id });
+    await asAdmin.callToolText('hadron_start_session', { description: 'Cora stint', workerRef: cora.id });
+    await asAdmin.callToolText('hadron_team_chat_post', {
+      session: irisSession,
+      body: 'Ping @MIRA, @Iris, @all, @team, and @unknown.',
+    });
+
+    const out = await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, route: 'mentions' });
+    expect(out).toContain(`route to: hrn:worker:${org.urn}:app:mira`);
+    expect(out).not.toContain(`route to: hrn:worker:${org.urn}:app:cora`);
+    expect(out).toContain(`hrn:worker:${org.urn}:app:iris (author)`);
+    expect(out).toContain('@all (no eligible live target)');
+    expect(out).toContain('@team (no eligible live target)');
+    expect(out).toContain('@unknown (no eligible live target)');
+  });
+
+  it('bounds a combined checkpoint to the processed page across asymmetric cursors', async () => {
+    const mira = await db.worker.create({
+      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' },
+    });
+    const asAdmin = server(admin.id);
+    await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: worker.id });
+    await asAdmin.callToolText('hadron_start_session', { description: 'Mira stint', workerRef: mira.id });
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'first' });
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'second' });
+    await asAdmin.callToolText('hadron_team_chat_post', { body: 'third' });
+    await db.channelReadState.create({
+      data: { id: generateId(), workerId: mira.id, channelId: channel.id, lastSeenSeq: 2 },
+    });
+
+    const page = await asAdmin.callToolText('hadron_team_chat_read', {
+      monitor: true,
+      checkpointMode: 'combined',
+      limit: 1,
+    });
+    expect(page).toContain('first');
+    expect(page).not.toContain('second');
+    expect(page).toContain('More messages remain after this page');
+    const proof = combinedCheckpointOf(page);
+    await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, acknowledgeCombined: proof });
+    const states = await db.channelReadState.findMany({
+      where: { channelId: channel.id },
+      orderBy: { workerId: 'asc' },
+      select: { workerId: true, lastSeenSeq: true },
+    });
+    expect(states).toEqual([
+      { workerId: [worker.id, mira.id].sort()[0], lastSeenSeq: [worker.id, mira.id].sort()[0] === worker.id ? 1 : 2 },
+      { workerId: [worker.id, mira.id].sort()[1], lastSeenSeq: [worker.id, mira.id].sort()[1] === worker.id ? 1 : 2 },
+    ]);
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true })).toContain('second');
   });
 
   it('refuses manual cursors, App-key monitoring, non-live targets and impossible acknowledgements', async () => {

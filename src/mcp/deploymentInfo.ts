@@ -95,7 +95,12 @@
 // 0.19.0: #1265 — register + ChannelReadState-backed unattended team-chat
 // monitoring on hadron_team_chat_read (`monitor`, server-bound checkpoints,
 // deliberate acknowledgement). Token: `team-chat-monitor`.
-export const HADRON_SERVER_VERSION = '0.19.0';
+// 0.20.0: #1353 slice a+b+c — fixed-size combined monitor checkpoints,
+// consent-friendly baseline preview/apply, and server-side mention recipients.
+// MCP drops unknown arguments, so clients must be able to distinguish this
+// surface from 0.19.0 before sending `checkpointMode`, `acknowledgeCombined`,
+// `baseline`, or `route`. Token: `team-chat-router`.
+export const HADRON_SERVER_VERSION = '0.20.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
@@ -169,6 +174,8 @@ export const MCP_SURFACE_CAPABILITIES = [
   'channels',
   /** #1265 — register-routed team-chat monitor with durable read state. */
   'team-chat-monitor',
+  /** #1353 a+b+c — aggregate checkpoints, explicit baseline, mention recipients. */
+  'team-chat-router',
 ] as const;
 
 /**
