@@ -233,6 +233,8 @@ func markupCases() []kase {
 		{"name": "the quoted span is escaped like %q", "node": node(`Use when <say "hi"> fires.`),
 			"why": "the span is author-controlled; the server quotes it with goQuote"},
 		{"name": "a printable non-ASCII span is quoted as is", "node": node("Use when a <café> opens.")},
+		{"name": "a non-printable code point in the span is escaped", "node": node("Use when a <a\u200bb> opens."),
+			"why": "U+200B is where Go %q (\\u200b) and a naive JSON.stringify diverge; the server must quote it the Go way"},
 		{"name": "markup is reported beside too-long", "node": node("Use when <memory> " + strings.Repeat("x", 1024)),
 			"why": "both are errors, so fixing one does not reveal the other on the next run"},
 	}
