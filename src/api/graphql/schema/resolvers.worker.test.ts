@@ -1043,6 +1043,20 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     );
   });
 
+  it('keeps held workers visible after App uninstall, matching the point-read contract', async () => {
+    const held = await createHeld(app.id, 'Uninstalled Held', admin.id);
+    await db.app.update({
+      where: { id: app.id },
+      data: { uninstalledAt: new Date() },
+    });
+
+    for (const viewer of [admin.id, appMember.id]) {
+      const page = await Q.heldWorkers({}, { userRef: admin.id }, ctx(viewer));
+      expect(page.total).toBe(1);
+      expect(page.items.map((row: { id: string }) => row.id)).toEqual([held.id]);
+    }
+  });
+
   it('preloads multiple-live-session activity once for the page, including held-but-idle workers', async () => {
     const driven = await createHeld(app.id, 'Driven', appMember.id);
     const idle = await createHeld(app.id, 'Idle', appMember.id);

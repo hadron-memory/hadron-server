@@ -47,11 +47,14 @@ import { orgRoleAtLeast } from './orgRole.js';
  *   `false` returns ONLY the two arms the member table cannot express — what
  *   the access-control fold wants, since its other branches already cover
  *   member Apps and re-folding them would be redundant work.
+ * @param opts.includeUninstalled  Preserve uninstalled Apps for historical
+ *   read surfaces whose rows remain legible after uninstall. Defaults false,
+ *   so existing chat and memory consumers remain live-App-only.
  */
 export async function participantAppIds(
   db: Pick<PrismaClient, 'orgMember' | 'app' | 'appMember'>,
   principal: { userId?: string | null; impersonation?: { orgId: string } | null },
-  opts: { includeMemberships?: boolean } = {},
+  opts: { includeMemberships?: boolean; includeUninstalled?: boolean } = {},
 ): Promise<string[]> {
   const userId = principal.userId;
   if (!userId) return [];
@@ -91,7 +94,7 @@ export async function participantAppIds(
   const apps = await db.app.findMany({
     where: {
       deletedAt: null,
-      uninstalledAt: null,
+      ...(opts.includeUninstalled ? {} : { uninstalledAt: null }),
       // The impersonation bound is applied ONCE, outside the arms, so it
       // governs every arm including any added later. The first version bounded
       // only the org arm, and `includeMemberships` then returned Apps the

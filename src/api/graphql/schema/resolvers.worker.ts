@@ -155,7 +155,12 @@ async function workerReadableAppIds(ctx: Context): Promise<string[]> {
     return ctx.appId ? [ctx.appId] : [];
   }
   if (!isPlatformAdmin(ctx)) {
-    return participantAppIds(ctx.db, ctx, { includeMemberships: true });
+    return participantAppIds(ctx.db, ctx, {
+      includeMemberships: true,
+      // Worker history remains legible after uninstall; this surface lists
+      // current holds from that retained roster too.
+      includeUninstalled: true,
+    });
   }
 
   // `participantAppIds` deliberately omits the platform-role arm because its
@@ -164,7 +169,6 @@ async function workerReadableAppIds(ctx: Context): Promise<string[]> {
   const apps = await ctx.db.app.findMany({
     where: {
       deletedAt: null,
-      uninstalledAt: null,
       OR: [
         ...(ctx.impersonation ? [] : [{ ownerUserId: ctx.userId }]),
         ctx.impersonation
@@ -1463,6 +1467,9 @@ export const workerQueries = {
       heldByUserId,
       ...(includeRetired ? {} : { retiredAt: null }),
       appId: { in: readableAppIds },
+      // App keys can outlive their row's soft deletion in cached credentials;
+      // uninstalled is readable by contract, deleted is not.
+      app: { is: { deletedAt: null } },
     };
     const [rows, total] = await Promise.all([
       ctx.db.worker.findMany({
