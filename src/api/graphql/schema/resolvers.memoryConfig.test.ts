@@ -320,8 +320,17 @@ describe('T9 — uniqueness and format', () => {
     expect(dup.errors![0].extensions).toMatchObject({ role: 'spec.rule' });
   });
 
-  it.each(['', 'Spec', 'spec..rule', 'spec_rule', '.spec', 'x'.repeat(65)])('role %j is INVALID_NODE_ROLE (#1322 grammar), nothing written', async (role) => {
-    expect(code(await gql(as(orgAdmin), CREATE, { m: kb.id, i: { role } }))).toBe('INVALID_NODE_ROLE');
+  it.each([
+    ['', 'EMPTY'],
+    ['Spec', 'BAD_SEGMENT'],
+    ['spec..rule', 'BAD_SEGMENT'],
+    ['spec_rule', 'BAD_SEGMENT'],
+    ['.spec', 'BAD_SEGMENT'],
+    ['x'.repeat(65), 'TOO_LONG'],
+  ])('role %j is INVALID_NODE_ROLE with reason %s (#1322 grammar, cli#716 Q9), nothing written', async (role, reason) => {
+    const r = await gql(as(orgAdmin), CREATE, { m: kb.id, i: { role } });
+    expect(code(r)).toBe('INVALID_NODE_ROLE');
+    expect(r.errors![0].extensions).toMatchObject({ role, reason });
     expect(await db.memoryConfig.count()).toBe(0);
   });
 
