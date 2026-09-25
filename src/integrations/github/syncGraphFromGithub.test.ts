@@ -328,6 +328,27 @@ describe('syncGraphFromGithub', () => {
       .toEqual([{ revNo: 1, description: 'v1' }]);
   });
 
+  it('a sync over unrevisioned drift takes the reconcile AND its own revision (#1339 review)', async () => {
+    // @codex P1: a raw write between two syncs used to be folded into the
+    // sync's single revision, and the refreshed fingerprint then hid it.
+    const nodeId = 'aaaa000000000000000000000000001339';
+    const nodeA = join(mockSources, 'test-org', 'test/repo', 'nodeD');
+    mkdirSync(nodeA, { recursive: true });
+    writeNodeFiles(nodeA, { id: nodeId, name: 'nodeD', description: 'v1' });
+    await syncGraphFromGithub(makeGraph());
+    await db.node.update({ where: { id: nodeId }, data: { content: 'raw writer' } });
+
+    writeNodeFiles(nodeA, { id: nodeId, name: 'nodeD', description: 'v2' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq).toBe(3);
+    const history = await db.nodeRevision.findMany({ where: { nodeId }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    expect(history[1]!.revLabel).toBe('Synchronized from GitHub');
+    expect(history[1]!.description).toBe('v1');
+  });
+
   it('re-sync replaces old nodes with the new set', async () => {
     const nodeA = join(mockSources, 'test-org', 'test/repo', 'nodeA');
     mkdirSync(nodeA, { recursive: true });

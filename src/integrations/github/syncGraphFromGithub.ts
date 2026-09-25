@@ -27,7 +27,6 @@ import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import {
   buildNodeRevisionSnapshot,
-  computeRevisionStateHash,
   createNodeRevision,
   diffNodeChanges,
   ensureCurrentNodeRevisionInTransaction,
@@ -62,18 +61,20 @@ async function updateNodeFromGitSync(
   revisionBase?: Node,
 ): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${current.id} FOR UPDATE`;
+  // Unrevisioned drift gets its OWN revision before the Git edit's, never
+  // folded into it (@codex P1 / @copilot, PR #1339) — the same order as the
+  // GraphQL and MCP update paths. A swap base is exempt: its row was
+  // reconciled when the swap captured it, and the parked row is a
+  // mechanical waypoint, not a committed state.
+  if (revisionBase == null) await ensureCurrentNodeRevisionInTransaction(tx, current.id);
   const locked = await tx.node.findUniqueOrThrow({ where: { id: current.id } });
   // A swap can park this row at a temporary invalid loc earlier in the SAME
   // transaction. History must describe committed states, so diff/snapshot the
   // captured pre-sync row rather than that mechanical waypoint.
   const before = revisionBase ?? locked;
   const changes = diffNodeChanges(before, update);
-  const stateDrifted =
-    revisionBase == null &&
-    before.revisionContentHash != null &&
-    before.revisionContentHash !== await computeRevisionStateHash(tx, before.id);
 
-  if (changes.length > 0 || stateDrifted) {
+  if (changes.length > 0) {
     await createNodeRevision(
       tx,
       buildNodeRevisionSnapshot(

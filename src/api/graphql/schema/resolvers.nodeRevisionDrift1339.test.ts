@@ -15,6 +15,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { type Context } from './resolvers.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { resolvers } from './resolvers.js';
+import { createNode as controllerCreateNode } from '../../../controller/operations/createNode.js';
 import { generateId } from '../../../lib/id.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -75,3 +77,45 @@ describe('#1339 review — drift is reconciled before the guard and the edit', (
     expect(updated.revSeq).toBe(2);
   });
 });
+
+// Round 3 (@codex P1 / @copilot, PR #1339): the SAME rule on every other
+// writer that snapshots a predecessor — reconcile drift first, never fold it.
+describe('#1339 review — drift is reconciled first on upsert, controller create and restore', () => {
+  const reconcileThenOwn = async (nodeId: string, ownLabel?: RegExp) => {
+    const history = await db.nodeRevision.findMany({ where: { nodeId }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    if (ownLabel) expect(history[1]!.revLabel ?? '').toMatch(ownLabel);
+    expect(history[1]!.content).toBe('changed by a raw writer');
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq).toBe(3);
+  };
+
+  it('writeNodeCore upsert over an existing drifted row', async () => {
+    const node = await driftedNode('drift:upsert');
+    await writeNodeCore({ memoryId, loc: node.loc, name: node.name, content: 'upserted' }, ctx(), 'upsert');
+    await reconcileThenOwn(node.id);
+  });
+
+  it('the legacy controller createNode over an existing drifted row', async () => {
+    const node = await driftedNode('drift:controller');
+    await controllerCreateNode({ memoryId, loc: node.loc, name: node.name, content: 'controller' });
+    await reconcileThenOwn(node.id);
+  });
+
+  it('restoreNodeRevision over a drifted row', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:restore', name: 'r', content: 'v1' } });
+    await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update'); // r1 = v1, live 2
+    const r1 = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id, revNo: 1 } });
+    await db.node.update({ where: { id: node.id }, data: { content: 'changed by a raw writer' } });
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: r1.id } as never, ctx());
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    // r1 (v1), r2 = the reconcile of the raw write, r3 = restore's own pre-restore snapshot.
+    expect(history.map((r) => r.revNo)).toEqual([1, 2, 3]);
+    expect(history[1]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    expect(history[2]!.content).toBe('changed by a raw writer');
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.content).toBe('v1');
+    expect(after.revSeq).toBe(4);
+  });
+});
+

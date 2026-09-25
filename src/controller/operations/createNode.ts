@@ -5,6 +5,7 @@ import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
 import {
+  ensureCurrentNodeRevisionInTransaction,
   buildNodeRevisionSnapshot,
   revisionStateHashRefreshMarker,
   createNodeRevision,
@@ -60,9 +61,14 @@ export const createNode = async (
     await lockAncestorsForCreate(tx, node.memoryId, loc);
     await lockLocForWrite(tx, node.memoryId, loc);
 
-    const existing = await tx.node.findUnique({
+    const prior = await tx.node.findUnique({
       where: { loc_memoryId: { loc, memoryId: node.memoryId } },
+      select: { id: true },
     });
+    // Row lock + drift reconciled as its own revision before the snapshot
+    // (@copilot, PR #1339), then the authoritative re-read it is built from.
+    if (prior) await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
+    const existing = prior ? await tx.node.findUnique({ where: { id: prior.id } }) : null;
     if (existing) {
       await createNodeRevision(
         tx,

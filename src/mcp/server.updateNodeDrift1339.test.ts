@@ -95,3 +95,38 @@ describe('#1339 review — hadron_create_parent_node re-save is a revisioned wri
   });
 });
 
+describe('#1339 review — hadron_create_node over a drifted tombstone', () => {
+  it('reconciles the drift as its own revision before snapshotting the overwritten tombstone', async () => {
+    const node = await seed('drift:tombstone', { deletedAt: new Date() });
+    await db.node.update({ where: { id: node.id }, data: { content: 'changed by a raw writer' } });
+    await createTestableMcpServer(auth()).callToolText('hadron_create_node', {
+      urn: `hrn:node:${memory.urn}:${node.loc}`,
+      name: 'resurrected',
+      content: 'new',
+    });
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    expect(history[1]!.content).toBe('changed by a raw writer');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(3);
+  });
+});
+
+describe('#1339 review — hadron_move_node same-slot rename over drift', () => {
+  it('reconciles the drift before snapshotting the rename', async () => {
+    const node = await seed('drift:rename-me', { name: 'Old Name' });
+    await db.node.update({ where: { id: node.id }, data: { content: 'changed by a raw writer' } });
+    const urn = `hrn:node:${memory.urn}:${node.loc}`;
+    await createTestableMcpServer(auth()).callToolText('hadron_move_node', {
+      urn, targetUrn: urn, renameToLeaf: true,
+    });
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.name).toBe('rename-me');
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    expect(history[1]!.name).toBe('Old Name');
+    expect(after.revSeq).toBe(3);
+  });
+});
+

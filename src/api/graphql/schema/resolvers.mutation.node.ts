@@ -1226,7 +1226,7 @@ export async function writeNodeCore(
             // before this fix: 40 concurrent pairs, 40 double-successes, zero
             // refusals. Spec 039 Phase 0 D1's create-only guarantee held only
             // sequentially, which is why a sequential test pinned it happily.
-            const authoritative = await tx.node.findUnique({
+            let authoritative = await tx.node.findUnique({
               where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
             });
 
@@ -1247,6 +1247,14 @@ export async function writeNodeCore(
             // the #976 defect. `upsert` mode reaches here for a live row too,
             // deliberately: that mode is either-way by contract.
             if (authoritative) {
+              // Row lock + drift reconciled as its own revision BEFORE this
+              // snapshot (@copilot, PR #1339): the address lock binds only
+              // writers that take it, so a raw write landing after the read
+              // above would otherwise be snapshotted stale, overwritten, and
+              // hidden by the refreshed fingerprint. Same order as the update
+              // path.
+              await ensureCurrentNodeRevisionInTransaction(tx, authoritative.id);
+              authoritative = await tx.node.findUniqueOrThrow({ where: { id: authoritative.id } });
               await createNodeRevision(tx, {
                 ...buildNodeRevisionSnapshot(authoritative, editorFromAuth(ctx), {
                   revLabel: input.reason,
@@ -3714,6 +3722,10 @@ export const nodeMutations = {
       const restored = await ctx.db.$transaction(async (tx) => {
         // Spec 049 S4: lock-then-gate — the check above is the fast refusal.
         await lockLocForWrite(tx, node.memoryId, node.loc);
+        // Row lock + drift reconciled as its own revision before the restore's
+        // snapshot, as on every other revisioned writer (@copilot, PR #1339).
+        // A missing row returns null here and falls to the conflict below.
+        await ensureCurrentNodeRevisionInTransaction(tx, node.id);
         const current = await tx.node.findUnique({ where: { id: node.id } });
         if (
           !current ||

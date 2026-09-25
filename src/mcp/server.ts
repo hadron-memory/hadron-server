@@ -4818,7 +4818,15 @@ export function createMcpServerInstance(
        * resolved `?? null` / `?? []` value, not the raw argument.
        */
       const snapshotOverwrittenNode = async (tx: Prisma.TransactionClient) => {
-        const pre = await tx.node.findUnique({ where: { loc_memoryId: { loc, memoryId } } });
+        const prior = await tx.node.findUnique({
+          where: { loc_memoryId: { loc, memoryId } },
+          select: { id: true },
+        });
+        if (!prior) return null;
+        // Row lock + drift reconciled as its own revision before this snapshot
+        // (@copilot, PR #1339), then the authoritative re-read.
+        await ensureCurrentNodeRevisionInTransaction(tx, prior.id);
+        const pre = await tx.node.findUnique({ where: { id: prior.id } });
         if (!pre) return null;
         await createNodeRevision(tx, {
           id: generateId(),
@@ -6258,10 +6266,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // name that is already normalized.
             const newName = toLoc.split(':').pop()!;
             if (renameToLeaf === true && existing.name !== newName) {
+              // Row lock + drift reconciled as its own revision, then the
+              // authoritative re-read the snapshot is built from — the rule on
+              // every single-row revisioned writer (PR #1339 review).
+              await ensureCurrentNodeRevisionInTransaction(tx, existing.id);
+              const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
               await createNodeRevision(tx, {
                 id: generateId(),
-                ...buildNodeRevisionSnapshot(existing, editorFromAuth(auth), {
-                  changes: diffNodeChanges(existing, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+                ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
+                  changes: diffNodeChanges(locked, { loc: toLoc, name: newName, memoryId: toMemory.id }),
                 }),
               });
               await tx.node.update({
