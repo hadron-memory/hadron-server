@@ -367,11 +367,23 @@ export const agentMutations = {
       // cor:acl:080:03 — congruence invariant: an agent may become PUBLIC only
       // if every knowledge memory it links (excluding per-user personal/private)
       // is itself PUBLIC. Checked against the CURRENT links before persisting.
-      // #1349 (@codex, PR #1357): the CHECK moved into the same transaction as
-      // the write, below — checking here and writing there let an
-      // `updateAgentMemoryRole(read-write)` interleave: this query saw no
-      // writable item while that one saw a non-PUBLIC agent, and both
-      // committed, leaving a PUBLIC agent holding read-write knowledge.
+      // cor:acl:080:03 — congruence: an agent may become PUBLIC only if every
+      // knowledge memory it links is itself PUBLIC, and (#1349) only if it
+      // holds no read-write knowledge.
+      //
+      // Checked TWICE, deliberately (@codex P2, PR #1357). The authoritative
+      // check is under the agent row lock in the transaction below, because
+      // checking here and writing there let an `updateAgentMemoryRole(
+      // read-write)` interleave. But the locked check alone is too LATE for a
+      // call that also supplies a first `systemMemoryId`: the promotion below
+      // converts the target memory to class='system', clears its visibility and
+      // disables uploads in its OWN transaction, so a later rejection rolled
+      // that back nowhere and left a mutated orphan the agent never attached.
+      // This early pass is the fail-fast that keeps the refusal ahead of any
+      // externally visible mutation; the locked one still decides.
+      if (visibility === 'PUBLIC') {
+        await assertAgentPublicAllowed(ctx.db, id);
+      }
       let newUrn: string | undefined;
       if (urn !== undefined) {
         if (!agent.organizationId) {

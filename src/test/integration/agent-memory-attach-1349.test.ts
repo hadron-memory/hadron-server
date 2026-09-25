@@ -437,6 +437,30 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     expect(await readsContent(readerKey, 'pubmove')).not.toBeNull();
   });
 
+  it('a refused publication does not mutate a system memory on the way out', async () => {
+    // Combined `visibility: PUBLIC` + first `systemMemoryId`: the promotion
+    // runs in its own transaction, so a congruence rejection that came only
+    // from the locked recheck left the target memory converted to
+    // class='system' with its visibility cleared, attached to nothing.
+    const { agentId } = await agentWithApp(attackerOrgId, 'orphan-guard');
+    const attach = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read-write' });
+    expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
+    const brain = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:brain`,
+        name: 'brain', class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+
+    const r = await gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, visibility: PUBLIC, systemMemoryId: $m) { id } }`, { r: agentId, m: brain.id });
+    expect(JSON.stringify(r.errors)).toMatch(/read-write knowledge/i);
+
+    const after = await db.memory.findUniqueOrThrow({ where: { id: brain.id } });
+    expect(after.class).toBe('knowledge');
+    expect(after.visibility).toBe('ORGANIZATION');
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agentId } })).systemMemoryId).toBeNull();
+  });
+
   it('a read-write link to a SOFT-DELETED memory does not block publishing the agent', async () => {
     // Such an item grants nothing — every access fold excludes deleted
     // memories — so counting it permanently refused publication.

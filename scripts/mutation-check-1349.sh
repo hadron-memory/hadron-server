@@ -94,3 +94,7 @@ run "20 PUBLIC transfer keeps foreign writable links" "$A" \
 run "21 publication counts deleted-memory links" "$A" \
   "    where: { agentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } }," \
   "    where: { agentId, deletedAt: null, role: 'read-write' },"
+run "22 early congruence fail-fast removed" "$AG" \
+  "      if (visibility === 'PUBLIC') {
+        await assertAgentPublicAllowed(ctx.db, id);
+      }" "      "
