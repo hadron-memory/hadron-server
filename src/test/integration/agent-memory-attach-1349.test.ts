@@ -207,6 +207,18 @@ describe('#1349 — an attach cannot grant what the caller does not hold', () =>
     expect(await writes(appKey, 'orgKnowledge')).toBe(false);
   });
 
+  it('same tenant, read-only grant: a record-readable but content-unreadable memory is still refused', async () => {
+    // Isolates the CONTENT gate from the RECORD gate. The attacker is org
+    // OWNER, so `canReadMemoryRecord`'s org-member fast path admits this
+    // memory's record — but #653 excludes its NODES from the content gate, and
+    // an attach grants content. Same tenant and role `read`, so neither the
+    // tenancy rule nor the write check can catch it: only the content gate can.
+    const { agentId, appKey } = await agentWithApp(attackerOrgId, 'sibling-read');
+    const r = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.siblingAppScoped!.urn, r: 'read' });
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect(await readsContent(appKey, 'siblingAppScoped')).toBeNull();
+  });
+
   it('same tenant: an org admin cannot amplify a sibling App\'s isolated memory to their own agent', async () => {
     // Preconditions, measured rather than assumed: the caller can neither read
     // nor write this memory directly, so any access the attachment confers is
