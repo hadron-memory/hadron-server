@@ -45,6 +45,7 @@ import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { requireWorkerReadAccess } from './resolvers.worker.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -708,8 +709,14 @@ export const nodeQueries = {
       // 007-entity-id-or-urn). #335: scoping pins the lookup; the access
       // filter is still intersected so `memory` can never widen visibility.
       if (memoryRef != null && memoryRef !== '') {
+        // #1316: a missing `memory:` throws MEMORY_NOT_FOUND, so an unreadable
+        // one must too — the bare null it used to return disclosed that the
+        // memory exists. (The loc inside a READABLE memory still answers null
+        // when absent: that caller may already see the memory.) `allowed` is
+        // the node-content gate this resolver already computed, so the
+        // concealment costs no second authorization round (@copilot, #1350).
         const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-        if (!allowed(scopedMemoryId)) return null;
+        if (!allowed(scopedMemoryId)) throw new MemoryNotFoundError(memoryRef);
         const node = await ctx.db.node.findFirst({
           where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
           include,
@@ -1695,11 +1702,13 @@ export const nodeQueries = {
           else unavailable.push(ref);
         }
       } else {
+        // #1316: an unreadable memory answers MEMORY_NOT_FOUND exactly like a
+        // missing one; the FORBIDDEN it used to throw disclosed existence.
+        // Gated on `access`, the node-content filter computed above, rather
+        // than a second authorization round (@copilot, #1350).
         const { id: memId } = await resolveMemoryRef(ctx.db, memory!);
-        const accessible = await getAccessibleMemoryIds(ctx);
-        if (accessible !== null && !accessible.includes(memId)) {
-          throw new GraphQLError('Memory not accessible.', { extensions: { code: 'FORBIDDEN' } });
-        }
+        const accessibleIds = access.memoryId as { in: string[] } | undefined;
+        if (accessibleIds && !accessibleIds.in.includes(memId)) throw new MemoryNotFoundError(memory!);
         // Count cap: take MAX+1 to detect overflow, then fail loud rather than
         // silently returning a truncated subtree.
         const rows = await ctx.db.node.findMany({
