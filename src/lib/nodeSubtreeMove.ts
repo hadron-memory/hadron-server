@@ -63,6 +63,7 @@ import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
   diffNodeChanges,
+  revisionStateHashRefreshMarker,
   type SnapshotSourceNode,
   type SnapshotEditor,
 } from './nodeRevisionSnapshot.js';
@@ -379,7 +380,10 @@ export async function moveNodeSubtree(
       tx,
       buildNodeRevisionSnapshot(n, editor, { changes: diffNodeChanges(n, changed) }),
     );
-    await tx.node.update({ where: { id: n.id }, data: changed });
+    await tx.node.update({
+      where: { id: n.id },
+      data: { ...changed, revisionContentHash: revisionStateHashRefreshMarker() },
+    });
   }
 
   if (!crossMemory) {

@@ -27,9 +27,11 @@ import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import {
   buildNodeRevisionSnapshot,
-  computeRevisionContentHash,
+  computeRevisionStateHash,
   createNodeRevision,
   diffNodeChanges,
+  ensureCurrentNodeRevisionInTransaction,
+  revisionStateHashRefreshMarker,
 } from '../../lib/nodeRevisionSnapshot.js';
 
 function decryptToken(ciphertext: string): string {
@@ -66,12 +68,12 @@ async function updateNodeFromGitSync(
   // captured pre-sync row rather than that mechanical waypoint.
   const before = revisionBase ?? locked;
   const changes = diffNodeChanges(before, update);
-  const contentDrifted =
+  const stateDrifted =
+    revisionBase == null &&
     before.revisionContentHash != null &&
-    before.revisionContentHash !== computeRevisionContentHash(before.content);
-  if (contentDrifted && !changes.includes('content')) changes.push('content');
+    before.revisionContentHash !== await computeRevisionStateHash(tx, before.id);
 
-  if (changes.length > 0) {
+  if (changes.length > 0 || stateDrifted) {
     await createNodeRevision(
       tx,
       buildNodeRevisionSnapshot(
@@ -82,14 +84,11 @@ async function updateNodeFromGitSync(
     );
   }
 
-  const postContent = Object.prototype.hasOwnProperty.call(update, 'content')
-    ? (update.content as string | null | undefined)
-    : locked.content;
   await tx.node.update({
     where: { id: locked.id },
     data: {
       ...(update as Prisma.NodeUncheckedUpdateInput),
-      revisionContentHash: computeRevisionContentHash(postContent),
+      revisionContentHash: revisionStateHashRefreshMarker(),
     },
   });
 }
@@ -490,6 +489,7 @@ export const syncGraphFromGithub = async (
             }
             if (occupant && occupant.id !== byId.id) {
               await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${occupant.id} FOR UPDATE`;
+              await ensureCurrentNodeRevisionInTransaction(tx, occupant.id);
               const lockedOccupant = await tx.node.findUniqueOrThrow({ where: { id: occupant.id } });
               if (!parkedRevisionBases.has(occupant.id)) {
                 parkedRevisionBases.set(occupant.id, lockedOccupant);
@@ -538,7 +538,7 @@ export const syncGraphFromGithub = async (
                 id: createId,
                 memoryId: graph.id,
                 ...update,
-                revisionContentHash: computeRevisionContentHash(update.content as string | null | undefined),
+                revisionContentHash: revisionStateHashRefreshMarker(),
               },
               select: { id: true },
             });

@@ -4,7 +4,7 @@ import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import {
-  computeRevisionContentHash,
+  revisionStateHashRefreshMarker,
   editorFromAuth,
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
@@ -1848,7 +1848,7 @@ export const memoryMutations = {
               where: { id: node.id },
               data: {
                 content: encrypted.content ?? null,
-                revisionContentHash: computeRevisionContentHash(encrypted.content),
+                revisionContentHash: revisionStateHashRefreshMarker(),
                 abstract: encrypted.abstract ?? null,
                 data: (encrypted.data ?? null) as InputJsonValue,
               },
@@ -2036,7 +2036,7 @@ export const memoryMutations = {
               where: { id: node.id },
               data: {
                 content: encrypted.content ?? null,
-                revisionContentHash: computeRevisionContentHash(encrypted.content),
+                revisionContentHash: revisionStateHashRefreshMarker(),
                 abstract: encrypted.abstract ?? null,
                 data: (encrypted.data ?? null) as InputJsonValue,
               },

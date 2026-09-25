@@ -4,7 +4,7 @@ import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
-  computeRevisionContentHash,
+  revisionStateHashRefreshMarker,
   createNodeRevision,
   type SnapshotEditor,
 } from '../../lib/nodeRevisionSnapshot.js';
@@ -290,7 +290,11 @@ export async function mergeMemoryGraph(
             );
             await tx.node.update({
               where: { id: row.id },
-              data: { memoryId: targetMemoryId, updatedBy: actorId },
+              data: {
+                memoryId: targetMemoryId,
+                updatedBy: actorId,
+                revisionContentHash: revisionStateHashRefreshMarker(),
+              },
             });
           }
           return rows.length;
@@ -379,11 +383,7 @@ export async function mergeMemoryGraph(
               merged.contentChanged ? (merged.changed.content as string | null) : tgt.content,
             );
           }
-          writeData.revisionContentHash = computeRevisionContentHash(
-            Object.prototype.hasOwnProperty.call(writeData, 'content')
-              ? (writeData.content as string | null | undefined)
-              : tgt.content,
-          );
+          writeData.revisionContentHash = revisionStateHashRefreshMarker();
           await tx.node.update({ where: { id: tgt.id }, data: writeData });
         }
         foldedIds.push(src.id);

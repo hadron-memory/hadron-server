@@ -6,7 +6,7 @@ import { serializeTags } from '../../integrations/db/provider.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
 import {
   buildNodeRevisionSnapshot,
-  computeRevisionContentHash,
+  revisionStateHashRefreshMarker,
   createNodeRevision,
   diffNodeChanges,
 } from '../../lib/nodeRevisionSnapshot.js';
@@ -81,11 +81,11 @@ export const createNode = async (
         memoryId: node.memoryId,
         loc,
         ...fields,
-        revisionContentHash: computeRevisionContentHash(content),
+        revisionContentHash: revisionStateHashRefreshMarker(),
       },
       update: {
         ...fields,
-        revisionContentHash: computeRevisionContentHash(content),
+        revisionContentHash: revisionStateHashRefreshMarker(),
       },
       include: {
         outgoingEdges: { include: { target: true } },

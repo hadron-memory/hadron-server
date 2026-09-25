@@ -20,7 +20,7 @@ import {
 } from '../lib/usageRecorder.js';
 import {
   buildNodeRevisionSnapshot,
-  computeRevisionContentHash,
+  revisionStateHashRefreshMarker,
   ensureCurrentNodeRevisionInTransaction,
   createNodeRevision,
   editorFromAuth,
@@ -4729,7 +4729,7 @@ export function createMcpServerInstance(
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
           content: storedContent,
-          revisionContentHash: computeRevisionContentHash(storedContent),
+          revisionContentHash: revisionStateHashRefreshMarker(),
           seq: createSeq,
           tags: tags ?? [],
           properties: properties as any ?? undefined,
@@ -4748,7 +4748,7 @@ export function createMcpServerInstance(
           abstract: storedAbstract,
           abstractOriginHash: nextAbstractOriginHash,
           content: storedContent,
-          revisionContentHash: computeRevisionContentHash(storedContent),
+          revisionContentHash: revisionStateHashRefreshMarker(),
           // seq is structural ordering, not content: preserve it on update when
           // omitted (parity with the upsertNode resolver) so a content-only
           // re-write doesn't wipe a node out of its ordered list (PR #309 review).
@@ -5265,11 +5265,7 @@ export function createMcpServerInstance(
                 }),
               }),
             });
-            data.revisionContentHash = computeRevisionContentHash(
-              Object.prototype.hasOwnProperty.call(data, 'content')
-                ? (data.content as string | null | undefined)
-                : current.content,
-            );
+            data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
               : existing;
@@ -6235,7 +6231,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               });
               await tx.node.update({
                 where: { id: existing.id },
-                data: { loc: toLoc, name: newName, memoryId: toMemory.id },
+                data: {
+                  loc: toLoc,
+                  name: newName,
+                  memoryId: toMemory.id,
+                  revisionContentHash: revisionStateHashRefreshMarker(),
+                },
               });
             }
           } else {

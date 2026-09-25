@@ -19,7 +19,6 @@
 
 import { Prisma } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { createHash } from 'crypto';
 import { generateId } from './id.js';
 
 /**
@@ -142,18 +141,42 @@ export function buildNodeRevisionSnapshot(
 export const DEFAULT_MAX_REV_COUNT = 10;
 
 /**
- * #1323 — internal fingerprint of the exact AT-REST content column.
+ * #1323 — internal fingerprint of every AT-REST field NodeRevision captures.
  *
- * This is intentionally not Node.contentHash (external-producer provenance),
- * not the skill artifact hash, and not a hash of included partials. PostgreSQL
- * backfills the same `md5(COALESCE(content, ''))` expression in the migration.
+ * This is intentionally not Node.contentHash (external-producer provenance)
+ * or the skill artifact hash. PostgreSQL owns the canonical encoding through
+ * `hadron_node_revision_state_hash(nodes)`: JSON/array formatting differs
+ * between runtimes, so both reconciliation and sanctioned writers ask the DB
+ * for the fingerprint rather than trying to duplicate it in JavaScript.
+ *
+ * The column retains its original `revisionContentHash` name because it is an
+ * internal implementation detail introduced in the same unreleased change;
+ * semantically it now covers the complete curated revision state.
  */
-export function computeRevisionContentHash(content: string | null | undefined): string {
-  return createHash('md5').update(content ?? '', 'utf8').digest('hex');
+export async function computeRevisionStateHash(
+  db: Pick<PrismaClient, '$queryRaw'>,
+  nodeId: string,
+): Promise<string | null> {
+  const [row] = await db.$queryRaw<Array<{ hash: string }>>`
+    SELECT hadron_node_revision_state_hash(n) AS hash
+    FROM nodes n
+    WHERE n.id = ${nodeId}
+  `;
+  return row?.hash ?? null;
 }
 
 /**
- * #1323 — reconcile a content write that bypassed every revisioned authoring
+ * Value a sanctioned writer assigns to request a fingerprint refresh. The DB
+ * trigger replaces it with the canonical hash of NEW before the row is stored.
+ * A bypass writer does not touch the marker, so its tracked-field change leaves
+ * the old hash behind and is detectable on the next exposed read.
+ */
+export function revisionStateHashRefreshMarker(): string {
+  return 'refresh';
+}
+
+/**
+ * #1323 — reconcile a tracked-field write that bypassed every revisioned authoring
  * seam before exposing the node's current revision.
  *
  * The row lock makes the comparison, snapshot, counter advance and baseline
@@ -188,7 +211,8 @@ export async function ensureCurrentNodeRevisionInTransaction(
   const node = await tx.node.findUnique({ where: { id: nodeId } });
   if (!node) return null;
 
-  const actual = computeRevisionContentHash(node.content);
+  const actual = await computeRevisionStateHash(tx, node.id);
+  if (actual == null) return null;
   if (node.revisionContentHash === actual) return node.revSeq;
   if (node.revisionContentHash == null) {
     await tx.node.update({
@@ -204,8 +228,8 @@ export async function ensureCurrentNodeRevisionInTransaction(
       node,
       { userId: null, info: 'system:revision-reconcile' },
       {
-        revLabel: 'Reconciled content changed outside a revisioned writer (#1323)',
-        changes: ['content'],
+        revLabel: 'Reconciled state changed outside a revisioned writer (#1323)',
+        changes: [],
       },
     ),
   );

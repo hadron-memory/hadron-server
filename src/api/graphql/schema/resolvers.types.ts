@@ -19,7 +19,6 @@ import { parseRunRegisterSnapshot, resolveRegister, snapshotRowsAsEntries, toGql
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import {
-  computeRevisionContentHash,
   ensureCurrentNodeRevisionInTransaction,
   revisionStateMatches,
   type SnapshotSourceNode,
@@ -339,12 +338,9 @@ export const typeResolvers = {
       _args: unknown,
       ctx: Context,
     ) => {
-      // The common case is already attested and needs no second read. This also
-      // keeps the revision field tied to the exact parent object when a
-      // supported writer commits after that parent was fetched.
-      if (n.revisionContentHash === computeRevisionContentHash(n.content)) return n.revSeq;
-
-      // Raw writers are detected lazily. Reconcile + refetch under one lock,
+      // Raw writers are detected lazily. The canonical fingerprint is computed
+      // by PostgreSQL because the revision state includes JSON/array fields
+      // whose text encoding is not portable across runtimes. Reconcile + refetch under one lock,
       // then use the new number ONLY when the complete revisioned state still
       // matches the parent object. If a concurrent supported write changed the
       // row, the parent's own number remains the only self-consistent answer.

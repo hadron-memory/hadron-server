@@ -126,9 +126,23 @@ describe('updateNode snapshot capture (#620)', () => {
 });
 
 describe('#1323 current revision contract', () => {
-  it('initializes the at-rest content baseline for direct/raw inserts', async () => {
+  it('initializes the complete at-rest state baseline for direct/raw inserts', async () => {
     const n = await makeNode('revision-insert-baseline', { content: 'fresh bytes' });
-    expect(n.revisionContentHash).toBe('fd6f136535f2a7847d839a100f6b807f');
+    expect(n.revisionContentHash).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('reconciles a metadata-only write that bypasses a revisioned writer', async () => {
+    const n = await makeNode('revision-metadata-drift', { data: { stage: 1 } });
+    await db.node.update({ where: { id: n.id }, data: { data: { stage: 2 } } });
+
+    const drifted = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    expect(await resolvers.Node.revision(drifted as never, {}, ctx())).toBe(2);
+    expect(await db.nodeRevision.findUniqueOrThrow({
+      where: { nodeId_revNo: { nodeId: n.id, revNo: 1 } },
+    })).toMatchObject({
+      data: { stage: 2 },
+      revLabel: 'Reconciled state changed outside a revisioned writer (#1323)',
+    });
   });
 
   it('applies an ownerRepo-only update without inventing a revision', async () => {
@@ -170,12 +184,12 @@ describe('#1323 current revision contract', () => {
 
     const postPushSql = readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8');
     expect(postPushSql).toContain(
-      'SET "rev_seq" = "rev_seq" + 1,\n    "revision_content_hash" = md5(COALESCE("content", \'\'))',
+      'SET "rev_seq" = "rev_seq" + 1,\n    "revision_content_hash" = hadron_node_revision_state_hash("nodes")',
     );
     await db.$executeRawUnsafe(`
       UPDATE "nodes"
       SET "rev_seq" = "rev_seq" + 1,
-          "revision_content_hash" = md5(COALESCE("content", ''))
+          "revision_content_hash" = hadron_node_revision_state_hash("nodes")
       WHERE "revision_content_hash" IS NULL
     `);
 

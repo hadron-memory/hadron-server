@@ -1176,10 +1176,10 @@ model Node {
   /// A revisioned edit snapshots the pre-edit state at this number, then
   /// atomically advances the live row to the next number.
   revSeq             Int       @default(1) @map("rev_seq")
-  /// #1323: host-independent MD5 of the at-rest content column at revSeq.
+  /// #1323: host-independent MD5 of the complete at-rest revisioned state.
   /// Internal safeguard only (never an artifact fingerprint): an exposed read
   /// reconciles a mismatch by taking a server-authored revision. Included
-  /// partials/template data are deliberately outside this hash.
+  /// partials/template data and operational fields are deliberately outside it.
   revisionContentHash String?   @map("revision_content_hash")
   createdAt          DateTime  @default(now()) @map("created_at")
   createdBy          String?   @map("created_by")

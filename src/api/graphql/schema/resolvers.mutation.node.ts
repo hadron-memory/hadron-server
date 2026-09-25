@@ -23,10 +23,11 @@ import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
-  computeRevisionContentHash,
+  computeRevisionStateHash,
   editorFromAuth,
   diffNodeChanges,
   restorableNodeFields,
+  revisionStateHashRefreshMarker,
   jsonOrDbNull,
   REV_LABEL_MAX_LEN,
 } from '../../../lib/nodeRevisionSnapshot.js';
@@ -1043,7 +1044,7 @@ export async function writeNodeCore(
 
             const changes = diffNodeChanges(current, suppliedForDiff);
             const hashMismatch =
-              current.revisionContentHash !== computeRevisionContentHash(current.content);
+              current.revisionContentHash !== await computeRevisionStateHash(tx, current.id);
             const needsRevision = resolvedEdges !== null || changes.length > 0 || hashMismatch;
             const changesUnversionedField =
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
@@ -1080,13 +1081,9 @@ export async function writeNodeCore(
               });
             }
 
-            const postContent =
-              Object.prototype.hasOwnProperty.call(updatePayload, 'content')
-                ? (updatePayload.content as string | null | undefined)
-                : current.content;
             const data = {
               ...updatePayload,
-              revisionContentHash: computeRevisionContentHash(postContent),
+              revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
             const where = opts?.targetNodeId
@@ -1149,9 +1146,7 @@ export async function writeNodeCore(
               tags,
               createdBy,
               ...hashPayload,
-              revisionContentHash: computeRevisionContentHash(
-                (nodeFieldsClean as { content?: string | null }).content,
-              ),
+              revisionContentHash: revisionStateHashRefreshMarker(),
               ...(seqForCreate != null ? { seq: seqForCreate } : {}),
             } as Prisma.NodeUncheckedCreateInput,
             update: updatePayload,
@@ -1261,11 +1256,7 @@ export async function writeNodeCore(
               ...upsertArgs,
               update: {
                 ...upsertArgs.update,
-                revisionContentHash: computeRevisionContentHash(
-                  Object.prototype.hasOwnProperty.call(upsertArgs.update, 'content')
-                    ? (upsertArgs.update.content as string | null | undefined)
-                    : authoritative?.content,
-                ),
+                revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted
                 // node merely by writing to its loc — a behaviour change this
@@ -2226,11 +2217,7 @@ export const nodeMutations = {
           if (p.abstractChanged) {
             data.abstractOriginHash = computeContentHash(p.plaintext.content);
           }
-          data.revisionContentHash = computeRevisionContentHash(
-            Object.prototype.hasOwnProperty.call(data, 'content')
-              ? (data.content as string | null | undefined)
-              : raw.content,
-          );
+          data.revisionContentHash = revisionStateHashRefreshMarker();
 
           await tx.node.update({ where: { id: raw.id }, data });
         }
@@ -3250,11 +3237,7 @@ export const nodeMutations = {
       if (abstractChanged) {
         writeData.abstractOriginHash = computeContentHash(postMergeContent);
       }
-      writeData.revisionContentHash = computeRevisionContentHash(
-        Object.prototype.hasOwnProperty.call(writeData, 'content')
-          ? (writeData.content as string | null | undefined)
-          : target.content,
-      );
+      writeData.revisionContentHash = revisionStateHashRefreshMarker();
       writeData.updatedBy = ctx.userId ?? ctx.clientId ?? null;
 
       // #725/#737 — the merged target must still satisfy its collection's schema.
@@ -3811,11 +3794,7 @@ export const nodeMutations = {
         if ('data' in writeData) {
           writeData.data = jsonOrDbNull(writeData.data as never);
         }
-        writeData.revisionContentHash = computeRevisionContentHash(
-          Object.prototype.hasOwnProperty.call(writeData, 'content')
-            ? (writeData.content as string | null | undefined)
-            : current.content,
-        );
+        writeData.revisionContentHash = revisionStateHashRefreshMarker();
         return tx.node.update({
           where: { id: current.id },
           data: writeData,

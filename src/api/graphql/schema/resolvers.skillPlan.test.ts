@@ -12,6 +12,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { splitNodeUrn } from '../../../lib/urn.js';
+import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -631,8 +632,14 @@ describe('classes and bodies', () => {
     const entry = first.entries[0];
     const headerHash = /hash=([0-9a-f]{16})/.exec(entry.renderedBody as string)![1]!;
 
-    await db.node.update({ where: { id: node.id }, data: { description: 'off-road metadata' } });
-    await db.node.update({ where: { id: node.id }, data: { revSeq: { increment: 1 } } });
+    await db.node.update({
+      where: { id: node.id },
+      data: {
+        description: 'revisioned metadata',
+        revSeq: { increment: 1 },
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
     const got = await plan({
       intent: 'STATUS',
       files: [{
