@@ -105,7 +105,7 @@ run "22 early congruence fail-fast removed" "$AG" \
       }" "      "
 
 run "23 publication does not lock linked memories" "$AG" \
-  "          for (const { memoryId } of linked) {
+  "          for (const memoryId of lockedMemoryIds) {
             await tx.\$queryRaw\`SELECT id FROM memories WHERE id = \${memoryId} FOR UPDATE\`;
           }" "          "
 # 24 SURVIVES by design — see the UNPROVEN BY TEST note at that line. Kept in
@@ -115,6 +115,17 @@ run "24 narrowing check not re-run under the lock (expected survivor)" "$M" \
   "        if (visibility !== undefined) {
           await assertMemoryVisibilityChangeAllowed(tx, memory, visibility);
         }" "        "
+
+# 25 and 26 SURVIVE by design — see the UNPROVEN BY TEST notes at those lines.
+run "25 promotion back outside the deciding transaction (expected survivor)" "$AG" \
+  "        if (promoteSystemMemoryId) {
+          await tx.memory.update({" \
+  "        if (promoteSystemMemoryId) {
+          await ctx.db.memory.update({"
+run "26 post-lock link re-scan removed (expected survivor)" "$AG" \
+  "          if (now.length !== lockedMemoryIds.length || now.some((m: string, i: number) => m !== lockedMemoryIds[i])) {
+            throw new AgentLinkSetChangedError();
+          }" "          "
 
 # A stale pattern is a FAILED run, not a skipped line. Counting only
 # KILLED/SURVIVED lines once let two stale mutants — the attach gate and the

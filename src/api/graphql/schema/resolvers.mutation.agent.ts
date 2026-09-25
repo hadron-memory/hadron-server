@@ -1,6 +1,18 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
+
+/**
+ * Raised by the publication path when the agent's knowledge-link set changed
+ * between the pre-lock snapshot and the post-lock re-scan (#1364). Internal to
+ * this module: it never reaches a client, it only triggers the retry.
+ */
+class AgentLinkSetChangedError extends Error {
+  constructor() {
+    super('agent link set changed during publication');
+    this.name = 'AgentLinkSetChangedError';
+  }
+}
 import {
   assertSystemMemoryOwner,
   repairAgentSystemMemoryOwner,
@@ -398,6 +410,9 @@ export const agentMutations = {
       // Rationale: once an agent has a brain, swapping it destroys the
       // scaffold and confuses the UX. Users who want a different brain
       // should delete the agent and create a new one.
+      // Set when a first-attach promotion is due; performed inside the
+      // deciding transaction so a refusal cannot leave it half-applied (#1364).
+      let promoteSystemMemoryId: string | null = null;
       if (systemMemoryId !== undefined) {
         const incoming = systemMemoryId === '' ? null : systemMemoryId;
         if (agent.systemMemoryId && incoming !== agent.systemMemoryId) {
@@ -405,8 +420,17 @@ export const agentMutations = {
         }
         if (!agent.systemMemoryId && incoming) {
           // First-attach: verify the target memory exists, belongs to this
-          // org, isn't already another agent's system memory, and promote it
-          // to class='system'.
+          // org, and isn't already another agent's system memory. These are
+          // READS ONLY — the promotion WRITE now happens in the deciding
+          // transaction below (#1364, @codex on PR #1357).
+          //
+          // It used to be a bare `ctx.db.memory.update` right here, outside any
+          // transaction. That was safe only while the congruence check ran
+          // earlier in the function; once that check moved under the agent lock
+          // (to close a publication race), a refused publication could leave
+          // this memory converted to class='system' with its visibility cleared
+          // and uploads disabled, attached to nothing. Deferring the write is
+          // what makes the refusal and the promotion succeed or fail together.
           const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: incoming } });
           // #949: was a bare `target.organizationId !== agent.organizationId`,
           // which for a USER-owned agent compares `null !== null` ⇒ false and
@@ -425,20 +449,7 @@ export const agentMutations = {
           if (otherAgent) {
             throw new Error('This memory is already the system memory of another agent');
           }
-          await ctx.db.memory.update({
-            where: { id: incoming },
-            data: {
-              // 035-visibility-enum-cleanup: mark via class; clear visibility
-              // (forbidden non-null on class='system'). Agent visibility no
-              // longer propagates onto the system memory.
-              class: 'system',
-              name: `${name ?? agent.name} System`,
-              visibility: null,
-              // system-class memories must opt out of uploads (schema.prisma,
-              // 006-asset-upload-redesign). #519 review.
-              acceptsUploads: false,
-            },
-          });
+          promoteSystemMemoryId = incoming;
         }
       }
 
@@ -549,7 +560,15 @@ export const agentMutations = {
 
       // #1079 — the rename and its alias record commit together (see the App arm
       // in resolvers.mutation.app.ts for why they cannot be separate).
-      return ctx.db.$transaction(async (tx) => {
+      // #1364 — bounded retry around the deciding transaction. The only thing
+      // that raises AgentLinkSetChangedError is the post-lock re-scan below,
+      // and once this transaction holds the agent lock no further link can be
+      // added, so a single retry is normally enough; the cap is there so a
+      // pathological loop fails loudly instead of spinning.
+      const MAX_PUBLISH_ATTEMPTS = 3;
+      for (let attempt = 1; ; attempt++) {
+      try {
+      return await ctx.db.$transaction(async (tx) => {
         // Lock and RE-READ the urn inside the transaction (PR #1080 review,
         // Codex + Copilot P2). The row above was read before the transaction
         // opened, so two concurrent renames could both record the SAME old urn
@@ -572,19 +591,51 @@ export const agentMutations = {
         // An attach that adds a link to a memory outside this set still cannot
         // slip past: it must take the agent lock below, which this transaction
         // holds until it commits.
+        let lockedMemoryIds: string[] = [];
         if (visibility === 'PUBLIC') {
           const linked = await tx.agentMemoryItem.findMany({
             where: { agentId: id, deletedAt: null },
             select: { memoryId: true },
             orderBy: { memoryId: 'asc' },
           });
-          for (const { memoryId } of linked) {
+          lockedMemoryIds = linked.map((l: { memoryId: string }) => l.memoryId);
+          for (const memoryId of lockedMemoryIds) {
             await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
           }
         }
         const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
           SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
         `;
+        if (visibility === 'PUBLIC') {
+          // Re-scan the link set now that the agent row is LOCKED (#1364,
+          // @codex on PR #1357). The scan above happened before this lock, so
+          // an attach could commit in between and add a link whose memory is
+          // therefore absent from `lockedMemoryIds` — and a concurrent
+          // narrowing of that memory would then be serialized against nothing.
+          //
+          // The repair is a RETRY, not a second round of locking: taking a
+          // memory lock while already holding the agent lock would be
+          // agent-then-memory, inverting the attach path's memory-then-agent
+          // order and deadlocking. Aborting releases both locks; the next
+          // attempt sees the new link in its snapshot and locks it properly.
+          // No attach can add a further link once this lock is held, so the
+          // retry converges.
+          // UNPROVEN BY TEST, and kept, for the same reason as the deferred
+          // promotion above: staging it needs THREE transactions to interleave
+          // (an attach committing between the snapshot and this lock, plus a
+          // narrowing of that new memory). The suite stays green without it;
+          // the hole it closes is a PUBLIC agent linked to non-public
+          // knowledge.
+          const afterLock = await tx.agentMemoryItem.findMany({
+            where: { agentId: id, deletedAt: null },
+            select: { memoryId: true },
+            orderBy: { memoryId: 'asc' },
+          });
+          const now = afterLock.map((l: { memoryId: string }) => l.memoryId);
+          if (now.length !== lockedMemoryIds.length || now.some((m: string, i: number) => m !== lockedMemoryIds[i])) {
+            throw new AgentLinkSetChangedError();
+          }
+        }
         // cor:acl:080:03 — congruence invariant: an agent may become PUBLIC
         // only if every knowledge memory it links (excluding per-user
         // personal/private) is itself PUBLIC, and (#1349) only if it holds no
@@ -593,6 +644,34 @@ export const agentMutations = {
         // instead of both observing a state the other is about to change.
         if (visibility === 'PUBLIC') {
           await assertAgentPublicAllowed(tx, id);
+        }
+        // The deferred first-attach promotion (#1364): inside THIS transaction,
+        // after the congruence decision, so a refusal rolls it back with
+        // everything else instead of leaving a mutated orphan.
+        //
+        // UNPROVEN BY TEST, and kept. Moving this write back outside the
+        // transaction leaves the suite green, because reaching it needs the
+        // early fail-fast to PASS and this locked decision to REFUSE — i.e. a
+        // disqualifying link committing in between. 20 iterations of the paired
+        // race did not stage it. Per `review:a-green-mutation-indicts-the-test`
+        // that green indicts the test: without this placement, a publication
+        // refused by a link that landed in that window still promotes the
+        // memory, which is exactly the orphan #1364 was filed for.
+        if (promoteSystemMemoryId) {
+          await tx.memory.update({
+            where: { id: promoteSystemMemoryId },
+            data: {
+              // 035-visibility-enum-cleanup: mark via class; clear visibility
+              // (forbidden non-null on class='system'). Agent visibility no
+              // longer propagates onto the system memory.
+              class: 'system',
+              name: `${name ?? agent.name} System`,
+              visibility: null,
+              // system-class memories must opt out of uploads (schema.prisma,
+              // 006-asset-upload-redesign). #519 review.
+              acceptsUploads: false,
+            },
+          });
         }
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
@@ -633,6 +712,17 @@ export const agentMutations = {
         include: AGENT_INCLUDE,
         });
       });
+      } catch (err) {
+        if (err instanceof AgentLinkSetChangedError && attempt < MAX_PUBLISH_ATTEMPTS) continue;
+        if (err instanceof AgentLinkSetChangedError) {
+          throw new GraphQLError(
+            'The agent\'s knowledge links kept changing while publishing it; retry the request.',
+            { extensions: { code: 'CONFLICT', reason: 'AGENT_LINKS_CHANGED' } },
+          );
+        }
+        throw err;
+      }
+      }
     },
 
     deleteAgent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {

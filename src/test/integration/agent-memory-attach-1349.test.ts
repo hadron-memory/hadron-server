@@ -461,6 +461,68 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     expect((await db.agent.findUniqueOrThrow({ where: { id: agentId } })).systemMemoryId).toBeNull();
   });
 
+  it('a refused publication does not rename the agent\'s system memory either', async () => {
+    // What the early fail-fast is actually load-bearing for, now that the
+    // promotion is deferred into the deciding transaction (#1364): the
+    // system-memory URN sync commits its OWN transaction BEFORE the deciding
+    // one. Without the fail-fast, a refused publication combined with a rename
+    // would move the system memory's URN and then refuse, leaving the memory
+    // renamed under an agent that never was.
+    const { agentId } = await agentWithApp(attackerOrgId, 'urnsync-guard');
+    const sysMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId,
+        // MUST be exactly `${agent.urn}-system`: the sync only touches a
+        // system memory still on the derived pattern, so an org-prefixed urn
+        // here would skip it and the test would pass without the guard.
+        urn: `ag-urnsync-guard-${suffix}-system`,
+        name: 'sys', class: 'system', visibility: null,
+      } as never,
+    });
+    await db.agent.update({ where: { id: agentId }, data: { systemMemoryId: sysMem.id, urn: `ag-urnsync-guard-${suffix}` } });
+    const attach = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read-write' });
+    expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
+
+    const before = (await db.memory.findUniqueOrThrow({ where: { id: sysMem.id } })).urn;
+    const r = await gql(key.attacker!, `mutation($r: ID!, $u: String!) { updateAgent(ref: $r, visibility: PUBLIC, urn: $u) { id } }`, { r: agentId, u: `renamed-${suffix}` });
+    expect(JSON.stringify(r.errors)).toMatch(/read-write knowledge/i);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: sysMem.id } })).urn).toBe(before);
+  });
+
+  it('a NEW attach racing publication cannot leave a mutated system memory behind', async () => {
+    // #1364: the fail-fast alone is not enough. A link added between the
+    // fail-fast and the locked decision makes the decision REFUSE — and the
+    // promotion write must still not have happened. Deferring the write into
+    // the deciding transaction is what makes refusal and promotion atomic.
+    for (let i = 0; i < 6; i++) {
+      const { agentId } = await agentWithApp(attackerOrgId, `orphan-race-${i}`);
+      const brain = await db.memory.create({
+        data: {
+          id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:brain-${i}`,
+          name: `brain-${i}`, class: 'knowledge', visibility: 'ORGANIZATION',
+        } as never,
+      });
+
+      await Promise.allSettled([
+        gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read-write' }),
+        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, visibility: PUBLIC, systemMemoryId: $m) { id } }`, { r: agentId, m: brain.id }),
+      ]);
+
+      const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      const brainRow = await db.memory.findUniqueOrThrow({ where: { id: brain.id } });
+      // Whichever won: the promotion happened if and only if the agent kept it.
+      if (agentRow.systemMemoryId !== brain.id) {
+        expect(brainRow.class, `iteration ${i}: promoted an orphan`).toBe('knowledge');
+        expect(brainRow.visibility).toBe('ORGANIZATION');
+      }
+      // And the invariant this PR exists for still holds.
+      const link = await db.agentMemoryItem.findFirst({ where: { agentId, deletedAt: null } });
+      if (agentRow.visibility === 'PUBLIC') {
+        expect(link?.role, `iteration ${i}: PUBLIC agent holding read-write knowledge`).not.toBe('read-write');
+      }
+    }
+  });
+
   it('a read-write link to a SOFT-DELETED memory does not block publishing the agent', async () => {
     // Such an item grants nothing — every access fold excludes deleted
     // memories — so counting it permanently refused publication.
