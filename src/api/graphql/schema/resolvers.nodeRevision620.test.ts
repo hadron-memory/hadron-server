@@ -125,6 +125,11 @@ describe('updateNode snapshot capture (#620)', () => {
 });
 
 describe('#1323 current revision contract', () => {
+  it('initializes the at-rest content baseline for direct/raw inserts', async () => {
+    const n = await makeNode('revision-insert-baseline', { content: 'fresh bytes' });
+    expect(n.revisionContentHash).toBe('fd6f136535f2a7847d839a100f6b807f');
+  });
+
   it('starts at 1, exposes the live revision, and snapshots the predecessor', async () => {
     const n = await makeNode('revision-contract', { content: 'v1' });
     expect(await resolvers.Node.revision(n as never, {}, ctx())).toBe(1);
@@ -169,6 +174,21 @@ describe('#1323 current revision contract', () => {
     const read = await resolvers.Query.node({}, { ref: n.id, raw: true }, ctx());
     expect(read?.content).toBe('off-road v2');
     expect(await resolvers.Node.revision(read as never, {}, ctx())).toBe(2);
+  });
+
+  it('reconciles an off-road body returned by findNodes before exposing revision', async () => {
+    const n = await makeNode('revision-find-nodes', { content: 'v1' });
+    await db.node.update({ where: { id: n.id }, data: { content: 'off-road search body' } });
+
+    const result = await resolvers.Query.findNodes(
+      {},
+      { filter: { memoryIds: [memory.id] } },
+      ctx(),
+    );
+    const hit = result.hits.find((candidate) => candidate.node.id === n.id)!;
+    expect(hit.node.content).toBe('off-road search body');
+    expect(await resolvers.Node.revision(hit.node as never, {}, ctx())).toBe(2);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(1);
   });
 });
 

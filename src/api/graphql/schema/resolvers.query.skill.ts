@@ -554,7 +554,11 @@ export const skillQueries = {
         if ((await ensureCurrentNodeRevisionInTransaction(tx, id)) != null) liveIds.push(id);
       }
       return tx.node.findMany({
-        where: { id: { in: liveIds } },
+        // Reapply BOTH discovery and access/scope predicates after waiting for
+        // the row locks. An id can move into another tenant's memory while the
+        // transaction waits; id-only here would turn the locked re-read into a
+        // cross-tenant content read.
+        where: { AND: [declaredWhere, { id: { in: liveIds } }] } as never,
         select: declaredSelect,
         orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
       });

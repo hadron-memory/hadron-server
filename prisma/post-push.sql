@@ -435,3 +435,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_worker_channel_uniq
   ON channel_read_states (worker_id, channel_id) WHERE worker_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_agent_app_channel_uniq
   ON channel_read_states (agent_id, app_id, channel_id) WHERE agent_id IS NOT NULL;
+
+-- #1323 — every newly inserted Node gets an at-rest content baseline, including
+-- raw/createMany writers Prisma cannot route through an application helper.
+-- Keep in lockstep with 20260925010000_trustworthy_node_revisions.
+CREATE OR REPLACE FUNCTION hadron_initialize_node_revision_content_hash()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW."revision_content_hash" IS NULL THEN
+    NEW."revision_content_hash" := md5(COALESCE(NEW."content", ''));
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS nodes_initialize_revision_content_hash ON "nodes";
+CREATE TRIGGER nodes_initialize_revision_content_hash
+BEFORE INSERT ON "nodes"
+FOR EACH ROW EXECUTE FUNCTION hadron_initialize_node_revision_content_hash();

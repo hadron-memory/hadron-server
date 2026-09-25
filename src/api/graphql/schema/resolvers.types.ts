@@ -18,6 +18,14 @@ import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../li
 import { parseRunRegisterSnapshot, resolveRegister, snapshotRowsAsEntries, toGqlRegisterRows } from '../../../lib/resolveRegister.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
+import {
+  computeRevisionContentHash,
+  ensureCurrentNodeRevisionInTransaction,
+  revisionStateMatches,
+  type SnapshotSourceNode,
+} from '../../../lib/nodeRevisionSnapshot.js';
+import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -323,9 +331,32 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
-    // Parent read surfaces reconcile and re-fetch under one row lock. Returning
-    // that row's counter keeps the GraphQL object internally consistent.
-    revision: (n: { revSeq: number }, _args?: unknown, _ctx?: Context) => n.revSeq,
+    revision: async (
+      n: SnapshotSourceNode & {
+        revSeq: number;
+        revisionContentHash: string | null;
+      },
+      _args: unknown,
+      ctx: Context,
+    ) => {
+      // The common case is already attested and needs no second read. This also
+      // keeps the revision field tied to the exact parent object when a
+      // supported writer commits after that parent was fetched.
+      if (n.revisionContentHash === computeRevisionContentHash(n.content)) return n.revSeq;
+
+      // Raw writers are detected lazily. Reconcile + refetch under one lock,
+      // then use the new number ONLY when the complete revisioned state still
+      // matches the parent object. If a concurrent supported write changed the
+      // row, the parent's own number remains the only self-consistent answer.
+      return ctx.db.$transaction(async (tx) => {
+        if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id)) == null) return n.revSeq;
+        const current = await tx.node.findUnique({ where: { id: n.id } });
+        if (!current) return n.revSeq;
+        const key = sessionKeyCache.getByMemoryId(current.memoryId);
+        if (key) decryptNodeFieldsWithKey(current, key);
+        return revisionStateMatches(n, current) ? current.revSeq : n.revSeq;
+      });
+    },
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     // The referenced asset for a `reference` node carrying data.asset
     // (createAssetReferenceNode / hadron_store_file). Resolves the soft

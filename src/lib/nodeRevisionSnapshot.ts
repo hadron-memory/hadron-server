@@ -385,6 +385,15 @@ export function diffNodeChanges(
   return changed;
 }
 
+/** Whether two rows describe the same revisioned Node state. */
+export function revisionStateMatches(
+  left: Partial<SnapshotSourceNode>,
+  right: Partial<SnapshotSourceNode>,
+): boolean {
+  if (left.id !== right.id) return false;
+  return TRACKED_NODE_FIELDS.every((field) => fieldEquals(left[field], right[field]));
+}
+
 /**
  * The node fields a snapshot restores (restoreNodeRevision) — ONE home for
  * both the pre-restore `changes` diff and the write-back, so the field list
