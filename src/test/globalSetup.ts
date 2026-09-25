@@ -241,7 +241,7 @@ async function applyTemplateConstraints(client: Client) {
 
   // #1325 — MemoryConfig templates: exactly one owner + per-owner live-name
   // uniqueness; rule task-reference markers. Synced with prisma/post-push.sql
-  // + the 20260925010000_memory_config migration.
+  // + the 20260925030000_memory_config migration.
   await client.query(`
     ALTER TABLE memory_config_templates
       DROP CONSTRAINT IF EXISTS chk_memory_config_template_owner;

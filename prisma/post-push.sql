@@ -243,7 +243,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS scopes_app_name_uniq
 
 -- ─── #1325 — MemoryConfig templates: exactly one owner + per-owner live-name
 -- uniqueness; rule task-reference markers (fail closed on a hard-deleted task).
--- Synced with the 20260925010000_memory_config migration and src/test/globalSetup.ts.
+-- Synced with the 20260925030000_memory_config migration and src/test/globalSetup.ts.
 ALTER TABLE memory_config_templates
   DROP CONSTRAINT IF EXISTS chk_memory_config_template_owner;
 ALTER TABLE memory_config_templates
