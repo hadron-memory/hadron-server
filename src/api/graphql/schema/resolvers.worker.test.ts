@@ -886,6 +886,14 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     expect(other.items.map((row: { id: string }) => row.id)).not.toContain(second.id);
     expect(other.items).toHaveLength(1);
     expect(await W.appUrn(other.items[0], {}, ctx(admin.id))).toBe(app.urn);
+
+    const negativeOffset = await Q.heldWorkers(
+      {},
+      { userRef: appMember.id, limit: 1, offset: -1 },
+      ctx(admin.id),
+    );
+    expect(negativeOffset.total).toBe(2);
+    expect(negativeOffset.items.map((row: { id: string }) => row.id)).toEqual([second.id]);
   });
 
   it('unions org-owned and user-owned Apps, but only where the viewer passes the shared gate', async () => {
@@ -970,6 +978,27 @@ describe('#1344 — heldWorkers across readable Apps', () => {
       total: 0,
     });
     expect(await Q.heldWorkers({}, { userRef: 'missing-target' }, ctx(outsider.id))).toEqual({
+      items: [],
+      total: 0,
+    });
+
+    await db.user.createMany({
+      data: [
+        {
+          id: generateId(),
+          handle: `amb-held-a-${generateId().slice(-6)}`,
+          email: 'AmbHeld@example.com',
+          roles: ['READER'],
+        },
+        {
+          id: generateId(),
+          handle: `amb-held-b-${generateId().slice(-6)}`,
+          email: 'ambheld@example.com',
+          roles: ['READER'],
+        },
+      ],
+    });
+    expect(await Q.heldWorkers({}, { userRef: 'AMBHELD@example.com' }, ctx(outsider.id))).toEqual({
       items: [],
       total: 0,
     });

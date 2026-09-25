@@ -16,7 +16,12 @@ import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import {
+  AgentNotFoundError,
+  AmbiguousUserRefError,
+  UserNotFoundError,
+} from '../../../lib/entityRef/errors.js';
+import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
@@ -48,7 +53,6 @@ import {
   requireOwnerOrOrgRole,
   isNonReaderAppMember,
   clampListTake,
-  resolveUserRefArg,
 } from './resolvers.helpers.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
@@ -1458,9 +1462,9 @@ export const workerQueries = {
   ) => {
     let heldByUserId: string;
     try {
-      heldByUserId = await resolveUserRefArg(ctx.db, { ref: userRef });
+      heldByUserId = (await resolveUserRefOrEmail(ctx.db, userRef)).id;
     } catch (err) {
-      if (err instanceof GraphQLError && err.extensions?.code === 'NOT_FOUND') {
+      if (err instanceof UserNotFoundError || err instanceof AmbiguousUserRefError) {
         return { items: [], total: 0 };
       }
       throw err;
@@ -1483,7 +1487,7 @@ export const workerQueries = {
         include: { app: { select: { urn: true } } },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         take: clampListTake(limit),
-        skip: offset ?? 0,
+        skip: Math.max(0, offset ?? 0),
       }),
       ctx.db.worker.count({ where }),
     ]);
