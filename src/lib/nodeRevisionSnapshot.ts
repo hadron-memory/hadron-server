@@ -167,37 +167,53 @@ export async function ensureCurrentNodeRevision(
   nodeId: string,
 ): Promise<number> {
   return db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${nodeId} FOR UPDATE`;
-    const node = await tx.node.findUnique({ where: { id: nodeId } });
-    if (!node) throw new Error(`Node not found while reconciling revision: ${nodeId}`);
+    const revision = await ensureCurrentNodeRevisionInTransaction(tx, nodeId);
+    if (revision == null) throw new Error(`Node not found while reconciling revision: ${nodeId}`);
+    return revision;
+  });
+}
 
-    const actual = computeRevisionContentHash(node.content);
-    if (node.revisionContentHash === actual) return node.revSeq;
-    if (node.revisionContentHash == null) {
-      await tx.node.update({
-        where: { id: node.id },
-        data: { revisionContentHash: actual },
-      });
-      return node.revSeq;
-    }
+/**
+ * Transaction-scoped half of {@link ensureCurrentNodeRevision}. Callers that
+ * render or hash node fields use this and then re-read those fields in the SAME
+ * transaction: the row lock prevents a writer from pairing revision N+1 with
+ * the body from the earlier, pre-lock query.
+ */
+export async function ensureCurrentNodeRevisionInTransaction(
+  tx: Prisma.TransactionClient,
+  nodeId: string,
+): Promise<number | null> {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "nodes" WHERE "id" = ${nodeId} FOR UPDATE`;
+  if (locked.length === 0) return null;
+  const node = await tx.node.findUnique({ where: { id: nodeId } });
+  if (!node) return null;
 
-    await createNodeRevision(
-      tx,
-      buildNodeRevisionSnapshot(
-        node,
-        { userId: null, info: 'system:revision-reconcile' },
-        {
-          revLabel: 'Reconciled content changed outside a revisioned writer (#1323)',
-          changes: ['content'],
-        },
-      ),
-    );
+  const actual = computeRevisionContentHash(node.content);
+  if (node.revisionContentHash === actual) return node.revSeq;
+  if (node.revisionContentHash == null) {
     await tx.node.update({
       where: { id: node.id },
       data: { revisionContentHash: actual },
     });
-    return node.revSeq + 1;
+    return node.revSeq;
+  }
+
+  await createNodeRevision(
+    tx,
+    buildNodeRevisionSnapshot(
+      node,
+      { userId: null, info: 'system:revision-reconcile' },
+      {
+        revLabel: 'Reconciled content changed outside a revisioned writer (#1323)',
+        changes: ['content'],
+      },
+    ),
+  );
+  await tx.node.update({
+    where: { id: node.id },
+    data: { revisionContentHash: actual },
   });
+  return node.revSeq + 1;
 }
 
 /**

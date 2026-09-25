@@ -48,7 +48,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { isCiphertext } from '../../../lib/crypto.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
-import { ensureCurrentNodeRevision } from '../../../lib/nodeRevisionSnapshot.js';
+import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import {
   classifyDeclaration,
   classifySkill,
@@ -511,8 +511,7 @@ export const skillQueries = {
     // report — filtering it out would make the corpus look clean by hiding
     // the nodes the rule exists for.
     // Declared is the opt-in (§4.1: "declared, not merely runnable").
-    const declaredRows = await ctx.db.node.findMany({
-      where: {
+    const declaredWhere = {
         deletedAt: null,
         OR: DISCOVERY_OR,
         // INTERSECTED, not spread (@copilot, PR #1240). `memoryAccessFilter`
@@ -523,8 +522,8 @@ export const skillQueries = {
         // than the one asked for, which a client running `--prune` against a
         // single memory would act on for files it never meant to touch.
         AND: [access, ...(memoryIds ? [{ memoryId: { in: memoryIds } }] : [])],
-      } as never,
-      select: {
+    } as never;
+    const declaredSelect = {
         id: true,
         loc: true,
         // #1292: only `unrecognized` reads it, so an item for a node with no
@@ -536,18 +535,35 @@ export const skillQueries = {
         memoryId: true,
         memory: { select: { urn: true } },
         revSeq: true,
-      },
-      take: SKILL_PLAN_MAX_NODES + 1,
-      orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
-    });
+    } as const;
+    const declaredRows = await ctx.db.$transaction(async (tx) => {
+      const candidates = await tx.node.findMany({
+        where: declaredWhere,
+        select: declaredSelect,
+        take: SKILL_PLAN_MAX_NODES + 1,
+        orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
+      });
+      if (candidates.length > SKILL_PLAN_MAX_NODES) return candidates;
+
+      // Lock in a stable order, reconcile every counter, then re-read the
+      // fields the planner hashes/renders before releasing any lock. A
+      // sequential `ensure...` loop over an earlier projection could label old
+      // content with the newly reconciled revision.
+      const liveIds: string[] = [];
+      for (const id of candidates.map((r) => r.id).sort()) {
+        if ((await ensureCurrentNodeRevisionInTransaction(tx, id)) != null) liveIds.push(id);
+      }
+      return tx.node.findMany({
+        where: { id: { in: liveIds } },
+        select: declaredSelect,
+        orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
+      });
+    }, { timeout: 60_000, maxWait: 15_000 });
     if (declaredRows.length > SKILL_PLAN_MAX_NODES) {
       throw new GraphQLError(
         `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
-    }
-    for (const row of declaredRows) {
-      row.revSeq = await ensureCurrentNodeRevision(ctx.db, row.id);
     }
     await decryptNodesBatch(ctx.db, declaredRows);
 
@@ -686,7 +702,7 @@ export const skillQueries = {
         fileHash: f.fileHash ?? '',
         headerId: f.nodeId ?? '',
         headerSource: f.sourceUrn ?? '',
-        ...(f.revision !== undefined ? { headerRevision: f.revision } : {}),
+        ...(typeof f.revision === 'number' ? { headerRevision: f.revision } : {}),
         ...(f.parseFailed ? { parseFailed: true } : {}),
         ...(f.hasExtraFrontmatter ? { hasExtraFrontmatter: true } : {}),
       };

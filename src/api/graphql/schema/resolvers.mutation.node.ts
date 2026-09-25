@@ -3708,6 +3708,47 @@ export const nodeMutations = {
       const restored = await ctx.db.$transaction(async (tx) => {
         // Spec 049 S4: lock-then-gate — the check above is the fast refusal.
         await lockLocForWrite(tx, node.memoryId, node.loc);
+        const current = await tx.node.findUnique({ where: { id: node.id } });
+        if (
+          !current ||
+          current.deletedAt ||
+          current.memoryId !== node.memoryId ||
+          current.loc !== node.loc
+        ) {
+          const movedMemory = !!current && current.memoryId !== node.memoryId;
+          throw new GraphQLError(
+            `Node revision target moved or was deleted while this restore waited — re-read it and retry.`,
+            {
+              extensions: {
+                code: 'NODE_WRITE_CONFLICT',
+                revisionId,
+                memoryId: node.memoryId,
+                movedMemory,
+                ...(!movedMemory && current ? { currentLoc: current.loc } : {}),
+              },
+            },
+          );
+        }
+
+        // Repeat every state-dependent gate against the authoritative row.
+        // The preflight checks above are useful fast refusals, but they cannot
+        // protect a restore that waited behind a concurrent writer.
+        assertGovernedWrite(
+          current,
+          mergedGovernedState(current, {
+            role: (restoreFields as { role?: string | null }).role,
+            isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
+          }),
+          'update',
+          undefined,
+          { context: 'restore' },
+        );
+        await enforceNodeSchemaOnWrite(
+          tx,
+          current.memoryId,
+          'objectType' in restoreFields ? (restoreFields.objectType as string | null) : current.objectType,
+          'properties' in restoreFields ? restoreFields.properties : current.properties,
+        );
         if (truncate) {
           // #617 truncate: collapse the history so the selected revision becomes
           // the new baseline. Delete every snapshot NEWER than the selected one
@@ -3718,11 +3759,11 @@ export const nodeMutations = {
           // Missing NodeRevision rows are valid after pruning/truncation; the
           // live revision must never move backwards or stay unchanged.
           await tx.node.update({
-            where: { id: node.id },
+            where: { id: current.id },
             data: { revSeq: { increment: 1 } },
           });
           await tx.nodeRevision.deleteMany({
-            where: { nodeId: node.id, createdAt: { gt: revision.createdAt } },
+            where: { nodeId: current.id, createdAt: { gt: revision.createdAt } },
           });
         } else {
           // Non-destructive default: snapshot current state before restoring so
@@ -3735,8 +3776,8 @@ export const nodeMutations = {
           // with the write-back below.
           await createNodeRevision(tx, {
             id: generateId(),
-            ...buildNodeRevisionSnapshot(node, editorFromAuth(ctx), {
-              changes: diffNodeChanges(node, restoreFields),
+            ...buildNodeRevisionSnapshot(current, editorFromAuth(ctx), {
+              changes: diffNodeChanges(current, restoreFields),
             }),
           });
         }
@@ -3762,10 +3803,10 @@ export const nodeMutations = {
         writeData.revisionContentHash = computeRevisionContentHash(
           Object.prototype.hasOwnProperty.call(writeData, 'content')
             ? (writeData.content as string | null | undefined)
-            : node.content,
+            : current.content,
         );
         return tx.node.update({
-          where: { id: node.id },
+          where: { id: current.id },
           data: writeData,
           include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
         });

@@ -17,6 +17,7 @@ import { GraphQLError } from 'graphql';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from '../../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType } from '../../lib/enforceNodeSchema.js';
 import type { MemorySchema } from '../../lib/memorySchema.js';
+import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -220,6 +221,10 @@ export async function mergeMemoryGraph(
       }
     }
     if (relocateIds.length > 0) {
+      const relocateIdSet = new Set(relocateIds);
+      const classifiedLocById = new Map(
+        page.filter((row) => relocateIdSet.has(row.id)).map((row) => [row.id, row.loc]),
+      );
       // Enforce the target schema on the collection members relocating in (only
       // when the target IS schema'd — page rows are id/loc-only, so fetch the
       // typed subset's discriminator/properties for validation). Re-read the
@@ -239,9 +244,44 @@ export async function mergeMemoryGraph(
       for (let i = 0; i < relocateIds.length; i += batchSize) {
         const ids = relocateIds.slice(i, i + batchSize);
         const moved = await db.$transaction(async (tx) => {
-          const rows = await tx.node.findMany({
+          let rows = await tx.node.findMany({
             where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
           });
+          // Memory-scope locks precede every loc-scope lock in the global
+          // protocol. This first gate acquires them and gives a fast refusal;
+          // the second gate below rechecks the authoritative post-loc-lock rows.
+          await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          await acquireLockSet(
+            tx,
+            ids.flatMap((id) => {
+              const loc = classifiedLocById.get(id)!;
+              return [
+                { memoryId: sourceMemoryId, loc },
+                { memoryId: targetMemoryId, loc },
+              ];
+            }),
+          );
+          rows = await tx.node.findMany({
+            where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
+          });
+          for (const row of rows) {
+            if (row.loc !== classifiedLocById.get(row.id)) {
+              throw new Error(`merge source node ${row.id} moved during classification; retry the merge`);
+            }
+          }
+          const lateCollision = await tx.node.findFirst({
+            where: {
+              memoryId: targetMemoryId,
+              deletedAt: null,
+              loc: { in: rows.map((row) => row.loc) },
+            },
+            select: { loc: true },
+          });
+          if (lateCollision) {
+            throw new Error(`merge target loc ${lateCollision.loc} appeared during classification; retry the merge`);
+          }
+          // Reentrant memory locks; fresh governed/protected facts for the rows
+          // now serialized by their source + destination address locks.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
           for (const row of rows) {
             await createNodeRevision(

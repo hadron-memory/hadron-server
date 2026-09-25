@@ -173,7 +173,7 @@ export function classifySkill(node: NodeFacts, file: FileFacts | null): Classifi
 
   if (
     node.nodeHash !== file.headerHash ||
-    (file.headerRevision !== undefined && file.headerRevision !== node.revision)
+    (typeof file.headerRevision === 'number' && file.headerRevision !== node.revision)
   ) return { urn, class: 'stale' };
   return { urn, class: 'current' };
 }

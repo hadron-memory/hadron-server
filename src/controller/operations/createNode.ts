@@ -4,6 +4,18 @@ import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
+import {
+  buildNodeRevisionSnapshot,
+  computeRevisionContentHash,
+  createNodeRevision,
+  diffNodeChanges,
+} from '../../lib/nodeRevisionSnapshot.js';
+import {
+  acquireLockSet,
+  ancestorLocs,
+  lockAncestorsForCreate,
+  lockLocForWrite,
+} from '../../lib/nodeSubtreeLock.js';
 
 /**
  * Create a new node: save to filesystem and upsert into the database.
@@ -14,6 +26,8 @@ export const createNode = async (
   if (!node.loc || !node.name || !node.memoryId) {
     throw new Error('Node requires loc, name, and memoryId');
   }
+  const loc = node.loc;
+  const name = node.name;
 
   // Save to filesystem
   const fsResult = await saveNodeToFs(node, GRAPHS_PATH);
@@ -22,34 +36,62 @@ export const createNode = async (
   }
 
   const id = node.id ?? generateId();
+  const tags = serializeTags(node.tags ?? []) as string[];
+  const content = node.content ?? null;
+  const fields = {
+    name,
+    alias: node.alias ?? null,
+    description: node.description ?? null,
+    content,
+    contentHash: node.contentHash ?? null,
+    tags,
+    ownerRepo: node.ownerRepo ?? null,
+  };
 
-  const saved = await db.node.upsert({
-    where: { loc_memoryId: { loc: node.loc, memoryId: node.memoryId } },
-    create: {
-      id,
-      memoryId: node.memoryId,
-      loc: node.loc,
-      name: node.name,
-      alias: node.alias ?? null,
-      description: node.description ?? null,
-      content: node.content ?? null,
-      contentHash: node.contentHash ?? null,
-      tags: serializeTags(node.tags ?? []) as string[],
-      ownerRepo: node.ownerRepo ?? null,
-    },
-    update: {
-      name: node.name,
-      alias: node.alias ?? null,
-      description: node.description ?? null,
-      content: node.content ?? null,
-      contentHash: node.contentHash ?? null,
-      tags: serializeTags(node.tags ?? []) as string[],
-      ownerRepo: node.ownerRepo ?? null,
-    },
-    include: {
-      outgoingEdges: { include: { target: true } },
-      incomingEdges: { include: { source: true } },
-    },
+  const saved = await db.$transaction(async (tx) => {
+    // This legacy controller is still a real authoring seam. Declare its whole
+    // path lock-set first, then use the normal create/update helpers for their
+    // authoritative gates. A second call at the same loc must snapshot the
+    // first state exactly like GraphQL and MCP do.
+    await acquireLockSet(tx, [
+      ...ancestorLocs(loc).map((ancestorLoc) => ({ memoryId: node.memoryId, loc: ancestorLoc })),
+      { memoryId: node.memoryId, loc },
+    ]);
+    await lockAncestorsForCreate(tx, node.memoryId, loc);
+    await lockLocForWrite(tx, node.memoryId, loc);
+
+    const existing = await tx.node.findUnique({
+      where: { loc_memoryId: { loc, memoryId: node.memoryId } },
+    });
+    if (existing) {
+      await createNodeRevision(
+        tx,
+        buildNodeRevisionSnapshot(
+          existing,
+          { userId: null, info: 'controller:createNode' },
+          { changes: diffNodeChanges(existing, fields) },
+        ),
+      );
+    }
+
+    return tx.node.upsert({
+      where: { loc_memoryId: { loc, memoryId: node.memoryId } },
+      create: {
+        id,
+        memoryId: node.memoryId,
+        loc,
+        ...fields,
+        revisionContentHash: computeRevisionContentHash(content),
+      },
+      update: {
+        ...fields,
+        revisionContentHash: computeRevisionContentHash(content),
+      },
+      include: {
+        outgoingEdges: { include: { target: true } },
+        incomingEdges: { include: { source: true } },
+      },
+    });
   });
 
   return saved as unknown as Node;

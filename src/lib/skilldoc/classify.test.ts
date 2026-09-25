@@ -58,6 +58,10 @@ describe('each class, produced in isolation', () => {
     expect(classifySkill(node(), file({ headerRevision: undefined })).class).toBe('current');
   });
 
+  it('current — GraphQL null revision has the same meaning as omission', () => {
+    expect(classifySkill(node(), file({ headerRevision: null })).class).toBe('current');
+  });
+
   it('locally-edited — the file no longer matches its own header', () => {
     expect(classifySkill(node(), file({ fileHash: 'cccccccccccccccc' })).class).toBe('locally-edited');
   });

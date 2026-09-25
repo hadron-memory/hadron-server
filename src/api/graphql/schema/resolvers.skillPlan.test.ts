@@ -604,6 +604,27 @@ describe('classes and bodies', () => {
     expect(got.orphans).toHaveLength(0);
   });
 
+  it('treats an explicit null file revision as omitted', async () => {
+    const node = await mkNode('tasks:null-revision', { properties: declaration() });
+    const exported = await plan({ intent: 'EXPORT', files: [] });
+    const entry = exported.entries[0];
+    const headerHash = /hash=([0-9a-f]{16})/.exec(entry.renderedBody as string)![1]!;
+
+    const got = await plan({
+      intent: 'STATUS',
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: entry.urn,
+        nodeId: node.id,
+        revision: null,
+        headerHash,
+        fileHash: headerHash,
+      }],
+    });
+
+    expect(got.entries[0].class).toBe('current');
+  });
+
   it('classifies a hash-equal artifact from an older revision as stale', async () => {
     const node = await mkNode('tasks:revision-stale', { properties: declaration() });
     const first = await plan({ intent: 'EXPORT', files: [] });
@@ -625,6 +646,17 @@ describe('classes and bodies', () => {
     });
 
     expect(got.entries[0]).toMatchObject({ revision: 2, class: 'stale' });
+  });
+
+  it('renders off-road content with the revision reconciled for those exact bytes', async () => {
+    const node = await mkNode('tasks:off-road-content', { properties: declaration() });
+    await plan({ intent: 'EXPORT', files: [] });
+    await db.node.update({ where: { id: node.id }, data: { content: '# Off-road body' } });
+
+    const got = await plan({ intent: 'EXPORT', files: [] });
+    expect(got.entries[0].revision).toBe(2);
+    expect(got.entries[0].renderedBody).toContain('# Off-road body');
+    expect(got.entries[0].renderedBody).toContain(' rev=2 ');
   });
 
   it('a blocking lint finding outranks a current file relationship', async () => {

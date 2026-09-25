@@ -517,6 +517,7 @@ describe('#1323 — read tools surface and reconcile the current revision', () =
     const first = await srv.callToolText('hadron_get_node', { urn });
     const second = await srv.callToolText('hadron_get_node', { urn });
     expect(first).toMatch(/^Revision: 2$/m);
+    expect(first).toContain('off-road content');
     expect(second).toMatch(/^Revision: 2$/m);
     expect(await db.nodeRevision.count({ where: { nodeId: fx.nodes.witness.id } })).toBe(1);
   });

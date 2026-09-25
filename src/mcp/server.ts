@@ -21,7 +21,7 @@ import {
 import {
   buildNodeRevisionSnapshot,
   computeRevisionContentHash,
-  ensureCurrentNodeRevision,
+  ensureCurrentNodeRevisionInTransaction,
   createNodeRevision,
   editorFromAuth,
   diffNodeChanges,
@@ -1105,6 +1105,7 @@ async function resolveMemoryByUrn(
  */
 type ReadProjectionNode = {
   id: string;
+  revSeq: number;
   name: string;
   loc: string;
   memoryId: string;
@@ -1124,6 +1125,23 @@ type ReadProjectionNode = {
   outgoingEdges: Array<{ name: string | null; loc: string; target: { id: string; loc: string; memoryId: string; name: string } }>;
   incomingEdges: Array<{ name: string | null; loc: string; source: { id: string; loc: string; memoryId: string; name: string } }>;
 };
+
+const readProjectionInclude = {
+  outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
+  incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
+  memory: { select: { isEncrypted: true } },
+} as const;
+
+/** Reconcile and fetch the complete projection while the node row stays locked. */
+async function loadCurrentReadProjection(nodeId: string): Promise<ReadProjectionNode | null> {
+  return db.$transaction(async (tx) => {
+    if ((await ensureCurrentNodeRevisionInTransaction(tx, nodeId)) == null) return null;
+    return tx.node.findFirst({
+      where: { id: nodeId, deletedAt: null },
+      include: readProjectionInclude,
+    }) as Promise<ReadProjectionNode | null>;
+  });
+}
 
 /**
  * Spec 041 (PR-2, #206): decrypt a fetched node in place when this process
@@ -1154,7 +1172,7 @@ async function renderNodeReadProjection(
   scope: 'content' | 'abstract' | 'all',
   opts: { locked?: boolean } = {},
 ): Promise<string> {
-  const revision = await ensureCurrentNodeRevision(db, node.id);
+  const revision = node.revSeq;
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
   const outgoingLines = await Promise.all(
     node.outgoingEdges.map(async (e) => {
@@ -3558,12 +3576,24 @@ export function createMcpServerInstance(
         return textResult(err.message);
       }
       const scope = contentScope ?? 'content';
+      // Reconcile + fetch under one row lock. The first lookup selects the
+      // address and authorizes its memory; it must not supply the body after a
+      // reconciliation advanced the counter.
+      const current = await loadCurrentReadProjection(node.id);
+      if (
+        !current ||
+        current.memoryId !== node.memoryId ||
+        current.loc !== node.loc ||
+        !(await canReadMemory(db, auth, current.memoryId))
+      ) {
+        return textResult(`Node "${rawUrn}" not found.`);
+      }
       // Spec 041: decrypt when this session holds the key; mark locked
       // otherwise (blanked fields + Locked meta line, never raw ciphertext).
-      const lockState = mcpDecryptOrMark(node);
+      const lockState = mcpDecryptOrMark(current);
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      const projection = await renderNodeReadProjection(node, scope, {
+      const projection = await renderNodeReadProjection(current, scope, {
         locked: lockState === 'locked',
       });
 
@@ -3594,7 +3624,7 @@ export function createMcpServerInstance(
       //
       // A LOCKED node still records: the projection is what crossed the
       // boundary, and the caller did read this node's addressable state.
-      recordNodeRead(db, { id: node.id, loc, memoryId: node.memoryId }, auth);
+      recordNodeRead(db, { id: current.id, loc, memoryId: current.memoryId }, auth);
 
       // #696: `#data` addresses the node's DATA, not the node — and before the
       // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
@@ -3662,6 +3692,8 @@ export function createMcpServerInstance(
       const ordered: Array<ReadProjectionNode & { id: string }> = [];
       /** node id -> the fragment its ref named, for the shared notice below. */
       const fragmentByNodeId = new Map<string, string>();
+      /** resolved node id -> caller ref; prefix reads naturally fall back to id. */
+      const echoByNodeId = new Map<string, string>();
       const unavailable: string[] = [];
 
       if (hasPrefix) {
@@ -3677,11 +3709,7 @@ export function createMcpServerInstance(
           where: { memoryId: mem.id, loc: { startsWith: locPrefix! }, deletedAt: null },
           orderBy: { loc: 'asc' },
           take: BATCH_READ_MAX_NODES + 1,
-          include: {
-            outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
-            incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
-            memory: { select: { isEncrypted: true } },
-          },
+          include: readProjectionInclude,
         });
         if (rows.length > BATCH_READ_MAX_NODES) {
           return textResult(
@@ -3753,11 +3781,7 @@ export function createMcpServerInstance(
         // The per-node projection every fetch below must produce, identical to
         // hadron_get_node's (cor:api:040:01) — kept in one place so the PK and
         // URN paths cannot drift apart.
-        const projectionInclude = {
-          outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
-          incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
-          memory: { select: { isEncrypted: true } },
-        } as const;
+        const projectionInclude = readProjectionInclude;
 
         const nodeByRef = new Map<string, ReadProjectionNode & { id: string }>();
 
@@ -3859,6 +3883,7 @@ export function createMcpServerInstance(
           if (frag && !fragmentByNodeId.has(n.id)) fragmentByNodeId.set(n.id, frag);
           if (seenIds.has(n.id)) continue;
           seenIds.add(n.id);
+          echoByNodeId.set(n.id, raw);
           ordered.push(n);
         }
       }
@@ -3873,7 +3898,17 @@ export function createMcpServerInstance(
       const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
-      for (const n of ordered) {
+      for (const selected of ordered) {
+        const n = await loadCurrentReadProjection(selected.id);
+        if (
+          !n ||
+          n.memoryId !== selected.memoryId ||
+          n.loc !== selected.loc ||
+          !(await canReadMemory(db, auth, n.memoryId))
+        ) {
+          unavailable.push(echoByNodeId.get(selected.id) ?? selected.id);
+          continue;
+        }
         if (truncated) {
           omitted.push(await nodeUrn(n.loc, n.memoryId));
           continue;

@@ -160,6 +160,16 @@ describe('#1323 current revision contract', () => {
     expect(['v2-a', 'v2-b']).toContain(live.content);
     expect(live.content).not.toBe(snapshots[1].content);
   });
+
+  it('returns reconciled content and revision from the same canonical read', async () => {
+    const n = await makeNode('revision-read-consistency', { content: 'v1' });
+    await resolvers.Query.node({}, { ref: n.id, raw: true }, ctx());
+    await db.node.update({ where: { id: n.id }, data: { content: 'off-road v2' } });
+
+    const read = await resolvers.Query.node({}, { ref: n.id, raw: true }, ctx());
+    expect(read?.content).toBe('off-road v2');
+    expect(await resolvers.Node.revision(read as never, {}, ctx())).toBe(2);
+  });
 });
 
 describe('restoreNodeRevision round-trip (#620)', () => {
