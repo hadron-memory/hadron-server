@@ -21,6 +21,7 @@ H=src/api/graphql/schema/resolvers.helpers.ts
 M=src/api/graphql/schema/resolvers.mutation.memory.ts
 A=src/lib/agentPublicCongruence.ts
 AG=src/api/graphql/schema/resolvers.mutation.agent.ts
+AT=src/api/graphql/schema/resolvers.types.ts
 SPEC=src/test/integration/agent-memory-attach-1349.test.ts
 
 STALE=0
@@ -264,6 +265,11 @@ run "57 syncs gated on the pre-read systemMemoryId" "$AG" \
   "      const committedSystemMemoryId = published?.systemMemoryId ?? agent.systemMemoryId;" "      const committedSystemMemoryId = agent.systemMemoryId;"
 run "58 same-App install check read without the lock" "$H" \
   "    SELECT app_id FROM app_agents WHERE app_id = \${app.id} AND agent_id = \${agentId} FOR KEY SHARE" "    SELECT app_id FROM app_agents WHERE app_id = \${app.id} AND agent_id = \${agentId}"
+# #1357 round 10 (@codex): user-owned PUBLIC is not a public Agent.memoryItems
+# audience, even when the legacy link is excluded from congruence checks.
+run "59 Agent.memoryItems bypasses the owner record gate" "$AT" \
+  "if (mem.visibility === 'PUBLIC' && mem.appId == null && mem.ownerUserId == null) {" \
+  "if (mem.visibility === 'PUBLIC' && mem.appId == null) {"
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

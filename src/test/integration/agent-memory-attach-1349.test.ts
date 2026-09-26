@@ -791,6 +791,18 @@ describe("#1349 — the caller must hold it in their OWN right (@codex, PR #1357
     const r = await gql(key.attacker!, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { visibility } }`, { r: agentId });
     expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
     expect(r.data!.updateAgent.visibility).toBe('PUBLIC');
+    // A PUBLIC agent object is readable by another org member, but its
+    // memoryItems must not hand them strict-owner Memory scalars. This path
+    // previously short-circuited on PUBLIC + no App without ownerUserId.
+    const listing = `query($r: ID!) { agent(ref: $r) { memoryItems { memory { id name } } } }`;
+    const outsider = await gql(key.reader2!, listing, { r: agentId });
+    expect(outsider.errors, JSON.stringify(outsider.errors)).toBeUndefined();
+    expect(outsider.data!.agent.memoryItems).toEqual([]);
+    const owner = await gql(key.attacker!, listing, { r: agentId });
+    expect(owner.errors, JSON.stringify(owner.errors)).toBeUndefined();
+    expect(owner.data!.agent.memoryItems.map((item: { memory: { id: string } }) => item.memory.id).sort()).toEqual(
+      [ownedPublic.id, ownedPrivate.id].sort(),
+    );
   });
 
   it('a PUBLIC read-write app-scoped link does not block publishing the agent', async () => {
