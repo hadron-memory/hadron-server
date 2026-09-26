@@ -702,7 +702,7 @@ export const appMutations = {
             }
             const keyFields = apiKeyWriteFields(aiApiKey);
             if (existing) {
-              // Re-judged on the LOCKED row (#1389 review): a concurrent edit
+              // Re-judged on the LOCKED row (#1380 / #1389 review): a concurrent edit
               // after the read above must not let this write keep a provider
               // whose endpoint or key was cleared in between.
               await ctx.db.$transaction(async (tx) => {

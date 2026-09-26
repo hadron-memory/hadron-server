@@ -882,7 +882,7 @@ export const agentMutations = {
         );
       }
       if (existing) {
-        // Re-judged on the LOCKED row (#1389 review): a concurrent edit that
+        // Re-judged on the LOCKED row (#1380 / #1389 review): a concurrent edit that
         // cleared the endpoint or key after the read above must not let this
         // write restore a provider that now lacks them.
         await ctx.db.$transaction(async (tx) => {
