@@ -142,12 +142,18 @@ const ENDPOINT_REQUIRED = new Set(['openai-compatible']);
  * the write, where the admin can still fix them. A keyless local server
  * (Ollama) accepts any placeholder bearer.
  */
-export function requireKeyFor(config: { provider: string; endpoint?: string | null }, hasKey: boolean): void {
-  if (hasKey || usesProcessCredential(config)) return;
+export function requireKeyFor(
+  config: { provider: string; endpoint?: string | null },
+  hasKey: boolean,
+  ownerType: AiConfigOwnerType,
+): void {
+  if (hasKey || usesProcessCredential(config, ownerType)) return;
   throw new AiConfigValidationError(
     explicitEndpoint(config)
       ? `A '${config.provider}' config with an endpoint needs its own API key (any placeholder for a host that does not check one).`
-      : `Provider '${config.provider}' needs an API key; the server's own credentials belong to other providers.`,
+      : ownerType !== 'HADRON_SERVER'
+        ? `An AI config needs its own API key; only the platform's own configs may use the server's credentials.`
+        : `Provider '${config.provider}' needs an API key; the server's own credentials belong to other providers.`,
   );
 }
 

@@ -965,7 +965,7 @@ export const agentMutations = {
         refuseLegacyBaseUrl(args.params);
         const endpoint = args.endpoint ? validateEndpoint(args.endpoint) : null;
         requireEndpointFor(args.provider, endpoint);
-        requireKeyFor({ provider: args.provider, endpoint }, !!args.apiKey);
+        requireKeyFor({ provider: args.provider, endpoint }, !!args.apiKey, args.ownerType);
         validateApiStyle(args.provider, args.apiStyle);
         // No upsert: a P2002 from the partial unique (owner, name) index is
         // the duplicate-name typed error, not a retry (upsert is not
@@ -1035,7 +1035,11 @@ export const agentMutations = {
         validateApiStyle(provider, apiStyle);
         const resultingEndpoint = endpoint === undefined ? existing.endpoint : endpoint;
         requireEndpointFor(provider, resultingEndpoint);
-        requireKeyFor({ provider, endpoint: resultingEndpoint }, args.apiKey === undefined ? !!existing.apiKeyEncrypted : !!args.apiKey);
+        requireKeyFor(
+          { provider, endpoint: resultingEndpoint },
+          args.apiKey === undefined ? !!existing.apiKeyEncrypted : !!args.apiKey,
+          owner.ownerType,
+        );
         const config = await ctx.db.aiServiceConfig.update({
           where: { id: existing.id },
           data: {

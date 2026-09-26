@@ -8088,12 +8088,15 @@ export const typeDefs = `#graphql
     036-ai-service-config: create a named AI config on an owner entity.
 
     apiKey semantics: non-empty = encrypted at rest with a masked preview.
-    Omitted is accepted only where a run can use the server's own
-    credential: openai, anthropic or bedrock at their default host (no
-    endpoint). Any other provider (glm, openai-compatible), and any config
-    with an endpoint, is refused with AiConfigValidationError, because the
-    SDK would otherwise send the server's credential to a host that didn't
-    issue it (#1389). A host that checks no key takes any placeholder.
+    Omitted is accepted only where a run may use the server's own
+    credential: a HADRON_SERVER config for openai, anthropic or bedrock at
+    their default host (no endpoint). Every ORGANIZATION, APP and AGENT
+    config needs its own key: the platform credential is platform spend
+    (#1390). Any other provider (glm, openai-compatible), and any config
+    with an endpoint, needs one too, because the SDK would otherwise send
+    the server's credential to a host that didn't issue it (#1389). All of
+    these are refused with AiConfigValidationError. A host that checks no
+    key takes any placeholder.
     Name must be 1-64 lower-case [a-z0-9_-], unique per
     owner. provider must be a known provider; params are validated per
     provider.

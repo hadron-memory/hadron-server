@@ -522,7 +522,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     // Org owner — org admin OK.
     const orgCfg = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'default', provider: 'openai', model: 'gpt-4o' },
+      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'default', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-org' },
       ctxFor(admin.id),
     );
     expect(orgCfg.ownerType).toBe('ORGANIZATION');
@@ -564,13 +564,13 @@ describe('AiServiceConfig CRUD (US2)', () => {
   it('rejects duplicate names per owner with the typed error', async () => {
     await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm' },
+      { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-a' },
       ctxFor(admin.id),
     );
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'openai', model: 'x' },
+        { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'openai', model: 'x', apiKey: 'sk-b' },
         ctxFor(admin.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'DuplicateAiServiceConfigNameError' } });
@@ -607,7 +607,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     ).rejects.toMatchObject({ extensions: { code: 'AiConfigValidationError' } });
   });
 
-  it('apiKey update semantics: empty string clears, value replaces', async () => {
+  it('apiKey update semantics: value replaces; empty string clears, only where a keyless config may run (#1390)', async () => {
     const created = await resolvers.Mutation.createAiServiceConfig(
       {},
       { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-one' },
@@ -622,11 +622,18 @@ describe('AiServiceConfig CRUD (US2)', () => {
     const stored = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: created.id } });
     expect(decryptToken(stored.apiKeyEncrypted!)).toBe('sk-two');
 
-    const cleared = await resolvers.Mutation.updateAiServiceConfig(
+    // A tenant (here AGENT) config always needs its own key: clearing is refused.
+    await expect(
+      resolvers.Mutation.updateAiServiceConfig({}, { id: created.id, apiKey: '' }, ctxFor(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'AiConfigValidationError' } });
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: created.id } })).apiKeyEncrypted).not.toBeNull();
+    // The platform's own anthropic config may run on the server credential, so it may clear.
+    const host = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { id: created.id, apiKey: '' },
-      ctxFor(admin.id),
+      { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'hosted', provider: 'anthropic', model: 'm', apiKey: 'sk-host' },
+      platformAdminCtx(),
     );
+    const cleared = await resolvers.Mutation.updateAiServiceConfig({}, { id: host.id, apiKey: '' }, platformAdminCtx());
     expect(cleared.hasApiKey).toBe(false);
     expect(cleared.apiKeyPreview).toBeNull();
   });
@@ -948,7 +955,18 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     // host that issued the server's credential may run keyless.
     expect(await code(mk({ provider: 'glm', model: 'm', name: 'keyless-glm', apiKey: undefined }))).toBe('AiConfigValidationError');
     expect(await code(mk({ provider: 'openai', model: 'm', name: 'keyless-ep', endpoint: 'https://llm.example.com/v1', apiKey: undefined }))).toBe('AiConfigValidationError');
-    expect(await code(mk({ provider: 'openai', model: 'm', name: 'keyless-openai', apiKey: undefined }))).toBeUndefined();
+    // #1390: even at its own host, a keyless ORG config is refused; only the
+    // platform's own config may use the server credential.
+    expect(await code(mk({ provider: 'openai', model: 'm', name: 'keyless-openai', apiKey: undefined }))).toBe('AiConfigValidationError');
+    expect(
+      await code(
+        resolvers.Mutation.createAiServiceConfig(
+          {},
+          { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'keyless-host', provider: 'openai', model: 'm' },
+          platformAdminCtx(),
+        ),
+      ),
+    ).toBeUndefined();
     // params.toolCalling is type-checked.
     expect(await code(mk({ provider: 'openai-compatible', model: 'm', name: 'badtools', endpoint: 'https://api.together.xyz/v1', params: { toolCalling: 'yes' } }))).toBe('UnknownAiProviderError');
   });
