@@ -224,7 +224,7 @@ describe('read-state', () => {
     await postAs('done with the build', [], worker.id);
     await postAs('old note', [], retired.id);
     const own = await renderAttentionSection(db, run);
-    expect(own.text).toContain(`- team (${appMem.urn}:chats:team): nothing new (only your own posts since seq 0; channel is at 2)`);
+    expect(own.text).toContain(`- team (${appMem.urn}:chats:team): nothing new from others since seq 0 (channel is at 2)`);
     // The checkpoint still moves past them: they are read, not pending.
     expect(own.captured.get(channel.id)).toBe(2);
     // A human's post carries no authorWorkerId, and it is news.
@@ -235,11 +235,11 @@ describe('read-state', () => {
     const otherAgent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'other', urn: `${org.urn}:other`, visibility: 'ORGANIZATION' } });
     const stranger = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: otherAgent.id, name: 'Zed', slug: 'zed' } });
     await postAs('mine now', [], worker.id);
-    expect((await renderAttentionSection(db, run)).text).toContain('nothing new (only your own posts since seq 3; channel is at 4)');
+    expect((await renderAttentionSection(db, run)).text).toContain('nothing new from others since seq 3 (channel is at 4)');
     // A deleted post is no news either.
     const gone = await postAs('retracted', [], stranger.id);
     await db.node.update({ where: { id: gone.inserted.id }, data: { deletedAt: new Date() } });
-    expect((await renderAttentionSection(db, run)).text).toContain('nothing new (only your own posts since seq 3; channel is at 5)');
+    expect((await renderAttentionSection(db, run)).text).toContain('nothing new from others since seq 3 (channel is at 5)');
     await postAs('from zed', [], stranger.id);
     expect((await renderAttentionSection(db, run)).text).toContain('new since seq 3 (channel is at 6)');
   });

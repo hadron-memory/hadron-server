@@ -220,13 +220,16 @@ export async function renderAttentionSection(
       lines.push(`- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq}; encrypted, so your own posts were not filtered)`);
       continue;
     }
-    // One indexed EXISTS per row: only someone else's post is news (#1388).
+    // One indexed EXISTS per row: only someone else's live post is news
+    // (#1388; cor:dmo:090:07).
     const [{ found }] = await db.$queryRaw<Array<{ found: boolean }>>`
       SELECT EXISTS (SELECT 1 ${othersInWindow(c, seen, Prisma.empty)}) AS found`;
     lines.push(
       found
         ? `- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq})`
-        : `- ${c.name} (${where}): nothing new (only your own posts since seq ${seen}; channel is at ${c.lastSeq})`,
+        : // Own posts, or deleted ones: either way nothing live from anyone
+          // else, so say exactly that (#1393 QA, Chip).
+          `- ${c.name} (${where}): nothing new from others since seq ${seen} (channel is at ${c.lastSeq})`,
     );
   }
   return { text: `## Channels (attention)\n${lines.join('\n')}`, captured };
