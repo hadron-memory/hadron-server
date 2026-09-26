@@ -28,7 +28,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import type { ResolvedAiConfig } from '../aiConfig.js';
 import { decryptToken } from '../tokenCrypto.js';
-import { defaultEndpoint, effectiveApiStyle, explicitEndpoint } from '../aiEndpoint.js';
+import { defaultEndpoint, effectiveApiStyle, explicitEndpoint, usesProcessCredential } from '../aiEndpoint.js';
 import { guardedEndpointFetch } from './endpointFetch.js';
 
 export interface LlmRequest {
@@ -68,11 +68,14 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
   // (OPENAI_API_KEY, ANTHROPIC_API_KEY, the AWS chain). Sent to an
   // admin-chosen host, that would hand the server's own credential to
   // whoever runs it (#1389 review, Codex P1). An explicit endpoint therefore
-  // requires the config's own key; only a provider's default host may use
-  // the process credential.
-  if (endpoint && !key) {
+  // requires the config's own key, and so does a provider whose DEFAULT host
+  // is not the credential's issuer: glm's is Z.ai, and the OpenAI SDK would
+  // send it the server's OPENAI_API_KEY (#1385 review).
+  if (!key && !usesProcessCredential(resolved.config)) {
     throw new LlmInvocationError(
-      `Provider "${provider}" has an explicit endpoint but no stored key; the server's own credentials are never sent to a configured host.`,
+      endpoint
+        ? `Provider "${provider}" has an explicit endpoint but no stored key; the server's own credentials are never sent to a configured host.`
+        : `Provider "${provider}" needs a stored key; the server's own credentials belong to other providers.`,
       provider,
       false,
     );

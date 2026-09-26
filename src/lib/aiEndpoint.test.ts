@@ -11,6 +11,7 @@ import {
   isPrivateNetworkAddress,
   refuseLegacyBaseUrl,
   requireEndpointFor,
+  usesProcessCredential,
   validateApiStyle,
   validateEndpoint,
 } from './aiEndpoint.js';
@@ -164,5 +165,13 @@ describe('openai-compatible (#1373)', () => {
   it('speaks Chat Completions by default, and either style may be chosen', () => {
     expect(effectiveApiStyle({ provider: 'openai-compatible' })).toBe('CHAT_COMPLETIONS');
     expect(() => validateApiStyle('openai-compatible', 'RESPONSES')).not.toThrow();
+  });
+});
+
+describe('usesProcessCredential: which keyless configs may run on the server credential (#1385 review)', () => {
+  it('only at a default host that issued it', () => {
+    for (const provider of ['openai', 'anthropic', 'bedrock']) expect(usesProcessCredential({ provider }), provider).toBe(true);
+    for (const provider of ['glm', 'openai-compatible', 'mystery']) expect(usesProcessCredential({ provider }), provider).toBe(false);
+    expect(usesProcessCredential({ provider: 'openai', endpoint: 'https://llm.example.com/v1' })).toBe(false);
   });
 });

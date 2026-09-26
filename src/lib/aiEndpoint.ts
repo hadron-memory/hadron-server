@@ -72,6 +72,22 @@ export function explicitEndpoint(config: { provider?: string; endpoint?: string 
   return config.endpoint || null;
 }
 
+/**
+ * Providers whose DEFAULT host issued the process credential the SDK falls
+ * back to (OPENAI_API_KEY → OpenAI, ANTHROPIC_API_KEY → Anthropic, the AWS
+ * chain → Bedrock). Only these may run on it; any other provider needs its
+ * config's own key (#1385 review: glm's default host is Z.ai).
+ */
+const AMBIENT_CREDENTIAL_PROVIDERS: ReadonlySet<string> = new Set(['openai', 'anthropic', 'bedrock']);
+
+/**
+ * Whether a config with NO stored key runs on the server's own credential:
+ * only at a provider's default host, and only where that host issued it.
+ */
+export function usesProcessCredential(config: { provider: string; endpoint?: string | null }): boolean {
+  return !explicitEndpoint(config) && AMBIENT_CREDENTIAL_PROVIDERS.has(config.provider);
+}
+
 /** What a request for this config is sent to: its endpoint, else the default. */
 export function effectiveEndpoint(config: { provider: string; endpoint?: string | null }): string | null {
   return explicitEndpoint(config) ?? defaultEndpoint(config.provider);
