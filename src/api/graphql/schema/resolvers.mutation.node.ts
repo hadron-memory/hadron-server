@@ -101,7 +101,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
-import { carryNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
+import { carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
   ancestorLocs,
@@ -1079,6 +1079,9 @@ export async function writeNodeCore(
 
             const data = {
               ...updatePayload,
+              // The snapshot above keeps the old author. The new live content
+              // has no verified author until the attestation/human gates land.
+              ...(changes.length > 0 ? clearNodeAuthorship() : {}),
               revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
@@ -1270,6 +1273,9 @@ export async function writeNodeCore(
               ...upsertArgs,
               update: {
                 ...upsertArgs.update,
+                ...(opts?.copiedAuthorship
+                  ? carryNodeAuthorship(opts.copiedAuthorship)
+                  : authoritative ? clearNodeAuthorship() : {}),
                 revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted
@@ -2279,6 +2285,7 @@ export const nodeMutations = {
           }
           data.revisionContentHash = revisionStateHashRefreshMarker();
 
+          Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
         }
       });
@@ -3368,7 +3375,7 @@ export const nodeMutations = {
         );
 
         if (Object.keys(changed).length > 0) {
-          await tx.node.update({ where: { id: target.id }, data: writeData });
+          await tx.node.update({ where: { id: target.id }, data: { ...writeData, ...clearNodeAuthorship() } });
         }
 
         if (fields.has('EDGES')) {

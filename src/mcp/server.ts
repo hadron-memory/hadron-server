@@ -27,6 +27,7 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
+import { clearNodeAuthorship } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
@@ -3117,6 +3118,7 @@ export function createMcpServerInstance(
             where: { loc_memoryId: { loc, memoryId } },
             select: { id: true, deletedAt: true },
           });
+          let sectionChanged = false;
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             // Reconcile only while the row is still in this memory.
@@ -3130,6 +3132,7 @@ export function createMcpServerInstance(
               );
             }
             const changes = diffNodeChanges(current, upsertArgs.update);
+            sectionChanged = changes.length > 0;
             if (changes.length > 0) {
               await createNodeRevision(tx, {
                 id: generateId(),
@@ -3139,7 +3142,7 @@ export function createMcpServerInstance(
           }
           const row = await tx.node.upsert({
             ...upsertArgs,
-            update: { ...upsertArgs.update, revisionContentHash: revisionStateHashRefreshMarker() },
+            update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
           return row.id;
         });
@@ -5069,6 +5072,7 @@ export function createMcpServerInstance(
             // deleted while taking the new content.
             update: {
               ...upsertArgs.update,
+              ...(pre ? clearNodeAuthorship() : {}),
               ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
             } as any,
           });
@@ -5461,6 +5465,7 @@ export function createMcpServerInstance(
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && resolvedEdges === null) return;
+            const changedFields = diffNodeChanges(current, data);
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -5484,6 +5489,7 @@ export function createMcpServerInstance(
                 }),
               }),
             });
+            if (changedFields.length > 0) Object.assign(data, clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })

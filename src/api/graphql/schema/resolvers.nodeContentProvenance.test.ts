@@ -6,6 +6,7 @@ import { buildSchema, type GraphQLInputObjectType } from 'graphql';
 import { typeResolvers } from './resolvers.types.js';
 import type { Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { writeNodeCore } from './resolvers.mutation.node.js';
 
 const at = new Date('2026-09-26T20:00:00Z');
 let nodeMemoryId: string;
@@ -50,6 +51,46 @@ beforeEach(async () => {
 });
 
 describe('#1326 content provenance reads', () => {
+  it('keeps the old task stamp in history but clears it on an ordinary content edit', async () => {
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: memory.organizationId!, userId: readerId } },
+      data: { role: 'ADMIN' },
+    });
+    await writeNodeCore(
+      { memoryId: nodeMemoryId, loc: 'authored', content: 'new body' },
+      { db, userId: readerId, roles: ['ADMIN'] } as Context,
+      'update',
+    );
+    const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(live).toMatchObject({
+      content: 'new body', authorshipKind: null, authoredByTask: null,
+      authoredByRevision: null, authoredByHuman: null, authoredAt: null,
+    });
+    const old = await db.nodeRevision.findFirstOrThrow({ where: { nodeId }, orderBy: { revNo: 'desc' } });
+    expect(old).toMatchObject({
+      content: 'body', authorshipKind: 'TASK', authoredByTask: taskId,
+      authoredByRevision: 4, authoredAt: at,
+    });
+  });
+
+  it('keeps a task stamp and creates no revision for an identical save', async () => {
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: memory.organizationId!, userId: readerId } },
+      data: { role: 'ADMIN' },
+    });
+    await writeNodeCore(
+      { memoryId: nodeMemoryId, loc: 'authored', content: 'body' },
+      { db, userId: readerId, roles: ['ADMIN'] } as Context,
+      'update',
+    );
+    expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
+      authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 4, authoredAt: at,
+    });
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
+  });
+
   it('offers no public GraphQL setter for system-owned attribution or validation', () => {
     const schema = buildSchema(typeDefs);
     for (const name of ['NodeInput', 'CreateNodeInput', 'UpdateNodeInput']) {

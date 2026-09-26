@@ -25,3 +25,14 @@ export function carryNodeAuthorship(source: NodeAuthorshipStamp): NodeAuthorship
     authoredAt: source.authoredAt,
   };
 }
+
+/** An authored edit has no verified replacement attribution until #1328/#1336. */
+export function clearNodeAuthorship(): NodeAuthorshipStamp {
+  return {
+    authorshipKind: null,
+    authoredByTask: null,
+    authoredByRevision: null,
+    authoredByHuman: null,
+    authoredAt: null,
+  };
+}
