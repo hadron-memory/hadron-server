@@ -8154,7 +8154,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       offset: z.number().int().optional().describe('Page offset.'),
       session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
     },
-    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session }) => {
+    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession }) => {
+      // A blank session is no session, for every consumer below (#1362 review).
+      const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       await heartbeatSession(session);
       return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session });
     },
@@ -8268,7 +8270,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         proof: z.string().describe('Opaque server proof from the returned checkpoint; binds Worker + Channel + sequence.'),
       })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
     },
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel, monitor, monitorFor, acknowledge }) => {
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, app, channel, monitor, monitorFor, acknowledge }) => {
+      // A blank session is no session, for every consumer below (#1362 review):
+      // otherwise the MCP layer drops the bound session as "explicit" while
+      // maybeAdvanceOwnChannelRead's trim falls back to it.
+      const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
         return textResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
       }

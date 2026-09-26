@@ -442,6 +442,23 @@ describe('MCP parity and discovery gate', () => {
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: newer.channel.id } })).toBeNull();
   });
 
+  it('a blank explicit session is no session: the read behaves exactly as with none (#1362 review)', async () => {
+    await post('one');
+    await post('two');
+    const bound = createTestableMcpServer({ ...auth(), sessionId });
+    for (const tool of ['hadron_team_chat_read', 'hadron_channel_read'] as const) {
+      await db.channelReadState.deleteMany({});
+      const args = tool === 'hadron_channel_read' ? { channel: channel.id, sinceSeq: 0 } : { sinceSeq: 0 };
+      const blank = await bound.callToolText(tool, { ...args, session: '   ' });
+      const blankCursor = await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
+      await db.channelReadState.deleteMany({});
+      const omitted = await bound.callToolText(tool, args);
+      const omittedCursor = await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
+      expect(blank, tool).toBe(omitted);
+      expect(blankCursor?.lastSeenSeq ?? null, tool).toBe(omittedCursor?.lastSeenSeq ?? null);
+    }
+  });
+
   it('a monitor read never advances the Worker cursor, even with the session bound to the transport (#1362 review)', async () => {
     await post('first');
     await post('second');
