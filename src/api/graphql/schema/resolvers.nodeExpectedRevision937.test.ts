@@ -253,6 +253,28 @@ describe('GraphQL expectedRevision (#937)', () => {
     });
   });
 
+  // Added in review (@Andi, PR #1352): the resolver-level validation exists
+  // precisely BECAUSE internal delegates and resolver tests bypass the GraphQL
+  // Int coercion, so a test that only goes through the schema cannot hold it.
+  // Deleting the check left the suite green before these cases.
+  it('rejects a non-positive, non-integer or over-32-bit precondition at the resolver seam', async () => {
+    const node = await seed('guard:invalid');
+    for (const bad of [0, -1, 1.5, 2_147_483_648, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const error = await update('updateNode', {
+        id: node.id,
+        content: 'should not land',
+        expectedRevision: bad,
+      }).catch((e: unknown) => e);
+      expect(error, `expectedRevision: ${bad}`).toBeInstanceOf(GraphQLError);
+      expect((error as GraphQLError).extensions.code, `expectedRevision: ${bad}`).toBe('BAD_USER_INPUT');
+      expect((error as GraphQLError).extensions.field, `expectedRevision: ${bad}`).toBe('expectedRevision');
+      // Refused before any write: the content must be untouched.
+      const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+      expect(after.content).toBe('version one');
+      expect(after.revSeq).toBe(node.revSeq);
+    }
+  });
+
   it('does not turn the precondition into a revision oracle for an unreadable node', async () => {
     const node = await seed('occ:concealed');
     let caught: unknown;

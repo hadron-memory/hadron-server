@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
-import { createTestableMcpServer } from './server.js';
+import { createTestableMcpServer, mcpDoorCanReplay } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -146,6 +146,56 @@ describe('MCP expectedRevision (#937)', () => {
       content: 'unguarded edit',
       revSeq: 2,
     });
+  });
+
+  // Added in review (@Andi, PR #1352). The guard-ONLY call — a precondition
+  // with no field changes — is a documented use ("a useful no-op check"), and
+  // three separate guards make it work: the entry condition must admit it into
+  // the transaction at all, the comparison must run, and the early return must
+  // stop it manufacturing history. Each could be removed with the suite staying
+  // green before these cases.
+  describe('a guard-only call (precondition, no field changes)', () => {
+    it('refuses a stale precondition instead of silently succeeding', async () => {
+      const node = await seed('occ:guard-only-stale');
+      const mcp = createTestableMcpServer(auth());
+      // Advance the node so revision 1 is stale.
+      await mcp.callToolText('hadron_update_node', { urn: urnFor(node.loc), content: 'version two' });
+      const before = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+
+      expect(
+        await mcp.callToolText('hadron_update_node', { urn: urnFor(node.loc), expectedRevision: 1 }),
+      ).toMatch(/^\[node_write_conflict\]/);
+      // And nothing moved: not the revision, not the history, not the content.
+      const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+      expect(after.revSeq).toBe(before.revSeq);
+      expect(after.content).toBe(before.content);
+      expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
+    });
+
+    it('passes a current precondition without manufacturing a revision', async () => {
+      const node = await seed('occ:guard-only-current');
+      const mcp = createTestableMcpServer(auth());
+      const before = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+
+      const result = await mcp.callToolText('hadron_update_node', {
+        urn: urnFor(node.loc),
+        expectedRevision: before.revSeq,
+      });
+      expect(result).not.toMatch(/^\[node_write_conflict\]/);
+      const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+      expect(after.revSeq, 'a guard-only check must not advance the live revision').toBe(before.revSeq);
+      expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+    });
+  });
+
+  // Added in review (@Andi, PR #1352): a precondition is an UPDATE concept, so
+  // a generic write carrying one must not replay through a governed CREATE
+  // door. Nothing pinned the `op !== 'update'` half of that rule.
+  it('never replays a precondition through a governed create door', () => {
+    expect(mcpDoorCanReplay({ expectedRevision: 3 }, 'task', 'update')).toBe(true);
+    expect(mcpDoorCanReplay({ expectedRevision: 3 }, 'review', 'update')).toBe(true);
+    expect(mcpDoorCanReplay({ expectedRevision: 3 }, 'task', 'create')).toBe(false);
+    expect(mcpDoorCanReplay({ expectedRevision: 3 }, 'review', 'create')).toBe(false);
   });
 
   it.each(['hadron_update_node', 'hadron_update_task', 'hadron_update_review'])(
