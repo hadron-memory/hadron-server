@@ -56,7 +56,7 @@ import {
   AgentNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
-import { isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
+import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
 import {
@@ -833,6 +833,10 @@ export async function requireAgentMemoryGrant(
       );
     }
   }
+  // cor:acl:080:03 — both fresh attach and legacy-row re-role can leave an
+  // active item on a PUBLIC agent. Judge the locked agent and memory together
+  // here so neither door can retain non-PUBLIC covered knowledge (#1357).
+  await assertLinkAllowedForPublicAgent(agent.visibility, memory);
   return role;
 }
 

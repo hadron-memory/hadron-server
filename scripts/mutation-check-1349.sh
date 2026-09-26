@@ -270,6 +270,9 @@ run "58 same-App install check read without the lock" "$H" \
 run "59 Agent.memoryItems bypasses the owner record gate" "$AT" \
   "if (mem.visibility === 'PUBLIC' && mem.appId == null && mem.ownerUserId == null) {" \
   "if (mem.visibility === 'PUBLIC' && mem.appId == null) {"
+# #1357 round 11 (@copilot): legacy re-role must share the PUBLIC link gate.
+run "60 re-role bypasses PUBLIC knowledge congruence" "$H" \
+  "  await assertLinkAllowedForPublicAgent(agent.visibility, memory);" ""
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

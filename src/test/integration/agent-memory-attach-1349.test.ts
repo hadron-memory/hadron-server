@@ -1469,6 +1469,23 @@ describe('#1357 round 6 (@copilot, PR #1357)', () => {
     expect(await db.agentMemoryItem.count({ where: { memoryId: appMem.id } })).toBe(0);
   });
 
+  it('re-role cannot retain non-public covered knowledge on a PUBLIC agent', async () => {
+    const { agentId } = await agentWithApp(attackerOrgId, 'legacy-public-rerole');
+    await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
+    const memory = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId,
+        urn: `attacker-${suffix}:legacy-public-rerole`, name: 'legacy-public-rerole',
+        class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+    });
+    const item = await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: memory.id, role: 'read' },
+    });
+    const r = await gql(key.attacker!, SET_ROLE, { g: agentId, m: memory.id, r: 'read' });
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors![0]!.message).toContain('PUBLIC agent');
+    expect((await db.agentMemoryItem.findUniqueOrThrow({ where: { id: item.id } })).role).toBe('read');
+  });
+
   it('re-role refuses a legacy system-memory item after the shared memory gate', async () => {
     const admin = await db.user.create({
       data: { id: generateId(), handle: `padmin-role-${suffix}`, githubUsername: `padmin-role-${suffix}`, roles: ['ADMIN'] },

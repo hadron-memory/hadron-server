@@ -14,7 +14,6 @@ import { encryptToken } from '../../../lib/tokenCrypto.js';
 import {
   assertMemoryVisibilityChangeAllowed,
   revokeLinksForeignToTenant,
-  assertLinkAllowedForPublicAgent,
 } from '../../../lib/agentPublicCongruence.js';
 import {
   backfillMemoryEmbeddings,
@@ -1657,16 +1656,9 @@ export const memoryMutations = {
       // transfer or a membership revocation committing in between would
       // otherwise let a caller who no longer administers it write the grant.
       await requireOwnerOrOrgRole(txCtx, lockedAgent, 'ADMIN');
-      // #1349 — THE MEMORY-SIDE GATE. The agent gate above says the caller may
-      // configure this agent; it says nothing about the memory they are handing
-      // it. Runs BEFORE the class checks below so a caller who cannot read the
-      // memory learns nothing about its class (that refusal names the class).
+      // #1349 — THE MEMORY-SIDE GATE. It checks capability, class and PUBLIC
+      // congruence AFTER concealing an unreadable memory; re-role shares it.
       const grantedRole = await requireAgentMemoryGrant(txCtx, lockedAgent, memory, role, memoryRef);
-      // Class restrictions live in requireAgentMemoryGrant, shared with re-role.
-      // cor:acl:080:03 — a PUBLIC agent may reference only PUBLIC knowledge:
-      // reject linking a covered (non-per-user, non-app-scoped), non-PUBLIC
-      // memory to a PUBLIC agent.
-      await assertLinkAllowedForPublicAgent(lockedAgent.visibility, memory);
       // Upsert semantics (#501): granting is idempotent — re-attaching an
       // already-attached memory updates the role, and a soft-deleted grant
       // row (which still occupies the @@unique(agentId, memoryId) slot) is
