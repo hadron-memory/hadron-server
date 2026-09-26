@@ -2864,7 +2864,8 @@ export const typeDefs = `#graphql
     id: ID!
     appId: ID!
     """
-    The App's canonical URN, as a scalar identity suitable for cross-App
+    The App's canonical URN (the same value App.urn returns, e.g.
+    hrn:app:acme.com:team), as a scalar identity suitable for cross-App
     worker lists. Null when the caller cannot inspect this App's workers. This
     intentionally does not return the App object, whose nested keys and
     members have a narrower read audience.

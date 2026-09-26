@@ -47,7 +47,7 @@ import { resolveMemoryRoot } from './chat-scope.js';
 import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
-import { participantAppIds } from '../../../lib/auth/appParticipation.js';
+import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import {
   type Context,
   requireOrgRole,
@@ -56,6 +56,7 @@ import {
   isAppParticipant,
   isPlatformAdmin,
   clampListTake,
+  safeCanonicalUrn,
 } from './resolvers.helpers.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
@@ -155,15 +156,15 @@ export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promis
 
 /**
  * Batch form of the worker-read audience, as a `where` over workers. Ordinary
- * user principals delegate to the shared App-participation set
- * (`participantAppIds`) rather than spelling its AppMember / org-CONTRIBUTOR /
- * user-owner arms again; that set is bounded by the caller's own memberships.
+ * user principals delegate to the shared App-participation predicate
+ * (`participantAppWhere`, the builder `participantAppIds` itself runs) rather
+ * than spelling its AppMember / org-CONTRIBUTOR / user-owner arms again.
  * The two caller-specific arms stay here: a pure App key reaches only itself,
  * while a platform admin reaches every org App plus their own user-owned Apps.
  *
- * The platform arm is a RELATION filter, not an id list (#1347 review): as an
- * id list it materialized every org App on the server into `appId IN (…)`,
- * growing with the whole tenant base. The differential test in
+ * Every arm is a RELATION filter, not an id list (#1347 review): as id lists
+ * the platform arm materialized every org App on the server, and an org
+ * CONTRIBUTOR's every App of the org, into `appId IN (…)`. The differential test in
  * resolvers.worker.test.ts pins every arm to `requireWorkerReadAccess`.
  */
 async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInput> {
@@ -171,13 +172,13 @@ async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInpu
     return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }
   if (!isPlatformAdmin(ctx)) {
-    const appIds = await participantAppIds(ctx.db, ctx, {
+    const apps = await participantAppWhere(ctx.db, ctx, {
       includeMemberships: true,
       // Worker history remains legible after uninstall; this surface lists
       // current holds from that retained roster too.
       includeUninstalled: true,
     });
-    return { appId: { in: appIds } };
+    return apps ? { app: { is: apps } } : { id: { in: [] } };
   }
   // `participantAppIds` deliberately omits the platform-role arm because its
   // existing consumers answer admins above their fold. Supply that caller arm
@@ -1925,9 +1926,12 @@ export const workerFieldResolvers = {
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
-      return loadAppUrnForWorker(ctx, worker.appId, {
+      const stored = await loadAppUrnForWorker(ctx, worker.appId, {
         memoize: info?.operation?.operation === 'query',
       });
+      // Canonical, as documented and as `App.urn` answers — the stored column
+      // may be a legacy shape (#1347 review).
+      return stored ? safeCanonicalUrn('app', stored) : null;
     },
     /**
      * The worker's URN (#991). See `resolveWorkerUrnField`.

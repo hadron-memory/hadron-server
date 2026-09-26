@@ -887,7 +887,7 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     expect(other.total).toBe(2);
     expect(other.items.map((row: { id: string }) => row.id)).not.toContain(second.id);
     expect(other.items).toHaveLength(1);
-    expect(await W.appUrn(other.items[0], {}, ctx(admin.id))).toBe(app.urn);
+    expect(await W.appUrn(other.items[0], {}, ctx(admin.id))).toBe(`hrn:app:${app.urn}`);
 
     const negativeOffset = await Q.heldWorkers(
       {},
@@ -1100,6 +1100,32 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     await expectCode(M.releaseWorker({}, { workerRef: unheld.id }, ctx(admin.id)), 'FORBIDDEN');
     await expectCode(M.releaseWorker({}, { workerRef: held.id }, ctx(admin.id)), 'FORBIDDEN');
     expect((await db.worker.findUniqueOrThrow({ where: { id: held.id } })).heldByUserId).toBe(admin.id);
+  });
+
+  it('appUrn is the App\'s CANONICAL URN, the value App.urn answers, even for a legacy stored shape (#1347 review)', async () => {
+    const legacy = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Legacy', urn: `${org.urn}::legacy-team` },
+    });
+    const held = await createHeld(legacy.id, 'Legacy Held', admin.id);
+    const page = await Q.heldWorkers({}, { userRef: admin.id }, ctx(admin.id));
+    const item = page.items.find((row: { id: string }) => row.id === held.id);
+    const expected = (resolvers as any).App.urn({ urn: legacy.urn });
+    expect(expected).toBe(`hrn:app:${org.urn}:legacy-team`);
+    expect(await W.appUrn(item, {}, ctx(admin.id), { operation: { operation: 'query' } })).toBe(expected);
+  });
+
+  it('the page binds no App-id list for an org CONTRIBUTOR, however many Apps the org has (#1347 review)', async () => {
+    for (let i = 0; i < 5; i++) {
+      await db.app.create({ data: { id: generateId(), organizationId: org.id, name: `Many ${i}`, urn: `${org.urn}:many-${i}` } });
+    }
+    await createHeld(app.id, 'Bounded', admin.id);
+    const appScans = vi.spyOn(db.app, 'findMany');
+    try {
+      expect((await Q.heldWorkers({}, { userRef: admin.id }, ctx(contrib.id))).total).toBe(1);
+      expect(appScans).not.toHaveBeenCalled();
+    } finally {
+      appScans.mockRestore();
+    }
   });
 
   it('a soft-deleted App\'s held workers are gone from the page and the total', async () => {

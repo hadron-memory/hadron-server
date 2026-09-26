@@ -56,8 +56,27 @@ export async function participantAppIds(
   principal: { userId?: string | null; impersonation?: { orgId: string } | null },
   opts: { includeMemberships?: boolean; includeUninstalled?: boolean } = {},
 ): Promise<string[]> {
+  const where = await participantAppWhere(db, principal, opts);
+  if (!where) return [];
+  const apps = await db.app.findMany({ where, select: { id: true } });
+  return apps.map((a) => a.id);
+}
+
+/**
+ * {@link participantAppIds} as a `where` over Apps rather than an id list —
+ * the SAME arms (that function now runs this one), for a caller that filters
+ * through the App relation instead of binding every participating App into
+ * `IN (…)`: an org CONTRIBUTOR participates in every App of the org, so the id
+ * list grows with the org (#1347 review). Only the caller's own org
+ * memberships are read eagerly. `null` means "no App at all".
+ */
+export async function participantAppWhere(
+  db: Pick<PrismaClient, 'orgMember'>,
+  principal: { userId?: string | null; impersonation?: { orgId: string } | null },
+  opts: { includeMemberships?: boolean; includeUninstalled?: boolean } = {},
+): Promise<Prisma.AppWhereInput | null> {
   const userId = principal.userId;
-  if (!userId) return [];
+  if (!userId) return null;
 
   // findMany + `deletedAt: null`, never findUnique on the composite PK: a
   // REVOKED org membership must not authorize
@@ -89,23 +108,19 @@ export async function participantAppIds(
   // append to its chat. A user-owned App is reachable here ONLY through the
   // owner arm above.
   if (opts.includeMemberships) arms.push({ members: { some: { userId } }, ownerUserId: null });
-  if (arms.length === 0) return [];
+  if (arms.length === 0) return null;
 
-  const apps = await db.app.findMany({
-    where: {
-      deletedAt: null,
-      ...(opts.includeUninstalled ? {} : { uninstalledAt: null }),
-      // The impersonation bound is applied ONCE, outside the arms, so it
-      // governs every arm including any added later. The first version bounded
-      // only the org arm, and `includeMemberships` then returned Apps the
-      // TARGET belongs to in any other org — contradicting this function's own
-      // documented one-org boundary (@copilot on PR #1207). `isAppParticipant`
-      // has the same structure for the same reason: it bounds once, above its
-      // arms, rather than per arm.
-      ...(principal.impersonation ? { organizationId: principal.impersonation.orgId } : {}),
-      OR: arms,
-    },
-    select: { id: true },
-  });
-  return apps.map((a) => a.id);
+  return {
+    deletedAt: null,
+    ...(opts.includeUninstalled ? {} : { uninstalledAt: null }),
+    // The impersonation bound is applied ONCE, outside the arms, so it
+    // governs every arm including any added later. The first version bounded
+    // only the org arm, and `includeMemberships` then returned Apps the
+    // TARGET belongs to in any other org — contradicting this function's own
+    // documented one-org boundary (@copilot on PR #1207). `isAppParticipant`
+    // has the same structure for the same reason: it bounds once, above its
+    // arms, rather than per arm.
+    ...(principal.impersonation ? { organizationId: principal.impersonation.orgId } : {}),
+    OR: arms,
+  };
 }
