@@ -274,4 +274,3 @@ describe('apply under concurrency (#1399 review)', () => {
     expect((await rulesOf(mem.id)).map((x) => x.role)).toEqual(['notes']);
   });
 });
-

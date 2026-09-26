@@ -241,4 +241,3 @@ export const memoryConfigApplyMutations = {
     ctx: Context,
   ) => applyMemoryConfigTemplate(ctx, args),
 };
-
