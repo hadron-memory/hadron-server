@@ -102,6 +102,10 @@ import {
   requireOrgRole,
   requireOwnerOrOrgRole,
   concealUnreadableDenial,
+  resolveMemoryRefForWrite,
+  canOpenMemoryRecordById,
+  refArgNotFoundError,
+  chosenRefArg,
   requireMemoryWriteAccess,
   MEMORY_INCLUDE,
   AGENT_INCLUDE,
@@ -221,6 +225,31 @@ async function resolveGranteeId(
   });
 }
 
+
+/**
+ * Refuse, with a typed error, a subscription mutation whose (memory, org) row
+ * does not exist (#1381). Before this it reached Prisma's `update` / `delete`
+ * and surfaced P2025's own text, server paths included. A caller who cannot
+ * open the memory gets resolveRefArg's memory miss, so the row's absence is
+ * not an oracle for the memory's existence either.
+ */
+async function requireMemorySubscription(
+  ctx: Context,
+  memoryId: string,
+  organizationId: string,
+  memoryRef: string,
+): Promise<void> {
+  const row = await ctx.db.memorySubscription.findUnique({
+    where: { memoryId_organizationId: { memoryId, organizationId } },
+    select: { memoryId: true },
+  });
+  if (row) return;
+  if (!(await canOpenMemoryRecordById(ctx, memoryId))) throw refArgNotFoundError('memory', memoryRef);
+  throw new GraphQLError('No subscription from that organization to this memory.', {
+    extensions: { code: 'NOT_FOUND' },
+  });
+}
+
 export const memoryMutations = {
     mergeMemories: async (
       _: unknown,
@@ -231,8 +260,11 @@ export const memoryMutations = {
       const deleteSourceMem = input.deleteSourceMem ?? false;
       const fields = new Set<NodeMergeField>(input.include ?? ALL_NODE_MERGE_FIELDS);
 
-      const { id: sourceId } = await resolveMemoryRef(ctx.db, rawSource);
-      const { id: targetId } = await resolveMemoryRef(ctx.db, rawTarget);
+      // #1381: both ends conceal AS THEY RESOLVE. The class and encryption
+      // refusals below run before authorization, so an unreadable memory used
+      // to answer with its class, its encryption state and its internal id.
+      const { id: sourceId } = await resolveMemoryRefForWrite(ctx, rawSource);
+      const { id: targetId } = await resolveMemoryRefForWrite(ctx, rawTarget);
       if (sourceId === targetId) {
         throw new GraphQLError('mergeMemories: source and target are the same memory.', {
           extensions: { code: 'MERGE_SOURCE_EQUALS_TARGET', memoryId: sourceId },
@@ -681,8 +713,14 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      // #1381: resolve the ref (id OR URN, cor:api:140:01) so a miss is a typed
+      // MEMORY_NOT_FOUND rather than Prisma's own error text, and conceal a
+      // memory the caller cannot open exactly as that miss. `id` is the
+      // resolved PK from here on.
+      const ref = id;
+      ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+      await concealUnreadableDenial(ctx, id, ref, () => requireOwnerOrOrgRole(ctx, memory, 'ADMIN'));
       // #725 — validate the property schema for well-formedness BEFORE it is
       // stored: a malformed schema is BAD_USER_INPUT, never a persisted garbage
       // blob. `null` clears it; the stored value is the normalized schema (so
@@ -988,24 +1026,28 @@ export const memoryMutations = {
       // group) gate on org-admin role on the parent org. Authz runs first
       // so unauthorized callers can't probe row state via the system-memory
       // guard or idempotency short-circuit.
-      if (memory.class === 'personal' || memory.class === 'private') {
-        if (!ctx.userId || memory.userId !== ctx.userId) {
-          throw new Error(`Forbidden: only the owner can delete a ${memory.class} memory`);
+      // #1381: a caller who cannot open this memory gets resolveMemoryRef's
+      // miss — the owner-only refusals below also named the memory's class.
+      await concealUnreadableDenial(ctx, resolvedId, id, async () => {
+        if (memory.class === 'personal' || memory.class === 'private') {
+          if (!ctx.userId || memory.userId !== ctx.userId) {
+            throw new Error(`Forbidden: only the owner can delete a ${memory.class} memory`);
+          }
+        } else if (memory.ownerUserId !== null) {
+          // spec 047: a user-owned memory is deletable only by its owner.
+          if (ctx.userId !== memory.ownerUserId) {
+            throw new Error('Forbidden: only the owner can delete this memory');
+          }
+        } else {
+          // Org-owned (the XOR CHECK guarantees ownerUserId is null here ⇒ org is
+          // set); assert it explicitly rather than fall back to an empty org id.
+          if (memory.organizationId === null) {
+            throw new Error('Invariant: org-owned memory has no organizationId');
+          }
+          // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
+          await requireOrgAction(ctx, memory.organizationId, 'memory.delete');
         }
-      } else if (memory.ownerUserId !== null) {
-        // spec 047: a user-owned memory is deletable only by its owner.
-        if (ctx.userId !== memory.ownerUserId) {
-          throw new Error('Forbidden: only the owner can delete this memory');
-        }
-      } else {
-        // Org-owned (the XOR CHECK guarantees ownerUserId is null here ⇒ org is
-        // set); assert it explicitly rather than fall back to an empty org id.
-        if (memory.organizationId === null) {
-          throw new Error('Invariant: org-owned memory has no organizationId');
-        }
-        // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
-        await requireOrgAction(ctx, memory.organizationId, 'memory.delete');
-      }
+      });
       // System-class memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
       // up with no brain via a stray deleteMemory call.
@@ -1434,8 +1476,11 @@ export const memoryMutations = {
       { id, token, expiresAt }: { id: string; token: string; expiresAt?: string },
       ctx: Context,
     ) => {
+      // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
+      const ref = id;
+      ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+      await concealUnreadableDenial(ctx, id, ref, () => requireOwnerOrOrgRole(ctx, memory, 'ADMIN'));
       const encrypted = encryptToken(token);
       return ctx.db.memory.update({
         where: { id },
@@ -1643,6 +1688,11 @@ export const memoryMutations = {
       // subscribable. ORGANIZATION/GROUP/NULL (personal/private/app/system)
       // are all rejected (PRIVATE is gone from the enum).
       if (memory.visibility !== 'PUBLIC') {
+        // #1381: that refusal confirmed a non-PUBLIC memory exists. A caller who
+        // cannot open it gets resolveRefArg's own miss instead.
+        if (!(await canOpenMemoryRecordById(ctx, resolvedMemoryId))) {
+          throw refArgNotFoundError('memory', chosenRefArg({ ref: memoryRef, id: memoryId })!);
+        }
         throw new Error('Only public memories can be subscribed to by other organizations');
       }
 
@@ -1678,7 +1728,17 @@ export const memoryMutations = {
       const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
       const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+      // #1381: a caller who cannot open the memory gets resolveRefArg's own miss.
+      const chosen = chosenRefArg({ ref: memoryRef, id: memoryId })!;
+      await concealUnreadableDenial(
+        ctx,
+        resolvedMemoryId,
+        chosen,
+        () => requireOwnerOrOrgRole(ctx, memory, 'ADMIN'),
+        () => refArgNotFoundError('memory', chosen),
+      );
+      // A missing subscription is a typed NOT_FOUND, not Prisma's P2025 text.
+      await requireMemorySubscription(ctx, resolvedMemoryId, resolvedOrgId, chosen);
       return ctx.db.memorySubscription.update({
         where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
         data: { role: role as Role },
@@ -1723,9 +1783,23 @@ export const memoryMutations = {
         });
         return m?.role === 'ADMIN' || m?.role === 'OWNER';
       };
-      if (!(await isOwnerAdmin()) && !(await isSubscriberAdmin())) {
-        throw new Error('Forbidden');
-      }
+      // #1381: a caller who cannot open the memory gets resolveRefArg's own miss.
+      const chosen = chosenRefArg({ ref: memoryRef, id: memoryId })!;
+      await concealUnreadableDenial(
+        ctx,
+        resolvedMemoryId,
+        chosen,
+        async () => {
+          if (!(await isOwnerAdmin()) && !(await isSubscriberAdmin())) {
+            throw new Error('Forbidden');
+          }
+        },
+        () => refArgNotFoundError('memory', chosen),
+      );
+      // Being an admin of the SUBSCRIBING org passes the gate above for any
+      // memory at all, so the missing-row case must conceal too — it used to
+      // surface Prisma's own error text, server paths included.
+      await requireMemorySubscription(ctx, resolvedMemoryId, resolvedOrgId, chosen);
       await ctx.db.memorySubscription.delete({
         where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
       });
@@ -1733,11 +1807,14 @@ export const memoryMutations = {
     },
 
     syncMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
+      const ref = id;
+      ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({
         where: { id },
         include: { organization: true },
       });
-      await requireOwnerOrOrgRole(ctx, memory, 'CONTRIBUTOR');
+      await concealUnreadableDenial(ctx, id, ref, () => requireOwnerOrOrgRole(ctx, memory, 'CONTRIBUTOR'));
 
       const result = await syncGraphFromGithub(memory);
       if (result.error) throw new Error(result.error);
@@ -1753,8 +1830,11 @@ export const memoryMutations = {
     },
 
     pushMemoryToGit: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
+      const ref = id;
+      ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+      await concealUnreadableDenial(ctx, id, ref, () => requireOwnerOrOrgRole(ctx, memory, 'ADMIN'));
 
       const { pushMemoryToGit: push } = await import('../../../integrations/github/pushMemoryToGit.js');
       const result = await push(id);
@@ -1935,16 +2015,19 @@ export const memoryMutations = {
       // Auth: the App-key path (same org — the SECRET-mode flow) OR the
       // memory's OWNER (private memories are owner-only; spec 041 makes
       // self-encryption a first-class user action).
-      if (ctx.appId) {
-        const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
-        if (memory.organizationId !== app.organizationId) {
-          throw new Error('Forbidden: memory does not belong to this app\'s organization');
+      // #1381: a caller who cannot open this memory gets resolveMemoryRef's miss.
+      await concealUnreadableDenial(ctx, resolvedMemoryId, memoryId, async () => {
+        if (ctx.appId) {
+          const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+          if (memory.organizationId !== app.organizationId) {
+            throw new Error('Forbidden: memory does not belong to this app\'s organization');
+          }
+        } else if (!ctx.userId || memory.userId !== ctx.userId) {
+          throw new GraphQLError('Only the memory owner (or an org App) may encrypt it.', {
+            extensions: { code: 'FORBIDDEN' },
+          });
         }
-      } else if (!ctx.userId || memory.userId !== ctx.userId) {
-        throw new GraphQLError('Only the memory owner (or an org App) may encrypt it.', {
-          extensions: { code: 'FORBIDDEN' },
-        });
-      }
+      });
       // Class gate (D-2026-07-06-B, #516 resolved): 'private' is the ONLY
       // encryptable class — no exceptions. Tier 2.5's SECRET-mode memories are
       // now born class='private' (resolvers.mutation.session.ts) and the anon→

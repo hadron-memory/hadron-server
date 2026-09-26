@@ -4,6 +4,7 @@ import {
   hasSchemePrefix,
 } from '../../../lib/urn.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -234,8 +235,10 @@ export const sessionQueries = {
         // #250: deny a memory the caller can't read. Return [] (not a thrown
         // Forbidden) to avoid leaking existence — mirrors nodeById returning
         // null for an out-of-scope target.
+        // #1381: an unreadable memory answers as resolveMemoryRef's miss, not
+        // with an empty page that a missing memory never produces.
         if (accessibleMemoryIds !== null && !accessibleMemoryIds.includes(resolvedMemoryId)) {
-          return [];
+          throw new MemoryNotFoundError(memoryId);
         }
         memoryScopeId = resolvedMemoryId;
       }
