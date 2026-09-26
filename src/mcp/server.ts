@@ -27,7 +27,7 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
-import { clearNodeAuthorship } from '../lib/nodeAuthorship.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
@@ -3132,7 +3132,7 @@ export function createMcpServerInstance(
               );
             }
             const changes = diffNodeChanges(current, upsertArgs.update);
-            sectionChanged = changes.length > 0;
+            sectionChanged = authoredContentChanged(changes);
             if (changes.length > 0) {
               await createNodeRevision(tx, {
                 id: generateId(),
@@ -5489,7 +5489,7 @@ export function createMcpServerInstance(
                 }),
               }),
             });
-            if (changedFields.length > 0) Object.assign(data, clearNodeAuthorship());
+            if (authoredContentChanged(changedFields)) Object.assign(data, clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })

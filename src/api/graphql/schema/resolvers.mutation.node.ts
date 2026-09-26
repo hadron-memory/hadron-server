@@ -101,7 +101,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
-import { carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
+import { authoredContentChanged, carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
   ancestorLocs,
@@ -1081,7 +1081,7 @@ export async function writeNodeCore(
               ...updatePayload,
               // The snapshot above keeps the old author. The new live content
               // has no verified author until the attestation/human gates land.
-              ...(changes.length > 0 ? clearNodeAuthorship() : {}),
+              ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
               revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
@@ -1275,7 +1275,8 @@ export async function writeNodeCore(
                 ...upsertArgs.update,
                 ...(opts?.copiedAuthorship
                   ? carryNodeAuthorship(opts.copiedAuthorship)
-                  : authoritative ? clearNodeAuthorship() : {}),
+                  : authoritative && (mode === 'create' || authoredContentChanged(diffNodeChanges(authoritative, suppliedForDiff)))
+                    ? clearNodeAuthorship() : {}),
                 revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted

@@ -36,3 +36,8 @@ export function clearNodeAuthorship(): NodeAuthorshipStamp {
     authoredAt: null,
   };
 }
+
+/** Address and ordering changes carry the same authored content. */
+export function authoredContentChanged(changes: readonly string[]): boolean {
+  return changes.some((field) => field !== 'memoryId' && field !== 'loc' && field !== 'seq');
+}
