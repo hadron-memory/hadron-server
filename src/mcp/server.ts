@@ -7682,18 +7682,29 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // together precisely so this stays a single test).
         ...(includeEnded ? {} : { endedAt: null }),
       };
-      const [sessions, total] = await Promise.all([
-        db.session.findMany({
-          where,
-          orderBy: { startedAt: 'desc' },
-          take,
-          select: {
-            id: true, startedAt: true, endedAt: true, type: true, plan: true,
-            appId: true, workerId: true,
-          },
-        }),
-        db.session.count({ where }),
-      ]);
+      // Both reads share ONE repeatable-read snapshot (Codex P2 + Copilot on
+      // the first head): as independent READ COMMITTED statements they could
+      // straddle a concurrent hadron_start_session — count sees 10, the insert
+      // lands, findMany then returns a DIFFERENT 10 that quietly drops the
+      // oldest while total === length reports "not truncated". That is the
+      // absence-as-reaped ambiguity this tool exists to kill, reopened in a
+      // race window; one snapshot closes it.
+      const [sessions, total] = await db.$transaction(
+        async (tx) => {
+          const rows = await tx.session.findMany({
+            where,
+            orderBy: { startedAt: 'desc' },
+            take,
+            select: {
+              id: true, startedAt: true, endedAt: true, type: true, plan: true,
+              appId: true, workerId: true,
+            },
+          });
+          const count = await tx.session.count({ where });
+          return [rows, count] as const;
+        },
+        { isolationLevel: 'RepeatableRead' },
+      );
       if (sessions.length === 0) {
         return textResult(
           includeEnded
