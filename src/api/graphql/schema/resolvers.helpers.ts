@@ -773,7 +773,14 @@ export async function requireAgentMemoryGrant(
     //
     // Loosening this guard on that premise would have been a change made for a
     // case that cannot occur, so it stays strict.
-    if (agent.visibility === 'PUBLIC') {
+    // Only for a COVERED memory, exactly as publication judges it (@codex,
+    // PR #1357): an App-scoped or strict-owner memory is not part of any
+    // public surface — the fold confines it to its own App — so
+    // assertAgentPublicAllowed ignores such links. Without the same exemption
+    // here, attach-then-publish succeeded (reachable by a platform admin, who
+    // can read and write an App-scoped memory) while publish-then-attach was
+    // refused: one invariant, two answers depending on order.
+    if (agent.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory)) {
       throw new GraphQLError(
         'A PUBLIC agent may hold read-only knowledge only — publishing it would grant write access to every organization that installs it.',
         { extensions: { code: 'FORBIDDEN', reason: 'PUBLIC_AGENT_READ_WRITE' } },

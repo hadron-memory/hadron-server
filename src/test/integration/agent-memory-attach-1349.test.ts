@@ -1336,3 +1336,73 @@ describe('#1357 round 4 — the in-transaction congruence check on a transfer', 
     }
   });
 });
+
+describe('#1357 round 5 (@codex, PR #1357)', () => {
+  const RENAME = `mutation($r: ID!, $u: String!) { updateAgent(ref: $r, urn: $u) { urn } }`;
+
+  it('rename race, OLDER sync first: a rename committing inside another\'s window still converges on the latest URN', async () => {
+    const base = `attacker-${suffix}`;
+    const sys = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, urn: `${base}:ren-a-system`, name: 'ren System', class: 'system' } as never,
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'ren', urn: `${base}:ren-a`, systemMemoryId: sys.id } as never,
+    });
+    // Request 2 (→ ren-c) has already read the agent at ren-a. Request 1
+    // (→ ren-b) then runs to completion — its own sync included — before
+    // request 2's transaction starts.
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    let staged = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...a: unknown[]) => {
+      if (!staged) {
+        staged = true;
+        spy.mockImplementation(((...b: unknown[]) => real(...b)) as never);
+        const first = await gql(key.attacker!, RENAME, { r: agent.id, u: 'ren-b' });
+        expect(first.errors, JSON.stringify(first.errors)).toBeUndefined();
+        expect((await db.memory.findUniqueOrThrow({ where: { id: sys.id } })).urn).toBe(`${base}:ren-b-system`);
+      }
+      return real(...a);
+    }) as never);
+    try {
+      const second = await gql(key.attacker!, RENAME, { r: agent.id, u: 'ren-c' });
+      expect(staged).toBe(true);
+      expect(second.errors, JSON.stringify(second.errors)).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).urn).toBe(`${base}:ren-c`);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: sys.id } })).urn).toBe(`${base}:ren-c-system`);
+  });
+
+  it('a PUBLIC agent may hold READ-WRITE on an App-scoped memory — the same answer in either order', async () => {
+    // A platform admin can read and write an App-scoped memory, so both orders
+    // are reachable. App-scoped links are outside the covered set, which is how
+    // publication judges them; the attach guard now agrees.
+    const admin = await db.user.create({
+      data: { id: generateId(), handle: `padmin2-${suffix}`, githubUsername: `padmin2-${suffix}`, roles: ['ADMIN'] },
+    });
+    const adminKey = (await mintUserApiKey(db, { userId: admin.id, label: 'k', createdBy: admin.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+    const { app } = await createDbAppWithKey(db, 'covered-order', attackerOrgId);
+    const scoped = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, appId: app.id, urn: `attacker-${suffix}:covered-order`, name: 'co', class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+    });
+    const urn = `hrn:mem:attacker-${suffix}:covered-order`;
+    // Order A: attach to a non-public agent, then publish it.
+    const a = await db.agent.create({ data: { id: generateId(), organizationId: attackerOrgId, name: 'co-a', urn: `attacker-${suffix}:co-a` } as never });
+    const attachA = await gql(adminKey, ATTACH, { g: a.id, m: urn, r: 'read-write' });
+    expect(attachA.errors, JSON.stringify(attachA.errors)).toBeUndefined();
+    const publish = await gql(adminKey, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { visibility } }`, { r: a.id });
+    expect(publish.errors, JSON.stringify(publish.errors)).toBeUndefined();
+    // Order B: attach to an already-PUBLIC agent.
+    const b = await db.agent.create({ data: { id: generateId(), organizationId: attackerOrgId, name: 'co-b', urn: `attacker-${suffix}:co-b`, visibility: 'PUBLIC' } as never });
+    const attachB = await gql(adminKey, ATTACH, { g: b.id, m: urn, r: 'read-write' });
+    expect(attachB.errors, JSON.stringify(attachB.errors)).toBeUndefined();
+    expect(await db.agentMemoryItem.count({ where: { memoryId: scoped.id, role: 'read-write', deletedAt: null } })).toBe(2);
+  });
+
+  it('control: the PUBLIC-agent read-write guard still applies to a COVERED memory', async () => {
+    const pubAgent = await db.agent.create({ data: { id: generateId(), organizationId: attackerOrgId, name: 'cov-pub', urn: `attacker-${suffix}:cov-pub`, visibility: 'PUBLIC' } as never });
+    const r = await gql(key.attacker!, ATTACH, { g: pubAgent.id, m: mem.ownKnowledge!.urn, r: 'read-write' });
+    expect(r.errors?.[0]?.extensions?.reason).toBe('PUBLIC_AGENT_READ_WRITE');
+  });
+});

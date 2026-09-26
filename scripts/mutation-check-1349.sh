@@ -116,7 +116,7 @@ run "9 concealment -> plain FORBIDDEN" "$H" \
   "  if (!canRead) throw new MemoryNotFoundError(ref);" \
   "  if (!canRead) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });"
 run "10 PUBLIC-agent read-write guard removed" "$H" \
-  "    if (agent.visibility === 'PUBLIC') {" "    if (false) {"
+  "    if (agent.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory)) {" "    if (false) {"
 run "11 agent-becomes-PUBLIC guard removed" "$A" \
   "  if (writable.length > 0) {" "  if (false) {"
 run "12 foreign-link revocation disabled" "$A" \
@@ -248,6 +248,10 @@ run "49 agent gate not re-run on the locked agent (attach)" "$M" \
   "      await requireOwnerOrOrgRole(txCtx, lockedAgent, 'ADMIN');" ""
 run "50 agent gate not re-run on the locked agent (re-role)" "$M" \
   "      await requireOwnerOrOrgRole({ ...ctx, db: tx } as Context, lockedAgent, 'ADMIN');" ""
+run "51 rename sync keyed on the stale pre-transaction URN" "$AG" \
+  "          oldAgentUrn: replacedUrn," "          oldAgentUrn: agent.urn,"
+run "52 PUBLIC-agent read-write guard ignores the covered set" "$H" \
+  "    if (agent.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory)) {" "    if (agent.visibility === 'PUBLIC') {"
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

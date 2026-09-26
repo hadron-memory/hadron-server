@@ -543,6 +543,12 @@ export const agentMutations = {
       // pathological loop fails loudly instead of spinning.
       const MAX_PUBLISH_ATTEMPTS = 3;
       let published: Awaited<ReturnType<typeof ctx.db.agent.update>> | undefined;
+      // The agent URN this request actually overwrote, read under the agent
+      // lock (@codex, PR #1357). The pre-transaction read can be stale: when a
+      // concurrent rename commits first, the URN this request replaces is
+      // THAT rename's, and a sync keyed on the stale read skips a memory the
+      // other request already advanced.
+      let predecessorUrn: string | undefined;
       for (let attempt = 1; ; attempt++) {
       try {
       published = await ctx.db.$transaction(async (tx) => {
@@ -593,6 +599,7 @@ export const agentMutations = {
         const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
           SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
         `;
+        predecessorUrn = lockedRow?.urn;
         if (visibility === 'PUBLIC') {
           // Re-scan the link set now that the agent row is LOCKED (#1364,
           // @codex on PR #1357). The scan above happened before this lock, so
@@ -756,11 +763,12 @@ export const agentMutations = {
       // write the agent's CURRENT state, read under the memory lock — not this
       // request's values — so two concurrent renames converge on the latest
       // (@codex, PR #1357). See syncSystemMemoryUrn / syncSystemMemoryName.
-      if (agent.systemMemoryId && newUrn !== undefined && newUrn !== agent.urn) {
+      const replacedUrn = predecessorUrn ?? agent.urn;
+      if (agent.systemMemoryId && newUrn !== undefined && newUrn !== replacedUrn) {
         await syncSystemMemoryUrn(ctx.db, {
           agentId: agent.id,
           systemMemoryId: agent.systemMemoryId,
-          oldAgentUrn: agent.urn,
+          oldAgentUrn: replacedUrn,
           actor: ctx.userId ?? ctx.clientId ?? null,
         }).catch((err) => {
           console.warn('[updateAgent] system memory URN sync failed:', err);
