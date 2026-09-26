@@ -21,7 +21,7 @@ import {
   AmbiguousUserRefError,
   UserNotFoundError,
 } from '../../../lib/entityRef/errors.js';
-import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
+import { isEmailUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
@@ -75,6 +75,8 @@ type AppRow = {
   organizationId: string | null;
   ownerUserId: string | null;
   uninstalledAt: Date | null;
+  /** Honoured by requireWorkerReadAccess whenever the row carries it (#1347 review). */
+  deletedAt?: Date | null;
 };
 
 const forbidden = (): GraphQLError =>
@@ -128,8 +130,16 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
  * the owner of a user-owned App. A pure App-key principal may read its OWN
  * App's staff (team automation follows the roster); impersonation reads are
  * bounded to the support session's single org (#876 class).
+ *
+ * An UNINSTALLED App's staff stay readable (the roster remains legible); a
+ * soft-DELETED App's do not. Every other reader already refused a deleted App
+ * on its own, but `worker(ref)` and `releaseWorker` load the row by id with
+ * `findUniqueOrThrow` and relied on this gate — so a participant could read a
+ * deleted App's worker while its own field masks (`maySeeWorkerInternals`)
+ * refused it. Found by the #1347 differential test; checked here, once.
  */
 export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
+  if (app.deletedAt) throw forbidden();
   if (ctx.impersonation) {
     if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
       throw forbidden();
@@ -1460,6 +1470,14 @@ export const workerQueries = {
         return { items: [], total: 0 };
       }
       throw err;
+    }
+    // An email is a PERSONAL field (`canSeeUserPersonalFields`: self, a shared
+    // org, or a platform admin). Resolving one for anybody else would let a
+    // caller who can read an App's workers — a direct App member from another
+    // org, or a pure App key — confirm a guessed email by the page coming back
+    // non-empty. For them the email names nobody, like a missing user.
+    if (isEmailUserRef(userRef) && !(await canSeeUserPersonalFields(ctx, heldByUserId))) {
+      return { items: [], total: 0 };
     }
 
     const readableAppIds = await workerReadableAppIds(ctx);

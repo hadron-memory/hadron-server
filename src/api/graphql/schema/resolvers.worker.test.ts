@@ -877,9 +877,11 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     expect(self.total).toBe(1);
     expect(self.items[0].id).toBe(first.id);
 
+    // By HANDLE: the holder shares no org with this viewer, so their email is
+    // not the viewer's to resolve (#1347 review; the email test below).
     const other = await Q.heldWorkers(
       {},
-      { userRef: 'held-other@example.com', limit: 1, offset: 1 },
+      { userRef: 'held-other', limit: 1, offset: 1 },
       ctx(admin.id),
     );
     expect(other.total).toBe(2);
@@ -1055,6 +1057,105 @@ describe('#1344 — heldWorkers across readable Apps', () => {
       expect(page.total).toBe(1);
       expect(page.items.map((row: { id: string }) => row.id)).toEqual([held.id]);
     }
+  });
+
+  it('an EMAIL userRef resolves only for a caller who may see that user\'s personal fields (#1347 review)', async () => {
+    await db.user.update({ where: { id: admin.id }, data: { handle: 'mail-target', email: 'mail-target@example.com' } });
+    const held = await createHeld(app.id, 'Mail Held', admin.id);
+    const ids = (page: { items: { id: string }[] }) => page.items.map((row) => row.id);
+    // A direct App member from no shared org reads the App's workers, but not
+    // the holder's email: the email must name nobody for them.
+    expect(await Q.heldWorkers({}, { userRef: 'mail-target@example.com' }, ctx(appMember.id))).toEqual({ items: [], total: 0 });
+    expect(ids(await Q.heldWorkers({}, { userRef: 'mail-target' }, ctx(appMember.id)))).toEqual([held.id]);
+    // A pure App key has no personal-field reach at all.
+    expect(await Q.heldWorkers({}, { userRef: 'mail-target@example.com' }, ctx(undefined, app.id))).toEqual({ items: [], total: 0 });
+    expect(ids(await Q.heldWorkers({}, { userRef: admin.id }, ctx(undefined, app.id)))).toEqual([held.id]);
+    // Self, and a caller sharing an org, still resolve it.
+    expect(ids(await Q.heldWorkers({}, { userRef: 'mail-target@example.com' }, ctx(admin.id)))).toEqual([held.id]);
+    expect(ids(await Q.heldWorkers({}, { userRef: 'MAIL-TARGET@example.com' }, ctx(contrib.id)))).toEqual([held.id]);
+  });
+
+  it('impersonation reads only the shared org\'s Apps, and never a user-owned App', async () => {
+    const personal = await db.app.create({
+      data: { id: generateId(), ownerUserId: contrib.id, name: 'Contrib Personal', urn: `imp-owner-${Date.now()}:personal` },
+    });
+    const orgHeld = await createHeld(app.id, 'Imp Org', admin.id);
+    await createHeld(personal.id, 'Imp Personal', admin.id);
+    const imp = (orgId: string): Context =>
+      ({ db, userId: contrib.id, roles: [], impersonation: { sessionId: 'imp', actorUserId: outsider.id, orgId, expiresAt: new Date(Date.now() + 60_000) } }) as Context;
+    // Unimpersonated, contrib reads both: the org App as a CONTRIBUTOR, the personal App as its owner.
+    expect((await Q.heldWorkers({}, { userRef: admin.id }, ctx(contrib.id))).total).toBe(2);
+    const inOrg = await Q.heldWorkers({}, { userRef: admin.id }, imp(org.id));
+    expect(inOrg.items.map((row: { id: string }) => row.id)).toEqual([orgHeld.id]);
+    expect(await Q.heldWorkers({}, { userRef: admin.id }, imp(generateId()))).toEqual({ items: [], total: 0 });
+  });
+
+  it('a soft-deleted App\'s worker is refused by the id point read and by releaseWorker too (#1347 review)', async () => {
+    const held = await createHeld(app.id, 'Deleted Point', admin.id);
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    await expectCode(Q.worker({}, { ref: held.id }, ctx(admin.id)), 'FORBIDDEN');
+    // releaseWorker runs the read gate before its idempotent return: an
+    // unheld worker there would otherwise hand back its row.
+    const unheld = await createHeld(app.id, 'Deleted Unheld', null);
+    await expectCode(M.releaseWorker({}, { workerRef: unheld.id }, ctx(admin.id)), 'FORBIDDEN');
+    await expectCode(M.releaseWorker({}, { workerRef: held.id }, ctx(admin.id)), 'FORBIDDEN');
+    expect((await db.worker.findUniqueOrThrow({ where: { id: held.id } })).heldByUserId).toBe(admin.id);
+  });
+
+  it('a soft-deleted App\'s held workers are gone from the page and the total', async () => {
+    await createHeld(app.id, 'Deleted App Held', admin.id);
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    for (const c of [ctx(admin.id), ctx(undefined, app.id)]) {
+      expect(await Q.heldWorkers({}, { userRef: admin.id }, c)).toEqual({ items: [], total: 0 });
+    }
+  });
+
+  it('DIFFERENTIAL: a held worker is on the page exactly when the point read worker(ref) admits it (#1347 review)', async () => {
+    // The page's App set (workerReadableAppIds, with a hand-written platform
+    // arm) and the point gate (requireWorkerReadAccess) are two implementations
+    // of one audience. This matrix pins them together across principal and
+    // App shapes, so a change to either that is not made to the other reds.
+    const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'other-org', urn: `other-org-${Date.now()}.com` } });
+    const shapes = {
+      live: app,
+      uninstalled: await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone`, uninstalledAt: new Date() } }),
+      deleted: await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Dead', urn: `${org.urn}:dead`, deletedAt: new Date() } }),
+      userOwned: await db.app.create({ data: { id: generateId(), ownerUserId: admin.id, name: 'Mine', urn: `diff-owner-${Date.now()}:mine` } }),
+      otherOrg: await db.app.create({ data: { id: generateId(), organizationId: otherOrg.id, name: 'Elsewhere', urn: `${otherOrg.urn}:team` } }),
+    };
+    await db.appMember.create({ data: { appId: shapes.uninstalled.id, userId: appMember.id, role: 'member' } });
+    const workers = new Map<string, string>();
+    for (const [shape, a] of Object.entries(shapes)) workers.set((await createHeld(a.id, `Diff ${shape}`, admin.id)).id, shape);
+    const imp = (userId: string, orgId: string): Context =>
+      ({ db, userId, roles: [], impersonation: { sessionId: 'imp', actorUserId: outsider.id, orgId, expiresAt: new Date(Date.now() + 60_000) } }) as Context;
+    const principals: Record<string, Context> = {
+      orgAdmin: ctx(admin.id),
+      contributor: ctx(contrib.id),
+      orgReader: ctx(orgReader.id),
+      appMember: ctx(appMember.id),
+      appReader: ctx(appReader.id),
+      outsider: ctx(outsider.id),
+      platformAdmin: { db, userId: outsider.id, roles: ['ADMIN'] },
+      appKey: ctx(undefined, app.id),
+      foreignAppKey: ctx(undefined, shapes.otherOrg.id),
+      hybrid: ctx(appMember.id, shapes.otherOrg.id),
+      impersonatedAdminInOrg: imp(admin.id, org.id),
+      impersonatedAdminElsewhere: imp(admin.id, otherOrg.id),
+    };
+    let admitted = 0;
+    for (const [who, c] of Object.entries(principals)) {
+      const page = await Q.heldWorkers({}, { userRef: admin.id, includeRetired: true, limit: 200 }, c);
+      const onPage = new Set(page.items.map((row: { id: string }) => row.id));
+      expect(page.total, who).toBe(onPage.size);
+      for (const [workerId, shape] of workers) {
+        const pointRead = await Q.worker({}, { ref: workerId }, c).then(() => true, () => false);
+        expect(onPage.has(workerId), `${who} / ${shape}`).toBe(pointRead);
+        if (pointRead) admitted++;
+      }
+    }
+    // Not vacuous in either direction: the matrix holds admits and refusals.
+    expect(admitted).toBeGreaterThan(10);
+    expect(admitted).toBeLessThan(Object.keys(principals).length * workers.size);
   });
 
   it('preloads multiple-live-session activity once for the page, including held-but-idle workers', async () => {

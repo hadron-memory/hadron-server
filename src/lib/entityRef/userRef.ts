@@ -72,13 +72,23 @@ export async function resolveUserRef(
  * `AmbiguousUserRefError` rather than resolving to an arbitrary one (wrong-grantee
  * hazard on a share).
  */
+/**
+ * Whether `resolveUserRefOrEmail` would read `ref` as an EMAIL — the one
+ * precedence rule, exported so a caller that must treat an email lookup
+ * differently (an email is a personal field) cannot restate it and drift.
+ */
+export function isEmailUserRef(ref: string): boolean {
+  const trimmed = ref.trim();
+  return trimmed.includes('@') && !/^(hrn|urn):/i.test(trimmed);
+}
+
 export async function resolveUserRefOrEmail(
   db: Pick<PrismaClient, 'user'>,
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
   const trimmed = ref.trim();
-  if (trimmed.includes('@') && !/^(hrn|urn):/i.test(trimmed)) {
+  if (isEmailUserRef(trimmed)) {
     const liveOnly = options?.includeDeleted ? {} : { deletedAt: null };
     // Exact (case-sensitive) first — `email` is case-sensitively unique, so this
     // is unambiguous when it hits.
