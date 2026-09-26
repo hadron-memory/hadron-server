@@ -15,7 +15,6 @@ import {
   computeEffectiveAccess,
   type ResolvedResource,
 } from '../../../lib/auth/effectiveAccess.js';
-import { appQueries } from './resolvers.query.app.js';
 import { agentQueries } from './resolvers.query.agent.js';
 import {
   globalSearch as runGlobalSearch,
@@ -37,6 +36,7 @@ import {
   canOpenMemoryRecordById,
   isMemoryReadableCached,
   isAuthorizationDenial,
+  requireOwnerOrOrgRole,
 } from './resolvers.helpers.js';
 
 /**
@@ -48,9 +48,9 @@ import {
  *  - memory → the record gate (`cor:api:140:03`: a caller who can open the
  *    record already knows the memory exists);
  *  - node → the node-content gate of its memory, the line `Query.node` draws;
- *  - every other kind → that kind's find-one query (`app(ref:)`,
- *    `agent(ref:)`, …). `null`, or an ordinary authorization denial, means
- *    "cannot open"; any other error propagates.
+ *  - every other kind → that kind's find-one query (`agent(ref:)`, …), or for
+ *    an App the gate `app(ref:)` applies once resolved. `null`, or an ordinary
+ *    authorization denial, means "cannot open"; any other error propagates.
  *
  * Deliberately NOT the audit's own `canRead`: that reports grants, and a
  * resource can be openable without one (a PUBLIC agent, for instance).
@@ -58,10 +58,15 @@ import {
 async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): Promise<boolean> {
   if (resolved.kind === 'memory') return canOpenMemoryRecordById(ctx, resolved.memory.id);
   if (resolved.kind === 'node') return isMemoryReadableCached(ctx, resolved.memory.id);
-  const findOne = (): Promise<unknown> => {
+  const findOne = async (): Promise<unknown> => {
     switch (resolved.kind) {
       case 'app':
-        return appQueries.app(null as never, { ref: resolved.app.id }, ctx);
+        // The App query's OWN gate, applied to the already-resolved (live) App
+        // — not the query itself, whose resolution step swallows EVERY error
+        // into null and would turn an outage into "not found" (@codex /
+        // @copilot, PR #1383).
+        await requireOwnerOrOrgRole(ctx, resolved.app, 'READER');
+        return resolved.app;
       case 'agent':
         return agentQueries.agent(null as never, { ref: resolved.agent.id }, ctx);
       case 'aiServiceConfig':

@@ -591,6 +591,27 @@ describe('#1381 — effectiveAccess (cor:acl:060:01, amended 2026-09-26)', () =>
     expect(wire(existing, ids.victimOrgUrn!)).toBe(wire(missing, `hrn:org:no-such-org-${suffix}`));
   });
 
+  it('a fault while judging an App is never masked as NOT_FOUND (@codex / @copilot, PR #1383)', async () => {
+    // app(ref:) swallows EVERY resolution error into null. Judging "can open"
+    // through it turned a fault in its re-resolution into NOT_FOUND for a
+    // caller who CAN open the App. The second app.findFirst is the one that
+    // re-resolution would issue; fail only that one.
+    const control = await audit('reader', ids.reader!, ids.victimAppUrn!);
+    expect(control.errors, 'precondition: the reader can open this App').toBeUndefined();
+    const real = db.app.findFirst.bind(db.app);
+    const fault = vi
+      .spyOn(db.app, 'findFirst')
+      .mockImplementationOnce(((...a: Parameters<typeof real>) => real(...a)) as never)
+      .mockRejectedValueOnce(new Error('injected app re-resolution failure'));
+    try {
+      const r = await audit('reader', ids.reader!, ids.victimAppUrn!);
+      expect(code(r)).not.toBe('NOT_FOUND');
+      expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    } finally {
+      fault.mockRestore();
+    }
+  });
+
   it('control: a reader self-auditing a memory they can open still gets the audit', async () => {
     const r = await audit('reader', ids.reader!, target.memUrn!.existing);
     expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();

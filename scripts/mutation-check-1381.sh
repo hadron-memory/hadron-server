@@ -200,6 +200,14 @@ run "33 effectiveAccess judges a node by the record gate" "$O" \
   "  if (resolved.kind === 'node') return isMemoryReadableCached(ctx, resolved.memory.id);" "  if (resolved.kind === 'node') return canOpenMemoryRecordById(ctx, resolved.memory.id);"
 run "34 effectiveAccess lets a find-one denial through" "$O" \
   "    if (isAuthorizationDenial(error)) return false;" ""
+# Reintroduces app(ref:)'s swallowing re-resolution itself (a faithful mutant;
+# calling appQueries.app would die on a missing import and "kill" for the
+# wrong reason).
+run "35 effectiveAccess re-resolves the App and swallows faults" "$O" \
+  "        await requireOwnerOrOrgRole(ctx, resolved.app, 'READER');
+        return resolved.app;" "        try { await resolveAppRef(ctx.db, resolved.app.id); } catch { return null; }
+        await requireOwnerOrOrgRole(ctx, resolved.app, 'READER');
+        return resolved.app;"
 run "25 missing subscription row does not conceal" "$M" \
   "  if (!(await canOpenMemoryRecordById(ctx, memoryId))) throw refArgNotFoundError('memory', memoryRef);" ""
 run "26 attachMemoryToApp" "$AM" \
