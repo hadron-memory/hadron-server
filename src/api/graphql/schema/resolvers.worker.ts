@@ -154,41 +154,46 @@ export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promis
 }
 
 /**
- * Batch form of the worker-read audience. Ordinary user principals delegate
- * to the shared App-participation set (`participantAppIds`) rather than
- * spelling its AppMember / org-CONTRIBUTOR / user-owner arms again. The two
- * caller-specific arms stay here: a pure App key reaches only itself, while a
- * platform admin reaches every live org App plus their own user-owned Apps.
+ * Batch form of the worker-read audience, as a `where` over workers. Ordinary
+ * user principals delegate to the shared App-participation set
+ * (`participantAppIds`) rather than spelling its AppMember / org-CONTRIBUTOR /
+ * user-owner arms again; that set is bounded by the caller's own memberships.
+ * The two caller-specific arms stay here: a pure App key reaches only itself,
+ * while a platform admin reaches every org App plus their own user-owned Apps.
+ *
+ * The platform arm is a RELATION filter, not an id list (#1347 review): as an
+ * id list it materialized every org App on the server into `appId IN (…)`,
+ * growing with the whole tenant base. The differential test in
+ * resolvers.worker.test.ts pins every arm to `requireWorkerReadAccess`.
  */
-async function workerReadableAppIds(ctx: Context): Promise<string[]> {
+async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInput> {
   if (!ctx.userId) {
-    return ctx.appId ? [ctx.appId] : [];
+    return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }
   if (!isPlatformAdmin(ctx)) {
-    return participantAppIds(ctx.db, ctx, {
+    const appIds = await participantAppIds(ctx.db, ctx, {
       includeMemberships: true,
       // Worker history remains legible after uninstall; this surface lists
       // current holds from that retained roster too.
       includeUninstalled: true,
     });
+    return { appId: { in: appIds } };
   }
-
   // `participantAppIds` deliberately omits the platform-role arm because its
   // existing consumers answer admins above their fold. Supply that caller arm
   // here while preserving strict ownership for user-owned Apps.
-  const apps = await ctx.db.app.findMany({
-    where: {
-      deletedAt: null,
-      OR: [
-        ...(ctx.impersonation ? [] : [{ ownerUserId: ctx.userId }]),
-        ctx.impersonation
-          ? { organizationId: ctx.impersonation.orgId }
-          : { organizationId: { not: null } },
-      ],
+  return {
+    app: {
+      is: {
+        OR: [
+          ...(ctx.impersonation ? [] : [{ ownerUserId: ctx.userId }]),
+          ctx.impersonation
+            ? { organizationId: ctx.impersonation.orgId }
+            : { organizationId: { not: null } },
+        ],
+      },
     },
-    select: { id: true },
-  });
-  return apps.map((app) => app.id);
+  };
 }
 
 type TeamAgentRow = {
@@ -1480,14 +1485,15 @@ export const workerQueries = {
       return { items: [], total: 0 };
     }
 
-    const readableAppIds = await workerReadableAppIds(ctx);
     const where: Prisma.WorkerWhereInput = {
       heldByUserId,
       ...(includeRetired ? {} : { retiredAt: null }),
-      appId: { in: readableAppIds },
-      // App keys can outlive their row's soft deletion in cached credentials;
-      // uninstalled is readable by contract, deleted is not.
-      app: { is: { deletedAt: null } },
+      AND: [
+        await workerReadableWhere(ctx),
+        // App keys can outlive their row's soft deletion in cached credentials;
+        // uninstalled is readable by contract, deleted is not.
+        { app: { is: { deletedAt: null } } },
+      ],
     };
     const [rows, total] = await Promise.all([
       ctx.db.worker.findMany({
