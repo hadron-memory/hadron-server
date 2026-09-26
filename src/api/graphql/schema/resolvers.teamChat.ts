@@ -212,6 +212,28 @@ async function locateTeamChatRoot(ctx: Context, app: AppRow): Promise<ChatRootRo
 }
 
 /**
+ * The Channel the App-ref convenience read (`teamChatMessages`) actually
+ * serves: its root is `locateTeamChatRoot`'s — the OLDEST live team-space
+ * `chats:team` — which need not be `App.defaultChannel`. A caller advancing a
+ * cursor around that read must capture THIS Channel, before the read, with
+ * the same context the resolver gets (#1362 review, Codex P2).
+ */
+export async function locateTeamChatChannel(
+  ctx: Context,
+  appId: string,
+): Promise<{ rootId: string; channelId: string; lastSeq: number } | null> {
+  const app = await ctx.db.app.findUnique({ where: { id: appId } });
+  if (!app) return null;
+  const root = await locateTeamChatRoot(ctx, app);
+  if (!root) return null;
+  const channel = await ctx.db.channel.findFirst({
+    where: { chatRootNodeId: root.id, deletedAt: null },
+    select: { id: true, lastSeq: true },
+  });
+  return channel ? { rootId: root.id, channelId: channel.id, lastSeq: channel.lastSeq } : null;
+}
+
+/**
  * First-post bootstrap: provision the Team Agent's shared app-class memory
  * (idempotent, race-safe) and create the `chats` parent, the chat root, and
  * the `chats:team:messages` container in it. Race-safe: a concurrent first

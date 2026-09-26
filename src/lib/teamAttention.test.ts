@@ -420,6 +420,28 @@ describe('explicit switchover', () => {
 describe('MCP parity and discovery gate', () => {
   const auth = (): AuthContext => ({ userId: user.id, appId: app.id, roles: ['READER'], clientId: `user:${user.id}` });
 
+  it('an explicit-session team-chat read advances the Channel it read, not a newer App default (#1362 review)', async () => {
+    // `channel` is the App's OLDEST team-space root, which is what the
+    // convenience read serves. Make a newer team-space root the App default.
+    const other = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:pilot-other`, name: 'other', class: 'app', appId: app.id },
+    });
+    const newer = await ensureChannelWithRoot(db, { memoryId: other.id, loc: 'chats:team', name: 'team', createdBy: user.id });
+    await db.app.update({ where: { id: app.id }, data: { defaultChannelId: newer.channel.id } });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: newer.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' },
+    });
+    await db.channel.update({ where: { id: newer.channel.id }, data: { lastSeq: 7 } });
+    await post('one');
+    await post('two');
+
+    const read = await createTestableMcpServer(auth()).callToolText('hadron_team_chat_read', { sinceSeq: 0, session: sessionId });
+    expect(read).toContain('two');
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
+      .toMatchObject({ lastSeenSeq: 2 });
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: newer.channel.id } })).toBeNull();
+  });
+
   it('a monitor read never advances the Worker cursor, even with the session bound to the transport (#1362 review)', async () => {
     await post('first');
     await post('second');

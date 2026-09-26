@@ -175,6 +175,7 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
@@ -8303,18 +8304,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
 
       try {
-        const captured = session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined)
-          ? await resolveAppRef(db, appRef).then((resolvedApp) => db.app.findUnique({
-              where: { id: resolvedApp.id },
-              select: { id: true, defaultChannel: { select: { id: true, lastSeq: true } } },
-            }))
-          : null;
         // Suppress the header-bound session only for user principals whose
         // explicit Worker session owns cursor attribution. A pure App key
         // needs its binding for the resolver's session-memory isolation.
         const resolverCtx = session && auth.userId
           ? { ...chatCtx(), sessionId: undefined }
           : chatCtx();
+        // Capture the Channel the resolver will actually read (its oldest
+        // team-space root, not necessarily App.defaultChannel), BEFORE the
+        // read, with the context the resolver gets (#1362 review, Codex P2).
+        const pilotAppId = session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined)
+          ? (await resolveAppRef(db, appRef)).id
+          : null;
+        const captured = pilotAppId ? await locateTeamChatChannel(resolverCtx, pilotAppId) : null;
         const page = await resolvers.Query.teamChatMessages(
           {},
           {
@@ -8327,11 +8329,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           },
           resolverCtx,
         );
-        if (captured?.defaultChannel && session) {
+        // Advance only if the resolver still serves the root captured above;
+        // a root that changed mid-read is skipped (a duplicate nudge, never a
+        // cursor moved on a Channel whose messages were not read).
+        const stillServed = captured && pilotAppId
+          ? (await locateTeamChatChannel(resolverCtx, pilotAppId))?.rootId === captured.rootId
+          : false;
+        if (captured && session && stillServed) {
           try {
             await maybeAdvanceOwnChannelRead(chatCtx(), {
-              channelId: captured.defaultChannel.id,
-              capturedHead: captured.defaultChannel.lastSeq,
+              channelId: captured.channelId,
+              capturedHead: captured.lastSeq,
               sessionRef: session,
               sinceSeq,
               beforeSeq,
