@@ -173,7 +173,9 @@ run "24 updateMemorySubscription skips the hidden refusal" "$M" \
 run "24a deleteMemorySubscription missing error" "$M" \
   "        () => refArgNotFoundError('memory', chosen)," "        () => new Error('Forbidden'),"
 run "24b deleteMemorySubscription lets an org error through" "$M" \
-  "        if (memoryHidden) throw refArgNotFoundError('memory', chosenRefArg({ ref: memoryRef, id: memoryId })!);" ""
+  "        if (memoryHidden && callerInput) {" "        if (false) {"
+run "24c deleteMemorySubscription converts faults too" "$M" \
+  "        if (memoryHidden && callerInput) {" "        if (memoryHidden) {"
 run "25 missing subscription row does not conceal" "$M" \
   "  if (!(await canOpenMemoryRecordById(ctx, memoryId))) throw refArgNotFoundError('memory', memoryRef);" ""
 run "26 attachMemoryToApp" "$AM" \

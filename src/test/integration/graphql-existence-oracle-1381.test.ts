@@ -451,6 +451,29 @@ describe('#1381 — controls: what concealment must not change', () => {
     expect(await sideEffects()).toEqual(before);
   });
 
+  it('deleteMemorySubscription: a MALFORMED orgRef on a hidden memory answers as the missing memory', async () => {
+    // Both-or-neither is caller input: a missing memory refuses before the org
+    // is parsed, so a hidden one must not answer BAD_USER_INPUT instead.
+    const q = `mutation($r: String!, $o: String!, $i: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o, orgId: $i) }`;
+    const existing = await gql('outsider', q, { r: target.memUrn!.existing, o: ids.otherOrg, i: ids.otherOrg });
+    const missing = await gql('outsider', q, { r: target.memUrn!.missing, o: ids.otherOrg, i: ids.otherOrg });
+    expect(code(missing)).toBe('NOT_FOUND');
+    expect(wire(existing, target.memUrn!.existing)).toBe(wire(missing, target.memUrn!.missing));
+  });
+
+  it('deleteMemorySubscription: a fault resolving the org propagates, even for a hidden memory', async () => {
+    const q = `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
+    const fault = vi.spyOn(db.organization, 'findFirst').mockRejectedValueOnce(new Error('injected org-resolution db failure'));
+    try {
+      const result = await gql('outsider', q, { r: target.memUrn!.existing, o: `oracle-1381-neutral-${suffix}` });
+      expect(fault).toHaveBeenCalled();
+      expect(code(result)).toBe('INTERNAL_SERVER_ERROR');
+      expect(result.errors![0]!.message).toContain('injected org-resolution db failure');
+    } finally {
+      fault.mockRestore();
+    }
+  });
+
   it('a fault inside the write authorization at resolution propagates, never as not-found', async () => {
     // resolveMemoryRefForWrite runs requireMemoryWriteAccess to decide
     // "hidden"; its first DB read is this `findUniqueOrThrow` (resolution

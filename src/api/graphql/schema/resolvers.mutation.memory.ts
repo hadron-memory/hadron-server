@@ -1,5 +1,6 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
+import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
@@ -1791,7 +1792,16 @@ export const memoryMutations = {
       // arriving first cannot tell an existing memory from a missing one.
       const memoryHidden = !(await canOpenMemoryRecordById(ctx, resolvedMemoryId));
       const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId }).catch((e: unknown) => {
-        if (memoryHidden) throw refArgNotFoundError('memory', chosenRefArg({ ref: memoryRef, id: memoryId })!);
+        // Only CALLER-INPUT errors are converted — a missing org, both-or-neither,
+        // a malformed URN — since a missing memory refuses before the org is ever
+        // parsed. A DB fault is not input: it propagates as itself, never as
+        // "no such memory" (@copilot, PR #1383).
+        const callerInput =
+          e instanceof UrnNotQualifiedError ||
+          (e instanceof GraphQLError && (e.extensions.code === 'NOT_FOUND' || e.extensions.code === 'BAD_USER_INPUT'));
+        if (memoryHidden && callerInput) {
+          throw refArgNotFoundError('memory', chosenRefArg({ ref: memoryRef, id: memoryId })!);
+        }
         throw e;
       });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
