@@ -48,7 +48,11 @@ export interface AiConfigTestOverride {
   endpoint?: string | null;
   /** Omitted = the saved style; null = the provider default. */
   apiStyle?: AiApiStyle | null;
-  /** Tests with this key instead of the stored one. Never stored, never echoed. */
+  /**
+   * Tests with this key instead of the stored one. Never stored, never echoed.
+   * Omitted = the stored key; null or '' = NO key, as updateAiServiceConfig
+   * reads them (it clears the key), so an edit that removes the key tests as one.
+   */
   apiKey?: string | null;
 }
 
@@ -81,7 +85,16 @@ export const AI_CONFIG_TEST_LIMIT = 5;
 export const AI_CONFIG_TEST_WINDOW_MS = 60_000;
 const recentTests = new Map<string, number[]>();
 
-function admitTest(key: string, now: number): number | null {
+/** Past this many tracked pairs, every stale one is dropped (#1385 review). */
+const LIMITER_SWEEP_AT = 1_000;
+
+/** Admit one test for `key` at `now`; the seconds to wait when refused. Exported for tests. */
+export function admitTest(key: string, now: number): number | null {
+  if (recentTests.size >= LIMITER_SWEEP_AT) {
+    for (const [k, times] of recentTests) {
+      if (times.every((t) => now - t >= AI_CONFIG_TEST_WINDOW_MS)) recentTests.delete(k);
+    }
+  }
   const kept = (recentTests.get(key) ?? []).filter((t) => now - t < AI_CONFIG_TEST_WINDOW_MS);
   if (kept.length >= AI_CONFIG_TEST_LIMIT) {
     recentTests.set(key, kept);
@@ -97,6 +110,11 @@ export function resetAiConfigTestLimiter(): void {
   recentTests.clear();
 }
 
+/** Test-only: how many caller/config pairs the limiter is tracking. */
+export function aiConfigTestLimiterSize(): number {
+  return recentTests.size;
+}
+
 // ── Secrets never leave ──────────────────────────────────────────────────
 
 /** Every secret string a key may appear as in provider error text. */
@@ -110,7 +128,9 @@ function secretsOf(rawKey: string | null): string[] {
   } catch {
     // not JSON — the whole key is the only secret
   }
-  return out.filter((s) => s.length >= 4);
+  // Every non-empty secret, however short: the write paths accept short keys,
+  // and "never echoed" has no length exception (#1385 review).
+  return out.filter((s) => s.length > 0);
 }
 
 const MAX_ERROR_CHARS = 500;
@@ -175,7 +195,10 @@ export async function testAiServiceConfig(
   const tested = { provider, endpoint, apiStyle };
 
   const overrideKey = override.apiKey || null;
-  const keySource: Source | 'NONE' = overrideKey ? 'OVERRIDE' : row.apiKeyEncrypted ? 'SAVED' : 'NONE';
+  // Omitted keeps the stored key; an explicit null/'' clears it, exactly as
+  // the write would (#1385 review), so it tests as "no key".
+  const keyCleared = override.apiKey !== undefined && !override.apiKey;
+  const keySource: Source | 'NONE' = overrideKey ? 'OVERRIDE' : !keyCleared && row.apiKeyEncrypted ? 'SAVED' : 'NONE';
   const used: AiConfigTestResult['used'] = {
     provider: override.provider ? 'OVERRIDE' : 'SAVED',
     model: override.model ? 'OVERRIDE' : 'SAVED',
@@ -196,7 +219,13 @@ export async function testAiServiceConfig(
       ok: false,
       latencyMs: 0,
       reply: null,
-      error: { code: 'NO_API_KEY', message: 'This config has no stored key; supply one to test with.', transient: false },
+      error: {
+        code: 'NO_API_KEY',
+        message: keyCleared
+          ? 'The edit clears this config\'s key; supply one to test with.'
+          : 'This config has no stored key; supply one to test with.',
+        transient: false,
+      },
     };
   }
 

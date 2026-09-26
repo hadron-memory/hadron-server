@@ -13,7 +13,13 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { encryptToken } from '../../lib/tokenCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { AI_CONFIG_TEST_LIMIT, resetAiConfigTestLimiter } from './testAiServiceConfig.js';
+import {
+  AI_CONFIG_TEST_LIMIT,
+  AI_CONFIG_TEST_WINDOW_MS,
+  admitTest,
+  aiConfigTestLimiterSize,
+  resetAiConfigTestLimiter,
+} from './testAiServiceConfig.js';
 
 const SAVED_KEY = 'sk-saved-0123456789';
 const OVERRIDE_KEY = 'sk-override-9876543210';
@@ -137,6 +143,22 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(await db.usageEvent.count({ where: { type: 'ai-config-test' } })).toBe(0);
   });
 
+  it('an override that CLEARS the key (null or empty) tests as no key, as the save would', async () => {
+    const cfg = await mkConfig({ organizationId: org.id });
+    for (const apiKey of [null, '']) {
+      const r = await test(cfg.id, ctxFor(admin.id), { apiKey });
+      expect(r, String(apiKey)).toMatchObject({ ok: false, used: { key: 'NONE' }, error: { code: 'NO_API_KEY' } });
+    }
+    expect(captured).toEqual([]);
+  });
+
+  it('a short key is scrubbed too', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, endpoint: `${origin}/echo-key/v4`, apiKeyEncrypted: encryptToken('zq9') });
+    const r = await test(cfg.id, ctxFor(admin.id));
+    expect(r.error.message).toContain('[redacted]');
+    expect(r.error.message).not.toContain('zq9');
+  });
+
   it('provider error text is scrubbed of the key before it is returned', async () => {
     const cfg = await mkConfig({ organizationId: org.id, endpoint: `${origin}/echo-key/v4` });
     const r = await test(cfg.id, ctxFor(admin.id));
@@ -193,6 +215,14 @@ describe('testAiServiceConfig (#1378)', () => {
     expect([event.keyOwnerType, event.organizationId]).toEqual(['HADRON_SERVER', org.id]);
     const counter = await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } });
     expect(counter.used).toBe(13);
+  });
+
+  it('the limiter forgets stale caller/config pairs instead of growing forever', () => {
+    for (let i = 0; i < 1000; i++) admitTest(`u:${i}`, 0);
+    expect(aiConfigTestLimiterSize()).toBe(1000);
+    // Past the window, the next admission sweeps every stale pair.
+    admitTest('fresh', AI_CONFIG_TEST_WINDOW_MS + 1);
+    expect(aiConfigTestLimiterSize()).toBe(1);
   });
 
   it('is rate-limited per caller and config', async () => {
