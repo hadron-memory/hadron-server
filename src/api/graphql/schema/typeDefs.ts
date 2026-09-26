@@ -692,6 +692,67 @@ export const typeDefs = `#graphql
     updatedAt: DateTime!
   }
 
+  "#1353 — compact unread metadata for one Worker/Channel pair. No message body is returned."
+  type TeamAttentionChannel {
+    channel: ID!
+    name: String!
+    unread: Int!
+    unreadMentions: Int!
+    firstUnreadSeq: Int
+    lastSeq: Int!
+  }
+
+  "#1353 — one live Worker that has relevant unread attention after the supplied token."
+  type TeamAttentionWorker {
+    worker: ID!
+    name: String!
+    urn: String
+    live: Boolean!
+    channels: [TeamAttentionChannel!]!
+  }
+
+  type TeamAttentionResult {
+    "Opaque signed snapshot. Adopt it only after every listed nudge is accepted."
+    token: String!
+    workers: [TeamAttentionWorker!]!
+  }
+
+  type TeamAttentionSwitchoverChannel {
+    channel: ID!
+    name: String!
+    fromSeq: Int!
+    throughSeq: Int!
+    unread: Int!
+    unreadMentions: Int!
+  }
+
+  type TeamAttentionSwitchoverWorker {
+    worker: ID!
+    name: String!
+    urn: String
+    channels: [TeamAttentionSwitchoverChannel!]!
+  }
+
+  type TeamAttentionSwitchoverPreview {
+    "Short-lived proof binding the exact operator, App, Workers, registers, cursors and heads shown here."
+    proof: String!
+    expiresAt: DateTime!
+    workers: [TeamAttentionSwitchoverWorker!]!
+  }
+
+  type TeamAttentionSwitchoverResult {
+    applied: Boolean!
+    workersAdvanced: Int!
+    channelsAdvanced: Int!
+  }
+
+  "#1353 — the exact Worker/Channel cursor advanced by markOwnTeamChatRead."
+  type OwnTeamChatReadState {
+    workerId: ID!
+    channelId: ID!
+    lastSeenSeq: Int!
+  }
+
   "Spec 049 Phase 5 — what an Agent's install-created register row is made with (plan §3.5)."
   type RegisterDefaults {
     mentionOnly: Boolean!
@@ -2685,6 +2746,99 @@ export const typeDefs = `#graphql
     taskState: NodeRoleRuleRefState
   }
 
+  "#1325 part (c) — which entity owns a MemoryConfigTemplate. Exactly one per template."
+  enum MemoryConfigTemplateOwnerType {
+    HADRON_SERVER
+    ORGANIZATION
+    USER
+    APP
+  }
+
+  """
+  #1325 part (c) — a reusable rulebook with exactly one owner, COPIED into a
+  memory's config when applied (never live-linked). Read and managed only by
+  its owner's managers: a platform admin (server), an org ADMIN/OWNER
+  (organization), the user themselves (user), the App's owner or org
+  ADMIN/OWNER (App). For anyone else it does not exist.
+  """
+  type MemoryConfigTemplate {
+    id: ID!
+    "Unique per owner among live templates; 1-64 lower-case letters, digits, '-' or '_'."
+    name: String!
+    description: String
+    "Applied as locked rules (#1334)."
+    required: Boolean!
+    ownerType: MemoryConfigTemplateOwnerType!
+    "ID of the owning organization, user or App; null for the server."
+    ownerId: ID
+    "Role-ascending."
+    rules: [MemoryConfigTemplateRule!]!
+    "Optimistic-concurrency token for the template AND its rules."
+    revision: Int!
+    createdAt: DateTime!
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  "#1325 part (c) — one rule of a template: a node-role rule without the config-only fields."
+  type MemoryConfigTemplateRule {
+    role: String!
+    authorTask: String
+    authorTaskId: ID
+    authorTaskState: NodeRoleRuleRefState!
+    validationTask: String
+    validationTaskId: ID
+    validationTaskState: NodeRoleRuleRefState!
+    "Documentation, not procedure: a deleted description node reads as NONE, never BROKEN."
+    descriptionNode: String
+    descriptionNodeId: ID
+    descriptionNodeState: NodeRoleRuleRefState!
+    strictSubRoles: Boolean!
+    writers: NodeRoleWriters!
+    validateBy: ContentValidator
+    enabled: Boolean!
+  }
+
+  type MemoryConfigTemplatesPage {
+    items: [MemoryConfigTemplate!]!
+    total: Int!
+  }
+
+  "Filter for memoryConfigTemplates(). Narrows the templates you manage; it never widens them."
+  input MemoryConfigTemplateFilter {
+    ownerType: MemoryConfigTemplateOwnerType
+    "ID or URN of the owner (with ownerType). An owner you do not manage matches nothing."
+    ownerRef: ID
+  }
+
+  "#1325 part (c) — a new template. \`rules\` are validated as a whole before anything is written."
+  input CreateMemoryConfigTemplateInput {
+    name: String!
+    description: String
+    required: Boolean
+    "Each role at most once (NODE_ROLE_RULE_EXISTS)."
+    rules: [CreateNodeRoleRuleInput!]
+  }
+
+  """
+  #1325 part (c) — change a template. An omitted field is unchanged;
+  description null clears it. \`rules\`, when given, REPLACES the template's
+  rules in one transaction.
+  """
+  input UpdateMemoryConfigTemplateInput {
+    name: String
+    description: String
+    required: Boolean
+    rules: [CreateNodeRoleRuleInput!]
+  }
+
+  type MemoryConfigTemplatePayload {
+    template: MemoryConfigTemplate!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
   type NodeRoleRulePayload {
     rule: NodeRoleRule!
     "Empty until #1327 adds its visibility warnings."
@@ -2692,7 +2846,8 @@ export const typeDefs = `#graphql
   }
 
   """
-  #1325 — a new rule. Task and description references are node IDs or URNs you
+  #1325 — a new rule, in a memory's config or in a template's rule list.
+  Task and description references are node IDs or URNs you
   can read; a node you cannot read is refused exactly like a missing one
   (NODE_NOT_FOUND), and a task reference must be a runnable task (NOT_A_TASK).
   """
@@ -6119,6 +6274,15 @@ export const typeDefs = `#graphql
     """
     memoryConfig(memoryRef: ID!): MemoryConfig!
 
+    "#1325 part (c) — one template you manage, by id; null for anything else, including a missing or deleted one."
+    memoryConfigTemplate(ref: ID!): MemoryConfigTemplate
+
+    """
+    #1325 part (c) — the templates you manage, name-ascending. Default page 50,
+    at most 200; limit 0 returns the count only.
+    """
+    memoryConfigTemplates(filter: MemoryConfigTemplateFilter, limit: Int, offset: Int): MemoryConfigTemplatesPage!
+
     """
     Spec 049 Phase 2 — paginated list of the scopes you may read, optionally
     narrowed by owner, by an App's resolution context, by name, and by the
@@ -6184,6 +6348,25 @@ export const typeDefs = `#graphql
     channelRef: the Channel's id or its address (\`Channel.chatRootUrn\`, #1171).
     """
     channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
+
+    """
+    #1353 internal pilot: compact attention for this operator's LIVE Workers.
+    The signed token is a pure poll watermark and never changes read state.
+    Omit since for all current unread. since:"now" is refused: discarding a
+    backlog requires the separate preview + confirmed switchover.
+
+    A router must adopt the returned token only after EVERY listed nudge was
+    accepted. On any partial failure retain the prior token; retries can
+    duplicate a nudge but cannot silently lose one.
+    """
+    teamAttention(appRef: ID!, since: String): TeamAttentionResult!
+
+    """
+    Preview the explicit baseline switchover for the operator's current live
+    Workers. Read-only: inspect the exact cursors, heads and unread counts,
+    then pass proof to confirmTeamAttentionSwitchover within ten minutes.
+    """
+    teamAttentionSwitchoverPreview(appRef: ID!): TeamAttentionSwitchoverPreview!
 
     """
     036-ai-service-config: resolve a config name for an execution context
@@ -8113,6 +8296,30 @@ export const typeDefs = `#graphql
     "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule."
     deleteNodeRoleRule(ref: ID!, expectedRevision: Int): Boolean!
 
+    """
+    #1325 part (c) — create a template. ownerRef names the organization, user
+    or App; omit it for HADRON_SERVER (platform admins only; refused
+    HADRON_SERVER_NOT_CONFIGURED when this server has no row) and for USER
+    (yourself — you own templates for no one else). A second live template of
+    the same name under the same owner is MEMORY_CONFIG_TEMPLATE_EXISTS.
+    """
+    createMemoryConfigTemplate(
+      ownerType: MemoryConfigTemplateOwnerType!
+      ownerRef: ID
+      input: CreateMemoryConfigTemplateInput!
+    ): MemoryConfigTemplatePayload!
+
+    """
+    #1325 part (c) — change a template by its id. With expectedRevision, a
+    template changed since you read it is refused CONFLICT
+    (extensions.currentRevision) and nothing is written. A template you may not
+    manage reads as MEMORY_CONFIG_TEMPLATE_NOT_FOUND.
+    """
+    updateMemoryConfigTemplate(ref: ID!, input: UpdateMemoryConfigTemplateInput!, expectedRevision: Int): MemoryConfigTemplatePayload!
+
+    "#1325 part (c) — soft-delete a template. Configs it was applied to keep their copies."
+    deleteMemoryConfigTemplate(ref: ID!, expectedRevision: Int): Boolean!
+
     "Spec 049 Phase 2 — update a scope you may write (auth as createScope). memoryRefs replaces the ordered list."
     updateScope(ref: ID!, input: UpdateScopeInput!): Scope!
 
@@ -8162,6 +8369,23 @@ export const typeDefs = `#graphql
     channelRef: the Channel's id or its address (\`Channel.chatRootUrn\`, #1171).
     """
     advanceChannelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!, seq: Int!): ChannelReadState!
+
+    """
+    #1353 internal pilot: explicitly advance the cursor owned by one exact,
+    caller-owned live Worker session on one readable registered Channel.
+    Shares the MCP mark-read gate; unlike advanceChannelReadState this door is
+    operator+App pilot-gated and session-pinned. Monotonic; a seq beyond the
+    captured Channel watermark is refused.
+    """
+    markOwnTeamChatRead(appRef: ID!, sessionRef: ID!, channelRef: ID!, seq: Int!): OwnTeamChatReadState!
+
+    """
+    Explicitly confirm a previously previewed #1353 switchover. The proof is
+    actor/App/scope-bound; any live-Worker, register or cursor drift rejects
+    the whole transaction. It advances only through the heads captured by the
+    preview, so messages arriving afterward remain unread.
+    """
+    confirmTeamAttentionSwitchover(appRef: ID!, proof: String!): TeamAttentionSwitchoverResult!
 
     # Chatbot revisions (org ADMIN)
     """

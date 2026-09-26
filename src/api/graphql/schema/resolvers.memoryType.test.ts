@@ -919,10 +919,13 @@ describe('deleteMemory (spec 013)', () => {
 
     it('org admin (non-owner) cannot delete', async () => {
       // adminUser is an ADMIN of orgA but is NOT the owner of personalMemory.
-      // The personal-class branch must reject regardless of org role.
+      // The personal-class branch must reject regardless of org role — and
+      // (#1381) since they cannot open it either, as a missing memory: the old
+      // "only the owner can delete a personal memory" confirmed it exists AND
+      // named its class.
       await expect(
         resolvers.Mutation.deleteMemory({}, { id: personalMemory.id }, adminCtx()),
-      ).rejects.toThrow(/only the owner can delete a personal memory/);
+      ).rejects.toThrow(`MEMORY_NOT_FOUND: ${personalMemory.id}`);
       const after = await db.memory.findUniqueOrThrow({
         where: { id: personalMemory.id },
       });
@@ -936,7 +939,7 @@ describe('deleteMemory (spec 013)', () => {
           { id: personalMemory.id },
           { db, userId: nonOwner.id },
         ),
-      ).rejects.toThrow(/only the owner can delete a personal memory/);
+      ).rejects.toThrow(`MEMORY_NOT_FOUND: ${personalMemory.id}`);
       const after = await db.memory.findUniqueOrThrow({
         where: { id: personalMemory.id },
       });
@@ -950,7 +953,7 @@ describe('deleteMemory (spec 013)', () => {
           { id: personalMemory.id },
           { db },
         ),
-      ).rejects.toThrow(/only the owner can delete a personal memory/);
+      ).rejects.toThrow(`MEMORY_NOT_FOUND: ${personalMemory.id}`);
     });
 
     it('personal-class authz is idempotent for the owner', async () => {

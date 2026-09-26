@@ -65,8 +65,19 @@ beforeEach(async () => {
 
 describe('caller authorization (who may CALL)', () => {
   it('a non-privileged caller gets FORBIDDEN, not an empty result', async () => {
+    // #1381 (cor:acl:060:01, amended 2026-09-26): the stranger cannot OPEN this
+    // org memory, so it now answers as a missing resource — FORBIDDEN confirmed
+    // that it exists.
     const memUrn = `hrn:memory:${graph.urn}`;
     await expect(call(member.id, memUrn, ctx({ userId: stranger.id, roles: ['READER'] }))).rejects.toThrow(
+      'Resource not found',
+    );
+    // FORBIDDEN is still the answer for a resource the caller CAN open but may
+    // not audit: a PUBLIC memory, auditing someone else.
+    const pub = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${graph.urn}-public`, name: 'pub', class: 'knowledge', visibility: 'PUBLIC' },
+    });
+    await expect(call(member.id, `hrn:memory:${pub.urn}`, ctx({ userId: stranger.id, roles: ['READER'] }))).rejects.toThrow(
       'Forbidden',
     );
   });
@@ -195,9 +206,14 @@ describe('memory — personal class (strict owner)', () => {
     });
   }
 
+  // #1381 (cor:acl:060:01, amended 2026-09-26): a memory conceals for EVERY
+  // caller who cannot open it, and a platform admin cannot open another user's
+  // personal memory (#676). So these audits are run by the OWNER — the rule's
+  // strict-owner principal — rather than by the admin, whose audit now answers
+  // NOT_FOUND (pinned in the last case of this block).
   it('the owner is the MEMORY_PRINCIPAL with full capabilities', async () => {
     const mem = await freeStandingPersonal(member.id);
-    const res = await call(member.id, `hrn:memory:${mem.urn}`, asAdmin());
+    const res = await call(member.id, `hrn:memory:${mem.urn}`, ctx({ userId: member.id, roles: ['READER'] }));
     expect(res.role).toBe('owner');
     expect(res.canRead && res.canWrite && res.canManage && res.canDelete).toBe(true);
     expect(res.grants).toEqual([{ source: 'MEMORY_PRINCIPAL', role: 'owner', via: null }]);
@@ -205,9 +221,14 @@ describe('memory — personal class (strict owner)', () => {
 
   it('a platform admin subject gets NO access (no bypass into personal)', async () => {
     const mem = await freeStandingPersonal(member.id);
-    const res = await call(admin.id, `hrn:memory:${mem.urn}`, asAdmin());
+    const res = await call(admin.id, `hrn:memory:${mem.urn}`, ctx({ userId: member.id, roles: ['READER'] }));
     expect(res.canRead).toBe(false);
     expect(res.grants).toEqual([]);
+  });
+
+  it('#1381: a platform admin cannot audit another user\'s personal memory at all — it answers as missing', async () => {
+    const mem = await freeStandingPersonal(member.id);
+    await expect(call(member.id, `hrn:memory:${mem.urn}`, asAdmin())).rejects.toThrow('Resource not found');
   });
 
   it('a MemoryShare writer grantee gets MEMORY_SHARE write', async () => {
@@ -215,7 +236,7 @@ describe('memory — personal class (strict owner)', () => {
     await db.memoryShare.create({
       data: { memoryId: mem.id, granteeId: stranger.id, grantorId: member.id, role: 'writer' },
     });
-    const res = await call(stranger.id, `hrn:memory:${mem.urn}`, asAdmin());
+    const res = await call(stranger.id, `hrn:memory:${mem.urn}`, ctx({ userId: member.id, roles: ['READER'] }));
     expect(res.canRead).toBe(true);
     expect(res.canWrite).toBe(true);
     expect(res.grants[0].source).toBe('MEMORY_SHARE');

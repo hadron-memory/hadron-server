@@ -64,6 +64,10 @@ import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import {
+  maybeAdvanceOwnChannelRead,
+  teamAttentionPilotOperatorEnabled,
+} from '../../../lib/teamAttention.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
 // listing and the shared chat-loc gate both have to exclude `chats:team`, and
@@ -205,6 +209,28 @@ async function locateTeamChatRoot(ctx: Context, app: AppRow): Promise<ChatRootRo
     orderBy: { createdAt: 'asc' },
     select: { id: true, memoryId: true, loc: true },
   });
+}
+
+/**
+ * The Channel the App-ref convenience read (`teamChatMessages`) actually
+ * serves: its root is `locateTeamChatRoot`'s — the OLDEST live team-space
+ * `chats:team` — which need not be `App.defaultChannel`. A caller advancing a
+ * cursor around that read must capture THIS Channel, before the read, with
+ * the same context the resolver gets (#1362 review, Codex P2).
+ */
+export async function locateTeamChatChannel(
+  ctx: Context,
+  appId: string,
+): Promise<{ rootId: string; channelId: string; lastSeq: number } | null> {
+  const app = await ctx.db.app.findUnique({ where: { id: appId } });
+  if (!app) return null;
+  const root = await locateTeamChatRoot(ctx, app);
+  if (!root) return null;
+  const channel = await ctx.db.channel.findFirst({
+    where: { chatRootNodeId: root.id, deletedAt: null },
+    select: { id: true, lastSeq: true },
+  });
+  return channel ? { rootId: root.id, channelId: channel.id, lastSeq: channel.lastSeq } : null;
 }
 
 /**
@@ -581,7 +607,7 @@ async function resolveMentionTokens(
 // to no App. Narrowing the type is the census: every consumer that assumed an
 // App had to answer for it at the compiler rather than at runtime
 // (hadron-portal's `review:narrowing-a-fetch-narrows-its-type`, same lesson).
-type ChannelTarget = { channelId: string; app: AppRow | null; root: ChatRootRow; incarnation: ChannelIncarnation };
+type ChannelTarget = { channelId: string; lastSeq: number; app: AppRow | null; root: ChatRootRow; incarnation: ChannelIncarnation };
 
 const channelNotFound = (ref: string): GraphQLError =>
   new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'CHANNEL_NOT_FOUND', channelRef: ref } });
@@ -705,6 +731,7 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
       loc: true,
       chatRootNodeId: true,
       incarnation: true,
+      lastSeq: true,
       memory: {
         select: {
           appId: true,
@@ -788,6 +815,7 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
   if (mode === 'post') await requireChannelPostAccess(ctx, app, channel.memoryId);
   return {
     channelId: channel.id,
+    lastSeq: channel.lastSeq,
     app,
     root: { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc },
     incarnation: { id: channel.id, value: channel.incarnation },
@@ -1217,7 +1245,35 @@ export const teamChatQueries = {
     // One gate, two entry points: the convenience runs the same host-memory
     // point check the Channel-addressed read runs (Copilot on PR #1169).
     if (!(await hostMemoryReadable(ctx, root.memoryId, app))) return { items: [], total: 0 };
-    return readChannelRoot(ctx, appId, root, args);
+    // The pilot changes ordinary-read semantics only for an allowlisted
+    // operator and an exact Worker session. Outside that boundary this extra
+    // lookup is not even made.
+    // The Worker session may belong to a different pilot App that registered
+    // this App's Channel. The helper verifies that session's App allowlist and
+    // register entry before advancing; the Channel host is not the pilot key.
+    const pilotChannel =
+      ctx.sessionId && teamAttentionPilotOperatorEnabled(ctx.userId)
+        ? await ctx.db.channel.findFirst({
+            where: { chatRootNodeId: root.id, deletedAt: null },
+            select: { id: true, lastSeq: true },
+          })
+        : null;
+    const page = await readChannelRoot(ctx, appId, root, args);
+    if (pilotChannel) {
+      try {
+        await maybeAdvanceOwnChannelRead(ctx, {
+          channelId: pilotChannel.id,
+          capturedHead: pilotChannel.lastSeq,
+          ...args,
+          page,
+        });
+      } catch (error) {
+        // A cursor write failing must leave the transcript readable. The safe
+        // failure mode is a duplicate future nudge, never hidden content.
+        console.warn('[teamChatMessages] pilot read-state advance failed:', error);
+      }
+    }
+    return page;
   },
 
   /** Spec 049 Phase 8 — read ANY Channel by ref; a Channel the caller may not read is "no match". */
@@ -1237,6 +1293,19 @@ export const teamChatQueries = {
     ctx: Context,
   ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
     const target = await resolveChannelTarget(ctx, channelRef, 'read');
-    return readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
+    const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
+    if (ctx.sessionId && teamAttentionPilotOperatorEnabled(ctx.userId)) {
+      try {
+        await maybeAdvanceOwnChannelRead(ctx, {
+          channelId: target.channelId,
+          capturedHead: target.lastSeq,
+          ...args,
+          page,
+        });
+      } catch (error) {
+        console.warn('[channelMessages] pilot read-state advance failed:', error);
+      }
+    }
+    return page;
   },
 };

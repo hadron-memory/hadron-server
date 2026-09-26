@@ -127,6 +127,8 @@ import {
   concealUnreadableDenial,
   concealUnreadableNodeDenial,
   nodeNotFoundError,
+  resolveMemoryRefForWrite,
+  isMemoryHiddenForWrite,
   type NodeInput,
   type NodeEdgeInput,
   type CreateNodeInput,
@@ -397,8 +399,11 @@ export async function writeNodeCore(
       if (input.abstract !== undefined && input.abstract !== null) {
         if (input.abstract.length > 2000) {
           const err = new NodeAbstractTooLongError(input.abstract.length);
+          // Same shared envelope as the edit-aware sites — for a create or
+          // full replacement it carries no currentLength (none exists), so
+          // the wire shape is identical to the previous literal.
           throw new GraphQLError(err.message, {
-            extensions: { code: err.name, length: err.length, max: err.max },
+            extensions: err.extensionFields(),
           });
         }
         const normalized: string | null =
@@ -1387,7 +1392,7 @@ export async function writeNodeCore(
  * genuine miss and a soft-deleted row map to the same not-found (no existence
  * oracle), while a malformed URN propagates as UrnNotQualifiedError (spec 022).
  */
-async function resolveExistingNode(ctx: Context, ref: string) {
+async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?: boolean }) {
   let id: string;
   try {
     ({ id } = await resolveNodeRef(ctx.db, ref));
@@ -1403,6 +1408,12 @@ async function resolveExistingNode(ctx: Context, ref: string) {
     throw new GraphQLError(`Node not found: "${ref}"`, {
       extensions: { code: 'NODE_NOT_FOUND', ref },
     });
+  // #1381: a node the caller will WRITE, in a memory it can neither write nor
+  // read, answers here — at resolution — exactly as a missing one. Refusing at
+  // the later write gate leaks through ORDER (see resolveMemoryRefForWrite).
+  if (opts?.forWrite && (await isMemoryHiddenForWrite(ctx, node.memoryId, 'node'))) {
+    throw nodeNotFoundError(ref);
+  }
   return node;
 }
 
@@ -1437,9 +1448,10 @@ async function resolveRelocationTarget(
   if (hasUrn) {
     const { memoryUrn, loc } = splitWholeNodeUrn(targetUrn as string);
     destLoc = loc;
-    ({ id: destMemoryId } = await resolveMemoryRef(ctx.db, memoryUrn));
+    // #1381: the destination is written, so it conceals as it resolves.
+    ({ id: destMemoryId } = await resolveMemoryRefForWrite(ctx, memoryUrn));
   } else {
-    ({ id: destMemoryId } = await resolveMemoryRef(ctx.db, targetMemoryRef as string));
+    ({ id: destMemoryId } = await resolveMemoryRefForWrite(ctx, targetMemoryRef as string));
     destLoc = source.loc;
   }
   try {
@@ -2898,7 +2910,7 @@ export const nodeMutations = {
       { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
       ctx: Context,
     ) => {
-      const source = await resolveExistingNode(ctx, sourceRef);
+      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
       const { destMemoryId, destLoc } = await resolveRelocationTarget(
         ctx, source, targetUrn, targetMemoryRef,
       );
@@ -3580,7 +3592,8 @@ export const nodeMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      // #1381: an unreadable memory answers as resolveMemoryRef's miss.
+      const { id: resolvedMemoryId } = await resolveMemoryRefForWrite(ctx, memoryId);
       await requireMemoryWriteAccess(ctx, resolvedMemoryId);
 
       // #725 — this bulk path bypasses writeNodeCore, so enforce the memory's

@@ -22,7 +22,9 @@ import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { appendChatMessage } from './chatRoot.js';
-import { getMemoryEncryptionInfo } from './nodeCrypto.js';
+import { encryptNodeFields, getMemoryEncryptionInfo } from './nodeCrypto.js';
+import { generateDataKey } from './crypto.js';
+import { sessionKeyCache } from './sessionKeyCache.js';
 import { advanceReadState, readStatesFor, renderAttentionSection } from './channelReadState.js';
 import { renderDerivedBlocks, resolveRegister } from './resolveRegister.js';
 
@@ -144,10 +146,72 @@ describe('read-state', () => {
     const section = await renderAttentionSection(db, run1);
     expect(section.text).toContain('nothing new for you (mention-only; channel is at 1)');
     await post('@iris look', ['iris']);
-    await post('@iris again', ['iris']);
-    expect((await renderAttentionSection(db, run1)).text).toContain('2 new mentions of you since seq 0 (channel is at 3)');
+    await post('@all look', ['all']);
+    await post('@team look', ['team']);
+    await post('@someone else', ['someone']);
+    expect((await renderAttentionSection(db, run1)).text).toContain('3 new mentions of you since seq 0 (channel is at 5)');
     await advanceReadState(db, { agentId: agent.id, appId: app.id }, channel.id, 2);
-    expect((await renderAttentionSection(db, run1)).text).toContain('1 new mention of you since seq 2 (channel is at 3)');
+    expect((await renderAttentionSection(db, run1)).text).toContain('2 new mentions of you since seq 2 (channel is at 5)');
+  });
+
+  it('an encrypted Channel\'s mention-only row reports new messages instead of "nothing new for you" (#1362 review)', async () => {
+    // The run's entry memory stays plaintext (headless runs refuse an
+    // encrypted entry); the REGISTERED Channel lives in an encrypted memory.
+    const encMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:sealed`, name: 'sealed', class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true },
+    });
+    sessionKeyCache.set('rs-encrypted', encMem.id, generateDataKey());
+    const made = await ensureChannelWithRoot(db, { memoryId: encMem.id, loc: 'chats:sealed', name: 'sealed', createdBy: admin.id });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: made.channel.id, attendeeAgentId: agent.id, role: 'BOTH', mentionOnly: true },
+    });
+    const enc = await getMemoryEncryptionInfo(db, encMem.id);
+    // Stored exactly as a real encrypted post is: the envelope becomes { __enc }.
+    const sealed = encryptNodeFields({ content: '@all look', data: { mentions: ['all'] } }, enc);
+    expect(sealed.data).toHaveProperty('__enc');
+    await appendChatMessage(
+      db,
+      { id: made.rootId, memoryId: encMem.id, loc: 'chats:sealed' },
+      enc,
+      async ({ tx, seq, msgNum }) =>
+        tx.node.create({
+          data: {
+            id: generateId(), memoryId: encMem.id, loc: `chats:sealed:messages:${msgNum}`, name: msgNum,
+            nodeType: 'chat-message', seq, content: sealed.content, data: sealed.data as never,
+          },
+        }),
+      { asChannel: true },
+    );
+    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    const { text } = await renderAttentionSection(db, run);
+    expect(text).toContain(`- sealed (${encMem.urn}:chats:sealed): new since seq 0 (channel is at 1; encrypted, so mentions were not filtered)`);
+    sessionKeyCache.clear();
+  });
+
+  it('an attendee\'s own broadcast is not attention for it; someone else\'s is (#1362 review)', async () => {
+    await db.registerEntry.updateMany({ where: { appId: app.id }, data: { mentionOnly: true } });
+    const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
+    const postAs = (body: string, mentions: string[], authorWorkerId?: string) =>
+      appendChatMessage(
+        db,
+        { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc },
+        enc,
+        async ({ tx, seq, msgNum }) =>
+          tx.node.create({
+            data: {
+              id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum,
+              nodeType: 'chat-message', seq, content: body,
+              data: { mentions, ...(authorWorkerId ? { authorWorkerId } : {}) },
+            },
+          }),
+        { asChannel: true },
+      );
+    // Iris is cast from this run's Agent: her team-wide post is the attendee's own.
+    await postAs('@all heads up', ['all'], worker.id);
+    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    expect((await renderAttentionSection(db, run)).text).toContain('nothing new for you (mention-only; channel is at 1)');
+    await postAs('@all from a human', ['all']);
+    expect((await renderAttentionSection(db, run)).text).toContain('1 new mention of you since seq 0 (channel is at 2)');
   });
 
   it('a cleanly reused Channel has no phantom attention and its next message clears old cursors (#1226)', async () => {

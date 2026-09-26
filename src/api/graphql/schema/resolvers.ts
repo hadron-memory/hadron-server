@@ -53,8 +53,14 @@ import { agentMutations } from './resolvers.mutation.agent.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
+import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAttention.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
+import {
+  memoryConfigTemplateFieldResolvers,
+  memoryConfigTemplateMutations,
+  memoryConfigTemplateQueries,
+} from './resolvers.memoryConfigTemplate.js';
 import { scopeMutations, scopeQueries, scopeFieldResolvers } from './resolvers.scope.js';
 import { channelMutations, channelQueries, channelFieldResolvers } from './resolvers.channel.js';
 import { registerMutations, registerQueries, registerFieldResolvers, readStateQueries, readStateMutations } from './resolvers.register.js';
@@ -84,6 +90,8 @@ export const resolvers = {
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
   NodeRoleRule: memoryConfigFieldResolvers.NodeRoleRule,
+  MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
+  MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
   Query: {
     ...nodeQueries,
     ...skillQueries,
@@ -96,8 +104,10 @@ export const resolvers = {
     ...appQueries,
     ...chatQueries,
     ...teamChatQueries,
+    ...teamAttentionQueries,
     ...teamWorkQueries,
     ...memoryConfigQueries,
+    ...memoryConfigTemplateQueries,
     ...scopeQueries,
     ...channelQueries,
     ...registerQueries,
@@ -134,8 +144,10 @@ export const resolvers = {
     ...workerMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
+    ...teamAttentionMutations,
     ...teamWorkMutations,
     ...memoryConfigMutations,
+    ...memoryConfigTemplateMutations,
     ...scopeMutations,
     ...channelMutations,
     ...registerMutations,

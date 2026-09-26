@@ -69,9 +69,15 @@ import { assertValidRuleRole } from '../../../lib/governedRole.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { generateId } from '../../../lib/id.js';
 
-type Writers = 'ALL' | 'OWNER' | 'ADMIN';
-type Validator = 'AGENT' | 'PLATFORM';
+export type Writers = 'ALL' | 'OWNER' | 'ADMIN';
+export type Validator = 'AGENT' | 'PLATFORM';
 type RefState = 'NONE' | 'OK' | 'BROKEN' | 'UNREADABLE';
+
+/** The reference columns a node-role rule and a template rule share (#1325 part c). */
+export type RuleRefRow = Pick<
+  NodeRoleRule,
+  'authorTaskId' | 'authorTaskRequired' | 'validationTaskId' | 'validationTaskRequired' | 'descriptionNodeId'
+>;
 
 export interface CreateNodeRoleRuleInput {
   role: string;
@@ -176,7 +182,7 @@ async function managedRule(ctx: Context, ref: string): Promise<NodeRoleRule & { 
 }
 
 /** Mutations stamp the actor; impersonation is read-only (#876). */
-function requireWriter(ctx: Context): string {
+export function requireWriter(ctx: Context): string {
   if (ctx.impersonation) throw new Error('Forbidden');
   if (!ctx.userId) throw new Error('Unauthenticated');
   return ctx.userId;
@@ -209,7 +215,7 @@ const REF_COLUMNS: Record<RefKind, { id: 'authorTaskId' | 'validationTaskId' | '
   descriptionNode: { id: 'descriptionNodeId' },
 };
 
-type ResolvedRef = { kind: RefKind; id: string; ref: string };
+export type ResolvedRef = { kind: RefKind; id: string; ref: string };
 
 /**
  * The column writes for the references present in `input`. A given ref sets
@@ -217,7 +223,7 @@ type ResolvedRef = { kind: RefKind; id: string; ref: string };
  * ref is an explicit clear and drops both. An omitted ref yields nothing.
  * `resolved` lists the refs that were set, for {@link lockRuleRefs}.
  */
-async function refWrites(
+export async function refWrites(
   ctx: Context,
   input: UpdateNodeRoleRuleInput,
 ): Promise<{ cols: Partial<Record<string, string | boolean | null>>; resolved: ResolvedRef[] }> {
@@ -253,7 +259,7 @@ async function refWrites(
  * BEFORE the rule's row lock: a hard node delete locks the node and then SET
  * NULLs the rule, so the same order here cannot deadlock against it.
  */
-async function lockRuleRefs(ctx: Context, tx: Prisma.TransactionClient, resolved: ResolvedRef[]): Promise<void> {
+export async function lockRuleRefs(ctx: Context, tx: Prisma.TransactionClient, resolved: ResolvedRef[]): Promise<void> {
   if (resolved.length === 0) return;
   const ids = [...new Set(resolved.map((r) => r.id))].sort();
   // The node rows ALONE: a join here would be re-checked by Postgres against
@@ -305,7 +311,7 @@ async function touchConfig(tx: Prisma.TransactionClient, configId: string, actor
  * must not block an unrelated edit to the rule; #1328 refuses writes of that
  * role until a manager repoints it.
  */
-function assertValidateByHasTask(state: { validateBy: Validator | null; validationTaskId: string | null; validationTaskRequired: boolean }): void {
+export function assertValidateByHasTask(state: { validateBy: Validator | null; validationTaskId: string | null; validationTaskRequired: boolean }): void {
   if (state.validateBy != null && state.validationTaskId == null && !state.validationTaskRequired) {
     throw new GraphQLError('`validateBy` needs a validation task: set `validationTaskRef`, or clear `validateBy`.', {
       extensions: { code: 'BAD_USER_INPUT', field: 'validateBy', reason: 'VALIDATION_TASK_REQUIRED' },
@@ -323,7 +329,7 @@ async function materializeConfig(tx: Prisma.TransactionClient, memoryId: string,
   return row.id;
 }
 
-function translateRoleTaken(e: unknown, role: string): never {
+export function translateRoleTaken(e: unknown, role: string): never {
   if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
     throw new GraphQLError(`This memory's config already has a rule for role "${role}"; update it instead.`, {
       extensions: { code: 'NODE_ROLE_RULE_EXISTS', role },
@@ -347,7 +353,7 @@ async function configForManagedMemory(db: PrismaClient, memoryId: string) {
  */
 type RefView = { urn: string | null; id: string | null; state: RefState };
 const refViewCache = new WeakMap<object, Map<string, Promise<RefView>>>();
-function refViewOnce(ctx: Context, rule: NodeRoleRule, kind: RefKind): Promise<RefView> {
+function refViewOnce(ctx: Context, rule: RuleRefRow, kind: RefKind): Promise<RefView> {
   let perRule = refViewCache.get(rule);
   if (!perRule) refViewCache.set(rule, (perRule = new Map()));
   let pending = perRule.get(kind);
@@ -490,11 +496,34 @@ export const memoryConfigMutations = {
   },
 };
 
-function conflict(currentRevision: number): GraphQLError {
-  return new GraphQLError('The rule changed since you read it; re-read it and retry.', {
+export function conflict(currentRevision: number, what = 'rule'): GraphQLError {
+  return new GraphQLError(`The ${what} changed since you read it; re-read it and retry.`, {
     extensions: { code: 'CONFLICT', currentRevision },
   });
 }
+
+/**
+ * The reference fields of a rule, for a node-role rule and a template rule
+ * alike. The `*Id` fields shadow the row's own columns ON PURPOSE: the default
+ * resolver would hand out the stored id whatever the state, including the
+ * UNREADABLE node whose URN is withheld.
+ */
+export const ruleRefFieldResolvers = {
+  authorTaskId: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).id,
+  validationTaskId: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'validationTask')).id,
+  descriptionNodeId: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'descriptionNode')).id,
+  authorTask: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).urn,
+  authorTaskState: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).state,
+  validationTask: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'validationTask')).urn,
+  validationTaskState: async (r: RuleRefRow, _: unknown, ctx: Context) =>
+    (await refViewOnce(ctx, r, 'validationTask')).state,
+  descriptionNode: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'descriptionNode')).urn,
+  // A description node is documentation, not procedure: losing it is NONE, never BROKEN.
+  descriptionNodeState: async (r: RuleRefRow, _: unknown, ctx: Context) => {
+    const v = await refViewOnce(ctx, r, 'descriptionNode');
+    return v.state === 'BROKEN' ? 'NONE' : v.state;
+  },
+};
 
 export const memoryConfigFieldResolvers = {
   Memory: {
@@ -516,23 +545,7 @@ export const memoryConfigFieldResolvers = {
         : ctx.db.nodeRoleRule.findMany({ where: { configId: config.id }, orderBy: { role: 'asc' } }),
   },
   NodeRoleRule: {
-    // The `*Id` fields shadow the row's own columns ON PURPOSE: the default
-    // resolver would hand out the stored id whatever the state, including the
-    // UNREADABLE node whose URN is withheld.
-    authorTaskId: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).id,
-    validationTaskId: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'validationTask')).id,
-    descriptionNodeId: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'descriptionNode')).id,
-    authorTask: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).urn,
-    authorTaskState: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).state,
-    validationTask: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'validationTask')).urn,
-    validationTaskState: async (r: NodeRoleRule, _: unknown, ctx: Context) =>
-      (await refViewOnce(ctx, r, 'validationTask')).state,
-    descriptionNode: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'descriptionNode')).urn,
-    // A description node is documentation, not procedure: losing it is NONE, never BROKEN.
-    descriptionNodeState: async (r: NodeRoleRule, _: unknown, ctx: Context) => {
-      const v = await refViewOnce(ctx, r, 'descriptionNode');
-      return v.state === 'BROKEN' ? 'NONE' : v.state;
-    },
+    ...ruleRefFieldResolvers,
     sourceTemplate: async (r: NodeRoleRule, _: unknown, ctx: Context) => {
       if (r.sourceTemplateId == null) return null;
       const t = await ctx.db.memoryConfigTemplate.findUnique({
