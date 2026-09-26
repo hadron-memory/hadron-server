@@ -8441,7 +8441,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       {
         session: z.string().describe('Your live Worker session; selects the Worker whose own cursor advances.'),
         app: z.string().optional().describe('The pilot App. Omit to recover it from session or the active selection.'),
-        channel: z.string().optional().describe('Channel id or address. Omit for the App default team Channel.'),
+        channel: z.string().optional().describe('Channel id or address. Omit for the team Channel hadron_team_chat_read serves for the App.'),
         seq: z.number().int().min(0).describe('Read through this exact sequence.'),
       },
       async ({ session, app, channel, seq }) => {
@@ -8455,7 +8455,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
         try {
-          const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef: channel, sessionRef: session, seq });
+          // An omitted channel means the one hadron_team_chat_read SERVES —
+          // its oldest team-space root, which need not be App.defaultChannel
+          // (#1362 review, Copilot). Resolved here, with the read's own
+          // locator, so the mark lands on the Channel that was read.
+          let channelRef: string | null | undefined = channel;
+          if (channelRef === undefined) {
+            channelRef = (await locateTeamChatChannel(chatCtx(), (await resolveAppRef(db, appRef)).id))?.channelId ?? '';
+          }
+          const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef, sessionRef: session, seq });
           return textResult(JSON.stringify(result, null, 2));
         } catch (error) {
           return scopeErrorText(error);

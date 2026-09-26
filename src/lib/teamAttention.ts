@@ -862,12 +862,12 @@ export async function markOwnTeamChatRead(
   const session = await ownLiveSessionWorker(ctx, args.sessionRef, app.id);
   if (!session) fail('That session is not one of your live Worker sessions in this App.', 'SESSION_NOT_LIVE');
   const { workerId } = session;
+  // The caller names the Channel. The MCP tool resolves an OMITTED channel to
+  // the one its convenience read serves (locateTeamChatChannel), which need
+  // not be App.defaultChannel; defaulting to that here marked the wrong
+  // Channel after a read of the other one (#1362 review, Copilot).
   const channelRef = args.channelRef?.trim();
-  const channelId = args.channelRef == null
-    ? app.defaultChannelId
-    : channelRef
-      ? await resolveChannelRefId(ctx.db, channelRef)
-      : null;
+  const channelId = channelRef ? await resolveChannelRefId(ctx.db, channelRef) : null;
   if (!channelId) fail('No readable registered Channel matches.', 'CHANNEL_NOT_FOUND');
   const view = await resolveRegister(ctx.db, { attendee: { workerId }, actor: ctx });
   const row = view?.rows.find((r) => r.channel.id === channelId);

@@ -442,6 +442,26 @@ describe('MCP parity and discovery gate', () => {
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: newer.channel.id } })).toBeNull();
   });
 
+  it('mark-read with no channel marks the Channel the convenience read serves, not a newer App default (#1362 review)', async () => {
+    const other = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:pilot-other2`, name: 'other2', class: 'app', appId: app.id },
+    });
+    const newer = await ensureChannelWithRoot(db, { memoryId: other.id, loc: 'chats:team', name: 'team', createdBy: user.id });
+    await db.app.update({ where: { id: app.id }, data: { defaultChannelId: newer.channel.id } });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: newer.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' },
+    });
+    await db.channel.update({ where: { id: newer.channel.id }, data: { lastSeq: 7 } });
+    await post('one');
+    await post('two');
+
+    const out = await createTestableMcpServer(auth()).callToolText('hadron_team_chat_mark_read', { session: sessionId, seq: 2 });
+    expect(out).toContain(`"channelId": "${channel.id}"`);
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
+      .toMatchObject({ lastSeenSeq: 2 });
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: newer.channel.id } })).toBeNull();
+  });
+
   it('a blank explicit session is no session: the read behaves exactly as with none (#1362 review)', async () => {
     await post('one');
     await post('two');
