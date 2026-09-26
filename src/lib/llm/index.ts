@@ -66,10 +66,18 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
     case 'anthropic':
       return createAnthropic({ apiKey: key })(model);
     case 'openai':
+      // Calling the provider directly selects the Responses API (POST
+      // /responses) in @ai-sdk/openai 4.x. Kept for a custom baseUrl too: a
+      // custom URL alone does not say the host lacks /responses, so choosing
+      // the API per endpoint is a contract decision, not something to infer
+      // here (#1374).
       return createOpenAI({ apiKey: key, ...(params.baseUrl ? { baseURL: params.baseUrl } : {}) })(model);
     case 'glm':
-      // OpenAI-compatible endpoint (headless-runner D1 note).
-      return createOpenAI({ apiKey: key, baseURL: params.baseUrl ?? GLM_DEFAULT_BASE_URL })(model);
+      // OpenAI-compatible endpoint (headless-runner D1 note). `.chat()`
+      // explicitly: Zhipu and Z.ai serve only /chat/completions, and the
+      // provider's default model would POST /responses, failing every glm
+      // call (#1374).
+      return createOpenAI({ apiKey: key, baseURL: params.baseUrl ?? GLM_DEFAULT_BASE_URL }).chat(model);
     case 'bedrock': {
       let triple: { accessKeyId?: string; secretAccessKey?: string; region?: string } = {};
       if (key) {
