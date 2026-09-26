@@ -55,7 +55,7 @@
  */
 import { GraphQLError } from 'graphql';
 import { Prisma, type NodeRoleRule, type PrismaClient } from '../../../generated/prisma/index.js';
-import { type Context, isMemoryReadableCached, requireOwnerOrOrgRole } from './resolvers.helpers.js';
+import { type Context, isMemoryReadableCached, isMemoryReadableFresh, requireOwnerOrOrgRole } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { EntityNotFoundError, MemoryNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -235,10 +235,13 @@ async function lockRuleRefs(ctx: Context, tx: Prisma.TransactionClient, resolved
   const byId = new Map(rows.map((r) => [r.id, r]));
   for (const { kind, id, ref } of resolved) {
     const row = byId.get(id);
-    // The shared read gate also refuses a soft-deleted memory. It is memoized
-    // per request, and the MEMORY row is not locked: a host memory deleted in
-    // this window can still be saved, and then reads BROKEN (fail-closed, H5).
-    if (!row || row.deleted_at || !(await isMemoryReadableCached(ctx, row.memory_id))) {
+    // The shared read gate, asked FRESH: the pre-check memoized this memory's
+    // answer, so a cached re-check of an unmoved node would check nothing, and
+    // the response would reuse it (#1360 review). It also refuses a
+    // soft-deleted memory. Residual: neither the memory row nor the caller's
+    // membership is locked, so access revoked after this point and before
+    // commit still saves; that is every authorize-then-write surface's window.
+    if (!row || row.deleted_at || !(await isMemoryReadableFresh(ctx, row.memory_id))) {
       throw new NodeNotFoundError(ref);
     }
     if (kind !== 'descriptionNode' && row.is_runnable !== true) throw notATask(kind);

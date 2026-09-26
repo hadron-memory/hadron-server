@@ -346,6 +346,21 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
 }
 
 /**
+ * {@link isMemoryReadableCached}, but ALWAYS re-asked, and the fresh answer
+ * replaces the request's memoized one. For a check that must reflect the state
+ * at a later point in the same request — a re-check inside a write's
+ * transaction — where the memoized answer from the pre-check would make it a
+ * no-op (#1360 review), and where later reads in the request must not reuse
+ * the stale decision either.
+ */
+export function isMemoryReadableFresh(ctx: Context, memoryId: string): Promise<boolean> {
+  const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
+  const pending = getAccessibleMemoryIds(ctx, memoryId).then((ids) => ids === null || ids.includes(memoryId));
+  cache.set(memoryId, pending);
+  return pending;
+}
+
+/**
  * Resolve a memory ref (ID or URN) to its id IFF the caller may read it; returns
  * null when the ref does not resolve OR the caller lacks read access — so a
  * ref-scoped surface answers with an empty page and discloses neither the

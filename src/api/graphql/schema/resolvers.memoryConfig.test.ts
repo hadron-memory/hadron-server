@@ -450,6 +450,24 @@ describe('#1360 review — gates, concurrency, audit, and unaddressable referenc
     expect(await db.nodeRoleRule.count()).toBe(0);
   });
 
+  it('access to an UNMOVED task revoked while the write is in flight is re-checked, not read from the request cache', async () => {
+    const other = await db.organization.create({ data: { id: generateId(), name: 'third', urn: 'third.com' } });
+    const shared = await db.memory.create({
+      data: { id: generateId(), organizationId: other.id, urn: 'third.com:shared', name: 'shared', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+    const t = await db.node.create({ data: { id: generateId(), memoryId: shared.id, loc: 'tasks:t', name: 'T', isRunnable: true } });
+    await db.orgMember.create({ data: { organizationId: other.id, userId: orgAdmin, role: 'READER' } });
+    let creating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.node.update({ where: { id: t.id }, data: { name: 'T2' } });
+      await tx.orgMember.updateMany({ where: { organizationId: other.id, userId: orgAdmin }, data: { deletedAt: new Date() } });
+      creating = gql(as(orgAdmin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: t.id } });
+      await pause(400);
+    });
+    expect(code(await creating!)).toBe('NODE_NOT_FOUND');
+    expect(await db.nodeRoleRule.count()).toBe(0);
+  });
+
   it('a task moved to another memory the saver CAN read while the write is in flight is still accepted', async () => {
     const kb2 = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'acme.com:kb2', name: 'kb2', class: 'knowledge', visibility: 'ORGANIZATION' },
