@@ -560,6 +560,47 @@ describe('MCP parity and discovery gate', () => {
       .toBeNull();
   });
 
+  it('does not advance a Worker whose App belongs to a soft-deleted org', async () => {
+    const independentMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:independent`,
+        name: 'independent', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    const made = await ensureChannelWithRoot(db, {
+      memoryId: independentMemory.id, loc: 'chats:independent', name: 'independent', createdBy: user.id,
+    });
+    const independent = made.channel;
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: independent.id, attendeeWorkerId: worker.id, role: 'WATCH' },
+    });
+    const enc = await getMemoryEncryptionInfo(db, independentMemory.id);
+    await appendChatMessage(
+      db,
+      { id: made.rootId, memoryId: independentMemory.id, loc: 'chats:independent' },
+      enc,
+      async ({ tx, seq, msgNum }) => tx.node.create({
+        data: {
+          id: generateId(), memoryId: independentMemory.id,
+          loc: `chats:independent:messages:${msgNum}`, name: msgNum,
+          nodeType: 'chat-message', seq, content: 'still readable',
+        },
+      }),
+      { asChannel: true },
+    );
+
+    // Soft delete stamps the org only: the App row and every membership stay.
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    await createTestableMcpServer(auth()).callToolText('hadron_channel_read', {
+      channel: independent.id, session: sessionId, sinceSeq: 0,
+    });
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: independent.id } }))
+      .toBeNull();
+    // The pilot door answers a deleted org's App exactly like an absent one.
+    const error = await getTeamAttention(userCtx(), app.id).catch((e) => e);
+    expect(error).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
+  });
+
   it('a convenience read of a registered cross-App team Channel uses the Worker session pilot', async () => {
     await db.appAgent.create({ data: { appId: otherApp.id, agentId: agent.id } });
     await db.appMember.create({ data: { appId: otherApp.id, userId: user.id, role: 'admin' } });

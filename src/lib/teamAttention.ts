@@ -208,6 +208,18 @@ function verify(token: string): SignedPayload {
   }
 }
 
+/**
+ * A LIVE App: not deleted, not uninstalled, and — when org-owned — in an org
+ * that is not soft-deleted. `softDeleteOrganizationCore` stamps only the org
+ * and keeps its membership rows, so the App row and `isAppParticipant` alone
+ * would go on admitting a deleted org's former participants (#1362 review).
+ */
+const LIVE_APP_WHERE: Prisma.AppWhereInput = {
+  deletedAt: null,
+  uninstalledAt: null,
+  OR: [{ organizationId: null }, { organization: { deletedAt: null } }],
+};
+
 async function resolvePilotApp(ctx: Context, appRef: string): Promise<AppRow> {
   if (!ctx.userId || ctx.impersonation) fail('Team attention is available only to an ordinary user.', 'FORBIDDEN');
   let id: string;
@@ -218,7 +230,7 @@ async function resolvePilotApp(ctx: Context, appRef: string): Promise<AppRow> {
     throw error;
   }
   const app = await ctx.db.app.findFirst({
-    where: { id, deletedAt: null, uninstalledAt: null },
+    where: { id, ...LIVE_APP_WHERE },
     select: { id: true, urn: true, organizationId: true, ownerUserId: true, defaultChannelId: true },
   });
   // Existing-but-unreadable and absent Apps are indistinguishable. This is a
@@ -780,7 +792,7 @@ async function ownLiveSessionWorker(
   // still drive it. Recheck current App participation before a read mutates
   // its cursor, including when the Channel is independently readable.
   const app = await ctx.db.app.findFirst({
-    where: { id: session.appId, deletedAt: null, uninstalledAt: null },
+    where: { id: session.appId, ...LIVE_APP_WHERE },
     select: { id: true, organizationId: true, ownerUserId: true },
   });
   if (!app || !(await isAppParticipant(ctx, app))) return null;
