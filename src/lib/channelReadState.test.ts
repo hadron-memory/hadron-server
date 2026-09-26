@@ -76,6 +76,25 @@ async function post(body: string, mentions: string[] = []) {
   );
 }
 
+/** A post carrying routing metadata: no authorWorkerId is a human's post. */
+async function postAs(body: string, mentions: string[], authorWorkerId?: string) {
+  const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
+  return appendChatMessage(
+    db,
+    { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc },
+    enc,
+    async ({ tx, seq, msgNum }) =>
+      tx.node.create({
+        data: {
+          id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum,
+          nodeType: 'chat-message', seq, content: body,
+          data: { mentions, ...(authorWorkerId ? { authorWorkerId } : {}) },
+        },
+      }),
+    { asChannel: true },
+  );
+}
+
 beforeEach(async () => {
   vi.clearAllMocks();
   await cleanDb(db);
@@ -190,28 +209,56 @@ describe('read-state', () => {
 
   it('an attendee\'s own broadcast is not attention for it; someone else\'s is (#1362 review)', async () => {
     await db.registerEntry.updateMany({ where: { appId: app.id }, data: { mentionOnly: true } });
-    const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
-    const postAs = (body: string, mentions: string[], authorWorkerId?: string) =>
-      appendChatMessage(
-        db,
-        { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc },
-        enc,
-        async ({ tx, seq, msgNum }) =>
-          tx.node.create({
-            data: {
-              id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum,
-              nodeType: 'chat-message', seq, content: body,
-              data: { mentions, ...(authorWorkerId ? { authorWorkerId } : {}) },
-            },
-          }),
-        { asChannel: true },
-      );
     // Iris is cast from this run's Agent: her team-wide post is the attendee's own.
     await postAs('@all heads up', ['all'], worker.id);
     const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     expect((await renderAttentionSection(db, run)).text).toContain('nothing new for you (mention-only; channel is at 1)');
     await postAs('@all from a human', ['all']);
     expect((await renderAttentionSection(db, run)).text).toContain('1 new mention of you since seq 0 (channel is at 2)');
+  });
+
+  it('an unfiltered row: the attendee\'s own posts are never new to it; a human\'s or another Agent\'s are (#1388)', async () => {
+    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    // Iris is cast from this run's Agent, and a retired sibling's posts are still its own.
+    const retired = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Old', slug: 'old', retiredAt: new Date() } });
+    await postAs('done with the build', [], worker.id);
+    await postAs('old note', [], retired.id);
+    const own = await renderAttentionSection(db, run);
+    expect(own.text).toContain(`- team (${appMem.urn}:chats:team): nothing new (only your own posts since seq 0; channel is at 2)`);
+    // The checkpoint still moves past them: they are read, not pending.
+    expect(own.captured.get(channel.id)).toBe(2);
+    // A human's post carries no authorWorkerId, and it is news.
+    await postAs('a human asks', []);
+    expect((await renderAttentionSection(db, run)).text).toContain(`- team (${appMem.urn}:chats:team): new since seq 0 (channel is at 3)`);
+    // So is another Agent's Worker, once the human's post has been seen.
+    await advanceReadState(db, { agentId: agent.id, appId: app.id }, channel.id, 3);
+    const otherAgent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'other', urn: `${org.urn}:other`, visibility: 'ORGANIZATION' } });
+    const stranger = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: otherAgent.id, name: 'Zed', slug: 'zed' } });
+    await postAs('mine now', [], worker.id);
+    expect((await renderAttentionSection(db, run)).text).toContain('nothing new (only your own posts since seq 3; channel is at 4)');
+    // A deleted post is no news either.
+    const gone = await postAs('retracted', [], stranger.id);
+    await db.node.update({ where: { id: gone.inserted.id }, data: { deletedAt: new Date() } });
+    expect((await renderAttentionSection(db, run)).text).toContain('nothing new (only your own posts since seq 3; channel is at 5)');
+    await postAs('from zed', [], stranger.id);
+    expect((await renderAttentionSection(db, run)).text).toContain('new since seq 3 (channel is at 6)');
+  });
+
+  it('an encrypted unfiltered row says own posts were not filtered, rather than decrypting (#1388)', async () => {
+    const encMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:sealed-w`, name: 'sealed-w', class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true },
+    });
+    sessionKeyCache.set('rs-encrypted-w', encMem.id, generateDataKey());
+    const made = await ensureChannelWithRoot(db, { memoryId: encMem.id, loc: 'chats:sealed', name: 'sealed', createdBy: admin.id });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: made.channel.id, attendeeAgentId: agent.id, role: 'BOTH', mentionOnly: false },
+    });
+    await db.channel.update({ where: { id: made.channel.id }, data: { lastSeq: 2 } });
+    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    expect((await renderAttentionSection(db, run)).text).toContain(
+      `- sealed (${encMem.urn}:chats:sealed): new since seq 0 (channel is at 2; encrypted, so your own posts were not filtered)`,
+    );
+    sessionKeyCache.clear();
   });
 
   it('a cleanly reused Channel has no phantom attention and its next message clears old cursors (#1226)', async () => {

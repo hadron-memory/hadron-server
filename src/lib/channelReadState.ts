@@ -18,6 +18,13 @@
  * stored `data.mentions` names one of the attendee's tokens: a Worker's own,
  * or for an Agent-in-App every Worker cast from that Agent in that App
  * (mentions name Workers, never Agents — plan §4.4, proposed).
+ *
+ * The attendee's OWN posts are never new to it, on any row (Holger,
+ * 2026-09-26, hadron-server#1388; cor:dmo:090:07): the attention form of
+ * "never send a message back to its author". Deciding that reads routing
+ * metadata (`data.authorWorkerId`), never content. On an ENCRYPTED Channel the
+ * author is sealed inside the envelope, so the row says it was not filtered
+ * rather than decrypting per hop (accepted noise, same ruling).
  */
 
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
@@ -83,13 +90,11 @@ export async function attendeeMentionTokens(db: Db, attendee: RegisterAttendee):
 }
 
 /**
- * The Workers whose posts are the attendee's OWN, excluded from the
- * MENTION count (#1362 review, Codex P2): with the broadcast tokens counted as
- * mentions, a Worker's own post to the whole team would otherwise read as a
- * mention of its own Agent. Retired Workers included: their posts are still
- * the attendee's own. Unfiltered rows are decided from `lastSeq` alone by
- * design (no message query) and still count own posts as new; that is the
- * separate follow-up hadron-server#1388.
+ * The Workers whose posts are the attendee's OWN, never new to it on any row
+ * (#1388): on a mention-only row a Worker's own team-wide broadcast would
+ * otherwise read as a mention of its own Agent (#1362 review, Codex P2), and
+ * on an unfiltered row as news. Retired Workers included: their posts are
+ * still the attendee's own.
  */
 async function attendeeWorkerIds(db: Db, attendee: RegisterAttendee): Promise<string[]> {
   if ('workerId' in attendee) return [attendee.workerId];
@@ -148,7 +153,23 @@ export async function renderAttentionSection(
   if (channels.length === 0) return none;
   const mentionRows = snap.rows.filter((r) => r.mentionOnly);
   const tokens = mentionRows.length ? await attendeeMentionTokens(db, attendee) : [];
-  const ownWorkerIds = mentionRows.length ? await attendeeWorkerIds(db, attendee) : [];
+  const ownWorkerIds = await attendeeWorkerIds(db, attendee);
+  // A live message in the (seen, lastSeq] window, optionally narrowed. Own
+  // posts are excluded with a NULL-SAFE predicate: a message with no
+  // authorWorkerId (a human's) must still count, where a Prisma JSON-path NOT
+  // would read it as NULL and drop it (#1362 review;
+  // dev:findings:prisma-json-path-not-drops-rows-missing-the-key). Content is
+  // never read or injected.
+  const othersInWindow = (c: { memoryId: string; loc: string; lastSeq: number }, seen: number, narrow: Prisma.Sql) => Prisma.sql`
+    FROM nodes node
+    WHERE node.memory_id = ${c.memoryId}
+      AND node.loc LIKE ${escapePrismaLikePattern(`${c.loc}:messages:`) + '%'} ESCAPE '\\'
+      AND node.node_type IN (${Prisma.join(MESSAGE_NODE_TYPES)})
+      AND node.deleted_at IS NULL
+      AND node.seq > ${seen}
+      AND node.seq <= ${c.lastSeq}
+      AND NOT (COALESCE(node.data->>'authorWorkerId', '') = ANY(${ownWorkerIds}::text[]))
+      ${narrow}`;
   const captured = new Map<string, number>();
   const lines: string[] = [];
   for (const c of channels) {
@@ -170,29 +191,20 @@ export async function renderAttentionSection(
       continue;
     }
     if (row.mentionOnly) {
-      // Only new messages that name the attendee count — a small indexed
-      // query over the (seen, lastSeq] window, content never injected.
-      // Counted in SQL, own posts excluded with a NULL-SAFE predicate: a
-      // message with no authorWorkerId must still count (a Prisma JSON-path
-      // NOT would read it as NULL and drop it), and nothing is materialized,
-      // however large the window (#1362 review;
-      // dev:findings:prisma-json-path-not-drops-rows-missing-the-key).
+      // Only new messages that name the attendee count — counted in SQL, so
+      // nothing is materialized however large the window.
       const mentions = tokens.length
         ? (
             await db.$queryRaw<Array<{ n: number }>>`
               SELECT count(*)::int AS n
-              FROM nodes node
-              WHERE node.memory_id = ${c.memoryId}
-                AND node.loc LIKE ${escapePrismaLikePattern(`${c.loc}:messages:`) + '%'} ESCAPE '\\'
-                AND node.node_type IN (${Prisma.join(MESSAGE_NODE_TYPES)})
-                AND node.deleted_at IS NULL
-                AND node.seq > ${seen}
-                AND node.seq <= ${c.lastSeq}
-                AND EXISTS (
+              ${othersInWindow(
+                c,
+                seen,
+                Prisma.sql`AND EXISTS (
                   SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(tokens)}::jsonb) AS wanted(token)
                   WHERE COALESCE(node.data->'mentions', '[]'::jsonb) ? wanted.token
-                )
-                AND NOT (COALESCE(node.data->>'authorWorkerId', '') = ANY(${ownWorkerIds}::text[]))`
+                )`,
+              )}`
           )[0]?.n ?? 0
         : 0;
       lines.push(
@@ -202,7 +214,20 @@ export async function renderAttentionSection(
       );
       continue;
     }
-    lines.push(`- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq})`);
+    if (c.memory.isEncrypted) {
+      // The author is sealed in the envelope: say so rather than decrypt per
+      // hop (#1388, accepted noise).
+      lines.push(`- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq}; encrypted, so your own posts were not filtered)`);
+      continue;
+    }
+    // One indexed EXISTS per row: only someone else's post is news (#1388).
+    const [{ found }] = await db.$queryRaw<Array<{ found: boolean }>>`
+      SELECT EXISTS (SELECT 1 ${othersInWindow(c, seen, Prisma.empty)}) AS found`;
+    lines.push(
+      found
+        ? `- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq})`
+        : `- ${c.name} (${where}): nothing new (only your own posts since seq ${seen}; channel is at ${c.lastSeq})`,
+    );
   }
   return { text: `## Channels (attention)\n${lines.join('\n')}`, captured };
 }
