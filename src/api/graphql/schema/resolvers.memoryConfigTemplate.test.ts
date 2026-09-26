@@ -15,6 +15,7 @@ import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { formatGraphQLError } from '../formatError.js';
+import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -273,6 +274,19 @@ describe('a deleted owner owns nothing a manager can reach (#1369 review)', () =
       expect((await gql(ctx, LIST)).data!.memoryConfigTemplates.total).toBe(0);
     }
     expect((await create(as(orgAdmin), 'APP', orgApp.id, { name: 'app-two' })).errors).toBeDefined();
+  });
+});
+
+describe('account deletion erases the user\'s own templates (#1369 review)', () => {
+  it('a deleted account\'s USER templates and their rules are gone; everyone else\'s stay', async () => {
+    const mine = (await create(as(userA), 'USER', null, { name: 'mine', rules: [{ role: 'spec' }, { role: 'review' }] }))
+      .data!.createMemoryConfigTemplate.template;
+    const other = (await create(as(userB), 'USER', null, { name: 'theirs', rules: [{ role: 'spec' }] })).data!.createMemoryConfigTemplate.template;
+    const org = await mkOrgTpl({ rules: [{ role: 'spec' }] });
+    await deleteUserAccount(db, { targetUserId: userA, actorUserId: userA });
+    expect(await db.memoryConfigTemplate.findUnique({ where: { id: mine.id } })).toBeNull();
+    expect(await db.memoryConfigTemplateRule.count({ where: { templateId: mine.id } })).toBe(0);
+    expect(await db.memoryConfigTemplate.count({ where: { id: { in: [other.id, org.id] } } })).toBe(2);
   });
 });
 
