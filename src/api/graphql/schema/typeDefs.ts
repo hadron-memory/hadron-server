@@ -8087,9 +8087,14 @@ export const typeDefs = `#graphql
     """
     036-ai-service-config: create a named AI config on an owner entity.
 
-    apiKey semantics: omitted = stored without a key (unusable for
-    execution until one is set); non-empty = encrypted at rest with a
-    masked preview. Name must be 1-64 lower-case [a-z0-9_-], unique per
+    apiKey semantics: non-empty = encrypted at rest with a masked preview.
+    Omitted is accepted only where a run can use the server's own
+    credential: openai, anthropic or bedrock at their default host (no
+    endpoint). Any other provider (glm, openai-compatible), and any config
+    with an endpoint, is refused with AiConfigValidationError, because the
+    SDK would otherwise send the server's credential to a host that didn't
+    issue it (#1389). A host that checks no key takes any placeholder.
+    Name must be 1-64 lower-case [a-z0-9_-], unique per
     owner. provider must be a known provider; params are validated per
     provider.
 
@@ -8115,7 +8120,9 @@ export const typeDefs = `#graphql
     036-ai-service-config: update a named AI config. All fields optional.
 
     apiKey semantics: omitted = keep the stored key; empty string =
-    clear it; non-empty = replace (encrypted, preview recomputed).
+    clear it; non-empty = replace (encrypted, preview recomputed). The
+    RESULTING config is held to createAiServiceConfig's key rule, so
+    clearing the key of a config that needs one is refused.
 
     Auth: admin rights on the owning entity (as aiServiceConfigs).
     """
@@ -8310,6 +8317,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]
@@ -8345,6 +8353,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]
