@@ -704,19 +704,27 @@ export async function requireAgentMemoryGrant(
     appId: string | null;
     userMemoryOfAgentId: string | null;
   },
-  role: AgentMemoryRole,
+  // The RAW role argument (@copilot, PR #1357): it is parsed only AFTER the
+  // concealment decision below, so a real-but-unreadable memory cannot be told
+  // from a missing one by sending an invalid role (BAD_USER_INPUT vs
+  // MEMORY_NOT_FOUND). Returns the parsed role for the caller to store.
+  rawRole: string | null | undefined,
   ref: string,
-): Promise<void> {
+): Promise<AgentMemoryRole> {
+  // The role the caller asked for, defaulted as parseAgentMemoryRole does; it
+  // only selects the same-App branch here and is validated after concealment.
+  const asked = rawRole ?? 'read';
   // Also a KNOWN mutation survivor (harness #8), for #7's reason: `self` feeds
   // only the write check below, which no reachable caller depends on today.
   const self = userPrincipalOnly(ctx);
   const canRead =
     (await holdsContentReadIndependently(ctx, memory.id)) ||
     // The ONE route by which App reach may admit an attach (#1357).
-    (role === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));
+    (asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));
   // Existence-hiding first: every refusal below this line is addressed to
   // someone who already knows the memory exists.
   if (!canRead) throw new MemoryNotFoundError(ref);
+  const role = parseAgentMemoryRole(rawRole);
 
   const sameTenant =
     (agent.organizationId != null && agent.organizationId === memory.organizationId) ||
@@ -789,6 +797,7 @@ export async function requireAgentMemoryGrant(
       );
     }
   }
+  return role;
 }
 
 /**

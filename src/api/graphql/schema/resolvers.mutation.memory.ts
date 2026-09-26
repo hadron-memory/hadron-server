@@ -105,7 +105,6 @@ import {
   requireOwnerOrOrgRole,
   concealUnreadableDenial,
   requireAgentMemoryGrant,
-  parseAgentMemoryRole,
   requireMemoryWriteAccess,
   MEMORY_INCLUDE,
   AGENT_INCLUDE,
@@ -776,7 +775,14 @@ export const memoryMutations = {
       // PUBLIC while this call observes no PUBLIC agent. This early pass stays
       // as the fail-fast, ahead of the URN/alias writes.
       if (visibility !== undefined) {
-        await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
+        // Judged against the RESULTING tenant (@codex / @copilot, PR #1357): a
+        // call that also transfers the memory must not classify agents against
+        // the organization it is leaving.
+        await assertMemoryVisibilityChangeAllowed(
+          ctx.db,
+          { ...memory, organizationId: newOrgId ?? memory.organizationId },
+          visibility,
+        );
       }
       // #1349 (@codex, PR #1357): narrowing out of PUBLIC also REVOKES the
       // foreign-tenant agent links that only PUBLIC ever justified. Deferred
@@ -971,7 +977,9 @@ export const memoryMutations = {
         // this row lock — which would otherwise leave a PUBLIC agent referencing
         // knowledge this call makes non-public (cor:acl:080:03).
         if (visibility !== undefined) {
-          await assertMemoryVisibilityChangeAllowed(tx, memory, visibility);
+          // The POST-update row, like the sweep below — a transfer in the same
+          // call otherwise had the two judge DIFFERENT tenants.
+          await assertMemoryVisibilityChangeAllowed(tx, row, visibility);
         }
         if (visibility !== undefined || newOrgId !== undefined) {
           await revokeLinksForeignToTenant(tx, row, ctx.userId ?? ctx.clientId ?? null);
@@ -1546,9 +1554,9 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
-      // #1349: the role is validated BEFORE anything is stored. The column is a
-      // free String, so an unknown value used to persist as an inert grant.
-      const grantedRole = parseAgentMemoryRole(role);
+      // #1349: the role is validated before anything is stored (the column is
+      // a free String, so an unknown value used to persist as an inert grant)
+      // — by the gate below, AFTER its concealment decision (@copilot, PR #1357).
       // #1349 — the gate and the write are ONE transaction, over locked rows
       // (see lockAttachmentPair). Everything the gate decides from — the
       // memory's visibility and tenancy, the agent's visibility — is re-read
@@ -1565,7 +1573,7 @@ export const memoryMutations = {
       // configure this agent; it says nothing about the memory they are handing
       // it. Runs BEFORE the class checks below so a caller who cannot read the
       // memory learns nothing about its class (that refusal names the class).
-      await requireAgentMemoryGrant(txCtx, lockedAgent, memory, grantedRole, memoryRef);
+      const grantedRole = await requireAgentMemoryGrant(txCtx, lockedAgent, memory, role, memoryRef);
       if (memory.class === 'system') {
         throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
       }
@@ -1681,8 +1689,8 @@ export const memoryMutations = {
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // #1349: re-role is its own escalation path — an existing `read` row
       // becomes the write cap here — so the NEW role gets the same memory-side
-      // gate as a fresh attach, not merely the agent gate.
-      const grantedRole = parseAgentMemoryRole(role);
+      // gate as a fresh attach, not merely the agent gate. The new role is
+      // parsed by that gate, after its concealment decision (@copilot, PR #1357).
       // #1349 — gate and write in ONE transaction over locked rows, for the
       // same reason as addMemoryToAgent: a re-role to `read-write` racing an
       // `updateAgent(visibility: PUBLIC)` could otherwise leave a PUBLIC agent
@@ -1693,11 +1701,11 @@ export const memoryMutations = {
         resolvedMemoryId,
         resolvedAgentId,
       );
-      await requireAgentMemoryGrant(
+      const grantedRole = await requireAgentMemoryGrant(
         { ...ctx, db: tx } as Context,
         lockedAgent,
         memory,
-        grantedRole,
+        role,
         memoryRef,
       );
       // #501: only a LIVE grant is updatable — updateMany + deletedAt:null

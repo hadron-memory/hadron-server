@@ -1139,3 +1139,62 @@ describe('#1357 round 2 — revocation and the same-App branch (@copilot, PR #13
     expect(await db.agentMemoryItem.count({ where: { memoryId: owned.id } })).toBe(0);
   });
 });
+
+describe('#1357 round 3 (@codex / @copilot, PR #1357)', () => {
+  it('an INVALID role on an unreadable memory answers as a missing memory — for attach and re-role', async () => {
+    const { agentId } = await agentWithApp(attackerOrgId, 'badrole-hidden');
+    const missingUrn = `hrn:mem:victim-${suffix}:no-such-memory`;
+    for (const q of [ATTACH, SET_ROLE]) {
+      const existing = await gql(key.attacker!, q, { g: agentId, m: mem.orgKnowledge!.urn, r: 'write' });
+      const missing = await gql(key.attacker!, q, { g: agentId, m: missingUrn, r: 'write' });
+      expect(code(missing)).toBe('MEMORY_NOT_FOUND');
+      expect(code(existing)).toBe('MEMORY_NOT_FOUND');
+      expect(existing.errors?.[0]?.message.replace(mem.orgKnowledge!.urn, '<REF>'))
+        .toBe(missing.errors?.[0]?.message.replace(missingUrn, '<REF>'));
+    }
+  });
+
+  it('control: an invalid role on a memory the caller CAN read is still BAD_USER_INPUT', async () => {
+    const { agentId } = await agentWithApp(attackerOrgId, 'badrole-visible');
+    const r = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'write' });
+    expect(code(r)).toBe('BAD_USER_INPUT');
+    expect(await db.agentMemoryItem.count({ where: { agentId } })).toBe(0);
+  });
+
+  const TRANSFER = `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o, visibility: ORGANIZATION) { id } }`;
+  const mkTransferFixture = async (label: string) => {
+    // The victim owns two orgs: the memory starts PUBLIC in victimOrg and moves to orgC.
+    const orgC = await db.organization.create({ data: { id: generateId(), name: `c-${label}`, urn: `c-${label}-${suffix}` } });
+    const victim = await db.user.findFirstOrThrow({ where: { handle: `victim-${suffix}` } });
+    await db.orgMember.create({ data: { organizationId: orgC.id, userId: victim.id, role: 'OWNER' } });
+    const m = await db.memory.create({
+      data: { id: generateId(), organizationId: victimOrgId, urn: `victim-${suffix}:${label}`, name: label, class: 'knowledge', visibility: 'PUBLIC' } as never,
+    });
+    return { orgC, m };
+  };
+
+  it('transfer + narrow in ONE call: a PUBLIC agent in the DESTINATION org blocks it', async () => {
+    const { orgC, m } = await mkTransferFixture('xfer-dest');
+    const destAgent = await db.agent.create({
+      data: { id: generateId(), organizationId: orgC.id, name: 'destpub', urn: `c-xfer-dest-${suffix}:destpub`, visibility: 'PUBLIC' } as never,
+    });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: destAgent.id, memoryId: m.id, role: 'read' } });
+    const r = await gql(key.victim!, TRANSFER, { id: m.id, o: orgC.id });
+    expect(r.errors?.[0]?.message ?? '').toMatch(/knowledge of the PUBLIC agent/);
+    const after = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
+    expect({ org: after.organizationId, vis: after.visibility }).toEqual({ org: victimOrgId, vis: 'PUBLIC' });
+  });
+
+  it('transfer + narrow in ONE call: a PUBLIC agent in the SOURCE org does not block it, and its link is revoked', async () => {
+    const { orgC, m } = await mkTransferFixture('xfer-src');
+    const srcAgent = await db.agent.create({
+      data: { id: generateId(), organizationId: victimOrgId, name: 'srcpub', urn: `victim-${suffix}:srcpub`, visibility: 'PUBLIC' } as never,
+    });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: srcAgent.id, memoryId: m.id, role: 'read' } });
+    const r = await gql(key.victim!, TRANSFER, { id: m.id, o: orgC.id });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    const after = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
+    expect({ org: after.organizationId, vis: after.visibility }).toEqual({ org: orgC.id, vis: 'ORGANIZATION' });
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: srcAgent.id } })).deletedAt).not.toBeNull();
+  });
+});

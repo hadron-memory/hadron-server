@@ -83,16 +83,20 @@ PY
   else echo "SURVIVED  $1 — $(echo "$out" | tr -s ' ')"; UNEXPECTED=$((UNEXPECTED+1)); fi
 }
 
+# The gate now also PARSES the role and returns it (@copilot, PR #1357), so
+# removing it must still define grantedRole — without a helper this file no
+# longer imports, or the run dies on a ReferenceError and "kills" falsely.
 run "1 attach gate removed" "$M" \
-  "      await requireAgentMemoryGrant(txCtx, lockedAgent, memory, grantedRole, memoryRef);" "      "
+  "      const grantedRole = await requireAgentMemoryGrant(txCtx, lockedAgent, memory, role, memoryRef);" \
+  "      const grantedRole = (role ?? 'read') as never;"
 run "2 re-role gate removed" "$M" \
-  "      await requireAgentMemoryGrant(
+  "      const grantedRole = await requireAgentMemoryGrant(
         { ...ctx, db: tx } as Context,
         lockedAgent,
         memory,
-        grantedRole,
+        role,
         memoryRef,
-      );" "      "
+      );" "      const grantedRole = (role ?? 'read') as never;"
 run "3 role validation disabled" "$H" \
   "  if (!(AGENT_MEMORY_ROLES as readonly string[]).includes(value)) {" "  if (false) {"
 run "4 content gate -> record gate" "$H" \
@@ -157,7 +161,9 @@ run "23 publication does not lock linked memories" "$AG" \
 # they are no longer allow-listed (@codex) — a regression must fail this script.
 run "24 narrowing check not re-run under the lock" "$M" \
   "        if (visibility !== undefined) {
-          await assertMemoryVisibilityChangeAllowed(tx, memory, visibility);
+          // The POST-update row, like the sweep below — a transfer in the same
+          // call otherwise had the two judge DIFFERENT tenants.
+          await assertMemoryVisibilityChangeAllowed(tx, row, visibility);
         }" "        "
 
 # 26 SURVIVES by design — see the UNPROVEN BY TEST note at that line.
@@ -205,9 +211,9 @@ run "33 locked other-claimant re-check removed" "$AG" \
 
 # ── #1357 same-App attach (Holger's ruling, 2026-09-26) ──────────────────
 run "34 same-App branch removed" "$H" \
-  "    (role === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));" "    false;"
+  "    (asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));" "    false;"
 run "35 same-App branch admits read-write" "$H" \
-  "    (role === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));" "    (await sameAppAttachAdmitted(ctx, agent.id, memory));"
+  "    (asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));" "    (await sameAppAttachAdmitted(ctx, agent.id, memory));"
 run "36 same-App install check removed (cross-App shortcut)" "$H" \
   "  if (!installed) return false;" ""
 run "37 same-App App gate removed" "$H" \
@@ -227,6 +233,12 @@ run "40 same-App admits a deleted App" "$H" \
       uninstalledAt: null," "      uninstalledAt: null,"
 run "41 same-App admits an App in a soft-deleted org" "$H" \
   "      OR: [{ organizationId: null }, { organization: { deletedAt: null } }]," ""
+run "45 role parsed before concealment" "$H" \
+  "  const asked = rawRole ?? 'read';" "  const asked = parseAgentMemoryRole(rawRole);"
+run "46 narrowing judged against the pre-transfer tenant (fail-fast)" "$M" \
+  "          { ...memory, organizationId: newOrgId ?? memory.organizationId }," "          memory,"
+run "47 narrowing judged against the pre-update row (in-transaction)" "$M" \
+  "          await assertMemoryVisibilityChangeAllowed(tx, row, visibility);" "          await assertMemoryVisibilityChangeAllowed(tx, memory, visibility);"
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \
