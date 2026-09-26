@@ -181,6 +181,14 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(captured[0].auth).toBe(`Bearer ${OVERRIDE_KEY}`);
   });
 
+  it('a stored key that no longer decrypts is a failed test with a reason, not an internal error', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, apiKeyEncrypted: 'not-a-valid-ciphertext' });
+    const r = await test(cfg.id, ctxFor(admin.id));
+    expect(r).toMatchObject({ ok: false, used: { key: 'SAVED' }, error: { code: 'KEY_UNREADABLE', transient: false } });
+    expect(captured).toEqual([]);
+    expect(await db.usageEvent.count({ where: { type: 'ai-config-test' } })).toBe(0);
+  });
+
   it('provider error text is scrubbed of the key before it is returned', async () => {
     const cfg = await mkConfig({ organizationId: org.id, endpoint: `${origin}/echo-key/v4` });
     const r = await test(cfg.id, ctxFor(admin.id));

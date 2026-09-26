@@ -16,12 +16,16 @@
  *   - reports, field by field, whether the SAVED value or a caller OVERRIDE was
  *     used, so "it works" can never be misread as "the saved config works".
  *
- * Metering (Holger, 2026-09-26, recorded on #1378): every test is recorded
- * (`type: 'ai-config-test'`); a test on the platform's key (a HADRON_SERVER
- * config, no override key) is platform-funded and counts against the org's
- * daily token quota and the existing debit rule; a BYOK test uses the owner's
- * provider account; a caller-supplied override key is the caller's own and
- * never debits. Small fixed prompt, tight token cap, rate-limited.
+ * Metering (Holger, 2026-09-26, recorded on #1378): every test that reaches
+ * a provider is recorded (`type: 'ai-config-test'`). A BYOK test uses the
+ * owner's provider account; a caller-supplied override key is the caller's
+ * own and never debits. The only PLATFORM-funded test is a platform admin
+ * testing a HADRON_SERVER config (only they pass the gate for one, and an
+ * org/App/Agent config with no key is NO_API_KEY, never the platform key): it
+ * is recorded with keyOwnerType HADRON_SERVER, attributed to the caller's
+ * active org when the request carries one (and counted against that org's
+ * daily token quota), otherwise recorded as the platform's own usage. Small
+ * fixed prompt, tight token cap, and the rate limit bound every path.
  */
 
 import { GraphQLError } from 'graphql';
@@ -141,7 +145,12 @@ function scrub(message: string, secrets: string[]): string {
   return out.length > MAX_ERROR_CHARS ? `${out.slice(0, MAX_ERROR_CHARS)}…` : out;
 }
 
-/** The org a test's usage is attributed to: the config's own, else its owner's, else the caller's active one. */
+/**
+ * The org a test's usage is attributed to: the config's own, else its owning
+ * App's or Agent's, else the caller's active org IF the request carries one.
+ * A platform admin's GraphQL request usually doesn't, and then a
+ * HADRON_SERVER test is simply the platform's own usage (no org to charge).
+ */
 async function billableOrgOf(ctx: Context, row: AiServiceConfig): Promise<string | null> {
   if (row.organizationId) return row.organizationId;
   if (row.appId) {
@@ -241,7 +250,27 @@ export async function testAiServiceConfig(
 
   // Decrypted only when it is the key being used: an override replaces it, and
   // a stale ciphertext must not block testing a good new key (#1385 review).
-  const savedKey = keySource === 'SAVED' && row.apiKeyEncrypted ? decryptToken(row.apiKeyEncrypted) : null;
+  let savedKey: string | null = null;
+  if (keySource === 'SAVED' && row.apiKeyEncrypted) {
+    try {
+      savedKey = decryptToken(row.apiKeyEncrypted);
+    } catch {
+      // A stored key written under an older HADRON_ENCRYPTION_KEY, or
+      // malformed: a failed test with a reason, not an internal error
+      // (#1385 review, Codex). No provider call, so nothing is metered.
+      return {
+        ...base,
+        ok: false,
+        latencyMs: 0,
+        reply: null,
+        error: {
+          code: 'KEY_UNREADABLE',
+          message: 'The stored key cannot be decrypted on this server; re-enter it to test and save.',
+          transient: false,
+        },
+      };
+    }
+  }
   const secrets = [...secretsOf(overrideKey), ...secretsOf(savedKey)];
   const resolved = {
     config: {
