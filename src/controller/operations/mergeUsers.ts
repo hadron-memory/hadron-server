@@ -62,6 +62,68 @@ const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   memory_config_templates: ['created_by', 'updated_by', 'deleted_by'],
 };
 
+/** The template-name grammar's length cap (`validateAiConfigName`). */
+const TEMPLATE_NAME_MAX = 64;
+
+/**
+ * A deterministic, grammar-valid template name not in `taken`: `<name>-merged`,
+ * then `<name>-merged-2`, `-3`, … The base is trimmed so the result stays
+ * within the name grammar's 64 characters; a trimmed base keeps only grammar
+ * characters, so the result is always a valid name (#1325 part c, Holger's
+ * collision ruling 2026-09-26).
+ */
+export function collisionFreeTemplateName(name: string, taken: ReadonlySet<string>): string {
+  for (let n = 1; ; n++) {
+    const suffix = n === 1 ? '-merged' : `-merged-${n}`;
+    const candidate = name.slice(0, TEMPLATE_NAME_MAX - suffix.length) + suffix;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/**
+ * Move the source's USER-owned config templates to the target (#1325 part c).
+ * Audit-stamp reassignment alone would leave them owned by a tombstone.
+ *
+ * Holger's collision ruling (2026-09-26): preserve both. The target's template
+ * keeps its name; an incoming LIVE template whose name the target already uses
+ * is renamed deterministically (`collisionFreeTemplateName`). Ids, rules and
+ * copied-config provenance are untouched. Uniqueness covers live rows only, so
+ * soft-deleted templates move as they are. Org/App/Server-owned templates are
+ * never re-owned here — only `owner_user_id` rows move.
+ *
+ * Race-free under the merge transaction: both user rows are held FOR UPDATE,
+ * and a template create takes its owner's row FOR SHARE first
+ * (`lockLiveOwner`), so neither account can gain a template mid-merge.
+ */
+async function mergeUserOwnedTemplates(
+  tx: Prisma.TransactionClient,
+  sourceUserId: string,
+  targetUserId: string,
+): Promise<void> {
+  const [incoming, existing] = await Promise.all([
+    tx.memoryConfigTemplate.findMany({
+      where: { ownerUserId: sourceUserId, deletedAt: null },
+      select: { id: true, name: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+    }),
+    tx.memoryConfigTemplate.findMany({ where: { ownerUserId: targetUserId, deletedAt: null }, select: { name: true } }),
+  ]);
+  const targetNames = new Set(existing.map((t) => t.name));
+  // Every live name on EITHER side is taken, so a rename can never land on a
+  // source template's own name that moves later in this loop.
+  const taken = new Set([...targetNames, ...incoming.map((t) => t.name)]);
+  for (const t of incoming) {
+    const name = targetNames.has(t.name) ? collisionFreeTemplateName(t.name, taken) : t.name;
+    taken.add(name);
+    await tx.$executeRaw`UPDATE memory_config_templates
+      SET owner_user_id = ${targetUserId}, name = ${name}, revision = revision + 1, updated_at = now()
+      WHERE id = ${t.id}`;
+  }
+  await tx.$executeRaw`UPDATE memory_config_templates
+    SET owner_user_id = ${targetUserId}, revision = revision + 1, updated_at = now()
+    WHERE owner_user_id = ${sourceUserId} AND deleted_at IS NOT NULL`;
+}
+
 export interface MergeUsersArgs {
   sourceUserId: string;
   targetUserId: string;
@@ -179,6 +241,8 @@ export async function mergeUsers(
       targetHandle: target.handle ?? source.handle,
       sourceHandle: source.handle,
     });
+
+    await mergeUserOwnedTemplates(tx, sourceUserId, targetUserId);
 
     // Fixed-identifier statements use parameterized tagged `$executeRaw`
     // (review:raw-sql-mutations): the two user ids interpolate as BOUND params,

@@ -16,6 +16,8 @@ import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { formatGraphQLError } from '../formatError.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
+import { collisionFreeTemplateName, mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { validateAiConfigName } from '../../../lib/aiConfig.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -368,6 +370,80 @@ describe('an admin demoted while a write waits on its locks is refused (#1360 re
     );
     expect(results.map((r) => r.errors)).toEqual(Array(8).fill(undefined));
     expect((await db.memoryConfigTemplate.findUniqueOrThrow({ where: { id: t.id } })).revision).toBe(t.revision + 8);
+  });
+});
+
+describe('an account merge transfers user-owned templates (#1325 part c, collision ruling 2026-09-26)', () => {
+  const mkUserTpl = async (userId: string, name: string, rules: unknown[] = []) =>
+    (await create(as(userId), 'USER', null, { name, rules })).data!.createMemoryConfigTemplate.template;
+  const merge = () => mergeUsers(db, { sourceUserId: userA, targetUserId: userB, actorUserId: userB });
+
+  it('moves every source template to the survivor; a colliding live name is renamed, ids and rules kept, the survivor\'s name untouched', async () => {
+    const targetBase = await mkUserTpl(userB, 'base');
+    await mkUserTpl(userB, 'base-merged');
+    const sourceBase = await mkUserTpl(userA, 'base', [{ role: 'spec', strictSubRoles: true }]);
+    const solo = await mkUserTpl(userA, 'solo');
+    const gone = await mkUserTpl(userA, 'base-old');
+    expect((await gql(as(userA), DELETE, { r: gone.id })).errors).toBeUndefined();
+
+    await merge();
+
+    expect(await db.memoryConfigTemplate.count({ where: { ownerUserId: userA } })).toBe(0);
+    const live = await db.memoryConfigTemplate.findMany({ where: { ownerUserId: userB, deletedAt: null }, orderBy: { name: 'asc' } });
+    expect(live.map((t) => t.name)).toEqual(['base', 'base-merged', 'base-merged-2', 'solo']);
+    // The survivor keeps its own template under its own name.
+    expect(live.find((t) => t.name === 'base')!.id).toBe(targetBase.id);
+    // The incoming one is the SAME row, renamed, with its rules.
+    const renamed = live.find((t) => t.name === 'base-merged-2')!;
+    expect(renamed.id).toBe(sourceBase.id);
+    expect(await db.memoryConfigTemplateRule.findMany({ where: { templateId: renamed.id }, select: { role: true, strictSubRoles: true } }))
+      .toEqual([{ role: 'spec', strictSubRoles: true }]);
+    expect(live.find((t) => t.name === 'solo')!.id).toBe(solo.id);
+    // Soft-deleted templates move too, unrenamed and still deleted.
+    const moved = await db.memoryConfigTemplate.findUniqueOrThrow({ where: { id: gone.id } });
+    expect([moved.ownerUserId, moved.name, moved.deletedAt != null]).toEqual([userB, 'base-old', true]);
+    // The survivor manages them now.
+    expect(code(await gql(as(userB), UPDATE, { r: renamed.id, i: { required: true } }))).toBeUndefined();
+  });
+
+  it('a rename never lands on a name the source itself brings along', async () => {
+    await mkUserTpl(userB, 'base');
+    const sourceBase = await mkUserTpl(userA, 'base');
+    const sourceMerged = await mkUserTpl(userA, 'base-merged');
+    await merge();
+    const live = await db.memoryConfigTemplate.findMany({ where: { ownerUserId: userB, deletedAt: null }, orderBy: { name: 'asc' } });
+    expect(live.map((t) => [t.name, t.id])).toEqual([
+      ['base', expect.any(String)],
+      ['base-merged', sourceMerged.id],
+      ['base-merged-2', sourceBase.id],
+    ]);
+  });
+
+  it('never re-owns a template the source merely authored for an org', async () => {
+    await db.orgMember.create({ data: { organizationId: org.id, userId: userA, role: 'ADMIN' } });
+    const orgTpl = (await create(as(userA), 'ORGANIZATION', org.id, { name: 'org-authored' })).data!.createMemoryConfigTemplate.template;
+    await merge();
+    const row = await db.memoryConfigTemplate.findUniqueOrThrow({ where: { id: orgTpl.id } });
+    expect([row.organizationId, row.ownerUserId, row.createdBy]).toEqual([org.id, null, userB]);
+  });
+
+  it('a 64-character colliding name is renamed within the name grammar', async () => {
+    const long = 'a'.repeat(64);
+    await mkUserTpl(userB, long);
+    const incoming = await mkUserTpl(userA, long);
+    await merge();
+    const row = await db.memoryConfigTemplate.findUniqueOrThrow({ where: { id: incoming.id } });
+    expect(row.name).toBe(`${'a'.repeat(57)}-merged`);
+    expect(validateAiConfigName(row.name)).toBe(row.name);
+  });
+
+  it('the rename is deterministic and skips every taken candidate', () => {
+    expect(collisionFreeTemplateName('x', new Set(['x']))).toBe('x-merged');
+    expect(collisionFreeTemplateName('x', new Set(['x', 'x-merged', 'x-merged-2']))).toBe('x-merged-3');
+    const long = 'b'.repeat(64);
+    const second = collisionFreeTemplateName(long, new Set([long, `${'b'.repeat(57)}-merged`]));
+    expect(second).toBe(`${'b'.repeat(55)}-merged-2`);
+    expect(second).toHaveLength(64);
   });
 });
 
