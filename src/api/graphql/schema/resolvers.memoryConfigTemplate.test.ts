@@ -419,6 +419,25 @@ describe('an account merge transfers user-owned templates (#1325 part c, collisi
     ]);
   });
 
+  it('a merge that races a survivor rename re-plans instead of failing (#1369 review)', async () => {
+    const survivor = await mkUserTpl(userB, 'foo');
+    const incoming = await mkUserTpl(userA, 'foo');
+    let merging: Promise<unknown> | undefined;
+    await db.$transaction(async (tx) => {
+      // The survivor renames onto the very name the merge will plan for the
+      // incoming 'foo', and holds it uncommitted while the merge plans.
+      await tx.memoryConfigTemplate.update({ where: { id: survivor.id }, data: { name: 'foo-merged' } });
+      merging = merge();
+      await pause(400);
+    });
+    await merging;
+    const live = await db.memoryConfigTemplate.findMany({ where: { ownerUserId: userB, deletedAt: null }, orderBy: { name: 'asc' } });
+    expect(live.map((t) => [t.name, t.id])).toEqual([
+      ['foo', incoming.id],
+      ['foo-merged', survivor.id],
+    ]);
+  });
+
   it('never re-owns a template the source merely authored for an org', async () => {
     await db.orgMember.create({ data: { organizationId: org.id, userId: userA, role: 'ADMIN' } });
     const orgTpl = (await create(as(userA), 'ORGANIZATION', org.id, { name: 'org-authored' })).data!.createMemoryConfigTemplate.template;

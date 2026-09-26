@@ -62,6 +62,35 @@ const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   memory_config_templates: ['created_by', 'updated_by', 'deleted_by'],
 };
 
+/**
+ * A merge that lost a race with a concurrent write and must be re-run from a
+ * fresh snapshot. The one raised here: a USER template renamed after the merge
+ * planned its collision renames, so a planned name is now taken (#1369 review,
+ * Codex P2). Template update/delete do not take the owner-row lock the merge
+ * holds, so the plan can go stale; re-planning is the fix, not a stronger lock.
+ */
+class MergeRaceError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'MergeRaceError';
+  }
+}
+
+/**
+ * How many times the SERIALIZABLE merge is re-run after a serialization abort
+ * (P2034) or a {@link MergeRaceError}. The body touches only the database, so
+ * a bounded re-run is safe (conventions:count-then-act-serializable-txn, as in
+ * deleteUserAccount).
+ */
+const MERGE_RETRIES = 3;
+
+/** A unique violation from a raw statement (Prisma wraps it as P2010 / SQLSTATE 23505). */
+function isUniqueViolation(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (e.code === 'P2002') return true;
+  return e.code === 'P2010' && ((e.meta as { code?: string } | undefined)?.code === '23505' || /23505/.test(e.message));
+}
+
 /** The template-name grammar's length cap (`validateAiConfigName`). */
 const TEMPLATE_NAME_MAX = 64;
 
@@ -115,9 +144,16 @@ async function mergeUserOwnedTemplates(
   for (const t of incoming) {
     const name = targetNames.has(t.name) ? collisionFreeTemplateName(t.name, taken) : t.name;
     taken.add(name);
-    await tx.$executeRaw`UPDATE memory_config_templates
-      SET owner_user_id = ${targetUserId}, name = ${name}, revision = revision + 1, updated_at = now()
-      WHERE id = ${t.id}`;
+    try {
+      await tx.$executeRaw`UPDATE memory_config_templates
+        SET owner_user_id = ${targetUserId}, name = ${name}, revision = revision + 1, updated_at = now()
+        WHERE id = ${t.id}`;
+    } catch (e) {
+      // The plan was built from this transaction's snapshot; a unique hit
+      // means a concurrent write took a planned name. Re-plan, don't fail.
+      if (isUniqueViolation(e)) throw new MergeRaceError(`template name '${name}' was taken concurrently`, { cause: e });
+      throw e;
+    }
   }
   await tx.$executeRaw`UPDATE memory_config_templates
     SET owner_user_id = ${targetUserId}, revision = revision + 1, updated_at = now()
@@ -161,6 +197,23 @@ export async function mergeUsers(
   if (sourceUserId === targetUserId) {
     throw new Error('mergeUsers: source and target must be different users');
   }
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles });
+    } catch (e) {
+      const retryable =
+        e instanceof MergeRaceError ||
+        (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2034');
+      if (!retryable || attempt > MERGE_RETRIES) throw e;
+    }
+  }
+}
+
+/** The single SERIALIZABLE merge transaction {@link mergeUsers} retries. */
+async function runMergeTxn(
+  db: PrismaClient,
+  { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false }: MergeUsersArgs,
+): Promise<User> {
   return db.$transaction(async (tx) => {
     // Serialize two merges involving either account. Ref resolution happens
     // in the GraphQL layer, but the rows are rechecked after the lock so a
