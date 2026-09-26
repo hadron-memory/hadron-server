@@ -60,6 +60,7 @@ import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
 import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { apiStyleApplies } from '../../../lib/aiEndpoint.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -682,7 +683,15 @@ export const appMutations = {
             if (existing) {
               await ctx.db.aiServiceConfig.update({
                 where: { id: existing.id },
-                data: { provider, model, ...keyFields, updatedBy: ctx.userId ?? null },
+                data: {
+                  provider,
+                  model,
+                  ...keyFields,
+                  // #1380 review: a legacy surface cannot express a style, so a
+                  // provider change that invalidates the stored one clears it.
+                  ...(apiStyleApplies(provider, existing.apiStyle) ? {} : { apiStyle: null }),
+                  updatedBy: ctx.userId ?? null,
+                },
               });
             } else {
               await ctx.db.aiServiceConfig.create({
