@@ -195,4 +195,24 @@ describe('#1389 review: the server credentials never reach a configured host', (
     expect((err as LlmInvocationError).transient).toBe(false);
     expect(captured).toEqual([]);
   });
+
+  it('glm with no endpoint and no stored key is refused: Z.ai never receives the server OpenAI key (#1385 review)', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-SERVER-AMBIENT');
+    const urls = stubDefaultHost();
+    const err = await generateText(resolved('glm', null, null, null, null), { prompt: 'hi' }).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmInvocationError);
+    expect(String(err.message)).toMatch(/needs a stored key/);
+    expect(urls).toEqual([]);
+  });
+
+  it('openai with no endpoint and no stored key still uses the process credential at its own host', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-SERVER-AMBIENT');
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push(`${String(input instanceof Request ? input.url : input)} ${new Headers(init?.headers).get('authorization')}`);
+      return new Response(JSON.stringify(CHAT_COMPLETION), { headers: { 'content-type': 'application/json' } });
+    });
+    await generateText(resolved('openai', null, null, 'CHAT_COMPLETIONS', null), { prompt: 'hi' });
+    expect(seen).toEqual(['https://api.openai.com/v1/chat/completions Bearer sk-SERVER-AMBIENT']);
+  });
 });
