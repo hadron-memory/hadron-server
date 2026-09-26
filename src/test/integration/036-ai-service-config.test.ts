@@ -882,6 +882,26 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: appCfg.id } })).endpoint).toBeNull();
   });
 
+  it('a legacy provider change resets even a style the new provider supports (#1380 review)', async () => {
+    const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'RESPONSES' } });
+    // glm supports apiStyle, but RESPONSES was chosen for OpenAI; Z.ai serves chat.
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'glm', model: 'GLM-5.3', apiKey: 'k' }, ctxFor(admin.id));
+    const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
+    expect([row.provider, row.apiStyle]).toEqual(['glm', null]);
+  });
+
+  it('the member picker drops a legacy params.baseUrl (#1380 review)', async () => {
+    const member = await db.user.create({ data: { id: generateId(), handle: 'cfg-member2', githubId: 36009, name: 'M2' } });
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    const legacy = await createConfig({ organizationId: org.id }, 'legacy-url', { provider: 'glm' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { params: { baseUrl: 'http://10.9.9.9/v4', maxTokens: 50 } } });
+    const listed = await resolvers.Query.resolveAiServiceConfigs({}, { appRef: app.id }, ctxFor(member.id));
+    const row = listed.find((c) => c.name === 'legacy-url')!;
+    expect(row.params).toEqual({ maxTokens: 50 });
+    expect(JSON.stringify(listed)).not.toContain('10.9.9.9');
+  });
+
   it('the legacy App AI arguments drop a stranded style too (#1380 review)', async () => {
     const legacy = await createConfig({ appId: app.id }, 'default', { provider: 'openai' });
     await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'CHAT_COMPLETIONS' } });

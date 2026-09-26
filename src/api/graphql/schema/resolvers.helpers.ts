@@ -1080,7 +1080,13 @@ export function aiConfigOwnerOf(c: AiServiceConfigRow): { ownerType: AiConfigOwn
  */
 export function toGqlAiServiceConfigForPicker(c: AiServiceConfigRow) {
   const full = toGqlAiServiceConfig(c);
-  return { ...full, endpoint: null, effectiveEndpoint: c.endpoint ? null : full.effectiveEndpoint };
+  // A legacy row may still carry params.baseUrl (D2: no migration): it is no
+  // longer read, but it names a host all the same, so members don't see it.
+  const params =
+    full.params && typeof full.params === 'object' && !Array.isArray(full.params) && 'baseUrl' in full.params
+      ? Object.fromEntries(Object.entries(full.params as Record<string, unknown>).filter(([k]) => k !== 'baseUrl'))
+      : full.params;
+  return { ...full, params, endpoint: null, effectiveEndpoint: c.endpoint ? null : full.effectiveEndpoint };
 }
 
 export function toGqlAiServiceConfig(c: AiServiceConfigRow) {

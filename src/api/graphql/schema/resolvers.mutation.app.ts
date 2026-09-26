@@ -60,7 +60,7 @@ import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
 import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
-import { apiStyleApplies, requireEndpointFor } from '../../../lib/aiEndpoint.js';
+import { requireEndpointFor } from '../../../lib/aiEndpoint.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -698,11 +698,11 @@ export const appMutations = {
                   model,
                   ...keyFields,
                   // #1380 review: a legacy surface can express neither a style nor
-                  // an endpoint. A style the new provider can't use is cleared,
-                  // and so is an endpoint on any provider change: it named the
-                  // OLD provider's host, and the new key must not be sent there.
-                  ...(apiStyleApplies(provider, existing.apiStyle) ? {} : { apiStyle: null }),
-                  ...(provider !== existing.provider ? { endpoint: null } : {}),
+                  // an endpoint, and both were chosen for the OLD provider. Any
+                  // provider change clears both, so the new provider starts
+                  // from its own defaults and the new key never goes to the
+                  // old host.
+                  ...(provider !== existing.provider ? { endpoint: null, apiStyle: null } : {}),
                   updatedBy: ctx.userId ?? null,
                 },
               });
