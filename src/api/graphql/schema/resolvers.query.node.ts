@@ -689,12 +689,7 @@ export const nodeQueries = {
       const typeErr = validateUrnType(parsed, 'node');
       if (typeErr) throw new Error(typeErr);
       const value = parsed.value;
-
-      // Form 2: explicit `hrn:node:` URN — strict resolution, no loc
-      // fallback (resolveNodeRef enforces the fully-qualified shape; a
-      // malformed input propagates as UrnNotQualifiedError rather than
-      // masking as not-found).
-      if (parsed.type === 'node') {
+      const movedUrnRead = async () => {
         let id: string;
         try {
           ({ id } = await resolveNodeRef(ctx.db, ref));
@@ -702,9 +697,18 @@ export const nodeQueries = {
           if (e instanceof NodeNotFoundError) return null;
           throw e;
         }
-        const node = await ctx.db.node.findUnique({ where: { id }, include });
-        if (!node || node.deletedAt || !allowed(node.memoryId)) return null;
-        return finish(node);
+        const selected = await ctx.db.node.findUnique({ where: { id }, include });
+        return selected && !selected.deletedAt && allowed(selected.memoryId)
+          ? finish(selected)
+          : null;
+      };
+
+      // Form 2: explicit `hrn:node:` URN — strict resolution, no loc
+      // fallback (resolveNodeRef enforces the fully-qualified shape; a
+      // malformed input propagates as UrnNotQualifiedError rather than
+      // masking as not-found).
+      if (parsed.type === 'node') {
+        return movedUrnRead();
       }
 
       // Form 3a: bare loc pinned by `memory:` (ID or URN per
@@ -745,13 +749,20 @@ export const nodeQueries = {
           select: { id: true },
         });
         if (memory) {
-          if (!allowed(memory.id)) return null;
-          const node = await ctx.db.node.findFirst({
-            where: { loc: urnLoc, memoryId: memory.id, deletedAt: null },
-            include,
-          });
-          return node ? finish(node) : null;
+          if (allowed(memory.id)) {
+            const node = await ctx.db.node.findFirst({
+              where: { loc: urnLoc, memoryId: memory.id, deletedAt: null },
+              include,
+            });
+            if (node) return finish(node);
+          }
+          // The memory may be unreadable now while its former node moved to
+          // one the caller CAN read. resolveNodeRef still checks the live old
+          // address first, so a new occupant cannot be shadowed by an alias.
+          return movedUrnRead();
         }
+        const moved = await movedUrnRead();
+        if (moved) return moved;
       }
 
       // Form 3c: bare loc across EVERY readable memory. #391: exclude

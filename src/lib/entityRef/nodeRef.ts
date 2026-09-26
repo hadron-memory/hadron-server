@@ -50,8 +50,32 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
-import { findMemoryByAliasedUrn } from '../urnAlias.js';
-import { NodeNotFoundError } from './errors.js';
+import { findLiveUrnAliasTargets, findMemoryByAliasedUrn } from '../urnAlias.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from './errors.js';
+
+/**
+ * Resolve a node's old composed address after the live memory/loc lookup
+ * missed. Alias rows carry no authority: re-query current node and memory
+ * liveness, then leave caller-specific content access to the caller's gate.
+ */
+async function findMovedNode(
+  db: Pick<PrismaClient, 'node' | 'urnAlias'>,
+  ref: string,
+  bareUrn: string,
+  includeDeleted = false,
+): Promise<{ id: string } | null> {
+  const rows = await findLiveUrnAliasTargets(db, 'NODE', bareUrn, (ids) =>
+    db.node.findMany({
+      where: {
+        id: { in: ids },
+        ...(includeDeleted ? {} : { deletedAt: null, memory: { deletedAt: null } }),
+      },
+      select: { id: true },
+    }),
+  );
+  if (rows.length > 1) throw new AmbiguousLegacyUrnError(ref);
+  return rows[0] ?? null;
+}
 
 export async function resolveNodeRef(
   db: Pick<PrismaClient, 'node' | 'memory' | 'urnAlias'>,
@@ -179,15 +203,25 @@ export async function resolveNodeRef(
       // `<memory-urn>:<loc>` and resolve strictly — soft-deleted
       // memories produce a clean miss rather than a fall-through that
       // could resolve to the wrong node in `contextMemoryId`.
-      if (!options?.includeDeleted && memory.deletedAt) throw new NodeNotFoundError(ref);
+      if (!options?.includeDeleted && memory.deletedAt) {
+        const moved = await findMovedNode(db, ref, normalized);
+        if (moved) return moved;
+        throw new NodeNotFoundError(ref);
+      }
       const loc = memLoc;
       const node = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
         select: { id: true, deletedAt: true },
       });
-      if (!node || (!options?.includeDeleted && node.deletedAt)) throw new NodeNotFoundError(ref);
+      if (!node || (!options?.includeDeleted && node.deletedAt)) {
+        const moved = await findMovedNode(db, ref, normalized, options?.includeDeleted);
+        if (moved) return moved;
+        throw new NodeNotFoundError(ref);
+      }
       return { id: node.id };
     }
+    const moved = await findMovedNode(db, ref, normalized, options?.includeDeleted);
+    if (moved) return moved;
     if (strictUrnNode) {
       // Explicit `urn:node:` with no live memory at the named prefix
       // — reject without falling back to short-loc.

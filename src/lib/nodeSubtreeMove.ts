@@ -57,6 +57,8 @@ import { deriveEdgeLoc } from './edgeLoc.js';
 import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
+import { recordUrnRename } from './urnAlias.js';
+import { safeNodeUrnV2 } from './urnEmit.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
 import {
@@ -379,6 +381,31 @@ export async function moveNodeSubtree(
         }
       }
     }
+  }
+
+  // cor:urn:030:01 — each moved row leaves a published address behind, even
+  // when its parent memory's stored URN never changes. Record every predecessor
+  // in this SAME transaction as the two-phase rebase. The shared alias helper
+  // normalizes and deduplicates repeat moves; the node-ref resolver applies
+  // live-address precedence and current-target liveness on lookup.
+  const sourceMemoryUrn = (await tx.memory.findUniqueOrThrow({
+    where: { id: srcMemoryId }, select: { urn: true },
+  })).urn;
+  const targetMemoryUrn = crossMemory
+    ? (await tx.memory.findUniqueOrThrow({
+        where: { id: destMemoryId }, select: { urn: true },
+      })).urn
+    : sourceMemoryUrn;
+  const aliasKey = (memoryUrn: string, loc: string) =>
+    safeNodeUrnV2(memoryUrn, loc).slice('hrn:node:'.length);
+  for (const n of subtree) {
+    await recordUrnRename(tx, {
+      entityType: 'NODE',
+      entityId: n.id,
+      oldUrn: aliasKey(sourceMemoryUrn, n.loc),
+      newUrn: aliasKey(targetMemoryUrn, newLocById.get(n.id)!),
+      createdBy: editor.userId ?? editor.info ?? null,
+    });
   }
 
   // Move every node in two phases so per-row updates never trip the

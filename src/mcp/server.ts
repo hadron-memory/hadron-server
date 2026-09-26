@@ -3627,12 +3627,10 @@ export function createMcpServerInstance(
       // reported below rather than silently serving the parent.
       const { memoryUrn, loc, fragment, literalLoc } = splitNodeUrnTolerant(rawUrn);
       const memory = await resolveMemoryByUrn(memoryUrn);
-      if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
-      }
-      if (!(await canReadMemory(db, auth, memory.id))) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
-      }
+      const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id);
+      const missing = () => textResult(sourceReadable
+        ? `Node "${rawUrn}" not found.`
+        : `Memory not found: "${memoryUrn}".`);
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
@@ -3667,19 +3665,42 @@ export function createMcpServerInstance(
       // a tombstoned row returns "not found" instead of leaking its last
       // content.
       let matchedLiteral = false;
-      let node = await db.node.findFirst({
-        where: { loc: literalLoc ?? loc, memoryId: memory.id, deletedAt: null },
-        include: nodeReadInclude,
-      });
+      let node = sourceReadable && memory
+        ? await db.node.findFirst({
+            where: { loc: literalLoc ?? loc, memoryId: memory.id, deletedAt: null },
+            include: nodeReadInclude,
+          })
+        : null;
       if (node && literalLoc) matchedLiteral = true;
-      if (!node && literalLoc) {
+      if (!node && literalLoc && sourceReadable && memory) {
         node = await db.node.findFirst({
           where: { loc, memoryId: memory.id, deletedAt: null },
           include: nodeReadInclude,
         });
       }
       if (!node) {
-        return textResult(`Node "${rawUrn}" not found.`);
+        // #1391 — the old memory or loc can have vanished on a move. Resolve
+        // the full address (LIVE first, alias on miss) before gating the node
+        // at its CURRENT memory. Even when the old memory is unreadable, a live
+        // occupant there must beat a historical alias to another node.
+        const aliasRef = fragment ? rawUrn.slice(0, rawUrn.lastIndexOf('#')) : rawUrn;
+        let movedId: string;
+        try {
+          ({ id: movedId } = await resolveNodeRef(db, aliasRef));
+        } catch (e) {
+          if (e instanceof NodeNotFoundError) return missing();
+          throw e;
+        }
+        const target = await db.node.findFirst({
+          where: { id: movedId, deletedAt: null },
+          select: { memoryId: true },
+        });
+        if (!target || !(await canReadMemory(db, auth, target.memoryId))) return missing();
+        node = await db.node.findFirst({
+          where: { id: movedId, memoryId: target.memoryId, deletedAt: null },
+          include: nodeReadInclude,
+        });
+        if (!node) return missing();
       }
 
       // Spec 031 — contentScope-driven response shape. Default 'content'
@@ -3907,6 +3928,37 @@ export function createMcpServerInstance(
         const projectionInclude = readProjectionInclude;
 
         const nodeByRef = new Map<string, ReadProjectionNode & { id: string }>();
+        // A moved node's historical address is a fallback only after the
+        // direct, live address misses. Re-resolve under the CURRENT memory's
+        // gate; the old memory conveys no authority (cor:urn:030:02).
+        const resolveMovedRef = async (r: UrnRef) => {
+          const aliasRef = fragmentByRef.has(r.raw)
+            ? r.raw.slice(0, r.raw.lastIndexOf('#'))
+            : r.raw;
+          let id: string;
+          try {
+            ({ id } = await resolveNodeRef(db, aliasRef));
+          } catch (e) {
+            if (e instanceof NodeNotFoundError) {
+              unavailable.push(r.raw);
+              return;
+            }
+            throw e;
+          }
+          const target = await db.node.findFirst({
+            where: { id, deletedAt: null }, select: { memoryId: true },
+          });
+          if (!target || !(await canReadMemory(db, auth, target.memoryId))) {
+            unavailable.push(r.raw);
+            return;
+          }
+          const row = await db.node.findFirst({
+            where: { id, memoryId: target.memoryId, deletedAt: null },
+            include: projectionInclude,
+          });
+          if (row) nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
+          else unavailable.push(r.raw);
+        };
 
         // URN refs: group by memory so each distinct memory is gated + fetched
         // once (not N findFirsts).
@@ -3919,7 +3971,7 @@ export function createMcpServerInstance(
         for (const [mu, group] of byMemory) {
           const mem = await resolveMemoryByUrn(mu);
           if (!mem || !(await canReadMemory(db, auth, mem.id))) {
-            for (const r of group) unavailable.push(r.raw);
+            for (const r of group) await resolveMovedRef(r);
             continue;
           }
           // Both candidates for a fragmented ref, in ONE query: the literal
@@ -3941,7 +3993,7 @@ export function createMcpServerInstance(
             const literal = r.literalLoc ? rowByLoc.get(r.literalLoc) : undefined;
             const row = literal ?? rowByLoc.get(r.loc);
             if (!row) {
-              unavailable.push(r.raw);
+              await resolveMovedRef(r);
               continue;
             }
             // A literal match resolved nothing away, so it carries no notice.

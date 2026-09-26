@@ -22,7 +22,9 @@
  * platform are **composed on read** from one of them — a node URN carries its
  * memory's slug, a worker URN its App's slug, an apprun URN likewise. Renaming
  * one memory therefore orphans every published *node* URN beneath it, which is
- * the platform's most-cited identifier.
+ * the platform's most-cited identifier. A node MOVE is the exception: it changes
+ * the node's loc or memory without renaming its old memory, so it records a
+ * NODE alias for the composed address it left (#1391).
  *
  * A derived URN heals **when** it resolves THROUGH its parent's ref resolver:
  * `hrn:worker:<root>:<app-slug>:<slug>` is resolved by looking up
@@ -60,11 +62,10 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { normalizeUrnForLookup } from './urn.js';
 
 /**
- * The entities whose URN is a stored, renameable column. Deliberately closed:
- * everything else composes its URN on read from one of these, so adding a member
- * means a new column somewhere, not a new derived shape.
+ * The four stored-URN entities, plus NODE for moves of a composed address.
+ * Other derived URNs inherit parent aliases through their resolver.
  */
-export type UrnAliasEntityType = 'ORGANIZATION' | 'MEMORY' | 'AGENT' | 'APP';
+export type UrnAliasEntityType = 'ORGANIZATION' | 'MEMORY' | 'AGENT' | 'APP' | 'NODE';
 
 /** Why an alias row exists. See the Prisma enum for the authoritative list. */
 export type UrnAliasReason = 'RENAME' | 'ORG_RENAME_CASCADE' | 'V1_MIGRATION';
@@ -301,4 +302,3 @@ export async function findMemoryByAliasedUrn(
   }
   return null;
 }
-
