@@ -2916,7 +2916,7 @@ export const typeDefs = `#graphql
   }
 
   type AiServiceConfigTestError {
-    "NO_API_KEY | LLM_CALL_FAILED"
+    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
     code: String!
     "Provider error text, scrubbed of the key and truncated."
     message: String!
@@ -8198,9 +8198,10 @@ export const typeDefs = `#graphql
     #1378: test a SAVED config by id with one small real call, through the same
     client, endpoint and egress guard a run uses; the stored key never leaves
     the server. The override argument tests edited values without saving them. Auth: as
-    updateAiServiceConfig; refused under impersonation. Every test is metered
-    (usage type ai-config-test); platform-key tests count against the org's
-    daily token quota. Rate-limited per caller and config (RATE_LIMITED).
+    updateAiServiceConfig; refused under impersonation. Every test that
+    reaches the provider is metered (usage type ai-config-test); NO_API_KEY
+    and KEY_UNREADABLE make no call and record nothing. The call is bounded
+    by a 20s timeout. Rate-limited per caller and config (RATE_LIMITED).
     """
     testAiServiceConfig(id: ID!, override: AiServiceConfigTestOverride): AiServiceConfigTestResult!
 

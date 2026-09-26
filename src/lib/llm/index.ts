@@ -36,6 +36,14 @@ export interface LlmRequest {
   prompt: string;
   /** Hard output ceiling — callers pass their remaining run budget. */
   maxTokens?: number;
+  /**
+   * Abort the provider call after this many ms (#1385 review). A run has its
+   * own deadline around the whole flow; a single interactive call (the
+   * saved-config Test) has none, and an endpoint that accepts the connection
+   * but never answers must not hold the request forever. An abort surfaces as
+   * a transient LlmInvocationError.
+   */
+  timeoutMs?: number;
 }
 
 export interface LlmResult {
@@ -483,6 +491,7 @@ export async function generateText(
       ...(req.system ? { system: req.system } : {}),
       prompt: req.prompt,
       ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
+      ...(req.timeoutMs != null ? { abortSignal: AbortSignal.timeout(req.timeoutMs), maxRetries: 0 } : {}),
     });
     return {
       text: out.text,

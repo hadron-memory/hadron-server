@@ -17,7 +17,8 @@
  *     used, so "it works" can never be misread as "the saved config works".
  *
  * Metering (Holger, 2026-09-26, recorded on #1378): every test that reaches
- * a provider is recorded (`type: 'ai-config-test'`). A BYOK test uses the
+ * a provider is recorded (pre-call failures, NO_API_KEY and KEY_UNREADABLE,
+ * make no call and record nothing) (`type: 'ai-config-test'`). A BYOK test uses the
  * owner's provider account; a caller-supplied override key is the caller's
  * own and never debits. The only PLATFORM-funded test is a platform admin
  * testing a HADRON_SERVER config (only they pass the gate for one, and an
@@ -167,9 +168,14 @@ async function billableOrgOf(ctx: Context, row: AiServiceConfig): Promise<string
 export interface AiConfigTestDeps {
   generate: (resolved: Parameters<typeof generateText>[0], req: LlmRequest) => Promise<LlmResult>;
   now: () => number;
+  /** The probe's hard deadline; an endpoint that never answers is a failed test, not a hung request. */
+  timeoutMs: number;
 }
 
-const defaultDeps: AiConfigTestDeps = { generate: generateText, now: () => Date.now() };
+/** Long enough for a slow model's first token, short enough for a button. */
+export const AI_CONFIG_TEST_TIMEOUT_MS = 20_000;
+
+const defaultDeps: AiConfigTestDeps = { generate: generateText, now: () => Date.now(), timeoutMs: AI_CONFIG_TEST_TIMEOUT_MS };
 
 export async function testAiServiceConfig(
   ctx: Context,
@@ -288,7 +294,7 @@ export async function testAiServiceConfig(
   let out: LlmResult | null = null;
   let error: AiConfigTestResult['error'] = null;
   try {
-    out = await deps.generate(resolved, AI_CONFIG_TEST_REQUEST);
+    out = await deps.generate(resolved, { ...AI_CONFIG_TEST_REQUEST, timeoutMs: deps.timeoutMs });
   } catch (e) {
     error = {
       code: 'LLM_CALL_FAILED',

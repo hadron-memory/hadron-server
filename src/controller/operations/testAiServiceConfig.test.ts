@@ -13,7 +13,9 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { encryptToken } from '../../lib/tokenCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { generateText } from '../../lib/llm/index.js';
 import {
+  testAiServiceConfig,
   AI_CONFIG_TEST_LIMIT,
   AI_CONFIG_TEST_WINDOW_MS,
   admitTest,
@@ -34,6 +36,7 @@ const CHAT_COMPLETION = {
 };
 
 let server: Server;
+const hanging: Array<import('node:http').ServerResponse> = [];
 let origin: string;
 const captured: Array<{ path: string; auth: string | undefined; body: Record<string, unknown> }> = [];
 
@@ -49,6 +52,11 @@ beforeAll(async () => {
     const path = req.url ?? '';
     captured.push({ path, auth: req.headers.authorization, body: await readBody(req) });
     res.setHeader('content-type', 'application/json');
+    if (path.startsWith('/hang/')) {
+      // Accepts the request and never answers.
+      hanging.push(res);
+      return;
+    }
     if (path.startsWith('/echo-key/')) {
       // A provider that echoes the bearer back in its error body.
       res.statusCode = 401;
@@ -62,6 +70,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  for (const res of hanging) res.destroy();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
@@ -187,6 +196,15 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(r).toMatchObject({ ok: false, used: { key: 'SAVED' }, error: { code: 'KEY_UNREADABLE', transient: false } });
     expect(captured).toEqual([]);
     expect(await db.usageEvent.count({ where: { type: 'ai-config-test' } })).toBe(0);
+  });
+
+  it('an endpoint that never answers is a failed, transient test within the deadline (#1385 review)', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, endpoint: `${origin}/hang/v4` });
+    const started = Date.now();
+    const r = await testAiServiceConfig(ctxFor(admin.id), cfg.id, {}, { generate: generateText, now: () => Date.now(), timeoutMs: 300 });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(r).toMatchObject({ ok: false, error: { code: 'LLM_CALL_FAILED', transient: true } });
+    expect(captured.filter((c) => c.path.startsWith('/hang/'))).toHaveLength(1);
   });
 
   it('provider error text is scrubbed of the key before it is returned', async () => {
