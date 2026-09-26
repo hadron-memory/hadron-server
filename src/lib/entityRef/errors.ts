@@ -189,17 +189,53 @@ export class NodeLocConflictError extends Error {
  * invariants." Carries the offending length so the user-facing message
  * can be actionable.
  *
+ * Call sites that COMPUTE the new abstract from an existing one (`replaceText`,
+ * `nodeMerge`) pass `edit.currentLength`, and the message then reports the
+ * numbers a surgical edit needs — original length, delta, and headroom under
+ * the cap (#1117). Create/full-replacement sites pass nothing (there is no
+ * truthful "current" at validation time) and keep the bare message.
+ *
  * GraphQL `extensions.code: 'NodeAbstractTooLongError'` per constitution
  * S2 (typed-error boundary).
  */
 export class NodeAbstractTooLongError extends Error {
   public readonly max = 2000;
-  constructor(public readonly length: number) {
-    super(
-      `Abstract exceeds 2000-character cap (got ${length} chars). ` +
-        `Use a shorter summary or expand 'content' for the long form.`,
-    );
+  /** Length of the abstract this edit started from, when the throw site knows it. */
+  public readonly currentLength: number | null;
+  constructor(
+    public readonly length: number,
+    edit?: { currentLength: number },
+  ) {
+    const sentences = [`Abstract exceeds 2000-character cap (got ${length} chars).`];
+    if (edit != null) {
+      const delta = length - edit.currentLength;
+      const available = 2000 - edit.currentLength;
+      sentences.push(
+        `This edit takes a ${edit.currentLength}-character abstract to ${length} ` +
+          `(${delta >= 0 ? '+' : ''}${delta}); ${available} characters were available.`,
+      );
+    }
+    sentences.push(`Use a shorter summary or expand 'content' for the long form.`);
+    super(sentences.join(' '));
     this.name = 'NodeAbstractTooLongError';
+    this.currentLength = edit?.currentLength ?? null;
+  }
+
+  /**
+   * Typed-error envelope for GraphQL adapters: the identity/length fields
+   * every refusal carries, plus `currentLength`/`available` when the throw
+   * site reported edit context — so every surface exposing this error
+   * offers the same machine-actionable shape (Copilot round 1 on PR #1371).
+   */
+  extensionFields(): Record<string, unknown> {
+    return {
+      code: this.name,
+      length: this.length,
+      max: this.max,
+      ...(this.currentLength != null
+        ? { currentLength: this.currentLength, available: this.max - this.currentLength }
+        : {}),
+    };
   }
 }
 

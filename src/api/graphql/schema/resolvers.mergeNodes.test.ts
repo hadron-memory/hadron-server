@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -393,11 +394,29 @@ describe('mergeNodes — guards', () => {
     await expect(merge({ source: generateId(), target: tgt.id })).rejects.toThrow(/not found/i);
   });
 
-  it('rejects an over-long merged abstract', async () => {
+  it('rejects an over-long merged abstract, reporting the target length, delta and headroom (#1117)', async () => {
     const src = await makeNode('src', { abstract: 'b'.repeat(1500) });
     const tgt = await makeNode('tgt', { abstract: 'a'.repeat(1500) });
-    await expect(
-      merge({ source: src.id, target: tgt.id, include: ['ABSTRACT'] }),
-    ).rejects.toThrow(/2000/);
+    // combineText joins with a blank line: 1500 + 2 + 1500 = 3002, delta
+    // +1502 against 500 headroom. Message AND extensions carry the numbers
+    // (Copilot round 1 on PR #1371: adapters must not drop them).
+    let caught: unknown;
+    try {
+      await merge({ source: src.id, target: tgt.id, include: ['ABSTRACT'] });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    const err = caught as GraphQLError;
+    expect(err.message).toMatch(
+      /\(got 3002 chars\)\. This edit takes a 1500-character abstract to 3002 \(\+1502\); 500 characters were available\./,
+    );
+    expect(err.extensions).toMatchObject({
+      code: 'NodeAbstractTooLongError',
+      length: 3002,
+      max: 2000,
+      currentLength: 1500,
+      available: 500,
+    });
   });
 });
