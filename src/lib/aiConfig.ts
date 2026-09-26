@@ -91,7 +91,6 @@ const baseParams = z
   .object({
     maxTokens: z.number().int().positive().optional(),
     temperature: z.number().min(0).max(2).optional(),
-    baseUrl: z.string().url().startsWith('http').optional(),
   })
   .passthrough();
 

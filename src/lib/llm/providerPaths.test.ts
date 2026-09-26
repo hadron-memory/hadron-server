@@ -76,35 +76,46 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function resolved(provider: string, params: Record<string, unknown> | null = null, endpoint: string | null = null) {
+function resolved(
+  provider: string,
+  params: Record<string, unknown> | null = null,
+  endpoint: string | null = null,
+  apiStyle: string | null = null,
+) {
   return {
     ownerType: 'ORGANIZATION',
-    config: { provider, model: 'GLM-5.3', apiKeyEncrypted: encryptToken('test-key'), params, endpoint },
+    config: { provider, model: 'GLM-5.3', apiKeyEncrypted: encryptToken('test-key'), params, endpoint, apiStyle },
   } as never;
 }
 
+/** Record the URL of every fetch the SDK makes to a provider's REAL default host. */
+function stubDefaultHost(): string[] {
+  const urls: string[] = [];
+  vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+    urls.push(String(input instanceof Request ? input.url : input));
+    return new Response(JSON.stringify(CHAT_COMPLETION), { headers: { 'content-type': 'application/json' } });
+  });
+  return urls;
+}
+
 describe('#1374 — outgoing API path per provider shape', () => {
-  it('glm with a custom base URL calls {baseUrl}/chat/completions and parses the reply', async () => {
-    const out = await generateText(resolved('glm', { baseUrl: `${origin}/api/paas/v4` }), { prompt: 'hi' });
+  it('glm with an endpoint calls {endpoint}/chat/completions and parses the reply', async () => {
+    const out = await generateText(resolved('glm', null, `${origin}/api/paas/v4`), { prompt: 'hi' });
     expect(captured.map((c) => `${c.method} ${c.path}`)).toEqual(['POST /api/paas/v4/chat/completions']);
     expect(captured[0].auth).toBe('Bearer test-key');
     expect(captured[0].body).toMatchObject({ model: 'GLM-5.3', messages: [{ role: 'user', content: 'hi' }] });
     expect(out).toMatchObject({ text: 'ok', tokensIn: 3, tokensOut: 1, provider: 'glm' });
   });
 
-  it('glm with NO base URL calls the default Zhipu host at /chat/completions', async () => {
-    const urls: string[] = [];
-    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
-      urls.push(String(input instanceof Request ? input.url : input));
-      return new Response(JSON.stringify(CHAT_COMPLETION), { headers: { 'content-type': 'application/json' } });
-    });
+  it('glm with NO endpoint calls the default Z.ai host at /chat/completions (D1)', async () => {
+    const urls = stubDefaultHost();
     const out = await generateText(resolved('glm'), { prompt: 'hi' });
-    expect(urls).toEqual(['https://open.bigmodel.cn/api/paas/v4/chat/completions']);
+    expect(urls).toEqual(['https://api.z.ai/api/paas/v4/chat/completions']);
     expect(out.text).toBe('ok');
   });
 
-  it('openai with a custom base URL is UNCHANGED: still the Responses API (a contract decision, not inferred)', async () => {
-    const err = await generateText(resolved('openai', { baseUrl: `${origin}/v1` }), { prompt: 'hi' }).catch((e) => e);
+  it('openai with an endpoint and no apiStyle stays on the Responses API (never inferred from the URL)', async () => {
+    const err = await generateText(resolved('openai', null, `${origin}/v1`), { prompt: 'hi' }).catch((e) => e);
     expect(err).toBeInstanceOf(LlmInvocationError);
     expect(captured.map((c) => `${c.method} ${c.path}`)).toEqual(['POST /v1/responses']);
   });
@@ -125,20 +136,34 @@ describe('#1373 — AiServiceConfig.endpoint and the connect-time egress guard',
     expect(captured.map((c) => c.path)).toEqual(['/zai/v4/chat/completions', '/oai/v1/responses', '/ant/v1/messages']);
   });
 
-  it('endpoint wins over the legacy params.baseUrl', async () => {
-    await generateText(resolved('glm', { baseUrl: `${origin}/legacy/v4` }, `${origin}/zai/v4`), { prompt: 'hi' });
-    expect(captured.map((c) => c.path)).toEqual(['/zai/v4/chat/completions']);
+  it('a legacy params.baseUrl is not read: the request goes to the provider default (D2)', async () => {
+    const urls = stubDefaultHost();
+    await generateText(resolved('glm', { baseUrl: `${origin}/legacy/v4` }), { prompt: 'hi' });
+    expect(urls).toEqual(['https://api.z.ai/api/paas/v4/chat/completions']);
+    expect(captured).toEqual([]);
   });
 
-  it('in production a loopback endpoint is refused before any request, for endpoint AND legacy baseUrl', async () => {
+  it('apiStyle picks the wire protocol (D3), both ways round', async () => {
+    await generateText(resolved('openai', null, `${origin}/compat/v1`, 'CHAT_COMPLETIONS'), { prompt: 'hi' });
+    await generateText(resolved('glm', null, `${origin}/zai/v4`, 'RESPONSES'), { prompt: 'hi' }).catch(() => undefined);
+    expect(captured.map((c) => c.path)).toEqual(['/compat/v1/chat/completions', '/zai/v4/responses']);
+  });
+
+  it('in production a loopback endpoint is refused before any request', async () => {
     vi.stubEnv('NODE_ENV', 'production');
-    for (const r of [resolved('glm', null, `${origin}/zai/v4`), resolved('openai', { baseUrl: `${origin}/v1` })]) {
-      const err = await generateText(r, { prompt: 'hi' }).catch((e) => e);
-      expect(err).toBeInstanceOf(LlmInvocationError);
-      expect(String(err.message)).toMatch(/not allowed/);
-      expect((err as LlmInvocationError).transient).toBe(false);
-    }
+    const err = await generateText(resolved('glm', null, `${origin}/zai/v4`), { prompt: 'hi' }).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmInvocationError);
+    expect(String(err.message)).toMatch(/not allowed/);
+    expect((err as LlmInvocationError).transient).toBe(false);
     expect(captured).toEqual([]);
+  });
+
+  it('the self-hosted private-network opt-in admits it in production (D4)', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS', 'true');
+    const out = await generateText(resolved('glm', null, `${origin}/lan/v4`), { prompt: 'hi' });
+    expect(out.text).toBe('ok');
+    expect(captured.map((c) => c.path)).toEqual(['/lan/v4/chat/completions']);
   });
 
   it('a redirect is refused, not followed (a redirect to an IP literal would skip the pin)', async () => {

@@ -15,8 +15,8 @@
  *   - the scheme is http or https; https-only is enforced when `endpoint` is
  *     WRITTEN, not here, so a legacy http `params.baseUrl` keeps working;
  *   - loopback is allowed only outside production (a local Ollama or a test's
- *     capture server). A private-network opt-in for self-hosted deployments is
- *     an open decision on #1373 (D4) and is NOT implemented.
+ *     capture server), and private addresses only under the self-hosted
+ *     operator opt-in `AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS=true` (D4).
  *
  * Provider DEFAULT hosts are constants and do not pass through here.
  */
@@ -26,7 +26,7 @@ import type { LookupAddress } from 'node:dns';
 import { isIP, type LookupFunction } from 'node:net';
 import { Agent } from 'undici';
 import { isForbiddenAddress, pinnedLookup } from '../webFetch.js';
-import { isLoopbackAddress, loopbackAllowed } from '../aiEndpoint.js';
+import { isLoopbackAddress, loopbackAllowed, privateEndpointsAllowed } from '../aiEndpoint.js';
 
 export class AiEndpointForbiddenError extends Error {
   constructor(readonly host: string, reason: string) {
@@ -59,7 +59,9 @@ async function allowedAddresses(url: URL, forbidden: (ip: string) => boolean): P
 /** A `fetch` for the AI SDK that enforces the posture above on every request. */
 export function guardedEndpointFetch(env: NodeJS.ProcessEnv = process.env): typeof fetch {
   const allowLoopback = loopbackAllowed(env);
-  const forbidden = (ip: string) => isForbiddenAddress(ip) && !(allowLoopback && isLoopbackAddress(ip));
+  const allowPrivate = privateEndpointsAllowed(env);
+  const forbidden = (ip: string) =>
+    !allowPrivate && isForbiddenAddress(ip) && !(allowLoopback && isLoopbackAddress(ip));
   return async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     // The scheme is NOT narrowed here: https-only is the write-time rule for

@@ -28,7 +28,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import type { ResolvedAiConfig } from '../aiConfig.js';
 import { decryptToken } from '../tokenCrypto.js';
-import { defaultEndpoint, explicitEndpoint } from '../aiEndpoint.js';
+import { defaultEndpoint, effectiveApiStyle, explicitEndpoint } from '../aiEndpoint.js';
 import { guardedEndpointFetch } from './endpointFetch.js';
 
 export interface LlmRequest {
@@ -61,27 +61,25 @@ export class LlmInvocationError extends Error {
 function modelFor(resolved: ResolvedAiConfig): LanguageModel {
   const { provider, model, apiKeyEncrypted } = resolved.config;
   const key = apiKeyEncrypted ? decryptToken(apiKeyEncrypted) : undefined;
-  // #1373: an EXPLICIT endpoint (the config's `endpoint`, or the legacy
-  // `params.baseUrl` for openai/glm) is admin-chosen, so it goes through the
+  // #1373: an EXPLICIT endpoint is admin-chosen, so it goes through the
   // connect-time egress guard. Provider defaults are constants and do not.
   const endpoint = explicitEndpoint(resolved.config);
   const conn = endpoint ? { baseURL: endpoint, fetch: guardedEndpointFetch() } : {};
+  // D3: the wire protocol for an OpenAI-compatible provider. Calling the
+  // provider directly selects the Responses API in @ai-sdk/openai 4.x;
+  // `.chat()` selects Chat Completions (#1374).
+  const openAiCompatible = (client: ReturnType<typeof createOpenAI>) =>
+    effectiveApiStyle(resolved.config) === 'CHAT_COMPLETIONS' ? client.chat(model) : client(model);
   switch (provider) {
     case 'anthropic':
       return createAnthropic({ apiKey: key, ...conn })(model);
     case 'openai':
-      // Calling the provider directly selects the Responses API (POST
-      // /responses) in @ai-sdk/openai 4.x. Kept for a custom baseUrl too: a
-      // custom URL alone does not say the host lacks /responses, so choosing
-      // the API per endpoint is a contract decision, not something to infer
-      // here (#1374).
-      return createOpenAI({ apiKey: key, ...conn })(model);
+      // Default RESPONSES; an OpenAI-compatible host that serves only Chat
+      // Completions sets apiStyle, never inferred from the URL (#1374).
+      return openAiCompatible(createOpenAI({ apiKey: key, ...conn }));
     case 'glm':
-      // OpenAI-compatible endpoint (headless-runner D1 note). `.chat()`
-      // explicitly: Zhipu and Z.ai serve only /chat/completions, and the
-      // provider's default model would POST /responses, failing every glm
-      // call (#1374).
-      return createOpenAI({ apiKey: key, baseURL: defaultEndpoint('glm')!, ...conn }).chat(model);
+      // Default CHAT_COMPLETIONS: Zhipu and Z.ai serve only /chat/completions.
+      return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('glm')!, ...conn }));
     case 'bedrock': {
       let triple: { accessKeyId?: string; secretAccessKey?: string; region?: string } = {};
       if (key) {

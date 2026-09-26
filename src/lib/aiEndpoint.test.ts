@@ -3,7 +3,15 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { AI_PROVIDER_ENDPOINTS, effectiveEndpoint, explicitEndpoint, validateEndpoint } from './aiEndpoint.js';
+import {
+  AI_PROVIDER_ENDPOINTS,
+  effectiveApiStyle,
+  effectiveEndpoint,
+  explicitEndpoint,
+  refuseLegacyBaseUrl,
+  validateApiStyle,
+  validateEndpoint,
+} from './aiEndpoint.js';
 
 const prod = { NODE_ENV: 'production' } as NodeJS.ProcessEnv;
 const dev = { NODE_ENV: 'development' } as NodeJS.ProcessEnv;
@@ -34,19 +42,20 @@ describe('validateEndpoint', () => {
   });
 });
 
-describe('endpoint precedence', () => {
-  it('endpoint beats params.baseUrl, which beats the provider default', () => {
-    const glm = { provider: 'glm', params: { baseUrl: 'https://legacy.example/v4' } };
-    expect(effectiveEndpoint({ ...glm, endpoint: 'https://api.z.ai/api/paas/v4' })).toBe('https://api.z.ai/api/paas/v4');
-    expect(effectiveEndpoint(glm)).toBe('https://legacy.example/v4');
-    expect(effectiveEndpoint({ provider: 'glm' })).toBe('https://open.bigmodel.cn/api/paas/v4');
+describe('endpoint resolution (D1, D2)', () => {
+  it('an endpoint wins; an unset endpoint ALWAYS means the provider default', () => {
+    expect(effectiveEndpoint({ provider: 'glm', endpoint: 'https://open.bigmodel.cn/api/paas/v4' })).toBe('https://open.bigmodel.cn/api/paas/v4');
+    expect(effectiveEndpoint({ provider: 'glm' })).toBe('https://api.z.ai/api/paas/v4');
+    expect(effectiveEndpoint({ provider: 'openai' })).toBe('https://api.openai.com/v1');
   });
 
-  it('params.baseUrl is honoured only by the providers that honoured it before (no silent host change)', () => {
-    const params = { baseUrl: 'https://legacy.example/v1' };
-    expect(explicitEndpoint({ provider: 'openai', params })).toBe('https://legacy.example/v1');
-    expect(explicitEndpoint({ provider: 'anthropic', params })).toBeNull();
-    expect(explicitEndpoint({ provider: 'bedrock', params })).toBeNull();
+  it('params.baseUrl is never read, and writing one is refused with a pointer to endpoint', () => {
+    const legacy = { provider: 'openai', params: { baseUrl: 'https://legacy.example/v1' } };
+    expect(explicitEndpoint(legacy)).toBeNull();
+    expect(effectiveEndpoint(legacy)).toBe('https://api.openai.com/v1');
+    expect(() => refuseLegacyBaseUrl({ baseUrl: 'https://legacy.example/v1' })).toThrow(/set the config's endpoint/);
+    expect(() => refuseLegacyBaseUrl({ maxTokens: 10 })).not.toThrow();
+    expect(() => refuseLegacyBaseUrl(null)).not.toThrow();
   });
 
   it('bedrock has no default endpoint (the SDK derives it from the region)', () => {
@@ -58,5 +67,44 @@ describe('endpoint precedence', () => {
       if (list.length) expect(list.filter((e) => e.isDefault), provider).toHaveLength(1);
       for (const e of list) expect(validateEndpoint(e.url, prod)).toBe(e.url);
     }
+    expect(AI_PROVIDER_ENDPOINTS.glm.find((e) => e.isDefault)!.url).toBe('https://api.z.ai/api/paas/v4');
+  });
+});
+
+describe('private endpoints (D4)', () => {
+  const optIn = { NODE_ENV: 'production', AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS: 'true' } as NodeJS.ProcessEnv;
+
+  it('the self-hosted opt-in admits private and loopback hosts, plain http included', () => {
+    for (const url of ['http://10.0.0.5:11434/v1', 'http://localhost:11434/v1', 'http://ollama.lan/v1']) {
+      expect(validateEndpoint(url, optIn)).toBe(url);
+    }
+  });
+
+  it('without it, production refuses them exactly as before', () => {
+    expect(() => validateEndpoint('http://10.0.0.5:11434/v1', prod)).toThrow(/Invalid endpoint/);
+    expect(() => validateEndpoint('http://localhost:11434/v1', prod)).toThrow(/loopback/);
+    expect(() => validateEndpoint('https://10.0.0.5/v1', { ...prod, AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS: 'yes' } as NodeJS.ProcessEnv)).toThrow();
+  });
+
+  it('it never admits credentials, a query or a fragment', () => {
+    expect(() => validateEndpoint('http://u:p@10.0.0.5/v1', optIn)).toThrow(/credentials/);
+    expect(() => validateEndpoint('http://10.0.0.5/v1?x=1', optIn)).toThrow(/query/);
+  });
+});
+
+describe('apiStyle (D3)', () => {
+  it('defaults by provider, and a stored style wins', () => {
+    expect(effectiveApiStyle({ provider: 'glm' })).toBe('CHAT_COMPLETIONS');
+    expect(effectiveApiStyle({ provider: 'openai' })).toBe('RESPONSES');
+    expect(effectiveApiStyle({ provider: 'openai', apiStyle: 'CHAT_COMPLETIONS' })).toBe('CHAT_COMPLETIONS');
+    expect(effectiveApiStyle({ provider: 'anthropic' })).toBeNull();
+  });
+
+  it('is refused for a single-protocol provider and for an unknown value', () => {
+    expect(() => validateApiStyle('anthropic', 'CHAT_COMPLETIONS')).toThrow(/OpenAI-compatible providers only/);
+    expect(() => validateApiStyle('bedrock', 'RESPONSES')).toThrow(/OpenAI-compatible providers only/);
+    expect(() => validateApiStyle('openai', 'COMPLETIONS')).toThrow(/Unknown apiStyle/);
+    expect(() => validateApiStyle('anthropic', null)).not.toThrow();
+    expect(() => validateApiStyle('glm', 'RESPONSES')).not.toThrow();
   });
 });

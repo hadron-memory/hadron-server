@@ -2856,14 +2856,26 @@ export const typeDefs = `#graphql
     endpoint: String
     """
     #1373: where a request for this config actually goes: endpoint, else the
-    legacy params.baseUrl (openai/glm only), else the provider default. Null
-    only for bedrock, whose endpoint is derived from its region.
+    provider default. Null only for bedrock, whose endpoint is derived from
+    its region.
     """
     effectiveEndpoint: String
+    "#1373: the wire protocol as stored; null = the provider default. OpenAI-compatible providers only."
+    apiStyle: AiApiStyle
+    "#1373: the wire protocol a request actually uses (apiStyle, else the provider default); null for single-protocol providers."
+    effectiveApiStyle: AiApiStyle
     "Disabled configs are skipped by resolution (the walk continues outward)."
     enabled: Boolean!
     createdAt: DateTime!
     updatedAt: DateTime
+  }
+
+  "#1373: the wire protocol of an OpenAI-compatible provider."
+  enum AiApiStyle {
+    "POST {endpoint}/chat/completions — what most OpenAI-compatible hosts serve (the glm default)."
+    CHAT_COMPLETIONS
+    "POST {endpoint}/responses — OpenAI's Responses API (the openai default)."
+    RESPONSES
   }
 
   "#1373: one known endpoint for a provider, from the server's single suggestion list."
@@ -2897,6 +2909,8 @@ export const typeDefs = `#graphql
     params: JSON
     "#1373: where requests for this config go (see AiServiceConfig.effectiveEndpoint)."
     effectiveEndpoint: String
+    "#1373: the wire protocol requests use (see AiServiceConfig.effectiveApiStyle)."
+    effectiveApiStyle: AiApiStyle
   }
 
   """
@@ -8092,6 +8106,8 @@ export const typeDefs = `#graphql
       params: JSON
       "#1373: base URL; https only, no query/fragment/credentials. Omit for the provider default."
       endpoint: String
+      "#1373: OpenAI-compatible providers only; omit for the provider default."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
 
@@ -8112,6 +8128,8 @@ export const typeDefs = `#graphql
       params: JSON
       "#1373: omitted = unchanged; null or empty string = clear (provider default)."
       endpoint: String
+      "#1373: omitted = unchanged; null = clear (provider default)."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
 

@@ -794,9 +794,9 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
 
   it('with no endpoint the effective endpoint is the provider default, and resolveAIConfig reports the same', async () => {
     const c = await mk({});
-    expect(c).toMatchObject({ endpoint: null, effectiveEndpoint: 'https://open.bigmodel.cn/api/paas/v4' });
+    expect(c).toMatchObject({ endpoint: null, effectiveEndpoint: 'https://api.z.ai/api/paas/v4' });
     const resolved = await resolvers.Query.resolveAIConfig({}, { name: 'zai', appRef: app.id }, ctxFor(admin.id));
-    expect(resolved.effectiveEndpoint).toBe('https://open.bigmodel.cn/api/paas/v4');
+    expect(resolved).toMatchObject({ effectiveEndpoint: 'https://api.z.ai/api/paas/v4', effectiveApiStyle: 'CHAT_COMPLETIONS' });
   });
 
   it('refuses an invalid endpoint with the typed validation error and writes nothing', async () => {
@@ -823,13 +823,45 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     expect((await upd('')).endpoint).toBeNull();
   });
 
+  it('apiStyle round-trips for an OpenAI-compatible provider and is refused for a single-protocol one (D3)', async () => {
+    const c = await mk({ apiStyle: 'RESPONSES' });
+    expect(c).toMatchObject({ apiStyle: 'RESPONSES', effectiveApiStyle: 'RESPONSES' });
+    const cleared = await resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, apiStyle: null }, ctxFor(admin.id));
+    expect(cleared).toMatchObject({ apiStyle: null, effectiveApiStyle: 'CHAT_COMPLETIONS' });
+    await resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, apiStyle: 'RESPONSES' }, ctxFor(admin.id));
+    // A provider change is judged with the style it would strand.
+    let caught: GraphQLError | null = null;
+    try {
+      await resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, provider: 'anthropic' }, ctxFor(admin.id));
+    } catch (e) {
+      caught = e as GraphQLError;
+    }
+    expect(caught?.extensions?.code).toBe('AiConfigValidationError');
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).provider).toBe('glm');
+  });
+
+  it('writing params.baseUrl is refused, but a legacy row carrying one can still be edited (D2)', async () => {
+    let caught: GraphQLError | null = null;
+    try {
+      await mk({ params: { baseUrl: 'https://api.z.ai/api/paas/v4' } });
+    } catch (e) {
+      caught = e as GraphQLError;
+    }
+    expect(caught?.extensions?.code).toBe('AiConfigValidationError');
+    const legacy = await createConfig({ organizationId: org.id }, 'legacy', { provider: 'glm' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { params: { baseUrl: 'https://legacy.example/v4' } } });
+    const edited = await resolvers.Mutation.updateAiServiceConfig({}, { id: legacy.id, enabled: false }, ctxFor(admin.id));
+    expect(edited).toMatchObject({ enabled: false, effectiveEndpoint: 'https://api.z.ai/api/paas/v4' });
+  });
+
   it('aiProviderEndpoints serves the single suggestion list: one default per listed provider, none for bedrock or an unknown provider', async () => {
     const glm = await resolvers.Query.aiProviderEndpoints({}, { provider: 'glm' });
     expect(glm.map((e) => e.url)).toEqual([
-      'https://open.bigmodel.cn/api/paas/v4',
       'https://api.z.ai/api/paas/v4',
       'https://api.z.ai/api/coding/paas/v4',
+      'https://open.bigmodel.cn/api/paas/v4',
     ]);
+    expect(glm[0].isDefault).toBe(true);
     expect(glm.filter((e) => e.isDefault)).toHaveLength(1);
     expect(await resolvers.Query.aiProviderEndpoints({}, { provider: 'bedrock' })).toEqual([]);
     expect(await resolvers.Query.aiProviderEndpoints({}, { provider: 'toString' })).toEqual([]);

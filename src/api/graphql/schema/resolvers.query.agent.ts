@@ -1,6 +1,6 @@
 // agentQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { decryptToken } from '../../../lib/tokenCrypto.js';
-import { AI_PROVIDER_ENDPOINTS, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
+import { AI_PROVIDER_ENDPOINTS, effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
   NoAiConfigAvailableError,
   DEFAULT_AI_CONFIG_NAME,
@@ -343,6 +343,7 @@ export const agentQueries = {
           apiKey: decryptToken(config.apiKeyEncrypted),
           params: config.params ?? null,
           effectiveEndpoint: effectiveEndpoint(config),
+          effectiveApiStyle: effectiveApiStyle(config),
         };
       } catch (e) {
         rethrowAiConfigTyped(e);

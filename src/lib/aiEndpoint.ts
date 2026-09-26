@@ -6,11 +6,15 @@
  * server-owned catalogue the portal and the CLI render, and the provider
  * defaults the LLM client falls back to are its `isDefault` entries.
  *
- * DRAFT: the glm default (D1), the `params.baseUrl` migration (D2), an
- * `apiStyle` field (D3) and a self-hosted private-network opt-in (D4) are
- * open decisions on #1373; this module takes none of them. The glm default is
- * today's host, and `params.baseUrl` stays a read fallback for the providers
- * that honoured it before.
+ * Holger's rulings on #1373 (2026-09-26, recorded in team chat #2078):
+ *   - D1: glm's default is Z.ai's general endpoint (pay-as-you-go), not the
+ *     Coding Plan, whose terms limit it to officially supported tools.
+ *   - D2: an unset `endpoint` ALWAYS means the provider default. The legacy
+ *     `params.baseUrl` is not read; the few existing configs are fixed by hand,
+ *     so there is no migration.
+ *   - D3: `apiStyle` picks the wire protocol for OpenAI-compatible providers.
+ *   - D4: private/loopback endpoints need a self-hosted operator's opt-in,
+ *     `AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS=true`, off by default.
  */
 
 import { isIP } from 'node:net';
@@ -35,15 +39,9 @@ export const AI_PROVIDER_ENDPOINTS: Record<AiProvider, readonly AiProviderEndpoi
   openai: [{ url: 'https://api.openai.com/v1', label: 'OpenAI', isDefault: true, note: null }],
   glm: [
     {
-      url: 'https://open.bigmodel.cn/api/paas/v4',
-      label: 'Zhipu BigModel (China)',
-      isDefault: true,
-      note: 'Pay-as-you-go on a Zhipu BigModel account.',
-    },
-    {
       url: 'https://api.z.ai/api/paas/v4',
       label: 'Z.ai (general)',
-      isDefault: false,
+      isDefault: true,
       note: 'Pay-as-you-go: draws on the Z.ai account balance.',
     },
     {
@@ -51,6 +49,12 @@ export const AI_PROVIDER_ENDPOINTS: Record<AiProvider, readonly AiProviderEndpoi
       label: 'Z.ai Coding Plan',
       isDefault: false,
       note: "Draws on a Z.ai Coding Plan subscription. Z.ai's terms limit the plan to officially supported tools.",
+    },
+    {
+      url: 'https://open.bigmodel.cn/api/paas/v4',
+      label: 'Zhipu BigModel (China)',
+      isDefault: false,
+      note: 'Pay-as-you-go on a Zhipu BigModel account.',
     },
   ],
   bedrock: [],
@@ -61,24 +65,60 @@ export function defaultEndpoint(provider: string): string | null {
   return AI_PROVIDER_ENDPOINTS[provider as AiProvider]?.find((e) => e.isDefault)?.url ?? null;
 }
 
-/** Providers whose client honoured `params.baseUrl` before `endpoint` existed. */
-const LEGACY_BASE_URL_PROVIDERS = new Set(['openai', 'glm']);
-
-/**
- * The explicit override a config carries, or null for the provider default:
- * `endpoint`, else — only for the providers that already honoured it —
- * `params.baseUrl`, so no existing config changes host (#1373 acceptance).
- */
-export function explicitEndpoint(config: { provider: string; endpoint?: string | null; params?: unknown }): string | null {
-  if (config.endpoint) return config.endpoint;
-  if (!LEGACY_BASE_URL_PROVIDERS.has(config.provider)) return null;
-  const baseUrl = (config.params as { baseUrl?: unknown } | null | undefined)?.baseUrl;
-  return typeof baseUrl === 'string' && baseUrl !== '' ? baseUrl : null;
+/** The config's own endpoint, or null for the provider default (D2: nothing else is read). */
+export function explicitEndpoint(config: { provider?: string; endpoint?: string | null }): string | null {
+  return config.endpoint || null;
 }
 
-/** What a request for this config is sent to: the override, else the default. */
-export function effectiveEndpoint(config: { provider: string; endpoint?: string | null; params?: unknown }): string | null {
+/** What a request for this config is sent to: its endpoint, else the default. */
+export function effectiveEndpoint(config: { provider: string; endpoint?: string | null }): string | null {
   return explicitEndpoint(config) ?? defaultEndpoint(config.provider);
+}
+
+/**
+ * D2: `params.baseUrl` is not read any more, so accepting it would store a
+ * setting that silently does nothing. Refused where params are WRITTEN, not on
+ * every edit, so an unrelated change to a legacy row is not blocked.
+ */
+export function refuseLegacyBaseUrl(params: unknown): void {
+  if (params && typeof params === 'object' && 'baseUrl' in params) {
+    throw new AiConfigValidationError("params.baseUrl is no longer read; set the config's endpoint instead.");
+  }
+}
+
+// ── apiStyle (D3) ────────────────────────────────────────────────────────
+
+/** The wire protocol an OpenAI-compatible provider speaks. */
+export const AI_API_STYLES = ['CHAT_COMPLETIONS', 'RESPONSES'] as const;
+export type AiApiStyle = (typeof AI_API_STYLES)[number];
+
+/**
+ * Per-provider default, and the set of providers where a style applies at all.
+ * Anthropic and Bedrock have one protocol each, so a style there is refused
+ * rather than stored and ignored.
+ */
+const DEFAULT_API_STYLE: Partial<Record<string, AiApiStyle>> = {
+  openai: 'RESPONSES',
+  glm: 'CHAT_COMPLETIONS',
+};
+
+export function defaultApiStyle(provider: string): AiApiStyle | null {
+  return DEFAULT_API_STYLE[provider] ?? null;
+}
+
+export function effectiveApiStyle(config: { provider: string; apiStyle?: string | null }): AiApiStyle | null {
+  return (config.apiStyle as AiApiStyle | null | undefined) ?? defaultApiStyle(config.provider);
+}
+
+/** Validate a (provider, apiStyle) pair as it will be stored. */
+export function validateApiStyle(provider: string, apiStyle: string | null | undefined): void {
+  if (apiStyle == null) return;
+  if (!(AI_API_STYLES as readonly string[]).includes(apiStyle)) {
+    throw new AiConfigValidationError(`Unknown apiStyle '${apiStyle}'.`);
+  }
+  if (!(provider in DEFAULT_API_STYLE)) {
+    throw new AiConfigValidationError(`apiStyle applies to OpenAI-compatible providers only, not '${provider}'.`);
+  }
 }
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
@@ -90,6 +130,15 @@ export function isLoopbackAddress(ip: string): boolean {
 /** Dev and test may target a local server (Ollama, a capture server); production never. */
 export function loopbackAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.NODE_ENV !== 'production';
+}
+
+/**
+ * D4: a self-hosted operator may let configs reach private and loopback
+ * addresses (a LAN Ollama or vLLM). Off by default; the hosted platform leaves
+ * it unset. It also admits plain http, which LAN model servers usually speak.
+ */
+export function privateEndpointsAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS === 'true';
 }
 
 /**
@@ -112,7 +161,9 @@ export function validateEndpoint(raw: string, env: NodeJS.ProcessEnv = process.e
   if (url.search || url.hash) refuse('a query string or fragment is not allowed.');
   const host = url.hostname.replace(/^\[|\]$/g, '');
   const loopback = LOOPBACK_HOSTS.has(host) || (isIP(host) !== 0 && isLoopbackAddress(host));
-  if (loopback) {
+  if (privateEndpointsAllowed(env)) {
+    // D4 opt-in: address class and scheme are the operator's call.
+  } else if (loopback) {
     if (!loopbackAllowed(env)) refuse('a loopback host is not allowed on this server.');
   } else {
     if (url.protocol !== 'https:') refuse('use https.');
