@@ -730,11 +730,24 @@ export async function requireAgentMemoryGrant(
   // Existence-hiding first: every refusal below this line is addressed to
   // someone who already knows the memory exists.
   if (!canRead) throw new MemoryNotFoundError(ref);
+  // Both attachment mutations use this gate, including re-role on a legacy
+  // AgentMemoryItem. Check class AFTER concealment: an unreadable memory must
+  // still answer like a miss, without revealing its class (#1349, #1101).
+  if (memory.class === 'system') {
+    throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
+  }
+  // #1101: these classes have no App audience to grant. A personal share is
+  // per-user, and a private memory is not shareable.
+  if (memory.class === 'personal' || memory.class === 'private') {
+    throw new GraphQLError(
+      memory.class === 'private'
+        ? 'A private-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Private memories are never shareable either, not even by their owner. If this content needs to reach an agent, it has to live in a memory whose class has readers.'
+        : 'A personal-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Giving another person access is the owner’s to do, not an administrator’s: createMemoryShare is the mechanism and only the owner may call it, so if you are not the owner, ask them.',
+      { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryId: memory.id, memoryClass: memory.class } },
+    );
+  }
   // An APP-class memory is App-internal and never an agent's to hold, for any
-  // caller (@copilot, PR #1357). The knowledge/group limit lived only inside the
-  // same-App branch, so a platform admin — who reads it in their own right —
-  // could attach one, per-session rows included, and the App fold would then
-  // hand it to every session of the App, breaking session isolation.
+  // caller (@copilot, PR #1357): its fold would break session isolation.
   if (memory.class === 'app') {
     throw new GraphQLError('An App-class memory belongs to its App and cannot be attached to an agent.', {
       extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryClass: memory.class },

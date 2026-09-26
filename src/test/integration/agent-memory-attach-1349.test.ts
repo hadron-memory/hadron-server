@@ -769,6 +769,30 @@ describe("#1349 — the caller must hold it in their OWN right (@codex, PR #1357
     expect(await db.agentMemoryItem.count({ where: { agentId } })).toBe(0);
   });
 
+  it('legacy links to user-owned memories do not enter a PUBLIC agent covered set', async () => {
+    // A user-owned row stays strict-owner even when its visibility column says
+    // PUBLIC. Seed legacy links directly: the supported attach gate does not
+    // grant a user-owned memory to an org-owned agent.
+    const { agentId } = await agentWithApp(attackerOrgId, 'owned-covered');
+    const ownedPublic = await db.memory.create({
+      data: { id: generateId(), ownerUserId: attackerUserId, organizationId: null,
+        urn: `attacker-${suffix}:owned-covered-public`, name: 'owned-covered-public',
+        class: 'knowledge', visibility: 'PUBLIC' } as never,
+    });
+    const ownedPrivate = await db.memory.create({
+      data: { id: generateId(), ownerUserId: attackerUserId, organizationId: null,
+        urn: `attacker-${suffix}:owned-covered-private`, name: 'owned-covered-private',
+        class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+    });
+    await db.agentMemoryItem.createMany({ data: [
+      { id: generateId(), agentId, memoryId: ownedPublic.id, role: 'read-write' },
+      { id: generateId(), agentId, memoryId: ownedPrivate.id, role: 'read' },
+    ] });
+    const r = await gql(key.attacker!, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { visibility } }`, { r: agentId });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(r.data!.updateAgent.visibility).toBe('PUBLIC');
+  });
+
   it('a PUBLIC read-write app-scoped link does not block publishing the agent', async () => {
     // The mirror image, and a FALSE REFUSAL rather than a hole: the covered-set
     // exclusions keep app-scoped links out of a PUBLIC agent's public surface,
@@ -1431,6 +1455,25 @@ describe('#1357 round 6 (@copilot, PR #1357)', () => {
     const r = await gql(adminKey, ATTACH, { g: agentId, m: `hrn:mem:attacker-${suffix}:appclass-any`, r: 'read' });
     expect(code(r)).toBe('UNSUPPORTED_MEMORY_CLASS');
     expect(await db.agentMemoryItem.count({ where: { memoryId: appMem.id } })).toBe(0);
+  });
+
+  it('re-role refuses a legacy system-memory item after the shared memory gate', async () => {
+    const admin = await db.user.create({
+      data: { id: generateId(), handle: `padmin-role-${suffix}`, githubUsername: `padmin-role-${suffix}`, roles: ['ADMIN'] },
+    });
+    const adminKey = (await mintUserApiKey(db, { userId: admin.id, label: 'k', createdBy: admin.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+    const { agentId } = await agentWithApp(attackerOrgId, 'legacy-system-role');
+    const sys = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId,
+        urn: `attacker-${suffix}:legacy-system-role`, name: 'legacy-system-role', class: 'system' } as never,
+    });
+    const item = await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: sys.id, role: 'read' },
+    });
+    const r = await gql(adminKey, SET_ROLE, { g: agentId, m: sys.id, r: 'read-write' });
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors![0]!.message).toContain('system memories can only be attached');
+    expect((await db.agentMemoryItem.findUniqueOrThrow({ where: { id: item.id } })).role).toBe('read');
   });
 
   it('an agent soft-deleted after the pre-check answers exactly as a missing agent, and gets no grant', async () => {

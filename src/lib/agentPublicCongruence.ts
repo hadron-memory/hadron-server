@@ -7,6 +7,7 @@
  * an agent's public surface:
  *   - per-user personal/private (`class IN ('personal','private')`) — owner-only
  *     by class, never PUBLIC;
+ *   - user-owned (`ownerUserId != null`) — strict-owner, never publicly readable;
  *   - app-scoped (`appId != null`) — App-internal even at `visibility=PUBLIC`
  *     (#653: `effectiveAccess` blocks public read via `!isAppScopedShared`), so
  *     it is never publicly readable regardless of its visibility value.
@@ -34,11 +35,20 @@ const badInput = (message: string) =>
  *
  * Exported since #1349: the agent-attachment gate needs the SAME notion of
  * "genuinely public audience". A `visibility = 'PUBLIC'` column alone does not
- * mean it — an app-scoped row is App-internal even when PUBLIC (#653), and a
- * personal/private row is owner-only whatever the column says.
+ * mean it — app-scoped rows are App-internal (#653), and strict-owner
+ * classes or user-owned rows remain owner-only whatever the column says.
  */
-export function isExcludedFromCoveredSet(memory: { class: string; appId: string | null }): boolean {
-  return memory.class === 'personal' || memory.class === 'private' || memory.appId != null;
+export function isExcludedFromCoveredSet(memory: {
+  class: string;
+  appId: string | null;
+  ownerUserId: string | null;
+}): boolean {
+  return (
+    memory.class === 'personal' ||
+    memory.class === 'private' ||
+    memory.appId != null ||
+    memory.ownerUserId != null
+  );
 }
 
 /**
@@ -54,6 +64,7 @@ export async function nonPublicLinkedMemories(
       deletedAt: null,
       class: { notIn: ['personal', 'private'] }, // per-user owner-only: excluded
       appId: null, // app-scoped: App-internal even if PUBLIC (#653) — excluded
+      ownerUserId: null, // spec-047 user-owned: strict-owner even if PUBLIC
       visibility: { not: 'PUBLIC' },
       agentItems: { some: { agentId, deletedAt: null } },
     },
@@ -91,6 +102,7 @@ export async function assertAgentPublicAllowed(db: Db, agentId: string): Promise
         deletedAt: null,
         class: { notIn: ['personal', 'private'] },
         appId: null,
+        ownerUserId: null,
       },
     },
     select: { memory: { select: { name: true } } },
@@ -250,10 +262,10 @@ export async function revokeLinksForeignToTenant(
  */
 export async function assertLinkAllowedForPublicAgent(
   agentVisibility: string | null,
-  memory: { class: string; appId: string | null; visibility: string | null },
+  memory: { class: string; appId: string | null; ownerUserId: string | null; visibility: string | null },
 ): Promise<void> {
   if (agentVisibility !== 'PUBLIC') return;
-  if (isExcludedFromCoveredSet(memory)) return; // per-user / app-scoped: allowed
+  if (isExcludedFromCoveredSet(memory)) return; // strict-owner / app-scoped: allowed
   if (memory.visibility === 'PUBLIC') return;
   throw badInput(
     `Cannot link a non-public memory to a PUBLIC agent — a PUBLIC agent may ` +
