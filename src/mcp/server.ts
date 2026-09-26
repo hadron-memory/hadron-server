@@ -349,6 +349,12 @@ export function mcpDoorCanReplay(
   if (kind !== 'task' && kind !== 'review') return true;
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined) continue;
+    // #937 — a revision precondition replays through governed UPDATE doors,
+    // but is intentionally absent from every CREATE door.
+    if (key === 'expectedRevision') {
+      if (op !== 'update') return false;
+      continue;
+    }
     if (key === 'isRunnable') {
       if (kind !== 'task' || (op === 'create' && value !== true)) return false;
       continue;
@@ -5024,9 +5030,10 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_update_node',
-    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
+    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
+      expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses with [node_write_conflict]; omit for backward-compatible last-write-wins behavior.'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
@@ -5051,7 +5058,7 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -5107,7 +5114,7 @@ export function createMcpServerInstance(
                 context: 'node-write',
                 surface: 'mcp',
                 canReplay: (kind) =>
-                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }, kind, 'update'),
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, expectedRevision }, kind, 'update'),
               }
             : {},
         );
@@ -5292,7 +5299,7 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
-      if (Object.keys(data).length > 0 || resolvedEdges !== null) {
+      if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
@@ -5329,6 +5336,21 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #937 — bind a client-side read/modify/write to the Revision it
+            // actually read. The row lock + #1339 reconciliation above make
+            // this the same atomic revSeq guard used by writeNodeCore. Do not
+            // include the current value in the refusal: write authority is not
+            // necessarily read authority, and a conflict must not become a
+            // revision oracle.
+            if (expectedRevision !== undefined && current.revSeq !== expectedRevision) {
+              throw new ScopeGraphQLError(
+                `Node at loc "${loc}" changed since it was read — re-read and retry.`,
+                { extensions: { code: 'NODE_WRITE_CONFLICT', loc, memoryId: memory.id } },
+              );
+            }
+            // A guard-only call is a useful no-op check and must not manufacture
+            // a history row or advance the live revision.
+            if (Object.keys(data).length === 0 && resolvedEdges === null) return;
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -5371,6 +5393,9 @@ export function createMcpServerInstance(
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
+            return textResult(`[node_write_conflict] ${e.message}`);
+          }
           throw e;
         }
       }
@@ -5573,6 +5598,7 @@ export function createMcpServerInstance(
   // no argument.
   const taskUpdateArgs = {
     ...governedDoorArgs,
+    expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
     isRunnable: z
       .boolean()
       .optional()
@@ -5581,6 +5607,7 @@ export function createMcpServerInstance(
 
   const reviewUpdateArgs = {
     ...governedDoorArgs,
+    expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
     role: z
       .string()
       .nullable()

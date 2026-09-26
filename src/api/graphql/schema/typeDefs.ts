@@ -3766,6 +3766,15 @@ export const typeDefs = `#graphql
     memoryId: String
     "Selector, with 'memoryId': the target's current loc. Not writable here — moveNode relocates."
     loc: String
+    """
+    Optional optimistic-concurrency precondition (#937). When supplied, the
+    update is applied only while the node's current live revision still equals
+    this positive integer. A mismatch refuses atomically with
+    NODE_WRITE_CONFLICT; omitting it or passing null preserves last-write-wins
+    compatibility.
+    Read the baseline from Node.revision.
+    """
+    expectedRevision: Int
     "Omit to preserve (D4)."
     name: String
     nodeType: String

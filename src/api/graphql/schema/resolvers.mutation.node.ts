@@ -1066,9 +1066,17 @@ export async function writeNodeCore(
             }
 
             const changes = diffNodeChanges(current, suppliedForDiff);
-            const needsRevision = resolvedEdges !== null || changes.length > 0;
             const changesUnversionedField =
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
+            // ownerRepo deliberately remains outside restorable node history,
+            // so an unguarded ownerRepo-only update keeps its legacy
+            // revision-free behaviour. A guarded update is different: every
+            // successful state change must consume the claimed token or the
+            // same expectedRevision could be reused to overwrite it (#937).
+            const needsRevision =
+              resolvedEdges !== null ||
+              changes.length > 0 ||
+              (opts?.guardRevSeq !== undefined && changesUnversionedField);
             if (!needsRevision && !changesUnversionedField) {
               // A stale guard is refused even when the write is a no-op: the
               // compare-and-swap protects the caller's merge base, and an
@@ -1522,7 +1530,18 @@ async function updateNodeCore(
   op: string,
   opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext },
 ) {
-  const { id, memoryId, loc, ...fields } = input;
+  const { id, memoryId, loc, expectedRevision, ...fields } = input;
+  // GraphQL guarantees a signed 32-bit integer on the wire, but resolver tests
+  // and internal delegates call this function directly. Keep the public
+  // contract true at the shared seam rather than relying on one transport.
+  if (
+    expectedRevision != null &&
+    (!Number.isInteger(expectedRevision) || expectedRevision <= 0 || expectedRevision > 2_147_483_647)
+  ) {
+    throw new GraphQLError('expectedRevision must be a positive 32-bit integer.', {
+      extensions: { code: 'BAD_USER_INPUT', field: 'expectedRevision' },
+    });
+  }
   const hasId = id != null && id !== '';
   if (hasId && (memoryId != null || loc != null)) {
     throw new GraphQLError(
@@ -1581,6 +1600,7 @@ async function updateNodeCore(
   // write hit a different node.
   return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
     targetNodeId,
+    guardRevSeq: expectedRevision ?? undefined,
     ownsKind: opts?.ownsKind,
     governedContext: opts?.governedContext,
     concealUnreadable: {
