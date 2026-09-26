@@ -468,6 +468,65 @@ describe('#1360 review — gates, concurrency, audit, and unaddressable referenc
     expect(await db.nodeRoleRule.count()).toBe(0);
   });
 
+  // Codex P1 on a4ee5c0: the MANAGE gate is re-asked inside the transaction
+  // after its lock waits. Demoting ADMIN → READER keeps kb (and its task)
+  // readable, so each refusal below is the manage re-check and nothing else.
+  const demoteAdmin = (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) =>
+    tx.orgMember.updateMany({ where: { organizationId: org.id, userId: orgAdmin }, data: { role: 'READER' } });
+
+  it('a manager demoted while a CREATE waits on its task lock is refused MEMORY_NOT_FOUND, and nothing is written', async () => {
+    let creating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.node.update({ where: { id: task.id }, data: { name: 'Author 2' } });
+      await demoteAdmin(tx);
+      creating = gql(as(orgAdmin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: task.urn } });
+      await pause(400);
+    });
+    expect(code(await creating!)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.nodeRoleRule.count()).toBe(0);
+    expect(await db.memoryConfig.count()).toBe(0);
+  });
+
+  it('a manager demoted while an UPDATE waits on the rule lock is refused NOT_FOUND, and the rule is unchanged', async () => {
+    const rule = await mk({});
+    let updating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "node_role_rules" WHERE "id" = ${rule.id} FOR UPDATE`;
+      await demoteAdmin(tx);
+      updating = gql(as(orgAdmin), UPDATE, { r: rule.id, i: { enabled: false } });
+      await pause(400);
+    });
+    expect(code(await updating!)).toBe('NOT_FOUND');
+    const row = await db.nodeRoleRule.findUniqueOrThrow({ where: { id: rule.id } });
+    expect([row.enabled, row.revision]).toEqual([true, rule.revision]);
+  });
+
+  it('a manager demoted while a DELETE waits on the rule lock is refused NOT_FOUND, and the rule survives', async () => {
+    const rule = await mk({});
+    let deleting: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "node_role_rules" WHERE "id" = ${rule.id} FOR UPDATE`;
+      await demoteAdmin(tx);
+      deleting = gql(as(orgAdmin), DELETE, { r: rule.id });
+      await pause(400);
+    });
+    expect(code(await deleting!)).toBe('NOT_FOUND');
+    expect(await db.nodeRoleRule.count({ where: { id: rule.id } })).toBe(1);
+  });
+
+  it('a memory soft-deleted while a DELETE waits on the rule lock refuses the delete', async () => {
+    const rule = await mk({});
+    let deleting: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "node_role_rules" WHERE "id" = ${rule.id} FOR UPDATE`;
+      await tx.memory.update({ where: { id: kb.id }, data: { deletedAt: new Date() } });
+      deleting = gql(as(orgAdmin), DELETE, { r: rule.id });
+      await pause(400);
+    });
+    expect(code(await deleting!)).toBe('NOT_FOUND');
+    expect(await db.nodeRoleRule.count({ where: { id: rule.id } })).toBe(1);
+  });
+
   it('a task moved to another memory the saver CAN read while the write is in flight is still accepted', async () => {
     const kb2 = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'acme.com:kb2', name: 'kb2', class: 'knowledge', visibility: 'ORGANIZATION' },

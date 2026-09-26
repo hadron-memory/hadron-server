@@ -55,7 +55,13 @@
  */
 import { GraphQLError } from 'graphql';
 import { Prisma, type NodeRoleRule, type PrismaClient } from '../../../generated/prisma/index.js';
-import { type Context, isMemoryReadableCached, isMemoryReadableFresh, requireOwnerOrOrgRole } from './resolvers.helpers.js';
+import {
+  type Context,
+  isMemoryReadableCached,
+  isMemoryReadableFresh,
+  requireOwnerOrOrgRole,
+  withoutRequestCaches,
+} from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { EntityNotFoundError, MemoryNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -131,8 +137,32 @@ async function managedMemory(ctx: Context, memoryRef: string): Promise<MemoryGat
   return memory;
 }
 
+/**
+ * The MANAGE gate asked AGAIN inside the write transaction, after its last lock
+ * wait (#1360 review, Codex P1). The pre-check authorizes the request, but a
+ * write then waits on node and rule row locks for as long as their holders
+ * take, and a manager demoted or removed, or a memory deleted, during that wait
+ * must not still save. Asked FRESH — without the request's memos, which would
+ * replay the pre-check — on the memory row as it reads now, and refused with
+ * the same not-found answer as the pre-check, and on the transaction's own
+ * connection (see `withoutRequestCaches`). Residual, as in `lockRuleRefs`:
+ * neither the memory row nor the membership is locked, so a revocation that
+ * commits after this read and before our commit still saves. That window is
+ * every authorize-then-write surface's; this keeps our own lock waits from
+ * widening it.
+ */
+async function reassertManage(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  notFound: () => Error,
+): Promise<void> {
+  const memory = await tx.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: MEMORY_GATE_SELECT });
+  if (!memory || !(await canManageMemoryConfig(withoutRequestCaches(ctx, tx), memory))) throw notFound();
+}
+
 /** Resolve a rule ref (its id) the caller may MANAGE, or throw the missing-rule answer. */
-async function managedRule(ctx: Context, ref: string): Promise<NodeRoleRule> {
+async function managedRule(ctx: Context, ref: string): Promise<NodeRoleRule & { memoryId: string }> {
   const rule = await ctx.db.nodeRoleRule.findUnique({
     where: { id: ref },
     include: { config: { select: { memory: { select: { ...MEMORY_GATE_SELECT, deletedAt: true } } } } },
@@ -142,7 +172,7 @@ async function managedRule(ctx: Context, ref: string): Promise<NodeRoleRule> {
     throw new NodeRoleRuleNotFoundError(ref);
   }
   const { config: _config, ...row } = rule;
-  return row;
+  return { ...row, memoryId: memory.id };
 }
 
 /** Mutations stamp the actor; impersonation is read-only (#876). */
@@ -241,7 +271,7 @@ async function lockRuleRefs(ctx: Context, tx: Prisma.TransactionClient, resolved
     // soft-deleted memory. Residual: neither the memory row nor the caller's
     // membership is locked, so access revoked after this point and before
     // commit still saves; that is every authorize-then-write surface's window.
-    if (!row || row.deleted_at || !(await isMemoryReadableFresh(ctx, row.memory_id))) {
+    if (!row || row.deleted_at || !(await isMemoryReadableFresh(ctx, row.memory_id, tx))) {
       throw new NodeNotFoundError(ref);
     }
     if (kind !== 'descriptionNode' && row.is_runnable !== true) throw notATask(kind);
@@ -374,6 +404,7 @@ export const memoryConfigMutations = {
     try {
       const rule = await ctx.db.$transaction(async (tx) => {
         await lockRuleRefs(ctx, tx, resolved);
+        await reassertManage(ctx, tx, memory.id, () => new MemoryNotFoundError(memoryRef));
         const configId = await materializeConfig(tx, memory.id, actor);
         const created = await tx.nodeRoleRule.create({
           data: {
@@ -404,7 +435,7 @@ export const memoryConfigMutations = {
     ctx: Context,
   ) => {
     const actor = requireWriter(ctx);
-    const { id } = await managedRule(ctx, ref);
+    const { id, memoryId } = await managedRule(ctx, ref);
     const { cols: refs, resolved } = await refWrites(ctx, input);
     const data: Prisma.NodeRoleRuleUncheckedUpdateInput = {
       ...refs,
@@ -424,6 +455,7 @@ export const memoryConfigMutations = {
       await lockRuleRefs(ctx, tx, resolved);
       const current = await lockRule(tx, id);
       if (!current) throw new NodeRoleRuleNotFoundError(ref);
+      await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
       assertValidateByHasTask({
         validateBy: ('validateBy' in data ? data.validateBy : current.validateBy) as Validator | null,
@@ -445,10 +477,11 @@ export const memoryConfigMutations = {
     ctx: Context,
   ) => {
     const actor = requireWriter(ctx);
-    const { id } = await managedRule(ctx, ref);
+    const { id, memoryId } = await managedRule(ctx, ref);
     await ctx.db.$transaction(async (tx) => {
       const current = await lockRule(tx, id);
       if (!current) throw new NodeRoleRuleNotFoundError(ref);
+      await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
       await tx.nodeRoleRule.delete({ where: { id } });
       await touchConfig(tx, current.configId, actor);
