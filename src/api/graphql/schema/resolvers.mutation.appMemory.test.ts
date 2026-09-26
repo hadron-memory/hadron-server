@@ -368,31 +368,37 @@ describe('attachMemoryToApp', () => {
       { appRef: app.id, agentRef: agent.id, memoryClass: 'private', name: 'Theirs' },
       asUser(memberUser.id),
     );
-    // adminUser is an App member but not the owner — must get the same FORBIDDEN
-    // as for any non-owned memory, never a state-revealing error.
+    // adminUser is an App member but not the owner — never a state-revealing
+    // error. #1381: they cannot open this private memory, so it answers as a
+    // missing one (stronger than the old FORBIDDEN, which confirmed existence).
     await expect(
       attachMemoryToApp(
         null,
         { memoryRef: theirs.id, appRef: app.id, agentRef: agent.id },
         asUser(adminUser.id),
       ).catch((e) => {
-        throw new Error(code(e));
+        // A direct resolver call sees the typed error's own `code`; formatError
+        // maps it into extensions on the wire.
+        throw new Error(code(e) ?? (e as { code?: string }).code);
       }),
-    ).rejects.toThrow('FORBIDDEN');
+    ).rejects.toThrow('MEMORY_NOT_FOUND');
   });
 
   it('rejects attaching a memory the caller does not own', async () => {
     const mem = await freeStandingPersonal(memberUser.id);
-    // adminUser is an App member but not the owner.
+    // adminUser is an App member but not the owner, and (#1381) cannot open
+    // this personal memory, so it answers as a missing one.
     await expect(
       attachMemoryToApp(
         null,
         { memoryRef: mem.id, appRef: app.id, agentRef: agent.id },
         asUser(adminUser.id),
       ).catch((e) => {
-        throw new Error(code(e));
+        // A direct resolver call sees the typed error's own `code`; formatError
+        // maps it into extensions on the wire.
+        throw new Error(code(e) ?? (e as { code?: string }).code);
       }),
-    ).rejects.toThrow('FORBIDDEN');
+    ).rejects.toThrow('MEMORY_NOT_FOUND');
   });
 
   it('returns a uniform FORBIDDEN for a non-owned memory regardless of class (no class/appId enumeration leak)', async () => {
