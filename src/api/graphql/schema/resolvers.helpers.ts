@@ -640,6 +640,21 @@ export async function requireAgentMemoryGrant(
     // this guard: a foreign App key, holding only an AgentOrgGrant on the
     // published agent, overwrote the publisher's node. Same-tenant ownership
     // does not make that safe — the audience, not the tenancy, is what widens.
+    // NOT covered-set-excluded here, unlike `assertAgentPublicAllowed`, and
+    // that asymmetry is deliberate (@codex raised it on PR #1357 as an
+    // order-dependence; measured, the order-dependence does not exist).
+    //
+    // The premise was that attaching an app-scoped memory read-write to a
+    // non-PUBLIC agent and then publishing succeeds, while publishing first and
+    // then attaching is refused here. The first half does not happen: an
+    // app-scoped memory is content-unreadable by every user principal in its
+    // own right — #653 keeps it out of the org gates and the App fold is
+    // excluded by design above — so the attach is refused at the READ gate,
+    // before this guard is reached, whichever order the caller picks. Both
+    // paths refuse; the invariant is single-valued.
+    //
+    // Loosening this guard on that premise would have been a change made for a
+    // case that cannot occur, so it stays strict.
     if (agent.visibility === 'PUBLIC') {
       throw new GraphQLError(
         'A PUBLIC agent may hold read-only knowledge only — publishing it would grant write access to every organization that installs it.',

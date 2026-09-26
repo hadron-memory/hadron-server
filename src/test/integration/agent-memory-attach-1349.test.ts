@@ -327,6 +327,42 @@ describe('#1349 — the agent\'s AUDIENCE, not just the memory\'s tenancy (@code
     expect(await db.agentMemoryItem.count({ where: { agentId: publicAgentId } })).toBe(0);
   });
 
+  it('an app-scoped memory is refused at the READ gate, so the attach order cannot matter', async () => {
+    // Raised in review as an order-dependence: attach-then-publish would
+    // succeed for an app-scoped item while publish-then-attach is refused.
+    // Measured, the first half does not happen — an app-scoped memory is
+    // content-unreadable by every user principal in its own right (#653 keeps
+    // it out of the org gates, and App-derived reach is excluded by design), so
+    // BOTH orders refuse and the invariant is single-valued. This case exists to
+    // keep that refuted premise refuted.
+    const ownApp2 = await db.app.create({
+      data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:ownapp2`, name: 'own app 2' } as never,
+    });
+    const scoped = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:scopedrw`,
+        name: 'scopedrw', class: 'knowledge', visibility: 'ORGANIZATION', appId: ownApp2.id,
+      } as never,
+    });
+    await db.node.create({ data: { id: generateId(), memoryId: scoped.id, loc: 'payroll', name: 'p', content: 'APP-SCOPED RW' } });
+    const urn = `hrn:mem:attacker-${suffix}:scopedrw`;
+
+    const nonPublic = await agentWithApp(attackerOrgId, 'scoped-nonpublic');
+    const pubAgent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'pub2', urn: `attacker-${suffix}:pub2`, visibility: 'PUBLIC' } as never,
+    });
+    await db.appAgent.create({ data: { appId: ownApp2.id, agentId: pubAgent.id } as never });
+
+    // Order A: attach to a NON-public agent first.
+    const a = await gql(key.attacker!, ATTACH, { g: nonPublic.agentId, m: urn, r: 'read-write' });
+    // Order B: attach to an already-PUBLIC agent.
+    const b = await gql(key.attacker!, ATTACH, { g: pubAgent.id, m: urn, r: 'read-write' });
+    // Same answer either way, and it is the read gate's, not the audience rule's.
+    expect(code(a)).toBe('MEMORY_NOT_FOUND');
+    expect(code(b)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.agentMemoryItem.count({ where: { memoryId: scoped.id } })).toBe(0);
+  });
+
   it('P1: an agent holding read-write knowledge may not BECOME public', async () => {
     // The same rule from the other side — either end can move.
     const { agentId } = await agentWithApp(attackerOrgId, 'becomes-public');
