@@ -88,7 +88,7 @@ describe('private endpoints (D4)', () => {
   });
 
   it('it never admits link-local (metadata), multicast, unspecified or other reserved ranges (#1380 review)', () => {
-    for (const url of ['http://169.254.169.254/latest', 'http://[fe80::1]/v1', 'http://224.0.0.1/v1', 'http://0.0.0.0/v1', 'http://[::]/v1']) {
+    for (const url of ['http://169.254.169.254/latest', 'http://[fe80::1]/v1', 'http://224.0.0.1/v1', 'http://0.0.0.0/v1', 'http://[::]/v1', 'http://[fd00:ec2::254]/latest', 'http://[fd00:0ec2::254]/latest']) {
       expect(() => validateEndpoint(url, optIn), url).toThrow(/never allowed/);
     }
     for (const url of ['http://172.16.4.2/v1', 'http://192.168.1.9/v1', 'http://[fd12:3456::1]/v1', 'http://127.0.0.1/v1']) {
@@ -100,7 +100,7 @@ describe('private endpoints (D4)', () => {
     for (const ip of ['10.1.2.3', '172.31.0.1', '192.168.0.1', '127.0.0.1', '::1', 'fd00::1', 'fc00::5', '::ffff:10.0.0.1']) {
       expect(isPrivateNetworkAddress(ip), ip).toBe(true);
     }
-    for (const ip of ['169.254.169.254', '172.32.0.1', '8.8.8.8', 'fe80::1', '224.0.0.1', '0.0.0.0', '::', 'ff02::1', '100.64.0.1']) {
+    for (const ip of ['169.254.169.254', '172.32.0.1', '8.8.8.8', 'fe80::1', '224.0.0.1', '0.0.0.0', '::', 'ff02::1', '100.64.0.1', 'fd00:ec2::254', 'fd00:0ec2:0:0:0:0:0:254', 'fd00:ec2:1::5']) {
       expect(isPrivateNetworkAddress(ip), ip).toBe(false);
     }
   });
