@@ -44,11 +44,15 @@ SURVIVORS=0
 # and must not read as a survivor — the third way this harness lied (PR #1383:
 # a partial run of 13 tests was reported as SURVIVED).
 # shellcheck disable=SC2086
+# The EXIT STATUS counts too (@codex, PR #1383): a suite that fails to load
+# can leave a `Tests … passed (N)` line with no "failed" in it, and a baseline
+# measured on that would validate every mutant against a reduced count.
 base_raw=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run $SPECS 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+base_status=$?
 base_line=$(echo "$base_raw" | grep -E '^ *Tests ')
 BASELINE=$(echo "$base_line" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
-if [ -z "$BASELINE" ] || echo "$base_line" | grep -q failed; then
-  echo "REFUSING: the baseline is not green — $base_line"
+if [ "$base_status" -ne 0 ] || [ -z "$BASELINE" ] || echo "$base_raw" | grep -qE '^ *(Tests|Test Files) .*failed'; then
+  echo "REFUSING: the baseline is not green (vitest exit $base_status) — $base_line"
   echo "$base_raw" | tail -5 | sed 's/^/            /'
   exit 1
 fi
