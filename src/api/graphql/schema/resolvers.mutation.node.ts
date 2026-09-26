@@ -397,8 +397,11 @@ export async function writeNodeCore(
       if (input.abstract !== undefined && input.abstract !== null) {
         if (input.abstract.length > 2000) {
           const err = new NodeAbstractTooLongError(input.abstract.length);
+          // Same shared envelope as the edit-aware sites — for a create or
+          // full replacement it carries no currentLength (none exists), so
+          // the wire shape is identical to the previous literal.
           throw new GraphQLError(err.message, {
-            extensions: { code: err.name, length: err.length, max: err.max },
+            extensions: err.extensionFields(),
           });
         }
         const normalized: string | null =
