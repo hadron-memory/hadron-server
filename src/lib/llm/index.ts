@@ -72,6 +72,19 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
   // #1373: an EXPLICIT endpoint is admin-chosen, so it goes through the
   // connect-time egress guard. Provider defaults are constants and do not.
   const endpoint = explicitEndpoint(resolved.config);
+  // With no stored key, every SDK falls back to the PROCESS's credentials
+  // (OPENAI_API_KEY, ANTHROPIC_API_KEY, the AWS chain). Sent to an
+  // admin-chosen host, that would hand the server's own credential to
+  // whoever runs it (#1389 review, Codex P1). An explicit endpoint therefore
+  // requires the config's own key; only a provider's default host may use
+  // the process credential.
+  if (endpoint && !key) {
+    throw new LlmInvocationError(
+      `Provider "${provider}" has an explicit endpoint but no stored key; the server's own credentials are never sent to a configured host.`,
+      provider,
+      false,
+    );
+  }
   const conn = endpoint ? { baseURL: endpoint, fetch: guardedEndpointFetch() } : {};
   // D3: the wire protocol for an OpenAI-compatible provider. Calling the
   // provider directly selects the Responses API in @ai-sdk/openai 4.x;
