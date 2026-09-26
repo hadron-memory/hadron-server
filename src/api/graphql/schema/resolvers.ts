@@ -55,6 +55,11 @@ import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
+import {
+  memoryConfigTemplateFieldResolvers,
+  memoryConfigTemplateMutations,
+  memoryConfigTemplateQueries,
+} from './resolvers.memoryConfigTemplate.js';
 import { scopeMutations, scopeQueries, scopeFieldResolvers } from './resolvers.scope.js';
 import { channelMutations, channelQueries, channelFieldResolvers } from './resolvers.channel.js';
 import { registerMutations, registerQueries, registerFieldResolvers, readStateQueries, readStateMutations } from './resolvers.register.js';
@@ -84,6 +89,8 @@ export const resolvers = {
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
   NodeRoleRule: memoryConfigFieldResolvers.NodeRoleRule,
+  MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
+  MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
   Query: {
     ...nodeQueries,
     ...skillQueries,
@@ -98,6 +105,7 @@ export const resolvers = {
     ...teamChatQueries,
     ...teamWorkQueries,
     ...memoryConfigQueries,
+    ...memoryConfigTemplateQueries,
     ...scopeQueries,
     ...channelQueries,
     ...registerQueries,
@@ -136,6 +144,7 @@ export const resolvers = {
     ...teamChatMutations,
     ...teamWorkMutations,
     ...memoryConfigMutations,
+    ...memoryConfigTemplateMutations,
     ...scopeMutations,
     ...channelMutations,
     ...registerMutations,
