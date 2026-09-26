@@ -806,14 +806,18 @@ describe('hadron_move_node — cross-memory move + permission denial', () => {
     ).toBeNull();
   });
 
-  it('refuses with "write access denied for source memory" when the caller lacks source write', async () => {
+  it('refuses a caller who cannot read the source memory as if it did not exist (#1316)', async () => {
+    // The viewer has no membership, so it cannot READ the source memory either.
+    // "Write access denied for source memory" would confirm the memory exists;
+    // the missing-memory answer does not. (A caller who CAN read it still gets
+    // the write denial — pinned in mcp-existence-oracle-1316.test.ts.)
     const srv = createTestableMcpServer(viewerAuth());
     const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:somewhere-else`,
     });
 
-    expect(text).toMatch(/Write access denied for source memory/);
+    expect(text).toBe(`Source memory not found: "${fx.memory.urn}".`);
     // No row got moved.
     const sourceRow = await db.node.findUnique({
       where: { id: fx.nodes.moveSource.id },
