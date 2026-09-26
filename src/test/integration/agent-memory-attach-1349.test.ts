@@ -865,6 +865,30 @@ describe('#1349 — containment: pre-existing rows are STILL LIVE (residual expo
 });
 
 describe('#1349 — Holger\'s cross-tenant ruling (2026-09-25)', () => {
+  it('PUBLIC is a READ audience even for a platform admin who can write it', async () => {
+    // Pins the read-only half of the PUBLIC exception on its own. For any other
+    // caller the write-capability check would also refuse, masking it; a
+    // platform ADMIN can write the memory, so only this rule decides.
+    const admin = await db.user.create({
+      data: { id: generateId(), handle: `padmin-${suffix}`, githubUsername: `padmin-${suffix}`, roles: ['ADMIN'] },
+    });
+    const adminKey = (await mintUserApiKey(db, { userId: admin.id, label: 'k', createdBy: admin.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+    // Its OWN PUBLIC memory: the shared `publicKnowledge` fixture is narrowed out
+    // of PUBLIC by earlier cases in this file, which masked this test in the
+    // full-file run while it passed alone (found by the mutation harness).
+    const pub = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: victimOrgId, urn: `victim-${suffix}:padminpub`,
+        name: 'padminpub', class: 'knowledge', visibility: 'PUBLIC',
+      } as never,
+    });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: pub.id } })).visibility, 'precondition: PUBLIC').toBe('PUBLIC');
+    const { agentId } = await agentWithApp(attackerOrgId, 'padmin-public-rw');
+    const r = await gql(adminKey, ATTACH, { g: agentId, m: `hrn:mem:victim-${suffix}:padminpub`, r: 'read-write' });
+    expect(r.errors?.[0]?.extensions?.reason).toBe('CROSS_TENANT_ATTACH');
+    expect(await db.agentMemoryItem.count({ where: { agentId } })).toBe(0);
+  });
+
   it('a caller who CAN read another tenant\'s memory still may not attach it', async () => {
     // `dual` reads the victim org's knowledge memory as a member, so this is
     // not an existence question — the refusal is allowed to be actionable.
@@ -875,5 +899,173 @@ describe('#1349 — Holger\'s cross-tenant ruling (2026-09-25)', () => {
     expect(code(r)).toBe('FORBIDDEN');
     expect(r.errors![0]!.extensions?.reason).toBe('CROSS_TENANT_ATTACH');
     expect(await readsContent(appKey, 'orgKnowledge')).toBeNull();
+  });
+});
+
+describe("#1357 — the same-App attach (Holger's ruling, 2026-09-26)", () => {
+  // An authorized caller may attach an App's own memory, READ-ONLY, to another
+  // agent installed in that same App — explicit checks, no cross-App shortcut,
+  // and the row confers no ambient authority of its own.
+  let appX: { id: string };
+  let appXKey: string;
+  let appYKey: string;
+  let secondAgentId: string;
+
+  beforeAll(async () => {
+    ({ app: appX, rawKey: appXKey } = await createDbAppWithKey(db, 'same-app-x', attackerOrgId));
+    const y = await createDbAppWithKey(db, 'same-app-y', attackerOrgId);
+    appYKey = y.rawKey;
+    const scoped = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, appId: appX.id, urn: `attacker-${suffix}:xknow`,
+        name: 'xknow', class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const n = await db.node.create({ data: { id: generateId(), memoryId: scoped.id, loc: 'payroll', name: 'p', content: 'APP X KNOWLEDGE' } });
+    mem.appX = { id: scoped.id, urn: `hrn:mem:attacker-${suffix}:xknow`, nodeId: n.id };
+    // The SECOND agent, installed in App X — and in App Y too, so the
+    // no-ambient-authority case below has an App to leak into.
+    secondAgentId = (await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'second', urn: `attacker-${suffix}:second` } as never,
+    })).id;
+    await createDbAppAgent(db, appX.id, secondAgentId);
+    await createDbAppAgent(db, y.app.id, secondAgentId);
+    // Precondition, measured: App X's key cannot read the memory before the attach.
+    expect(await readsContent(appXKey, 'appX'), 'precondition').toBeNull();
+  });
+
+  it('an org admin attaches App X knowledge read-only to a second agent installed in App X', async () => {
+    const r = await gql(key.attacker!, ATTACH, { g: secondAgentId, m: mem.appX!.urn, r: 'read' });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(await db.agentMemoryItem.findFirst({ where: { agentId: secondAgentId, memoryId: mem.appX!.id }, select: { role: true } }))
+      .toEqual({ role: 'read' });
+    expect(await readsContent(appXKey, 'appX')).toBe('APP X KNOWLEDGE');
+  });
+
+  it('the row confers no ambient authority: App Y, where the same agent is installed, still cannot read it', async () => {
+    expect(await db.agentMemoryItem.count({ where: { agentId: secondAgentId, memoryId: mem.appX!.id } })).toBe(1);
+    expect(await readsContent(appYKey, 'appX')).toBeNull();
+  });
+
+  it('no cross-App shortcut: an agent installed only in ANOTHER App is refused, even for an admin of both', async () => {
+    const { agentId, appKey } = await agentWithApp(attackerOrgId, 'same-app-cross');
+    const r = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.appX!.urn, r: 'read' });
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.agentMemoryItem.count({ where: { agentId } })).toBe(0);
+    expect(await readsContent(appKey, 'appX')).toBeNull();
+  });
+
+  it('read-only only: a same-App READ-WRITE attach still needs the caller\'s own write capability', async () => {
+    const third = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'third', urn: `attacker-${suffix}:third` } as never,
+    });
+    await createDbAppAgent(db, appX.id, third.id);
+    const r = await gql(key.attacker!, ATTACH, { g: third.id, m: mem.appX!.urn, r: 'read-write' });
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.agentMemoryItem.count({ where: { agentId: third.id } })).toBe(0);
+    expect(await writes(appXKey, 'appX')).toBe(false);
+  });
+
+  it('a same-App read row cannot be re-roled to read-write through the same branch', async () => {
+    const r = await gql(key.attacker!, SET_ROLE, { g: secondAgentId, m: mem.appX!.urn, r: 'read-write' });
+    expect(r.errors).toHaveLength(1);
+    expect(await db.agentMemoryItem.findFirst({ where: { agentId: secondAgentId, memoryId: mem.appX!.id }, select: { role: true } }))
+      .toEqual({ role: 'read' });
+  });
+
+  it('an uninstalled App admits nothing', async () => {
+    const gone = await createDbAppWithKey(db, 'same-app-gone', attackerOrgId);
+    const goneMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, appId: gone.app.id, urn: `attacker-${suffix}:goneknow`,
+        name: 'goneknow', class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'goneagent', urn: `attacker-${suffix}:goneagent` } as never,
+    });
+    await createDbAppAgent(db, gone.app.id, agent.id);
+    await db.app.update({ where: { id: gone.app.id }, data: { uninstalledAt: new Date() } });
+    const r = await gql(key.attacker!, ATTACH, { g: agent.id, m: `hrn:mem:attacker-${suffix}:goneknow`, r: 'read' });
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.agentMemoryItem.count({ where: { memoryId: goneMem.id } })).toBe(0);
+  });
+
+  it('only knowledge/group: an App-scoped APP-class memory is not admitted', async () => {
+    const appClass = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, appId: appX.id, urn: `attacker-${suffix}:xappclass`,
+        name: 'xappclass', class: 'app', visibility: null,
+      } as never,
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'appclassagent', urn: `attacker-${suffix}:appclassagent` } as never,
+    });
+    await createDbAppAgent(db, appX.id, agent.id);
+    const r = await gql(key.attacker!, ATTACH, { g: agent.id, m: `hrn:mem:attacker-${suffix}:xappclass`, r: 'read' });
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.agentMemoryItem.count({ where: { memoryId: appClass.id } })).toBe(0);
+  });
+
+  it('a DELETED App admits nothing', async () => {
+    const del = await createDbAppWithKey(db, 'same-app-deleted', attackerOrgId);
+    const delMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, appId: del.app.id, urn: `attacker-${suffix}:delknow`,
+        name: 'delknow', class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'delagent', urn: `attacker-${suffix}:delagent` } as never,
+    });
+    await createDbAppAgent(db, del.app.id, agent.id);
+    await db.app.update({ where: { id: del.app.id }, data: { deletedAt: new Date() } });
+    const r = await gql(key.attacker!, ATTACH, { g: agent.id, m: `hrn:mem:attacker-${suffix}:delknow`, r: 'read' });
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.agentMemoryItem.count({ where: { memoryId: delMem.id } })).toBe(0);
+  });
+
+  it('an App in a SOFT-DELETED org admits nothing', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'gone org', urn: `goneorg-${suffix}` } });
+    const admin = await db.user.create({ data: { id: generateId(), handle: `goneadmin-${suffix}`, githubUsername: `goneadmin-${suffix}` } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'OWNER' } });
+    const adminKey = (await mintUserApiKey(db, { userId: admin.id, label: 'k', createdBy: admin.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+    const z = await createDbAppWithKey(db, 'same-app-goneorg', org.id);
+    const zMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, appId: z.app.id, urn: `goneorg-${suffix}:zknow`,
+        name: 'zknow', class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, name: 'zagent', urn: `goneorg-${suffix}:zagent` } as never,
+    });
+    await createDbAppAgent(db, z.app.id, agent.id);
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    const r = await gql(adminKey, ATTACH, { g: agent.id, m: `hrn:mem:goneorg-${suffix}:zknow`, r: 'read' });
+    expect(r.errors, 'refused').toHaveLength(1);
+    expect(await db.agentMemoryItem.count({ where: { memoryId: zMem.id } })).toBe(0);
+    // Recorded for the mutation check: WHICH gate answered.
+    (globalThis as Record<string, unknown>).__goneOrgCode = code(r);
+  });
+
+  it('a caller not authorized for the App is refused by the App gate', async () => {
+    // Masking, stated rather than hidden: any caller who passes the AGENT gate
+    // but not the App's is also refused later by the tenancy rule — measured,
+    // there is no constructible principal for whom the App gate alone decides.
+    // So this pins the App gate by its ANSWER: MEMORY_NOT_FOUND comes from the
+    // read gate, where tenancy would answer FORBIDDEN / CROSS_TENANT_ATTACH.
+    const plain = await db.user.create({
+      data: { id: generateId(), handle: `plain-${suffix}`, githubUsername: `plain-${suffix}` },
+    });
+    await db.orgMember.create({ data: { organizationId: attackerOrgId, userId: plain.id, role: 'CONTRIBUTOR' } });
+    const plainKey = (await mintUserApiKey(db, { userId: plain.id, label: 'k', createdBy: plain.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+    const owned = await db.agent.create({
+      data: { id: generateId(), ownerUserId: plain.id, name: 'plainagent', urn: `plain-${suffix}:agent` } as never,
+    });
+    await createDbAppAgent(db, appX.id, owned.id);
+    const r = await gql(plainKey, ATTACH, { g: owned.id, m: mem.appX!.urn, r: 'read' });
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.agentMemoryItem.count({ where: { agentId: owned.id } })).toBe(0);
   });
 });

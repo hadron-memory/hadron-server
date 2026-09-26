@@ -271,7 +271,7 @@ async function lockAttachmentPair(
   });
   const agent = await tx.agent.findUniqueOrThrow({
     where: { id: agentId },
-    select: { organizationId: true, ownerUserId: true, visibility: true },
+    select: { id: true, organizationId: true, ownerUserId: true, visibility: true },
   });
   return { memory, agent };
 }

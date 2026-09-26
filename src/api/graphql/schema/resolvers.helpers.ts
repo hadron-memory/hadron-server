@@ -595,6 +595,65 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
 }
 
 /**
+ * The same-App attach (#1357; Holger's ruling, 2026-09-26): an appropriately
+ * authorized caller may attach an App's own memory, READ-ONLY, to another
+ * agent installed in that same App.
+ *
+ * Why it needs its own branch: the capability check excludes App-derived reach
+ * on purpose — counting it let a memory reachable only through App B be
+ * laundered into App A. That also made an App-scoped memory (#653: App-internal,
+ * excluded from every org-wide gate) unattachable by anyone, including the
+ * App's own admins, so provisioning a SECOND agent in the App could not give it
+ * the App's knowledge. This admits exactly that and nothing wider:
+ *
+ *  - **the memory's OWN App** — `memory.appId`, never whichever App the caller
+ *    happens to reach it through. That is the "no cross-App shortcut";
+ *  - **the target agent is installed in that App**, which is live (not deleted,
+ *    not uninstalled, its org not soft-deleted);
+ *  - **the caller is authorized for that App** by the gate `createMemoryInApp`
+ *    uses to provision App knowledge (`requireOwnerOrOrgRole(app, 'ADMIN')`), so
+ *    "appropriately authorized" means what it already means;
+ *  - **knowledge / group only** — never a strict-owner class;
+ *  - **`read` only**, mirroring provisioning, which links App knowledge `read`
+ *    and leaves writes with the org admin. A same-App `read-write` still needs
+ *    the caller's own write capability, unchanged.
+ *
+ * The row this admits confers no ambient authority of its own: the access fold
+ * (`admissibleFoldRows`) confines an App-scoped row to its own App, so the new
+ * agent reaches the memory only inside the App that owns it (#1376).
+ */
+async function sameAppAttachAdmitted(
+  ctx: Context,
+  agentId: string,
+  memory: { appId: string | null; class: string },
+): Promise<boolean> {
+  if (memory.appId == null) return false;
+  if (memory.class !== 'knowledge' && memory.class !== 'group') return false;
+  const app = await ctx.db.app.findFirst({
+    where: {
+      id: memory.appId,
+      deletedAt: null,
+      uninstalledAt: null,
+      OR: [{ organizationId: null }, { organization: { deletedAt: null } }],
+    },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app) return false;
+  const installed = await ctx.db.appAgent.findUnique({
+    where: { appId_agentId: { appId: app.id, agentId } },
+    select: { appId: true },
+  });
+  if (!installed) return false;
+  try {
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+    return false;
+  }
+  return true;
+}
+
+/**
  * Gate an agent-memory ATTACHMENT on the capability it grants (#1349).
  *
  * `addMemoryToAgent` / `updateAgentMemoryRole` authorize the AGENT (its owner
@@ -629,7 +688,7 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
  */
 export async function requireAgentMemoryGrant(
   ctx: Context,
-  agent: { organizationId: string | null; ownerUserId: string | null; visibility: string | null },
+  agent: { id: string; organizationId: string | null; ownerUserId: string | null; visibility: string | null },
   memory: {
     id: string;
     class: string;
@@ -643,8 +702,13 @@ export async function requireAgentMemoryGrant(
   role: AgentMemoryRole,
   ref: string,
 ): Promise<void> {
+  // Also a KNOWN mutation survivor (harness #8), for #7's reason: `self` feeds
+  // only the write check below, which no reachable caller depends on today.
   const self = userPrincipalOnly(ctx);
-  const canRead = await holdsContentReadIndependently(ctx, memory.id);
+  const canRead =
+    (await holdsContentReadIndependently(ctx, memory.id)) ||
+    // The ONE route by which App reach may admit an attach (#1357).
+    (role === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));
   // Existence-hiding first: every refusal below this line is addressed to
   // someone who already knows the memory exists.
   if (!canRead) throw new MemoryNotFoundError(ref);
@@ -702,6 +766,14 @@ export async function requireAgentMemoryGrant(
         { extensions: { code: 'FORBIDDEN', reason: 'PUBLIC_AGENT_READ_WRITE' } },
       );
     }
+    // Defense in depth, and a KNOWN mutation survivor (harness #7): no caller
+    // constructible today reaches this check without already holding write.
+    // Same tenant, everyone past the agent gate (an org ADMIN, or a user-owned
+    // agent's owner) can write what they can read — and App-scoped knowledge,
+    // which no user writes, is refused by the read gate above (the same-App
+    // branch admits `read` only). Cross tenant, the tenancy rule and the
+    // PUBLIC-is-read-only rule refuse first. It stays because those facts live
+    // in other files, and this is the check that states the actual invariant.
     try {
       await requireMemoryWriteAccess(self, memory.id);
     } catch (error) {

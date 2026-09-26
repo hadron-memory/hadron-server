@@ -24,6 +24,24 @@ AG=src/api/graphql/schema/resolvers.mutation.agent.ts
 SPEC=src/test/integration/agent-memory-attach-1349.test.ts
 
 STALE=0
+UNEXPECTED=0
+
+# Baseline on the unmutated tree (ported from #1383's hardening): exit status
+# zero, no failed line, and the TOTAL test count every mutant run must
+# reproduce. A run reporting fewer tests (a file that failed to load, a crashed
+# worker, an exhausted DB) did not test the mutant; it must not read as a
+# survivor — #1383 observed a 13-of-297 run reported as SURVIVED.
+base_raw=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run "$SPEC" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+base_status=$?
+base_line=$(echo "$base_raw" | grep -E '^ *Tests ')
+BASELINE=$(echo "$base_line" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
+if [ "$base_status" -ne 0 ] || [ -z "$BASELINE" ] || echo "$base_raw" | grep -qE '^ *(Tests|Test Files) .*failed'; then
+  echo "REFUSING: the baseline is not green (vitest exit $base_status) — $base_line"
+  echo "$base_raw" | tail -5 | sed 's/^/            /'
+  exit 1
+fi
+echo "baseline: $BASELINE tests, all passing"
+
 run() { # name file old new
   python3 - "$2" "$3" "$4" <<'PY' || { echo "STALE     $1 — pattern no longer matches the implementation"; STALE=$((STALE+1)); return; }
 import sys
@@ -46,8 +64,15 @@ PY
     STALE=$((STALE+1))
     return
   fi
+  total=$(echo "$out" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
+  if [ "$total" != "$BASELINE" ]; then
+    echo "ERRORED   $1 — partial run: $total of $BASELINE tests reported ($(echo "$out" | tr -s ' '))"
+    STALE=$((STALE+1))
+    return
+  fi
   if echo "$out" | grep -q failed; then echo "KILLED    $1 — $(echo "$out" | tr -s ' ')"
-  else echo "SURVIVED  $1 — $(echo "$out" | tr -s ' ')"; fi
+  elif [[ "$1" == *"(expected survivor)"* ]]; then echo "SURVIVED  $1 — $(echo "$out" | tr -s ' ')"
+  else echo "SURVIVED  $1 — $(echo "$out" | tr -s ' ')"; UNEXPECTED=$((UNEXPECTED+1)); fi
 }
 
 run "1 attach gate removed" "$M" \
@@ -63,17 +88,17 @@ run "2 re-role gate removed" "$M" \
 run "3 role validation disabled" "$H" \
   "  if (!(AGENT_MEMORY_ROLES as readonly string[]).includes(value)) {" "  if (false) {"
 run "4 content gate -> record gate" "$H" \
-  "  const canRead = await holdsContentReadIndependently(ctx, memory.id);" \
-  "  const canRead = await canReadMemoryRecord(userPrincipalOnly(ctx), memory);"
+  "    (await holdsContentReadIndependently(ctx, memory.id)) ||" \
+  "    (await canReadMemoryRecord(userPrincipalOnly(ctx), memory)) ||"
 run "5 tenancy check dropped" "$H" \
   "  if (!sameTenant && !publicRead) {" "  if (false) {"
 run "6 PUBLIC allowed read-write cross-tenant" "$H" \
   "  const publicRead = role === 'read' && genuinelyPublic;" "  const publicRead = genuinelyPublic;"
-run "7 write-capability check dropped" "$H" \
+run "7 write-capability check dropped (expected survivor)" "$H" \
   "    try {
       await requireMemoryWriteAccess(self, memory.id);" "    try {
       await Promise.resolve();"
-run "8 user-principal narrowing removed" "$H" \
+run "8 user-principal narrowing removed (expected survivor)" "$H" \
   "  const self = userPrincipalOnly(ctx);" "  const self = ctx;"
 run "9 concealment -> plain FORBIDDEN" "$H" \
   "  if (!canRead) throw new MemoryNotFoundError(ref);" \
@@ -172,6 +197,31 @@ run "33 locked other-claimant re-check removed" "$AG" \
             });
           }" "          void claimedElsewhere;"
 
+# ── #1357 same-App attach (Holger's ruling, 2026-09-26) ──────────────────
+run "34 same-App branch removed" "$H" \
+  "    (role === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));" "    false;"
+run "35 same-App branch admits read-write" "$H" \
+  "    (role === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));" "    (await sameAppAttachAdmitted(ctx, agent.id, memory));"
+run "36 same-App install check removed (cross-App shortcut)" "$H" \
+  "  if (!installed) return false;" ""
+run "37 same-App App gate removed" "$H" \
+  "  try {
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+    return false;
+  }
+  return true;" "  return true;"
+run "38 same-App class restriction removed" "$H" \
+  "  if (memory.class !== 'knowledge' && memory.class !== 'group') return false;" ""
+run "39 same-App admits an uninstalled App" "$H" \
+  "      uninstalledAt: null," ""
+run "40 same-App admits a deleted App" "$H" \
+  "      deletedAt: null,
+      uninstalledAt: null," "      uninstalledAt: null,"
+run "41 same-App admits an App in a soft-deleted org" "$H" \
+  "      OR: [{ organizationId: null }, { organization: { deletedAt: null } }]," ""
+
 # A stale pattern is a FAILED run, not a skipped line. Counting only
 # KILLED/SURVIVED lines once let two stale mutants — the attach gate and the
 # re-role gate, the two that matter most — drop out of a reported total without
@@ -181,6 +231,13 @@ if [ "$STALE" -ne 0 ]; then
   echo "FAILED: $STALE mutation(s) were STALE or ERRORED."
   echo "Every reported count is therefore incomplete — a stale pattern was never"
   echo "applied, and an errored run never reported. Fix and re-run."
+  exit 1
+fi
+if [ "$UNEXPECTED" -ne 0 ]; then
+  echo
+  echo "FAILED: $UNEXPECTED unexpected survivor(s) — a guard no test pins. Only a"
+  echo "mutant NAMED '(expected survivor)', with its reason at the mutated line,"
+  echo "may survive (@codex, PR #1383)."
   exit 1
 fi
 echo
