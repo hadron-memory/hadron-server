@@ -167,6 +167,32 @@ describe('publishRevision', () => {
 });
 
 describe('restoreRevision', () => {
+  it('restoring over existing nodes is a revisioned write — drift reconciled first (#1339 review)', async () => {
+    // @copilot: the restore upsert rewrote existing system nodes with no
+    // NodeRevision and no fingerprint refresh, so the next exposed read
+    // mistook the restore for a raw writer and lost its real predecessor.
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId: systemMemory.id, loc: 'prompts:main', name: 'main', nodeType: 'system', content: 'v1' },
+    });
+    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'v1' }, adminCtx());
+    await db.node.update({ where: { id: node.id }, data: { content: 'changed by a raw writer' } });
+
+    await resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx());
+
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after.content).toBe('v1');
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revLabel)).toEqual([
+      'Reconciled state changed outside a revisioned writer (#1323)',
+      'Restored from a published agent snapshot',
+    ]);
+    expect(history[1]!.content).toBe('changed by a raw writer');
+    expect(after.revSeq).toBe(3);
+    // The fingerprint was refreshed, so an exposed read has nothing to reconcile.
+    expect(await resolvers.Node.revision(after as never, {}, adminCtx())).toBe(3);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(2);
+  });
+
   it('restores nodes from a snapshot and auto-saves current state', async () => {
     // Create initial revision
     await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'v1' }, adminCtx());

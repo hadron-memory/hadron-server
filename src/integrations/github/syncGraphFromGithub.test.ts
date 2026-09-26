@@ -2,10 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'path';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { db } from '../db/client.js';
-import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
+import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeFrontmatterNode, writeNodeFiles } from '../../test/helpers.js';
 import { splitGitArgv } from '../../test/gitArgv.js';
 import { GIT_TRANSPORT_GUARD } from './execGit.js';
-import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
+import { syncGraphFromGithub, updateNodeFromGitSync, GitSyncTargetMovedError, type MemoryWithOrg } from './syncGraphFromGithub.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/channels.js';
 import { generateId } from '../../lib/id.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
@@ -323,6 +323,44 @@ describe('syncGraphFromGithub', () => {
 
     expect(second!.id).toBe(first!.id);
     expect(second!.description).toBe('v2');
+    expect(second!.revSeq).toBe(2);
+    expect(await db.nodeRevision.findMany({ where: { nodeId }, select: { revNo: true, description: true } }))
+      .toEqual([{ revNo: 1, description: 'v1' }]);
+  });
+
+  it('a sync over unrevisioned drift takes the reconcile AND its own revision (#1339 review)', async () => {
+    // @codex P1: a raw write between two syncs used to be folded into the
+    // sync's single revision, and the refreshed fingerprint then hid it.
+    const nodeId = 'aaaa000000000000000000000000001339';
+    const nodeA = join(mockSources, 'test-org', 'test/repo', 'nodeD');
+    mkdirSync(nodeA, { recursive: true });
+    writeNodeFiles(nodeA, { id: nodeId, name: 'nodeD', description: 'v1' });
+    await syncGraphFromGithub(makeGraph());
+    await db.node.update({ where: { id: nodeId }, data: { content: 'raw writer' } });
+
+    writeNodeFiles(nodeA, { id: nodeId, name: 'nodeD', description: 'v2' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq).toBe(3);
+    const history = await db.nodeRevision.findMany({ where: { nodeId }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    expect(history[1]!.revLabel).toBe('Synchronized from GitHub');
+    expect(history[1]!.description).toBe('v1');
+  });
+
+  it('refuses to apply a sync update to a row that has left the synced memory (#1339 review)', async () => {
+    // @copilot: the row lock must re-validate ownership — a concurrent
+    // cross-memory move between the preflight lookup and the lock would
+    // otherwise have the repo's update rewrite a FOREIGN memory's node.
+    const nodeId = 'aaaa000000000000000000000000001340';
+    const row = await db.node.create({ data: { id: nodeId, memoryId: dbGraphId, loc: 'moved:away', name: 'n', content: 'mine' } });
+    await expect(
+      db.$transaction((tx) => updateNodeFromGitSync(tx, row, { content: 'from git' }, undefined, 'some-other-memory')),
+    ).rejects.toBeInstanceOf(GitSyncTargetMovedError);
+    const after = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(after.content).toBe('mine');
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
   });
 
   it('re-sync replaces old nodes with the new set', async () => {
@@ -532,6 +570,40 @@ describe('move-aware identity', () => {
     expect(rows[0].id).toBe(nodeId);
     expect(rows[0].loc).toBe('tasks:add-platform-spec');
     expect(rows[0].name).toBe('renamed task');
+  });
+
+  it('records one committed revision per node when two files swap locs', async () => {
+    const aId = 'aaaa111100000000000000000000000021';
+    const bId = 'bbbb222200000000000000000000000022';
+    const aDir = join(repoRoot(), 'a');
+    const bDir = join(repoRoot(), 'b');
+    mkdirSync(aDir, { recursive: true });
+    mkdirSync(bDir, { recursive: true });
+    writeNodeFiles(aDir, { id: aId, name: 'A' });
+    writeNodeFiles(bDir, { id: bId, name: 'B' });
+    await syncGraphFromGithub(makeGraph());
+    await db.memory.update({ where: { id: dbGraphId }, data: { maxRevCount: 1 } });
+
+    rmSync(aDir, { recursive: true });
+    rmSync(bDir, { recursive: true });
+    mkdirSync(aDir, { recursive: true });
+    mkdirSync(bDir, { recursive: true });
+    writeNodeFiles(aDir, { id: bId, name: 'B' });
+    writeNodeFiles(bDir, { id: aId, name: 'A' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'b', revSeq: 2 });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'a', revSeq: 2 });
+    expect(
+      await db.nodeRevision.findMany({
+        where: { nodeId: { in: [aId, bId] } },
+        orderBy: { nodeId: 'asc' },
+        select: { nodeId: true, revNo: true, loc: true },
+      }),
+    ).toEqual([
+      { nodeId: aId, revNo: 1, loc: 'a' },
+      { nodeId: bId, revNo: 1, loc: 'b' },
+    ]);
   });
 
   it('never steals a foreign memory\'s node id — mints a fresh id instead', async () => {
@@ -1030,5 +1102,175 @@ describe('a file whose path cannot be a loc (#1224)', () => {
     const result = await syncGraphFromGithub(makeGraph());
     expect(result.error).toBeUndefined();
     expect(await db.node.findUnique({ where: { id: nodeId } })).toBeNull();
+  });
+});
+
+// ── #1348: git sync restores objectType, and absence never clears it ────────
+// cor:int:020:01 (amended 2026-09-25): a field absent from the file means no
+// opinion — on create it takes its default, on update the stored value is kept,
+// and clearing takes an explicit statement for that field. For objectType a
+// FILE never clears it (hadron-cli#725: absent, "" and blank are all no
+// opinion; `node update --object-type ""` is the clear), so only a non-blank
+// value is written, as-is. Both file forms, and every persistence path.
+describe('#1348 — objectType through git sync', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+  const legacy = (loc: string, meta: Parameters<typeof writeNodeFiles>[1]) => {
+    const dir = join(repoRoot(), loc);
+    mkdirSync(dir, { recursive: true });
+    writeNodeFiles(dir, meta);
+  };
+  const frontmatter = (loc: string, meta: Parameters<typeof writeFrontmatterNode>[1]) =>
+    writeFrontmatterNode(join(repoRoot(), `${loc}.md`), meta, 'Body.');
+  const stored = async (loc: string) =>
+    (await db.node.findFirst({ where: { loc, memoryId: dbGraphId }, select: { objectType: true, role: true } }));
+  const sync = async () => {
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+  };
+
+  it.each([
+    ['frontmatter', frontmatter],
+    ['legacy directory', legacy],
+  ] as const)('%s: a fresh restore CREATES the node with its objectType', async (_n, write) => {
+    write('competitors:acme', { name: 'Acme', objectType: 'competitor' });
+    await sync();
+    expect((await stored('competitors:acme'))?.objectType).toBe('competitor');
+  });
+
+  it.each([
+    ['frontmatter', frontmatter],
+    ['legacy directory', legacy],
+  ] as const)('%s: an ID-FIRST update applies a changed objectType', async (_n, write) => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a', name: 'A', objectType: 'lead', ownerRepo: 'test/repo' } });
+    write('a', { id, name: 'A', objectType: 'customer' });
+    await sync();
+    expect((await stored('a'))?.objectType).toBe('customer');
+  });
+
+  it('a sync-changed objectType is revisioned like any tracked field (#1339 path)', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'h', name: 'H', objectType: 'lead', ownerRepo: 'test/repo' } });
+    frontmatter('h', { id, name: 'H', objectType: 'customer' });
+    await sync();
+    const revs = await db.nodeRevision.findMany({ where: { nodeId: id }, select: { objectType: true, changes: true } });
+    expect(revs).toContainEqual(expect.objectContaining({ objectType: 'lead', changes: expect.arrayContaining(['objectType']) }));
+  });
+
+  it('an ID-FIRST MOVE carries the objectType to the new loc', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'old', name: 'A', objectType: 'lead', ownerRepo: 'test/repo' } });
+    frontmatter('new', { id, name: 'A', objectType: 'customer' });
+    await sync();
+    expect(await stored('old')).toBeNull();
+    expect((await stored('new'))?.objectType).toBe('customer');
+  });
+
+  it('a LOC-KEYED update (file id unknown) applies a changed objectType', async () => {
+    await db.node.create({ data: { id: generateId(), memoryId: dbGraphId, loc: 'b', name: 'B', objectType: 'lead', ownerRepo: 'test/repo' } });
+    frontmatter('b', { name: 'B', objectType: 'customer' }); // writeFrontmatterNode mints a fresh, unknown id
+    await sync();
+    expect((await stored('b'))?.objectType).toBe('customer');
+  });
+
+  // The load-bearing half: every mirrored file written before #725 lacks the key.
+  it.each([
+    ['omitted', {}],
+    ['explicit null', { objectType: null }],
+    ['empty string', { objectType: '' }],
+    ['whitespace', { objectType: '   ' }],
+  ] as const)('a file with objectType %s PRESERVES the stored value on update (both forms)', async (_n, extra) => {
+    const idF = generateId();
+    const idL = generateId();
+    await db.node.create({ data: { id: idF, memoryId: dbGraphId, loc: 'f', name: 'F', objectType: 'insight', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: idL, memoryId: dbGraphId, loc: 'l', name: 'L', objectType: 'insight', ownerRepo: 'test/repo' } });
+    frontmatter('f', { id: idF, name: 'F', ...extra });
+    legacy('l', { id: idL, name: 'L', ...extra });
+    await sync();
+    expect((await stored('f'))?.objectType).toBe('insight');
+    expect((await stored('l'))?.objectType).toBe('insight');
+  });
+
+  it.each([
+    ['omitted', {}],
+    ['empty string', { objectType: '' }],
+    ['whitespace', { objectType: '   ' }],
+  ] as const)('a NEW node whose file has objectType %s gets the unset default', async (_n, extra) => {
+    frontmatter('plain', { name: 'Plain', ...extra });
+    await sync();
+    expect((await stored('plain'))?.objectType).toBeNull();
+  });
+
+  it('a non-blank value is written as-is, like CLI import (no trimming)', async () => {
+    frontmatter('padded', { name: 'P', objectType: ' competitor ' });
+    await sync();
+    expect((await stored('padded'))?.objectType).toBe(' competitor ');
+  });
+
+  // #725: a structured record must satisfy its collection. Sync restores no
+  // properties, so the record is judged with the properties the row already has.
+  describe('on a memory with a property schema (@codex P1, PR #1358)', () => {
+    const schema = {
+      objectTypes: {
+        competitor: { fields: { url: { type: 'text', required: true } } },
+        note: { fields: { topic: { type: 'text' } } },
+      },
+    };
+    beforeEach(async () => {
+      await db.memory.update({ where: { id: dbGraphId }, data: { schema } });
+    });
+    const syncResult = async () => {
+      const result = await syncGraphFromGithub(makeGraph());
+      expect(result.error).toBeUndefined();
+      return result;
+    };
+
+    it('a value whose record conforms IS written — on update and on create', async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'c', name: 'C', objectType: 'note', properties: { url: 'https://x' }, ownerRepo: 'test/repo' } });
+      frontmatter('c', { id, name: 'C', objectType: 'competitor' });
+      frontmatter('n', { name: 'N', objectType: 'note' });
+      const result = await syncResult();
+      expect((await stored('c'))?.objectType).toBe('competitor');
+      expect((await stored('n'))?.objectType).toBe('note');
+      expect(result.skippedObjectTypes).toEqual([]);
+    });
+
+    it('an UNDECLARED collection is not written: the stored value is kept and the file is reported', async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'u', name: 'U', objectType: 'note', ownerRepo: 'test/repo' } });
+      frontmatter('u', { id, name: 'U-renamed', objectType: 'bogus' });
+      const result = await syncResult();
+      const row = await db.node.findFirst({ where: { loc: 'u', memoryId: dbGraphId } });
+      expect([row?.objectType, row?.name]).toEqual(['note', 'U-renamed']); // the rest of the file still applied
+      expect(result.skippedObjectTypes).toEqual([expect.stringMatching(/^u \(bogus\): /)]);
+    });
+
+    it('a collection whose REQUIRED field the row lacks is not written — a fresh restore creates the node without it', async () => {
+      frontmatter('fresh', { name: 'F', objectType: 'competitor' });
+      frontmatter('other', { name: 'O' });
+      const result = await syncResult();
+      expect((await stored('fresh'))?.objectType).toBeNull();
+      expect(await stored('other')).not.toBeNull(); // one bad file never fails the memory's sync
+      expect(result.skippedObjectTypes).toEqual([expect.stringMatching(/^fresh \(competitor\): /)]);
+    });
+
+    it('judges the properties the row already has (sync restores none): a conforming row takes the collection', async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'l', name: 'L', properties: { url: 'https://y' }, ownerRepo: 'test/repo' } });
+      frontmatter('l', { id, name: 'L', objectType: 'competitor' });
+      await syncResult();
+      expect((await stored('l'))?.objectType).toBe('competitor');
+    });
+  });
+
+  it('#1218 governed signals are untouched: an objectType-only file keeps a stored role, and a file role still sets it', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'r', name: 'R', role: 'review', ownerRepo: 'test/repo' } });
+    frontmatter('r', { id, name: 'R', objectType: 'insight' });
+    frontmatter('s', { name: 'S', objectType: 'insight', role: 'review' });
+    await sync();
+    expect(await stored('r')).toEqual({ objectType: 'insight', role: 'review' });
+    expect(await stored('s')).toEqual({ objectType: 'insight', role: 'review' });
   });
 });

@@ -389,6 +389,100 @@ export async function resolveReadableMemoryId(
 }
 
 /**
+ * Resolve a memory ref for a surface that reads the memory's NODE data, and
+ * answer an unreadable memory exactly as `resolveMemoryRef` answers a missing
+ * one: `MemoryNotFoundError(ref)`, carrying the caller's own ref (#1316).
+ *
+ * The throwing twin of {@link resolveReadableMemoryId}, for surfaces whose
+ * missing-memory contract is the typed `MEMORY_NOT_FOUND` error rather than an
+ * empty page. Before this, each such surface resolved first (only a MISSING
+ * memory throws there) and then applied its own gate with its own denial —
+ * `[]`, `NOT_FOUND`, `null`, `FORBIDDEN` — so "exists but unreadable" differed
+ * from "no such memory". Memory URNs are guessable, which made each one a
+ * cross-tenant name oracle.
+ *
+ * The gate is the node-content gate (`isMemoryReadableCached`, i.e.
+ * `getAccessibleMemoryIds`) — the one these surfaces already used, so this
+ * moves only the response, not the access decision. It is deliberately NOT the
+ * record gate: an org member may open an app/system memory RECORD whose nodes
+ * that gate excludes, and these surfaces return node data.
+ *
+ * Malformed refs and DB faults propagate from `resolveMemoryRef` unchanged.
+ */
+export async function resolveNodeReadableMemoryRef(
+  ctx: Context,
+  ref: string,
+): Promise<{ id: string }> {
+  const { id } = await resolveMemoryRef(ctx.db, ref);
+  if (!(await isMemoryReadableCached(ctx, id))) throw new MemoryNotFoundError(ref);
+  return { id };
+}
+
+/**
+ * True for an ORDINARY authorization denial — the only error an existence
+ * classification may replace. The platform's gates deny in three spellings:
+ * a `FORBIDDEN`-coded GraphQLError, a plain `Error('Forbidden')` /
+ * `Error('Forbidden: …')` (requireOrgRole, requireOrgAction,
+ * requireOwnerOrOrgRole), and `Error('Unauthenticated')`. Anything else — a DB
+ * fault, a typed domain refusal, a malformed ref — is not a denial and must
+ * propagate as itself (#1316: no blanket catch-all).
+ */
+export function isAuthorizationDenial(error: unknown): boolean {
+  if (error instanceof GraphQLError) return error.extensions.code === 'FORBIDDEN';
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message === 'Forbidden' ||
+    error.message.startsWith('Forbidden:') ||
+    error.message === 'Unauthenticated'
+  );
+}
+
+/**
+ * Run a memory-targeted mutation's EXISTING authorization, and when it denies
+ * a caller who cannot even open the memory's record, answer as the missing
+ * branch does: `MemoryNotFoundError(ref)` (#1316).
+ *
+ * A caller who CAN open the record (via `Query.memory`) already knows the
+ * memory exists, so their denial stays exactly what the surface threw —
+ * readable-but-not-permitted remains FORBIDDEN, which is the actionable
+ * answer. Only an ordinary denial ({@link isAuthorizationDenial}) is
+ * classified; every other error, and every success, passes through untouched,
+ * so no permitted caller is ever narrowed. The record read here selects every
+ * field `canReadMemoryRecord` requires (omitting one can fail it open —
+ * #1104).
+ *
+ * `authorize` must perform authorization ONLY — no writes — since it runs
+ * before classification and its side effects would not be concealed.
+ */
+export async function concealUnreadableDenial(
+  ctx: Context,
+  memoryId: string,
+  ref: string,
+  authorize: () => Promise<void>,
+): Promise<void> {
+  try {
+    await authorize();
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+    const record = await ctx.db.memory.findUnique({
+      where: { id: memoryId },
+      select: {
+        id: true,
+        class: true,
+        userId: true,
+        ownerUserId: true,
+        organizationId: true,
+        appId: true,
+        userMemoryOfAgentId: true,
+        deletedAt: true,
+      },
+    });
+    if (record && !record.deletedAt && (await canReadMemoryRecord(ctx, record))) throw error;
+    throw new MemoryNotFoundError(ref);
+  }
+}
+
+/**
  * The RECORD-level memory read gate — "may this caller open this memory's
  * record (its scalars: name, description, data)?", as distinct from
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".

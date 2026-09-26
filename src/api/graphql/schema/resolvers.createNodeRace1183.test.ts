@@ -182,7 +182,7 @@ describe('createNode is create-only under concurrency (#1183)', () => {
     ]);
 
     const [row] = await db.node.findMany({ where: { memoryId, loc: 'cor:api:010:03' } });
-    expect(row.revSeq).toBe(0);
+    expect(row.revSeq).toBe(1);
     expect(await db.nodeRevision.count({ where: { nodeId: row.id } })).toBe(0);
   });
 

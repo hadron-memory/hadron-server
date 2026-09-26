@@ -196,6 +196,8 @@ export const typeDefs = `#graphql
     objectType: String
     tags: [String!]
     isRunnable: Boolean
+    "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
+    role: String
     locPrefix: String
     createdBy: String
     updatedAfter: String
@@ -945,6 +947,8 @@ export const typeDefs = `#graphql
     headerHash: String
     """The hash the client computed over the file itself."""
     fileHash: String
+    "The positive rev=N value from provenance. Null means an older artifact omitted it."
+    revision: Int
     """True when the file exists and could not be parsed."""
     parseFailed: Boolean
     """True when the file carries frontmatter keys the renderer never writes."""
@@ -1007,6 +1011,8 @@ export const typeDefs = `#graphql
   type SkillPlanEntry {
     urn: String!
     nodeId: String!
+    "Authoritative current node revision used in rendered provenance."
+    revision: Int!
     """The stored skill name (D12 retired derivation)."""
     name: String!
     """
@@ -1126,6 +1132,8 @@ export const typeDefs = `#graphql
 
   type Node {
     id: ID!
+    "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
+    revision: Int!
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -1143,7 +1151,8 @@ export const typeDefs = `#graphql
     property schema when it has one. NULL for an ordinary node.
 
     NOT 'nodeType' (the platform-kind axis, which drives retrieval) and NOT
-    'role' (what the node is for, which has no retrieval impact).
+    'role' (what the node is for; role can be filtered explicitly but does not
+    change default ranking or rendering).
     """
     objectType: String
     loc: String!
@@ -1227,13 +1236,14 @@ export const typeDefs = `#graphql
 
     NOT 'nodeType' (the platform-kind axis, load-bearing for retrieval) and NOT
     'objectType' (the collection discriminator, schema-validated). This field
-    has NO retrieval impact.
+    does not change default retrieval or ranking; NodeFilter.role explicitly
+    selects its exact dotted family (#1322).
 
-    A GOVERNED value routes the write to that kind's own authoring door, and the
-    generic node surface is refused: 'review' and 'spec' today, alongside the
-    task kind, which is gated on 'isRunnable' rather than on any label because a
-    label can be omitted and a capability cannot. 'role: \"weather-widget\"'
-    does nothing at all.
+    A GOVERNED family routes the write to that kind's own authoring door, and
+    the generic node surface is refused: 'review' / 'review.*' and 'spec' /
+    'spec.*' today, alongside the task kind, which is gated on 'isRunnable'
+    rather than on any label because a label can be omitted and a capability
+    cannot. Other values are inert unless a caller explicitly filters for them.
     """
     role: String
     llmModel: String
@@ -5846,7 +5856,7 @@ export const typeDefs = `#graphql
     The App's memory scope is authoritative, so the filter's memory-scope
     fields (memoryIds / memoryClasses) are rejected with BAD_USER_INPUT rather
     than silently ignored — use findNodes for cross-memory scoping. Only
-    node-level predicates (nodeType, tags, isRunnable, locPrefix, createdBy,
+    node-level predicates (nodeType, tags, isRunnable, role, locPrefix, createdBy,
     updatedAfter/Before, includeDeleted) apply. Unlike findNodes, system-memory
     nodes are NOT excluded by default.
     """
@@ -6552,7 +6562,7 @@ export const typeDefs = `#graphql
 
     """
     #1201 — the CREATE door for the spec kind. A write that would produce a
-    node with role: 'spec' must come through here; the generic createNode
+    node with role: 'spec' or a dotted 'spec.*' sub-role must come through here; the generic createNode
     refuses it.
 
     PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
@@ -6586,7 +6596,7 @@ export const typeDefs = `#graphql
 
     """
     #1201 — the CREATE door for the review kind. A write that would produce a
-    node with role: 'review' must come through here; the generic createNode
+    node with role: 'review' or a dotted 'review.*' sub-role must come through here; the generic createNode
     refuses it.
 
     PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
@@ -6782,8 +6792,9 @@ export const typeDefs = `#graphql
     every NodeRevision NEWER than the selected one (createdAt strictly greater),
     WITHOUT creating a pre-restore snapshot. Boundary is EXCLUSIVE of the
     selected row: the selected revision is KEPT and becomes the new baseline
-    (the most-recent snapshot afterward); its era and older survive. Restore +
-    truncate run in one transaction (atomic).
+    (the most-recent snapshot afterward); its era and older survive. The live
+    revision counter still advances monotonically for the restore itself.
+    Restore + truncate run in one transaction (atomic).
     """
     restoreNodeRevision(revisionId: ID!, truncate: Boolean = false): Node!
 

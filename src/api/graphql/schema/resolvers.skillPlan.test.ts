@@ -12,6 +12,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { splitNodeUrn } from '../../../lib/urn.js';
+import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -586,10 +587,12 @@ describe('classes and bodies', () => {
     const urn = exported.entries[0].urn as string;
     const body = exported.entries[0].renderedBody as string;
     const headerHash = /hash=([0-9a-f]{16})/.exec(body)![1]!;
+    expect(exported.entries[0].revision).toBe(1);
+    expect(body).toContain(' rev=1 ');
 
     const got = await plan({
       intent: 'EXPORT',
-      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+      files: [{ dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, revision: 1, headerHash, fileHash: headerHash }],
     });
 
     expect(got.entries[0].class).toBe('current');
@@ -600,6 +603,91 @@ describe('classes and bodies', () => {
       reasons: [{ code: 'current' }],
     });
     expect(got.orphans).toHaveLength(0);
+  });
+
+  it('treats an explicit null file revision as omitted', async () => {
+    const node = await mkNode('tasks:null-revision', { properties: declaration() });
+    const exported = await plan({ intent: 'EXPORT', files: [] });
+    const entry = exported.entries[0];
+    const headerHash = /hash=([0-9a-f]{16})/.exec(entry.renderedBody as string)![1]!;
+
+    const got = await plan({
+      intent: 'STATUS',
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: entry.urn,
+        nodeId: node.id,
+        revision: null,
+        headerHash,
+        fileHash: headerHash,
+      }],
+    });
+
+    expect(got.entries[0].class).toBe('current');
+  });
+
+  it('classifies a hash-equal artifact from an older revision as stale', async () => {
+    const node = await mkNode('tasks:revision-stale', { properties: declaration() });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const entry = first.entries[0];
+    const headerHash = /hash=([0-9a-f]{16})/.exec(entry.renderedBody as string)![1]!;
+
+    await db.node.update({
+      where: { id: node.id },
+      data: {
+        description: 'revisioned metadata',
+        revSeq: { increment: 1 },
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+    const got = await plan({
+      intent: 'STATUS',
+      files: [{
+        dirName: 'my-skill',
+        sourceUrn: entry.urn,
+        nodeId: node.id,
+        revision: entry.revision,
+        headerHash,
+        fileHash: headerHash,
+      }],
+    });
+
+    expect(got.entries[0]).toMatchObject({ revision: 2, class: 'stale' });
+  });
+
+  it('renders off-road content with the revision reconciled for those exact bytes', async () => {
+    const node = await mkNode('tasks:off-road-content', { properties: declaration() });
+    await plan({ intent: 'EXPORT', files: [] });
+    await db.node.update({ where: { id: node.id }, data: { content: '# Off-road body' } });
+
+    const got = await plan({ intent: 'EXPORT', files: [] });
+    expect(got.entries[0].revision).toBe(2);
+    expect(got.entries[0].renderedBody).toContain('# Off-road body');
+    expect(got.entries[0].renderedBody).toContain(' rev=2 ');
+  });
+
+  it('keeps rendered fields paired with their revision when a bypass write lands after the locked fetch', async () => {
+    const node = await mkNode('tasks:revision-pair-race', { properties: declaration() });
+    const runTransaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
+    let injected = false;
+    const transactionSpy = vi.spyOn(db, '$transaction').mockImplementation((async (...args: any[]) => {
+      const result = await runTransaction(...args);
+      if (!injected) {
+        injected = true;
+        await db.node.update({ where: { id: node.id }, data: { content: '# Raced body' } });
+      }
+      return result;
+    }) as never);
+
+    try {
+      const got = await plan({ intent: 'EXPORT', files: [] });
+      expect(got.entries[0].revision).toBe(1);
+      expect(got.entries[0].renderedBody).toContain('# Body');
+      expect(got.entries[0].renderedBody).not.toContain('# Raced body');
+      expect(got.entries[0].renderedBody).toContain(' rev=1 ');
+    } finally {
+      transactionSpy.mockRestore();
+    }
   });
 
   it('a blocking lint finding outranks a current file relationship', async () => {
@@ -1691,6 +1779,75 @@ describe('#1315 — `synced` is refused for claudeSkill, and only there', () => 
     const got = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
     const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
     expect(e.findings.map((f: { rule: string }) => f.rule)).not.toContain('skill-name-reserved');
+    expect(e.exportPlan).toMatchObject({ action: 'WRITE' });
+  });
+});
+
+// ── #1341: a description Cowork refuses is kept out of export for Claude only ─
+describe('#1341 — a `<…>` description is refused for claudeSkill, and only there', () => {
+  it('EXPORT for claudeSkill plans SKIP with the actionable reason, renders nothing, and PRESERVES a file already there', async () => {
+    const node = await mkNode('tasks:markup', {
+      properties: declaration({ name: 'markup-skill', description: 'Use when adding a node to <memory>.' }),
+    });
+    const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName: 'markup-skill', sourceUrn: '' }] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings.map((f: { rule: string }) => f.rule)).toContain('skill-description-markup');
+    expect(e.renderedBody).toBeNull();
+    expect(e.exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-description-markup', message: expect.stringContaining('"<memory>"') }],
+    });
+  });
+
+  it('a PAIRED, unedited export whose description later gains markup is kept, not rewritten or removed', async () => {
+    // The real shape of this regression (Chip's QA probe on #1354): the skill
+    // exported cleanly, the installed file carries the node's id and hash, and
+    // then the author edited the description. The plan must keep the file the
+    // host already loads rather than overwrite it with an unloadable one.
+    const node = await mkNode('tasks:markup-paired', {
+      properties: declaration({ name: 'markup-paired', description: 'Does a thing. Use when you need it.' }),
+    });
+    const first = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+    const exported = first.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    const headerHash = /hash=([0-9a-f]{16})/.exec(exported.renderedBody as string)![1]!;
+
+    await db.node.update({
+      where: { id: node.id },
+      data: { properties: declaration({ name: 'markup-paired', description: 'Use when adding a node to <memory>.' }) },
+    });
+    const got = await plan({
+      intent: 'EXPORT',
+      host: 'claudeSkill',
+      files: [{ dirName: 'markup-paired', sourceUrn: exported.urn, nodeId: node.id, headerHash, fileHash: headerHash }],
+    });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.renderedBody).toBeNull();
+    expect(e.exportPlan).toMatchObject({
+      action: 'SKIP',
+      preservesExistingFile: true,
+      reasons: [{ code: 'skill-description-markup' }],
+    });
+    expect(got.orphans.map((o: { dirName: string }) => o.dirName)).not.toContain('markup-paired');
+  });
+
+  it('the SAME description exports normally for codexSkill', async () => {
+    const node = await mkNode('tasks:markup-codex', {
+      properties: { exports: { codexSkill: { name: 'markup-skill', description: 'Use when adding a node to <memory>.', enable: true } } },
+    });
+    const got = await plan({ intent: 'EXPORT', host: 'codexSkill', files: [] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings.map((f: { rule: string }) => f.rule)).not.toContain('skill-description-markup');
+    expect(e.exportPlan).toMatchObject({ action: 'WRITE' });
+  });
+
+  it('CONTROL: a lone `<` (measured as accepted) exports normally for claudeSkill', async () => {
+    const node = await mkNode('tasks:markup-control', {
+      properties: declaration({ name: 'markup-control', description: 'Use when a < b.' }),
+    });
+    const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [] });
+    const e = got.entries.find((x: { nodeId: string }) => x.nodeId === node.id);
+    expect(e.findings).toEqual([]);
     expect(e.exportPlan).toMatchObject({ action: 'WRITE' });
   });
 });

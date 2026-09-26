@@ -77,6 +77,14 @@ describe('#1235 §4a — the published cross-repo vectors', () => {
     );
   });
 
+  it('writes the authoritative revision when supplied without changing the content hash', () => {
+    const out = render(V.id, V.name, V.source, V.description, V.content, 7);
+    expect(out).toContain(
+      '<!-- hadron-skill id=01a0099f949d76a9baf3a16527485475 rev=7 ' +
+        'source=hrn:node:hadronmemory.com:hadron-cli:tasks:example hash=3fc4ef3150dc27d5 -->',
+    );
+  });
+
   it('OMITS id= entirely when the id is empty — never writes it blank', () => {
     // The header grammar is `\w+=\S+`, so `id= ` makes the line unparseable and
     // demotes a file we generated to "somebody else's skill" — which reports

@@ -63,6 +63,8 @@ import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
   diffNodeChanges,
+  ensureCurrentNodeRevisionInTransaction,
+  revisionStateHashRefreshMarker,
   type SnapshotSourceNode,
   type SnapshotEditor,
 } from './nodeRevisionSnapshot.js';
@@ -226,10 +228,38 @@ export async function moveNodeSubtree(
 
   // The subtree: the source node's descendants, on ':' path boundaries (so
   // `findings:auth` doesn't sweep in `findings:auth-v2`).
+  const firstDescendants = await tx.node.findMany({
+    where: { memoryId: srcMemoryId, deletedAt: null, loc: { startsWith: `${source.loc}:` } },
+    select: { id: true },
+  });
+  // #1323 (@codex P1, PR #1339): every moved row is row-locked and its
+  // unrevisioned drift reconciled as its OWN revision (id order — one global
+  // order, so concurrent multi-row operations cannot lock-invert) BEFORE the
+  // move is planned from it; otherwise the move's snapshot would fold the drift
+  // and the refreshed fingerprint would hide it. The plan is then built from
+  // the rows as they are under their locks, and a source that moved or a
+  // descendant set that changed in the meantime refuses as a retryable move.
+  const reconcileIds = [source.id, ...firstDescendants.map((d) => d.id)].sort();
+  for (const id of reconcileIds) {
+    await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: srcMemoryId });
+  }
+  const lockedSource = await tx.node.findUnique({ where: { id: source.id } });
+  if (
+    !lockedSource ||
+    lockedSource.deletedAt ||
+    lockedSource.memoryId !== srcMemoryId ||
+    lockedSource.loc !== source.loc
+  ) {
+    throw new SubtreeMoveSourceChangedError(source.id);
+  }
   const descendants = await tx.node.findMany({
     where: { memoryId: srcMemoryId, deletedAt: null, loc: { startsWith: `${source.loc}:` } },
   });
-  const subtree: SnapshotSourceNode[] = [source, ...descendants];
+  const lockedIds = [source.id, ...descendants.map((d) => d.id)].sort();
+  if (lockedIds.length !== reconcileIds.length || lockedIds.some((id, i) => id !== reconcileIds[i])) {
+    throw new SubtreeMoveSourceChangedError(source.id);
+  }
+  const subtree: SnapshotSourceNode[] = [lockedSource, ...descendants];
   // Rebase a source-subtree loc onto the destination: source.loc → destLoc,
   // source.loc:x → destLoc:x. slice(source.loc.length) is '' for the source
   // node and ':x…' for a descendant.
@@ -379,7 +409,10 @@ export async function moveNodeSubtree(
       tx,
       buildNodeRevisionSnapshot(n, editor, { changes: diffNodeChanges(n, changed) }),
     );
-    await tx.node.update({ where: { id: n.id }, data: changed });
+    await tx.node.update({
+      where: { id: n.id },
+      data: { ...changed, revisionContentHash: revisionStateHashRefreshMarker() },
+    });
   }
 
   if (!crossMemory) {

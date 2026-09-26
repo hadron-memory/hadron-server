@@ -242,8 +242,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS scopes_app_name_uniq
   ON scopes (app_id, name) WHERE app_id IS NOT NULL AND deleted_at IS NULL;
 
 -- ─── #1325 — MemoryConfig templates: exactly one owner + per-owner live-name
--- uniqueness; rule task-reference markers (fail closed on a hard-deleted task).
--- Synced with the 20260925030000_memory_config migration and src/test/globalSetup.ts.
+-- uniqueness; rule task-reference markers (fail closed on a hard-deleted task);
+-- and #1322 dotted rule-key grammar. Synced with the
+-- 20260925030000_memory_config + 20260925100000_dotted_role_rules migrations
+-- and src/test/globalSetup.ts.
 ALTER TABLE memory_config_templates
   DROP CONSTRAINT IF EXISTS chk_memory_config_template_owner;
 ALTER TABLE memory_config_templates
@@ -263,12 +265,44 @@ ALTER TABLE node_role_rules
   ADD CONSTRAINT chk_node_role_rule_task_markers
   CHECK ((author_task_id IS NULL OR author_task_required)
      AND (validation_task_id IS NULL OR validation_task_required));
+-- #1345 review (@copilot): name any existing rule key the new CHECKs would
+-- refuse, and say what to do, instead of failing on an opaque constraint
+-- violation. (The tables arrived in 20260925030000 and have no write path
+-- before #1325(b), so none is expected; this makes the unexpected actionable.)
+DO $$
+DECLARE
+  bad text;
+BEGIN
+  SELECT string_agg(format('%s:%s (%L)', src, id, role), ', ') INTO bad FROM (
+    SELECT 'node_role_rules' AS src, id, role FROM node_role_rules
+     WHERE NOT (char_length(role) BETWEEN 1 AND 64 AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$')
+    UNION ALL
+    SELECT 'memory_config_template_rules', id, role FROM memory_config_template_rules
+     WHERE NOT (char_length(role) BETWEEN 1 AND 64 AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$')
+    LIMIT 20
+  ) t;
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '#1322: rule keys the dotted grammar refuses (lower-case letter/digit/dash segments joined by dots, 1-64 characters). Rename or delete these rules, then re-run: %', bad;
+  END IF;
+END $$;
+ALTER TABLE node_role_rules
+  DROP CONSTRAINT IF EXISTS chk_node_role_rule_role_format;
+ALTER TABLE node_role_rules
+  ADD CONSTRAINT chk_node_role_rule_role_format
+  CHECK (char_length(role) BETWEEN 1 AND 64
+     AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$');
 ALTER TABLE memory_config_template_rules
   DROP CONSTRAINT IF EXISTS chk_memory_config_template_rule_task_markers;
 ALTER TABLE memory_config_template_rules
   ADD CONSTRAINT chk_memory_config_template_rule_task_markers
   CHECK ((author_task_id IS NULL OR author_task_required)
      AND (validation_task_id IS NULL OR validation_task_required));
+ALTER TABLE memory_config_template_rules
+  DROP CONSTRAINT IF EXISTS chk_memory_config_template_rule_role_format;
+ALTER TABLE memory_config_template_rules
+  ADD CONSTRAINT chk_memory_config_template_rule_role_format
+  CHECK (char_length(role) BETWEEN 1 AND 64
+     AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$');
 
 -- #974 Worker model (cor:dmo:050:11, cor:agt:020:02 v0.0.3): a worker's name
 -- is unique per App, case-insensitively — a functional unique, so it lives
@@ -464,3 +498,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_worker_channel_uniq
   ON channel_read_states (worker_id, channel_id) WHERE worker_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_agent_app_channel_uniq
   ON channel_read_states (agent_id, app_id, channel_id) WHERE agent_id IS NOT NULL;
+
+-- #1323 — every newly inserted Node gets a complete at-rest state baseline, including
+-- raw/createMany writers Prisma cannot route through an application helper.
+-- Keep in lockstep with 20260925010000_trustworthy_node_revisions.
+-- `prisma db push` adds the nullable column without running the migration, so
+-- upgrade every row still carrying that one-time marker to the new LIVE-state
+-- counter semantics before clearing it. Re-running post-push is then a no-op.
+CREATE OR REPLACE FUNCTION hadron_node_revision_state_hash(node_row "nodes")
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE AS $$
+  SELECT md5(jsonb_build_array(
+    node_row."memory_id", node_row."loc", node_row."name", node_row."alias",
+    node_row."description", node_row."abstract", node_row."abstract_origin_hash",
+    node_row."content", to_jsonb(node_row."tags"), node_row."node_type",
+    node_row."object_type", node_row."is_link", node_row."properties",
+    node_row."data", node_row."seq", node_row."is_runnable", node_row."role",
+    node_row."llm_model", node_row."ai_agent"
+  )::text)
+$$;
+
+UPDATE "nodes"
+SET "rev_seq" = "rev_seq" + 1,
+    "revision_content_hash" = hadron_node_revision_state_hash("nodes")
+WHERE "revision_content_hash" IS NULL;
+
+CREATE OR REPLACE FUNCTION hadron_initialize_node_revision_content_hash()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' OR NEW."revision_content_hash" = 'refresh' THEN
+    NEW."revision_content_hash" := hadron_node_revision_state_hash(NEW);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS nodes_initialize_revision_content_hash ON "nodes";
+CREATE TRIGGER nodes_initialize_revision_content_hash
+BEFORE INSERT OR UPDATE ON "nodes"
+FOR EACH ROW EXECUTE FUNCTION hadron_initialize_node_revision_content_hash();
