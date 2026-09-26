@@ -208,8 +208,7 @@ export function isPrivateNetworkAddress(ip: string): boolean {
 /**
  * Write-time validation for `endpoint`. Static checks only: whether a HOSTNAME
  * resolves to a private address can change after the write, so that is the
- * connect-time guard's job (`guardedEndpointFetch`), which also covers the
- * legacy `params.baseUrl`. Returns the stored form (no trailing slash).
+ * connect-time guard's job (`guardedEndpointFetch`). Returns the stored form (no trailing slash).
  */
 export function validateEndpoint(raw: string, env: NodeJS.ProcessEnv = process.env): string {
   // The raw value is never echoed: it may carry credentials or a secret in a
