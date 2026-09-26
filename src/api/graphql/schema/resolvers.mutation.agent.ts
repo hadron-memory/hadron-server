@@ -875,20 +875,30 @@ export const agentMutations = {
         );
       }
       if (existing) {
-        await ctx.db.aiServiceConfig.update({
-          where: { id: existing.id },
-          data: {
-            provider,
-            model,
-            ...keyData,
-            // #1380 review: this legacy surface can express neither a style nor
-            // an endpoint, and both were chosen for the OLD provider (its host,
-            // its protocol). Any provider change clears both, so the new
-            // provider starts from its own defaults and the new key never goes
-            // to the old host.
-            ...(provider !== existing.provider ? { endpoint: null, apiStyle: null } : {}),
-            updatedBy: ctx.userId ?? null,
-          },
+        // Decided on the LOCKED row (#1380 review): a concurrent modern update
+        // may have switched the provider (and its endpoint/style) since the
+        // read above, and the clearing below must compare against that.
+        await ctx.db.$transaction(async (tx) => {
+          const cur = await lockAiServiceConfig(tx, existing.id);
+          if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
+          if (!apiKey && !cur.apiKeyEncrypted) {
+            rethrowAiConfigTyped(new AiConfigValidationError('API key is required when no key is saved yet'));
+          }
+          await tx.aiServiceConfig.update({
+            where: { id: cur.id },
+            data: {
+              provider,
+              model,
+              ...keyData,
+              // #1380 review: this legacy surface can express neither a style nor
+              // an endpoint, and both were chosen for the OLD provider (its host,
+              // its protocol). Any provider change clears both, so the new
+              // provider starts from its own defaults and the new key never goes
+              // to the old host.
+              ...(provider !== cur.provider ? { endpoint: null, apiStyle: null } : {}),
+              updatedBy: ctx.userId ?? null,
+            },
+          });
         });
       } else {
         // apiKey is guaranteed non-blank here (guard above); P2002 from a

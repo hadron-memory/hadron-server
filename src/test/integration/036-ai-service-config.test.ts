@@ -19,6 +19,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { waitForLockWaiters } from '../lockWait.js';
 
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -971,5 +972,57 @@ describe('updateAiServiceConfig judges the provider/style pair on the locked row
     await holder;
     expect(((await write) as GraphQLError | null)?.extensions?.code).toBe('AiConfigValidationError');
     expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'anthropic', apiStyle: null });
+  });
+});
+
+describe('the legacy writers clear a stale endpoint/style against the LOCKED row (#1380 review)', () => {
+  async function holdAndSwitch(id: string, write: () => Promise<unknown>) {
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => (locked = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // A concurrent modern update: switches the row to GLM with a GLM endpoint and style.
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${id} FOR UPDATE`;
+        await tx.aiServiceConfig.update({
+          where: { id },
+          data: { provider: 'glm', endpoint: 'https://open.bigmodel.cn/api/paas/v4', apiStyle: 'CHAT_COMPLETIONS' },
+        });
+        locked();
+        await gate;
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    const pending = write();
+    await waitForLockWaiters(db); // the legacy write has read the OLD row and is now waiting on the lock
+    release();
+    await holder;
+    await pending;
+  }
+
+  it('updateAgentAIConfig switching back to openai clears the GLM endpoint and style', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'AGENT', ownerId: agent.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      ctxFor(admin.id),
+    );
+    await holdAndSwitch(c.id, () =>
+      resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-2', apiKey: 'k-2' }, ctxFor(admin.id)),
+    );
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null, apiStyle: null });
+  });
+
+  it('updateApp (legacy aiProvider) switching back to openai clears them too', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      ctxFor(admin.id),
+    );
+    await holdAndSwitch(c.id, () =>
+      resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'openai', aiModel: 'gpt-2' } as never, ctxFor(admin.id)),
+    );
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null, apiStyle: null });
   });
 });
