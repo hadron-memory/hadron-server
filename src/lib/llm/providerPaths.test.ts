@@ -158,6 +158,15 @@ describe('#1373 — AiServiceConfig.endpoint and the connect-time egress guard',
     expect(captured).toEqual([]);
   });
 
+  it('the opt-in never reaches the metadata address, even with the key in hand (#1380 review)', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS', 'true');
+    const err = await generateText(resolved('glm', null, 'http://169.254.169.254/v1'), { prompt: 'hi' }).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmInvocationError);
+    expect(String(err.message)).toMatch(/not allowed/);
+    expect((err as LlmInvocationError).transient).toBe(false);
+  });
+
   it('the self-hosted private-network opt-in admits it in production (D4)', async () => {
     vi.stubEnv('NODE_ENV', 'production');
     vi.stubEnv('AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS', 'true');

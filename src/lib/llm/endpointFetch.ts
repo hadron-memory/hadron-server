@@ -15,8 +15,11 @@
  *   - the scheme is http or https; https-only is enforced when `endpoint` is
  *     WRITTEN, not here, so a legacy http `params.baseUrl` keeps working;
  *   - loopback is allowed only outside production (a local Ollama or a test's
- *     capture server), and private addresses only under the self-hosted
- *     operator opt-in `AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS=true` (D4).
+ *     capture server), and private-network addresses only under the
+ *     self-hosted operator opt-in `AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS=true`
+ *     (D4) — which never admits link-local/metadata, multicast or reserved;
+ *   - a temporary resolver failure is a retryable `AiEndpointResolveError`, not
+ *     a refusal, so a run is redelivered instead of failed for good;
  *
  * Provider DEFAULT hosts are constants and do not pass through here.
  */
@@ -26,7 +29,23 @@ import type { LookupAddress } from 'node:dns';
 import { isIP, type LookupFunction } from 'node:net';
 import { Agent } from 'undici';
 import { isForbiddenAddress, pinnedLookup } from '../webFetch.js';
-import { isLoopbackAddress, loopbackAllowed, privateEndpointsAllowed } from '../aiEndpoint.js';
+import { isLoopbackAddress, isPrivateNetworkAddress, loopbackAllowed, privateEndpointsAllowed } from '../aiEndpoint.js';
+
+/**
+ * A resolver failure that may clear on its own (#1380 review, Codex P2): kept
+ * distinct from a refusal so the run is RETRIED rather than failed for good.
+ * The message names a network failure, which `isTransient` classifies as
+ * transient.
+ */
+export class AiEndpointResolveError extends Error {
+  constructor(readonly host: string, readonly code: string) {
+    super(`AI endpoint host "${host}" could not be resolved right now (${code}): a temporary DNS or network failure.`);
+    this.name = 'AiEndpointResolveError';
+  }
+}
+
+/** Resolver codes that describe a temporary condition, not a missing host. */
+const TRANSIENT_DNS_CODES = new Set(['EAI_AGAIN', 'ETIMEOUT', 'ESERVFAIL', 'ECONNREFUSED', 'ECANCELLED']);
 
 export class AiEndpointForbiddenError extends Error {
   constructor(readonly host: string, reason: string) {
@@ -44,7 +63,9 @@ async function allowedAddresses(url: URL, forbidden: (ip: string) => boolean): P
   } else {
     try {
       addrs = await lookup(host, { all: true, verbatim: true });
-    } catch {
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      if (code && TRANSIENT_DNS_CODES.has(code)) throw new AiEndpointResolveError(host, code);
       throw new AiEndpointForbiddenError(host, 'it does not resolve');
     }
   }
@@ -61,7 +82,9 @@ export function guardedEndpointFetch(env: NodeJS.ProcessEnv = process.env): type
   const allowLoopback = loopbackAllowed(env);
   const allowPrivate = privateEndpointsAllowed(env);
   const forbidden = (ip: string) =>
-    !allowPrivate && isForbiddenAddress(ip) && !(allowLoopback && isLoopbackAddress(ip));
+    isForbiddenAddress(ip) &&
+    !(allowLoopback && isLoopbackAddress(ip)) &&
+    !(allowPrivate && isPrivateNetworkAddress(ip));
   return async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     // The scheme is NOT narrowed here: https-only is the write-time rule for

@@ -8,6 +8,7 @@ import {
   effectiveApiStyle,
   effectiveEndpoint,
   explicitEndpoint,
+  isPrivateNetworkAddress,
   refuseLegacyBaseUrl,
   validateApiStyle,
   validateEndpoint,
@@ -84,6 +85,24 @@ describe('private endpoints (D4)', () => {
     expect(() => validateEndpoint('http://10.0.0.5:11434/v1', prod)).toThrow(/Invalid endpoint/);
     expect(() => validateEndpoint('http://localhost:11434/v1', prod)).toThrow(/loopback/);
     expect(() => validateEndpoint('https://10.0.0.5/v1', { ...prod, AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS: 'yes' } as NodeJS.ProcessEnv)).toThrow();
+  });
+
+  it('it never admits link-local (metadata), multicast, unspecified or other reserved ranges (#1380 review)', () => {
+    for (const url of ['http://169.254.169.254/latest', 'http://[fe80::1]/v1', 'http://224.0.0.1/v1', 'http://0.0.0.0/v1', 'http://[::]/v1']) {
+      expect(() => validateEndpoint(url, optIn), url).toThrow(/never allowed/);
+    }
+    for (const url of ['http://172.16.4.2/v1', 'http://192.168.1.9/v1', 'http://[fd12:3456::1]/v1', 'http://127.0.0.1/v1']) {
+      expect(validateEndpoint(url, optIn), url).toBe(url);
+    }
+  });
+
+  it('isPrivateNetworkAddress: RFC 1918, ULA and loopback, mapped forms included; nothing reserved', () => {
+    for (const ip of ['10.1.2.3', '172.31.0.1', '192.168.0.1', '127.0.0.1', '::1', 'fd00::1', 'fc00::5', '::ffff:10.0.0.1']) {
+      expect(isPrivateNetworkAddress(ip), ip).toBe(true);
+    }
+    for (const ip of ['169.254.169.254', '172.32.0.1', '8.8.8.8', 'fe80::1', '224.0.0.1', '0.0.0.0', '::', 'ff02::1', '100.64.0.1']) {
+      expect(isPrivateNetworkAddress(ip), ip).toBe(false);
+    }
   });
 
   it('it never admits credentials, a query or a fragment', () => {

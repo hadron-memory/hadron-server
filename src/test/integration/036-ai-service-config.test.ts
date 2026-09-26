@@ -840,6 +840,28 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).provider).toBe('glm');
   });
 
+  it('a legacy provider change drops a style the new provider cannot use (#1380 review)', async () => {
+    const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'CHAT_COMPLETIONS' } });
+    // Same provider: the style survives the legacy write.
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-x' }, ctxFor(admin.id));
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).apiStyle).toBe('CHAT_COMPLETIONS');
+    // A provider with one protocol: the stranded style is cleared.
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'anthropic', model: 'claude-x' }, ctxFor(admin.id));
+    const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
+    expect([row.provider, row.apiStyle]).toEqual(['anthropic', null]);
+    // …and the modern surface can edit it again without tripping the pair check.
+    await expect(resolvers.Mutation.updateAiServiceConfig({}, { id: legacy.id, enabled: false }, ctxFor(admin.id))).resolves.toMatchObject({ enabled: false });
+  });
+
+  it('the legacy App AI arguments drop a stranded style too (#1380 review)', async () => {
+    const legacy = await createConfig({ appId: app.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'CHAT_COMPLETIONS' } });
+    await resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'anthropic', aiModel: 'claude-x' } as never, ctxFor(admin.id));
+    const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
+    expect([row.provider, row.apiStyle]).toEqual(['anthropic', null]);
+  });
+
   it('writing params.baseUrl is refused, but a legacy row carrying one can still be edited (D2)', async () => {
     let caught: GraphQLError | null = null;
     try {

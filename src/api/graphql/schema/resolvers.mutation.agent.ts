@@ -1,6 +1,6 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
-import { refuseLegacyBaseUrl, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
+import { apiStyleApplies, refuseLegacyBaseUrl, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
   assertSystemMemoryOwner,
@@ -875,7 +875,15 @@ export const agentMutations = {
       if (existing) {
         await ctx.db.aiServiceConfig.update({
           where: { id: existing.id },
-          data: { provider, model, ...keyData, updatedBy: ctx.userId ?? null },
+          data: {
+            provider,
+            model,
+            ...keyData,
+            // #1380 review: this legacy surface cannot express a style, so a
+            // provider change that invalidates the stored one clears it.
+            ...(apiStyleApplies(provider, existing.apiStyle) ? {} : { apiStyle: null }),
+            updatedBy: ctx.userId ?? null,
+          },
         });
       } else {
         // apiKey is guaranteed non-blank here (guard above); P2002 from a

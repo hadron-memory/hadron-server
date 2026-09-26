@@ -18,7 +18,7 @@
  */
 
 import { isIP } from 'node:net';
-import { isForbiddenAddress } from './webFetch.js';
+import { embeddedIpv4, isForbiddenAddress } from './webFetch.js';
 import { AiConfigValidationError, type AiProvider } from './aiConfig.js';
 
 export interface AiProviderEndpoint {
@@ -110,6 +110,11 @@ export function effectiveApiStyle(config: { provider: string; apiStyle?: string 
   return (config.apiStyle as AiApiStyle | null | undefined) ?? defaultApiStyle(config.provider);
 }
 
+/** Whether a stored style applies to this provider at all. */
+export function apiStyleApplies(provider: string, apiStyle: string | null | undefined): boolean {
+  return apiStyle == null || provider in DEFAULT_API_STYLE;
+}
+
 /** Validate a (provider, apiStyle) pair as it will be stored. */
 export function validateApiStyle(provider: string, apiStyle: string | null | undefined): void {
   if (apiStyle == null) return;
@@ -133,12 +138,27 @@ export function loopbackAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
- * D4: a self-hosted operator may let configs reach private and loopback
- * addresses (a LAN Ollama or vLLM). Off by default; the hosted platform leaves
- * it unset. It also admits plain http, which LAN model servers usually speak.
+ * D4: a self-hosted operator may let configs reach PRIVATE-NETWORK and
+ * loopback addresses (a LAN Ollama or vLLM). Off by default; the hosted
+ * platform leaves it unset. It also admits plain http, which LAN model servers
+ * usually speak. It never admits link-local (the cloud metadata service lives
+ * at 169.254.169.254), multicast, unspecified or other reserved ranges: the
+ * opt-in widens to a LAN, not to everything the egress policy forbids
+ * (#1380 review, Copilot).
  */
 export function privateEndpointsAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS === 'true';
+}
+
+/** RFC 1918, IPv6 ULA (fc00::/7) and loopback, including IPv4-mapped forms. */
+export function isPrivateNetworkAddress(ip: string): boolean {
+  const v4 = isIP(ip) === 4 ? ip : embeddedIpv4(ip);
+  if (v4) {
+    const [a, b] = v4.split('.').map(Number);
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  const lower = ip.toLowerCase();
+  return lower === '::1' || /^f[cd][0-9a-f]{0,2}:/.test(lower);
 }
 
 /**
@@ -162,7 +182,10 @@ export function validateEndpoint(raw: string, env: NodeJS.ProcessEnv = process.e
   const host = url.hostname.replace(/^\[|\]$/g, '');
   const loopback = LOOPBACK_HOSTS.has(host) || (isIP(host) !== 0 && isLoopbackAddress(host));
   if (privateEndpointsAllowed(env)) {
-    // D4 opt-in: address class and scheme are the operator's call.
+    // D4 opt-in: a private network, http included, but never a reserved range.
+    if (isIP(host) && isForbiddenAddress(host) && !isPrivateNetworkAddress(host)) {
+      refuse('a link-local, multicast or reserved address is never allowed.');
+    }
   } else if (loopback) {
     if (!loopbackAllowed(env)) refuse('a loopback host is not allowed on this server.');
   } else {
