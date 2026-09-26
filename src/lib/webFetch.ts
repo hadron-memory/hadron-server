@@ -95,6 +95,13 @@ export function isForbiddenAddress(ip: string): boolean {
     if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((n) => n === 0)) {
       return isForbiddenAddress(`${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`);
     }
+    // SIIT's IPv4-translated form (::ffff:0:a.b.c.d, RFC 2765 ::ffff:0:0:0/96)
+    // likewise reaches the IPv4 address in its low 32 bits, so that address is
+    // judged (#1380 review): on a network routing the prefix, ::ffff:0:a00:1
+    // is 10.0.0.1.
+    if (g.slice(0, 4).every((n) => n === 0) && g[4] === 0xffff && g[5] === 0) {
+      return isForbiddenAddress(`${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`);
+    }
     return (
       g.every((n) => n === 0) || // :: unspecified
       (g.slice(0, 7).every((n) => n === 0) && g[7] === 1) || // ::1 loopback
