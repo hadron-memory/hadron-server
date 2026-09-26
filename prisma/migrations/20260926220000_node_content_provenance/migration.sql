@@ -65,10 +65,15 @@ ALTER TABLE "node_content_validation_reports" ADD CONSTRAINT "chk_node_content_v
 -- pre-existing drift mismatch instead of silently blessing it during this
 -- expansion: only rows whose stored hash matched the OLD function advance to
 -- the new encoding. A mismatched row still reconciles on its next exposed read.
-CREATE TEMP TABLE node_revision_hash_before_1326 AS
-  SELECT n.id, n.revision_content_hash AS stored_hash,
-         hadron_node_revision_state_hash(n) AS old_actual_hash
-  FROM nodes n;
+CREATE TEMP TABLE node_revision_hash_before_1326 (id TEXT, stored_hash TEXT, old_actual_hash TEXT);
+DO $$ BEGIN
+  -- A db-push-only baseline (including migration-smoke CI) has the column but
+  -- not #1323's raw-SQL function. There is no old canonical hash to translate.
+  IF to_regprocedure('hadron_node_revision_state_hash(nodes)') IS NOT NULL THEN
+    EXECUTE 'INSERT INTO node_revision_hash_before_1326
+      SELECT n.id, n.revision_content_hash, hadron_node_revision_state_hash(n) FROM nodes n';
+  END IF;
+END $$;
 
 CREATE OR REPLACE FUNCTION hadron_node_revision_state_hash(node_row "nodes")
 RETURNS TEXT LANGUAGE sql IMMUTABLE AS $$
