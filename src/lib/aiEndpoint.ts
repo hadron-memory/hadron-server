@@ -126,18 +126,20 @@ const DEFAULT_API_STYLE: Partial<Record<string, AiApiStyle>> = {
 const ENDPOINT_REQUIRED = new Set(['openai-compatible']);
 
 /**
- * Refuse a resulting (provider, endpoint) pair that could never make a call:
- * an `openai-compatible` config has no default host to fall back to.
+ * Refuse a resulting config with no key that no run could use: with no stored
+ * key an SDK reaches for the PROCESS's credentials, which only a default host
+ * that issued them may receive (`usesProcessCredential`; #1389 review, Codex
+ * P1). modelFor refuses the same configs at call time; this refuses them at
+ * the write, where the admin can still fix them. A keyless local server
+ * (Ollama) accepts any placeholder bearer.
  */
-export function requireKeyFor(provider: string, hasKey: boolean): void {
-  // With no stored key an SDK reaches for the PROCESS's credentials; a
-  // custom host must never get those (#1389 review, Codex P1). A keyless local
-  // server (Ollama) accepts any placeholder bearer.
-  if (ENDPOINT_REQUIRED.has(provider) && !hasKey) {
-    throw new AiConfigValidationError(
-      `Provider '${provider}' needs an API key (any placeholder for a host that does not check one).`,
-    );
-  }
+export function requireKeyFor(config: { provider: string; endpoint?: string | null }, hasKey: boolean): void {
+  if (hasKey || usesProcessCredential(config)) return;
+  throw new AiConfigValidationError(
+    explicitEndpoint(config)
+      ? `A '${config.provider}' config with an endpoint needs its own API key (any placeholder for a host that does not check one).`
+      : `Provider '${config.provider}' needs an API key; the server's own credentials belong to other providers.`,
+  );
 }
 
 export function requireEndpointFor(provider: string, endpoint: string | null | undefined): void {

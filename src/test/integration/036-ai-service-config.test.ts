@@ -943,6 +943,12 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     // server's own credential and send it to this host (#1389 review).
     expect(await code(mk({ provider: 'openai-compatible', model: 'm', name: 'keyless', endpoint: 'https://api.together.xyz/v1', apiKey: undefined }))).toBe('AiConfigValidationError');
     expect(await code(resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, apiKey: '' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    // The same rule for every provider (usesProcessCredential): glm's default
+    // host is Z.ai, and any explicit endpoint is admin-chosen; only a default
+    // host that issued the server's credential may run keyless.
+    expect(await code(mk({ provider: 'glm', model: 'm', name: 'keyless-glm', apiKey: undefined }))).toBe('AiConfigValidationError');
+    expect(await code(mk({ provider: 'openai', model: 'm', name: 'keyless-ep', endpoint: 'https://llm.example.com/v1', apiKey: undefined }))).toBe('AiConfigValidationError');
+    expect(await code(mk({ provider: 'openai', model: 'm', name: 'keyless-openai', apiKey: undefined }))).toBeUndefined();
     // params.toolCalling is type-checked.
     expect(await code(mk({ provider: 'openai-compatible', model: 'm', name: 'badtools', endpoint: 'https://api.together.xyz/v1', params: { toolCalling: 'yes' } }))).toBe('UnknownAiProviderError');
   });

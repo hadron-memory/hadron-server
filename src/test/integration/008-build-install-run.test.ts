@@ -267,6 +267,14 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
     expect((err as { extensions?: { code?: string } }).extensions?.code).toBe('AiConfigValidationError');
     // Nothing half-made: no App row, so a retry cannot collide with a reserved URN.
     expect(await db.app.count()).toBe(before);
+    // A keyless glm through the same legacy args: refused before the App, too.
+    const keyless = await resolvers.Mutation.createApp(
+      {},
+      { orgRef: orgX.id, agentRef: agent.id, name: 'Keyless @ Org X', aiProvider: 'glm', aiModel: 'm' },
+      adminCtx(mike.id),
+    ).catch((e: unknown) => e);
+    expect((keyless as { extensions?: { code?: string } }).extensions?.code).toBe('AiConfigValidationError');
+    expect(await db.app.count()).toBe(before);
   });
 });
 

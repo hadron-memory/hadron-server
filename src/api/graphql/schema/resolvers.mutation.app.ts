@@ -272,6 +272,7 @@ export const appMutations = {
           validateProviderAndParams(aiProvider, null);
           // The legacy args carry no endpoint (#1373): openai-compatible needs one.
           requireEndpointFor(aiProvider, null);
+          requireKeyFor({ provider: aiProvider, endpoint: null }, !!aiApiKey);
         } catch (e) {
           rethrowAiConfigTyped(e);
         }
@@ -691,8 +692,9 @@ export const appMutations = {
             // openai-compatible config through it must keep the one it has
             // (same provider) — a provider change clears it below (#1373).
             try {
-              requireEndpointFor(provider, existing && existing.provider === provider ? existing.endpoint : null);
-              requireKeyFor(provider, aiApiKey === undefined ? !!existing?.apiKeyEncrypted : !!aiApiKey);
+              const keptEndpoint = existing && existing.provider === provider ? existing.endpoint : null;
+              requireEndpointFor(provider, keptEndpoint);
+              requireKeyFor({ provider, endpoint: keptEndpoint }, aiApiKey === undefined ? !!existing?.apiKeyEncrypted : !!aiApiKey);
             } catch (e) {
               rethrowAiConfigTyped(e);
             }
