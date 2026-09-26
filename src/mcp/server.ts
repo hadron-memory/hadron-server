@@ -7797,9 +7797,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             select: { id: true, lastSeq: true },
           })
         : null;
-      // An explicit session owns this read. Hide a different header-bound
-      // session from the delegated resolver so exactly one Worker advances.
-      const resolverCtx = args.session ? { ...chatCtx(), sessionId: undefined } : chatCtx();
+      // An explicit Worker session owns cursor attribution for user callers.
+      // Keep a pure App key's header-bound session: the delegated resolver
+      // uses it to isolate reads to that session's memory.
+      const resolverCtx = args.session && auth.userId
+        ? { ...chatCtx(), sessionId: undefined }
+        : chatCtx();
       const page = await resolvers.Query.channelMessages(
         {},
         { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null },
