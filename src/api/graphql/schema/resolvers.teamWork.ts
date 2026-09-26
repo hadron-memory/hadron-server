@@ -733,7 +733,12 @@ export const teamWorkMutations = {
       if (typeof model !== 'string' || model.trim() === '') {
         throw badInput('model must be a non-empty string when provided (pass null to use the session model).');
       }
-      reportedModel = model.trim().slice(0, 120);
+      // Refuse over-length LOUDLY, exactly as the tool/action vocabulary does
+      // — a silently truncated model id is a wrong attribution (Ella, #1401).
+      if (model.trim().length > 120) {
+        throw badInput('model exceeds 120 characters — it names a model, not a free-text field.');
+      }
+      reportedModel = model.trim();
     }
 
     const { id: appId } = await resolveAppRef(ctx.db, appRef);
@@ -745,6 +750,12 @@ export const teamWorkMutations = {
     }
     await requireTeamWorkAccess(ctx, app, 'record');
     const { sessionId, workerName, workerId, llmModel } = await resolveWorkSession(ctx, app, sessionRef);
+    // Computed ONCE and used by both the stored row and the returned item —
+    // two independent `??` expressions let a mutant swap precedence in the
+    // stored row alone and survive every receipt-only assertion (Ella, #1401).
+    // An empty-string session model normalizes to null here too, so the
+    // receipt and the read-back can never disagree (Ella nit 3).
+    const modelAttribution: string | null = reportedModel ?? (llmModel?.trim() ? llmModel : null);
 
     const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));
     await ensureWorklogSchema(ctx, root.memoryId);
@@ -762,7 +773,7 @@ export const teamWorkMutations = {
       ...(detail != null ? { detail } : {}),
       // Event-time snapshot (#1398): explicit report > session's llmModel >
       // absent. Later session/model changes can never relabel this row.
-      ...((reportedModel ?? llmModel) != null ? { model: reportedModel ?? llmModel } : {}),
+      ...(modelAttribution != null ? { model: modelAttribution } : {}),
     };
     // #725: this surface holds itself to the declared schema — including a
     // deployment-tightened one (an admin-edited worklog declaration governs
@@ -821,7 +832,7 @@ export const teamWorkMutations = {
       action: actionToken,
       at,
       detail: detail ?? null,
-      model: reportedModel ?? llmModel,
+      model: modelAttribution,
     };
   },
 };

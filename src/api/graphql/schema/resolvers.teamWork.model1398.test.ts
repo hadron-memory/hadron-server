@@ -87,10 +87,20 @@ beforeEach(async () => {
 });
 
 describe('#1398 — model attribution on worklog milestones', () => {
-  it('an explicit model report wins over the session model', async () => {
+  it('an explicit model report wins over the session model — receipt AND stored row', async () => {
     await db.session.update({ where: { id: session.id }, data: { llmModel: 'claude-opus-5-5' } });
     const item = await record({ model: 'glm-5.3' });
     expect(item.model).toBe('glm-5.3');
+    // Read the STORED row back: a precedence swap that only touched the
+    // stored expression must not survive (Ella, #1401).
+    const memoryId = await worklogMemory();
+    const row = await db.node.findFirstOrThrow({
+      where: { memoryId, objectType: WORKLOG_OBJECT_TYPE },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect((row.properties as Record<string, unknown>).model).toBe('glm-5.3');
+    const page = await Q.teamWorkItems({}, { appRef: app.id }, ctx(contrib.id));
+    expect(page.items[0].model).toBe('glm-5.3');
   });
 
   it('without an explicit report, the SESSION model is snapshotted at record time', async () => {
@@ -135,6 +145,20 @@ describe('#1398 — model attribution on worklog milestones', () => {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
+  });
+
+  it('an over-length model is refused loudly, never silently truncated', async () => {
+    await expect(record({ model: 'x'.repeat(121) })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
+  it('an empty-string session model normalizes to null — receipt and read-back agree', async () => {
+    await db.session.update({ where: { id: session.id }, data: { llmModel: '' } });
+    const item = await record();
+    expect(item.model).toBeNull();
+    const page = await Q.teamWorkItems({}, { appRef: app.id }, ctx(contrib.id));
+    expect(page.items[0].model).toBeNull();
   });
 
   it('a legacy record without the key reads back null, and the pre-model declaration converges', async () => {
