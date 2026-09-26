@@ -350,12 +350,20 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
  * replaces the request's memoized one. For a check that must reflect the state
  * at a later point in the same request — a re-check inside a write's
  * transaction — where the memoized answer from the pre-check would make it a
- * no-op (#1360 review), and where later reads in the request must not reuse
- * the stale decision either.
+ * no-op, and where later reads in the request must not reuse the stale
+ * decision either (#1360 review).
+ *
+ * The gate runs on a copy of the context with EVERY request memo removed (each
+ * `*Cache` key), not just `memoryReadCache`: `getAccessibleMemoryIds` consults
+ * nested ones too (`appDerivedMemoryIdCache` for App-derived access, App rows),
+ * and bypassing only the outer one re-used the inner answer (#1360 review,
+ * round 4). Stripping by suffix keeps a memo added later from quietly
+ * re-staling this path.
  */
 export function isMemoryReadableFresh(ctx: Context, memoryId: string): Promise<boolean> {
+  const uncached = Object.fromEntries(Object.entries(ctx).filter(([k]) => !k.endsWith('Cache'))) as Context;
   const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
-  const pending = getAccessibleMemoryIds(ctx, memoryId).then((ids) => ids === null || ids.includes(memoryId));
+  const pending = getAccessibleMemoryIds(uncached, memoryId).then((ids) => ids === null || ids.includes(memoryId));
   cache.set(memoryId, pending);
   return pending;
 }
