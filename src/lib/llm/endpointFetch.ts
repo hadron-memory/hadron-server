@@ -12,8 +12,9 @@
  *   - redirects are refused outright, as a non-retryable error: an LLM API
  *     does not redirect, and a redirect to an IP literal would bypass the pin
  *     (no lookup happens);
- *   - the scheme is http or https; https-only is enforced when `endpoint` is
- *     WRITTEN, not here, so a legacy http `params.baseUrl` keeps working;
+ *   - plain http only when EVERY resolved address is private-network or
+ *     loopback: a key and a prompt never cross the public internet
+ *     unencrypted;
  *   - loopback is allowed only outside production (a local Ollama or a test's
  *     capture server), and private-network addresses only under the
  *     self-hosted operator opt-in `AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS=true`
@@ -87,13 +88,17 @@ export function guardedEndpointFetch(env: NodeJS.ProcessEnv = process.env): type
     !(allowPrivate && isPrivateNetworkAddress(ip));
   return async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
-    // The scheme is NOT narrowed here: https-only is the write-time rule for
-    // `endpoint`, and narrowing at connect time would break a legacy
-    // `params.baseUrl` that works today. The egress protection is the address.
     if (url.protocol !== 'https:' && url.protocol !== 'http:') {
       throw new AiEndpointForbiddenError(url.hostname, `unsupported scheme ${url.protocol}`);
     }
     const addrs = await allowedAddresses(url, forbidden);
+    // Plaintext only inside a private network (#1380 review, Codex P1): the
+    // key and the prompt must never cross the public internet unencrypted.
+    // Checked on the RESOLVED addresses, since a hostname's class is only
+    // known now.
+    if (url.protocol === 'http:' && !addrs.every((a) => isPrivateNetworkAddress(a.address))) {
+      throw new AiEndpointForbiddenError(url.hostname, 'plain http is allowed only to a private-network address; use https');
+    }
     const dispatcher = new Agent({ connect: { lookup: pinnedLookup(addrs, forbidden) as unknown as LookupFunction } });
     try {
       // 'manual', then refuse: 'error' rejects with a TypeError the AI SDK

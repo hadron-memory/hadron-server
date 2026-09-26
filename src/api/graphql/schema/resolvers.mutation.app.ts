@@ -687,9 +687,12 @@ export const appMutations = {
                   provider,
                   model,
                   ...keyFields,
-                  // #1380 review: a legacy surface cannot express a style, so a
-                  // provider change that invalidates the stored one clears it.
+                  // #1380 review: a legacy surface can express neither a style nor
+                  // an endpoint. A style the new provider can't use is cleared,
+                  // and so is an endpoint on any provider change: it named the
+                  // OLD provider's host, and the new key must not be sent there.
                   ...(apiStyleApplies(provider, existing.apiStyle) ? {} : { apiStyle: null }),
+                  ...(provider !== existing.provider ? { endpoint: null } : {}),
                   updatedBy: ctx.userId ?? null,
                 },
               });

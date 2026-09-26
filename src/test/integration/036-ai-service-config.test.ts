@@ -854,6 +854,20 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     await expect(resolvers.Mutation.updateAiServiceConfig({}, { id: legacy.id, enabled: false }, ctxFor(admin.id))).resolves.toMatchObject({ enabled: false });
   });
 
+  it('a legacy provider change clears the endpoint too: the new key never goes to the old host (#1380 review)', async () => {
+    const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { endpoint: 'https://api.openai.com/v1' } });
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-y' }, ctxFor(admin.id));
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).endpoint).toBe('https://api.openai.com/v1');
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'anthropic', model: 'claude-x', apiKey: 'sk-new' }, ctxFor(admin.id));
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).endpoint).toBeNull();
+
+    const appCfg = await createConfig({ appId: app.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: appCfg.id }, data: { endpoint: 'https://api.openai.com/v1' } });
+    await resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'glm', aiModel: 'GLM-5.3' } as never, ctxFor(admin.id));
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: appCfg.id } })).endpoint).toBeNull();
+  });
+
   it('the legacy App AI arguments drop a stranded style too (#1380 review)', async () => {
     const legacy = await createConfig({ appId: app.id }, 'default', { provider: 'openai' });
     await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'CHAT_COMPLETIONS' } });
