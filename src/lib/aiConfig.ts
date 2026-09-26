@@ -20,9 +20,10 @@ import { encryptToken } from './tokenCrypto.js';
 
 /**
  * Lock an AI config's row for the rest of the transaction and read it as it
- * is NOW (#1389 review). Write-time invariants (endpoint and key required,
- * a provider change clearing a stale endpoint/style) are judged on this row,
- * so a concurrent edit can't slip between the check and the write.
+ * is NOW (#1380 / #1389 review). Write-time invariants (the provider/style
+ * pair, the endpoint and key a config needs, a provider change clearing a
+ * stale endpoint/style) are judged on this row, so a concurrent edit can't
+ * slip between the check and the write.
  */
 export async function lockAiServiceConfig(tx: Prisma.TransactionClient, id: string): Promise<AiServiceConfig | null> {
   await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${id} FOR UPDATE`;

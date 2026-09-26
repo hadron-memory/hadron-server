@@ -1060,9 +1060,10 @@ export const agentMutations = {
           return provider;
         };
         judge(existing);
-        // …and again on the LOCKED row, in the write's transaction (#1389
-        // review): a concurrent edit between the read above and this write
-        // can't leave a config that the write-time rules refuse.
+        // …and again on the LOCKED row, in the write's transaction (#1380 /
+        // #1389 review): a concurrent edit between the read above and this
+        // write can't leave a config the write-time rules refuse, including a
+        // provider/style pair neither of two racing updates judged.
         const config = await ctx.db.$transaction(async (tx) => {
           const cur = await lockAiServiceConfig(tx, existing.id);
           if (!cur) throw new AiServiceConfigNotFoundError(args.id);
