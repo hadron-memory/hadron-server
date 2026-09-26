@@ -65,7 +65,7 @@
  */
 
 import { GraphQLError } from 'graphql';
-import type { NodeRoleRule, PrismaClient } from '../generated/prisma/index.js';
+import type { NodeRoleRule, Prisma, PrismaClient } from '../generated/prisma/index.js';
 
 /** The closed governed subset of `Node.role` plus the capability-gated kind. */
 export type GovernedKind = 'task' | 'review' | 'spec';
@@ -330,7 +330,7 @@ export function resolveNodeRoleRule<T extends { role: string; enabled: boolean; 
  * stays in the pure helper so callers and tests share one lookup contract.
  */
 export async function resolveMemoryNodeRoleRule(
-  db: Pick<PrismaClient, 'memoryConfig'>,
+  db: Pick<PrismaClient, 'memoryConfig'> | Pick<Prisma.TransactionClient, 'memoryConfig'>,
   memoryId: string,
   role: string | null | undefined,
 ): Promise<NodeRoleResolution<NodeRoleRule>> {
@@ -375,6 +375,51 @@ export function governedKindsOf(state: GovernedState): GovernedKindEntry[] {
 export type GovernedRefusal = 'produces' | 'removes' | 'edits';
 
 /** The typed refusal — `extensions.code: 'ROLE_GOVERNED'`, naming the door that can act. */
+/**
+ * #1330 — a write assigned a sub-role that a STRICT parent rule does not
+ * declare (Holger's H1: `strictSubRoles` refuses undeclared sub-roles under
+ * that parent; unrelated roles stay free).
+ */
+export class RoleNotDeclaredError extends GraphQLError {
+  constructor(role: string, strictParent: string) {
+    super(
+      `Role "${role}" is not declared in this memory's config, and its parent role "${strictParent}" allows only declared sub-roles (strictSubRoles). Use a declared sub-role, or ask a manager of the memory to declare it.`,
+      { extensions: { code: 'ROLE_NOT_DECLARED', role, strictParent } },
+    );
+    this.name = 'RoleNotDeclaredError';
+  }
+}
+
+/**
+ * #1330 — the H1 strict-sub-role refusal at the shared write boundary, called
+ * by `writeNodeCore` inside its write transaction.
+ *
+ * Judged only when the write ASSIGNS a role, i.e. sets one that differs from
+ * the node's prior role. An existing node that already carries a now-undeclared
+ * role is not refused for an unrelated edit (no retroactive invalidation, per
+ * the issue), and a role is never assigned or derived here.
+ *
+ * Exempt: a node that is runnable after the write, and a platform write, which
+ * only server code can claim (a function argument, never client input).
+ *
+ * The config row is taken FOR SHARE first. Every rule write stamps that row
+ * (`touchConfig`, an UPDATE) inside its own transaction, so a concurrent
+ * strictness change serializes against this check rather than racing it.
+ */
+export async function assertRoleDeclaredForWrite(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  write: { role: string | null | undefined; priorRole: string | null | undefined; runnableAfter: boolean | null | undefined },
+  opts: { platformWrite?: boolean } = {},
+): Promise<void> {
+  const role = write.role;
+  if (!role || role === (write.priorRole ?? null)) return;
+  if (write.runnableAfter === true || opts.platformWrite === true) return;
+  await tx.$queryRaw`SELECT 1 FROM "memory_configs" WHERE "memory_id" = ${memoryId} FOR SHARE`;
+  const resolution = await resolveMemoryNodeRoleRule(tx, memoryId, role);
+  if (resolution.kind === 'UNDECLARED_UNDER_STRICT') throw new RoleNotDeclaredError(role, resolution.ancestor.role);
+}
+
 export class RoleGovernedError extends GraphQLError {
   constructor(
     public readonly entry: GovernedKindEntry,

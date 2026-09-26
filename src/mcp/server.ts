@@ -3,6 +3,8 @@ import { createHmac, randomUUID } from 'crypto';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
+  assertRoleDeclaredForWrite,
+  RoleNotDeclaredError,
   governedKindsOf,
   roleIsOrDescendsFrom,
   type GovernedKind,
@@ -5017,6 +5019,14 @@ export function createMcpServerInstance(
           });
           if (authoritative && !authoritative.deletedAt) throw LIVE_LOC_CONFLICT;
 
+          // #1330 — H1 strict sub-roles, as writeNodeCore judges them (this
+          // handler is its parity implementation, so the gate is repeated here).
+          await assertRoleDeclaredForWrite(tx, memoryId, {
+            role: role === undefined ? (authoritative?.role ?? null) : role,
+            priorRole: authoritative?.role ?? null,
+            runnableAfter: mergedGovernedState(authoritative, { role, isRunnable }).isRunnable,
+          });
+
           const pre = await snapshotOverwrittenNode(tx);
           const written = await tx.node.upsert({
             ...upsertArgs,
@@ -5044,6 +5054,7 @@ export function createMcpServerInstance(
         if (e === LIVE_LOC_CONFLICT) {
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
+        if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
         throw e;
       }
@@ -5414,6 +5425,12 @@ export function createMcpServerInstance(
                 { extensions: { code: 'NODE_WRITE_CONFLICT', loc, memoryId: memory.id } },
               );
             }
+            // #1330 — H1 strict sub-roles on the locked row, as writeNodeCore.
+            await assertRoleDeclaredForWrite(tx, memory.id, {
+              role: role === undefined ? current.role : role,
+              priorRole: current.role,
+              runnableAfter: mergedGovernedState(current, { role, isRunnable }).isRunnable,
+            });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && resolvedEdges === null) return;
@@ -5459,6 +5476,7 @@ export function createMcpServerInstance(
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
           }
