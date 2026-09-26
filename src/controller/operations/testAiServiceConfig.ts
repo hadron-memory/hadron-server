@@ -25,8 +25,13 @@
  * org/App/Agent config with no key is NO_API_KEY, never the platform key): it
  * is recorded with keyOwnerType HADRON_SERVER, attributed to the caller's
  * active org when the request carries one (and counted against that org's
- * daily token quota), otherwise recorded as the platform's own usage. Small
- * fixed prompt, tight token cap, and the rate limit bound every path.
+ * daily token quota, which must have headroom before the call, as a run's
+ * launch gate requires), otherwise recorded as the platform's own usage. That
+ * includes a HADRON_SERVER config with no stored key at a default host that
+ * issued the server's own credential (the AWS chain for Bedrock, say): a run
+ * uses that credential, so the test does too (`key: PLATFORM`). Small fixed
+ * prompt, tight token cap, and the rate limit (charged only for calls that
+ * reach a provider) bound every path.
  */
 
 import { GraphQLError } from 'graphql';
@@ -38,13 +43,14 @@ import {
   effectiveApiStyle,
   effectiveEndpoint,
   validateApiStyle,
+  usesProcessCredential,
   validateEndpoint,
   type AiApiStyle,
 } from '../../lib/aiEndpoint.js';
 import { generateText, LlmInvocationError, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
 import { recordLlmUsage } from '../../lib/metering/index.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
-import { defaultQuotaLimit, recordQuotaUsage } from '../../jobs/appRuns.js';
+import { defaultQuotaLimit, hasQuotaHeadroom, recordQuotaUsage } from '../../jobs/appRuns.js';
 
 export interface AiConfigTestOverride {
   provider?: string | null;
@@ -62,6 +68,8 @@ export interface AiConfigTestOverride {
 }
 
 type Source = 'SAVED' | 'OVERRIDE';
+/** PLATFORM: no stored key, and the server's own credential served the call, as it would a run's. */
+type KeySource = Source | 'PLATFORM' | 'NONE';
 
 export interface AiConfigTestResult {
   ok: boolean;
@@ -69,7 +77,7 @@ export interface AiConfigTestResult {
   model: string;
   endpoint: string | null;
   apiStyle: AiApiStyle | null;
-  used: { provider: Source; model: Source; endpoint: Source; apiStyle: Source; key: Source | 'NONE' };
+  used: { provider: Source; model: Source; endpoint: Source; apiStyle: Source; key: KeySource };
   latencyMs: number;
   reply: string | null;
   error: { code: string; message: string; transient: boolean } | null;
@@ -198,13 +206,6 @@ export async function testAiServiceConfig(
   // Impersonation is a read-only support view (#876), and a test spends.
   if (ctx.impersonation || !ctx.userId) throw new Error('Forbidden');
 
-  const retryAfter = admitTest(`${ctx.userId}:${row.id}`, deps.now());
-  if (retryAfter != null) {
-    throw new GraphQLError(`Too many tests of this config; try again in ${retryAfter}s.`, {
-      extensions: { code: 'RATE_LIMITED', retryAfterSeconds: retryAfter },
-    });
-  }
-
   // The config under test: saved values, overridden field by field, and
   // validated exactly as a write would validate them.
   const provider = override.provider ?? row.provider;
@@ -222,7 +223,15 @@ export async function testAiServiceConfig(
   // Omitted keeps the stored key; an explicit null/'' clears it, exactly as
   // the write would (#1385 review), so it tests as "no key".
   const keyCleared = override.apiKey !== undefined && !override.apiKey;
-  const keySource: Source | 'NONE' = overrideKey ? 'OVERRIDE' : !keyCleared && row.apiKeyEncrypted ? 'SAVED' : 'NONE';
+  const keySource: KeySource = overrideKey
+    ? 'OVERRIDE'
+    : !keyCleared && row.apiKeyEncrypted
+      ? 'SAVED'
+      : // Only the platform's own config may run on the platform's credential
+        // (Holger's metering ruling, above); modelFor decides the rest.
+        owner.ownerType === 'HADRON_SERVER' && usesProcessCredential(tested)
+        ? 'PLATFORM'
+        : 'NONE';
   const used: AiConfigTestResult['used'] = {
     // Presence, not truthiness: an empty model is still what gets sent.
     provider: override.provider != null ? 'OVERRIDE' : 'SAVED',
@@ -285,10 +294,46 @@ export async function testAiServiceConfig(
       model,
       endpoint,
       apiStyle,
-      apiKeyEncrypted: overrideKey ? encryptToken(overrideKey) : row.apiKeyEncrypted,
+      // PLATFORM runs keyless even when the edit is what cleared the key.
+      apiKeyEncrypted: overrideKey ? encryptToken(overrideKey) : keySource === 'SAVED' ? row.apiKeyEncrypted : null,
     },
     ownerType: owner.ownerType,
   };
+
+  // An override key is the caller's own; a platform credential, stored or the
+  // process's, is the platform's.
+  const keyOwnerType: AiConfigOwnerType | null = overrideKey ? null : keySource === 'PLATFORM' ? 'HADRON_SERVER' : owner.ownerType;
+  const organizationId = await billableOrgOf(ctx, row);
+  // A platform-funded probe needs the org's token headroom first, as a run's
+  // launch gate does: recordQuotaUsage records overage, it never refuses
+  // (#1385 review, Codex). No call, so nothing is metered.
+  if (
+    keyOwnerType === 'HADRON_SERVER' &&
+    organizationId &&
+    !(await hasQuotaHeadroom(ctx.db, 'org', organizationId, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens')))
+  ) {
+    return {
+      ...base,
+      ok: false,
+      latencyMs: 0,
+      reply: null,
+      error: {
+        code: 'QUOTA_EXCEEDED',
+        message: "The organization's daily platform token allowance is used up; a platform-funded test would exceed it.",
+        transient: true,
+      },
+    };
+  }
+
+  // Charged here, just before the provider call: a test refused locally (no
+  // key, an unreadable key, an invalid override) costs nobody anything, so it
+  // must not use up the caller's allowance either (#1385 review, Codex).
+  const retryAfter = admitTest(`${ctx.userId}:${row.id}`, deps.now());
+  if (retryAfter != null) {
+    throw new GraphQLError(`Too many tests of this config; try again in ${retryAfter}s.`, {
+      extensions: { code: 'RATE_LIMITED', retryAfterSeconds: retryAfter },
+    });
+  }
 
   const started = deps.now();
   let out: LlmResult | null = null;
@@ -305,9 +350,7 @@ export async function testAiServiceConfig(
   const latencyMs = Math.max(0, deps.now() - started);
 
   // Every test is recorded; a failed call is recorded at zero tokens so the
-  // attempt itself is on the ledger. An override key is the caller's own.
-  const keyOwnerType: AiConfigOwnerType | null = overrideKey ? null : owner.ownerType;
-  const organizationId = await billableOrgOf(ctx, row);
+  // attempt itself is on the ledger.
   const tokensIn = out?.tokensIn ?? 0;
   const tokensOut = out?.tokensOut ?? 0;
   await recordLlmUsage(ctx.db, {

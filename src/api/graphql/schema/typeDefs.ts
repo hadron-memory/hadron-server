@@ -2888,6 +2888,8 @@ export const typeDefs = `#graphql
   enum AiConfigTestKeySource {
     SAVED
     OVERRIDE
+    "A HADRON_SERVER config with no stored key: the server's own credential for that provider served the call, as it serves a run (#1385)."
+    PLATFORM
     NONE
   }
 
@@ -2916,7 +2918,7 @@ export const typeDefs = `#graphql
   }
 
   type AiServiceConfigTestError {
-    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
+    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
     code: String!
     "Provider error text, scrubbed of the key and truncated."
     message: String!

@@ -38,6 +38,14 @@ describe('connect-time resolution failures', () => {
     expect((err as LlmInvocationError).transient).toBe(true);
   });
 
+  it('a resolver that hangs is bounded by the caller deadline (#1385 review)', async () => {
+    lookupMock.mockImplementation(() => new Promise(() => {}));
+    const started = Date.now();
+    const err = await guardedEndpointFetch()('https://llm.example.test/v4/chat/completions', { signal: AbortSignal.timeout(50) }).catch((e) => e);
+    expect((err as Error).name).toBe('TimeoutError');
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
   it('a host that does not exist (ENOTFOUND) is a permanent refusal', async () => {
     failLookupWith('ENOTFOUND');
     await expect(guardedEndpointFetch()('https://llm.example.test/v4/chat/completions')).rejects.toBeInstanceOf(AiEndpointForbiddenError);

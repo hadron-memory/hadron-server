@@ -79,6 +79,22 @@ async function allowedAddresses(url: URL, forbidden: (ip: string) => boolean): P
   return addrs;
 }
 
+/** `work`, or the signal's reason as soon as it aborts, whichever comes first. */
+async function untilAborted<T>(work: Promise<T>, signal: AbortSignal | null | undefined): Promise<T> {
+  if (!signal) return work;
+  signal.throwIfAborted();
+  let onAbort = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([work, aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /** A `fetch` for the AI SDK that enforces the posture above on every request. */
 export function guardedEndpointFetch(env: NodeJS.ProcessEnv = process.env): typeof fetch {
   const allowLoopback = loopbackAllowed(env);
@@ -92,7 +108,10 @@ export function guardedEndpointFetch(env: NodeJS.ProcessEnv = process.env): type
     if (url.protocol !== 'https:' && url.protocol !== 'http:') {
       throw new AiEndpointForbiddenError(url.hostname, `unsupported scheme ${url.protocol}`);
     }
-    const addrs = await allowedAddresses(url, forbidden);
+    // The caller's deadline covers resolution too: a resolver that hangs
+    // must not hold the request past it (#1385 review).
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    const addrs = await untilAborted(allowedAddresses(url, forbidden), signal);
     // Plaintext only inside a private network (#1380 review, Codex P1): the
     // key and the prompt must never cross the public internet unencrypted.
     // Checked on the RESOLVED addresses, since a hostname's class is only

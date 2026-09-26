@@ -4,7 +4,7 @@
  * capture server stands in for the provider; no real provider, no real key.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { GraphQLError } from 'graphql';
@@ -14,6 +14,7 @@ import { generateId } from '../../lib/id.js';
 import { encryptToken } from '../../lib/tokenCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { generateText } from '../../lib/llm/index.js';
+import { defaultQuotaLimit, recordQuotaUsage } from '../../jobs/appRuns.js';
 import {
   testAiServiceConfig,
   AI_CONFIG_TEST_LIMIT,
@@ -111,6 +112,10 @@ beforeEach(async () => {
       { id: generateId(), organizationId: org.id, userId: member.id, role: 'CONTRIBUTOR' },
     ],
   });
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe('testAiServiceConfig (#1378)', () => {
@@ -264,6 +269,68 @@ describe('testAiServiceConfig (#1378)', () => {
     expect([event.keyOwnerType, event.organizationId]).toEqual(['HADRON_SERVER', org.id]);
     const counter = await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } });
     expect(counter.used).toBe(13);
+  });
+
+  describe('a keyless config at a default host (#1385 review)', () => {
+    const AMBIENT = 'sk-SERVER-AMBIENT-0123';
+    // The official OpenAI client honours OPENAI_BASE_URL, so the capture
+    // server stands in for api.openai.com without an explicit endpoint.
+    const ambient = () => {
+      vi.stubEnv('OPENAI_API_KEY', AMBIENT);
+      vi.stubEnv('OPENAI_BASE_URL', `${origin}/v1`);
+    };
+    const keyless = { provider: 'openai', endpoint: null, apiStyle: 'CHAT_COMPLETIONS', apiKeyEncrypted: null, apiKeyPreview: null };
+
+    it('a HADRON_SERVER config runs on the server credential, as a run would, and is platform-funded', async () => {
+      ambient();
+      const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+      const cfg = await mkConfig({ ...keyless, hadronServerId: host.id });
+      const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }));
+      expect(r).toMatchObject({ ok: true, used: { key: 'PLATFORM' }, error: null });
+      expect(captured.map((c) => [c.path, c.auth])).toEqual([['/v1/chat/completions', `Bearer ${AMBIENT}`]]);
+      expect(JSON.stringify(r)).not.toContain(AMBIENT);
+      const event = await db.usageEvent.findFirstOrThrow({ where: { type: 'ai-config-test' } });
+      expect(event.keyOwnerType).toBe('HADRON_SERVER');
+    });
+
+    it('an edit clearing a HADRON_SERVER key tests on the server credential, never the stored key', async () => {
+      ambient();
+      const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+      const cfg = await mkConfig({ ...keyless, apiKeyEncrypted: encryptToken(SAVED_KEY), hadronServerId: host.id });
+      const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'] }), { apiKey: '' });
+      expect(r).toMatchObject({ ok: true, used: { key: 'PLATFORM' } });
+      expect(captured.map((c) => c.auth)).toEqual([`Bearer ${AMBIENT}`]);
+    });
+
+    it('an org config never tests on the platform credential: NO_API_KEY, no call', async () => {
+      ambient();
+      const cfg = await mkConfig({ ...keyless, organizationId: org.id });
+      const r = await test(cfg.id, ctxFor(admin.id));
+      expect(r).toMatchObject({ ok: false, used: { key: 'NONE' }, error: { code: 'NO_API_KEY' } });
+      expect(captured).toEqual([]);
+    });
+  });
+
+  it('a platform-funded test with the org token allowance used up is refused before any call (#1385 review)', async () => {
+    const limit = defaultQuotaLimit('org', 'llm.tokens');
+    await recordQuotaUsage(db, 'org', org.id, 'llm.tokens', limit, limit);
+    const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+    const cfg = await mkConfig({ hadronServerId: host.id });
+    const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }));
+    expect(r).toMatchObject({ ok: false, error: { code: 'QUOTA_EXCEEDED', transient: true } });
+    expect(captured).toEqual([]);
+    expect(await db.usageEvent.count({ where: { type: 'ai-config-test' } })).toBe(0);
+    // BYOK is not the platform's allowance: the same org's own-key config still tests.
+    const own = await mkConfig({ organizationId: org.id });
+    expect((await test(own.id, ctxFor(admin.id, { organizationId: org.id }))).ok).toBe(true);
+  });
+
+  it('only calls that reach a provider use up the rate limit (#1385 review)', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, apiKeyEncrypted: null, apiKeyPreview: null });
+    for (let i = 0; i < AI_CONFIG_TEST_LIMIT + 2; i++) {
+      expect((await test(cfg.id, ctxFor(admin.id))).error.code).toBe('NO_API_KEY');
+    }
+    expect((await test(cfg.id, ctxFor(admin.id), { apiKey: OVERRIDE_KEY })).ok).toBe(true);
   });
 
   it('the limiter forgets stale caller/config pairs instead of growing forever', () => {
