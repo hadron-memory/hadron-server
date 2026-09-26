@@ -441,6 +441,53 @@ describe('moveNode subtree cascade (#768)', () => {
 });
 
 describe('cloneNode (#564)', () => {
+  it.each([
+    { role: null, isRunnable: null },
+    { role: 'weather', isRunnable: false },
+    { role: 'weather.widget', isRunnable: null },
+  ])('preserves ungoverned signals in same- and cross-memory clones: %j', async ({ role, isRunnable }) => {
+    const source = await createDbNode(db, { loc: 'alpha', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role, isRunnable } });
+
+    const same = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('alpha-copy') }, asUser());
+    const cross = await M.cloneNode(null, { sourceRef: source.id, targetMemoryRef: memB.id }, asUser());
+    for (const clone of [same, cross]) {
+      expect({ role: clone.role, isRunnable: clone.isRunnable }).toEqual({ role, isRunnable });
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).role).toBe(role);
+  });
+
+  it.each([
+    { role: 'spec', isRunnable: null },
+    { role: 'spec.rule', isRunnable: null },
+    { role: 'review', isRunnable: null },
+    { role: null, isRunnable: true },
+  ])('refuses a generic clone of governed signals without stripping them: %j', async ({ role, isRunnable }) => {
+    const source = await createDbNode(db, { loc: 'alpha', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role, isRunnable } });
+
+    await expect(M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('alpha-copy') }, asUser()))
+      .rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+    await expect(M.cloneNode(null, { sourceRef: source.id, targetMemoryRef: memB.id }, asUser()))
+      .rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+    expect(await db.node.findFirst({ where: { memoryId: memA.id, loc: 'alpha-copy' } })).toBeNull();
+    expect(await db.node.findFirst({ where: { memoryId: memB.id, loc: 'alpha' } })).toBeNull();
+    expect(await db.node.findUniqueOrThrow({ where: { id: source.id } }))
+      .toMatchObject({ role, isRunnable });
+  });
+
+  it('clones only the named node, leaving a descendant at its original loc', async () => {
+    const source = await createDbNode(db, { loc: 'parent', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'parent:child', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role: 'weather.widget' } });
+    await db.node.update({ where: { id: child.id }, data: { role: 'spec.rule' } });
+
+    const clone = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('copy') }, asUser());
+    expect(clone.role).toBe('weather.widget');
+    expect(await db.node.findFirst({ where: { memoryId: memA.id, loc: 'copy:child' } })).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).role).toBe('spec.rule');
+  });
+
   it('clones fields to a NEW node (fresh id), leaving the source intact', async () => {
     const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'hello' });
     const clone = await M.cloneNode(null, { sourceRef: alpha.id, targetUrn: urnA('alpha-copy') }, asUser());

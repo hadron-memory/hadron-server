@@ -19,6 +19,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
+import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -3076,7 +3077,10 @@ export const nodeMutations = {
         name: srcPlain.name,
         nodeType: srcPlain.nodeType,
         objectType: srcPlain.objectType ?? undefined, // #725 — carry the collection through a clone
-        isRunnable: srcPlain.isRunnable,
+        // Keep the complete governed signal set together. The ordinary
+        // writeNodeCore gate still refuses governed results from this generic
+        // clone path; it must never succeed by silently dropping a signal.
+        ...carryGovernedSignals(srcPlain),
         description: srcPlain.description ?? undefined,
         abstract: srcPlain.abstract ?? undefined,
         content: srcPlain.content ?? undefined,
