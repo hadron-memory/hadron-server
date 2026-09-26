@@ -50,10 +50,10 @@ import {
   validateEndpoint,
   type AiApiStyle,
 } from '../../lib/aiEndpoint.js';
-import { generateText, LlmInvocationError, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
+import { assertModelBuildable, generateText, LlmInvocationError, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
 import { recordLlmUsage } from '../../lib/metering/index.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
-import { defaultQuotaLimit, hasQuotaHeadroom, recordQuotaUsage } from '../../jobs/appRuns.js';
+import { consumeQuota, defaultQuotaLimit, recordQuotaUsage, releaseQuota } from '../../jobs/appRuns.js';
 
 export interface AiConfigTestOverride {
   provider?: string | null;
@@ -233,12 +233,28 @@ export interface AiConfigTestDeps {
   now: () => number;
   /** The probe's hard deadline; an endpoint that never answers is a failed test, not a hung request. */
   timeoutMs: number;
+  /** Local refusals (no network), run before anything is charged. */
+  preflight: (resolved: Parameters<typeof assertModelBuildable>[0]) => void;
 }
+
+/**
+ * Tokens reserved from the org's daily platform allowance BEFORE a
+ * platform-funded probe, then settled to the real count. Reserving makes the
+ * check and the spend one atomic step, so concurrent tests can't all pass the
+ * check and overshoot (#1385 review). The probe is a fixed prompt with
+ * maxTokens 16, so this bounds it with room to spare.
+ */
+export const AI_CONFIG_TEST_TOKEN_RESERVE = 256;
 
 /** Long enough for a slow model's first token, short enough for a button. */
 export const AI_CONFIG_TEST_TIMEOUT_MS = 20_000;
 
-const defaultDeps: AiConfigTestDeps = { generate: generateText, now: () => Date.now(), timeoutMs: AI_CONFIG_TEST_TIMEOUT_MS };
+const defaultDeps: AiConfigTestDeps = {
+  generate: generateText,
+  now: () => Date.now(),
+  timeoutMs: AI_CONFIG_TEST_TIMEOUT_MS,
+  preflight: assertModelBuildable,
+};
 
 export async function testAiServiceConfig(
   ctx: Context,
@@ -360,13 +376,29 @@ export async function testAiServiceConfig(
   // process's, is the platform's.
   const keyOwnerType: AiConfigOwnerType | null = overrideKey ? null : keySource === 'PLATFORM' ? 'HADRON_SERVER' : owner.ownerType;
   const organizationId = await billableOrgOf(ctx, row);
-  // A platform-funded probe needs the org's token headroom first, as a run's
-  // launch gate does: recordQuotaUsage records overage, it never refuses
-  // (#1385 review, Codex). No call, so nothing is metered.
+
+  // Local refusals first (#1385 review, Codex): a config that can't even be
+  // built (a malformed Bedrock key, say) never reaches a provider, so it
+  // charges neither the rate limit nor the quota, and records no usage.
+  try {
+    deps.preflight(resolved);
+  } catch (e) {
+    return {
+      ...base,
+      ok: false,
+      latencyMs: 0,
+      reply: null,
+      error: { code: 'CONFIG_INVALID', message: scrub(String((e as Error)?.message ?? e), secrets), transient: false },
+    };
+  }
+
+  // A platform-funded probe RESERVES its tokens from the org's allowance
+  // before the call, atomically (#1385 review): a check followed by a later
+  // record let concurrent tests all pass and overshoot. Settled after.
+  const quotaScope = keyOwnerType === 'HADRON_SERVER' && organizationId ? organizationId : null;
   if (
-    keyOwnerType === 'HADRON_SERVER' &&
-    organizationId &&
-    !(await hasQuotaHeadroom(ctx.db, 'org', organizationId, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens')))
+    quotaScope &&
+    !(await consumeQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), AI_CONFIG_TEST_TOKEN_RESERVE))
   ) {
     return {
       ...base,
@@ -386,6 +418,7 @@ export async function testAiServiceConfig(
   // must not use up the caller's allowance either (#1385 review, Codex).
   const retryAfter = admitTest(`${ctx.userId}:${row.id}`, deps.now());
   if (retryAfter != null) {
+    if (quotaScope) await releaseQuota(ctx.db, 'org', quotaScope, 'llm.tokens', AI_CONFIG_TEST_TOKEN_RESERVE);
     throw new GraphQLError(`Too many tests of this config; try again in ${retryAfter}s.`, {
       extensions: { code: 'RATE_LIMITED', retryAfterSeconds: retryAfter },
     });
@@ -420,9 +453,14 @@ export async function testAiServiceConfig(
     keyOwnerType,
     createdBy: ctx.userId,
   });
-  // Platform-funded tests count against the org's daily token allowance.
-  if (keyOwnerType === 'HADRON_SERVER' && organizationId && tokensIn + tokensOut > 0) {
-    await recordQuotaUsage(ctx.db, 'org', organizationId, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), tokensIn + tokensOut);
+  // Settle the reservation to what the probe really spent.
+  if (quotaScope) {
+    const spent = tokensIn + tokensOut;
+    if (spent > AI_CONFIG_TEST_TOKEN_RESERVE) {
+      await recordQuotaUsage(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), spent - AI_CONFIG_TEST_TOKEN_RESERVE);
+    } else {
+      await releaseQuota(ctx.db, 'org', quotaScope, 'llm.tokens', AI_CONFIG_TEST_TOKEN_RESERVE - spent);
+    }
   }
 
   return {

@@ -2918,7 +2918,7 @@ export const typeDefs = `#graphql
   }
 
   type AiServiceConfigTestError {
-    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
+    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | CONFIG_INVALID (the config cannot be built at all, e.g. a malformed Bedrock key; no call made) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
     code: String!
     "Provider error text, scrubbed of the key and truncated."
     message: String!

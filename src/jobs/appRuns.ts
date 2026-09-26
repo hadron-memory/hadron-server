@@ -211,6 +211,25 @@ export async function consumeQuota(
   return res === 1;
 }
 
+/**
+ * Give back part of a reservation taken with {@link consumeQuota} once the
+ * real cost is known. Floored at zero, so a counter reset in between can't
+ * go negative.
+ */
+export async function releaseQuota(
+  db: PrismaClient,
+  scopeKind: 'app' | 'org',
+  scopeId: string,
+  action: QuotaAction,
+  amount: number,
+): Promise<void> {
+  if (amount <= 0) return;
+  await db.$executeRaw`
+    UPDATE quota_counters SET used = GREATEST(used - ${amount}, 0)
+    WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
+      AND action = ${action} AND "window" = ${QUOTA_WINDOW}`;
+}
+
 /** Stored-limit headroom check WITHOUT consuming (the launch gate's token look-ahead). */
 export async function hasQuotaHeadroom(
   db: PrismaClient,

@@ -18,6 +18,7 @@ import { defaultQuotaLimit, recordQuotaUsage } from '../../jobs/appRuns.js';
 import {
   testAiServiceConfig,
   AI_CONFIG_TEST_LIMIT,
+  AI_CONFIG_TEST_TOKEN_RESERVE,
   AI_CONFIG_TEST_WINDOW_MS,
   admitTest,
   aiConfigTestLimiterSize,
@@ -214,7 +215,7 @@ describe('testAiServiceConfig (#1378)', () => {
   it('an endpoint that never answers is a failed, transient test within the deadline (#1385 review)', async () => {
     const cfg = await mkConfig({ organizationId: org.id, endpoint: `${origin}/hang/v4` });
     const started = Date.now();
-    const r = await testAiServiceConfig(ctxFor(admin.id), cfg.id, {}, { generate: generateText, now: () => Date.now(), timeoutMs: 300 });
+    const r = await testAiServiceConfig(ctxFor(admin.id), cfg.id, {}, { generate: generateText, now: () => Date.now(), timeoutMs: 300, preflight: () => {} });
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(r).toMatchObject({ ok: false, error: { code: 'LLM_CALL_FAILED', transient: true } });
     expect(captured.filter((c) => c.path.startsWith('/hang/'))).toHaveLength(1);
@@ -376,6 +377,34 @@ describe('testAiServiceConfig (#1378)', () => {
   it('scrubs the longest secret first, so a secret that prefixes another leaves no tail (#1385 review)', () => {
     const out = scrub('id AKIA123 secret AKIA123-very-secret-tail', ['AKIA123', 'AKIA123-very-secret-tail']);
     expect(out).toBe('id [redacted] secret [redacted]');
+  });
+
+  it('a config that cannot even be built is CONFIG_INVALID: no call, no usage row, no rate-limit slot (#1385 review)', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, provider: 'bedrock', model: 'anthropic.claude-x', endpoint: null, apiKeyEncrypted: encryptToken('not-json') });
+    for (let i = 0; i < AI_CONFIG_TEST_LIMIT + 2; i++) {
+      expect(await test(cfg.id, ctxFor(admin.id))).toMatchObject({ ok: false, error: { code: 'CONFIG_INVALID', transient: false } });
+    }
+    expect(captured).toEqual([]);
+    expect(await db.usageEvent.count({ where: { type: 'ai-config-test' } })).toBe(0);
+    expect(aiConfigTestLimiterSize()).toBe(0);
+  });
+
+  it('platform-funded tests RESERVE quota atomically: concurrent tests cannot both pass a nearly spent allowance (#1385 review)', async () => {
+    const limit = defaultQuotaLimit('org', 'llm.tokens');
+    // Room for exactly one reservation.
+    await recordQuotaUsage(db, 'org', org.id, 'llm.tokens', limit, limit - AI_CONFIG_TEST_TOKEN_RESERVE - 10);
+    const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+    const cfg = await mkConfig({ hadronServerId: host.id });
+    const [a, b] = await Promise.all([
+      test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id })),
+      test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id })),
+    ]);
+    expect([a.ok, b.ok].sort()).toEqual([false, true]);
+    expect([a, b].find((r) => !r.ok)!.error.code).toBe('QUOTA_EXCEEDED');
+    expect(captured).toHaveLength(1);
+    // Settled to the real spend (13 tokens), the unused reservation returned.
+    const counter = await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } });
+    expect(counter.used).toBe(limit - AI_CONFIG_TEST_TOKEN_RESERVE - 10 + 13);
   });
 
   it('the limiter forgets stale caller/config pairs instead of growing forever', () => {

@@ -66,6 +66,17 @@ export class LlmInvocationError extends Error {
   }
 }
 
+/**
+ * Build the model a call would use, WITHOUT calling it: every local refusal
+ * `modelFor` makes (a malformed Bedrock key, a keyless config it won't run, an
+ * unknown provider) surfaces here as the same LlmInvocationError, with no
+ * network. The config test (#1385) runs it before charging its rate limit and
+ * quota, so a config that could never reach a provider costs nothing.
+ */
+export function assertModelBuildable(resolved: ResolvedAiConfig): void {
+  modelFor(resolved);
+}
+
 function modelFor(resolved: ResolvedAiConfig): LanguageModel {
   const { provider, model, apiKeyEncrypted } = resolved.config;
   const key = apiKeyEncrypted ? decryptToken(apiKeyEncrypted) : undefined;
