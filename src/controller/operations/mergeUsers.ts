@@ -56,6 +56,10 @@ const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   ai_model_prices: ['created_by', 'updated_by', 'deleted_by'],
   credit_ledger_entries: ['created_by', 'updated_by', 'deleted_by'],
   agent_webhooks: ['created_by', 'updated_by', 'deleted_by'],
+  // #1325 — the memory config tables.
+  memory_configs: ['created_by', 'updated_by'],
+  node_role_rules: ['created_by', 'updated_by'],
+  memory_config_templates: ['created_by', 'updated_by', 'deleted_by'],
 };
 
 export interface MergeUsersArgs {

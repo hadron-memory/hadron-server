@@ -2577,6 +2577,151 @@ export const typeDefs = `#graphql
     (any role) and to ADMIN/OWNER of the memory's owning org.
     """
     members: [MemoryMember!]!
+    """
+    #1325 — this memory's config: its node-role rules. Null for anyone who does
+    not MANAGE the memory (the strict owner of a personal/private memory; else
+    its user owner or an org ADMIN/OWNER), however the Memory was reached. A
+    memory with no rules yet reads as the empty config (id null, no rules).
+    """
+    config: MemoryConfig
+  }
+
+  """
+  #1325 — a memory's config: exactly one per memory, holding its node-role
+  rules (one per role or declared sub-role). Read and changed only by the
+  memory's managers. Materialized by the first rule write; before that it reads
+  as empty, with a null id.
+  """
+  type MemoryConfig {
+    "Null until the first rule is written."
+    id: ID
+    memoryId: ID!
+    "Role-ascending."
+    rules: [NodeRoleRule!]!
+    createdAt: DateTime
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  enum NodeRoleWriters {
+    ALL
+    OWNER
+    ADMIN
+  }
+
+  enum ContentValidator {
+    AGENT
+    PLATFORM
+  }
+
+  """
+  #1325 — the state of one rule reference, next to its URN and id. NONE: not
+  configured. OK: the node is live and you can read it; its id is given, and
+  its URN too unless the node's memory has a legacy URN that cannot address it
+  (#697), when the URN is null and the id is the ref to use. BROKEN: configured,
+  but the node was deleted, so operations relying on the rule are refused until
+  a manager repoints it (fail-closed). UNREADABLE: the node exists but you may
+  not read it, so its URN and id are withheld.
+  """
+  enum NodeRoleRuleRefState {
+    NONE
+    OK
+    BROKEN
+    UNREADABLE
+  }
+
+  """
+  #1325 — one node-role rule. Task and description references are stored by
+  node id (they survive moves) and returned as a URN and an id, each with its
+  state. Both are given only when the state is OK; see NodeRoleRuleRefState.
+  """
+  type NodeRoleRule {
+    "The rule's id — its ref for updateNodeRoleRule / deleteNodeRoleRule (a rule has no URN)."
+    id: ID!
+    "The dotted role or sub-role this rule governs, unique within the config."
+    role: String!
+    authorTask: String
+    authorTaskId: ID
+    authorTaskState: NodeRoleRuleRefState!
+    validationTask: String
+    validationTaskId: ID
+    validationTaskState: NodeRoleRuleRefState!
+    "Documentation, not procedure: a deleted description node reads as NONE, never BROKEN."
+    descriptionNode: String
+    descriptionNodeId: ID
+    descriptionNodeState: NodeRoleRuleRefState!
+    "On a parent role: refuse its undeclared sub-roles instead of falling back to it."
+    strictSubRoles: Boolean!
+    writers: NodeRoleWriters!
+    validateBy: ContentValidator
+    enabled: Boolean!
+    "Set by applying a required template (#1334)."
+    locked: Boolean!
+    "The template this rule was copied from, if any (provenance only; no live link)."
+    sourceTemplateId: ID
+    sourceTemplate: NodeRoleRuleSourceTemplate
+    "Optimistic-concurrency token: pass it as expectedRevision to update or delete."
+    revision: Int!
+    createdAt: DateTime!
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  type NodeRoleRuleSourceTemplate {
+    id: ID!
+    name: String!
+    "The template has been deleted; the rule keeps its copy."
+    deleted: Boolean!
+  }
+
+  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success."
+  type MemoryConfigWarning {
+    code: String!
+    role: String!
+    field: String
+    taskUrn: String
+    taskState: NodeRoleRuleRefState
+  }
+
+  type NodeRoleRulePayload {
+    rule: NodeRoleRule!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
+  """
+  #1325 — a new rule. Task and description references are node IDs or URNs you
+  can read; a node you cannot read is refused exactly like a missing one
+  (NODE_NOT_FOUND), and a task reference must be a runnable task (NOT_A_TASK).
+  """
+  input CreateNodeRoleRuleInput {
+    "Lower-case letter/digit/dash segments joined by dots, 1-64 characters (INVALID_NODE_ROLE)."
+    role: String!
+    authorTaskRef: ID
+    validationTaskRef: ID
+    descriptionNodeRef: ID
+    strictSubRoles: Boolean
+    writers: NodeRoleWriters
+    "Needs a validation task."
+    validateBy: ContentValidator
+    enabled: Boolean
+  }
+
+  """
+  #1325 — change a rule. An omitted field is unchanged. A reference given as
+  null or an empty string CLEARS it; validateBy null clears it. The role itself
+  is the rule's identity and cannot be changed: delete and re-create instead.
+  """
+  input UpdateNodeRoleRuleInput {
+    authorTaskRef: ID
+    validationTaskRef: ID
+    descriptionNodeRef: ID
+    strictSubRoles: Boolean
+    writers: NodeRoleWriters
+    validateBy: ContentValidator
+    enabled: Boolean
   }
 
   """
@@ -5969,6 +6114,12 @@ export const typeDefs = `#graphql
     scope(ref: ID!): Scope
 
     """
+    #1325 — a memory's config, for the memory's managers only. For anyone else,
+    and for a missing memory, the same MEMORY_NOT_FOUND.
+    """
+    memoryConfig(memoryRef: ID!): MemoryConfig!
+
+    """
     Spec 049 Phase 2 — paginated list of the scopes you may read, optionally
     narrowed by owner, by an App's resolution context, by name, and by the
     cor:api:100:01 orgId (member-gated, no admin bypass; non-member ⇒ empty
@@ -7943,6 +8094,24 @@ export const typeDefs = `#graphql
     among live scopes (SCOPE_NAME_TAKEN), never \`global\` / \`app\`.
     """
     createScope(input: CreateScopeInput!): Scope!
+
+    """
+    #1325 — add a rule to a memory's config (creating the config on first use).
+    Managers only; anyone else gets MEMORY_NOT_FOUND. A role that already has a
+    rule is refused NODE_ROLE_RULE_EXISTS.
+    """
+    createNodeRoleRule(memoryRef: ID!, input: CreateNodeRoleRuleInput!): NodeRoleRulePayload!
+
+    """
+    #1325 — change a rule by its id. With expectedRevision, a rule changed since
+    you read it is refused CONFLICT (extensions.currentRevision) and nothing is
+    written; omitted, the last writer wins. A rule you may not manage reads as
+    NOT_FOUND.
+    """
+    updateNodeRoleRule(ref: ID!, input: UpdateNodeRoleRuleInput!, expectedRevision: Int): NodeRoleRulePayload!
+
+    "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule."
+    deleteNodeRoleRule(ref: ID!, expectedRevision: Int): Boolean!
 
     "Spec 049 Phase 2 — update a scope you may write (auth as createScope). memoryRefs replaces the ordered list."
     updateScope(ref: ID!, input: UpdateScopeInput!): Scope!

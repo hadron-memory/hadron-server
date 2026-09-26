@@ -194,13 +194,29 @@ export function isValidRuleRole(role: string): boolean {
   return role.length > 0 && role.length <= RULE_ROLE_MAX_LENGTH && RULE_ROLE_RE.test(role);
 }
 
+/**
+ * Why a rule key failed, as a structured field a client can branch on
+ * (hadron-cli#716 Q9 — the code and this field are the contract, never the
+ * prose). Deterministic priority, one reason per key: EMPTY for the literal
+ * empty string, TOO_LONG past the cap, otherwise BAD_SEGMENT. Nothing is
+ * repaired first: whitespace-only is BAD_SEGMENT, not EMPTY, because a key is
+ * never trimmed or lower-cased into validity.
+ */
+export type InvalidNodeRoleReason = 'EMPTY' | 'TOO_LONG' | 'BAD_SEGMENT';
+
+export function invalidRuleRoleReason(role: string): InvalidNodeRoleReason | null {
+  if (role === '') return 'EMPTY';
+  if (role.length > RULE_ROLE_MAX_LENGTH) return 'TOO_LONG';
+  return RULE_ROLE_RE.test(role) ? null : 'BAD_SEGMENT';
+}
+
 /** Typed rule-key refusal for the config mutation surface that consumes this helper. */
 export class InvalidNodeRoleError extends GraphQLError {
-  constructor(role: string) {
+  constructor(role: string, reason: InvalidNodeRoleReason = invalidRuleRoleReason(role) ?? 'BAD_SEGMENT') {
     super(
       `Invalid node-role rule key "${role}": use 1-${RULE_ROLE_MAX_LENGTH} characters as ` +
         'lower-case letter/digit/dash segments joined by dots (for example "spec.rule").',
-      { extensions: { code: 'INVALID_NODE_ROLE', role, maxLength: RULE_ROLE_MAX_LENGTH } },
+      { extensions: { code: 'INVALID_NODE_ROLE', role, reason, maxLength: RULE_ROLE_MAX_LENGTH } },
     );
     this.name = 'InvalidNodeRoleError';
   }
@@ -208,7 +224,8 @@ export class InvalidNodeRoleError extends GraphQLError {
 
 /** Validate a stored rule key while leaving arbitrary `Node.role` values untouched. */
 export function assertValidRuleRole(role: string): void {
-  if (!isValidRuleRole(role)) throw new InvalidNodeRoleError(role);
+  const reason = invalidRuleRoleReason(role);
+  if (reason !== null) throw new InvalidNodeRoleError(role, reason);
 }
 
 /**
