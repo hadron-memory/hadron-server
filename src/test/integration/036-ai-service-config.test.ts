@@ -315,6 +315,20 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     }
   });
 
+  it('withholds an explicit endpoint from members; a public provider default stays visible (#1380 review)', async () => {
+    const orgCfg = await createConfig({ organizationId: org.id }, 'lan', { provider: 'glm', apiKey: 'sk-lan' });
+    await db.aiServiceConfig.update({ where: { id: orgCfg.id }, data: { endpoint: 'http://10.1.2.3:11434/v1' } });
+    await createConfig({ organizationId: org.id }, 'default', { provider: 'glm', apiKey: 'sk-def' });
+    const listed = await resolvers.Query.resolveAiServiceConfigs({}, { appRef: app.id }, ctxFor(member.id));
+    const lan = listed.find((c) => c.name === 'lan')!;
+    const dflt = listed.find((c) => c.name === 'default')!;
+    expect([lan.endpoint, lan.effectiveEndpoint]).toEqual([null, null]);
+    expect(JSON.stringify(listed)).not.toContain('10.1.2.3');
+    expect(dflt.effectiveEndpoint).toBe('https://api.z.ai/api/paas/v4');
+    // The owner's admins still see it through the management read.
+    expect((await resolvers.Query.aiServiceConfig({}, { ref: orgCfg.id }, ctxFor(admin.id)))!.endpoint).toBe('http://10.1.2.3:11434/v1');
+  });
+
   it('does NOT include configs owned by sibling Agents in the same App', async () => {
     // A second Agent in the same org/App. Resolution always runs for one
     // App+Agent pair, so the sibling's configs must never leak into the list.

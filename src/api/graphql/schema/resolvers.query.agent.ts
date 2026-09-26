@@ -20,6 +20,7 @@ import {
   resolveOrgScope,
   isPlatformAdmin,
   toGqlAiServiceConfig,
+  toGqlAiServiceConfigForPicker,
   requireAiConfigOwnerAdmin,
   requireAiConfigPickerAccess,
   rethrowAiConfigTyped,
@@ -373,7 +374,7 @@ export const agentQueries = {
           appId: resolvedAppId,
           agentId: resolvedAgentId,
         });
-        return resolved.map((r) => toGqlAiServiceConfig(r.config));
+        return resolved.map((r) => toGqlAiServiceConfigForPicker(r.config));
       } catch (e) {
         rethrowAiConfigTyped(e);
       }
