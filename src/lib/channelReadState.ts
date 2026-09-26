@@ -83,10 +83,13 @@ export async function attendeeMentionTokens(db: Db, attendee: RegisterAttendee):
 }
 
 /**
- * The Workers whose posts are the attendee's OWN — never attention for it
- * (#1362 review, Codex P2): with the broadcast tokens counted as mentions, a
- * Worker's own post to the whole team would otherwise wake its own Agent's
- * run. Retired Workers included: their posts are still the attendee's own.
+ * The Workers whose posts are the attendee's OWN, excluded from the
+ * MENTION count (#1362 review, Codex P2): with the broadcast tokens counted as
+ * mentions, a Worker's own post to the whole team would otherwise read as a
+ * mention of its own Agent. Retired Workers included: their posts are still
+ * the attendee's own. Unfiltered rows are decided from `lastSeq` alone by
+ * design (no message query) and still count own posts as new; that is the
+ * separate follow-up hadron-server#1388.
  */
 async function attendeeWorkerIds(db: Db, attendee: RegisterAttendee): Promise<string[]> {
   if ('workerId' in attendee) return [attendee.workerId];
