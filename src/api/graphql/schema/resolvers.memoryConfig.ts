@@ -59,6 +59,7 @@ import {
   type Context,
   isMemoryReadableCached,
   isMemoryReadableFresh,
+  requireOrgRole,
   requireOwnerOrOrgRole,
   withoutRequestCaches,
 } from './resolvers.helpers.js';
@@ -101,7 +102,7 @@ export class NodeRoleRuleNotFoundError extends EntityNotFoundError {
   }
 }
 
-type MemoryGateRow = {
+export type MemoryGateRow = {
   id: string;
   class: string;
   userId: string | null;
@@ -120,7 +121,7 @@ type MemoryGateRow = {
  * the config exactly as its target would — `requireOrgRole` already confines it
  * to the one shared org — and `requireWriter` refuses every mutation.
  */
-async function canManageMemoryConfig(ctx: Context, memory: MemoryGateRow): Promise<boolean> {
+export async function canManageMemoryConfig(ctx: Context, memory: MemoryGateRow): Promise<boolean> {
   if (memory.class === 'personal' || memory.class === 'private') {
     return !ctx.impersonation && !!ctx.userId && memory.userId === ctx.userId;
   }
@@ -133,10 +134,54 @@ async function canManageMemoryConfig(ctx: Context, memory: MemoryGateRow): Promi
   }
 }
 
-const MEMORY_GATE_SELECT = { id: true, class: true, userId: true, organizationId: true, ownerUserId: true } as const;
+export const MEMORY_GATE_SELECT = { id: true, class: true, userId: true, organizationId: true, ownerUserId: true } as const;
+
+/**
+ * #1334 — LOCK authority over a memory's locked rules: the existing
+ * admin/owner hierarchy. On an org memory, an org ADMIN/OWNER
+ * (`requireOrgRole`, which admits a platform admin); a memory's user owner
+ * who is not also an org admin manages the config but cannot move a lock.
+ * A personal/private memory's config has exactly one manager, its strict
+ * owner (H3), and a memory with no org is managed by its user owner alone, so
+ * for both the manager IS the lock authority. Boolean, refusal-only, like the
+ * MANAGE gate.
+ */
+export async function hasLockAuthority(ctx: Context, memory: MemoryGateRow): Promise<boolean> {
+  if (memory.class === 'personal' || memory.class === 'private' || !memory.organizationId) {
+    return canManageMemoryConfig(ctx, memory);
+  }
+  if (ctx.impersonation) return false;
+  try {
+    await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+    return true;
+  } catch (e) {
+    if (e instanceof Error && e.message === 'Forbidden') return false;
+    throw e;
+  }
+}
+
+/** #1334 — a locked rule moved by someone without lock authority. The rule is readable to them, so this reveals nothing. */
+export function ruleLocked(rule: Pick<NodeRoleRule, 'id' | 'role' | 'sourceTemplateId'>): GraphQLError {
+  return new GraphQLError(
+    `The rule for role "${rule.role}" is locked by a required template; only an org admin can change or remove it.`,
+    { extensions: { code: 'RULE_LOCKED', ruleId: rule.id, role: rule.role, sourceTemplateId: rule.sourceTemplateId } },
+  );
+}
+
+/** The lock check, asked fresh inside the write transaction on the memory row as it reads now. */
+export async function assertMayMoveLock(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  rule: NodeRoleRule,
+): Promise<void> {
+  if (!rule.locked) return;
+  const memory = await tx.memory.findFirst({ where: { id: memoryId }, select: MEMORY_GATE_SELECT });
+  if (!memory || !(await hasLockAuthority(withoutRequestCaches(ctx, tx), memory))) throw ruleLocked(rule);
+}
 
 /** Resolve a memory ref the caller may MANAGE, or throw the missing-memory answer. */
-async function managedMemory(ctx: Context, memoryRef: string): Promise<MemoryGateRow> {
+export async function managedMemory(ctx: Context, memoryRef: string): Promise<MemoryGateRow> {
   const { id } = await resolveMemoryRef(ctx.db, memoryRef);
   const memory = await ctx.db.memory.findFirst({ where: { id, deletedAt: null }, select: MEMORY_GATE_SELECT });
   if (!memory || !(await canManageMemoryConfig(ctx, memory))) throw new MemoryNotFoundError(memoryRef);
@@ -157,7 +202,7 @@ async function managedMemory(ctx: Context, memoryRef: string): Promise<MemoryGat
  * every authorize-then-write surface's; this keeps our own lock waits from
  * widening it.
  */
-async function reassertManage(
+export async function reassertManage(
   ctx: Context,
   tx: Prisma.TransactionClient,
   memoryId: string,
@@ -291,7 +336,7 @@ function notATask(kind: RefKind): GraphQLError {
 }
 
 /** Lock a rule's row for the rest of the transaction and read it, or null when it is gone. */
-async function lockRule(tx: Prisma.TransactionClient, id: string): Promise<NodeRoleRule | null> {
+export async function lockRule(tx: Prisma.TransactionClient, id: string): Promise<NodeRoleRule | null> {
   await tx.$queryRaw`SELECT 1 FROM "node_role_rules" WHERE "id" = ${id} FOR UPDATE`;
   return tx.nodeRoleRule.findUnique({ where: { id } });
 }
@@ -300,7 +345,7 @@ async function lockRule(tx: Prisma.TransactionClient, id: string): Promise<NodeR
  * Stamp the config's audit fields: a rule change IS a change to the config
  * (#1360 review). `updatedAt` is Prisma's `@updatedAt`.
  */
-async function touchConfig(tx: Prisma.TransactionClient, configId: string, actor: string): Promise<void> {
+export async function touchConfig(tx: Prisma.TransactionClient, configId: string, actor: string): Promise<void> {
   await tx.memoryConfig.update({ where: { id: configId }, data: { updatedBy: actor } });
 }
 
@@ -320,7 +365,7 @@ export function assertValidateByHasTask(state: { validateBy: Validator | null; v
 }
 
 /** Create the config row if absent — race-safe, never a second row, never an aborted transaction. */
-async function materializeConfig(tx: Prisma.TransactionClient, memoryId: string, actor: string): Promise<string> {
+export async function materializeConfig(tx: Prisma.TransactionClient, memoryId: string, actor: string): Promise<string> {
   await tx.$executeRaw`
     INSERT INTO "memory_configs" ("id", "memory_id", "created_by", "updated_by")
     VALUES (${generateId()}, ${memoryId}, ${actor}, ${actor})
@@ -463,6 +508,7 @@ export const memoryConfigMutations = {
       if (!current) throw new NodeRoleRuleNotFoundError(ref);
       await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
+      await assertMayMoveLock(ctx, tx, memoryId, current);
       assertValidateByHasTask({
         validateBy: ('validateBy' in data ? data.validateBy : current.validateBy) as Validator | null,
         validationTaskId: ('validationTaskId' in refs ? refs.validationTaskId : current.validationTaskId) as string | null,
@@ -489,6 +535,7 @@ export const memoryConfigMutations = {
       if (!current) throw new NodeRoleRuleNotFoundError(ref);
       await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
+      await assertMayMoveLock(ctx, tx, memoryId, current);
       await tx.nodeRoleRule.delete({ where: { id } });
       await touchConfig(tx, current.configId, actor);
     });
