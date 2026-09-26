@@ -107,6 +107,8 @@ describe('#1330 — strictSubRoles at writeNodeCore', () => {
 
   it('a first rule write in flight is waited for, even with no config row to lock yet (#1400 review)', async () => {
     const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     // A rule write materializing this memory's FIRST config: it holds the
@@ -116,11 +118,12 @@ describe('#1330 — strictSubRoles at writeNodeCore', () => {
         await lockMemoryConfigExclusive(tx, memoryId);
         const config = await tx.memoryConfig.create({ data: { id: generateId(), memoryId } });
         await tx.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'doc', strictSubRoles: true } });
+        held();
         await gate;
       },
       { timeout: 15_000 },
     );
-    await pause(100);
+    await holding; // a barrier, not a sleep (#1400 review)
     const nodeWrite = create('race', { role: 'doc.unknown' }).then(() => null, (e: unknown) => e);
     await pause(400);
     release();
@@ -132,16 +135,19 @@ describe('#1330 — strictSubRoles at writeNodeCore', () => {
 
   it('the real rule writers take the exclusive side: createNodeRoleRule waits while a node write holds the shared lock (#1400 review)', async () => {
     const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const nodeSide = db.$transaction(
       async (tx) => {
         await lockMemoryConfigShared(tx, memoryId);
+        held();
         await gate;
       },
       { timeout: 15_000 },
     );
-    await pause(100);
+    await holding; // a barrier, not a sleep (#1400 review)
     let settled = false;
     const created = (resolvers.Mutation as any)
       .createNodeRoleRule({}, { memoryRef: memoryId, input: { role: 'doc', strictSubRoles: true } }, ctx())

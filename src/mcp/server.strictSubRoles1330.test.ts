@@ -52,4 +52,35 @@ describe('#1330 — MCP writers enforce strictSubRoles', () => {
     expect((await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n' } })).role).toBe('doc.legacy');
     expect(await srv.callToolText('hadron_update_node', { urn: urn('n'), content: 'edited' })).toMatch(/Node updated/);
   });
+
+  it('a resurrection judges the tombstone as LOCKED: a role changed underneath by a lock-free writer is not read stale (#1400 review)', async () => {
+    const srv = createTestableMcpServer(auth());
+    const tomb = await db.node.create({
+      data: { id: generateId(), memoryId: memory.id, loc: 't', name: 'T', role: 'doc.legacy', content: 'x', deletedAt: new Date() },
+    });
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // A writer that takes no loc lock (git sync, say) re-roles the tombstone
+    // to a DECLARED role, uncommitted, holding the row.
+    const sync = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM "nodes" WHERE "id" = ${tomb.id} FOR UPDATE`;
+        await tx.node.update({ where: { id: tomb.id }, data: { role: 'doc.guide' } });
+        held();
+        await gate;
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    // Naming the tombstone's OLD role: read stale, it would look unchanged.
+    const pending = srv.callToolText('hadron_create_node', { urn: urn('t'), name: 'T', role: 'doc.legacy', content: 'back' });
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await sync;
+    expect(await pending).toMatch(/^\[role_not_declared\]/);
+    expect(await db.node.findUniqueOrThrow({ where: { id: tomb.id } })).toMatchObject({ role: 'doc.guide' });
+  });
 });
+

@@ -5019,15 +5019,20 @@ export function createMcpServerInstance(
           });
           if (authoritative && !authoritative.deletedAt) throw LIVE_LOC_CONFLICT;
 
+          const pre = await snapshotOverwrittenNode(tx);
+
           // #1330 — H1 strict sub-roles, as writeNodeCore judges them (this
           // handler is its parity implementation, so the gate is repeated here).
+          // Judged on `pre`, the tombstone as LOCKED by the snapshot, not on the
+          // unlocked `authoritative` read: a writer that takes no loc lock (git
+          // sync) could change the tombstone's role in between, and a stale
+          // prior role would make an undeclared one read as unchanged (#1400
+          // review). A refusal rolls the snapshot back with everything else.
           await assertRoleDeclaredForWrite(tx, memoryId, {
-            role: role === undefined ? (authoritative?.role ?? null) : role,
-            priorRole: authoritative?.role ?? null,
-            runnableAfter: mergedGovernedState(authoritative, { role, isRunnable }).isRunnable,
+            role: role === undefined ? (pre?.role ?? null) : role,
+            priorRole: pre?.role ?? null,
+            runnableAfter: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
-
-          const pre = await snapshotOverwrittenNode(tx);
           const written = await tx.node.upsert({
             ...upsertArgs,
             // Resurrect (#543) on the authoritative row, not the stale probe: a
