@@ -441,6 +441,22 @@ describe('moveNode subtree cascade (#768)', () => {
 });
 
 describe('cloneNode (#564)', () => {
+  it('carries already-stored task attribution without minting a new task claim (#1326)', async () => {
+    const task = await createDbNode(db, { loc: 'author-task', memoryId: memA.id });
+    const authoredAt = new Date('2026-09-26T20:00:00Z');
+    const alpha = await db.node.create({
+      data: {
+        id: generateId(), memoryId: memA.id, loc: 'authored', name: 'Authored',
+        authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 3, authoredAt,
+      },
+    });
+    const clone = await M.cloneNode(null, { sourceRef: alpha.id, targetUrn: urnA('authored-copy') }, asUser());
+    expect(clone).toMatchObject({
+      authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 3, authoredAt,
+    });
+    expect(clone.id).not.toBe(alpha.id);
+  });
+
   it('clones fields to a NEW node (fresh id), leaving the source intact', async () => {
     const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'hello' });
     const clone = await M.cloneNode(null, { sourceRef: alpha.id, targetUrn: urnA('alpha-copy') }, asUser());

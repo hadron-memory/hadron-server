@@ -3,6 +3,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
+import { carryNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
   pendingEdgeStableTargetId,
@@ -241,6 +242,9 @@ export async function cloneMemoryGraph(
           // mints. See `governedSignals.ts` for why the set is derived from the
           // register rather than written out here.
           ...carryGovernedSignals(n),
+          // #1326 — provenance describes the copied content's origin, not a
+          // new execution of the authoring task by this clone operation.
+          ...carryNodeAuthorship(n),
           llmModel: n.llmModel,
           aiAgent: n.aiAgent,
           tokens: n.tokens,

@@ -131,6 +131,33 @@ function readNode(urn: string, contentScope: 'content' | 'abstract' | 'all') {
 // ───── explicit-set form ──────────────────────────────────────────────────
 
 describe('hadron_get_nodes — explicit set', () => {
+  it('shows revision-bound validation without disclosing a task in an unreadable memory (#1326)', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: fx.pmem.id, loc: 'hidden-task', name: 'Hidden task', nodeType: 'task' },
+    });
+    const node = await db.node.create({
+      data: {
+        id: generateId(), memoryId: fx.memory.id, loc: 'provenance', name: 'Provenance',
+        authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+      },
+    });
+    await db.nodeContentValidationReport.create({
+      data: {
+        nodeId: node.id, memoryId: fx.memory.id, nodeRevSeq: 1,
+        validationTaskId: task.id, validationTaskRevSeq: 1, outcome: 'FAIL',
+      },
+    });
+    const single = await readNode(nodeUrn('provenance'), 'content');
+    const batch = await batchRead({ refs: [nodeUrn('provenance')] });
+    for (const output of [single, batch]) {
+      expect(output).toContain('Authored by task: restricted');
+      expect(output).toContain('Validation: fail (node revision 1; validator restricted)');
+      expect(output).not.toContain('hidden-task');
+      expect(output).not.toContain(task.id);
+    }
+  });
+
   it('returns all nodes with content + edges, in INPUT order', async () => {
     await addNode({ loc: 'beta', name: 'NodeBeta', content: 'beta body' });
     await addNode({ loc: 'alpha', name: 'NodeAlpha', content: 'alpha body', edges: [{ targetUrn: nodeUrn('beta'), name: 'links-to' }] });

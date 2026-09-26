@@ -101,6 +101,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { carryNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
   ancestorLocs,
@@ -255,6 +256,8 @@ export async function writeNodeCore(
      * redesign unrelated write surfaces while #1220 remains separately scoped.
      */
     concealUnreadable?: { entity: 'memory' | 'node'; ref: string };
+    /** #1326 — an internal clone carries the source's already-stored stamp. */
+    copiedAuthorship?: NodeAuthorshipStamp;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -1135,6 +1138,7 @@ export async function writeNodeCore(
             where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
             create: {
               ...nodeFieldsClean,
+              ...(opts?.copiedAuthorship ? carryNodeAuthorship(opts.copiedAuthorship) : {}),
               id,
               tags,
               createdBy,
@@ -3093,7 +3097,7 @@ export const nodeMutations = {
       // caller (a read of the SOURCE memory, which may differ from the
       // destination's) and writeNodeCore records the write of the new node.
       recordNodeRead(ctx.db, toUsageNodeRef(source), ctx);
-      return writeNodeCore(input, ctx, 'create');
+      return writeNodeCore(input, ctx, 'create', { copiedAuthorship: carryNodeAuthorship(source) });
     },
 
     // Fold a source node into a target node, returning the updated target.
