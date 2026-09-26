@@ -212,9 +212,37 @@ export async function consumeQuota(
 }
 
 /**
- * Give back part of a reservation taken with {@link consumeQuota} once the
- * real cost is known. Floored at zero, so a counter reset in between can't
- * go negative.
+ * {@link consumeQuota} that also returns WHICH window the reservation landed
+ * in (its `reset_at`), or null when the stored limit has no headroom. The
+ * generation is what {@link releaseQuota} matches, so a reservation is only
+ * ever given back to the day it was taken from.
+ */
+export async function reserveQuota(
+  db: PrismaClient,
+  scopeKind: 'app' | 'org',
+  scopeId: string,
+  action: QuotaAction,
+  defaultLimit: number,
+  amount: number,
+): Promise<{ resetAt: string } | null> {
+  await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit);
+  // The generation as the DATABASE's own text: reset_at is a timestamp
+  // without time zone, and a JS Date parameter would be converted through
+  // the session's zone before comparing, so it could never match.
+  const rows = await db.$queryRaw<Array<{ reset_at: string }>>`
+    UPDATE quota_counters SET used = used + ${amount}
+    WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
+      AND action = ${action} AND "window" = ${QUOTA_WINDOW}
+      AND used + ${amount} <= "limit"
+    RETURNING reset_at::text AS reset_at`;
+  return rows[0] ? { resetAt: rows[0].reset_at } : null;
+}
+
+/**
+ * Give back part of a reservation once the real cost is known, but only to
+ * the window it came from (#1385 review). If the counter has rolled over
+ * since (a new day, `used` reset), the old reservation is gone with the old
+ * day, and subtracting it would erase the new day's usage. Floored at zero.
  */
 export async function releaseQuota(
   db: PrismaClient,
@@ -222,12 +250,14 @@ export async function releaseQuota(
   scopeId: string,
   action: QuotaAction,
   amount: number,
+  reservation: { resetAt: string },
 ): Promise<void> {
   if (amount <= 0) return;
   await db.$executeRaw`
     UPDATE quota_counters SET used = GREATEST(used - ${amount}, 0)
     WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
-      AND action = ${action} AND "window" = ${QUOTA_WINDOW}`;
+      AND action = ${action} AND "window" = ${QUOTA_WINDOW}
+      AND reset_at::text = ${reservation.resetAt}`;
 }
 
 /** Stored-limit headroom check WITHOUT consuming (the launch gate's token look-ahead). */

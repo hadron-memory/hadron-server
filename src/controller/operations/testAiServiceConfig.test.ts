@@ -407,6 +407,29 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(counter.used).toBe(limit - AI_CONFIG_TEST_TOKEN_RESERVE - 10 + 13);
   });
 
+  it('a reservation is only released into the window it was taken from: a rollover mid-probe keeps the new day\'s usage (#1385 review)', async () => {
+    const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+    const cfg = await mkConfig({ hadronServerId: host.id });
+    const rollover = async (resolved: Parameters<typeof generateText>[0], req: Parameters<typeof generateText>[1]) => {
+      // The day turns while the provider answers: the counter resets and
+      // records 50 tokens of NEW-day usage.
+      await db.quotaCounter.updateMany({
+        where: { scopeId: org.id, action: 'llm.tokens' },
+        data: { used: 50, resetAt: new Date(Date.now() + 2 * 86_400_000) },
+      });
+      return generateText(resolved, req);
+    };
+    const r = await testAiServiceConfig(ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), cfg.id, {}, {
+      generate: rollover,
+      now: () => Date.now(),
+      timeoutMs: 5_000,
+      preflight: () => {},
+    });
+    expect(r.ok).toBe(true);
+    const counter = await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } });
+    expect(counter.used).toBe(50);
+  });
+
   it('the limiter forgets stale caller/config pairs instead of growing forever', () => {
     for (let i = 0; i < 1000; i++) admitTest(`u:${i}`, 0);
     expect(aiConfigTestLimiterSize()).toBe(1000);

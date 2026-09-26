@@ -53,7 +53,7 @@ import {
 import { assertModelBuildable, generateText, LlmInvocationError, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
 import { recordLlmUsage } from '../../lib/metering/index.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
-import { consumeQuota, defaultQuotaLimit, recordQuotaUsage, releaseQuota } from '../../jobs/appRuns.js';
+import { defaultQuotaLimit, recordQuotaUsage, releaseQuota, reserveQuota } from '../../jobs/appRuns.js';
 
 export interface AiConfigTestOverride {
   provider?: string | null;
@@ -396,10 +396,10 @@ export async function testAiServiceConfig(
   // before the call, atomically (#1385 review): a check followed by a later
   // record let concurrent tests all pass and overshoot. Settled after.
   const quotaScope = keyOwnerType === 'HADRON_SERVER' && organizationId ? organizationId : null;
-  if (
-    quotaScope &&
-    !(await consumeQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), AI_CONFIG_TEST_TOKEN_RESERVE))
-  ) {
+  const reservation = quotaScope
+    ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), AI_CONFIG_TEST_TOKEN_RESERVE)
+    : null;
+  if (quotaScope && !reservation) {
     return {
       ...base,
       ok: false,
@@ -418,7 +418,7 @@ export async function testAiServiceConfig(
   // must not use up the caller's allowance either (#1385 review, Codex).
   const retryAfter = admitTest(`${ctx.userId}:${row.id}`, deps.now());
   if (retryAfter != null) {
-    if (quotaScope) await releaseQuota(ctx.db, 'org', quotaScope, 'llm.tokens', AI_CONFIG_TEST_TOKEN_RESERVE);
+    if (quotaScope && reservation) await releaseQuota(ctx.db, 'org', quotaScope, 'llm.tokens', AI_CONFIG_TEST_TOKEN_RESERVE, reservation);
     throw new GraphQLError(`Too many tests of this config; try again in ${retryAfter}s.`, {
       extensions: { code: 'RATE_LIMITED', retryAfterSeconds: retryAfter },
     });
@@ -454,12 +454,12 @@ export async function testAiServiceConfig(
     createdBy: ctx.userId,
   });
   // Settle the reservation to what the probe really spent.
-  if (quotaScope) {
+  if (quotaScope && reservation) {
     const spent = tokensIn + tokensOut;
     if (spent > AI_CONFIG_TEST_TOKEN_RESERVE) {
       await recordQuotaUsage(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), spent - AI_CONFIG_TEST_TOKEN_RESERVE);
     } else {
-      await releaseQuota(ctx.db, 'org', quotaScope, 'llm.tokens', AI_CONFIG_TEST_TOKEN_RESERVE - spent);
+      await releaseQuota(ctx.db, 'org', quotaScope, 'llm.tokens', AI_CONFIG_TEST_TOKEN_RESERVE - spent, reservation);
     }
   }
 
