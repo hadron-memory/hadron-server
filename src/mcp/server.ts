@@ -349,6 +349,12 @@ export function mcpDoorCanReplay(
   if (kind !== 'task' && kind !== 'review') return true;
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined) continue;
+    // #937 — a revision precondition replays through governed UPDATE doors,
+    // but is intentionally absent from every CREATE door.
+    if (key === 'expectedRevision') {
+      if (op !== 'update') return false;
+      continue;
+    }
     if (key === 'isRunnable') {
       if (kind !== 'task' || (op === 'create' && value !== true)) return false;
       continue;
@@ -646,7 +652,8 @@ export async function addEdge(args: {
       where: { id: rawSource },
       select: { id: true, loc: true, memoryId: true, deletedAt: true },
     });
-    if (!found || found.deletedAt) {
+    // #1316: a node in a memory hidden from this caller answers as a missing one.
+    if (!found || found.deletedAt || (await isMemoryHiddenFrom(auth, found.memoryId, 'write'))) {
       return { error: `Source node not found: "${rawSource}".` };
     }
     sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
@@ -663,7 +670,10 @@ export async function addEdge(args: {
     // it to the parent and bake that into a derived edge loc.
     const sourceFragRefusal = nodeFragmentRefusal(rawSource, sourceFrag);
     if (sourceFragRefusal) return { error: `Source: ${sourceFragRefusal}` };
-    const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
+    // #1316: hidden from this caller ⇒ the missing branch, BEFORE the node
+    // lookup — otherwise a missing loc answers "Source node not found" and so
+    // confirms the memory exists.
+    const sourceMem = await resolveVisibleMemoryByUrn(auth, sourceMemoryUrn, 'write');
     if (!sourceMem) {
       return { error: `Source memory not found: "${sourceMemoryUrn}".` };
     }
@@ -1102,6 +1112,54 @@ async function resolveMemoryByUrn(
   return aliased ? (candidates.find((m) => m.id === aliased.id) ?? null) : null;
 }
 
+/**
+ * Resolve a memory URN exactly as a tool's MISSING branch sees it (#1316):
+ * null when no such memory exists, and ALSO null when it exists but is hidden
+ * from this caller — so the tool's own `if (!memory) return <missing text>`
+ * answers both, byte for byte, from the same line.
+ *
+ * Folding the check into resolution, rather than refusing later, is the
+ * point. Each tool used to resolve first (only a missing memory refused
+ * there) and deny afterwards with its own text, so "exists but not yours"
+ * differed from "no such memory" — and memory URNs are guessable. A refusal
+ * placed any later than the missing branch leaks through whatever runs in
+ * between: loc validation, a node lookup, the other end of a move.
+ *
+ * Hidden means:
+ *   - `'read'`  — the caller cannot read the memory (`canReadMemory`).
+ *   - `'write'` — the caller can neither write NOR read it. A caller who may
+ *     read it already knows it exists and keeps the tool's actionable write
+ *     denial; a caller who may write is never narrowed, even without read.
+ */
+async function resolveVisibleMemoryByUrn(
+  auth: AuthContext,
+  rawUrn: string,
+  need: 'read' | 'write',
+): Promise<{ id: string; urn: string } | null> {
+  const memory = await resolveMemoryByUrn(rawUrn);
+  if (!memory) return null;
+  return (await isMemoryHiddenFrom(auth, memory.id, need)) ? null : memory;
+}
+
+/**
+ * The predicate behind {@link resolveVisibleMemoryByUrn}, for a tool whose
+ * missing branch answers after a lookup by some other key (a node PK): true
+ * when this memory must be treated as absent for this caller (#1316).
+ */
+async function isMemoryHiddenFrom(
+  auth: AuthContext,
+  memoryId: string,
+  need: 'read' | 'write',
+): Promise<boolean> {
+  // A no-op TODAY, and deliberately kept: every branch of the MCP gates has
+  // write ⇒ read, so a writer is also a reader and the read check alone would
+  // admit them. This makes "never narrow a writer" hold by construction instead
+  // of by that implication, which lives in another file and nothing pins. A
+  // mutant deleting this line therefore survives — that is expected, not a gap.
+  if (need === 'write' && (await canWriteToMemory(db, auth, memoryId))) return false;
+  return !(await canReadMemory(db, auth, memoryId));
+}
+
 // Access control lives in ./access-control.ts.
 
 /**
@@ -1320,6 +1378,7 @@ export function createMcpServerInstance(
    * keeps the pre-#1012 in-memory-only behaviour, so opting out costs nothing.
    */
   const clientKey = opts.clientKey ?? null;
+
   /**
    * #1009 — this MCP session replaced one the client had already been using
    * (it presented a session id this server did not know and re-initialized).
@@ -2093,12 +2152,10 @@ export function createMcpServerInstance(
       // Resolve via the shared helper — soft-delete filtering, trimming, and
       // bare-URN normalization all live in one place so every read-side
       // scoping point behaves consistently.
-      const mem = await resolveMemoryByUrn(memoryUrn);
+      // #1316: an unreadable memory takes the missing branch, not "Access denied".
+      const mem = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!mem) {
         return textResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
-      }
-      if (!(await canReadMemory(db, auth, mem.id))) {
-        return textResult(`Access denied: '${memoryUrn}'.`);
       }
 
       // Store the bare URN from the DB row (the canonical form for downstream
@@ -2914,7 +2971,8 @@ export function createMcpServerInstance(
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
       if (fragRefusal) return textResult(fragRefusal);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
@@ -4541,7 +4599,8 @@ export function createMcpServerInstance(
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
       if (fragRefusal) return textResult(fragRefusal);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
@@ -5024,9 +5083,10 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_update_node',
-    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
+    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
+      expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses with [node_write_conflict]; omit for backward-compatible last-write-wins behavior.'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
@@ -5051,7 +5111,7 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -5063,7 +5123,8 @@ export function createMcpServerInstance(
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
       if (fragRefusal) return textResult(fragRefusal);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
@@ -5107,7 +5168,7 @@ export function createMcpServerInstance(
                 context: 'node-write',
                 surface: 'mcp',
                 canReplay: (kind) =>
-                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }, kind, 'update'),
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, expectedRevision }, kind, 'update'),
               }
             : {},
         );
@@ -5292,7 +5353,7 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
-      if (Object.keys(data).length > 0 || resolvedEdges !== null) {
+      if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
@@ -5329,6 +5390,21 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #937 — bind a client-side read/modify/write to the Revision it
+            // actually read. The row lock + #1339 reconciliation above make
+            // this the same atomic revSeq guard used by writeNodeCore. Do not
+            // include the current value in the refusal: write authority is not
+            // necessarily read authority, and a conflict must not become a
+            // revision oracle.
+            if (expectedRevision !== undefined && current.revSeq !== expectedRevision) {
+              throw new ScopeGraphQLError(
+                `Node at loc "${loc}" changed since it was read — re-read and retry.`,
+                { extensions: { code: 'NODE_WRITE_CONFLICT', loc, memoryId: memory.id } },
+              );
+            }
+            // A guard-only call is a useful no-op check and must not manufacture
+            // a history row or advance the live revision.
+            if (Object.keys(data).length === 0 && resolvedEdges === null) return;
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -5371,6 +5447,9 @@ export function createMcpServerInstance(
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
+            return textResult(`[node_write_conflict] ${e.message}`);
+          }
           throw e;
         }
       }
@@ -5490,7 +5569,10 @@ export function createMcpServerInstance(
     }
     const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
     if (fragRefusal) return textResult(fragRefusal);
-    const memory = await resolveMemoryByUrn(memoryUrn);
+    // #1316: hidden from this caller ⇒ the missing branch. Before this the door's
+    // own concealment answered instead, echoing the RESOLVED id it was handed —
+    // the victim memory's internal id, to a caller who cannot read it.
+    const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
     if (!memory) return textResult(`Memory not found: "${memoryUrn}".`);
     try {
       validateLoc(loc);
@@ -5573,6 +5655,7 @@ export function createMcpServerInstance(
   // no argument.
   const taskUpdateArgs = {
     ...governedDoorArgs,
+    expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
     isRunnable: z
       .boolean()
       .optional()
@@ -5581,6 +5664,7 @@ export function createMcpServerInstance(
 
   const reviewUpdateArgs = {
     ...governedDoorArgs,
+    expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
     role: z
       .string()
       .nullable()
@@ -5802,7 +5886,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_replace_text',
-    "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
+    "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Multi-node runs are all-or-nothing: a node whose edited field would violate a field cap (e.g. the 2000-character abstract cap, whose refusal reports the edit's delta and remaining headroom) refuses the WHOLE batch before any write — nothing is partially applied; fix the edit and re-run. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
     {
       oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
       newText: z.string().describe('Replacement text. May be empty to delete the matched text. In regex mode, $1/$<name>/$& are honored.'),
@@ -6237,11 +6321,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         nodeFragmentRefusal(rawFrom, fromFrag) ?? nodeFragmentRefusal(rawTo, toFrag);
       if (moveRefusal) return textResult(moveRefusal);
 
-      const fromMemory = await resolveMemoryByUrn(fromMemoryUrn);
+      // #1316: BOTH ends conceal at the point their missing branch answers —
+      // a later refusal would leak through the loc validation and the source
+      // node lookup that run in between.
+      const fromMemory = await resolveVisibleMemoryByUrn(auth, fromMemoryUrn, 'write');
       if (!fromMemory) {
         return textResult(`Source memory not found: "${fromMemoryUrn}".`);
       }
-      const toMemory = await resolveMemoryByUrn(toMemoryUrn);
+      const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');
       if (!toMemory) {
         return textResult(`Target memory not found: "${toMemoryUrn}".`);
       }
@@ -9045,12 +9132,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         throw e;
       }
 
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: an unreadable memory takes the missing branch.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
-      }
-      if (!(await canReadMemory(db, auth, memory.id))) {
-        return textResult('Access denied for this memory.');
       }
 
       // #819 — the checks themselves now live in src/lib/memoryValidation.ts,
@@ -9095,7 +9180,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
         throw e;
       }
 
-      const memoryRef = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memoryRef = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memoryRef) return textResult(`Memory not found: "${memoryUrn}".`);
       if (!(await canWriteToMemory(db, auth, memoryRef.id))) {
         return textResult('Access denied.');

@@ -524,6 +524,53 @@ export async function concealUnreadableDenial(
 }
 
 /**
+ * The NODE-addressed twin of {@link concealUnreadableDenial} (#1316): run a
+ * node-targeted mutation's existing authorization, and when it denies a caller
+ * who cannot read the node's memory, throw `missing()` — the surface's own
+ * missing-node error, since each spells that miss its own way (a
+ * `NODE_NOT_FOUND` GraphQLError, a bare `NodeNotFoundError`, …) and only an
+ * identical answer conceals anything.
+ *
+ * These surfaces resolve the node BEFORE authorizing, so without this a caller
+ * who cannot read the memory learned three things by probing: the memory
+ * exists, the node exists, and (by a missing loc answering differently) that
+ * the loc is free.
+ *
+ * The classifier is the node-content gate (`isMemoryReadableCached`), NOT the
+ * record gate: a caller who may open an app/system memory's RECORD but not its
+ * nodes must not learn which nodes exist in it — the same line `Query.node`
+ * draws. Ordinary denials only ({@link isAuthorizationDenial}); every other
+ * error and every success passes through, so no permitted caller is narrowed.
+ *
+ * `authorize` must perform authorization ONLY — no writes.
+ */
+export async function concealUnreadableNodeDenial(
+  ctx: Context,
+  memoryId: string,
+  missing: () => Error,
+  authorize: () => Promise<void>,
+): Promise<void> {
+  try {
+    await authorize();
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+    if (await isMemoryReadableCached(ctx, memoryId)) throw error;
+    throw missing();
+  }
+}
+
+/**
+ * The typed `NODE_NOT_FOUND` answer the node-addressed mutations give for a
+ * ref that resolves to nothing — shared so a concealed denial is byte-identical
+ * to it (#1316).
+ */
+export function nodeNotFoundError(ref: string): GraphQLError {
+  return new GraphQLError(`Node not found: "${ref}"`, {
+    extensions: { code: 'NODE_NOT_FOUND', ref },
+  });
+}
+
+/**
  * The RECORD-level memory read gate — "may this caller open this memory's
  * record (its scalars: name, description, data)?", as distinct from
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".
@@ -2933,6 +2980,8 @@ export interface UpdateNodeInput
   id?: string;
   memoryId?: string;
   loc?: string;
+  /** Optional positive Node.revision compare-and-swap precondition (#937). */
+  expectedRevision?: number | null;
   name?: string;
 }
 

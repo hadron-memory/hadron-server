@@ -3102,6 +3102,14 @@ export const typeDefs = `#graphql
   type Worker {
     id: ID!
     appId: ID!
+    """
+    The App's canonical URN (the same value App.urn returns, e.g.
+    hrn:app:acme.com:team), as a scalar identity suitable for cross-App
+    worker lists. Null when the caller cannot inspect this App's workers. This
+    intentionally does not return the App object, whose nested keys and
+    members have a narrower read audience.
+    """
+    appUrn: String
     agentId: ID!
     "The worker's name ('Iris') — the identity every surface renders."
     name: String!
@@ -4005,6 +4013,15 @@ export const typeDefs = `#graphql
     memoryId: String
     "Selector, with 'memoryId': the target's current loc. Not writable here — moveNode relocates."
     loc: String
+    """
+    Optional optimistic-concurrency precondition (#937). When supplied, the
+    update is applied only while the node's current live revision still equals
+    this positive integer. A mismatch refuses atomically with
+    NODE_WRITE_CONFLICT; omitting it or passing null preserves last-write-wins
+    compatibility.
+    Read the baseline from Node.revision.
+    """
+    expectedRevision: Int
     "Omit to preserve (D4)."
     name: String
     nodeType: String
@@ -6471,6 +6488,19 @@ export const typeDefs = `#graphql
     ID or URN.
     """
     workers(appRef: ID!, includeRetired: Boolean, limit: Int, offset: Int): WorkersPage!
+
+    """
+    Workers CURRENTLY held by userRef across Apps the caller may inspect
+    (#1344), oldest casting first. userRef accepts a user id, handle, URN, or
+    email. Missing users, no holds, and holds confined to unreadable Apps all
+    return the same empty page; total and pagination are computed only after
+    the App authorization filter.
+
+    Retired castings are hidden unless includeRetired. hasLiveSession on each
+    item uses the existing derived idle-window predicate — it means the worker
+    is being driven now, not merely that an unended Session row exists.
+    """
+    heldWorkers(userRef: String!, includeRetired: Boolean, limit: Int, offset: Int): WorkersPage!
 
     """
     An App's role definitions (#960): every roles:<role> node in the Team

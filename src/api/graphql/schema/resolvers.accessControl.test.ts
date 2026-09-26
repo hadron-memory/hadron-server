@@ -303,13 +303,19 @@ describe('Mutation.deleteNode access control', () => {
     const target = await db.node.findFirstOrThrow({
       where: { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
     });
+    // #1316: the App cannot read this memory, so the denial answers exactly as
+    // a missing node does. It used to be `Forbidden`, which confirmed the node
+    // existed to a caller who could not read it.
     await expect(
       resolvers.Mutation.deleteNode(
         null,
         { nodeRef: target.id },
         ctx({ appId: appContributor.id }),
       ),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow(`Node not found: "${target.id}"`);
+    expect(await db.node.findUnique({ where: { id: target.id }, select: { deletedAt: true } })).toEqual({
+      deletedAt: null,
+    });
   });
 
   // 007-entity-id-or-urn (#542): deleteNode's nodeRef also accepts a

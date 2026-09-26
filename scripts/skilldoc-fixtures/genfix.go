@@ -240,6 +240,56 @@ func markupCases() []kase {
 	}
 }
 
+// headerCases are provenance-header inputs: the #1323 `rev=` edge values
+// (hadron-cli#724, merged as 9e7d2bd, is the first Go that reads one), plus the
+// separator cases they turned up. Each case edits the provenance
+// line of ONE Go-rendered file; genfix writes the edited file as `input` and
+// Go's ParseFile verdict beside it. A malformed `rev=` voids the WHOLE header
+// on both sides (#1339 / Eli, dev-team chat #1626), so a voided case reads
+// back with an empty source rather than a revision-less header.
+//
+// The separator cases are there because RE2's \s is [\t\n\f\r ] while
+// JavaScript's also takes \v and the Unicode spaces: an NBSP between two keys
+// is a separator to one reader and part of a value to the other. The first
+// generation of this section found the port on the JavaScript side of that
+// line, for the legacy header as much as the current one.
+func headerCases() []kase {
+	edit := func(name, old, repl, why string) kase {
+		c := kase{"name": name, "old": old, "new": repl}
+		if why != "" {
+			c["why"] = why
+		}
+		return c
+	}
+	const id = "id=node-1 "
+	const legacyOld = "hadron-skill id=node-1 source=hrn:node:a.com:mem:tasks:x hash="
+	return []kase{
+		edit("absent: a pre-#1323 header", id, id, "revision 0 in Go, null in TypeScript: both mean none"),
+		edit("rev=1, the minimum", id, id+"rev=1 ", ""),
+		edit("rev=7", id, id+"rev=7 ", ""),
+		edit("rev=2147483647, Node.revSeq's maximum", id, id+"rev=2147483647 ", ""),
+		edit("rev=2147483648 voids the header", id, id+"rev=2147483648 ", "one past the signed 32-bit column"),
+		edit("rev=99999999999 voids the header", id, id+"rev=99999999999 ", "eleven digits: Go refuses on length before parsing"),
+		edit("rev=0 voids the header", id, id+"rev=0 ", ""),
+		edit("rev=07 voids the header", id, id+"rev=07 ", "no leading zero: one spelling per revision"),
+		edit("rev=-1 voids the header", id, id+"rev=-1 ", ""),
+		edit("rev=+7 voids the header", id, id+"rev=+7 ", ""),
+		edit("rev=1.5 voids the header", id, id+"rev=1.5 ", ""),
+		edit("rev=7x voids the header", id, id+"rev=7x ", ""),
+		edit("a non-ASCII digit voids the header", id, id+"rev=\u0667 ", "Arabic-Indic seven: \\d must stay ASCII on both sides"),
+		edit("rev after hash: key order does not matter", " -->\n<!--", " rev=7 -->\n<!--", "anchored on the provenance line's end: the human line below it ends in ' -->' too"),
+		edit("a repeated rev: the last one counts (valid last)", id, id+"rev=0 rev=7 ", ""),
+		edit("a repeated rev: the last one counts (invalid last)", id, id+"rev=7 rev=0 ", ""),
+		edit("REV=7 is an unknown key, not a revision", id, id+"REV=7 ", "keys are case-sensitive"),
+		edit("an NBSP after the rev value", id, id+"rev=7\u00a0", "RE2 \\S takes the NBSP into the value; JS \\s takes it as a separator"),
+		edit("a vertical tab after the rev value", id, id+"rev=7\v", "RE2 \\s excludes \\v; JS \\s includes it"),
+		edit("an NBSP between two other keys", "source=", "\u00a0source=", "the same question without rev: it predates #1323"),
+		edit("a legacy header (control)", legacyOld, "Generated from hrn:node:a.com:mem:tasks:x -->\n<!-- hash=",
+			"the edit leaves a legacy line, then a comment neither reader treats as provenance"),
+		edit("a legacy header with an NBSP separator", legacyOld, "Generated from\u00a0hrn:node:a.com:mem:tasks:x -->\n<!-- hash=", ""),
+	}
+}
+
 // lintPerHost upserts authored cases into a section and fills each case's
 // findingsByHost from Go's LintFor over EVERY row of skilldoc.Hosts — never
 // skilldoc.Lint, the Claude-only wrapper, under which a codexSkill
@@ -465,6 +515,31 @@ func main() {
 	// c9fa75a) or later for the rule to exist.
 	doc["lintMarkup"], _ = json.Marshal(lintPerHost(doc, "lintMarkup", markupCases()))
 	doc["lintMarkupSourceCommit"], _ = json.Marshal(commit)
+
+	// ── parseHeader ─────────────────────────────────────────────────────────
+	// #1323: Go's ParseFile over the headerCases edits. Its own section and
+	// stamp, like lintMarkup; needs hadron-cli#724 (merged as 9e7d2bd) or
+	// later, where File.Revision exists — an older commit does not compile.
+	base, err := skilldoc.Render("node-1", "skill", "hrn:node:a.com:mem:tasks:x", "Use when testing.", "body")
+	if err != nil {
+		panic(fmt.Sprintf("parseHeader base render: %v", err))
+	}
+	pr := upsert(decodeOrEmpty(doc, "parseHeader"), headerCases()...)
+	for _, c := range pr {
+		old, repl := str(c, "old"), str(c, "new")
+		if strings.Count(base, old) != 1 {
+			panic(fmt.Sprintf("parseHeader %s: %q is not unique in the base file", str(c, "name"), old))
+		}
+		input := strings.Replace(base, old, repl, 1)
+		f, err := skilldoc.ParseFile([]byte(input))
+		if err != nil {
+			panic(fmt.Sprintf("parseHeader %s: %v", str(c, "name"), err))
+		}
+		c["input"] = input
+		c["id"], c["source"], c["hash"], c["revision"] = f.ID, f.Source, f.Hash, f.Revision
+	}
+	doc["parseHeader"], _ = json.Marshal(pr)
+	doc["parseHeaderSourceCommit"], _ = json.Marshal(commit)
 
 	// The commit is an ARGUMENT, never a literal. Hardcoding it meant the next
 	// regeneration at a newer revision would still stamp the old one, and
