@@ -38,8 +38,8 @@ describe('isForbiddenAddress', () => {
     }
   });
 
-  it('blocks loopback/unspecified/ULA/link-local/multicast IPv6', () => {
-    for (const ip of ['::1', '::', 'fc00::1', 'fd12:3456::1', 'fe80::1', 'ff02::1']) {
+  it('blocks loopback/unspecified/ULA/link-local/site-local/multicast IPv6', () => {
+    for (const ip of ['::1', '::', 'fc00::1', 'fd12:3456::1', 'fe80::1', 'febf::1', 'fec0::1', 'feff::1', 'ff02::1']) {
       expect(isForbiddenAddress(ip), ip).toBe(true);
     }
   });

@@ -101,7 +101,7 @@ describe('private endpoints (D4)', () => {
   });
 
   it('it never admits link-local (metadata), multicast, unspecified or other reserved ranges (#1380 review)', () => {
-    for (const url of ['http://169.254.169.254/latest', 'http://[fe80::1]/v1', 'http://224.0.0.1/v1', 'http://0.0.0.0/v1', 'http://[::]/v1', 'http://[fd00:ec2::254]/latest', 'http://[fd00:0ec2::254]/latest']) {
+    for (const url of ['http://169.254.169.254/latest', 'http://[fe80::1]/v1', 'http://[fec0::1]/v1', 'http://224.0.0.1/v1', 'http://0.0.0.0/v1', 'http://[::]/v1', 'http://[fd00:ec2::254]/latest', 'http://[fd00:0ec2::254]/latest']) {
       expect(() => validateEndpoint(url, optIn), url).toThrow(/never allowed/);
     }
     for (const url of ['http://172.16.4.2/v1', 'http://192.168.1.9/v1', 'http://[fd12:3456::1]/v1', 'http://127.0.0.1/v1']) {
