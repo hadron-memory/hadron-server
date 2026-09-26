@@ -864,7 +864,25 @@ export async function maybeAdvanceOwnChannelRead(
   if (args.sinceSeq != null && args.sinceSeq > seen) return null;
   const exhausted = args.page.total <= args.page.items.length;
   const visible = args.page.items.reduce((max, item) => Math.max(max, item.seq), seen);
-  const through = Math.min(args.capturedHead, exhausted ? args.capturedHead : visible);
+  let through = exhausted ? args.capturedHead : visible;
+  // A backfilled pre-#919 Channel can hold DUPLICATE seq values, and a partial
+  // page can end midway through one: advancing to it would hide the unread
+  // sibling forever (#1362 review, Codex P1). Stop one short when the Channel
+  // has more rows at the edge seq than this page returned.
+  if (!exhausted && visible > seen && row.channel.hostMemoryId) {
+    const returnedAtEdge = args.page.items.filter((item) => item.seq === visible).length;
+    const atEdge = await ctx.db.node.count({
+      where: {
+        memoryId: row.channel.hostMemoryId,
+        loc: { startsWith: escapePrismaLikePattern(`${row.channel.loc}:messages:`) },
+        nodeType: 'chat-message',
+        deletedAt: null,
+        seq: visible,
+      },
+    });
+    if (atEdge > returnedAtEdge) through = visible - 1;
+  }
+  through = Math.min(args.capturedHead, through);
   if (through <= seen) return seen;
   return advanceReadState(ctx.db, { workerId }, args.channelId, through);
 }

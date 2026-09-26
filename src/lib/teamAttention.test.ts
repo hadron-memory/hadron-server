@@ -129,6 +129,26 @@ afterEach(() => {
 });
 
 describe('worker-owned ordinary reads', () => {
+  it('a partial page ending inside a legacy duplicate seq stops one short (#1362 review)', async () => {
+    await post('one');
+    await post('two, first of a pre-#919 duplicate pair');
+    // The backfilled sibling: same seq, written outside the allocator.
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:002-dup`, name: '002-dup',
+        nodeType: 'chat-message', seq: 2, content: 'two, the unread sibling', createdAt: new Date(Date.now() + 1000),
+      },
+    });
+    const ctx = userCtx({ sessionId });
+    const page = await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 2, offset: 0 }, ctx);
+    expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1, 2]);
+    // Advancing to 2 would hide the sibling from every later read and count.
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
+    // Reading the rest finishes the pair, and the cursor then reaches the head.
+    await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 1, beforeSeq: null, mentionsRef: null, limit: 50, offset: 0 }, ctx);
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 2 });
+  });
+
   it('advances only contiguous, unfiltered forward pages and preserves every unsafe window', async () => {
     for (let i = 1; i <= 5; i++) await post(`message ${i}`);
     const ctx = userCtx({ sessionId });
