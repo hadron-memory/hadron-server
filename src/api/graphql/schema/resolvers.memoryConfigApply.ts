@@ -134,8 +134,6 @@ export async function applyMemoryConfigTemplate(
       // Validate the whole list before anything is written.
       const resolved = rules.flatMap(refsOf);
       await lockRuleRefs(ctx, tx, resolved);
-      await reassertManage(ctx, tx, memory.id, () => new MemoryNotFoundError(args.memoryRef));
-      await reassertManageOwner(ctx, tx, live, notFoundTemplate);
 
       // Lock order, as every rule write takes it: referenced nodes (above),
       // then the rules, then the config row (#1399 review). So the config is
@@ -154,6 +152,11 @@ export async function applyMemoryConfigTemplate(
           existing.set(r.role, r);
         }
       }
+      // Both gates asked again AFTER the last lock that can wait (the rules,
+      // above): a membership revoked while this transaction queued behind
+      // another rule write must not still authorize it (#1399 review).
+      await reassertManage(ctx, tx, memory.id, () => new MemoryNotFoundError(args.memoryRef));
+      await reassertManageOwner(ctx, tx, live, notFoundTemplate);
       // Asked once, fresh, only when a required template meets a locked rule.
       let lockAuthority: boolean | null = null;
       const mayMoveLocks = async () => {

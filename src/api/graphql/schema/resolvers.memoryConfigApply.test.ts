@@ -210,3 +210,51 @@ describe('RULE_LOCKED (#1334 slice 1)', () => {
     expect(code(await gql(as(orgAdmin), UPDATE_RULE, { r: entry.rule.id, i: { writers: 'OWNER' } }))).toBe('NOT_FOUND');
   });
 });
+
+describe('apply under concurrency (#1399 review)', () => {
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  /** Run `hold` in its own transaction, resolve once it holds its locks, commit on release(). */
+  function holder(hold: (tx: any) => Promise<void>) {
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const done = db.$transaction(async (tx) => { await hold(tx); held(); await gate; }, { timeout: 15_000 });
+    return { holding, release: () => { release(); return done; } };
+  }
+
+  it('a rule created concurrently for one of the roles fails the apply with CONFLICT, and nothing is half-applied', async () => {
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'aaa' }, { role: 'spec' }] });
+    // A createNodeRoleRule in flight: this memory's first config and a 'spec' rule, uncommitted.
+    const h = holder(async (tx) => {
+      const config = await tx.memoryConfig.create({ data: { id: generateId(), memoryId: mem.id } });
+      await tx.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'spec' } });
+    });
+    await h.holding;
+    const pending = apply(as(orgAdmin), t.id, mem.id);
+    await pause(300);
+    await h.release();
+    const r = await pending;
+    expect(code(r)).toBe('CONFLICT');
+    expect((await rulesOf(mem.id)).map((x) => x.role)).toEqual(['spec']);
+  });
+
+  it('authorization is re-asked after waiting on the rule lock: a demotion while queued refuses the apply', async () => {
+    await gql(as(orgAdmin), CREATE_RULE, { m: mem.id, i: { role: 'spec' } });
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'policy', required: true, rules: [{ role: 'spec', writers: 'ADMIN' }] });
+    const rule = (await rulesOf(mem.id))[0];
+    // An updateNodeRoleRule in flight holds the rule's row lock.
+    const h = holder(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "node_role_rules" WHERE "id" = ${rule.id} FOR UPDATE`;
+    });
+    await h.holding;
+    const pending = apply(as(orgAdmin), t.id, mem.id);
+    await pause(300); // the apply is now queued behind the rule lock
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: orgAdmin }, data: { role: 'CONTRIBUTOR' } });
+    await h.release();
+    const r = await pending;
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect((await rulesOf(mem.id))[0]).toMatchObject({ writers: 'ALL', locked: false, revision: 1 });
+  });
+});
+
