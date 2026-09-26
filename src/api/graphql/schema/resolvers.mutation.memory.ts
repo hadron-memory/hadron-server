@@ -774,14 +774,14 @@ export const memoryMutations = {
       // `updateAgent(visibility: PUBLIC)` cannot observe this memory as still
       // PUBLIC while this call observes no PUBLIC agent. This early pass stays
       // as the fail-fast, ahead of the URN/alias writes.
-      if (visibility !== undefined) {
+      if (visibility !== undefined || newOrgId !== undefined) {
         // Judged against the RESULTING tenant (@codex / @copilot, PR #1357): a
         // call that also transfers the memory must not classify agents against
-        // the organization it is leaving.
+        // the organization it is leaving; a transfer alone is checked too.
         await assertMemoryVisibilityChangeAllowed(
           ctx.db,
           { ...memory, organizationId: newOrgId ?? memory.organizationId },
-          visibility,
+          visibility ?? memory.visibility,
         );
       }
       // #1349 (@codex, PR #1357): narrowing out of PUBLIC also REVOKES the
@@ -976,10 +976,14 @@ export const memoryMutations = {
         // publication committing between the pre-transaction check above and
         // this row lock — which would otherwise leave a PUBLIC agent referencing
         // knowledge this call makes non-public (cor:acl:080:03).
-        if (visibility !== undefined) {
+        if (visibility !== undefined || newOrgId !== undefined) {
           // The POST-update row, like the sweep below — a transfer in the same
-          // call otherwise had the two judge DIFFERENT tenants.
-          await assertMemoryVisibilityChangeAllowed(tx, row, visibility);
+          // call otherwise had the two judge DIFFERENT tenants. And on a
+          // transfer ALONE too (@copilot, PR #1357): moving a non-PUBLIC memory
+          // into a tenant whose PUBLIC agent already links it would make that
+          // link same-tenant, so the sweep keeps it — a PUBLIC agent holding
+          // non-public knowledge. With no new visibility, the row's own counts.
+          await assertMemoryVisibilityChangeAllowed(tx, row, visibility ?? row.visibility);
         }
         if (visibility !== undefined || newOrgId !== undefined) {
           await revokeLinksForeignToTenant(tx, row, ctx.userId ?? ctx.clientId ?? null);
@@ -1569,6 +1573,11 @@ export const memoryMutations = {
         resolvedAgentId,
       );
       const txCtx = { ...ctx, db: tx } as Context;
+      // The AUTHORITATIVE agent gate, re-run on the LOCKED agent (@copilot,
+      // PR #1357): the check above read the agent before the lock, so an owner
+      // transfer or a membership revocation committing in between would
+      // otherwise let a caller who no longer administers it write the grant.
+      await requireOwnerOrOrgRole(txCtx, lockedAgent, 'ADMIN');
       // #1349 — THE MEMORY-SIDE GATE. The agent gate above says the caller may
       // configure this agent; it says nothing about the memory they are handing
       // it. Runs BEFORE the class checks below so a caller who cannot read the
@@ -1701,6 +1710,8 @@ export const memoryMutations = {
         resolvedMemoryId,
         resolvedAgentId,
       );
+      // Authoritative agent gate on the LOCKED agent — see addMemoryToAgent.
+      await requireOwnerOrOrgRole({ ...ctx, db: tx } as Context, lockedAgent, 'ADMIN');
       const grantedRole = await requireAgentMemoryGrant(
         { ...ctx, db: tx } as Context,
         lockedAgent,

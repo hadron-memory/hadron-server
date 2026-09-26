@@ -128,9 +128,14 @@ run "14 re-role actor stamp dropped" "$M" \
   "        data: { role: grantedRole },"
 
 # --- P1 round 2 (@codex on 7af8a4d6): each check serialized with its write ---
+# Anchored on the revocation call: the congruence check now opens with an
+# identical line, and a first-occurrence match silently mutated IT instead
+# (found when this mutant started "surviving" in round 4).
 run "15 revocation skips org transfer" "$M" \
-  "        if (visibility !== undefined || newOrgId !== undefined) {" \
-  "        if (visibility !== undefined) {"
+  "        if (visibility !== undefined || newOrgId !== undefined) {
+          await revokeLinksForeignToTenant(" \
+  "        if (visibility !== undefined) {
+          await revokeLinksForeignToTenant("
 run "16 revocation classifies from the PRE-update row" "$M" \
   "          await revokeLinksForeignToTenant(tx, row, ctx.userId ?? ctx.clientId ?? null);" \
   "          await revokeLinksForeignToTenant(tx, { ...memory, visibility: visibility ?? memory.visibility }, ctx.userId ?? ctx.clientId ?? null);"
@@ -160,11 +165,7 @@ run "23 publication does not lock linked memories" "$AG" \
 # PR #1357 round 2): each is killed by the concurrency test written for it, so
 # they are no longer allow-listed (@codex) — a regression must fail this script.
 run "24 narrowing check not re-run under the lock" "$M" \
-  "        if (visibility !== undefined) {
-          // The POST-update row, like the sweep below — a transfer in the same
-          // call otherwise had the two judge DIFFERENT tenants.
-          await assertMemoryVisibilityChangeAllowed(tx, row, visibility);
-        }" "        "
+  "          await assertMemoryVisibilityChangeAllowed(tx, row, visibility ?? row.visibility);" ""
 
 # 26 SURVIVES by design — see the UNPROVEN BY TEST note at that line.
 run "25 promotion back outside the deciding transaction" "$AG" \
@@ -238,7 +239,15 @@ run "45 role parsed before concealment" "$H" \
 run "46 narrowing judged against the pre-transfer tenant (fail-fast)" "$M" \
   "          { ...memory, organizationId: newOrgId ?? memory.organizationId }," "          memory,"
 run "47 narrowing judged against the pre-update row (in-transaction)" "$M" \
-  "          await assertMemoryVisibilityChangeAllowed(tx, row, visibility);" "          await assertMemoryVisibilityChangeAllowed(tx, memory, visibility);"
+  "          await assertMemoryVisibilityChangeAllowed(tx, row, visibility ?? row.visibility);" "          await assertMemoryVisibilityChangeAllowed(tx, memory, visibility ?? memory.visibility);"
+run "48 a transfer alone skips the congruence check" "$M" \
+  "        if (visibility !== undefined || newOrgId !== undefined) {
+          // The POST-update row" "        if (visibility !== undefined) {
+          // The POST-update row"
+run "49 agent gate not re-run on the locked agent (attach)" "$M" \
+  "      await requireOwnerOrOrgRole(txCtx, lockedAgent, 'ADMIN');" ""
+run "50 agent gate not re-run on the locked agent (re-role)" "$M" \
+  "      await requireOwnerOrOrgRole({ ...ctx, db: tx } as Context, lockedAgent, 'ADMIN');" ""
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

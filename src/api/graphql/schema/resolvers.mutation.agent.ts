@@ -287,6 +287,74 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   return createdAgent;
 }
 
+
+/**
+ * Bring an agent's system-memory URN in line with the agent's CURRENT URN,
+ * after a rename (#1357, @codex).
+ *
+ * Runs after the rename commits, so two renames of one agent can race: the
+ * second's sync can run first, find the memory still at the FIRST's old
+ * derived URN and skip, and the first's sync then advance it only to the
+ * intermediate URN — agent `C`, memory `B-system`. Writing the agent's URN as
+ * read now, under the memory row lock, converges instead: every sync starts
+ * after its own rename committed and syncs serialize on the memory lock, so
+ * the last one to run sees the latest agent. Locks the MEMORY only (the agent
+ * is read, not locked): locking the agent here would invert the attach path's
+ * memory-then-agent order.
+ *
+ * Rewrites only a URN still on the DERIVED pattern of this request's old agent
+ * URN — an author-chosen system-memory URN is never touched.
+ */
+export async function syncSystemMemoryUrn(
+  db: Context['db'],
+  args: { agentId: string; systemMemoryId: string; oldAgentUrn: string; actor: string | null },
+): Promise<void> {
+  const derivedOldUrn = `${args.oldAgentUrn}-system`;
+  await db.$transaction(async (tx) => {
+    const [lockedSys] = await tx.$queryRaw<{ urn: string }[]>`
+      SELECT urn FROM memories WHERE id = ${args.systemMemoryId} FOR UPDATE
+    `;
+    const currentSysUrn = lockedSys?.urn;
+    if (!currentSysUrn || currentSysUrn !== derivedOldUrn) return;
+    const current = await tx.agent.findUnique({ where: { id: args.agentId }, select: { urn: true } });
+    if (!current) return;
+    const targetUrn = `${current.urn}-system`;
+    if (targetUrn === currentSysUrn) return;
+    await tx.memory.update({
+      where: { id: args.systemMemoryId },
+      data: { urn: targetUrn, updatedBy: args.actor },
+    });
+    await recordUrnRename(tx, {
+      entityType: 'MEMORY',
+      entityId: args.systemMemoryId,
+      oldUrn: currentSysUrn,
+      newUrn: targetUrn,
+      createdBy: args.actor,
+    });
+  });
+}
+
+/**
+ * Bring an agent's system-memory name in line with the agent's CURRENT name
+ * (#1357, @codex): the same race as {@link syncSystemMemoryUrn} — two renames'
+ * syncs landing in reverse order would leave the OLDER name — closed the same
+ * way, by writing the agent's name as read under the memory row lock.
+ */
+export async function syncSystemMemoryName(
+  db: Context['db'],
+  args: { agentId: string; systemMemoryId: string; actor: string | null },
+): Promise<void> {
+  await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.systemMemoryId} FOR UPDATE`;
+    const current = await tx.agent.findUnique({ where: { id: args.agentId }, select: { name: true } });
+    if (!current) return;
+    await tx.memory.update({
+      where: { id: args.systemMemoryId },
+      data: { name: `${current.name} System`, updatedBy: args.actor },
+    });
+  });
+}
+
 export const agentMutations = {
     createAgent: async (
       _: unknown,
@@ -684,99 +752,26 @@ export const agentMutations = {
       // system-memory URN-reclaim check (#519 review). Only touch a memory whose
       // URN still matches the derived pattern: a wizard-supplied system memory
       // carries its own author-chosen URN we must not rewrite.
+      // Post-commit syncs of the agent's system memory (URN, then name). Both
+      // write the agent's CURRENT state, read under the memory lock — not this
+      // request's values — so two concurrent renames converge on the latest
+      // (@codex, PR #1357). See syncSystemMemoryUrn / syncSystemMemoryName.
       if (agent.systemMemoryId && newUrn !== undefined && newUrn !== agent.urn) {
-        const derivedOldUrn = `${agent.urn}-system`;
-        const sys = await ctx.db.memory.findUnique({
-          where: { id: agent.systemMemoryId },
-          select: { urn: true },
-        });
-        if (sys?.urn === derivedOldUrn) {
-          // #1079 (PR #1080 review, Codex + Copilot P2) — this renames a
-          // MEMORY, so it owes a MEMORY alias. Without one an agent rename
-          // silently 404'd every published node and edge URN under that
-          // agent's system memory — which for a Team Agent is its whole
-          // `roles:` branch, and for any agent is where its definition lives.
-          // I aliased the Agent and missed the memory it drags along.
-          //
-          // Wrapped in its OWN transaction rather than folded into the agent
-          // rename below, which preserves the best-effort contract this block
-          // already had: a URN collision here must not fail the agent rename.
-          // Folding it in would also break on the first caught error, because a
-          // failed statement poisons the enclosing Postgres transaction — the
-          // catch would swallow the error and every later write in that
-          // transaction would fail with "current transaction is aborted".
-          await ctx.db
-            .$transaction(async (tx) => {
-              const memId = agent.systemMemoryId as string;
-              // Lock and RE-READ inside the transaction (PR #1080 re-review,
-              // Codex P2). `sys.urn` was read before this transaction opened, so
-              // two concurrent agent renames could both see `A-system`; the
-              // first commits `B-system`, the second overwrites with `C-system`
-              // while still recording `A-system` as the predecessor — leaving
-              // the committed, possibly published `B-system` with no alias.
-              // Aliasing the urn actually superseded is the whole point.
-              const [lockedSys] = await tx.$queryRaw<{ urn: string }[]>`
-                SELECT urn FROM memories WHERE id = ${memId} FOR UPDATE
-              `;
-              const currentSysUrn = lockedSys?.urn;
-              // Re-check the derived-pattern guard against the LOCKED value: a
-              // concurrent rename may already have moved it off the pattern, and
-              // a wizard-supplied system memory carries an author-chosen URN we
-              // must never rewrite.
-              //
-              // UNPROVEN BY TEST, and kept anyway. Mutating this line away leaves
-              // the suite green, because the pre-transaction check above already
-              // excludes every input the suite can construct. Reaching it needs
-              // the pattern to match at that outer read and to have CHANGED by
-              // the time this lock is acquired — a genuine interleaving no test
-              // here can stage. Per `review:a-green-mutation-indicts-the-test`
-              // that green indicts the test, not the guard: it does not mean the
-              // check is redundant, only that nothing exercises it. It is the
-              // sole thing standing between a concurrent rename and this code
-              // rewriting an author-chosen system-memory URN from stale data.
-              if (!currentSysUrn || currentSysUrn !== derivedOldUrn) return;
-              await tx.memory.update({
-                where: { id: memId },
-                data: {
-                  urn: `${newUrn}-system`,
-                  updatedBy: ctx.userId ?? ctx.clientId ?? null,
-                },
-              });
-              await recordUrnRename(tx, {
-                entityType: 'MEMORY',
-                entityId: memId,
-                oldUrn: currentSysUrn,
-                newUrn: `${newUrn}-system`,
-                createdBy: ctx.userId ?? ctx.clientId ?? null,
-              });
-            })
-            .catch((err) => {
-              // Best-effort, like the name sync below: a rare collision on the
-              // new URN shouldn't fail the whole agent rename. The alias and the
-              // rename succeed or fail together, so a failure here leaves the
-              // memory at its old URN — still resolvable, which is the safe
-              // direction.
-              console.warn('[updateAgent] system memory URN sync failed:', err);
-            });
-        }
-      }
-
-      // ── Name sync for existing system memory.
-      // If the agent already has a system memory and the caller is updating
-      // the agent's name, propagate so they stay in lockstep.
-      // 035-visibility-enum-cleanup: visibility no longer propagates — a
-      // system memory's visibility is always NULL.
-      if (agent.systemMemoryId && name !== undefined) {
-        await ctx.db.memory.update({
-          where: { id: agent.systemMemoryId },
-          data: {
-            name: `${name} System`,
-            updatedBy: ctx.userId ?? ctx.clientId ?? null,
-          },
+        await syncSystemMemoryUrn(ctx.db, {
+          agentId: agent.id,
+          systemMemoryId: agent.systemMemoryId,
+          oldAgentUrn: agent.urn,
+          actor: ctx.userId ?? ctx.clientId ?? null,
         }).catch((err) => {
-          // Log but don't block the agent update — if the system memory
-          // has been manually renamed or deleted, we don't want to fail
-          // the whole operation.
+          console.warn('[updateAgent] system memory URN sync failed:', err);
+        });
+      }
+      if (agent.systemMemoryId && name !== undefined) {
+        await syncSystemMemoryName(ctx.db, {
+          agentId: agent.id,
+          systemMemoryId: agent.systemMemoryId,
+          actor: ctx.userId ?? ctx.clientId ?? null,
+        }).catch((err) => {
           console.warn('[updateAgent] system memory sync failed:', err);
         });
       }

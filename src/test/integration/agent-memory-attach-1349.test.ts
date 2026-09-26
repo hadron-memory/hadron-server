@@ -1198,3 +1198,141 @@ describe('#1357 round 3 (@codex / @copilot, PR #1357)', () => {
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: srcAgent.id } })).deletedAt).not.toBeNull();
   });
 });
+
+describe('#1357 round 4 (@codex / @copilot, PR #1357)', () => {
+  it('a TRANSFER alone into a tenant whose PUBLIC agent links the memory is refused (congruence)', async () => {
+    const orgC = await db.organization.create({ data: { id: generateId(), name: 'c-xonly', urn: `c-xonly-${suffix}` } });
+    const victim = await db.user.findFirstOrThrow({ where: { handle: `victim-${suffix}` } });
+    await db.orgMember.create({ data: { organizationId: orgC.id, userId: victim.id, role: 'OWNER' } });
+    const m = await db.memory.create({
+      data: { id: generateId(), organizationId: victimOrgId, urn: `victim-${suffix}:xonly`, name: 'xonly', class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+    });
+    const destPub = await db.agent.create({
+      data: { id: generateId(), organizationId: orgC.id, name: 'xonlypub', urn: `c-xonly-${suffix}:pub`, visibility: 'PUBLIC' } as never,
+    });
+    // A pre-existing cross-tenant link — after the transfer it would be same-tenant and survive the sweep.
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: destPub.id, memoryId: m.id, role: 'read' } });
+    const r = await gql(key.victim!, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: m.id, o: orgC.id });
+    expect(r.errors?.[0]?.message ?? '').toMatch(/knowledge of the PUBLIC agent/);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).organizationId).toBe(victimOrgId);
+  });
+
+  it('the agent gate is re-checked on the LOCKED agent: a revocation just before the transaction refuses the attach', async () => {
+    const { agentId } = await agentWithApp(attackerOrgId, 'toctou');
+    // A PUBLIC memory in the agent's own org: a revoked user can STILL read it,
+    // so the memory-side gate and tenancy both pass and only the agent gate can
+    // refuse. (First version used an org-visible memory, and the memory-side
+    // gate refused after the revocation — masked, caught by running this test
+    // against the previous head.)
+    const pub = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:toctou-pub`, name: 'toctou-pub', class: 'knowledge', visibility: 'PUBLIC' } as never,
+    });
+    const membership = await db.orgMember.findFirstOrThrow({ where: { organizationId: attackerOrgId, userId: attacker2UserId } });
+    // Stage the interleaving: the pre-transaction agent gate has passed; the
+    // revocation commits; then the transaction runs.
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce((async (...a: unknown[]) => {
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: attackerOrgId, userId: attacker2UserId } } as never, data: { deletedAt: new Date() } });
+      return real(...a);
+    }) as never);
+    try {
+      const r = await gql(key.attacker2!, ATTACH, { g: agentId, m: `hrn:mem:attacker-${suffix}:toctou-pub`, r: 'read' });
+      expect(spy).toHaveBeenCalled();
+      expect(r.errors, 'refused by the in-transaction agent gate').toHaveLength(1);
+      expect(await db.agentMemoryItem.count({ where: { agentId, memoryId: pub.id } })).toBe(0);
+    } finally {
+      spy.mockRestore();
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: attackerOrgId, userId: attacker2UserId } } as never, data: { deletedAt: membership.deletedAt } });
+    }
+  });
+
+  it('rename race: the OLDER rename\'s sync lands last and still converges on the agent\'s CURRENT URN and name', async () => {
+    const { syncSystemMemoryUrn, syncSystemMemoryName } = await import('../../api/graphql/schema/resolvers.mutation.agent.js');
+    // State after two renames A→B→C committed, with the SECOND sync already run
+    // (it skipped: memory still at A-system) and the FIRST sync about to run.
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'Final Name', urn: `attacker-${suffix}:race-c` } as never,
+    });
+    const sys = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:race-a-system`, name: 'First Name System', class: 'system' } as never,
+    });
+    await syncSystemMemoryUrn(db as never, { agentId: agent.id, systemMemoryId: sys.id, oldAgentUrn: `attacker-${suffix}:race-a`, actor: null });
+    await syncSystemMemoryName(db as never, { agentId: agent.id, systemMemoryId: sys.id, actor: null });
+    const after = await db.memory.findUniqueOrThrow({ where: { id: sys.id } });
+    expect(after.urn).toBe(`attacker-${suffix}:race-c-system`);
+    expect(after.name).toBe('Final Name System');
+  });
+
+  it('rename sync never rewrites an author-chosen system-memory URN', async () => {
+    const { syncSystemMemoryUrn } = await import('../../api/graphql/schema/resolvers.mutation.agent.js');
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'x', urn: `attacker-${suffix}:chosen-new` } as never,
+    });
+    const sys = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:my-own-brain`, name: 'b', class: 'system' } as never,
+    });
+    await syncSystemMemoryUrn(db as never, { agentId: agent.id, systemMemoryId: sys.id, oldAgentUrn: `attacker-${suffix}:chosen-old`, actor: null });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: sys.id } })).urn).toBe(`attacker-${suffix}:my-own-brain`);
+  });
+});
+
+describe('#1357 round 4 — re-role TOCTOU', () => {
+  it('the agent gate is re-checked on the LOCKED agent for a RE-ROLE too', async () => {
+    const { agentId } = await agentWithApp(attackerOrgId, 'toctou-rerole');
+    const pub = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:toctou-rr`, name: 'toctou-rr', class: 'knowledge', visibility: 'PUBLIC' } as never,
+    });
+    const row = await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: pub.id, role: 'read' } });
+    const membership = await db.orgMember.findFirstOrThrow({ where: { organizationId: attackerOrgId, userId: attacker2UserId } });
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce((async (...a: unknown[]) => {
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: attackerOrgId, userId: attacker2UserId } } as never, data: { deletedAt: new Date() } });
+      return real(...a);
+    }) as never);
+    try {
+      // Re-role to the SAME `read` role: the memory-side gate and tenancy pass
+      // for a PUBLIC same-org memory, so only the agent gate can refuse.
+      const r = await gql(key.attacker2!, SET_ROLE, { g: agentId, m: `hrn:mem:attacker-${suffix}:toctou-rr`, r: 'read' });
+      expect(spy).toHaveBeenCalled();
+      expect(r.errors, 'refused by the in-transaction agent gate').toHaveLength(1);
+      expect((await db.agentMemoryItem.findUniqueOrThrow({ where: { id: row.id } })).updatedBy).toBeNull();
+    } finally {
+      spy.mockRestore();
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: attackerOrgId, userId: attacker2UserId } } as never, data: { deletedAt: membership.deletedAt } });
+    }
+  });
+});
+
+describe('#1357 round 4 — the in-transaction congruence check on a transfer', () => {
+  it('a destination PUBLIC-agent link committing after the fail-fast is caught under the lock', async () => {
+    const orgC = await db.organization.create({ data: { id: generateId(), name: 'c-late', urn: `c-late-${suffix}` } });
+    const victim = await db.user.findFirstOrThrow({ where: { handle: `victim-${suffix}` } });
+    await db.orgMember.create({ data: { organizationId: orgC.id, userId: victim.id, role: 'OWNER' } });
+    const m = await db.memory.create({
+      data: { id: generateId(), organizationId: victimOrgId, urn: `victim-${suffix}:late`, name: 'late', class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+    });
+    const destPub = await db.agent.create({
+      data: { id: generateId(), organizationId: orgC.id, name: 'latepub', urn: `c-late-${suffix}:pub`, visibility: 'PUBLIC' } as never,
+    });
+    // The fail-fast runs before any transaction and sees NO link. The link
+    // commits between it and the deciding transaction — the window only the
+    // in-transaction check covers (it was masked by the fail-fast otherwise).
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    let staged = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...a: unknown[]) => {
+      if (!staged) {
+        staged = true;
+        await db.agentMemoryItem.create({ data: { id: generateId(), agentId: destPub.id, memoryId: m.id, role: 'read' } });
+      }
+      return real(...a);
+    }) as never);
+    try {
+      const r = await gql(key.victim!, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: m.id, o: orgC.id });
+      expect(staged, 'the link was staged inside the window').toBe(true);
+      expect(r.errors?.[0]?.message ?? '').toMatch(/knowledge of the PUBLIC agent/);
+      expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).organizationId).toBe(victimOrgId);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
