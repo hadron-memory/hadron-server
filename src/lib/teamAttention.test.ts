@@ -476,6 +476,18 @@ describe('MCP parity and discovery gate', () => {
       .toMatchObject({ lastSeenSeq: 2 });
   });
 
+  it('stops advertising the capability once the tools would refuse the App (#1362 review)', async () => {
+    const probe = () => createTestableMcpServer(auth()).callToolText('hadron_server_info', {});
+    expect(await probe()).toContain('team-attention');
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    expect(await probe()).not.toContain('team-attention');
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null } });
+    // Losing participation: no AppMember row, and an org role too weak to admit.
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: user.id } } });
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: user.id }, data: { role: 'READER' } });
+    expect(await probe()).not.toContain('team-attention');
+  });
+
   it('advertises the capability only inside the operator+App pilot and delegates the compact query', async () => {
     const enabled = createTestableMcpServer(auth());
     expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention');

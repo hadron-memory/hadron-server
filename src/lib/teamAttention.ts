@@ -242,6 +242,22 @@ async function resolvePilotApp(ctx: Context, appRef: string): Promise<AppRow> {
   return app;
 }
 
+/**
+ * Whether `resolvePilotApp` would admit this caller and App — the SAME checks,
+ * as a boolean, for the capability probe (#1362 review, Codex P2). Probing on
+ * the env allowlists alone advertised `team-attention` for an App that had
+ * since been uninstalled, deleted or left, and every tool then answered
+ * APP_NOT_FOUND.
+ */
+export async function teamAttentionAvailable(ctx: Context, appId: string): Promise<boolean> {
+  if (!ctx.userId || ctx.impersonation || !teamAttentionPilotEnabled(ctx.userId, appId)) return false;
+  const app = await ctx.db.app.findFirst({
+    where: { id: appId, ...LIVE_APP_WHERE },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  return !!app && (await isAppParticipant(ctx, app));
+}
+
 async function liveOwnWorkers(ctx: Context, app: AppRow): Promise<LiveWorker[]> {
   const now = new Date();
   const rows = await ctx.db.session.findMany({

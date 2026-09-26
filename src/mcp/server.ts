@@ -221,7 +221,7 @@ import { attendeeMentionTokens } from '../lib/channelReadState.js';
 import {
   markOwnTeamChatRead,
   maybeAdvanceOwnChannelRead,
-  teamAttentionPilotEnabled,
+  teamAttentionAvailable,
   teamAttentionPilotOperatorEnabled,
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
@@ -2159,7 +2159,9 @@ export function createMcpServerInstance(
         `version: ${dep.version}`,
         `capabilities: ${[
           ...MCP_SURFACE_CAPABILITIES,
-          ...(auth.appId && teamAttentionPilotEnabled(auth.userId ?? undefined, auth.appId) ? ['team-attention'] : []),
+          // Probed exactly as the tools will admit the call: allowlists, a
+          // live App and current participation (#1362 review).
+          ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId)) ? ['team-attention'] : []),
         ].join(', ')}`,
       ];
       // Spec 049 Phase 1: the resolved active organization and which rung of
