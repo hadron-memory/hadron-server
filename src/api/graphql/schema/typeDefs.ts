@@ -3083,6 +3083,8 @@ export const typeDefs = `#graphql
     at: DateTime!
     "Optional display extras (title, URL) — never filtered on."
     detail: JSON
+    "The LLM model that produced the work, snapshotted at record time (#1398): an explicit report wins over the recording session's model; null on records that predate the field or were made with none — never backfilled, so null always means unknown-at-record-time."
+    model: String
   }
 
   type TeamWorkItemsPage {
@@ -8815,6 +8817,8 @@ export const typeDefs = `#graphql
       ref: String!
       action: String!
       detail: JSON
+      "Optional explicit model report (#1398). Takes precedence over the session's model; a model switch or a late record should pass the model that actually did the work. Empty string is refused — pass nothing to fall back to the session's model."
+      model: String
     ): TeamWorkItem!
 
     """

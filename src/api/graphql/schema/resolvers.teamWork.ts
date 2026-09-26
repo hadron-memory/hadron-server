@@ -93,6 +93,35 @@ export const WORKLOG_COLLECTION_SCHEMA: MemorySchemaObjectType = {
     ref: { type: 'text', required: true },
     action: { type: 'text', required: true },
     at: { type: 'datetime', required: true },
+    // #1398: optional, event-time snapshot of the model that produced the
+    // work — explicit report wins over the session's llmModel; absent on
+    // records made before this field existed (read back as null, never
+    // backfilled: null means "unknown", not "the worker's current model").
+    model: { type: 'text', required: false },
+  },
+};
+
+/**
+ * The pre-#1398 canonical (#974's shape, without `model`) — same convergence
+ * rule as the pre-#974 legacy below: a stored declaration that deep-equals a
+ * SERVER-written canonical converges in place on the next record, so
+ * existing teams gain the optional field without an admin act. A declaration
+ * equal to NEITHER canonical is a deployment decision and stays governed —
+ * and since the collection is non-strict, `model` still admits unvalidated
+ * there, exactly as `detail` always has (adding attribution must not break
+ * existing writers).
+ */
+const PRE_MODEL_WORKLOG_COLLECTION_SCHEMA: MemorySchemaObjectType = {
+  description:
+    'Append-only team worklog — externally visible work milestones (#947, spec cor:agt:020). ref is the canonical equality-lookup key.',
+  fields: {
+    sessionId: { type: 'text', required: true },
+    workerName: { type: 'text', required: true },
+    tool: { type: 'text', required: true },
+    kind: { type: 'enum', required: true, values: [...WORK_KINDS] },
+    ref: { type: 'text', required: true },
+    action: { type: 'text', required: true },
+    at: { type: 'datetime', required: true },
   },
 };
 
@@ -239,7 +268,11 @@ async function ensureWorklogSchema(ctx: Context, memoryId: string): Promise<void
   const isDeclared = (schema: MemorySchema | null): boolean => {
     const current = schema?.objectTypes?.[WORKLOG_OBJECT_TYPE];
     if (!current) return false;
-    return stableJson(current) !== stableJson(LEGACY_WORKLOG_COLLECTION_SCHEMA);
+    const canonical = stableJson(current);
+    // #1398: BOTH server-written pre-shapes converge — the pre-#974 one and
+    // the pre-model #974 one. Anything else is a deployment decision.
+    return canonical !== stableJson(LEGACY_WORKLOG_COLLECTION_SCHEMA)
+      && canonical !== stableJson(PRE_MODEL_WORKLOG_COLLECTION_SCHEMA);
   };
   const row = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { schema: true } });
   if (isDeclared((row?.schema as unknown as MemorySchema | null) ?? null)) return;
@@ -424,10 +457,10 @@ async function resolveWorkSession(
   ctx: Context,
   app: AppRow,
   sessionRef: string,
-): Promise<{ sessionId: string; workerName: string; workerId: string | null }> {
+): Promise<{ sessionId: string; workerName: string; workerId: string | null; llmModel: string | null }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, deletedAt: true },
+    select: { id: true, appId: true, userId: true, workerId: true, deletedAt: true, llmModel: true },
   });
   if (!session || session.deletedAt) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -485,16 +518,16 @@ async function resolveWorkSession(
         { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
       );
     }
-    return { sessionId: session.id, workerName: worker.name, workerId: worker.id };
+    return { sessionId: session.id, workerName: worker.name, workerId: worker.id, llmModel: session.llmModel };
   }
   if (session.userId) {
     const user = await ctx.db.user.findUnique({
       where: { id: session.userId },
       select: { handle: true },
     });
-    if (user?.handle) return { sessionId: session.id, workerName: user.handle, workerId: null };
+    if (user?.handle) return { sessionId: session.id, workerName: user.handle, workerId: null, llmModel: session.llmModel };
   }
-  return { sessionId: session.id, workerName: app.name, workerId: null };
+  return { sessionId: session.id, workerName: app.name, workerId: null, llmModel: session.llmModel };
 }
 
 /** GraphQL shape of one worklog record. (Exported — TS4023: a resolver map
@@ -510,6 +543,7 @@ export interface TeamWorkItemOut {
   action: string;
   at: Date;
   detail: unknown;
+  model: string | null;
 }
 
 type WorkRow = { id: string; properties: unknown; createdAt: Date };
@@ -535,6 +569,10 @@ function projectWorkItem(row: WorkRow): TeamWorkItemOut {
     action: str(p.action),
     at,
     detail: p.detail ?? null,
+    // #1398: null on records that predate the field — deliberately NOT
+    // backfilled from the worker's current model, so null always means
+    // "unknown at record time", never a relabel.
+    model: str(p.model) || null,
   };
 }
 
@@ -655,6 +693,7 @@ export const teamWorkMutations = {
       ref,
       action,
       detail,
+      model,
     }: {
       appRef: string;
       sessionRef: string;
@@ -663,6 +702,7 @@ export const teamWorkMutations = {
       ref: string;
       action: string;
       detail?: unknown;
+      model?: string | null;
     },
     ctx: Context,
   ): Promise<TeamWorkItemOut> => {
@@ -684,6 +724,18 @@ export const teamWorkMutations = {
       }
     }
 
+    // #1398 — explicit model report: refuse a non-string or an empty/whitespace
+    // value rather than silently falling back to the session's model (a typo
+    // must not relabel the milestone), and cap it like any stored vocabulary
+    // word. NOT verified runtime telemetry — the caller's report.
+    let reportedModel: string | null = null;
+    if (model != null) {
+      if (typeof model !== 'string' || model.trim() === '') {
+        throw badInput('model must be a non-empty string when provided (pass null to use the session model).');
+      }
+      reportedModel = model.trim().slice(0, 120);
+    }
+
     const { id: appId } = await resolveAppRef(ctx.db, appRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     if (app.uninstalledAt) {
@@ -692,7 +744,7 @@ export const teamWorkMutations = {
       });
     }
     await requireTeamWorkAccess(ctx, app, 'record');
-    const { sessionId, workerName, workerId } = await resolveWorkSession(ctx, app, sessionRef);
+    const { sessionId, workerName, workerId, llmModel } = await resolveWorkSession(ctx, app, sessionRef);
 
     const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));
     await ensureWorklogSchema(ctx, root.memoryId);
@@ -708,6 +760,9 @@ export const teamWorkMutations = {
       action: actionToken,
       at: at.toISOString(),
       ...(detail != null ? { detail } : {}),
+      // Event-time snapshot (#1398): explicit report > session's llmModel >
+      // absent. Later session/model changes can never relabel this row.
+      ...((reportedModel ?? llmModel) != null ? { model: reportedModel ?? llmModel } : {}),
     };
     // #725: this surface holds itself to the declared schema — including a
     // deployment-tightened one (an admin-edited worklog declaration governs
@@ -766,6 +821,7 @@ export const teamWorkMutations = {
       action: actionToken,
       at,
       detail: detail ?? null,
+      model: reportedModel ?? llmModel,
     };
   },
 };
