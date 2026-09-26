@@ -904,6 +904,25 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     expect(edited).toMatchObject({ enabled: false, effectiveEndpoint: 'https://api.z.ai/api/paas/v4' });
   });
 
+  it('openai-compatible needs an endpoint on every write surface (#1373)', async () => {
+    const code = async (p: Promise<unknown>) => ((await p.catch((e) => e)) as GraphQLError)?.extensions?.code;
+    // Modern create: refused without, accepted with.
+    expect(await code(mk({ provider: 'openai-compatible', model: 'llama-3.3-70b', name: 'nope' }))).toBe('AiConfigValidationError');
+    const c = await mk({ provider: 'openai-compatible', model: 'llama-3.3-70b', name: 'compat', endpoint: 'https://api.together.xyz/v1', params: { toolCalling: true } });
+    expect(c).toMatchObject({ provider: 'openai-compatible', effectiveEndpoint: 'https://api.together.xyz/v1', effectiveApiStyle: 'CHAT_COMPLETIONS' });
+    // Clearing its endpoint would strand it.
+    expect(await code(resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, endpoint: null }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    // Switching another provider to it without one is refused too.
+    const other = await mk({ name: 'switch' });
+    expect(await code(resolvers.Mutation.updateAiServiceConfig({}, { id: other.id, provider: 'openai-compatible' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    // The legacy surfaces cannot set an endpoint, so they cannot create one.
+    expect(await code(resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai-compatible', model: 'x', apiKey: 'k' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    expect(await code(resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'openai-compatible', aiModel: 'x', aiApiKey: 'k' } as never, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    expect(await db.aiServiceConfig.count({ where: { provider: 'openai-compatible', endpoint: null } })).toBe(0);
+    // params.toolCalling is type-checked.
+    expect(await code(mk({ provider: 'openai-compatible', model: 'm', name: 'badtools', endpoint: 'https://api.together.xyz/v1', params: { toolCalling: 'yes' } }))).toBe('UnknownAiProviderError');
+  });
+
   it('aiProviderEndpoints serves the single suggestion list: one default per listed provider, none for bedrock or an unknown provider', async () => {
     const glm = await resolvers.Query.aiProviderEndpoints({}, { provider: 'glm' });
     expect(glm.map((e) => e.url)).toEqual([

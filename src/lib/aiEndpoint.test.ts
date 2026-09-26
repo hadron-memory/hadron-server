@@ -10,6 +10,7 @@ import {
   explicitEndpoint,
   isPrivateNetworkAddress,
   refuseLegacyBaseUrl,
+  requireEndpointFor,
   validateApiStyle,
   validateEndpoint,
 } from './aiEndpoint.js';
@@ -132,5 +133,23 @@ describe('apiStyle (D3)', () => {
     expect(() => validateApiStyle('openai', 'COMPLETIONS')).toThrow(/Unknown apiStyle/);
     expect(() => validateApiStyle('anthropic', null)).not.toThrow();
     expect(() => validateApiStyle('glm', 'RESPONSES')).not.toThrow();
+  });
+});
+
+describe('openai-compatible (#1373)', () => {
+  it('has no default endpoint and no suggestions: the host IS the configuration', () => {
+    expect(effectiveEndpoint({ provider: 'openai-compatible' })).toBeNull();
+    expect(AI_PROVIDER_ENDPOINTS['openai-compatible']).toEqual([]);
+  });
+
+  it('requires an endpoint; other providers do not', () => {
+    expect(() => requireEndpointFor('openai-compatible', null)).toThrow(/needs an endpoint/);
+    expect(() => requireEndpointFor('openai-compatible', 'https://api.together.xyz/v1')).not.toThrow();
+    expect(() => requireEndpointFor('glm', null)).not.toThrow();
+  });
+
+  it('speaks Chat Completions by default, and either style may be chosen', () => {
+    expect(effectiveApiStyle({ provider: 'openai-compatible' })).toBe('CHAT_COMPLETIONS');
+    expect(() => validateApiStyle('openai-compatible', 'RESPONSES')).not.toThrow();
   });
 });

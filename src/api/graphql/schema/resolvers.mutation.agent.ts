@@ -1,6 +1,6 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
-import { apiStyleApplies, refuseLegacyBaseUrl, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
+import { apiStyleApplies, refuseLegacyBaseUrl, requireEndpointFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
   assertSystemMemoryOwner,
@@ -863,6 +863,14 @@ export const agentMutations = {
       const existing = await ctx.db.aiServiceConfig.findFirst({
         where: { agentId: resolvedAgentId, name: DEFAULT_AI_CONFIG_NAME },
       });
+      // This legacy surface cannot set an endpoint, so an openai-compatible
+      // config through it must keep the one it has (same provider) — a
+      // provider change clears the endpoint below (#1373).
+      try {
+        requireEndpointFor(provider, existing && existing.provider === provider ? existing.endpoint : null);
+      } catch (e) {
+        rethrowAiConfigTyped(e);
+      }
       const keyData: Record<string, string> = {};
       if (apiKey) {
         keyData.apiKeyEncrypted = encryptToken(apiKey);
@@ -956,6 +964,7 @@ export const agentMutations = {
         validateProviderAndParams(args.provider, args.params ?? null);
         refuseLegacyBaseUrl(args.params);
         const endpoint = args.endpoint ? validateEndpoint(args.endpoint) : null;
+        requireEndpointFor(args.provider, endpoint);
         validateApiStyle(args.provider, args.apiStyle);
         // No upsert: a P2002 from the partial unique (owner, name) index is
         // the duplicate-name typed error, not a retry (upsert is not
@@ -1023,6 +1032,7 @@ export const agentMutations = {
         // style the new provider has no use for.
         const apiStyle = args.apiStyle === undefined ? existing.apiStyle : args.apiStyle;
         validateApiStyle(provider, apiStyle);
+        requireEndpointFor(provider, endpoint === undefined ? existing.endpoint : endpoint);
         const config = await ctx.db.aiServiceConfig.update({
           where: { id: existing.id },
           data: {

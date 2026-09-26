@@ -59,7 +59,7 @@ export class NoAiConfigAvailableError extends Error {
 
 // ── Provider registry + validation ──────────────────────────────────────
 
-export const KNOWN_AI_PROVIDERS = ['anthropic', 'openai', 'glm', 'bedrock'] as const;
+export const KNOWN_AI_PROVIDERS = ['anthropic', 'openai', 'glm', 'bedrock', 'openai-compatible'] as const;
 export type AiProvider = (typeof KNOWN_AI_PROVIDERS)[number];
 
 export const DEFAULT_AI_CONFIG_NAME = 'default';
@@ -106,6 +106,14 @@ const PROVIDER_PARAMS: Record<AiProvider, z.ZodType> = {
   // Bedrock credentials travel JSON-encoded in the apiKey field (portal
   // convention, finding llm-provider-config-surfaces); params stay generic.
   bedrock: baseParams,
+  // #1373 (Holger, 2026-09-26): any host speaking an OpenAI wire protocol —
+  // vLLM, Ollama, LM Studio, OpenRouter, Together, Groq, DeepSeek, … Its
+  // endpoint is REQUIRED (there is no default host). `toolCalling: true` opts
+  // the config into the run tool loop, which is otherwise refused: an unknown
+  // host is not assumed to support function calling.
+  'openai-compatible': baseParams.extend({
+    toolCalling: z.boolean().optional(),
+  }),
 };
 
 export function validateProviderAndParams(provider: string, params: unknown): void {

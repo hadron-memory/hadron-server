@@ -2840,7 +2840,7 @@ export const typeDefs = `#graphql
     ownerType: AiConfigOwnerType!
     "ID of the owning HadronServer / Organization / App / Agent."
     ownerId: ID!
-    "Provider identifier; v1 known: 'anthropic' | 'openai' | 'glm' | 'bedrock'."
+    "Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'bedrock' | 'openai-compatible' (any OpenAI-wire host; endpoint required)."
     provider: String!
     "Model identifier, passed verbatim to the provider."
     model: String!

@@ -60,7 +60,7 @@ import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
 import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
-import { apiStyleApplies } from '../../../lib/aiEndpoint.js';
+import { apiStyleApplies, requireEndpointFor } from '../../../lib/aiEndpoint.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -432,6 +432,8 @@ export const appMutations = {
       if (aiProvider && aiModel) {
         try {
           validateProviderAndParams(aiProvider, null);
+          // The legacy args carry no endpoint (#1373): openai-compatible needs one.
+          requireEndpointFor(aiProvider, null);
         } catch (e) {
           rethrowAiConfigTyped(e);
         }
@@ -676,6 +678,14 @@ export const appMutations = {
           } else {
             try {
               validateProviderAndParams(provider, null);
+            } catch (e) {
+              rethrowAiConfigTyped(e);
+            }
+            // This legacy surface cannot set an endpoint, so an
+            // openai-compatible config through it must keep the one it has
+            // (same provider) — a provider change clears it below (#1373).
+            try {
+              requireEndpointFor(provider, existing && existing.provider === provider ? existing.endpoint : null);
             } catch (e) {
               rethrowAiConfigTyped(e);
             }
