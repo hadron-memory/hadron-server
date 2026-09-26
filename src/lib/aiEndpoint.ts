@@ -110,11 +110,6 @@ export function effectiveApiStyle(config: { provider: string; apiStyle?: string 
   return (config.apiStyle as AiApiStyle | null | undefined) ?? defaultApiStyle(config.provider);
 }
 
-/** Whether a stored style applies to this provider at all. */
-export function apiStyleApplies(provider: string, apiStyle: string | null | undefined): boolean {
-  return apiStyle == null || provider in DEFAULT_API_STYLE;
-}
-
 /** Validate a (provider, apiStyle) pair as it will be stored. */
 export function validateApiStyle(provider: string, apiStyle: string | null | undefined): void {
   if (apiStyle == null) return;
@@ -189,8 +184,12 @@ export function isPrivateNetworkAddress(ip: string): boolean {
  * legacy `params.baseUrl`. Returns the stored form (no trailing slash).
  */
 export function validateEndpoint(raw: string, env: NodeJS.ProcessEnv = process.env): string {
+  // The raw value is never echoed: it may carry credentials or a secret in a
+  // query string, and this message reaches GraphQL clients and logs (#1380
+  // review). The parsed host alone identifies which endpoint was refused.
+  let shownHost = '';
   const refuse = (why: string): never => {
-    throw new AiConfigValidationError(`Invalid endpoint '${raw}': ${why}`);
+    throw new AiConfigValidationError(`Invalid endpoint${shownHost ? ` for host '${shownHost}'` : ''}: ${why}`);
   };
   let url: URL;
   try {
@@ -198,6 +197,7 @@ export function validateEndpoint(raw: string, env: NodeJS.ProcessEnv = process.e
   } catch {
     return refuse('not an absolute URL.');
   }
+  shownHost = url.host;
   if (url.username || url.password) refuse('credentials in the URL are not allowed; store the key in apiKey.');
   if (url.search || url.hash) refuse('a query string or fragment is not allowed.');
   const host = url.hostname.replace(/^\[|\]$/g, '');

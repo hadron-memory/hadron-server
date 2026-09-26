@@ -35,6 +35,19 @@ describe('validateEndpoint', () => {
     expect(() => validateEndpoint(url, dev)).toThrow(/Invalid endpoint/);
   });
 
+  it('never echoes the raw value: credentials in a refused URL stay out of the error (#1380 review)', () => {
+    let message = '';
+    try {
+      validateEndpoint('https://user:s3cret-key@api.z.ai/v4', dev);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/credentials in the URL are not allowed/);
+    expect(message).toContain("host 'api.z.ai'");
+    expect(message).not.toContain('s3cret-key');
+    expect(() => validateEndpoint('https://api.z.ai/v4?token=abc123', dev)).toThrow(/^(?!.*abc123)/);
+  });
+
   it('allows loopback (http included) only outside production', () => {
     for (const url of ['http://localhost:11434/v1', 'http://127.0.0.1:8080/v1', 'http://[::1]:8080/v1']) {
       expect(validateEndpoint(url, dev)).toBe(url);
