@@ -61,20 +61,24 @@ import { AmbiguousLegacyUrnError, NodeNotFoundError } from './errors.js';
 async function findMovedNode(
   db: Pick<PrismaClient, 'node' | 'urnAlias'>,
   ref: string,
-  bareUrn: string,
+  bareUrns: readonly string[],
   includeDeleted = false,
 ): Promise<{ id: string } | null> {
-  const rows = await findLiveUrnAliasTargets(db, 'NODE', bareUrn, (ids) =>
-    db.node.findMany({
-      where: {
-        id: { in: ids },
-        ...(includeDeleted ? {} : { deletedAt: null, memory: { deletedAt: null } }),
-      },
-      select: { id: true },
-    }),
-  );
-  if (rows.length > 1) throw new AmbiguousLegacyUrnError(ref);
-  return rows[0] ?? null;
+  const live = new Map<string, { id: string }>();
+  for (const bareUrn of new Set(bareUrns)) {
+    const rows = await findLiveUrnAliasTargets(db, 'NODE', bareUrn, (ids) =>
+      db.node.findMany({
+        where: {
+          id: { in: ids },
+          ...(includeDeleted ? {} : { deletedAt: null, memory: { deletedAt: null } }),
+        },
+        select: { id: true },
+      }),
+    );
+    for (const row of rows) live.set(row.id, row);
+    if (live.size > 1) throw new AmbiguousLegacyUrnError(ref);
+  }
+  return live.values().next().value ?? null;
 }
 
 export async function resolveNodeRef(
@@ -183,7 +187,7 @@ export async function resolveNodeRef(
           urn: { in: memoryUrnCandidates },
           ...(options?.includeDeleted ? {} : { deletedAt: null }),
         },
-        select: { id: true, deletedAt: true },
+        select: { id: true, urn: true, deletedAt: true },
       })) ??
       // #1079 — the memory may have been RENAMED since this node URN was
       // published, and a node URN is the most-published identifier there is.
@@ -199,12 +203,17 @@ export async function resolveNodeRef(
         { includeDeleted: options?.includeDeleted },
       ));
     if (memory) {
+      // A MEMORY alias can have carried this published node address through a
+      // prior memory rename. A later node move records the predecessor under
+      // the memory's CURRENT URN. Check both historical and translated keys;
+      // distinct live holders still refuse as ambiguous rather than guessing.
+      const movedKeys = [normalized, `${memory.urn}:${memLoc}`];
       // The prefix names a memory row. Treat the body as
       // `<memory-urn>:<loc>` and resolve strictly — soft-deleted
       // memories produce a clean miss rather than a fall-through that
       // could resolve to the wrong node in `contextMemoryId`.
       if (!options?.includeDeleted && memory.deletedAt) {
-        const moved = await findMovedNode(db, ref, normalized);
+        const moved = await findMovedNode(db, ref, movedKeys);
         if (moved) return moved;
         throw new NodeNotFoundError(ref);
       }
@@ -214,13 +223,13 @@ export async function resolveNodeRef(
         select: { id: true, deletedAt: true },
       });
       if (!node || (!options?.includeDeleted && node.deletedAt)) {
-        const moved = await findMovedNode(db, ref, normalized, options?.includeDeleted);
+        const moved = await findMovedNode(db, ref, movedKeys, options?.includeDeleted);
         if (moved) return moved;
         throw new NodeNotFoundError(ref);
       }
       return { id: node.id };
     }
-    const moved = await findMovedNode(db, ref, normalized, options?.includeDeleted);
+    const moved = await findMovedNode(db, ref, [normalized], options?.includeDeleted);
     if (moved) return moved;
     if (strictUrnNode) {
       // Explicit `urn:node:` with no live memory at the named prefix

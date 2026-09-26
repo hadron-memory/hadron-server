@@ -5,6 +5,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolveNodeRef } from './entityRef/nodeRef.js';
 import { moveNodeSubtree } from './nodeSubtreeMove.js';
+import { recordUrnRename } from './urnAlias.js';
 import { NodeNotFoundError } from './entityRef/errors.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../mcp/server.js';
@@ -78,6 +79,49 @@ describe('node move URN aliases', () => {
     const occupant = await createNode(source.id, 'old');
     expect(await resolveNodeRef(db, oldRoot)).toEqual({ id: occupant.id });
     expect((await resolvers.Query.node(null, { ref: oldRoot }, graphCtx()))?.id).toBe(occupant.id);
+  });
+
+  it('keeps the address published before a memory rename alive after a later node move', async () => {
+    const root = await createNode(source.id, 'old');
+    const publishedBeforeMemoryRename = nodeUrn(source, 'old');
+    const oldMemoryUrn = source.urn;
+    const newMemoryUrn = 'alias-a.example:renamed';
+    await db.$transaction(async (tx) => {
+      await recordUrnRename(tx, {
+        entityType: 'MEMORY', entityId: source.id,
+        oldUrn: oldMemoryUrn, newUrn: newMemoryUrn,
+      });
+      await tx.memory.update({ where: { id: source.id }, data: { urn: newMemoryUrn } });
+    });
+
+    await resolvers.Mutation.moveNode(null, {
+      sourceRef: root.id, targetUrn: `hrn:node:${newMemoryUrn}:new`,
+    }, graphCtx());
+    expect(await resolveNodeRef(db, publishedBeforeMemoryRename)).toEqual({ id: root.id });
+    expect((await resolvers.Query.node(null, { ref: publishedBeforeMemoryRename }, graphCtx()))?.id)
+      .toBe(root.id);
+    const mcp = createTestableMcpServer(mcpAuth());
+    expect(await mcp.callToolText('hadron_get_node', {
+      urn: publishedBeforeMemoryRename,
+    })).toContain('body of old');
+    expect(await mcp.callToolText('hadron_get_nodes', {
+      refs: [publishedBeforeMemoryRename],
+    })).toContain('body of old');
+  });
+
+  it('reads a moved legacy literal #data loc through MCP single and batch fallbacks', async () => {
+    const literal = await createNode(source.id, 'legacy#data');
+    const published = nodeUrn(source, 'legacy#data');
+    await resolvers.Mutation.moveNode(null, {
+      sourceRef: literal.id, targetUrn: nodeUrn(source, 'new'),
+    }, graphCtx());
+    const mcp = createTestableMcpServer(mcpAuth());
+    const single = await mcp.callToolText('hadron_get_node', { urn: published });
+    const batch = await mcp.callToolText('hadron_get_nodes', { refs: [published] });
+    expect(single).toContain('body of legacy#data');
+    expect(batch).toContain('body of legacy#data');
+    expect(single).not.toContain('Fragment: data');
+    expect(batch).not.toContain('Fragment: data');
   });
 
   it('records cross-memory aliases and applies the target memory gate on GraphQL and MCP reads', async () => {

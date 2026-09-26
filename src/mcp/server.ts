@@ -3683,14 +3683,21 @@ export function createMcpServerInstance(
         // the full address (LIVE first, alias on miss) before gating the node
         // at its CURRENT memory. Even when the old memory is unreadable, a live
         // occupant there must beat a historical alias to another node.
-        const aliasRef = fragment ? rawUrn.slice(0, rawUrn.lastIndexOf('#')) : rawUrn;
-        let movedId: string;
-        try {
-          ({ id: movedId } = await resolveNodeRef(db, aliasRef));
-        } catch (e) {
-          if (e instanceof NodeNotFoundError) return missing();
-          throw e;
+        const aliasRefs = literalLoc && fragment
+          ? [rawUrn, rawUrn.slice(0, rawUrn.lastIndexOf('#'))]
+          : [rawUrn];
+        let movedId: string | undefined;
+        for (const aliasRef of aliasRefs) {
+          try {
+            ({ id: movedId } = await resolveNodeRef(db, aliasRef));
+            if (aliasRef === rawUrn && literalLoc) matchedLiteral = true;
+            break;
+          } catch (e) {
+            if (e instanceof NodeNotFoundError) continue;
+            throw e;
+          }
         }
+        if (!movedId) return missing();
         const target = await db.node.findFirst({
           where: { id: movedId, deletedAt: null },
           select: { memoryId: true },
@@ -3932,18 +3939,23 @@ export function createMcpServerInstance(
         // direct, live address misses. Re-resolve under the CURRENT memory's
         // gate; the old memory conveys no authority (cor:urn:030:02).
         const resolveMovedRef = async (r: UrnRef) => {
-          const aliasRef = fragmentByRef.has(r.raw)
-            ? r.raw.slice(0, r.raw.lastIndexOf('#'))
-            : r.raw;
-          let id: string;
-          try {
-            ({ id } = await resolveNodeRef(db, aliasRef));
-          } catch (e) {
-            if (e instanceof NodeNotFoundError) {
-              unavailable.push(r.raw);
-              return;
+          const aliasRefs = r.literalLoc && fragmentByRef.has(r.raw)
+            ? [r.raw, r.raw.slice(0, r.raw.lastIndexOf('#'))]
+            : [r.raw];
+          let id: string | undefined;
+          for (const aliasRef of aliasRefs) {
+            try {
+              ({ id } = await resolveNodeRef(db, aliasRef));
+              if (aliasRef === r.raw && r.literalLoc) fragmentByRef.delete(r.raw);
+              break;
+            } catch (e) {
+              if (e instanceof NodeNotFoundError) continue;
+              throw e;
             }
-            throw e;
+          }
+          if (!id) {
+            unavailable.push(r.raw);
+            return;
           }
           const target = await db.node.findFirst({
             where: { id, deletedAt: null }, select: { memoryId: true },

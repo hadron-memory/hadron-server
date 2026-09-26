@@ -277,7 +277,7 @@ export async function findMemoryByAliasedUrn(
   candidateUrns: ReadonlyArray<string>,
   onAmbiguous: (candidate: string, rows: ReadonlyArray<{ id: string }>) => never,
   options?: { includeDeleted?: boolean },
-): Promise<{ id: string; deletedAt: Date | null } | null> {
+): Promise<{ id: string; urn: string; deletedAt: Date | null } | null> {
   for (const candidate of candidateUrns) {
     // Routed through the shared paged walk rather than fetching ids directly
     // (PR #1080 re-review, Codex P2): liveness is applied per page and the walk
@@ -291,7 +291,7 @@ export async function findMemoryByAliasedUrn(
     const rows = await findLiveUrnAliasTargets(db, 'MEMORY', candidate, (ids) =>
       db.memory.findMany({
         where: { id: { in: ids }, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
-        select: { id: true, deletedAt: true },
+        select: { id: true, urn: true, deletedAt: true },
       }),
     );
     if (rows.length === 0) continue;
