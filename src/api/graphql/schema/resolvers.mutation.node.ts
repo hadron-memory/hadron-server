@@ -2166,12 +2166,20 @@ export const nodeMutations = {
           const r = replacer.apply(pt.abstract);
           if (r.count > 0) {
             if (r.value.length > 2000) {
-              const err = new NodeAbstractTooLongError(r.value.length);
+              // #1117: the edit context (current length) is in hand here, so
+              // the refusal reports delta and headroom — the numbers a
+              // surgical edit can act on without a second read.
+              const err = new NodeAbstractTooLongError(r.value.length, {
+                currentLength: pt.abstract.length,
+              });
               throw new GraphQLError(`${err.message} (node ${pt.loc} / ${pt.id})`, {
                 extensions: {
                   code: err.name,
                   length: err.length,
                   max: err.max,
+                  ...(err.currentLength != null
+                    ? { currentLength: err.currentLength, available: err.max - err.currentLength }
+                    : {}),
                   nodeId: pt.id,
                   loc: pt.loc,
                 },

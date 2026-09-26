@@ -393,11 +393,15 @@ describe('mergeNodes — guards', () => {
     await expect(merge({ source: generateId(), target: tgt.id })).rejects.toThrow(/not found/i);
   });
 
-  it('rejects an over-long merged abstract', async () => {
+  it('rejects an over-long merged abstract, reporting the target length, delta and headroom (#1117)', async () => {
     const src = await makeNode('src', { abstract: 'b'.repeat(1500) });
     const tgt = await makeNode('tgt', { abstract: 'a'.repeat(1500) });
+    // combineText joins with a blank line: 1500 + 2 + 1500 = 3002, delta
+    // +1502 against 500 headroom.
     await expect(
       merge({ source: src.id, target: tgt.id, include: ['ABSTRACT'] }),
-    ).rejects.toThrow(/2000/);
+    ).rejects.toThrow(
+      /\(got 3002 chars\)\. This edit takes a 1500-character abstract to 3002 \(\+1502\); 500 characters were available\./,
+    );
   });
 });
