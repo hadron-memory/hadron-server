@@ -1071,6 +1071,18 @@ export function aiConfigOwnerOf(c: AiServiceConfigRow): { ownerType: AiConfigOwn
 }
 
 /** Masked management view — never carries key material beyond the preview. */
+/**
+ * #1380 review (Codex P2): the MEMBER-visible picker (resolveAiServiceConfigs)
+ * — any App member, not just the owner's admins — must not learn an explicit
+ * endpoint, which under the self-hosted private-network opt-in can be an
+ * internal hostname or address. The endpoint is withheld, and
+ * effectiveEndpoint is shown only when it is the public provider default.
+ */
+export function toGqlAiServiceConfigForPicker(c: AiServiceConfigRow) {
+  const full = toGqlAiServiceConfig(c);
+  return { ...full, endpoint: null, effectiveEndpoint: c.endpoint ? null : full.effectiveEndpoint };
+}
+
 export function toGqlAiServiceConfig(c: AiServiceConfigRow) {
   return {
     id: c.id,
