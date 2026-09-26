@@ -8081,6 +8081,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       for (const message of page.items) {
         const routes = watchers.filter((watcher) => {
           if (message.seq <= watcher.seen) return false;
+          // A Worker never receives its own post, including a broadcast.
+          if (message.authorWorkerId === watcher.workerId) return false;
           if (!watcher.mentionOnly) return true;
           return message.mentions.some((mention) => watcher.mentionTokens.has(mention));
         });
@@ -8243,7 +8245,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_read',
-    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
+    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and never routes a message back to its Worker author. It NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),

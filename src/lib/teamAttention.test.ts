@@ -263,6 +263,25 @@ describe('signed attention poll', () => {
     ]);
   });
 
+  it('excludes broadcast authors while counting multiple broadcast tokens once for another Worker', async () => {
+    const mira = await addWorker('Mira');
+    await db.registerEntry.updateMany({
+      where: { appId: app.id, channelId: channel.id },
+      data: { mentionOnly: true },
+    });
+    await post('@all @team by Dara', { mentions: ['all', 'team'], authorWorkerId: worker.id });
+    await post('@all @team by Mira', { mentions: ['all', 'team'], authorWorkerId: mira.id });
+
+    const result = await getTeamAttention(userCtx(), app.id);
+    expect(result.workers).toHaveLength(2);
+    expect(result.workers.find((row) => row.worker === worker.id)?.channels[0]).toMatchObject({
+      unread: 1, unreadMentions: 1, firstUnreadSeq: 2, lastSeq: 2,
+    });
+    expect(result.workers.find((row) => row.worker === mira.id)?.channels[0]).toMatchObject({
+      unread: 1, unreadMentions: 1, firstUnreadSeq: 1, lastSeq: 2,
+    });
+  });
+
   it('pages an encrypted Channel once for multiple Workers and fails safe when the key is unavailable', async () => {
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
     sessionKeyCache.set('attention-encrypted', memory.id, generateDataKey());
