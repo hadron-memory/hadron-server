@@ -142,6 +142,12 @@ describe('node move URN aliases', () => {
     expect(await mcp.callToolText('hadron_get_node', { urn: oldChild })).toContain('body of old:child');
     expect(await mcp.callToolText('hadron_get_nodes', { refs: [oldRoot, oldChild] }))
       .toContain('body of old:child');
+    await vi.waitFor(async () => {
+      const reads = await db.usageEvent.findMany({ where: { nodeId: child.id, type: 'read' } });
+      expect(reads.length).toBeGreaterThanOrEqual(2);
+      expect(reads.every((event) => event.nodeLoc === 'new:child' && event.memoryId === target.id))
+        .toBe(true);
+    });
 
     const readerMcp = createTestableMcpServer(mcpAuth(reader.id));
     expect(await resolvers.Query.node(null, { ref: oldChild }, graphCtx(reader.id))).toBeNull();

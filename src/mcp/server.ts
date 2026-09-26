@@ -3775,7 +3775,9 @@ export function createMcpServerInstance(
       //
       // A LOCKED node still records: the projection is what crossed the
       // boundary, and the caller did read this node's addressable state.
-      recordNodeRead(db, { id: current.id, loc, memoryId: current.memoryId }, auth);
+      // An alias read names the node at its CURRENT address; never pair the
+      // historical input loc with the target memory in the usage event.
+      recordNodeRead(db, { id: current.id, loc: current.loc, memoryId: current.memoryId }, auth);
 
       // #696: `#data` addresses the node's DATA, not the node — and before the
       // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
