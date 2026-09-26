@@ -22,7 +22,8 @@
  * owner's provider account; a caller-supplied override key is the caller's
  * own and never debits. The only PLATFORM-funded test is a platform admin
  * testing a HADRON_SERVER config (only they pass the gate for one, and an
- * org/App/Agent config with no key is NO_API_KEY, never the platform key): it
+ * org/App/Agent config with no key is NO_API_KEY, never the platform key,
+ * exactly as a run refuses it since #1390): it
  * is recorded with keyOwnerType HADRON_SERVER, attributed to the caller's
  * active org when the request carries one (and counted against that org's
  * daily token quota, which must have headroom before the call, as a run's
@@ -281,9 +282,9 @@ export async function testAiServiceConfig(
     ? 'OVERRIDE'
     : !keyCleared && row.apiKeyEncrypted
       ? 'SAVED'
-      : // Only the platform's own config may run on the platform's credential
-        // (Holger's metering ruling, above); modelFor decides the rest.
-        owner.ownerType === 'HADRON_SERVER' && usesProcessCredential(tested)
+      : // The run's own rule (modelFor): only the platform's own config may
+        // run on the platform's credential (#1390).
+        usesProcessCredential(tested, owner.ownerType)
         ? 'PLATFORM'
         : 'NONE';
   const used: AiConfigTestResult['used'] = {
