@@ -77,7 +77,6 @@ import { mirrorNodeMoveToGit } from '../../../integrations/github/mirrorNodeMove
 import {
   NodeLocConflictError,
   NodeNotFoundError,
-  MemoryNotFoundError,
   NodeAbstractTooLongError,
   EdgeNotFoundError,
 } from '../../../lib/entityRef/errors.js';
@@ -124,8 +123,10 @@ import {
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
   requireMemoryWriteAccess,
-  canReadMemoryRecord,
   isMemoryReadableCached,
+  concealUnreadableDenial,
+  concealUnreadableNodeDenial,
+  nodeNotFoundError,
   type NodeInput,
   type NodeEdgeInput,
   type CreateNodeInput,
@@ -148,44 +149,6 @@ import { type ToolDriveFile } from '../../../lib/emailClient.js';
 type NodeWriteMode = 'create' | 'update' | 'upsert';
 /** NodeInput with `name` optional — update mode preserves it on omit (D4). */
 type NodeWriteInput = Omit<NodeInput, 'name'> & { name?: string };
-
-/** Classify a denied direct write with the matching read surface's shared gate. */
-async function canReadNodeWriteTarget(
-  ctx: Context,
-  memoryId: string,
-  entity: 'memory' | 'node',
-): Promise<boolean> {
-  // Node contents have a deliberately narrower read set than Memory records:
-  // for example, an org member may open an app/system Memory record without
-  // being allowed to read its nodes. Keep update-by-node-id aligned with
-  // Query.node so that record readability cannot preserve a node oracle.
-  if (entity === 'node') return isMemoryReadableCached(ctx, memoryId);
-
-  // Read the complete record-gate shape; omitting one field can fail open.
-  const memory = await ctx.db.memory.findUnique({
-    where: { id: memoryId },
-    select: {
-      id: true,
-      class: true,
-      userId: true,
-      ownerUserId: true,
-      organizationId: true,
-      appId: true,
-      userMemoryOfAgentId: true,
-      deletedAt: true,
-    },
-  });
-  if (!memory || memory.deletedAt) return false;
-  return canReadMemoryRecord(ctx, memory);
-}
-
-/** Only ordinary authorization denials are eligible for #1316 concealment. */
-function isMemoryWriteDenial(error: unknown): boolean {
-  return (
-    (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') ||
-    (error instanceof Error && error.message === 'Unauthenticated')
-  );
-}
 
 /**
  * Why did an update-by-PK match no row? Extracted so the decision is testable
@@ -310,30 +273,21 @@ export async function writeNodeCore(
       const rawMemoryRef = input.memoryId;
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, rawMemoryRef);
       input.memoryId = resolvedMemoryId;
-      try {
-        await requireMemoryWriteAccess(ctx, input.memoryId);
-      } catch (error) {
-        // Successful writers are never narrowed: some App-session principals
-        // legitimately write a private memory without record-read access. Only
-        // an ordinary denial enters the existence-concealment classification;
-        // malformed input and operational failures propagate unchanged.
-        if (
-          !opts?.concealUnreadable ||
-          !isMemoryWriteDenial(error) ||
-          (await canReadNodeWriteTarget(
-            ctx,
-            resolvedMemoryId,
-            opts.concealUnreadable.entity,
-          ))
-        ) {
-          throw error;
-        }
-        if (opts.concealUnreadable.entity === 'node') {
-          throw new GraphQLError(`Node not found: "${opts.concealUnreadable.ref}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: opts.concealUnreadable.ref },
-          });
-        }
-        throw new MemoryNotFoundError(opts.concealUnreadable.ref);
+      // #1316: the direct node doors conceal an unreadable target exactly like
+      // a missing one, through the SHARED classifiers — a memory-addressed door
+      // against the record gate, a node-addressed one against the node-content
+      // gate (the line Query.node draws). Successful writers are never
+      // narrowed: some App-session principals legitimately write a private
+      // memory without record-read access. Internal callers pass no
+      // concealUnreadable and keep the bare denial.
+      const authorizeWrite = () => requireMemoryWriteAccess(ctx, resolvedMemoryId);
+      const conceal = opts?.concealUnreadable;
+      if (!conceal) {
+        await authorizeWrite();
+      } else if (conceal.entity === 'node') {
+        await concealUnreadableNodeDenial(ctx, resolvedMemoryId, () => nodeNotFoundError(conceal.ref), authorizeWrite);
+      } else {
+        await concealUnreadableDenial(ctx, resolvedMemoryId, conceal.ref, authorizeWrite);
       }
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. Since #1201 the ONLY source is the Channel table, and
@@ -1665,7 +1619,10 @@ export async function updateNodePropertiesWith(
       extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
     });
   }
-  await requireMemoryWriteAccess(ctx, meta.memoryId);
+  // #1316: a node in a memory the caller cannot read answers as a missing one.
+  await concealUnreadableNodeDenial(ctx, meta.memoryId, () => nodeNotFoundError(nodeRef), () =>
+    requireMemoryWriteAccess(ctx, meta.memoryId),
+  );
   // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
   await assertLocWritable(
     ctx.db,
@@ -1866,7 +1823,10 @@ export const nodeMutations = {
           extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
         });
       }
-      await requireMemoryWriteAccess(ctx, meta.memoryId);
+      // #1316: a node in a memory the caller cannot read answers as a missing one.
+      await concealUnreadableNodeDenial(ctx, meta.memoryId, () => nodeNotFoundError(nodeRef), () =>
+        requireMemoryWriteAccess(ctx, meta.memoryId),
+      );
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
       await assertLocWritable(
         ctx.db,
@@ -2036,7 +1996,8 @@ export const nodeMutations = {
       if (hasMemoryIds) {
         for (const ref of memoryIds!) {
           const { id: memId } = await resolveMemoryRef(ctx.db, ref);
-          await ensureAuthed(memId);
+          // #1316: an unreadable memory answers as resolveMemoryRef's miss.
+          await concealUnreadableDenial(ctx, memId, ref, () => ensureAuthed(memId));
           const where: Prisma.NodeWhereInput = { memoryId: memId, deletedAt: null };
           if (usePrefix) {
             // Match the node at `prefix` plus its descendants, on `:` path
@@ -2055,7 +2016,10 @@ export const nodeMutations = {
           if (nodeById.has(id)) continue;
           const row = await ctx.db.node.findUnique({ where: { id } });
           if (!row || row.deletedAt) continue;
-          await ensureAuthed(row.memoryId);
+          // #1316: a node in an unreadable memory answers as resolveNodeRef's miss.
+          await concealUnreadableNodeDenial(ctx, row.memoryId, () => new NodeNotFoundError(ref), () =>
+            ensureAuthed(row.memoryId),
+          );
           nodeById.set(id, row);
         }
       }
@@ -2417,7 +2381,10 @@ export const nodeMutations = {
         });
       }
       // One check covers the subtree too: every descendant shares this memory.
-      await requireMemoryWriteAccess(ctx, node.memoryId);
+      // #1316: a node in a memory the caller cannot read answers as a missing one.
+      await concealUnreadableNodeDenial(ctx, node.memoryId, () => nodeNotFoundError(nodeRef), () =>
+        requireMemoryWriteAccess(ctx, node.memoryId),
+      );
 
       // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
       // node preserves its original deletedAt/deletedBy (matches the
