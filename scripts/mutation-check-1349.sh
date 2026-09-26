@@ -252,6 +252,12 @@ run "51 rename sync keyed on the stale pre-transaction URN" "$AG" \
   "          oldAgentUrn: replacedUrn," "          oldAgentUrn: agent.urn,"
 run "52 PUBLIC-agent read-write guard ignores the covered set" "$H" \
   "    if (agent.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory)) {" "    if (agent.visibility === 'PUBLIC') {"
+run "53 an APP-class memory is attachable again" "$H" \
+  "  if (memory.class === 'app') {" "  if (false) {"
+run "54 locked agent liveness not checked" "$M" \
+  "  if (agent.deletedAt) throw new AgentNotFoundError(refs.agentRef);" ""
+run "55 locked memory liveness not checked" "$M" \
+  "  if (memory.deletedAt) throw new MemoryNotFoundError(refs.memoryRef);" ""
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

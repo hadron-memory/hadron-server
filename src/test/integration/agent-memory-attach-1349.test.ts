@@ -1406,3 +1406,66 @@ describe('#1357 round 5 (@codex, PR #1357)', () => {
     expect(r.errors?.[0]?.extensions?.reason).toBe('PUBLIC_AGENT_READ_WRITE');
   });
 });
+
+describe('#1357 round 6 (@copilot, PR #1357)', () => {
+  const stageBeforeTx = (act: () => Promise<unknown>) => {
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    let staged = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...a: unknown[]) => {
+      if (!staged) { staged = true; await act(); }
+      return real(...a);
+    }) as never);
+    return { spy, wasStaged: () => staged };
+  };
+
+  it('an APP-class memory is refused for every caller — a platform admin included', async () => {
+    const admin = await db.user.create({
+      data: { id: generateId(), handle: `padmin3-${suffix}`, githubUsername: `padmin3-${suffix}`, roles: ['ADMIN'] },
+    });
+    const adminKey = (await mintUserApiKey(db, { userId: admin.id, label: 'k', createdBy: admin.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+    const { app } = await createDbAppWithKey(db, 'appclass-any', attackerOrgId);
+    const appMem = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, appId: app.id, urn: `attacker-${suffix}:appclass-any`, name: 'ac', class: 'app', visibility: null } as never,
+    });
+    const { agentId } = await agentWithApp(attackerOrgId, 'appclass-any');
+    const r = await gql(adminKey, ATTACH, { g: agentId, m: `hrn:mem:attacker-${suffix}:appclass-any`, r: 'read' });
+    expect(code(r)).toBe('UNSUPPORTED_MEMORY_CLASS');
+    expect(await db.agentMemoryItem.count({ where: { memoryId: appMem.id } })).toBe(0);
+  });
+
+  it('an agent soft-deleted after the pre-check answers exactly as a missing agent, and gets no grant', async () => {
+    const { agentId } = await agentWithApp(attackerOrgId, 'dead-agent');
+    const missing = await gql(key.attacker!, ATTACH, { g: `hrn:agent:attacker-${suffix}:no-such-agent`, m: mem.ownKnowledge!.urn, r: 'read' });
+    const { spy, wasStaged } = stageBeforeTx(() => db.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } }));
+    try {
+      const r = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read' });
+      expect(wasStaged()).toBe(true);
+      expect(code(r)).toBe(code(missing));
+      expect(r.errors).toHaveLength(1);
+      expect(await db.agentMemoryItem.count({ where: { agentId } })).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a memory soft-deleted after the pre-check answers MEMORY_NOT_FOUND, and gets no grant', async () => {
+    // Through the SAME-APP branch: the ordinary read gate already excludes a
+    // deleted memory (the first version of this test was masked by it), but
+    // the same-App admission never looked at the memory's liveness.
+    const { app } = await createDbAppWithKey(db, 'liveness-app', attackerOrgId);
+    const doomed = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, appId: app.id, urn: `attacker-${suffix}:liveness-doomed`, name: 'liveness-doomed', class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+    });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: attackerOrgId, name: 'liveness-agent', urn: `attacker-${suffix}:liveness-agent` } as never });
+    await createDbAppAgent(db, app.id, agent.id);
+    const { spy, wasStaged } = stageBeforeTx(() => db.memory.update({ where: { id: doomed.id }, data: { deletedAt: new Date() } }));
+    try {
+      const r = await gql(key.attacker!, ATTACH, { g: agent.id, m: `hrn:mem:attacker-${suffix}:liveness-doomed`, r: 'read' });
+      expect(wasStaged()).toBe(true);
+      expect(code(r)).toBe('MEMORY_NOT_FOUND');
+      expect(await db.agentMemoryItem.count({ where: { memoryId: doomed.id } })).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

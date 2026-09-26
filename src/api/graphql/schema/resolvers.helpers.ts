@@ -724,6 +724,16 @@ export async function requireAgentMemoryGrant(
   // Existence-hiding first: every refusal below this line is addressed to
   // someone who already knows the memory exists.
   if (!canRead) throw new MemoryNotFoundError(ref);
+  // An APP-class memory is App-internal and never an agent's to hold, for any
+  // caller (@copilot, PR #1357). The knowledge/group limit lived only inside the
+  // same-App branch, so a platform admin — who reads it in their own right —
+  // could attach one, per-session rows included, and the App fold would then
+  // hand it to every session of the App, breaking session isolation.
+  if (memory.class === 'app') {
+    throw new GraphQLError('An App-class memory belongs to its App and cannot be attached to an agent.', {
+      extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryClass: memory.class },
+    });
+  }
   const role = parseAgentMemoryRole(rawRole);
 
   const sameTenant =

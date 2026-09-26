@@ -74,6 +74,7 @@ import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   agentSlugFromUrn,
@@ -252,12 +253,15 @@ async function lockAttachmentPair(
   tx: Prisma.TransactionClient,
   memoryId: string,
   agentId: string,
+  // The caller's own refs, for the miss errors below.
+  refs: { memoryRef: string; agentRef: string },
 ) {
   await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
   await tx.$queryRaw`SELECT id FROM agents WHERE id = ${agentId} FOR UPDATE`;
   const memory = await tx.memory.findUniqueOrThrow({
     where: { id: memoryId },
     select: {
+      deletedAt: true,
       id: true,
       class: true,
       visibility: true,
@@ -270,8 +274,15 @@ async function lockAttachmentPair(
   });
   const agent = await tx.agent.findUniqueOrThrow({
     where: { id: agentId },
-    select: { id: true, organizationId: true, ownerUserId: true, visibility: true },
+    select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
   });
+  // LIVENESS under the lock (@copilot, PR #1357). The resolvers refused a
+  // deleted row only BEFORE the transaction, so a concurrent deleteAgent — or a
+  // memory soft-delete — committing in between would otherwise get a grant
+  // written onto a row that no longer exists. Answered exactly as the
+  // resolvers answer a miss, agent first as they resolve.
+  if (agent.deletedAt) throw new AgentNotFoundError(refs.agentRef);
+  if (memory.deletedAt) throw new MemoryNotFoundError(refs.memoryRef);
   return { memory, agent };
 }
 
@@ -1571,6 +1582,7 @@ export const memoryMutations = {
         tx,
         resolvedMemoryId,
         resolvedAgentId,
+        { memoryRef, agentRef },
       );
       const txCtx = { ...ctx, db: tx } as Context;
       // The AUTHORITATIVE agent gate, re-run on the LOCKED agent (@copilot,
@@ -1709,6 +1721,7 @@ export const memoryMutations = {
         tx,
         resolvedMemoryId,
         resolvedAgentId,
+        { memoryRef, agentRef },
       );
       // Authoritative agent gate on the LOCKED agent — see addMemoryToAgent.
       await requireOwnerOrOrgRole({ ...ctx, db: tx } as Context, lockedAgent, 'ADMIN');
