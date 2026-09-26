@@ -44,7 +44,11 @@ import {
   releasesDeadChannelDescendants,
   type ChannelReader,
 } from './protectedLoc.js';
-import { GOVERNED_ROLES, governedKindsOf, RoleGovernedError } from './governedRole.js';
+import {
+  governedKindsOf,
+  governedRoleWhereClauses,
+  RoleGovernedError,
+} from './governedRole.js';
 
 /**
  * The governed signals as they stand UNDER THE LOCK, keyed by loc (#1210).
@@ -167,7 +171,7 @@ export async function assertMemoryBulkMutable(
     where: {
       memoryId,
       deletedAt: null,
-      OR: [{ role: { in: GOVERNED_ROLES as string[] } }, { isRunnable: true }],
+      OR: [...governedRoleWhereClauses(), { isRunnable: true }],
     },
     select: { loc: true, role: true, isRunnable: true },
   });
@@ -312,7 +316,7 @@ export async function assertBatchMutable(
       memoryId: { in: [...new Set(memoryIds)] },
       loc: { in: locs },
       deletedAt: null,
-      OR: [{ role: { in: GOVERNED_ROLES as string[] } }, { isRunnable: true }],
+      OR: [...governedRoleWhereClauses(), { isRunnable: true }],
     },
     select: { loc: true, role: true, isRunnable: true },
   });

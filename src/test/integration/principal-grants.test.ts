@@ -133,10 +133,13 @@ describe('requireOrgAction — no grant rows (transcription check)', () => {
     });
     // A grant is an exception ON TOP of membership, never a substitute:
     // revoking the membership instantly cuts every capability, the grant
-    // included (findings:revoked-membership-auth-gates).
+    // included (findings:revoked-membership-auth-gates). #1316: a revoked
+    // member is an outsider who cannot open the record either, so the refusal
+    // is the missing-memory answer rather than a Forbidden confirming it.
     await expect(
       resolvers.Mutation.cloneMemory({}, { ref: mem.id, targetUrn: 'org-a::km-3' }, contributorCtx()),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow(`MEMORY_NOT_FOUND: ${mem.id}`);
+    expect(await db.memory.findFirst({ where: { urn: 'org-a:km-3' } })).toBeNull();
   });
 });
 

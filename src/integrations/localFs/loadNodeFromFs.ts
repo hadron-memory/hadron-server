@@ -40,7 +40,8 @@ interface NodeYaml {
   name: string;
   urn?: string;
   type?: string;
-  objectType?: string;
+  /** YAML may carry any scalar here; only a non-blank string is read (#1348). */
+  objectType?: unknown;
   description?: string;
   /** Paragraph-length summary. Spec 031. Distinct from `description`. */
   abstract?: string;
@@ -199,6 +200,25 @@ function governedSignalsFromMeta(meta: NodeYaml): Partial<{ role: string | null;
   });
 }
 
+/**
+ * #1348 — read the collection discriminator off parsed frontmatter, keeping
+ * PRESENCE (cor:int:020:01: absent means no opinion — default on create,
+ * preserve on update, never clear).
+ *
+ * For `objectType` a FILE never clears it: absent, null, "" and whitespace
+ * are all no opinion, exactly as CLI import reads them (hadron-cli#725 —
+ * `strings.TrimSpace(v) != ""`); the clear is an explicit node update. So only
+ * a non-blank string yields the key, written as-is. The previous
+ * `meta.objectType ?? null` collapsed every one of those into `null`, which
+ * was harmless only because git sync never wrote the column — wiring it in
+ * as-is would have cleared a stored collection on every sync of every file
+ * written before #725.
+ */
+function objectTypeFromMeta(meta: NodeYaml): { objectType?: string } {
+  const v = meta.objectType;
+  return typeof v === 'string' && v.trim() !== '' ? { objectType: v } : {};
+}
+
 interface EdgeEntry {
   /** Either `target` or `id` identifies the target node. */
   target?: string;
@@ -298,7 +318,8 @@ async function loadFrontmatterNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
-      objectType: meta.objectType ?? null, // #725 — round-trip the collection discriminator
+      // #725 / #1348 — spread, NOT `?? null`: see objectTypeFromMeta.
+      ...objectTypeFromMeta(meta),
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
       abstract,
@@ -353,7 +374,8 @@ async function loadLegacyNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
-      objectType: meta.objectType ?? null, // #725 — round-trip the collection discriminator
+      // #725 / #1348 — spread, NOT `?? null`: see objectTypeFromMeta.
+      ...objectTypeFromMeta(meta),
       alias: meta.alias ?? null,
       description: meta.description ?? meta.summary ?? null,
       abstract,

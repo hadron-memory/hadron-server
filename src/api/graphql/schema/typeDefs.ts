@@ -196,6 +196,8 @@ export const typeDefs = `#graphql
     objectType: String
     tags: [String!]
     isRunnable: Boolean
+    "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
+    role: String
     locPrefix: String
     createdBy: String
     updatedAfter: String
@@ -1210,7 +1212,8 @@ export const typeDefs = `#graphql
     property schema when it has one. NULL for an ordinary node.
 
     NOT 'nodeType' (the platform-kind axis, which drives retrieval) and NOT
-    'role' (what the node is for, which has no retrieval impact).
+    'role' (what the node is for; role can be filtered explicitly but does not
+    change default ranking or rendering).
     """
     objectType: String
     loc: String!
@@ -1294,13 +1297,14 @@ export const typeDefs = `#graphql
 
     NOT 'nodeType' (the platform-kind axis, load-bearing for retrieval) and NOT
     'objectType' (the collection discriminator, schema-validated). This field
-    has NO retrieval impact.
+    does not change default retrieval or ranking; NodeFilter.role explicitly
+    selects its exact dotted family (#1322).
 
-    A GOVERNED value routes the write to that kind's own authoring door, and the
-    generic node surface is refused: 'review' and 'spec' today, alongside the
-    task kind, which is gated on 'isRunnable' rather than on any label because a
-    label can be omitted and a capability cannot. 'role: \"weather-widget\"'
-    does nothing at all.
+    A GOVERNED family routes the write to that kind's own authoring door, and
+    the generic node surface is refused: 'review' / 'review.*' and 'spec' /
+    'spec.*' today, alongside the task kind, which is gated on 'isRunnable'
+    rather than on any label because a label can be omitted and a capability
+    cannot. Other values are inert unless a caller explicitly filters for them.
     """
     role: String
     llmModel: String
@@ -2634,6 +2638,245 @@ export const typeDefs = `#graphql
     (any role) and to ADMIN/OWNER of the memory's owning org.
     """
     members: [MemoryMember!]!
+    """
+    #1325 — this memory's config: its node-role rules. Null for anyone who does
+    not MANAGE the memory (the strict owner of a personal/private memory; else
+    its user owner or an org ADMIN/OWNER), however the Memory was reached. A
+    memory with no rules yet reads as the empty config (id null, no rules).
+    """
+    config: MemoryConfig
+  }
+
+  """
+  #1325 — a memory's config: exactly one per memory, holding its node-role
+  rules (one per role or declared sub-role). Read and changed only by the
+  memory's managers. Materialized by the first rule write; before that it reads
+  as empty, with a null id.
+  """
+  type MemoryConfig {
+    "Null until the first rule is written."
+    id: ID
+    memoryId: ID!
+    "Role-ascending."
+    rules: [NodeRoleRule!]!
+    createdAt: DateTime
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  enum NodeRoleWriters {
+    ALL
+    OWNER
+    ADMIN
+  }
+
+  enum ContentValidator {
+    AGENT
+    PLATFORM
+  }
+
+  """
+  #1325 — the state of one rule reference, next to its URN and id. NONE: not
+  configured. OK: the node is live and you can read it; its id is given, and
+  its URN too unless the node's memory has a legacy URN that cannot address it
+  (#697), when the URN is null and the id is the ref to use. BROKEN: configured,
+  but the node was deleted, so operations relying on the rule are refused until
+  a manager repoints it (fail-closed). UNREADABLE: the node exists but you may
+  not read it, so its URN and id are withheld.
+  """
+  enum NodeRoleRuleRefState {
+    NONE
+    OK
+    BROKEN
+    UNREADABLE
+  }
+
+  """
+  #1325 — one node-role rule. Task and description references are stored by
+  node id (they survive moves) and returned as a URN and an id, each with its
+  state. Both are given only when the state is OK; see NodeRoleRuleRefState.
+  """
+  type NodeRoleRule {
+    "The rule's id — its ref for updateNodeRoleRule / deleteNodeRoleRule (a rule has no URN)."
+    id: ID!
+    "The dotted role or sub-role this rule governs, unique within the config."
+    role: String!
+    authorTask: String
+    authorTaskId: ID
+    authorTaskState: NodeRoleRuleRefState!
+    validationTask: String
+    validationTaskId: ID
+    validationTaskState: NodeRoleRuleRefState!
+    "Documentation, not procedure: a deleted description node reads as NONE, never BROKEN."
+    descriptionNode: String
+    descriptionNodeId: ID
+    descriptionNodeState: NodeRoleRuleRefState!
+    "On a parent role: refuse its undeclared sub-roles instead of falling back to it."
+    strictSubRoles: Boolean!
+    writers: NodeRoleWriters!
+    validateBy: ContentValidator
+    enabled: Boolean!
+    "Set by applying a required template (#1334)."
+    locked: Boolean!
+    "The template this rule was copied from, if any (provenance only; no live link)."
+    sourceTemplateId: ID
+    sourceTemplate: NodeRoleRuleSourceTemplate
+    "Optimistic-concurrency token: pass it as expectedRevision to update or delete."
+    revision: Int!
+    createdAt: DateTime!
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  type NodeRoleRuleSourceTemplate {
+    id: ID!
+    name: String!
+    "The template has been deleted; the rule keeps its copy."
+    deleted: Boolean!
+  }
+
+  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success."
+  type MemoryConfigWarning {
+    code: String!
+    role: String!
+    field: String
+    taskUrn: String
+    taskState: NodeRoleRuleRefState
+  }
+
+  "#1325 part (c) — which entity owns a MemoryConfigTemplate. Exactly one per template."
+  enum MemoryConfigTemplateOwnerType {
+    HADRON_SERVER
+    ORGANIZATION
+    USER
+    APP
+  }
+
+  """
+  #1325 part (c) — a reusable rulebook with exactly one owner, COPIED into a
+  memory's config when applied (never live-linked). Read and managed only by
+  its owner's managers: a platform admin (server), an org ADMIN/OWNER
+  (organization), the user themselves (user), the App's owner or org
+  ADMIN/OWNER (App). For anyone else it does not exist.
+  """
+  type MemoryConfigTemplate {
+    id: ID!
+    "Unique per owner among live templates; 1-64 lower-case letters, digits, '-' or '_'."
+    name: String!
+    description: String
+    "Applied as locked rules (#1334)."
+    required: Boolean!
+    ownerType: MemoryConfigTemplateOwnerType!
+    "ID of the owning organization, user or App; null for the server."
+    ownerId: ID
+    "Role-ascending."
+    rules: [MemoryConfigTemplateRule!]!
+    "Optimistic-concurrency token for the template AND its rules."
+    revision: Int!
+    createdAt: DateTime!
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  "#1325 part (c) — one rule of a template: a node-role rule without the config-only fields."
+  type MemoryConfigTemplateRule {
+    role: String!
+    authorTask: String
+    authorTaskId: ID
+    authorTaskState: NodeRoleRuleRefState!
+    validationTask: String
+    validationTaskId: ID
+    validationTaskState: NodeRoleRuleRefState!
+    "Documentation, not procedure: a deleted description node reads as NONE, never BROKEN."
+    descriptionNode: String
+    descriptionNodeId: ID
+    descriptionNodeState: NodeRoleRuleRefState!
+    strictSubRoles: Boolean!
+    writers: NodeRoleWriters!
+    validateBy: ContentValidator
+    enabled: Boolean!
+  }
+
+  type MemoryConfigTemplatesPage {
+    items: [MemoryConfigTemplate!]!
+    total: Int!
+  }
+
+  "Filter for memoryConfigTemplates(). Narrows the templates you manage; it never widens them."
+  input MemoryConfigTemplateFilter {
+    ownerType: MemoryConfigTemplateOwnerType
+    "ID or URN of the owner (with ownerType). An owner you do not manage matches nothing."
+    ownerRef: ID
+  }
+
+  "#1325 part (c) — a new template. \`rules\` are validated as a whole before anything is written."
+  input CreateMemoryConfigTemplateInput {
+    name: String!
+    description: String
+    required: Boolean
+    "Each role at most once (NODE_ROLE_RULE_EXISTS)."
+    rules: [CreateNodeRoleRuleInput!]
+  }
+
+  """
+  #1325 part (c) — change a template. An omitted field is unchanged;
+  description null clears it. \`rules\`, when given, REPLACES the template's
+  rules in one transaction.
+  """
+  input UpdateMemoryConfigTemplateInput {
+    name: String
+    description: String
+    required: Boolean
+    rules: [CreateNodeRoleRuleInput!]
+  }
+
+  type MemoryConfigTemplatePayload {
+    template: MemoryConfigTemplate!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
+  type NodeRoleRulePayload {
+    rule: NodeRoleRule!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
+  """
+  #1325 — a new rule, in a memory's config or in a template's rule list.
+  Task and description references are node IDs or URNs you
+  can read; a node you cannot read is refused exactly like a missing one
+  (NODE_NOT_FOUND), and a task reference must be a runnable task (NOT_A_TASK).
+  """
+  input CreateNodeRoleRuleInput {
+    "Lower-case letter/digit/dash segments joined by dots, 1-64 characters (INVALID_NODE_ROLE)."
+    role: String!
+    authorTaskRef: ID
+    validationTaskRef: ID
+    descriptionNodeRef: ID
+    strictSubRoles: Boolean
+    writers: NodeRoleWriters
+    "Needs a validation task."
+    validateBy: ContentValidator
+    enabled: Boolean
+  }
+
+  """
+  #1325 — change a rule. An omitted field is unchanged. A reference given as
+  null or an empty string CLEARS it; validateBy null clears it. The role itself
+  is the rule's identity and cannot be changed: delete and re-create instead.
+  """
+  input UpdateNodeRoleRuleInput {
+    authorTaskRef: ID
+    validationTaskRef: ID
+    descriptionNodeRef: ID
+    strictSubRoles: Boolean
+    writers: NodeRoleWriters
+    validateBy: ContentValidator
+    enabled: Boolean
   }
 
   """
@@ -2920,6 +3163,14 @@ export const typeDefs = `#graphql
   type Worker {
     id: ID!
     appId: ID!
+    """
+    The App's canonical URN (the same value App.urn returns, e.g.
+    hrn:app:acme.com:team), as a scalar identity suitable for cross-App
+    worker lists. Null when the caller cannot inspect this App's workers. This
+    intentionally does not return the App object, whose nested keys and
+    members have a narrower read audience.
+    """
+    appUrn: String
     agentId: ID!
     "The worker's name ('Iris') — the identity every surface renders."
     name: String!
@@ -3823,6 +4074,15 @@ export const typeDefs = `#graphql
     memoryId: String
     "Selector, with 'memoryId': the target's current loc. Not writable here — moveNode relocates."
     loc: String
+    """
+    Optional optimistic-concurrency precondition (#937). When supplied, the
+    update is applied only while the node's current live revision still equals
+    this positive integer. A mismatch refuses atomically with
+    NODE_WRITE_CONFLICT; omitting it or passing null preserves last-write-wins
+    compatibility.
+    Read the baseline from Node.revision.
+    """
+    expectedRevision: Int
     "Omit to preserve (D4)."
     name: String
     nodeType: String
@@ -5906,7 +6166,7 @@ export const typeDefs = `#graphql
     The App's memory scope is authoritative, so the filter's memory-scope
     fields (memoryIds / memoryClasses) are rejected with BAD_USER_INPUT rather
     than silently ignored — use findNodes for cross-memory scoping. Only
-    node-level predicates (nodeType, tags, isRunnable, locPrefix, createdBy,
+    node-level predicates (nodeType, tags, isRunnable, role, locPrefix, createdBy,
     updatedAfter/Before, includeDeleted) apply. Unlike findNodes, system-memory
     nodes are NOT excluded by default.
     """
@@ -6007,6 +6267,21 @@ export const typeDefs = `#graphql
     whoever may read the Agent.
     """
     scope(ref: ID!): Scope
+
+    """
+    #1325 — a memory's config, for the memory's managers only. For anyone else,
+    and for a missing memory, the same MEMORY_NOT_FOUND.
+    """
+    memoryConfig(memoryRef: ID!): MemoryConfig!
+
+    "#1325 part (c) — one template you manage, by id; null for anything else, including a missing or deleted one."
+    memoryConfigTemplate(ref: ID!): MemoryConfigTemplate
+
+    """
+    #1325 part (c) — the templates you manage, name-ascending. Default page 50,
+    at most 200; limit 0 returns the count only.
+    """
+    memoryConfigTemplates(filter: MemoryConfigTemplateFilter, limit: Int, offset: Int): MemoryConfigTemplatesPage!
 
     """
     Spec 049 Phase 2 — paginated list of the scopes you may read, optionally
@@ -6293,6 +6568,19 @@ export const typeDefs = `#graphql
     ID or URN.
     """
     workers(appRef: ID!, includeRetired: Boolean, limit: Int, offset: Int): WorkersPage!
+
+    """
+    Workers CURRENTLY held by userRef across Apps the caller may inspect
+    (#1344), oldest casting first. userRef accepts a user id, handle, URN, or
+    email. Missing users, no holds, and holds confined to unreadable Apps all
+    return the same empty page; total and pagination are computed only after
+    the App authorization filter.
+
+    Retired castings are hidden unless includeRetired. hasLiveSession on each
+    item uses the existing derived idle-window predicate — it means the worker
+    is being driven now, not merely that an unended Session row exists.
+    """
+    heldWorkers(userRef: String!, includeRetired: Boolean, limit: Int, offset: Int): WorkersPage!
 
     """
     An App's role definitions (#960): every roles:<role> node in the Team
@@ -6618,7 +6906,7 @@ export const typeDefs = `#graphql
 
     """
     #1201 — the CREATE door for the spec kind. A write that would produce a
-    node with role: 'spec' must come through here; the generic createNode
+    node with role: 'spec' or a dotted 'spec.*' sub-role must come through here; the generic createNode
     refuses it.
 
     PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
@@ -6652,7 +6940,7 @@ export const typeDefs = `#graphql
 
     """
     #1201 — the CREATE door for the review kind. A write that would produce a
-    node with role: 'review' must come through here; the generic createNode
+    node with role: 'review' or a dotted 'review.*' sub-role must come through here; the generic createNode
     refuses it.
 
     PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
@@ -7989,6 +8277,48 @@ export const typeDefs = `#graphql
     among live scopes (SCOPE_NAME_TAKEN), never \`global\` / \`app\`.
     """
     createScope(input: CreateScopeInput!): Scope!
+
+    """
+    #1325 — add a rule to a memory's config (creating the config on first use).
+    Managers only; anyone else gets MEMORY_NOT_FOUND. A role that already has a
+    rule is refused NODE_ROLE_RULE_EXISTS.
+    """
+    createNodeRoleRule(memoryRef: ID!, input: CreateNodeRoleRuleInput!): NodeRoleRulePayload!
+
+    """
+    #1325 — change a rule by its id. With expectedRevision, a rule changed since
+    you read it is refused CONFLICT (extensions.currentRevision) and nothing is
+    written; omitted, the last writer wins. A rule you may not manage reads as
+    NOT_FOUND.
+    """
+    updateNodeRoleRule(ref: ID!, input: UpdateNodeRoleRuleInput!, expectedRevision: Int): NodeRoleRulePayload!
+
+    "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule."
+    deleteNodeRoleRule(ref: ID!, expectedRevision: Int): Boolean!
+
+    """
+    #1325 part (c) — create a template. ownerRef names the organization, user
+    or App; omit it for HADRON_SERVER (platform admins only; refused
+    HADRON_SERVER_NOT_CONFIGURED when this server has no row) and for USER
+    (yourself — you own templates for no one else). A second live template of
+    the same name under the same owner is MEMORY_CONFIG_TEMPLATE_EXISTS.
+    """
+    createMemoryConfigTemplate(
+      ownerType: MemoryConfigTemplateOwnerType!
+      ownerRef: ID
+      input: CreateMemoryConfigTemplateInput!
+    ): MemoryConfigTemplatePayload!
+
+    """
+    #1325 part (c) — change a template by its id. With expectedRevision, a
+    template changed since you read it is refused CONFLICT
+    (extensions.currentRevision) and nothing is written. A template you may not
+    manage reads as MEMORY_CONFIG_TEMPLATE_NOT_FOUND.
+    """
+    updateMemoryConfigTemplate(ref: ID!, input: UpdateMemoryConfigTemplateInput!, expectedRevision: Int): MemoryConfigTemplatePayload!
+
+    "#1325 part (c) — soft-delete a template. Configs it was applied to keep their copies."
+    deleteMemoryConfigTemplate(ref: ID!, expectedRevision: Int): Boolean!
 
     "Spec 049 Phase 2 — update a scope you may write (auth as createScope). memoryRefs replaces the ordered list."
     updateScope(ref: ID!, input: UpdateScopeInput!): Scope!

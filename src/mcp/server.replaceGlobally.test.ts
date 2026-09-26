@@ -116,7 +116,9 @@ describe('hadron_replace_text', () => {
       fields: ['content'],
     });
     expect(text).toMatch(/error/i);
-    expect(text).toMatch(/forbidden|access/i);
+    // #1316: the viewer cannot read the memory, so it answers as a missing one
+    // rather than "Forbidden", which would confirm the memory exists.
+    expect(text).toMatch(/MEMORY_NOT_FOUND/);
   });
 
   it('surfaces an invalid-regex error as text', async () => {

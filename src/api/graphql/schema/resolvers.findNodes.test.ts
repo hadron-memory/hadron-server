@@ -289,6 +289,30 @@ describe('findNodes — filtered list (query omitted, subsumes `nodes`)', () => 
     const res = await findNodes({ filter: { memoryIds: [graph.id], isRunnable: true, locPrefix: 'task.' } });
     expect(res.hits.map((h: any) => h.node.loc)).toEqual(['task.a']);
   });
+
+  it('filters a role family on dot boundaries, including every descendant depth', async () => {
+    await mkNode(graph.id, { loc: 'r.base', name: 'base', role: 'spec' });
+    await mkNode(graph.id, { loc: 'r.child', name: 'child', role: 'spec.rule' });
+    await mkNode(graph.id, { loc: 'r.deep', name: 'deep', role: 'spec.rule.detail' });
+    await mkNode(graph.id, { loc: 'r.special', name: 'special', role: 'special' });
+    await mkNode(graph.id, { loc: 'r.specification', name: 'specification', role: 'specification' });
+    await mkNode(graph.id, { loc: 'r.none', name: 'none', role: null });
+
+    const spec = await findNodes({ filter: { memoryIds: [graph.id], role: 'spec' } });
+    expect(spec.hits.map((h: any) => h.node.loc)).toEqual(['r.base', 'r.child', 'r.deep']);
+
+    const rule = await findNodes({ filter: { memoryIds: [graph.id], role: 'spec.rule' } });
+    expect(rule.hits.map((h: any) => h.node.loc)).toEqual(['r.child', 'r.deep']);
+  });
+
+  it('treats wildcard characters literally in an open-string role filter', async () => {
+    await mkNode(graph.id, { loc: 'r.literal', name: 'literal', role: 'spec_rule' });
+    await mkNode(graph.id, { loc: 'r.literal-child', name: 'child', role: 'spec_rule.child' });
+    await mkNode(graph.id, { loc: 'r.wildcard-trap', name: 'trap', role: 'specXrule.child' });
+
+    const res = await findNodes({ filter: { memoryIds: [graph.id], role: 'spec_rule' } });
+    expect(res.hits.map((h: any) => h.node.loc)).toEqual(['r.literal', 'r.literal-child']);
+  });
 });
 
 describe('findNodes — structured filters apply to query results, not just lists', () => {
@@ -298,6 +322,20 @@ describe('findNodes — structured filters apply to query results, not just list
     await mkNode(graph.id, { loc: 'q.note', name: 'banana note', isRunnable: false });
     const res = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryIds: [graph.id], isRunnable: true } });
     expect(res.hits.map((h: any) => h.node.loc).sort()).toEqual(['q.run1', 'q.run2']);
+  });
+
+  it('respects the dotted role family inside lexical SQL', async () => {
+    await mkNode(graph.id, { loc: 'q.spec', name: 'banana base', role: 'spec' });
+    await mkNode(graph.id, { loc: 'q.rule', name: 'banana rule', role: 'spec.rule' });
+    await mkNode(graph.id, { loc: 'q.deep', name: 'banana detail', role: 'spec.rule.detail' });
+    await mkNode(graph.id, { loc: 'q.other', name: 'banana other', role: 'special' });
+
+    const res = await findNodes({
+      query: 'banana',
+      mode: 'keyword',
+      filter: { memoryIds: [graph.id], role: 'spec.rule' },
+    });
+    expect(res.hits.map((h: any) => h.node.loc).sort()).toEqual(['q.deep', 'q.rule']);
   });
 
   it('excludes soft-deleted matches by default and includes them with includeDeleted', async () => {

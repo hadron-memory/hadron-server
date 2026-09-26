@@ -25,7 +25,7 @@ was the one it forbade. `genfix.go` is that program, committed.
 #    unchanged reproduces it byte for byte (its `sourceCommit` says the same).
 #    Move it forward only to a commit whose Go matches the law you pin: an
 #    older one regenerates retired rules (@codex, PR #1295).
-COMMIT=b138e65
+COMMIT=9e7d2bd
 rm -rf /tmp/cli && mkdir -p /tmp/cli
 gh api repos/hadron-memory/hadron-cli/tarball/$COMMIT | tar xz -C /tmp/cli --strip-components=1
 
@@ -101,6 +101,16 @@ hadron-cli#712, but Go emits no `skill-name-reserved` there, so the TypeScript
 side reds against the result. Use plain spellings in these cases: Go folds with
 `x/text/collate` and the server with ICU, and the two differ only on exotic code
 points the name grammar already refuses.
+Since #1341, `lintMarkup` (stamping `lintMarkupSourceCommit`): the Cowork probe
+descriptions, authored in `markupCases()`, with findings per host the same way
+as `lintReserved`; it needs hadron-cli#722 or later for the rule to exist.
+Since #1323, `parseHeader` (stamping `parseHeaderSourceCommit`): Go's
+`ParseFile` over authored edits of ONE Go-rendered file (`headerCases()`: the
+`rev=` edge values, and whitespace separators in the current and the legacy
+header). Each case records the edited file as `input` beside Go's verdict, so
+the TypeScript side re-derives nothing. An edit whose anchor is not unique in
+the base file panics rather than editing the wrong spot. It needs hadron-cli#724
+(merged as `9e7d2bd`) or later, where `File.Revision` exists.
 
 It does NOT touch `lint`, which stays at `lintSourceCommit`. Regenerating that
 wholesale mixes a re-measurement into a port.
