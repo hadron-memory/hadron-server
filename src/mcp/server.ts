@@ -8376,86 +8376,93 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── #1353 internal-pilot compact attention ───────────────────────────────────
 
-  server.tool(
-    'hadron_team_attention',
-    'INTERNAL PILOT (#1353): return compact unread counts for this operator\'s LIVE Workers and an opaque signed poll token; never reads message bodies and never changes ChannelReadState. Omit since for all unread. Adopt the returned token only after every listed nudge is accepted; after any partial failure retain the prior token so retry may duplicate but cannot lose a nudge. since:"now" is refused — use the explicit switchover preview/apply tool.',
-    {
-      app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
-      since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
-    },
-    async ({ app, since }) => {
-      let appRef = app;
-      if (!appRef) {
-        const scopeError = requireAppScope();
-        if (scopeError) return scopeError;
-        appRef = auth.appId;
-      }
-      if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
-      try {
-        const result = await resolvers.Query.teamAttention({}, { appRef, since: since ?? null }, chatCtx());
-        return textResult(JSON.stringify(result, null, 2));
-      } catch (error) {
-        return scopeErrorText(error);
-      }
-    },
-  );
+  // Discovery follows the pilot (#1362 review, Codex P2): a connection whose
+  // operator is not allowlisted never sees these tools in tools/list. The App
+  // half of the allowlist cannot be decided here — the active App can change
+  // on the connection — so it stays with the per-call capability probe and
+  // each tool's own resolvePilotApp refusal.
+  if (auth.userId && !auth.impersonation && teamAttentionPilotOperatorEnabled(auth.userId)) {
+    server.tool(
+      'hadron_team_attention',
+      'INTERNAL PILOT (#1353): return compact unread counts for this operator\'s LIVE Workers and an opaque signed poll token; never reads message bodies and never changes ChannelReadState. Omit since for all unread. Adopt the returned token only after every listed nudge is accepted; after any partial failure retain the prior token so retry may duplicate but cannot lose a nudge. since:"now" is refused — use the explicit switchover preview/apply tool.',
+      {
+        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
+      },
+      async ({ app, since }) => {
+        let appRef = app;
+        if (!appRef) {
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        try {
+          const result = await resolvers.Query.teamAttention({}, { appRef, since: since ?? null }, chatCtx());
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
 
-  server.tool(
-    'hadron_team_attention_switchover',
-    'INTERNAL PILOT (#1353): explicitly baseline every current live Worker through captured Channel heads. preview is read-only and returns exact counts plus a short-lived proof. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after preview remain unread. This is the only supported way to discard the pre-router backlog.',
-    {
-      app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
-      action: z.enum(['preview', 'apply']).describe('preview makes no writes; apply requires the exact preview proof.'),
-      proof: z.string().optional().describe('Required for action:"apply"; returned by preview.'),
-    },
-    async ({ app, action, proof }) => {
-      let appRef = app;
-      if (!appRef) {
-        const scopeError = requireAppScope();
-        if (scopeError) return scopeError;
-        appRef = auth.appId;
-      }
-      if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
-      if (action === 'apply' && !proof) return textResult('[bad_user_input] action:"apply" requires the proof returned by preview.');
-      if (action === 'preview' && proof !== undefined) return textResult('[bad_user_input] preview does not accept a proof.');
-      try {
-        const result = action === 'preview'
-          ? await resolvers.Query.teamAttentionSwitchoverPreview({}, { appRef }, chatCtx())
-          : await resolvers.Mutation.confirmTeamAttentionSwitchover({}, { appRef, proof: proof! }, chatCtx());
-        return textResult(JSON.stringify(result, null, 2));
-      } catch (error) {
-        return scopeErrorText(error);
-      }
-    },
-  );
+    server.tool(
+      'hadron_team_attention_switchover',
+      'INTERNAL PILOT (#1353): explicitly baseline every current live Worker through captured Channel heads. preview is read-only and returns exact counts plus a short-lived proof. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after preview remain unread. This is the only supported way to discard the pre-router backlog.',
+      {
+        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        action: z.enum(['preview', 'apply']).describe('preview makes no writes; apply requires the exact preview proof.'),
+        proof: z.string().optional().describe('Required for action:"apply"; returned by preview.'),
+      },
+      async ({ app, action, proof }) => {
+        let appRef = app;
+        if (!appRef) {
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        if (action === 'apply' && !proof) return textResult('[bad_user_input] action:"apply" requires the proof returned by preview.');
+        if (action === 'preview' && proof !== undefined) return textResult('[bad_user_input] preview does not accept a proof.');
+        try {
+          const result = action === 'preview'
+            ? await resolvers.Query.teamAttentionSwitchoverPreview({}, { appRef }, chatCtx())
+            : await resolvers.Mutation.confirmTeamAttentionSwitchover({}, { appRef, proof: proof! }, chatCtx());
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
 
-  server.tool(
-    'hadron_team_chat_mark_read',
-    'INTERNAL PILOT (#1353): explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
-    {
-      session: z.string().describe('Your live Worker session; selects the Worker whose own cursor advances.'),
-      app: z.string().optional().describe('The pilot App. Omit to recover it from session or the active selection.'),
-      channel: z.string().optional().describe('Channel id or address. Omit for the App default team Channel.'),
-      seq: z.number().int().min(0).describe('Read through this exact sequence.'),
-    },
-    async ({ session, app, channel, seq }) => {
-      await heartbeatSession(session);
-      let appRef = app;
-      if (!appRef) {
-        await adoptAppFromSession(session);
-        const scopeError = requireAppScope();
-        if (scopeError) return scopeError;
-        appRef = auth.appId;
-      }
-      if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
-      try {
-        const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef: channel, sessionRef: session, seq });
-        return textResult(JSON.stringify(result, null, 2));
-      } catch (error) {
-        return scopeErrorText(error);
-      }
-    },
-  );
+    server.tool(
+      'hadron_team_chat_mark_read',
+      'INTERNAL PILOT (#1353): explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
+      {
+        session: z.string().describe('Your live Worker session; selects the Worker whose own cursor advances.'),
+        app: z.string().optional().describe('The pilot App. Omit to recover it from session or the active selection.'),
+        channel: z.string().optional().describe('Channel id or address. Omit for the App default team Channel.'),
+        seq: z.number().int().min(0).describe('Read through this exact sequence.'),
+      },
+      async ({ session, app, channel, seq }) => {
+        await heartbeatSession(session);
+        let appRef = app;
+        if (!appRef) {
+          await adoptAppFromSession(session);
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        try {
+          const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef: channel, sessionRef: session, seq });
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
+  }
 
   // ── hadron_list_workers ───────────────────────────────────────────────────────
 

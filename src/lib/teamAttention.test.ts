@@ -500,7 +500,11 @@ describe('MCP parity and discovery gate', () => {
     delete process.env.TEAM_ATTENTION_PILOT_USER_IDS;
     const disabled = createTestableMcpServer(auth());
     expect(await disabled.callToolText('hadron_server_info', {})).not.toContain('team-attention');
-    expect(await disabled.callToolText('hadron_team_attention', {})).toContain('[feature_not_available]');
+    // A non-pilot operator's connection does not even list the pilot tools
+    // (#1362 review): discovery follows the operator allowlist.
+    const pilotTools = ['hadron_team_attention', 'hadron_team_attention_switchover', 'hadron_team_chat_mark_read'];
+    expect(enabled.toolNames()).toEqual(expect.arrayContaining(pilotTools));
+    for (const name of pilotTools) expect(disabled.toolNames()).not.toContain(name);
   });
 
   it('ordinary MCP reads own the cursor and the explicit mark-read door covers filtered reads', async () => {
