@@ -1,5 +1,6 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import { validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
   assertSystemMemoryOwner,
@@ -932,6 +933,7 @@ export const agentMutations = {
         model: string;
         apiKey?: string | null;
         params?: unknown;
+        endpoint?: string | null;
         enabled?: boolean | null;
       },
       ctx: Context,
@@ -940,6 +942,7 @@ export const agentMutations = {
         const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
         const name = validateAiConfigName(args.name);
         validateProviderAndParams(args.provider, args.params ?? null);
+        const endpoint = args.endpoint ? validateEndpoint(args.endpoint) : null;
         // No upsert: a P2002 from the partial unique (owner, name) index is
         // the duplicate-name typed error, not a retry (upsert is not
         // race-safe on the cold path).
@@ -959,6 +962,7 @@ export const agentMutations = {
               args.params === undefined || args.params === null
                 ? undefined
                 : (args.params as InputJsonValue),
+            endpoint,
             enabled: args.enabled ?? true,
             createdBy: ctx.userId ?? null,
           },
@@ -982,6 +986,7 @@ export const agentMutations = {
         model?: string | null;
         apiKey?: string | null;
         params?: unknown;
+        endpoint?: string | null;
         enabled?: boolean | null;
       },
       ctx: Context,
@@ -994,6 +999,9 @@ export const agentMutations = {
         const provider = args.provider ?? existing.provider;
         const params = args.params === undefined ? existing.params : args.params;
         validateProviderAndParams(provider, params ?? null);
+        // Omitted = unchanged; null or '' = clear back to the provider default.
+        const endpoint =
+          args.endpoint === undefined ? undefined : args.endpoint ? validateEndpoint(args.endpoint) : null;
         const config = await ctx.db.aiServiceConfig.update({
           where: { id: existing.id },
           data: {
@@ -1004,6 +1012,7 @@ export const agentMutations = {
             ...(args.params === undefined
               ? {}
               : { params: args.params === null ? Prisma.DbNull : (args.params as InputJsonValue) }),
+            ...(endpoint === undefined ? {} : { endpoint }),
             ...(args.enabled == null ? {} : { enabled: args.enabled }),
             updatedBy: ctx.userId ?? null,
           },

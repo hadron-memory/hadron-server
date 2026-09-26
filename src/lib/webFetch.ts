@@ -174,8 +174,12 @@ async function assertHostAllowed(url: URL): Promise<LookupAddress[]> {
  * undici's connector calls this with `{ all: true }` (and no family), expecting
  * the array form — so that is the live path; the single-address branch is a
  * fallback for other lookup callers.
+ *
+ * `forbidden` defaults to the import egress policy; a caller with a narrower
+ * documented exception (the AI endpoint guard's dev-only loopback, #1373)
+ * passes its own predicate so the re-check matches what it validated.
  */
-export function pinnedLookup(addresses: LookupAddress[]) {
+export function pinnedLookup(addresses: LookupAddress[], forbidden: (ip: string) => boolean = isForbiddenAddress) {
   return (
     _hostname: string,
     options: { all?: boolean; family?: number } | number | null | undefined,
@@ -185,7 +189,7 @@ export function pinnedLookup(addresses: LookupAddress[]) {
       callback(new Error('no pinned addresses available'));
       return;
     }
-    if (addresses.some((a) => isForbiddenAddress(a.address))) {
+    if (addresses.some((a) => forbidden(a.address))) {
       callback(new Error('pinned address failed re-validation'));
       return;
     }

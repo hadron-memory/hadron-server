@@ -47,6 +47,12 @@ beforeAll(async () => {
     const path = req.url ?? '';
     captured.push({ method: req.method ?? '', path, auth: req.headers.authorization, body: await readBody(req) });
     res.setHeader('content-type', 'application/json');
+    if (path.startsWith('/redirect/')) {
+      res.statusCode = 307;
+      res.setHeader('location', `${origin}/api/paas/v4/chat/completions`);
+      res.end('{}');
+      return;
+    }
     if (path.endsWith('/chat/completions')) {
       res.end(JSON.stringify(CHAT_COMPLETION));
       return;
@@ -70,10 +76,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function resolved(provider: string, params: Record<string, unknown> | null = null) {
+function resolved(provider: string, params: Record<string, unknown> | null = null, endpoint: string | null = null) {
   return {
     ownerType: 'ORGANIZATION',
-    config: { provider, model: 'GLM-5.3', apiKeyEncrypted: encryptToken('test-key'), params },
+    config: { provider, model: 'GLM-5.3', apiKeyEncrypted: encryptToken('test-key'), params, endpoint },
   } as never;
 }
 
@@ -108,5 +114,38 @@ describe('#1374 — outgoing API path per provider shape', () => {
     const err = await generateText(resolved('openai'), { prompt: 'hi' }).catch((e) => e);
     expect(err).toBeInstanceOf(LlmInvocationError);
     expect(captured.map((c) => `${c.method} ${c.path}`)).toEqual(['POST /v1/responses']);
+  });
+});
+
+describe('#1373 — AiServiceConfig.endpoint and the connect-time egress guard', () => {
+  it('the endpoint column is where each provider sends its request', async () => {
+    await generateText(resolved('glm', null, `${origin}/zai/v4`), { prompt: 'hi' });
+    await generateText(resolved('openai', null, `${origin}/oai/v1`), { prompt: 'hi' }).catch(() => undefined);
+    await generateText(resolved('anthropic', null, `${origin}/ant/v1`), { prompt: 'hi' }).catch(() => undefined);
+    expect(captured.map((c) => c.path)).toEqual(['/zai/v4/chat/completions', '/oai/v1/responses', '/ant/v1/messages']);
+  });
+
+  it('endpoint wins over the legacy params.baseUrl', async () => {
+    await generateText(resolved('glm', { baseUrl: `${origin}/legacy/v4` }, `${origin}/zai/v4`), { prompt: 'hi' });
+    expect(captured.map((c) => c.path)).toEqual(['/zai/v4/chat/completions']);
+  });
+
+  it('in production a loopback endpoint is refused before any request, for endpoint AND legacy baseUrl', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    for (const r of [resolved('glm', null, `${origin}/zai/v4`), resolved('openai', { baseUrl: `${origin}/v1` })]) {
+      const err = await generateText(r, { prompt: 'hi' }).catch((e) => e);
+      expect(err).toBeInstanceOf(LlmInvocationError);
+      expect(String(err.message)).toMatch(/not allowed/);
+      expect((err as LlmInvocationError).transient).toBe(false);
+    }
+    expect(captured).toEqual([]);
+  });
+
+  it('a redirect is refused, not followed (a redirect to an IP literal would skip the pin)', async () => {
+    const err = await generateText(resolved('glm', null, `${origin}/redirect/v4`), { prompt: 'hi' }).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmInvocationError);
+    expect(String(err.message)).toMatch(/redirected \(307\)/);
+    expect((err as LlmInvocationError).transient).toBe(false);
+    expect(captured.map((c) => c.path)).toEqual(['/redirect/v4/chat/completions']);
   });
 });

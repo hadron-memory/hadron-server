@@ -17,6 +17,7 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
+import { effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
   canWriteToMemory,
   filterReadableMemoryIds,
@@ -966,6 +967,8 @@ export interface AiServiceConfigRow {
   apiKeyEncrypted: string | null;
   apiKeyPreview: string | null;
   params: unknown;
+  /** #1373 — optional so a row read before the column existed still maps. */
+  endpoint?: string | null;
   enabled: boolean;
   createdAt: Date | string;
   updatedAt?: Date | string | null;
@@ -989,6 +992,8 @@ export function toGqlAiServiceConfig(c: AiServiceConfigRow) {
     hasApiKey: !!c.apiKeyEncrypted,
     apiKeyPreview: c.apiKeyPreview,
     params: c.params ?? null,
+    endpoint: c.endpoint ?? null,
+    effectiveEndpoint: effectiveEndpoint(c),
     enabled: c.enabled,
     createdAt: toISO(c.createdAt)!,
     updatedAt: toISO(c.updatedAt ?? null),
