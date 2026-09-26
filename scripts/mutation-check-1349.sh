@@ -258,6 +258,10 @@ run "54 locked agent liveness not checked" "$M" \
   "  if (agent.deletedAt) throw new AgentNotFoundError(refs.agentRef);" ""
 run "55 locked memory liveness not checked" "$M" \
   "  if (memory.deletedAt) throw new MemoryNotFoundError(refs.memoryRef);" ""
+run "56 promotion names the memory from the pre-transaction snapshot" "$AG" \
+  "              name: \`\${name ?? lockedAgent.name} System\`," "              name: \`\${name ?? agent.name} System\`,"
+run "57 syncs gated on the pre-read systemMemoryId" "$AG" \
+  "      const committedSystemMemoryId = published?.systemMemoryId ?? agent.systemMemoryId;" "      const committedSystemMemoryId = agent.systemMemoryId;"
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

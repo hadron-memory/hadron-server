@@ -1469,3 +1469,56 @@ describe('#1357 round 6 (@copilot, PR #1357)', () => {
     }
   });
 });
+
+describe('#1357 round 7 — first-attach promotion and renames (@copilot, PR #1357)', () => {
+  const ATTACH_SYS = `mutation($r: ID!, $s: String!) { updateAgent(ref: $r, systemMemoryId: $s) { id } }`;
+  const RENAME_NAME = `mutation($r: ID!, $n: String!) { updateAgent(ref: $r, name: $n) { name } }`;
+  const fixture = async (label: string) => {
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: attackerOrgId, name: 'Old', urn: `attacker-${suffix}:${label}` } as never });
+    const brain = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:${label}-brain`, name: 'brain', class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+    });
+    return { agent, brain };
+  };
+  const inWindow = (act: () => Promise<void>) => {
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    let staged = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...a: unknown[]) => {
+      if (!staged) { staged = true; await act(); }
+      return real(...a);
+    }) as never);
+    return { spy, wasStaged: () => staged };
+  };
+
+  it('a rename committing inside a first-attach\'s window: the promoted memory takes the CURRENT name', async () => {
+    const { agent, brain } = await fixture('promo-a');
+    const { spy, wasStaged } = inWindow(async () => {
+      const r = await gql(key.attacker!, RENAME_NAME, { r: agent.id, n: 'New' });
+      expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    });
+    try {
+      const p = await gql(key.attacker!, ATTACH_SYS, { r: agent.id, s: brain.id });
+      expect(wasStaged()).toBe(true);
+      expect(p.errors, JSON.stringify(p.errors)).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.memory.findUniqueOrThrow({ where: { id: brain.id } })).name).toBe('New System');
+  });
+
+  it('a first-attach committing inside a rename\'s window: the rename still syncs the new name', async () => {
+    const { agent, brain } = await fixture('promo-b');
+    const { spy, wasStaged } = inWindow(async () => {
+      const p = await gql(key.attacker!, ATTACH_SYS, { r: agent.id, s: brain.id });
+      expect(p.errors, JSON.stringify(p.errors)).toBeUndefined();
+    });
+    try {
+      const r = await gql(key.attacker!, RENAME_NAME, { r: agent.id, n: 'New2' });
+      expect(wasStaged()).toBe(true);
+      expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.memory.findUniqueOrThrow({ where: { id: brain.id } })).name).toBe('New2 System');
+  });
+});

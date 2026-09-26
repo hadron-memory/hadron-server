@@ -658,7 +658,7 @@ export const agentMutations = {
           // transaction; the target row is locked in the ordered set.
           const lockedAgent = await tx.agent.findUniqueOrThrow({
             where: { id },
-            select: { systemMemoryId: true, organizationId: true, ownerUserId: true },
+            select: { systemMemoryId: true, organizationId: true, ownerUserId: true, name: true },
           });
           if (lockedAgent.systemMemoryId && lockedAgent.systemMemoryId !== promoteSystemMemoryId) {
             throw new GraphQLError(
@@ -691,7 +691,10 @@ export const agentMutations = {
               // (forbidden non-null on class='system'). Agent visibility no
               // longer propagates onto the system memory.
               class: 'system',
-              name: `${name ?? agent.name} System`,
+              // The LOCKED agent's name, not the pre-transaction snapshot
+              // (@copilot, PR #1357): a rename committing in between would
+              // otherwise leave the promoted memory named after the old one.
+              name: `${name ?? lockedAgent.name} System`,
               visibility: null,
               // system-class memories must opt out of uploads (schema.prisma,
               // 006-asset-upload-redesign). #519 review.
@@ -764,20 +767,24 @@ export const agentMutations = {
       // request's values — so two concurrent renames converge on the latest
       // (@codex, PR #1357). See syncSystemMemoryUrn / syncSystemMemoryName.
       const replacedUrn = predecessorUrn ?? agent.urn;
-      if (agent.systemMemoryId && newUrn !== undefined && newUrn !== replacedUrn) {
+      // Gated on the COMMITTED row's system memory, not the pre-read (@copilot,
+      // PR #1357): for a first attach, or a rename racing one, the snapshot has
+      // no systemMemoryId and every sync was skipped.
+      const committedSystemMemoryId = published?.systemMemoryId ?? agent.systemMemoryId;
+      if (committedSystemMemoryId && newUrn !== undefined && newUrn !== replacedUrn) {
         await syncSystemMemoryUrn(ctx.db, {
           agentId: agent.id,
-          systemMemoryId: agent.systemMemoryId,
+          systemMemoryId: committedSystemMemoryId,
           oldAgentUrn: replacedUrn,
           actor: ctx.userId ?? ctx.clientId ?? null,
         }).catch((err) => {
           console.warn('[updateAgent] system memory URN sync failed:', err);
         });
       }
-      if (agent.systemMemoryId && name !== undefined) {
+      if (committedSystemMemoryId && name !== undefined) {
         await syncSystemMemoryName(ctx.db, {
           agentId: agent.id,
-          systemMemoryId: agent.systemMemoryId,
+          systemMemoryId: committedSystemMemoryId,
           actor: ctx.userId ?? ctx.clientId ?? null,
         }).catch((err) => {
           console.warn('[updateAgent] system memory sync failed:', err);
