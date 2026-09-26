@@ -25,6 +25,7 @@ M=src/api/graphql/schema/resolvers.mutation.memory.ts
 AM=src/api/graphql/schema/resolvers.mutation.appMemory.ts
 Q=src/api/graphql/schema/resolvers.query.session.ts
 LA=src/controller/operations/listMemoryAssets.ts
+O=src/api/graphql/schema/resolvers.query.org.ts
 SPECS="src/test/integration/graphql-existence-oracle-1381.test.ts
 src/test/integration/memory-existence-oracle-1316.test.ts
 src/test/integration/mcp-existence-oracle-1316.test.ts
@@ -33,7 +34,10 @@ src/api/graphql/schema/resolvers.encryption041.test.ts
 src/api/graphql/schema/resolvers.memoryType.test.ts
 src/api/graphql/schema/resolvers.mutation.appMemory.test.ts
 src/api/graphql/schema/resolvers.usageEvents.access.test.ts
-src/controller/operations/listMemoryAssets.test.ts"
+src/controller/operations/listMemoryAssets.test.ts
+src/api/graphql/schema/resolvers.effectiveAccess.test.ts
+src/api/graphql/schema/resolvers.userOwnedAgent.test.ts
+src/api/graphql/schema/resolvers.impersonation.test.ts"
 
 BAD=0
 SURVIVORS=0
@@ -70,6 +74,7 @@ open(p, 'w').write(s[:at] + new + s[at + len(old):])
 PY
   # shellcheck disable=SC2086
   raw=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run $SPECS 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+  status=$?
   out=$(echo "$raw" | grep -E '^ *Tests ')
   git checkout -q -- "$2"
   if [ -z "$out" ]; then
@@ -81,6 +86,13 @@ PY
   total=$(echo "$out" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
   if [ "$total" != "$BASELINE" ]; then
     echo "ERRORED   $1 — partial run: $total of $BASELINE tests reported ($(echo "$out" | tr -s ' '))"
+    BAD=$((BAD+1))
+    return
+  fi
+  # A nonzero exit with NO failed test is an operational failure (teardown,
+  # an unhandled error), not a verdict on the mutant (@codex/@copilot, PR #1383).
+  if [ "$status" -ne 0 ] && ! echo "$out" | grep -q failed; then
+    echo "ERRORED   $1 — vitest exited $status without a failed test ($(echo "$out" | tr -s ' '))"
     BAD=$((BAD+1))
     return
   fi
@@ -176,6 +188,18 @@ run "24b deleteMemorySubscription lets an org error through" "$M" \
   "        if (memoryHidden && callerInput) {" "        if (false) {"
 run "24c deleteMemorySubscription converts faults too" "$M" \
   "        if (memoryHidden && callerInput) {" "        if (memoryHidden) {"
+run "24d ambiguous org alias leaks" "$M" \
+  "          e instanceof AmbiguousLegacyUrnError ||" ""
+run "30 effectiveAccess conceal removed" "$O" \
+  "      if ((memoryShaped || auditsSelf) && !(await callerCanOpenResource(ctx, resolved))) {" "      if (false) {"
+run "31 effectiveAccess conceals memory-shaped only for a self-audit" "$O" \
+  "      if ((memoryShaped || auditsSelf) && !(await callerCanOpenResource(ctx, resolved))) {" "      if (auditsSelf && !(await callerCanOpenResource(ctx, resolved))) {"
+run "32 effectiveAccess treats every non-memory kind as unopenable" "$O" \
+  "    return (await findOne()) != null;" "    return false;"
+run "33 effectiveAccess judges a node by the record gate" "$O" \
+  "  if (resolved.kind === 'node') return isMemoryReadableCached(ctx, resolved.memory.id);" "  if (resolved.kind === 'node') return canOpenMemoryRecordById(ctx, resolved.memory.id);"
+run "34 effectiveAccess lets a find-one denial through" "$O" \
+  "    if (isAuthorizationDenial(error)) return false;" ""
 run "25 missing subscription row does not conceal" "$M" \
   "  if (!(await canOpenMemoryRecordById(ctx, memoryId))) throw refArgNotFoundError('memory', memoryRef);" ""
 run "26 attachMemoryToApp" "$AM" \

@@ -13,7 +13,10 @@ import {
   resolveResource as resolveAccessResource,
   callerCanAudit,
   computeEffectiveAccess,
+  type ResolvedResource,
 } from '../../../lib/auth/effectiveAccess.js';
+import { appQueries } from './resolvers.query.app.js';
+import { agentQueries } from './resolvers.query.agent.js';
 import {
   globalSearch as runGlobalSearch,
   type SearchEntityType,
@@ -31,7 +34,51 @@ import {
   getAccessibleMemoryIds,
   resolveOrgScope,
   ORG_INCLUDE,
+  canOpenMemoryRecordById,
+  isMemoryReadableCached,
+  isAuthorizationDenial,
 } from './resolvers.helpers.js';
+
+/**
+ * May this caller OPEN the resolved resource? (`cor:acl:060:01`, amended
+ * 2026-09-26; #1381.) A resource the caller cannot open answers the audit's
+ * `NOT_FOUND` exactly as an unresolvable reference does.
+ *
+ * Answered by each kind's OWN read gate, never a copy of it:
+ *  - memory → the record gate (`cor:api:140:03`: a caller who can open the
+ *    record already knows the memory exists);
+ *  - node → the node-content gate of its memory, the line `Query.node` draws;
+ *  - every other kind → that kind's find-one query (`app(ref:)`,
+ *    `agent(ref:)`, …). `null`, or an ordinary authorization denial, means
+ *    "cannot open"; any other error propagates.
+ *
+ * Deliberately NOT the audit's own `canRead`: that reports grants, and a
+ * resource can be openable without one (a PUBLIC agent, for instance).
+ */
+async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): Promise<boolean> {
+  if (resolved.kind === 'memory') return canOpenMemoryRecordById(ctx, resolved.memory.id);
+  if (resolved.kind === 'node') return isMemoryReadableCached(ctx, resolved.memory.id);
+  const findOne = (): Promise<unknown> => {
+    switch (resolved.kind) {
+      case 'app':
+        return appQueries.app(null as never, { ref: resolved.app.id }, ctx);
+      case 'agent':
+        return agentQueries.agent(null as never, { ref: resolved.agent.id }, ctx);
+      case 'aiServiceConfig':
+        return agentQueries.aiServiceConfig(null as never, { ref: resolved.config.id }, ctx);
+      case 'organization':
+        return orgQueries.organization(null as never, { ref: resolved.org.id }, ctx);
+      case 'user':
+        return orgQueries.user(null as never, { ref: resolved.user.id }, ctx);
+    }
+  };
+  try {
+    return (await findOne()) != null;
+  } catch (error) {
+    if (isAuthorizationDenial(error)) return false;
+    throw error;
+  }
+}
 
 export const orgQueries = {
     effectiveAccess: async (
@@ -106,6 +153,22 @@ export const orgQueries = {
         }
       }
 
+      // cor:acl:060:01 (amended 2026-09-26, #1381): a resource the caller cannot
+      // open answers exactly as the unresolvable one above — for a memory or a
+      // node in one, whoever the caller is (cor:api:140:03); for any other kind,
+      // on a self-audit. Checked BEFORE the caller gate, so "NOT_FOUND before
+      // FORBIDDEN" covers the unopenable case too. The cost, accepted by the
+      // ruling: a user who knows a URN can't use the audit to learn why they
+      // can't reach it — attempting the operation now says "not found" too.
+      //
+      // AFTER the impersonation gate above, deliberately: that gate is #875's
+      // own scoped refusal for a platform admin's support session, which the
+      // amendment does not address and which no outsider can reach.
+      const auditsSelf = !!ctx.userId && subjectUser.id === ctx.userId;
+      const memoryShaped = resolved.kind === 'memory' || resolved.kind === 'node';
+      if ((memoryShaped || auditsSelf) && !(await callerCanOpenResource(ctx, resolved))) {
+        throw new GraphQLError('Resource not found', { extensions: { code: 'NOT_FOUND' } });
+      }
       // Who may CALL this — the same visibility bar as the underlying grant
       // tables. A non-privileged caller gets FORBIDDEN, never a silent empty
       // result, so the audit command can't probe access it isn't allowed to.
@@ -114,9 +177,8 @@ export const orgQueries = {
       // effective access learns nothing they couldn't already infer by trying
       // the operation, so there's no info-leak. Every other (cross-subject)
       // case stays gated by callerCanAudit exactly as before.
-      const isSelfAudit = !!ctx.userId && subjectUser.id === ctx.userId;
       if (
-        !isSelfAudit &&
+        !auditsSelf &&
         !(await callerCanAudit(ctx.db, { userId: ctx.userId, roles: ctx.roles }, resolved))
       ) {
         throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });

@@ -86,6 +86,7 @@ beforeAll(async () => {
   const outsider = await mkUser('outsider');
   ids.owner = owner.id;
   ids.outsider = outsider.id;
+  ids.reader = reader.id;
   ids.otherOrg = otherOrg.id;
   // An org the outsider does NOT administer: naming it sends deleteMemorySubscription
   // through its authorization refusal, not just its missing-row check.
@@ -189,12 +190,26 @@ beforeAll(async () => {
   });
   target.appPublicUrn = { existing: `hrn:mem:${appScoped.urn}`, missing: `hrn:mem:${orgUrn}:absent-app-${suffix}` };
   ids.appScoped = appScoped.id;
+  ids.victimAppUrn = `hrn:app:${victimApp.urn}`;
+  // A PUBLIC agent in the victim org: openable by anyone via agent(ref:) even
+  // though the outsider holds no grant on it — the control that "can open" is
+  // the kind's own read gate, not the audit's canRead.
+  const publicAgent = await db.agent.create({
+    data: { id: generateId(), organizationId: org.id, name: 'public agent', urn: `${orgUrn}:pubagent-${suffix}`, visibility: 'PUBLIC' } as never,
+  });
+  ids.publicAgentUrn = `hrn:agent:${orgUrn}:pubagent-${suffix}`;
+  ids.publicAgentId = publicAgent.id;
   // A SYSTEM-class memory: mergeMemories refused its class before authorizing,
   // echoing `memoryClass` to anyone who named it.
   const system = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${orgUrn}:system-${suffix}`, name: 'sys', class: 'system' },
   });
   target.systemUrn = { existing: `hrn:mem:${system.urn}`, missing: `hrn:mem:${orgUrn}:absent-system-${suffix}` };
+  // A node in it: the READER may open the system memory's RECORD (org member)
+  // but not its NODES — the case that separates the node gate from the record gate.
+  await db.node.create({ data: { id: generateId(), memoryId: system.id, loc: 'brain', name: 'brain' } });
+  ids.systemSlug = `system-${suffix}`;
+  ids.victimOrgUrn = `hrn:org:${orgUrn}`;
 
   const app = await createServer();
   server = createHttpServer(app);
@@ -461,6 +476,25 @@ describe('#1381 — controls: what concealment must not change', () => {
     expect(wire(existing, target.memUrn!.existing)).toBe(wire(missing, target.memUrn!.missing));
   });
 
+  it('deleteMemorySubscription: an AMBIGUOUS org alias on a hidden memory answers as the missing memory', async () => {
+    // Two live orgs claiming one legacy URN make resolveOrgRef throw
+    // AmbiguousLegacyUrnError — caller input, like a malformed ref (@codex, PR #1383).
+    const shared = `oracle-1381-ambig-${suffix}`;
+    const a = await db.organization.create({ data: { id: generateId(), name: 'ambig a', urn: `${shared}-a` } });
+    const b = await db.organization.create({ data: { id: generateId(), name: 'ambig b', urn: `${shared}-b` } });
+    await db.urnAlias.createMany({
+      data: [a, b].map((o) => ({ id: generateId(), urn: shared, entityType: 'ORGANIZATION' as const, entityId: o.id, reason: 'RENAME' as const })),
+    });
+    const q = `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
+    // Positive control: a caller who CAN open the memory sees the ambiguity itself.
+    const visible = await gql('reader', q, { r: target.memUrn!.existing, o: `hrn:org:${shared}` });
+    expect(visible.errors?.[0]?.message ?? '', 'precondition: the alias really is ambiguous').toMatch(/ambiguous|more than one/i);
+    const existing = await gql('outsider', q, { r: target.memUrn!.existing, o: `hrn:org:${shared}` });
+    const missing = await gql('outsider', q, { r: target.memUrn!.missing, o: `hrn:org:${shared}` });
+    expect(code(missing)).toBe('NOT_FOUND');
+    expect(wire(existing, target.memUrn!.existing)).toBe(wire(missing, target.memUrn!.missing));
+  });
+
   it('deleteMemorySubscription: a fault resolving the org propagates, even for a hidden memory', async () => {
     const q = `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
     const fault = vi.spyOn(db.organization, 'findFirst').mockRejectedValueOnce(new Error('injected org-resolution db failure'));
@@ -502,5 +536,74 @@ describe('#1381 — controls: what concealment must not change', () => {
     });
     expect(byUrn.errors, JSON.stringify(byUrn.errors)).toBeUndefined();
     expect((byUrn.data as { updateMemory: { name: string } }).updateMemory.name).toBe('by urn');
+  });
+});
+
+describe('#1381 — effectiveAccess (cor:acl:060:01, amended 2026-09-26)', () => {
+  const AUDIT = `query($u: ID!, $r: ID!) { effectiveAccess(user: $u, resource: $r) { resourceUrn canRead } }`;
+  const audit = (as: string, subject: string, resource: string) => gql(as, AUDIT, { u: subject, r: resource });
+  const nodeUrn = (slug: string, loc: string) => `hrn:node:${orgUrn}:${slug}:${loc}`;
+
+  it('self-audit of an unopenable memory ≡ a missing memory', async () => {
+    const existing = await audit('outsider', ids.outsider!, target.memUrn!.existing);
+    const missing = await audit('outsider', ids.outsider!, target.memUrn!.missing);
+    expect(code(missing)).toBe('NOT_FOUND');
+    expect(wire(existing, target.memUrn!.existing)).toBe(wire(missing, target.memUrn!.missing));
+  });
+
+  it('self-audit of a node in an unopenable memory ≡ a missing node, in it or anywhere', async () => {
+    const slug = `victim-${suffix}`;
+    const existing = await audit('outsider', ids.outsider!, nodeUrn(slug, 'probe'));
+    const missingLoc = await audit('outsider', ids.outsider!, nodeUrn(slug, 'no-such-loc'));
+    const missingMem = await audit('outsider', ids.outsider!, nodeUrn(`absent-${suffix}`, 'probe'));
+    expect(code(missingLoc)).toBe('NOT_FOUND');
+    expect(wire(existing, 'probe')).toBe(wire(missingLoc, 'no-such-loc'));
+    expect(JSON.stringify(existing.errors)).toBe(JSON.stringify(missingMem.errors));
+  });
+
+  it('a memory-shaped resource conceals for EVERY caller, not only a self-auditor', async () => {
+    // The outsider auditing the READER's access: the caller gate would answer
+    // FORBIDDEN, but the memory is unopenable to the caller, so NOT_FOUND first.
+    const existing = await audit('outsider', ids.reader!, target.memUrn!.existing);
+    const missing = await audit('outsider', ids.reader!, target.memUrn!.missing);
+    expect(code(missing)).toBe('NOT_FOUND');
+    expect(wire(existing, target.memUrn!.existing)).toBe(wire(missing, target.memUrn!.missing));
+  });
+
+  it('self-audit of an unopenable App ≡ a missing App', async () => {
+    const existing = await audit('outsider', ids.outsider!, ids.victimAppUrn!);
+    const missing = await audit('outsider', ids.outsider!, `hrn:app:${orgUrn}:no-such-app-${suffix}`);
+    expect(code(missing)).toBe('NOT_FOUND');
+    expect(wire(existing, ids.victimAppUrn!)).toBe(wire(missing, `hrn:app:${orgUrn}:no-such-app-${suffix}`));
+  });
+
+  it('a node is judged by the NODE gate: a reader who can open the system memory\'s record still gets NOT_FOUND for its node', async () => {
+    const existing = await audit('reader', ids.reader!, nodeUrn(ids.systemSlug!, 'brain'));
+    const missing = await audit('reader', ids.reader!, nodeUrn(ids.systemSlug!, 'no-such-loc'));
+    expect(code(missing)).toBe('NOT_FOUND');
+    expect(wire(existing, 'brain')).toBe(wire(missing, 'no-such-loc'));
+  });
+
+  it('self-audit of an org the caller cannot open (a denial, not a null) ≡ a missing org', async () => {
+    const existing = await audit('outsider', ids.outsider!, ids.victimOrgUrn!);
+    const missing = await audit('outsider', ids.outsider!, `hrn:org:no-such-org-${suffix}`);
+    expect(code(missing)).toBe('NOT_FOUND');
+    expect(wire(existing, ids.victimOrgUrn!)).toBe(wire(missing, `hrn:org:no-such-org-${suffix}`));
+  });
+
+  it('control: a reader self-auditing a memory they can open still gets the audit', async () => {
+    const r = await audit('reader', ids.reader!, target.memUrn!.existing);
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect((r.data as { effectiveAccess: { canRead: boolean } }).effectiveAccess.canRead).toBe(true);
+  });
+
+  it('control: a PUBLIC agent is openable by anyone, so its self-audit is answered, not concealed', async () => {
+    const r = await audit('outsider', ids.outsider!, ids.publicAgentUrn!);
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+  });
+
+  it('unchanged (open for Holger, per Vera): a non-self audit of a non-memory resource stays FORBIDDEN', async () => {
+    const r = await audit('outsider', ids.reader!, ids.victimAppUrn!);
+    expect(code(r)).toBe('FORBIDDEN');
   });
 });

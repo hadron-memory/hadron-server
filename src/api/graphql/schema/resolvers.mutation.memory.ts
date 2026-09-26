@@ -1,6 +1,7 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
 import { UrnNotQualifiedError } from '../../../lib/urn.js';
+import { AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
@@ -1798,6 +1799,9 @@ export const memoryMutations = {
         // "no such memory" (@copilot, PR #1383).
         const callerInput =
           e instanceof UrnNotQualifiedError ||
+          // An org ref whose legacy alias names two orgs is caller input too
+          // (@codex, PR #1383): a missing memory refuses before it is resolved.
+          e instanceof AmbiguousLegacyUrnError ||
           (e instanceof GraphQLError && (e.extensions.code === 'NOT_FOUND' || e.extensions.code === 'BAD_USER_INPUT'));
         if (memoryHidden && callerInput) {
           throw refArgNotFoundError('memory', chosenRefArg({ ref: memoryRef, id: memoryId })!);

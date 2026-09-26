@@ -71,6 +71,7 @@ open(p, 'w').write(s[:at] + new + s[at + len(old):])
 PY
   # shellcheck disable=SC2086
   raw=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run $SPECS 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+  status=$?
   out=$(echo "$raw" | grep -E '^ *Tests ')
   git checkout -q -- "$2"
   if [ -z "$out" ]; then
@@ -82,6 +83,13 @@ PY
   total=$(echo "$out" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
   if [ "$total" != "$BASELINE" ]; then
     echo "ERRORED   $1 — partial run: $total of $BASELINE tests reported ($(echo "$out" | tr -s ' '))"
+    BAD=$((BAD+1))
+    return
+  fi
+  # A nonzero exit with NO failed test is an operational failure (teardown,
+  # an unhandled error), not a verdict on the mutant (@codex/@copilot, PR #1383).
+  if [ "$status" -ne 0 ] && ! echo "$out" | grep -q failed; then
+    echo "ERRORED   $1 — vitest exited $status without a failed test ($(echo "$out" | tr -s ' '))"
     BAD=$((BAD+1))
     return
   fi
