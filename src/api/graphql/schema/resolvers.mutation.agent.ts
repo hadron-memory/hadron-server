@@ -1,6 +1,6 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
-import { apiStyleApplies, refuseLegacyBaseUrl, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
+import { refuseLegacyBaseUrl, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { testAiServiceConfig, type AiConfigTestOverride } from '../../../controller/operations/testAiServiceConfig.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
@@ -881,11 +881,11 @@ export const agentMutations = {
             model,
             ...keyData,
             // #1380 review: this legacy surface can express neither a style nor
-            // an endpoint. A style the new provider can't use is cleared, and so
-            // is an endpoint on any provider change: it named the OLD
-            // provider's host, and the new key must not be sent there.
-            ...(apiStyleApplies(provider, existing.apiStyle) ? {} : { apiStyle: null }),
-            ...(provider !== existing.provider ? { endpoint: null } : {}),
+            // an endpoint, and both were chosen for the OLD provider (its host,
+            // its protocol). Any provider change clears both, so the new
+            // provider starts from its own defaults and the new key never goes
+            // to the old host.
+            ...(provider !== existing.provider ? { endpoint: null, apiStyle: null } : {}),
             updatedBy: ctx.userId ?? null,
           },
         });
