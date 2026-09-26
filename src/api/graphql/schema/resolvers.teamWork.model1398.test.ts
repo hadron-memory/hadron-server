@@ -54,6 +54,8 @@ const record = (args: Record<string, unknown> = {}) =>
   );
 
 const worklogMemory = async () => {
+  // loc-scope-ok: deliberately spans the App's OWN app-class memories — the
+  // relation filter is the tenant scope, mirroring the resolver (#947).
   const root = await db.node.findFirst({ where: { loc: WORKLOG_LOC, memory: { appId: app.id, class: 'app' } } });
   expect(root).not.toBeNull();
   return root!.memoryId;
