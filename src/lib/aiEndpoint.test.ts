@@ -105,6 +105,13 @@ describe('private endpoints (D4)', () => {
     }
   });
 
+  it('plain http is only for a private network: a public IP literal is refused at write (#1380 review)', () => {
+    expect(() => validateEndpoint('http://8.8.8.8/v1', optIn)).toThrow(/plain http is allowed only to a private-network address/);
+    expect(validateEndpoint('https://8.8.8.8/v1', optIn)).toBe('https://8.8.8.8/v1');
+    // A hostname's class is unknown until it resolves: allowed here, checked at connect.
+    expect(validateEndpoint('http://ollama.lan/v1', optIn)).toBe('http://ollama.lan/v1');
+  });
+
   it('it never admits credentials, a query or a fragment', () => {
     expect(() => validateEndpoint('http://u:p@10.0.0.5/v1', optIn)).toThrow(/credentials/);
     expect(() => validateEndpoint('http://10.0.0.5/v1?x=1', optIn)).toThrow(/query/);

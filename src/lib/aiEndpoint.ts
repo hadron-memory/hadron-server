@@ -186,6 +186,11 @@ export function validateEndpoint(raw: string, env: NodeJS.ProcessEnv = process.e
     if (isIP(host) && isForbiddenAddress(host) && !isPrivateNetworkAddress(host)) {
       refuse('a link-local, multicast or reserved address is never allowed.');
     }
+    // Plain http only to a private network. A hostname's class is known only
+    // when it resolves, so the connect-time guard enforces that case.
+    if (url.protocol === 'http:' && isIP(host) && !isPrivateNetworkAddress(host)) {
+      refuse('plain http is allowed only to a private-network address; use https.');
+    }
   } else if (loopback) {
     if (!loopbackAllowed(env)) refuse('a loopback host is not allowed on this server.');
   } else {

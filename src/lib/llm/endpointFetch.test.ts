@@ -45,6 +45,18 @@ describe('connect-time resolution failures', () => {
     expect((err as LlmInvocationError).transient).toBe(false);
   });
 
+  it('plain http to a hostname that resolves to a PUBLIC address is refused at connect (#1380 review)', async () => {
+    vi.stubEnv('AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS', 'true');
+    lookupMock.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+    const err = await guardedEndpointFetch()('http://llm.example.test/v4/chat/completions').catch((e) => e);
+    expect(err).toBeInstanceOf(AiEndpointForbiddenError);
+    expect(String(err.message)).toMatch(/plain http is allowed only to a private-network address/);
+    // A mixed answer is refused too: every address must be private.
+    lookupMock.mockResolvedValue([{ address: '10.0.0.7', family: 4 }, { address: '93.184.216.34', family: 4 }]);
+    await expect(guardedEndpointFetch()('http://llm.example.test/v4/chat/completions')).rejects.toBeInstanceOf(AiEndpointForbiddenError);
+    vi.unstubAllEnvs();
+  });
+
   it('a hostname that resolves to the metadata address is refused even under the private opt-in', async () => {
     vi.stubEnv('AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS', 'true');
     lookupMock.mockResolvedValue([{ address: '169.254.169.254', family: 4 }]);
