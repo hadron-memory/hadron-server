@@ -67,6 +67,14 @@ export function isForbiddenAddress(ip: string): boolean {
       (a === 169 && b === 254) || // link-local incl. 169.254.169.254 metadata
       (a === 172 && b >= 16 && b <= 31) || // 172.16/12
       (a === 192 && b === 168) || // 192.168/16
+      // The rest of the IANA special-purpose registry: none of it is a
+      // public destination, and a network may route any of it internally
+      // (#1380 review).
+      (a === 192 && b === 0 && (octets[2] === 0 || octets[2] === 2)) || // 192.0.0/24 protocol assignments, 192.0.2/24 TEST-NET-1
+      (a === 192 && b === 88 && octets[2] === 99) || // 192.88.99/24 6to4 relay anycast (deprecated)
+      (a === 198 && (b === 18 || b === 19)) || // 198.18/15 benchmarking
+      (a === 198 && b === 51 && octets[2] === 100) || // 198.51.100/24 TEST-NET-2
+      (a === 203 && b === 0 && octets[2] === 113) || // 203.0.113/24 TEST-NET-3
       a >= 224 // multicast + reserved + broadcast
     );
   }
@@ -79,15 +87,59 @@ export function isForbiddenAddress(ip: string): boolean {
     // (PR-486 review, Codex P1 / Gemini critical).
     const embedded = embeddedIpv4(lower);
     if (embedded != null) return isForbiddenAddress(embedded);
-    if (lower === '::' || lower === '::1') return true; // unspecified + loopback
-    if (/^f[cd]/.test(lower)) return true; // fc00::/7 ULA
-    if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
-    if (/^fe[c-f]/.test(lower)) return true; // fec0::/10 site-local (deprecated, still routable on some hosts)
-    if (/^ff/.test(lower)) return true; // multicast
-    return false;
+    const g = ipv6Groups(lower);
+    if (!g) return true; // unparseable: never fetch it
+    // NAT64's well-known prefix carries an IPv4 destination in its low 32
+    // bits; on an IPv6-only host it is how PUBLIC IPv4 is reached, so the
+    // embedded address is judged, not the prefix.
+    if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((n) => n === 0)) {
+      return isForbiddenAddress(`${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`);
+    }
+    return (
+      g.every((n) => n === 0) || // :: unspecified
+      (g.slice(0, 7).every((n) => n === 0) && g[7] === 1) || // ::1 loopback
+      (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 1) || // 64:ff9b:1::/48 local-use NAT64
+      (g[0] === 0x100 && g.slice(1, 4).every((n) => n === 0)) || // 100::/64 discard
+      (g[0] === 0x2001 && g[1] < 0x200) || // 2001::/23 IETF protocol assignments (Teredo, ORCHID, ...)
+      (g[0] === 0x2001 && g[1] === 0xdb8) || // 2001:db8::/32 documentation
+      g[0] === 0x2002 || // 2002::/16 6to4 (embeds IPv4; deprecated)
+      (g[0] & 0xfff0) === 0x3ff0 || // 3fff::/20 documentation
+      g[0] === 0x5f00 || // 5f00::/16 SRv6 SIDs
+      (g[0] & 0xfe00) === 0xfc00 || // fc00::/7 ULA
+      (g[0] & 0xffc0) === 0xfe80 || // fe80::/10 link-local
+      (g[0] & 0xffc0) === 0xfec0 || // fec0::/10 site-local (deprecated, still routable on some hosts)
+      (g[0] & 0xff00) === 0xff00 // ff00::/8 multicast
+    );
   }
   // Not an IP at all — callers pass resolver output, so treat as forbidden.
   return true;
+}
+
+/**
+ * The eight 16-bit groups of an IPv6 literal, `::` expanded and a trailing
+ * dotted quad folded in, so range checks compare numbers rather than text
+ * (leading zeros and compression can't dodge them). Null if unparseable.
+ */
+export function ipv6Groups(ip6: string): number[] | null {
+  let s = ip6.toLowerCase();
+  const dotted = s.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    const parts = dotted[2].split('.').map(Number);
+    if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p > 255)) return null;
+    s = dotted[1] + ((parts[0] << 8) | parts[1]).toString(16) + ':' + ((parts[2] << 8) | parts[3]).toString(16);
+  }
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 && missing < 0) return null;
+  const groups = halves.length === 2 ? [...head, ...Array<string>(missing).fill('0'), ...tail] : head;
+  if (groups.length !== 8) return null;
+  if (groups.some((x) => !/^[0-9a-f]{0,4}$/.test(x))) return null;
+  const g = groups.map((x) => parseInt(x || '0', 16));
+  if (g.some((n) => Number.isNaN(n))) return null;
+  return g;
 }
 
 /**
@@ -98,30 +150,8 @@ export function isForbiddenAddress(ip: string): boolean {
  * leading-zero variants can't dodge the check.
  */
 export function embeddedIpv4(ip6: string): string | null {
-  let s = ip6.toLowerCase();
-  // Fold a trailing dotted-quad into two hex groups so the expansion below
-  // is uniform.
-  const dotted = s.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/);
-  if (dotted) {
-    const parts = dotted[2].split('.').map(Number);
-    if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p > 255)) return null;
-    s =
-      dotted[1] +
-      ((parts[0] << 8) | parts[1]).toString(16) +
-      ':' +
-      ((parts[2] << 8) | parts[3]).toString(16);
-  }
-  const halves = s.split('::');
-  if (halves.length > 2) return null;
-  const head = halves[0] ? halves[0].split(':') : [];
-  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
-  const missing = 8 - head.length - tail.length;
-  if (halves.length === 2 && missing < 0) return null;
-  const groups =
-    halves.length === 2 ? [...head, ...Array<string>(missing).fill('0'), ...tail] : head;
-  if (groups.length !== 8) return null;
-  const g = groups.map((x) => parseInt(x || '0', 16));
-  if (g.some((n) => Number.isNaN(n) || n < 0 || n > 0xffff)) return null;
+  const g = ipv6Groups(ip6);
+  if (!g) return null;
   const zeroTo = (i: number) => g.slice(0, i).every((n) => n === 0);
   const isMapped = zeroTo(5) && g[5] === 0xffff;
   const isCompat = zeroTo(6) && (g[6] !== 0 || g[7] > 1); // excludes :: and ::1 (plain v6)

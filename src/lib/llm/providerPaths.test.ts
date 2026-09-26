@@ -53,6 +53,18 @@ beforeAll(async () => {
       res.end('{}');
       return;
     }
+    if (path.startsWith('/slow-body/')) {
+      // Headers now, the body in two late chunks: the guarded fetch has
+      // returned (and closed its per-request agent) long before the SDK
+      // reads this body.
+      const body = JSON.stringify(CHAT_COMPLETION);
+      res.flushHeaders();
+      await new Promise((r) => setTimeout(r, 150));
+      res.write(body.slice(0, 20));
+      await new Promise((r) => setTimeout(r, 150));
+      res.end(body.slice(20));
+      return;
+    }
     if (path.endsWith('/chat/completions')) {
       res.end(JSON.stringify(CHAT_COMPLETION));
       return;
@@ -106,6 +118,11 @@ describe('#1374 — outgoing API path per provider shape', () => {
     expect(captured[0].auth).toBe('Bearer test-key');
     expect(captured[0].body).toMatchObject({ model: 'GLM-5.3', messages: [{ role: 'user', content: 'hi' }] });
     expect(out).toMatchObject({ text: 'ok', tokensIn: 3, tokensOut: 1, provider: 'glm' });
+  });
+
+  it('a body that arrives after the guarded fetch returns is still read in full (#1380 review)', async () => {
+    const out = await generateText(resolved('glm', null, `${origin}/slow-body/v4`), { prompt: 'hi' });
+    expect(out).toMatchObject({ text: 'ok', tokensIn: 3, tokensOut: 1 });
   });
 
   it('glm with NO endpoint calls the default Z.ai host at /chat/completions (D1)', async () => {
@@ -180,6 +197,9 @@ describe('#1373 — AiServiceConfig.endpoint and the connect-time egress guard',
     const err = await generateText(resolved('glm', null, `${origin}/redirect/v4`), { prompt: 'hi' }).catch((e) => e);
     expect(err).toBeInstanceOf(LlmInvocationError);
     expect(String(err.message)).toMatch(/redirected \(307\)/);
+    // The failure lands in AppRun.failure, which org READERs see; the
+    // endpoint's host does not (#1380 review).
+    expect(String(err.message)).not.toContain('127.0.0.1');
     expect((err as LlmInvocationError).transient).toBe(false);
     expect(captured.map((c) => c.path)).toEqual(['/redirect/v4/chat/completions']);
   });

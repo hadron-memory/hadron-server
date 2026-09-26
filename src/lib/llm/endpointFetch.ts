@@ -41,7 +41,11 @@ import { isLoopbackAddress, isPrivateNetworkAddress, loopbackAllowed, privateEnd
  */
 export class AiEndpointResolveError extends Error {
   constructor(readonly host: string, readonly code: string) {
-    super(`AI endpoint host "${host}" could not be resolved right now (${code}): a temporary DNS or network failure.`);
+    // The host stays on the error for server-side diagnosis but out of the
+    // message: that reaches AppRun.failure, which any org READER can read,
+    // while the endpoint itself is shown only to the config's admins
+    // (#1380 review, Codex).
+    super(`The configured AI endpoint could not be resolved right now (${code}): a temporary DNS or network failure.`);
     this.name = 'AiEndpointResolveError';
   }
 }
@@ -51,7 +55,8 @@ const TRANSIENT_DNS_CODES = new Set(['EAI_AGAIN', 'ETIMEOUT', 'ESERVFAIL', 'ECON
 
 export class AiEndpointForbiddenError extends Error {
   constructor(readonly host: string, reason: string) {
-    super(`AI endpoint host "${host}" is not allowed: ${reason}.`);
+    // Host kept out of the message for the same reason as above.
+    super(`The configured AI endpoint is not allowed: ${reason}.`);
     this.name = 'AiEndpointForbiddenError';
   }
 }
