@@ -114,6 +114,11 @@ interface Fixtures {
     node: { urn: string; loc: string; memoryUrn: string; isRunnable: boolean; content: string; properties: unknown };
     findingsByHost: Record<string, { rule: string; severity: string; message: string }[]>;
   }[];
+  /** #1323 — Go's ParseFile over authored provenance-header edits: the `rev=`
+   *  edge values (hadron-cli#724) and the separator cases, stamped separately. `revision` is Go's int: 0 means none, which the port
+   *  spells null. A voided header reads back with an empty source. */
+  parseHeaderSourceCommit: string;
+  parseHeader: { name: string; input: string; id: string; source: string; hash: string; revision: number }[];
 }
 
 /** Loads the fixtures, refusing an empty or absent set rather than yielding []. */
@@ -125,7 +130,7 @@ function loadFixtures(): Fixtures {
     'normalizeDescription', 'normalizeBody',
     'validName', 'hash', 'render', 'parseFile',
     'isNodeUrn', 'renderParseRoundTrip', 'lint', 'lintCollisions', 'declared',
-    'lintUnknownHostKeys', 'lintReserved', 'lintMarkup',
+    'lintUnknownHostKeys', 'lintReserved', 'lintMarkup', 'parseHeader',
   ];
   for (const s of sections) {
     const v = f[s];
@@ -378,6 +383,25 @@ describe('#1177 — isNodeUrn matches the Go reference exactly', () => {
       expect(c.valid, `${n} is accepted by urn-lib-go`).toBe(true);
       expect(isNodeUrn(c.in)).toBe(true);
     }
+  });
+});
+
+describe('#1323 — a provenance header, `rev=` included, reads back as Go reads it', () => {
+  it.each(F.parseHeader.map((c) => [c.name, c] as const))('parseHeader %s', (_n, c) => {
+    const got = parseFile(c.input);
+    expect(got.source).toBe(c.source);
+    expect(got.id).toBe(c.id);
+    expect(got.hash).toBe(c.hash);
+    expect(got.revision).toBe(c.revision === 0 ? null : c.revision);
+  });
+
+  it('POSITIVE CONTROL: the section carries read revisions, voided headers and a revision-less header', () => {
+    // A section generated from a Go that voided everything, or read everything,
+    // would pass both sides of a port that agreed with it.
+    expect(F.parseHeaderSourceCommit).toBeTruthy();
+    expect(F.parseHeader.filter((c) => c.revision > 0).length).toBeGreaterThanOrEqual(4);
+    expect(F.parseHeader.filter((c) => c.source === '').length).toBeGreaterThanOrEqual(8);
+    expect(F.parseHeader.filter((c) => c.source !== '' && c.revision === 0).length).toBeGreaterThanOrEqual(2);
   });
 });
 
