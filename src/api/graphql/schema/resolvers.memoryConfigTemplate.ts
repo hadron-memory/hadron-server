@@ -269,6 +269,40 @@ async function withRules(tx: Prisma.TransactionClient, t: MemoryConfigTemplate):
   return { ...t, rules: await tx.memoryConfigTemplateRule.findMany({ where: { templateId: t.id }, orderBy: { role: 'asc' } }) };
 }
 
+/**
+ * Share-lock the owner's row and re-check it is live, inside the create's
+ * transaction (#1369 review). The owner was resolved before the transaction,
+ * so an owner soft-deleted in between would otherwise get a template — for a
+ * user, one inserted AFTER `deleteUserAccount`'s template sweep, surviving the
+ * erasure. `deleteUserAccount` takes the user row FOR UPDATE first, so with
+ * this lock either the deletion commits first (the re-check sees it) or the
+ * create does (the sweep sees the template). Taken BEFORE the node share
+ * locks: account deletion goes user → nodes, and the same order cannot
+ * deadlock against it.
+ */
+async function lockLiveOwner(tx: Prisma.TransactionClient, owner: OwnerColumns): Promise<void> {
+  let live: unknown[];
+  if (owner.ownerUserId) {
+    live = await tx.$queryRaw`SELECT 1 FROM "users" WHERE "id" = ${owner.ownerUserId} AND "deleted_at" IS NULL FOR SHARE`;
+  } else if (owner.organizationId) {
+    live = await tx.$queryRaw`SELECT 1 FROM "organizations" WHERE "id" = ${owner.organizationId} AND "deleted_at" IS NULL FOR SHARE`;
+  } else if (owner.hadronServerId) {
+    live = await tx.$queryRaw`SELECT 1 FROM "hadron_server" WHERE "id" = ${owner.hadronServerId} AND "deleted_at" IS NULL FOR SHARE`;
+  } else {
+    // The App row alone: its organization's liveness is re-read on the next
+    // statement, since a join would be re-checked against a stale row
+    // (findings:for-share-with-a-join-drops-concurrently-moved-rows).
+    const rows = await tx.$queryRaw<{ organization_id: string | null }[]>`
+      SELECT "organization_id" FROM "apps"
+      WHERE "id" = ${owner.appId} AND "deleted_at" IS NULL AND "uninstalled_at" IS NULL FOR SHARE`;
+    const orgId = rows[0]?.organization_id ?? null;
+    live = rows.length && orgId
+      ? await tx.$queryRaw`SELECT 1 FROM "organizations" WHERE "id" = ${orgId} AND "deleted_at" IS NULL FOR SHARE`
+      : rows;
+  }
+  if (live.length === 0) throw new Error('Forbidden');
+}
+
 /** Lock a template's row for the rest of the transaction and read it, or null when it is gone. */
 async function lockTemplate(tx: Prisma.TransactionClient, id: string): Promise<MemoryConfigTemplate | null> {
   await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${id} FOR UPDATE`;
@@ -402,6 +436,7 @@ export const memoryConfigTemplateMutations = {
     const rules = await prepareRules(ctx, input.rules ?? []);
     try {
       const template = await ctx.db.$transaction(async (tx) => {
+        await lockLiveOwner(tx, owner);
         await lockRuleRefs(ctx, tx, rules.flatMap((r) => r.resolved));
         const id = generateId();
         const created = await tx.memoryConfigTemplate.create({

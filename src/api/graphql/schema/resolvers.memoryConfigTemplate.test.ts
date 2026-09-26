@@ -290,6 +290,32 @@ describe('account deletion erases the user\'s own templates (#1369 review)', () 
   });
 });
 
+describe('an owner deleted while a create is in flight gets no template (#1369 review)', () => {
+  it('a USER template racing account deletion: whichever commits first, none survives the erasure', async () => {
+    // Delete first: hold the user row as deleteUserAccount does, soft-delete it, then commit.
+    let creating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "users" WHERE "id" = ${userA} FOR UPDATE`;
+      creating = create(as(userA), 'USER', null, { name: 'late' });
+      await pause(400);
+      await tx.user.update({ where: { id: userA }, data: { deletedAt: new Date() } });
+    });
+    expect((await creating!).errors).toBeDefined();
+    expect(await db.memoryConfigTemplate.count({ where: { ownerUserId: userA } })).toBe(0);
+  });
+
+  it('an organization soft-deleted while the create waits refuses it', async () => {
+    let creating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+      creating = create(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'late' });
+      await pause(400);
+    });
+    expect((await creating!).errors).toBeDefined();
+    expect(await db.memoryConfigTemplate.count()).toBe(0);
+  });
+});
+
 describe('names', () => {
   it.each(['', 'Base', 'has space', '-lead', 'x'.repeat(65)])('name %j is BAD_USER_INPUT on field name', async (name) => {
     const r = await create(as(orgAdmin), 'ORGANIZATION', org.id, { name });
