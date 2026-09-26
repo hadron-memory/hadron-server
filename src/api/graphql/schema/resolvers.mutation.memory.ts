@@ -227,6 +227,27 @@ async function resolveGranteeId(
 
 
 /**
+ * Refuse a subscription mutation on a memory this caller cannot open, with
+ * resolveRefArg's own miss (#1381, `cor:api:140:03`) — for the mutations no
+ * such caller can legitimately complete (create, update).
+ *
+ * This includes a PUBLIC memory the caller still cannot open: an App-scoped
+ * one, which #653 keeps App-internal, so the shared read gate excludes it.
+ * Subscribing to it used to succeed, and success versus "no match" was the
+ * oracle. Refusing it is the narrowing `cor:api:140:03` requires, not a new
+ * policy: a caller who could not otherwise know the memory exists gets the
+ * missing answer.
+ */
+async function refuseHiddenSubscriptionMemory(
+  ctx: Context,
+  memoryId: string,
+  refArg: { ref?: string | null; id?: string | null },
+): Promise<void> {
+  if (await canOpenMemoryRecordById(ctx, memoryId)) return;
+  throw refArgNotFoundError('memory', chosenRefArg(refArg)!);
+}
+
+/**
  * Refuse, with a typed error, a subscription mutation whose (memory, org) row
  * does not exist (#1381). Before this it reached Prisma's `update` / `delete`
  * and surfaced P2025's own text, server paths included. A caller who cannot
@@ -1681,6 +1702,11 @@ export const memoryMutations = {
       // #764 (was 007-entity-id-or-urn): memoryRef/orgRef accept id / URN /
       // (org) handle. memoryId/orgId are the deprecated aliases.
       const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      // #1381: hidden from this caller ⇒ resolveRefArg's own miss, decided HERE,
+      // before the org resolves — an org error arriving first would tell an
+      // existing memory from a missing one. No caller who cannot open the
+      // memory can succeed here, so this narrows nobody legitimate.
+      await refuseHiddenSubscriptionMemory(ctx, resolvedMemoryId, { ref: memoryRef, id: memoryId });
       const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
 
@@ -1688,11 +1714,8 @@ export const memoryMutations = {
       // subscribable. ORGANIZATION/GROUP/NULL (personal/private/app/system)
       // are all rejected (PRIVATE is gone from the enum).
       if (memory.visibility !== 'PUBLIC') {
-        // #1381: that refusal confirmed a non-PUBLIC memory exists. A caller who
-        // cannot open it gets resolveRefArg's own miss instead.
-        if (!(await canOpenMemoryRecordById(ctx, resolvedMemoryId))) {
-          throw refArgNotFoundError('memory', chosenRefArg({ ref: memoryRef, id: memoryId })!);
-        }
+        // Reached only by a caller who can open the memory (#1381 refused the
+        // rest above), so this refusal discloses nothing they did not know.
         throw new Error('Only public memories can be subscribed to by other organizations');
       }
 
@@ -1726,19 +1749,18 @@ export const memoryMutations = {
       ctx: Context,
     ) => {
       const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      // #1381: hidden from this caller ⇒ resolveRefArg's own miss, decided HERE,
+      // before the org resolves — an org error arriving first would tell an
+      // existing memory from a missing one. No caller who cannot open the
+      // memory can succeed here, so this narrows nobody legitimate.
+      await refuseHiddenSubscriptionMemory(ctx, resolvedMemoryId, { ref: memoryRef, id: memoryId });
       const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-      // #1381: a caller who cannot open the memory gets resolveRefArg's own miss.
-      const chosen = chosenRefArg({ ref: memoryRef, id: memoryId })!;
-      await concealUnreadableDenial(
-        ctx,
-        resolvedMemoryId,
-        chosen,
-        () => requireOwnerOrOrgRole(ctx, memory, 'ADMIN'),
-        () => refArgNotFoundError('memory', chosen),
-      );
+      // Only callers who can open the memory reach here (#1381), so this
+      // denial discloses nothing they did not already know.
+      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
       // A missing subscription is a typed NOT_FOUND, not Prisma's P2025 text.
-      await requireMemorySubscription(ctx, resolvedMemoryId, resolvedOrgId, chosen);
+      await requireMemorySubscription(ctx, resolvedMemoryId, resolvedOrgId, chosenRefArg({ ref: memoryRef, id: memoryId })!);
       return ctx.db.memorySubscription.update({
         where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
         data: { role: role as Role },
@@ -1762,7 +1784,16 @@ export const memoryMutations = {
       ctx: Context,
     ) => {
       const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
+      // #1381: unlike create/update, a caller who cannot open the memory CAN
+      // succeed here — an admin of the subscribing org removing its own
+      // subscription — so it is not refused up front. Instead any org error
+      // becomes the memory's miss when the memory is hidden, so an org error
+      // arriving first cannot tell an existing memory from a missing one.
+      const memoryHidden = !(await canOpenMemoryRecordById(ctx, resolvedMemoryId));
+      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId }).catch((e: unknown) => {
+        if (memoryHidden) throw refArgNotFoundError('memory', chosenRefArg({ ref: memoryRef, id: memoryId })!);
+        throw e;
+      });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       // findFirst + deletedAt in both checks so a REVOKED membership no
       // longer authorizes subscription management (same rule as requireOrgRole).

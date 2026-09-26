@@ -37,6 +37,22 @@ src/controller/operations/listMemoryAssets.test.ts"
 
 BAD=0
 SURVIVORS=0
+
+# Baseline on the unmutated tree: every spec green, and the TOTAL test count
+# every mutant run must reproduce. A run reporting fewer tests (files that
+# failed to load, a crashed worker, an exhausted DB) did not test the mutant,
+# and must not read as a survivor — the third way this harness lied (PR #1383:
+# a partial run of 13 tests was reported as SURVIVED).
+# shellcheck disable=SC2086
+base_raw=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run $SPECS 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+base_line=$(echo "$base_raw" | grep -E '^ *Tests ')
+BASELINE=$(echo "$base_line" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
+if [ -z "$BASELINE" ] || echo "$base_line" | grep -q failed; then
+  echo "REFUSING: the baseline is not green — $base_line"
+  echo "$base_raw" | tail -5 | sed 's/^/            /'
+  exit 1
+fi
+echo "baseline: $BASELINE tests, all passing"
 run() { # name file old new [occurrence, 1-based]
   python3 - "$2" "$3" "$4" "${5:-1}" <<'PY' || { echo "STALE     $1 — pattern no longer matches the implementation"; BAD=$((BAD+1)); return; }
 import sys
@@ -55,6 +71,12 @@ PY
   if [ -z "$out" ]; then
     echo "ERRORED   $1 — no test summary; the run did not report on this mutant"
     echo "$raw" | tail -5 | sed 's/^/            /'
+    BAD=$((BAD+1))
+    return
+  fi
+  total=$(echo "$out" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
+  if [ "$total" != "$BASELINE" ]; then
+    echo "ERRORED   $1 — partial run: $total of $BASELINE tests reported ($(echo "$out" | tr -s ' '))"
     BAD=$((BAD+1))
     return
   fi
@@ -137,12 +159,17 @@ run "20 pushMemoryToGit conceal" "$M" \
   "await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');" 3
 run "21 updateMemory back to the raw id" "$M" \
   "      ({ id } = await resolveMemoryRef(ctx.db, ref));" "" 1
-run "22 createMemorySubscription conceal" "$M" \
-  "        if (!(await canOpenMemoryRecordById(ctx, resolvedMemoryId))) {" "        if (false) {"
-run "23 updateMemorySubscription missing error" "$M" \
-  "        () => refArgNotFoundError('memory', chosen)," "        () => new Error('Forbidden')," 1
-run "24 deleteMemorySubscription missing error" "$M" \
-  "        () => refArgNotFoundError('memory', chosen)," "        () => new Error('Forbidden')," 2
+run "22 create/update do not refuse a hidden memory" "$M" \
+  "  if (await canOpenMemoryRecordById(ctx, memoryId)) return;
+  throw refArgNotFoundError('memory', chosenRefArg(refArg)!);" "  return;"
+run "23 createMemorySubscription skips the hidden refusal" "$M" \
+  "      await refuseHiddenSubscriptionMemory(ctx, resolvedMemoryId, { ref: memoryRef, id: memoryId });" "" 1
+run "24 updateMemorySubscription skips the hidden refusal" "$M" \
+  "      await refuseHiddenSubscriptionMemory(ctx, resolvedMemoryId, { ref: memoryRef, id: memoryId });" "" 2
+run "24a deleteMemorySubscription missing error" "$M" \
+  "        () => refArgNotFoundError('memory', chosen)," "        () => new Error('Forbidden'),"
+run "24b deleteMemorySubscription lets an org error through" "$M" \
+  "        if (memoryHidden) throw refArgNotFoundError('memory', chosenRefArg({ ref: memoryRef, id: memoryId })!);" ""
 run "25 missing subscription row does not conceal" "$M" \
   "  if (!(await canOpenMemoryRecordById(ctx, memoryId))) throw refArgNotFoundError('memory', memoryRef);" ""
 run "26 attachMemoryToApp" "$AM" \
@@ -150,4 +177,5 @@ run "26 attachMemoryToApp" "$AM" \
 
 echo
 echo "survivors: $SURVIVORS   stale/errored: $BAD"
-[ "$BAD" -eq 0 ]
+# A survivor is a guard no test pins — a failure, not a note (@codex, PR #1383).
+[ "$BAD" -eq 0 ] && [ "$SURVIVORS" -eq 0 ]

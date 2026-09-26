@@ -170,6 +170,25 @@ beforeAll(async () => {
     existingSlug: `victim-${suffix}`,
     missingSlug: `absent-${suffix}`,
   };
+  // An App-scoped PUBLIC knowledge memory: App-internal (#653), so the shared
+  // read gate excludes it despite PUBLIC — and subscribing to it used to
+  // SUCCEED for a caller who could not open it.
+  const victimApp = await db.app.create({
+    data: { id: generateId(), organizationId: org.id, name: 'victim app', urn: `${orgUrn}:victim-app-${suffix}` },
+  });
+  const appScoped = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: org.id,
+      appId: victimApp.id,
+      urn: `${orgUrn}:app-public-${suffix}`,
+      name: 'app-scoped public',
+      class: 'knowledge',
+      visibility: 'PUBLIC',
+    },
+  });
+  target.appPublicUrn = { existing: `hrn:mem:${appScoped.urn}`, missing: `hrn:mem:${orgUrn}:absent-app-${suffix}` };
+  ids.appScoped = appScoped.id;
   // A SYSTEM-class memory: mergeMemories refused its class before authorizing,
   // echoing `memoryClass` to anyone who named it.
   const system = await db.memory.create({
@@ -309,6 +328,23 @@ const PROBES: Probe[] = [
     query: `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`,
     on: 'memUrn', vars: (r) => ({ r, o: ids.neutralOrg }), missingCode: 'NOT_FOUND',
   },
+  {
+    name: 'createMemorySubscription (an App-scoped PUBLIC memory the caller cannot open)',
+    query: `mutation($r: String!, $o: String!) { createMemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
+    on: 'appPublicUrn', vars: (r) => ({ r, o: ids.otherOrg }), missingCode: 'NOT_FOUND',
+  },
+  // The org resolves AFTER the memory: an org error must not arrive first for
+  // an existing memory when a missing memory refuses before it (@codex, PR #1383).
+  ...(['create', 'update', 'delete'] as const).map((verb) => ({
+    name: `${verb}MemorySubscription (a missing orgRef)`,
+    query:
+      verb === 'delete'
+        ? `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`
+        : `mutation($r: String!, $o: String!) { ${verb}MemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
+    on: 'memUrn',
+    vars: (r: string) => ({ r, o: `no-such-org-${suffix}` }),
+    missingCode: 'NOT_FOUND',
+  })),
   {
     name: 'updateMemory(id:)',
     query: `mutation($r: ID!) { updateMemory(id: $r, name: "renamed") { id } }`,

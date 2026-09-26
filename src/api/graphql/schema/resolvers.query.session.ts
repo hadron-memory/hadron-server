@@ -232,11 +232,10 @@ export const sessionQueries = {
       if (memoryId) {
         // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
         const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-        // #250: deny a memory the caller can't read. Return [] (not a thrown
-        // Forbidden) to avoid leaking existence — mirrors nodeById returning
-        // null for an out-of-scope target.
-        // #1381: an unreadable memory answers as resolveMemoryRef's miss, not
-        // with an empty page that a missing memory never produces.
+        // #250 denied an unreadable memory with [] to avoid leaking existence,
+        // but a MISSING memory throws above, so [] itself meant "exists, not
+        // yours". #1381 (`cor:api:140:03`): answer exactly as resolveMemoryRef's
+        // miss instead.
         if (accessibleMemoryIds !== null && !accessibleMemoryIds.includes(resolvedMemoryId)) {
           throw new MemoryNotFoundError(memoryId);
         }
