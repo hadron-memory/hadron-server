@@ -519,6 +519,84 @@ describe('MCP parity and discovery gate', () => {
     expect(await db.channelReadState.findFirst({ where: { workerId: iris.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
   });
 
+  it('does not advance a former Worker after its user loses App participation', async () => {
+    const independentMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:independent`,
+        name: 'independent', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    const made = await ensureChannelWithRoot(db, {
+      memoryId: independentMemory.id, loc: 'chats:independent', name: 'independent', createdBy: user.id,
+    });
+    const independent = made.channel;
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: independent.id, attendeeWorkerId: worker.id, role: 'WATCH' },
+    });
+    const enc = await getMemoryEncryptionInfo(db, independentMemory.id);
+    await appendChatMessage(
+      db,
+      { id: made.rootId, memoryId: independentMemory.id, loc: 'chats:independent' },
+      enc,
+      async ({ tx, seq, msgNum }) => tx.node.create({
+        data: {
+          id: generateId(), memoryId: independentMemory.id,
+          loc: `chats:independent:messages:${msgNum}`, name: msgNum,
+          nodeType: 'chat-message', seq, content: 'still readable',
+        },
+      }),
+      { asChannel: true },
+    );
+
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: user.id } } });
+    await db.orgMember.updateMany({
+      where: { organizationId: org.id, userId: user.id }, data: { role: 'READER' },
+    });
+    const read = await createTestableMcpServer(auth()).callToolText('hadron_channel_read', {
+      channel: independent.id, session: sessionId, sinceSeq: 0,
+    });
+    expect(read).toContain('still readable');
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: independent.id } }))
+      .toBeNull();
+  });
+
+  it('a convenience read of a registered cross-App team Channel uses the Worker session pilot', async () => {
+    await db.appAgent.create({ data: { appId: otherApp.id, agentId: agent.id } });
+    await db.appMember.create({ data: { appId: otherApp.id, userId: user.id, role: 'admin' } });
+    const otherMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:other-shared`,
+        name: 'other-shared', class: 'app', appId: otherApp.id, sharedMemoryOfAgentId: agent.id,
+      },
+    });
+    const made = await ensureChannelWithRoot(db, {
+      memoryId: otherMemory.id, loc: 'chats:team', name: 'other team',
+      createdBy: user.id, asDefaultOfAppId: otherApp.id,
+    });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: made.channel.id, attendeeWorkerId: worker.id, role: 'WATCH' },
+    });
+    const enc = await getMemoryEncryptionInfo(db, otherMemory.id);
+    await appendChatMessage(
+      db,
+      { id: made.rootId, memoryId: otherMemory.id, loc: 'chats:team' },
+      enc,
+      async ({ tx, seq, msgNum }) => tx.node.create({
+        data: {
+          id: generateId(), memoryId: otherMemory.id,
+          loc: `chats:team:messages:${msgNum}`, name: msgNum,
+          nodeType: 'chat-message', seq, content: 'cross-App team message',
+        },
+      }),
+      { asChannel: true },
+    );
+
+    const page = await Q.teamChatMessages({}, { appRef: otherApp.id }, userCtx({ sessionId }));
+    expect(page.total).toBe(1);
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: made.channel.id } }))
+      .toMatchObject({ lastSeenSeq: 1 });
+  });
+
   it('returns successful MCP transcripts when the best-effort cursor write fails', async () => {
     await post('the transcript survives');
     const server = createTestableMcpServer(auth());

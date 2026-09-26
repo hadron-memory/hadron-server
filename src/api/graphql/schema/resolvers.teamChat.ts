@@ -66,7 +66,6 @@ import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import {
   maybeAdvanceOwnChannelRead,
-  teamAttentionPilotEnabled,
   teamAttentionPilotOperatorEnabled,
 } from '../../../lib/teamAttention.js';
 
@@ -1224,11 +1223,14 @@ export const teamChatQueries = {
     // One gate, two entry points: the convenience runs the same host-memory
     // point check the Channel-addressed read runs (Copilot on PR #1169).
     if (!(await hostMemoryReadable(ctx, root.memoryId, app))) return { items: [], total: 0 };
-    // The pilot changes ordinary-read semantics only for an explicitly
-    // allowlisted operator+App and an exact Worker session. Outside that
-    // boundary this extra lookup is not even made.
+    // The pilot changes ordinary-read semantics only for an allowlisted
+    // operator and an exact Worker session. Outside that boundary this extra
+    // lookup is not even made.
+    // The Worker session may belong to a different pilot App that registered
+    // this App's Channel. The helper verifies that session's App allowlist and
+    // register entry before advancing; the Channel host is not the pilot key.
     const pilotChannel =
-      ctx.sessionId && teamAttentionPilotEnabled(ctx.userId, appId)
+      ctx.sessionId && teamAttentionPilotOperatorEnabled(ctx.userId)
         ? await ctx.db.channel.findFirst({
             where: { chatRootNodeId: root.id, deletedAt: null },
             select: { id: true, lastSeq: true },

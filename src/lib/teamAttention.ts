@@ -776,6 +776,14 @@ async function ownLiveSessionWorker(
     session.worker?.appId !== session.appId ||
     !teamAttentionPilotEnabled(ctx.userId, session.appId)
   ) return null;
+  // A historical Session.userId proves who started the Worker, not who may
+  // still drive it. Recheck current App participation before a read mutates
+  // its cursor, including when the Channel is independently readable.
+  const app = await ctx.db.app.findFirst({
+    where: { id: session.appId, deletedAt: null, uninstalledAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app || !(await isAppParticipant(ctx, app))) return null;
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
   return isSessionLive(session, events.get(session.id), new Date())
     ? { workerId: session.workerId, appId: session.appId }
