@@ -35,7 +35,14 @@
  */
 import { GraphQLError } from 'graphql';
 import { Prisma, type MemoryConfigTemplate, type MemoryConfigTemplateRule } from '../../../generated/prisma/index.js';
-import { type Context, clampListTake, isPlatformAdmin, requireOrgRole, requireOwnerOrOrgRole } from './resolvers.helpers.js';
+import {
+  type Context,
+  clampListTake,
+  isPlatformAdmin,
+  requireOrgRole,
+  requireOwnerOrOrgRole,
+  withoutRequestCaches,
+} from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
@@ -126,6 +133,24 @@ async function canManageOwner(ctx: Context, owner: OwnerColumns): Promise<boolea
   if (owner.ownerUserId) return !ctx.impersonation && !!ctx.userId && ctx.userId === owner.ownerUserId;
   const app = await liveApp(ctx, owner.appId!);
   return !!app && (await allowed(() => requireOwnerOrOrgRole(ctx, app, 'ADMIN')));
+}
+
+/**
+ * The MANAGE gate asked AGAIN inside the write transaction, after its last lock
+ * wait — the template twin of `reassertManage` in `resolvers.memoryConfig.ts`
+ * (#1360 review, Codex P1). The pre-check authorizes the request; an admin
+ * demoted or removed while the write waits on the owner, reference or template
+ * locks must not still save. Asked fresh and on the transaction's own
+ * connection, refused with the pre-check's own answer. The same residual as
+ * there: a revocation committing after this read and before commit still saves.
+ */
+async function reassertManageOwner(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  owner: OwnerColumns,
+  refused: () => Error,
+): Promise<void> {
+  if (!(await canManageOwner(withoutRequestCaches(ctx, tx), owner))) throw refused();
 }
 
 /**
@@ -438,6 +463,7 @@ export const memoryConfigTemplateMutations = {
       const template = await ctx.db.$transaction(async (tx) => {
         await lockLiveOwner(tx, owner);
         await lockRuleRefs(ctx, tx, rules.flatMap((r) => r.resolved));
+        await reassertManageOwner(ctx, tx, owner, () => new Error('Forbidden'));
         const id = generateId();
         const created = await tx.memoryConfigTemplate.create({
           data: {
@@ -473,6 +499,7 @@ export const memoryConfigTemplateMutations = {
         await lockRuleRefs(ctx, tx, (rules ?? []).flatMap((r) => r.resolved));
         const current = await lockTemplate(tx, id);
         if (!current) throw new MemoryConfigTemplateNotFoundError(ref);
+        await reassertManageOwner(ctx, tx, current, () => new MemoryConfigTemplateNotFoundError(ref));
         if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision, 'template');
         const updated = await tx.memoryConfigTemplate.update({
           where: { id },
@@ -507,6 +534,7 @@ export const memoryConfigTemplateMutations = {
     await ctx.db.$transaction(async (tx) => {
       const current = await lockTemplate(tx, id);
       if (!current) throw new MemoryConfigTemplateNotFoundError(ref);
+      await reassertManageOwner(ctx, tx, current, () => new MemoryConfigTemplateNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision, 'template');
       // Soft delete. Configs it was applied to keep their copies (copied, not live-linked).
       await tx.memoryConfigTemplate.update({

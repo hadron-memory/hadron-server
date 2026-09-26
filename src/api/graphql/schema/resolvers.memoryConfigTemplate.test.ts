@@ -316,6 +316,61 @@ describe('an owner deleted while a create is in flight gets no template (#1369 r
   });
 });
 
+describe('an admin demoted while a write waits on its locks is refused (#1360 review, Codex P1)', () => {
+  // ADMIN → CONTRIBUTOR keeps the org's task readable, so each refusal is the
+  // manage re-check inside the transaction and nothing else.
+  const demoteAdmin = (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) =>
+    tx.orgMember.updateMany({ where: { organizationId: org.id, userId: orgAdmin }, data: { role: 'CONTRIBUTOR' } });
+
+  it('a CREATE waiting on its task lock gets no template', async () => {
+    let creating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.node.update({ where: { id: task.id }, data: { name: 'Author 2' } });
+      await demoteAdmin(tx);
+      creating = create(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'late', rules: [{ role: 'spec', authorTaskRef: task.urn }] });
+      await pause(400);
+    });
+    expect((await creating!).errors?.[0]?.message).toBe('Forbidden');
+    expect(await db.memoryConfigTemplate.count()).toBe(0);
+  });
+
+  it('an UPDATE waiting on the template lock is MEMORY_CONFIG_TEMPLATE_NOT_FOUND, and the template is unchanged', async () => {
+    const t = await mkOrgTpl();
+    let updating: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${t.id} FOR UPDATE`;
+      await demoteAdmin(tx);
+      updating = gql(as(orgAdmin), UPDATE, { r: t.id, i: { required: true } });
+      await pause(400);
+    });
+    expect(code(await updating!)).toBe('MEMORY_CONFIG_TEMPLATE_NOT_FOUND');
+    const row = await db.memoryConfigTemplate.findUniqueOrThrow({ where: { id: t.id } });
+    expect([row.required, row.revision]).toEqual([false, t.revision]);
+  });
+
+  it('a DELETE waiting on the template lock is MEMORY_CONFIG_TEMPLATE_NOT_FOUND, and the template survives', async () => {
+    const t = await mkOrgTpl();
+    let deleting: Promise<Gql> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${t.id} FOR UPDATE`;
+      await demoteAdmin(tx);
+      deleting = gql(as(orgAdmin), DELETE, { r: t.id });
+      await pause(400);
+    });
+    expect(code(await deleting!)).toBe('MEMORY_CONFIG_TEMPLATE_NOT_FOUND');
+    expect((await db.memoryConfigTemplate.findUniqueOrThrow({ where: { id: t.id } })).deletedAt).toBeNull();
+  });
+
+  it('concurrent updates of one template all land: the re-check runs on the transaction\'s own connection', async () => {
+    const t = await mkOrgTpl();
+    const results = await Promise.all(
+      Array.from({ length: 8 }, (_, n) => gql(as(orgAdmin), UPDATE, { r: t.id, i: { description: `d${n}` } })),
+    );
+    expect(results.map((r) => r.errors)).toEqual(Array(8).fill(undefined));
+    expect((await db.memoryConfigTemplate.findUniqueOrThrow({ where: { id: t.id } })).revision).toBe(t.revision + 8);
+  });
+});
+
 describe('names', () => {
   it.each(['', 'Base', 'has space', '-lead', 'x'.repeat(65)])('name %j is BAD_USER_INPUT on field name', async (name) => {
     const r = await create(as(orgAdmin), 'ORGANIZATION', org.id, { name });
