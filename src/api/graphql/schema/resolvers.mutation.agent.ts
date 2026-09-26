@@ -13,6 +13,7 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   apiKeyWriteFields,
   apiKeyPreviewOf,
+  lockAiServiceConfig,
   validateAiConfigName,
   validateProviderAndParams,
   type AiConfigOwnerType,
@@ -1012,18 +1013,29 @@ export const agentMutations = {
         if (!existing) throw new AiServiceConfigNotFoundError(args.id);
         const owner = aiConfigOwnerOf(existing);
         await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
-        const provider = args.provider ?? existing.provider;
-        const params = args.params === undefined ? existing.params : args.params;
-        validateProviderAndParams(provider, params ?? null);
         if (args.params !== undefined) refuseLegacyBaseUrl(args.params);
         // Omitted = unchanged; null or '' = clear back to the provider default.
         const endpoint =
           args.endpoint === undefined ? undefined : args.endpoint ? validateEndpoint(args.endpoint) : null;
-        // Judged on the RESULTING pair: a provider change must not strand a
-        // style the new provider has no use for.
-        const apiStyle = args.apiStyle === undefined ? existing.apiStyle : args.apiStyle;
-        validateApiStyle(provider, apiStyle);
-        const config = await ctx.db.aiServiceConfig.update({
+        // The RESULTING config, judged against a base row: a provider change
+        // must not strand a style the new provider has no use for.
+        const judge = (base: typeof existing) => {
+          const provider = args.provider ?? base.provider;
+          const params = args.params === undefined ? base.params : args.params;
+          validateProviderAndParams(provider, params ?? null);
+          validateApiStyle(provider, args.apiStyle === undefined ? base.apiStyle : args.apiStyle);
+          return provider;
+        };
+        judge(existing);
+        // …and again on the LOCKED row, in the write's transaction (#1380
+        // review): two concurrent updates (one changing the provider, one the
+        // style) each passed on the old row and together wrote a pair neither
+        // judged.
+        const config = await ctx.db.$transaction(async (tx) => {
+          const cur = await lockAiServiceConfig(tx, existing.id);
+          if (!cur) throw new AiServiceConfigNotFoundError(args.id);
+          const provider = judge(cur);
+          return tx.aiServiceConfig.update({
           where: { id: existing.id },
           data: {
             ...(args.name != null ? { name: validateAiConfigName(args.name) } : {}),
@@ -1038,6 +1050,7 @@ export const agentMutations = {
             ...(args.enabled == null ? {} : { enabled: args.enabled }),
             updatedBy: ctx.userId ?? null,
           },
+          });
         });
         return toGqlAiServiceConfig(config);
       } catch (e: unknown) {
