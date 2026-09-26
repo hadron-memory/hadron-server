@@ -20,7 +20,7 @@
  * (mentions name Workers, never Agents — plan §4.4, proposed).
  */
 
-import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { generateId } from './id.js';
@@ -169,27 +169,29 @@ export async function renderAttentionSection(
     if (row.mentionOnly) {
       // Only new messages that name the attendee count — a small indexed
       // query over the (seen, lastSeq] window, content never injected.
-      const hits = tokens.length
-        ? await db.node.findMany({
-            where: {
-              memoryId: c.memoryId,
-              loc: { startsWith: escapePrismaLikePattern(`${c.loc}:messages:`) },
-              nodeType: { in: MESSAGE_NODE_TYPES },
-              deletedAt: null,
-              seq: { gt: seen, lte: c.lastSeq },
-              OR: tokens.map((t) => ({ data: { path: ['mentions'], array_contains: [t] } })),
-            },
-            select: { data: true },
-          })
-        : [];
-      // Own posts are never attention, broadcast or not. Filtered here, not in
-      // SQL: a JSON-path NOT over a message with no authorWorkerId is SQL NULL
-      // and would drop every human post along with the Worker's own.
-      const own = new Set(ownWorkerIds);
-      const mentions = hits.filter((h) => {
-        const author = (h.data as { authorWorkerId?: unknown } | null)?.authorWorkerId;
-        return !(typeof author === 'string' && own.has(author));
-      }).length;
+      // Counted in SQL, own posts excluded with a NULL-SAFE predicate: a
+      // message with no authorWorkerId must still count (a Prisma JSON-path
+      // NOT would read it as NULL and drop it), and nothing is materialized,
+      // however large the window (#1362 review;
+      // dev:findings:prisma-json-path-not-drops-rows-missing-the-key).
+      const mentions = tokens.length
+        ? (
+            await db.$queryRaw<Array<{ n: number }>>`
+              SELECT count(*)::int AS n
+              FROM nodes node
+              WHERE node.memory_id = ${c.memoryId}
+                AND node.loc LIKE ${escapePrismaLikePattern(`${c.loc}:messages:`) + '%'} ESCAPE '\\'
+                AND node.node_type IN (${Prisma.join(MESSAGE_NODE_TYPES)})
+                AND node.deleted_at IS NULL
+                AND node.seq > ${seen}
+                AND node.seq <= ${c.lastSeq}
+                AND EXISTS (
+                  SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(tokens)}::jsonb) AS wanted(token)
+                  WHERE COALESCE(node.data->'mentions', '[]'::jsonb) ? wanted.token
+                )
+                AND NOT (COALESCE(node.data->>'authorWorkerId', '') = ANY(${ownWorkerIds}::text[]))`
+          )[0]?.n ?? 0
+        : 0;
       lines.push(
         mentions > 0
           ? `- ${c.name} (${where}): ${mentions} new mention${mentions === 1 ? '' : 's'} of you since seq ${seen} (channel is at ${c.lastSeq})`
