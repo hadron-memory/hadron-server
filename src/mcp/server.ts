@@ -7670,22 +7670,30 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // createTestableMcpServer bypasses zod — normalize defensively (a NaN
       // would reach Prisma's `take` as a raw driver error rather than a clamp).
       const take = Math.max(1, Math.min(typeof limit === 'number' && Number.isFinite(limit) ? limit : 10, 50));
-      const sessions = await db.session.findMany({
-        where: {
-          ...scope,
-          deletedAt: null,
-          // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
-          // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
-          // together precisely so this stays a single test).
-          ...(includeEnded ? {} : { endedAt: null }),
-        },
-        orderBy: { startedAt: 'desc' },
-        take,
-        select: {
-          id: true, startedAt: true, endedAt: true, type: true, plan: true,
-          appId: true, workerId: true,
-        },
-      });
+      // #1133 — the count runs under the IDENTICAL where as the rows (one
+      // object, used by both queries), so the truncation disclosure cannot
+      // leak a session count the caller may not read: whatever scopes the
+      // rows scopes the total, by construction rather than by re-statement.
+      const where = {
+        ...scope,
+        deletedAt: null,
+        // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
+        // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
+        // together precisely so this stays a single test).
+        ...(includeEnded ? {} : { endedAt: null }),
+      };
+      const [sessions, total] = await Promise.all([
+        db.session.findMany({
+          where,
+          orderBy: { startedAt: 'desc' },
+          take,
+          select: {
+            id: true, startedAt: true, endedAt: true, type: true, plan: true,
+            appId: true, workerId: true,
+          },
+        }),
+        db.session.count({ where }),
+      ]);
       if (sessions.length === 0) {
         return textResult(
           includeEnded
@@ -7758,8 +7766,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       });
 
+      // #1133 — absence from this list must never be readable as "the session
+      // is gone" (tasks:end-worker-session reads it as "reaped", and a reaped
+      // session writes no handoff). When the list truncated, say so, and give
+      // recovery guidance that is TRUE: `limit` retrieves everything only
+      // while the total fits under its 50 cap — beyond that, say older rows
+      // exist instead of promising a call that cannot return them.
+      const truncated = total > sessions.length;
+      const header = truncated
+        ? total <= 50
+          ? `${sessions.length} session(s) — TRUNCATED, showing the newest ${sessions.length} of ${total}; pass limit: ${total} to see them all:\n`
+          : `${sessions.length} session(s) — TRUNCATED, showing the newest ${sessions.length} of ${total}; limit caps at 50, so ${total - 50} older session(s) lie beyond any single call:\n`
+        : `${sessions.length} session(s):\n`;
+
       return textResult(
-        `${sessions.length} session(s):\n${lines.join('\n')}\n\n` +
+        `${header}${lines.join('\n')}\n\n` +
           // #1034: "session id" stays GENERAL here, because this list includes
           // unbound sessions whose own row says "working as: nobody" — calling
           // every id a worker session id would contradict the line above it and
