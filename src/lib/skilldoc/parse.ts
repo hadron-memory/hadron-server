@@ -29,9 +29,16 @@ import { HUMAN_LINE, LEGACY_HUMAN_LINE } from './render.js';
 /** `---\n…\n---\n` framing. The header group is optional so an EMPTY block is
  *  still frontmatter — to the host, and therefore to the frontmatter rule. */
 const FRONTMATTER_RE = /^---\n(?:([\s\S]*?)\n)?---\n?([\s\S]*)$/;
-const MACHINE_RE = /^<!--\s*hadron-skill((?:\s+\w+=\S+)+)\s*-->$/;
-const MACHINE_KV = /(\w+)=(\S+)/g;
-const LEGACY_RE = /^<!--\s*Generated from\s+(\S+)\s*-->$/;
+/*
+ * The provenance lines use RE2's whitespace class, spelled out: Go's `\s` is
+ * [\t\n\f\r ] and nothing else, while JavaScript's also takes \v, NBSP and the
+ * other Unicode spaces (and its `\S` excludes them). With the JS classes an
+ * NBSP between two keys was a separator here and part of a value in Go, so a
+ * header Go voids read as ours — found by the `parseHeader` fixtures (#1323).
+ */
+const MACHINE_RE = /^<!--[\t\n\f\r ]*hadron-skill((?:[\t\n\f\r ]+\w+=[^\t\n\f\r ]+)+)[\t\n\f\r ]*-->$/;
+const MACHINE_KV = /(\w+)=([^\t\n\f\r ]+)/g;
+const LEGACY_RE = /^<!--[\t\n\f\r ]*Generated from[\t\n\f\r ]+([^\t\n\f\r ]+)[\t\n\f\r ]*-->$/;
 const HASH_RE = /^[0-9a-f]{16}$/;
 
 /**

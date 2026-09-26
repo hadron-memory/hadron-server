@@ -16,6 +16,7 @@ import {
   clampListTake,
   getAccessibleMemoryIds,
   requireMemoryWriteAccess,
+  concealUnreadableDenial,
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -121,8 +122,10 @@ export const channelMutations = {
   ): Promise<Channel> => {
     if (ctx.impersonation) throw new Error('Forbidden');
     if (!ctx.userId) throw new Error('Unauthenticated');
-    const { id: memoryId } = await resolveMemoryRef(ctx.db, input.memoryRef.trim());
-    await requireMemoryWriteAccess(ctx, memoryId);
+    const memoryRef = input.memoryRef.trim();
+    const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+    // #1316: a memory the caller cannot open answers as resolveMemoryRef's miss.
+    await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const loc = input.loc.trim();
     validateLoc(loc);
     const name = input.name.trim();

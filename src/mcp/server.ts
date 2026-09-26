@@ -3,7 +3,8 @@ import { createHmac, randomUUID } from 'crypto';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
-  GOVERNED_ROLES,
+  governedKindsOf,
+  roleIsOrDescendsFrom,
   type GovernedKind,
   mergedGovernedState,
   RoleGovernedError,
@@ -348,16 +349,30 @@ export function mcpDoorCanReplay(
   if (kind !== 'task' && kind !== 'review') return true;
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined) continue;
+    // #937 — a revision precondition replays through governed UPDATE doors,
+    // but is intentionally absent from every CREATE door.
+    if (key === 'expectedRevision') {
+      if (op !== 'update') return false;
+      continue;
+    }
     if (key === 'isRunnable') {
       if (kind !== 'task' || (op === 'create' && value !== true)) return false;
       continue;
     }
     if (key === 'role') {
-      if (kind !== 'review' || (op === 'create' && value !== 'review')) return false;
-      // The review door refuses ANOTHER governed value ("spec" has its own
-      // door), so only null, 'review' or an ordinary role replays (@copilot,
-      // PR #1305).
-      if (typeof value === 'string' && value !== 'review' && GOVERNED_ROLES.includes(value)) return false;
+      // #1345 review (@codex): the review CREATE door now sets any role in the
+      // review family it is asked for (`review` or a dotted `review.*`), so a
+      // generic create of `review.security` replays there.
+      if (kind !== 'review' || (op === 'create' && !(typeof value === 'string' && roleIsOrDescendsFrom(value, 'review')))) {
+        return false;
+      }
+      // The review door refuses ANOTHER governed family ("spec" and every
+      // `spec.*` sub-role have their own door), while `review.*` remains owned
+      // by this door (#1322). Null and ordinary open roles also replay.
+      if (
+        typeof value === 'string' &&
+        governedKindsOf({ role: value }).some((entry) => entry.kind !== 'review')
+      ) return false;
       continue;
     }
     if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
@@ -637,7 +652,8 @@ export async function addEdge(args: {
       where: { id: rawSource },
       select: { id: true, loc: true, memoryId: true, deletedAt: true },
     });
-    if (!found || found.deletedAt) {
+    // #1316: a node in a memory hidden from this caller answers as a missing one.
+    if (!found || found.deletedAt || (await isMemoryHiddenFrom(auth, found.memoryId, 'write'))) {
       return { error: `Source node not found: "${rawSource}".` };
     }
     sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
@@ -654,7 +670,10 @@ export async function addEdge(args: {
     // it to the parent and bake that into a derived edge loc.
     const sourceFragRefusal = nodeFragmentRefusal(rawSource, sourceFrag);
     if (sourceFragRefusal) return { error: `Source: ${sourceFragRefusal}` };
-    const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
+    // #1316: hidden from this caller ⇒ the missing branch, BEFORE the node
+    // lookup — otherwise a missing loc answers "Source node not found" and so
+    // confirms the memory exists.
+    const sourceMem = await resolveVisibleMemoryByUrn(auth, sourceMemoryUrn, 'write');
     if (!sourceMem) {
       return { error: `Source memory not found: "${sourceMemoryUrn}".` };
     }
@@ -1093,6 +1112,54 @@ async function resolveMemoryByUrn(
   return aliased ? (candidates.find((m) => m.id === aliased.id) ?? null) : null;
 }
 
+/**
+ * Resolve a memory URN exactly as a tool's MISSING branch sees it (#1316):
+ * null when no such memory exists, and ALSO null when it exists but is hidden
+ * from this caller — so the tool's own `if (!memory) return <missing text>`
+ * answers both, byte for byte, from the same line.
+ *
+ * Folding the check into resolution, rather than refusing later, is the
+ * point. Each tool used to resolve first (only a missing memory refused
+ * there) and deny afterwards with its own text, so "exists but not yours"
+ * differed from "no such memory" — and memory URNs are guessable. A refusal
+ * placed any later than the missing branch leaks through whatever runs in
+ * between: loc validation, a node lookup, the other end of a move.
+ *
+ * Hidden means:
+ *   - `'read'`  — the caller cannot read the memory (`canReadMemory`).
+ *   - `'write'` — the caller can neither write NOR read it. A caller who may
+ *     read it already knows it exists and keeps the tool's actionable write
+ *     denial; a caller who may write is never narrowed, even without read.
+ */
+async function resolveVisibleMemoryByUrn(
+  auth: AuthContext,
+  rawUrn: string,
+  need: 'read' | 'write',
+): Promise<{ id: string; urn: string } | null> {
+  const memory = await resolveMemoryByUrn(rawUrn);
+  if (!memory) return null;
+  return (await isMemoryHiddenFrom(auth, memory.id, need)) ? null : memory;
+}
+
+/**
+ * The predicate behind {@link resolveVisibleMemoryByUrn}, for a tool whose
+ * missing branch answers after a lookup by some other key (a node PK): true
+ * when this memory must be treated as absent for this caller (#1316).
+ */
+async function isMemoryHiddenFrom(
+  auth: AuthContext,
+  memoryId: string,
+  need: 'read' | 'write',
+): Promise<boolean> {
+  // A no-op TODAY, and deliberately kept: every branch of the MCP gates has
+  // write ⇒ read, so a writer is also a reader and the read check alone would
+  // admit them. This makes "never narrow a writer" hold by construction instead
+  // of by that implication, which lives in another file and nothing pins. A
+  // mutant deleting this line therefore survives — that is expected, not a gap.
+  if (need === 'write' && (await canWriteToMemory(db, auth, memoryId))) return false;
+  return !(await canReadMemory(db, auth, memoryId));
+}
+
 // Access control lives in ./access-control.ts.
 
 /**
@@ -1311,6 +1378,7 @@ export function createMcpServerInstance(
    * keeps the pre-#1012 in-memory-only behaviour, so opting out costs nothing.
    */
   const clientKey = opts.clientKey ?? null;
+
   /**
    * #1009 — this MCP session replaced one the client had already been using
    * (it presented a session id this server did not know and re-initialized).
@@ -2084,12 +2152,10 @@ export function createMcpServerInstance(
       // Resolve via the shared helper — soft-delete filtering, trimming, and
       // bare-URN normalization all live in one place so every read-side
       // scoping point behaves consistently.
-      const mem = await resolveMemoryByUrn(memoryUrn);
+      // #1316: an unreadable memory takes the missing branch, not "Access denied".
+      const mem = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!mem) {
         return textResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
-      }
-      if (!(await canReadMemory(db, auth, mem.id))) {
-        return textResult(`Access denied: '${memoryUrn}'.`);
       }
 
       // Store the bare URN from the DB row (the canonical form for downstream
@@ -2905,7 +2971,8 @@ export function createMcpServerInstance(
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
       if (fragRefusal) return textResult(fragRefusal);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
@@ -3050,6 +3117,7 @@ export function createMcpServerInstance(
       memoryUrns: z.array(z.string()).min(1).optional().describe('Scope search to this SET of memories (each a fully-qualified memory URN, hrn:mem:<root>:<slug>) — a targeted multi-memory search. Must be non-empty (for "everything", use allMemories). Mutually exclusive with memoryUrn and allMemories.'),
       allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
       isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
+      role: z.string().optional().describe('Filter by Node.role family in every mode. Segment-boundary prefix semantics: "spec" matches "spec" and dotted descendants such as "spec.rule", but never "special" or "specification" (#1322). Node.role remains an open string; this is a query filter, not role validation.'),
       objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
       scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
@@ -3059,7 +3127,7 @@ export function createMcpServerInstance(
       granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
       where: z.record(z.string(), z.unknown()).optional().describe('Structured predicate over a node\'s `properties`/`data` JSONB (#719) — filters, then the chosen mode ranks the survivors (composes with keyword/vector/hybrid/regex and survey/browse). A node is EITHER a branch (exactly one of `and`/`or`/`not`) OR a leaf: a `path` (array of JSON keys, e.g. ["sourceKind"]) plus exactly ONE operator — eq | ne | in | lt | lte | gt | gte | between | exists | contains. `field`: "properties" (default) | "data". `as`: "text" (default) | "number" | "datetime" | "boolean" — number/datetime route through DB guards so unparseable values drop the row (never an error); `contains` is jsonb @> containment. Bounded: depth ≤ 4, ≤ 32 leaves, path ≤ 8. Example: {"and":[{"path":["sourceKind"],"eq":"substack"},{"path":["extractedAt"],"as":"datetime","gte":"2026-07-04T00:00:00Z"}]}'),
     },
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, objectType, brief, limit, minScore, expand, granularity, where, scope }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, brief, limit, minScore, expand, granularity, where, scope }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -3292,6 +3360,7 @@ export function createMcpServerInstance(
             filter: {
               memoryIds: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,
+              role: role ?? undefined,
               objectType: objectType ?? undefined,
               locPrefix: filterLocPrefix,
               // #719 — structured JSONB predicate; findNodes validates it and
@@ -4497,7 +4566,7 @@ export function createMcpServerInstance(
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool if true: a write producing a runnable node must go through hadron_create_task, because authoring something the platform will EXECUTE is not the same act as writing prose. Accepted only as false/omitted (the default). Independent of nodeType — a runnable node may carry any nodeType.'),
-      role: z.string().optional().describe('#1201 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role has no retrieval impact. Most values are inert, but the GOVERNED ones — "review", "spec" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface. The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
+      role: z.string().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role does not affect default ranking, though hadron_find_nodes can filter by its dotted family. Most values are inert, but the GOVERNED families — "review" / "review.*" and "spec" / "spec.*" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface. The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
@@ -4530,7 +4599,8 @@ export function createMcpServerInstance(
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
       if (fragRefusal) return textResult(fragRefusal);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
@@ -5013,14 +5083,15 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_update_node',
-    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
+    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
+      expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses with [node_write_conflict]; omit for backward-compatible last-write-wins behavior.'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool: making a node runnable, and RETIRING a runnable one, both go through hadron_update_task. Editing a node that is already runnable is refused here too, whatever this field says, because the result is still a runnable node. Omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
-      role: z.string().nullable().optional().describe('#1201 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED values ("review", "spec") are refused here — use hadron_update_review, or the `hadron spec` CLI for a spec — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
+      role: z.string().nullable().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED families ("review" / "review.*", "spec" / "spec.*") are refused here — use hadron_update_review, or the `hadron spec` CLI for a spec — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Read the ABSENCE of the marker narrowly: it means "checked against this exact content" ONLY on a read that could have shown it — `contentScope` of `abstract` or `all`, on a memory that is unencrypted or unlocked. Under the default `content` scope, or on a locked memory, no marker is emitted either way and its absence says nothing at all. Spec 031/032.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
@@ -5040,7 +5111,7 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -5052,7 +5123,8 @@ export function createMcpServerInstance(
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
       if (fragRefusal) return textResult(fragRefusal);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
@@ -5096,7 +5168,7 @@ export function createMcpServerInstance(
                 context: 'node-write',
                 surface: 'mcp',
                 canReplay: (kind) =>
-                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }, kind, 'update'),
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, expectedRevision }, kind, 'update'),
               }
             : {},
         );
@@ -5281,7 +5353,7 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
-      if (Object.keys(data).length > 0 || resolvedEdges !== null) {
+      if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
@@ -5318,6 +5390,21 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #937 — bind a client-side read/modify/write to the Revision it
+            // actually read. The row lock + #1339 reconciliation above make
+            // this the same atomic revSeq guard used by writeNodeCore. Do not
+            // include the current value in the refusal: write authority is not
+            // necessarily read authority, and a conflict must not become a
+            // revision oracle.
+            if (expectedRevision !== undefined && current.revSeq !== expectedRevision) {
+              throw new ScopeGraphQLError(
+                `Node at loc "${loc}" changed since it was read — re-read and retry.`,
+                { extensions: { code: 'NODE_WRITE_CONFLICT', loc, memoryId: memory.id } },
+              );
+            }
+            // A guard-only call is a useful no-op check and must not manufacture
+            // a history row or advance the live revision.
+            if (Object.keys(data).length === 0 && resolvedEdges === null) return;
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -5360,6 +5447,9 @@ export function createMcpServerInstance(
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
+            return textResult(`[node_write_conflict] ${e.message}`);
+          }
           throw e;
         }
       }
@@ -5479,7 +5569,10 @@ export function createMcpServerInstance(
     }
     const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
     if (fragRefusal) return textResult(fragRefusal);
-    const memory = await resolveMemoryByUrn(memoryUrn);
+    // #1316: hidden from this caller ⇒ the missing branch. Before this the door's
+    // own concealment answered instead, echoing the RESOLVED id it was handed —
+    // the victim memory's internal id, to a caller who cannot read it.
+    const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
     if (!memory) return textResult(`Memory not found: "${memoryUrn}".`);
     try {
       validateLoc(loc);
@@ -5505,12 +5598,26 @@ export function createMcpServerInstance(
     // that is legitimate — it just belongs to the task's own door rather than
     // to the generic surface, which is exactly what the before-union-after gate
     // now requires. Omitted still preserves, so an ordinary edit is unaffected.
-    const signal =
-      mode === 'create'
-        ? entry.signal.field === 'isRunnable'
-          ? { isRunnable: true }
-          : { role: entry.signal.value }
-        : {};
+    //
+    // #1345 review (@codex): a role-governed kind is a FAMILY since #1322, so
+    // the review create door sets the family member the caller names
+    // (`review.security`) — defaulting to the base `review` — and refuses one
+    // outside the family. Without this, `review.*` was governed away from the
+    // generic tool with no MCP route left to author it.
+    let signal: Record<string, unknown> = {};
+    if (mode === 'create') {
+      if (entry.signal.field === 'isRunnable') {
+        signal = { isRunnable: true };
+      } else {
+        const asked = fields.role;
+        if (asked != null && !(typeof asked === 'string' && roleIsOrDescendsFrom(asked, entry.signal.value))) {
+          return textResult(
+            `hadron_create_${kind}: "role" must be "${entry.signal.value}" or a dotted "${entry.signal.value}.<sub-role>" (got ${JSON.stringify(asked)}).`,
+          );
+        }
+        signal = { role: typeof asked === 'string' ? asked : entry.signal.value };
+      }
+    }
 
     try {
       const node = await (
@@ -5548,6 +5655,7 @@ export function createMcpServerInstance(
   // no argument.
   const taskUpdateArgs = {
     ...governedDoorArgs,
+    expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
     isRunnable: z
       .boolean()
       .optional()
@@ -5556,11 +5664,21 @@ export function createMcpServerInstance(
 
   const reviewUpdateArgs = {
     ...governedDoorArgs,
+    expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
     role: z
       .string()
       .nullable()
       .optional()
-      .describe('Set null to RETIRE this node from the review kind. Omit to preserve. This door is the only way to change it. Setting it to another GOVERNED value ("spec") is refused — that kind has its own door.'),
+      .describe('Set null to RETIRE this node from the review kind. Omit to preserve. This door is the only way to change it, including moving it between "review" and a dotted "review.<sub-role>" (#1322). Setting it to another GOVERNED family ("spec" / "spec.*") is refused — that kind has its own door.'),
+  };
+
+  // #1345 review (@codex): the review family is authored here, sub-roles included.
+  const reviewCreateArgs = {
+    ...governedDoorArgs,
+    role: z
+      .string()
+      .optional()
+      .describe('Which member of the review family to create: "review" (the default) or a dotted sub-role such as "review.security" (#1322). Anything outside the review family is refused.'),
   };
 
   server.tool(
@@ -5572,8 +5690,8 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_review',
-    'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool, so you do not pass it. Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
-    governedDoorArgs,
+    'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool: "review" by default, or pass a dotted review sub-role such as "review.security". Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
+    reviewCreateArgs,
     async (args) => callGovernedDoor('review', 'create', args),
   );
 
@@ -5768,7 +5886,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_replace_text',
-    "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
+    "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Multi-node runs are all-or-nothing: a node whose edited field would violate a field cap (e.g. the 2000-character abstract cap, whose refusal reports the edit's delta and remaining headroom) refuses the WHOLE batch before any write — nothing is partially applied; fix the edit and re-run. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
     {
       oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
       newText: z.string().describe('Replacement text. May be empty to delete the matched text. In regex mode, $1/$<name>/$& are honored.'),
@@ -6203,11 +6321,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         nodeFragmentRefusal(rawFrom, fromFrag) ?? nodeFragmentRefusal(rawTo, toFrag);
       if (moveRefusal) return textResult(moveRefusal);
 
-      const fromMemory = await resolveMemoryByUrn(fromMemoryUrn);
+      // #1316: BOTH ends conceal at the point their missing branch answers —
+      // a later refusal would leak through the loc validation and the source
+      // node lookup that run in between.
+      const fromMemory = await resolveVisibleMemoryByUrn(auth, fromMemoryUrn, 'write');
       if (!fromMemory) {
         return textResult(`Source memory not found: "${fromMemoryUrn}".`);
       }
-      const toMemory = await resolveMemoryByUrn(toMemoryUrn);
+      const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');
       if (!toMemory) {
         return textResult(`Target memory not found: "${toMemoryUrn}".`);
       }
@@ -9011,12 +9132,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         throw e;
       }
 
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: an unreadable memory takes the missing branch.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
-      }
-      if (!(await canReadMemory(db, auth, memory.id))) {
-        return textResult('Access denied for this memory.');
       }
 
       // #819 — the checks themselves now live in src/lib/memoryValidation.ts,
@@ -9061,7 +9180,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
         throw e;
       }
 
-      const memoryRef = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memoryRef = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memoryRef) return textResult(`Memory not found: "${memoryUrn}".`);
       if (!(await canWriteToMemory(db, auth, memoryRef.id))) {
         return textResult('Access denied.');

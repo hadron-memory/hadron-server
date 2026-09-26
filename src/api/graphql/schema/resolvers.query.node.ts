@@ -30,6 +30,7 @@ import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retri
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
+import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import {
   parseUrnInput,
   validateUrnType,
@@ -94,6 +95,7 @@ export interface FindNodesArgs {
     objectType?: string | null;
     tags?: string[] | null;
     isRunnable?: boolean | null;
+    role?: string | null;
     locPrefix?: string | null;
     createdBy?: string | null;
     updatedAfter?: string | null;
@@ -839,6 +841,7 @@ export const nodeQueries = {
           loc: node.loc,
           name: node.name,
           nodeType: node.nodeType,
+          objectType: node.objectType,
           alias: node.alias,
           description: node.description,
           abstract: node.abstract,
@@ -846,6 +849,8 @@ export const nodeQueries = {
           content: node.content,
           tags: deserializeTags(node.tags) as string[],
           seq: node.seq,
+          role: node.role,
+          isRunnable: node.isRunnable,
           data: node.data,
           properties: node.properties,
           edges: node.outgoingEdges as unknown as EdgeForGit[],
@@ -1033,6 +1038,14 @@ export const nodeQueries = {
         ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
         ...(f.objectType ? { objectType: f.objectType } : {}),
         ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+        ...(f.role != null
+          ? {
+              OR: [
+                { role: f.role },
+                { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
+              ],
+            }
+          : {}),
         ...(f.tags?.length ? tagsFilter(f.tags) : {}),
         ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
         ...(f.createdBy ? { createdBy: f.createdBy } : {}),
@@ -1058,6 +1071,7 @@ export const nodeQueries = {
         nodeType: f.nodeType ?? null,
         objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
+        role: f.role ?? null,
         tags: f.tags ?? null,
         locPrefix: f.locPrefix ?? null,
         createdBy: f.createdBy ?? null,
@@ -1096,8 +1110,11 @@ export const nodeQueries = {
           // re-scoping here means a concurrent cross-memory move (cf. #409) can
           // never surface an out-of-scope node — cross-tenant reads are the
           // first-class invariant, not a cosmetic one.
+          // #1345 review (@copilot): the structured filters too, not only scope,
+          // so a node that stopped matching (e.g. its role changed) between the
+          // SQL filter and this read is not returned against the filter.
           const rows = await ctx.db.node.findMany({
-            where: { id: { in: ids }, memoryId: { in: scopeIds } },
+            where: { id: { in: ids }, memoryId: { in: scopeIds }, ...structuredWhere },
             include: nodeInclude,
           });
           await decryptNodesBatch(ctx.db, rows);
@@ -1137,11 +1154,61 @@ export const nodeQueries = {
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
-        f.nodeType || f.objectType || f.isRunnable != null || f.tags?.length || f.locPrefix ||
+        f.nodeType || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where
       );
       const page = off + finalLimit;
-      const fetchN = hasStructuredFilters ? Math.min(page * 5, 2000) : page;
+      const VECTOR_FETCH_CAP = 2000;
+      const fetchN = hasStructuredFilters ? Math.min(page * 5, VECTOR_FETCH_CAP) : page;
+
+      /**
+       * The ids among `ids` that pass every structured filter and `where`, in
+       * the caller's scope — the same predicate `buildResult` and the chunk
+       * branch apply on hydration.
+       */
+      const eligibleIds = async (ids: string[]): Promise<Set<string>> => {
+        let candidates = ids;
+        if (f.where != null) {
+          candidates = await provider.filterWhere({
+            db: ctx.db, ids, memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+          });
+        }
+        const rows = await ctx.db.node.findMany({
+          where: { id: { in: candidates }, memoryId: { in: scopeIds }, ...structuredWhere },
+          select: { id: true },
+        });
+        return new Set(rows.map((r) => r.id));
+      };
+
+      /**
+       * #1345 review (@codex P2): a vector candidate window is selected WITHOUT
+       * the structured filters (the ANN scan is index-driven), so a fixed
+       * over-fetch could leave the page empty when the matches rank past it —
+       * `limit: 1` returned nothing when the five nearest nodes had other roles.
+       * With filters present, widen the window (x4, to the same cap) until the
+       * filtered, floored hits fill the page, or the provider reports its raw
+       * candidate window exhausted.
+       * Past the cap a page can still be short; it is never wrong.
+       */
+      const widenVectorWindow = async <T extends { nodeId: string; score: number }>(
+        search: (limit: number, onWindow: (w: { exhausted: boolean }) => void) => Promise<T[]>,
+      ): Promise<T[]> => {
+        let limit = fetchN;
+        for (;;) {
+          // Exhaustion comes from the PROVIDER's raw window, never from the
+          // result size: node search dedupes chunk vectors to nodes, so a short
+          // or unchanged hit count can be duplicates with more of the index
+          // unread (@codex + @copilot, #1345 rounds 3-4). Unreported ⇒ not
+          // exhausted, so an unknown provider widens to the cap.
+          let exhausted = false;
+          const hits = await search(limit, (w) => { exhausted = w.exhausted; });
+          if (!hasStructuredFilters || limit >= VECTOR_FETCH_CAP || exhausted) return hits;
+          const floored = scoreFloor == null ? hits : hits.filter((h) => h.score >= scoreFloor);
+          const ok = await eligibleIds([...new Set(floored.map((h) => h.nodeId))]);
+          if (floored.filter((h) => ok.has(h.nodeId)).length >= page) return hits;
+          limit = Math.min(limit * 4, VECTOR_FETCH_CAP);
+        }
+      };
 
       // Hydrate a ranked (nodeId, score) list into hits: enforce the structured
       // filters via a Prisma re-fetch, order (by rank, or by an explicit sort),
@@ -1173,8 +1240,11 @@ export const nodeQueries = {
           );
           candidateIds = candidateIds.filter((id) => allowed.has(id));
         }
+        // #1345 review (@copilot): re-assert the memory scope at hydration. The
+        // candidates were scoped when RANKED, in a separate query; a node moved
+        // to another memory in between must not come back from outside scope.
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: candidateIds }, ...structuredWhere },
+          where: { id: { in: candidateIds }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
@@ -1206,8 +1276,12 @@ export const nodeQueries = {
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
           )).filter((id) => !shown.has(id));
           if (neighbourIds.length > 0) {
+            // Neighbours are deliberately UNFILTERED (appended context), but
+            // never out of scope: re-assert it here, like every other hydration
+            // in findNodes (#1345 review) — expandWithNeighbors scoped them in a
+            // separate query.
             const nRows = await ctx.db.node.findMany({
-              where: { id: { in: neighbourIds }, deletedAt: null },
+              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null },
               include: nodeInclude,
             });
             await decryptNodesBatch(ctx.db, nRows);
@@ -1240,8 +1314,12 @@ export const nodeQueries = {
         // from deeper ranks — a floor returns fewer, never weaker, results).
         ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
+        // #1345 review (@copilot): the lexical/regex SQL applied scope and the
+        // structured filters when RANKING; re-assert them at hydration, as
+        // buildResult does, so a node whose role (or memory, or deletion) changed
+        // in between is not returned against the filter it no longer meets.
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: ranked.map((r) => r.nodeId) } },
+          where: { id: { in: ranked.map((r) => r.nodeId) }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
@@ -1262,7 +1340,7 @@ export const nodeQueries = {
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
           )).filter((id) => !shown.has(id));
           if (neighbourIds.length > 0) {
-            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, deletedAt: null }, include: nodeInclude });
+            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null }, include: nodeInclude });
             await decryptNodesBatch(ctx.db, nRows);
             const nById = new Map(nRows.map((n) => [n.id, n]));
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
@@ -1419,11 +1497,16 @@ export const nodeQueries = {
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
 
-      // Chunk granularity (vector only) → passages, mirroring nodeSearch. The
-      // coarse structured node filters (nodeType/tags/…) are not applied to
-      // passage results in v1 (chunk-level, not node-level) — but a `where`
-      // predicate IS honored (#719): a passage from a parent that fails the
-      // predicate must not surface, so we drop it below.
+      // Chunk granularity (vector only) → passages, mirroring nodeSearch.
+      // #1345 review (@codex P2): every structured node filter applies to the
+      // passage's PARENT exactly as it does to a node hit — the same
+      // `structuredWhere` (nodeType, objectType, isRunnable, role, tags,
+      // locPrefix, createdBy, updated*, includeDeleted) plus the #719 `where`
+      // predicate. v1 applied only `where`, so `role` / `isRunnable` — which the
+      // MCP tool promises "in every mode" — silently returned passages from any
+      // parent. And the filters run BEFORE paging, with the same over-fetch the
+      // node path uses: a filtered-out passage must neither appear in nor
+      // consume the requested page.
       if (granularity === 'chunk') {
         if (effectiveMode !== 'vector') {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
@@ -1432,41 +1515,49 @@ export const nodeQueries = {
         // #497 — apply the minScore floor to the scored passages too (PR-569
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
-        const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit });
-        const chunkHits = (scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor))
-          .slice(off, off + finalLimit);
+        const rawChunks = await widenVectorWindow((limit, onWindow) =>
+          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow }),
+        );
+        const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
+        const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
         // #719 — honor `where` on chunk passages: keep only passages whose PARENT
         // node satisfies the predicate (also re-asserts the memory scope).
-        let allowedParents: Set<string> | null = null;
+        let whereAllowed: Set<string> | null = null;
         if (f.where != null) {
-          allowedParents = new Set(
+          whereAllowed = new Set(
             await provider.filterWhere({
-              db: ctx.db, ids: [...new Set(chunkHits.map((c) => c.nodeId))],
+              db: ctx.db, ids: candidateParentIds,
               memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
             }),
           );
         }
         const parents = await ctx.db.node.findMany({
-          where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },
+          where: {
+            id: { in: whereAllowed ? candidateParentIds.filter((id) => whereAllowed!.has(id)) : candidateParentIds },
+            // @copilot: re-assert scope at hydration, as buildResult does.
+            memoryId: { in: scopeIds },
+            ...structuredWhere,
+          },
           include: { memory: { select: { urn: true } } },
         });
+        const eligible = new Set(parents.map((p) => p.id));
+        const chunkHits = scoredChunks.filter((c) => eligible.has(c.nodeId)).slice(off, off + finalLimit);
+        const pageParentIds = new Set(chunkHits.map((c) => c.nodeId));
         const parentById = new Map(parents.map((p) => [p.id, p]));
         // #1061 — chunk granularity returns passages rather than whole nodes,
         // but the passage text IS node content, so each DISTINCT parent counts
         // once (not once per passage: three chunks of one node is one node's
         // content read, and per-chunk counting would make a node's read count
         // depend on how finely it happens to be chunked). Scoped to the parents
-        // that survive `allowedParents`, so a filtered-out node records nothing.
+        // on the returned PAGE, so a filtered-out or off-page node records nothing.
         recordNodeUsage(
           ctx.db,
           'read',
-          toUsageNodeRefs(
-            parents.filter((p) => allowedParents == null || allowedParents.has(p.id)),
-          ),
+          toUsageNodeRefs(parents.filter((p) => pageParentIds.has(p.id))),
           ctx,
         );
         const passages = chunkHits
-          .filter((c) => parentById.has(c.nodeId) && (allowedParents == null || allowedParents.has(c.nodeId)))
+          .filter((c) => parentById.has(c.nodeId))
           .map((c) => {
             const p = parentById.get(c.nodeId)! as { loc: string; memory: { urn: string } };
             // #697 Stage 2: emit the flat v2 node URN (matches Node.urn); fall
@@ -1492,7 +1583,9 @@ export const nodeQueries = {
         return { hits: [], passages, total: null, reason: null, degraded: null };
       }
 
-      const vecHits = await provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: fetchN });
+      const vecHits = await widenVectorWindow((limit, onWindow) =>
+        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow }),
+      );
 
       if (effectiveMode === 'vector') {
         const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
@@ -1509,7 +1602,9 @@ export const nodeQueries = {
       const fused = reciprocalRankFusionScored(
         [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
         (id) => id,
-      ).slice(0, fetchN);
+        // Keep at least the (possibly widened) vector window: truncating to the
+        // original fetchN would drop the matches widening went out to find.
+      ).slice(0, Math.max(fetchN, vecHits.length));
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
       return await buildResult(
         fused.map((r) => ({ nodeId: r.item, score: r.score })),
@@ -1948,6 +2043,7 @@ export const nodeQueries = {
           objectType?: string | null;
           tags?: string[] | null;
           isRunnable?: boolean | null;
+          role?: string | null;
           locPrefix?: string | null;
           createdBy?: string | null;
           updatedAfter?: string | null;
@@ -2234,6 +2330,14 @@ export const nodeQueries = {
           ...(f.nodeType ? { nodeType: f.nodeType } : {}),
           ...(f.objectType ? { objectType: f.objectType } : {}),
           ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+          ...(f.role != null
+            ? {
+                OR: [
+                  { role: f.role },
+                  { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
+                ],
+              }
+            : {}),
           ...(f.tags?.length ? tagsFilter(f.tags) : {}),
           ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
           ...(f.createdBy ? { createdBy: f.createdBy } : {}),

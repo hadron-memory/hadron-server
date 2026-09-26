@@ -173,7 +173,7 @@ describe('a refusal offers only routes that perform the refused operation (@code
       const e = new RoleGovernedError(spec, 'update', 'edits', { context });
       // Names no door as a remedy (@copilot, #1305 round 7); extensions.door
       // still identifies the kind's door for tooling.
-      expect(e.message).toBe('This write edits a node with role "spec". The generic node surface does not reach it. There is no route to suggest for this operation.');
+      expect(e.message).toBe('This write edits a node with a "spec"-family role ("spec" or a dotted "spec.*"). The generic node surface does not reach it. There is no route to suggest for this operation.');
       expect(e.extensions.door).toBe('updateSpecNode');
     }
   });
@@ -292,6 +292,10 @@ describe('kind signals are door-specific (@copilot + @codex, PR #1305 round 5)',
     expect(mcpDoorCanReplay({ isRunnable: true, role: 'note' }, 'task', 'create')).toBe(false);
     expect(mcpDoorCanReplay({ name: 'n', role: 'review' }, 'review', 'create')).toBe(true);
     expect(mcpDoorCanReplay({ role: 'review', isRunnable: false }, 'review', 'create')).toBe(false);
+    // #1345 round 3: the review create door sets any review-family role it is given.
+    expect(mcpDoorCanReplay({ name: 'n', role: 'review.security' }, 'review', 'create')).toBe(true);
+    expect(mcpDoorCanReplay({ name: 'n', role: 'spec.rule' }, 'review', 'create')).toBe(false);
+    expect(mcpDoorCanReplay({ name: 'n', role: 'reviewer' }, 'review', 'create')).toBe(false);
   });
 
   it('MCP: editing a live task while setting a role names no door; the control (content only) still does', async () => {
@@ -401,6 +405,8 @@ describe('a GraphQL create that RESURRECTS a governed tombstone (@codex, PR #130
 describe('review round 11 (@codex + @copilot, PR #1305)', () => {
   it('the review door cannot replay a role set to ANOTHER governed value', () => {
     expect(mcpDoorCanReplay({ role: 'spec' }, 'review', 'update')).toBe(false);
+    expect(mcpDoorCanReplay({ role: 'spec.rule' }, 'review', 'update')).toBe(false);
+    expect(mcpDoorCanReplay({ role: 'review.security' }, 'review', 'update')).toBe(true);
     expect(mcpDoorCanReplay({ role: null }, 'review', 'update')).toBe(true);
     expect(mcpDoorCanReplay({ role: 'note' }, 'review', 'update')).toBe(true);
   });

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/hadron-memory/hadron-cli/internal/skilldoc"
 )
@@ -94,7 +95,7 @@ func extras() []kase {
 		{"name": "id-differs-same-everything-else", "id": "01a0000000000000000000000000000f",
 			"source": "hrn:node:a.com:m:tasks:x", "skillName": "hadron-x",
 			"description": "d", "content": "body",
-			"why":         "the whole point of §4a: the id alone must move the digest"},
+			"why": "the whole point of §4a: the id alone must move the digest"},
 	}
 }
 
@@ -183,6 +184,141 @@ func reservedCases() []kase {
 		{"name": "a name containing synced is not reserved", "node": node(map[string]any{"claudeSkill": decl("synced-notes")}),
 			"why": "the whole name is matched, never a substring"},
 	}
+}
+
+// markupCases are the `lintMarkup` inputs (#1341), authored here and upserted
+// by name. The first twenty are Holger's Cowork probe upload (2026-09-25),
+// EXACTLY as uploaded: Cowork refused the twelve marked so and accepted the
+// eight marked so. The rest pin what the probe did not measure: which span the
+// message quotes, how it is quoted, and the nested `<<>` the rule refuses on
+// purpose. Both hosts declare every node, so the codexSkill column is a real
+// verdict rather than an undeclared-node result. Every description says "Use
+// when", so each case pins the markup rule and not skill-description-no-trigger.
+func markupCases() []kase {
+	node := func(desc string) map[string]any {
+		decl := map[string]any{"name": "probe", "description": desc, "enable": true}
+		return map[string]any{
+			"urn": "hrn:node:acme.com:mem:tasks:probe", "loc": "tasks:probe", "memoryUrn": "hrn:mem:acme.com:mem",
+			"isRunnable": true, "content": "# Probe\n\nSteps.",
+			"properties": map[string]any{"exports": map[string]any{"claudeSkill": decl, "codexSkill": decl}},
+		}
+	}
+	probe := func(name, verdict, desc string) kase {
+		return kase{"name": name + " (Cowork " + verdict + ")", "node": node(desc)}
+	}
+	return []kase{
+		probe("p01-clean-control", "accepted", "Does a thing. Use when you need it."),
+		probe("p02-placeholder", "refused", "Use when adding a node to <memory>."),
+		probe("p03-capital-tag", "refused", "Use when working as <Name>."),
+		probe("p04-hyphen-tag", "refused", "Use when given a <memory-urn>."),
+		probe("p05-lone-lt", "accepted", "Use when a < b."),
+		probe("p06-lone-gt", "accepted", "Use when b > a."),
+		probe("p07-lt-and-gt-spaced", "refused", "Use when 1 < 2 and 3 > 2."),
+		probe("p08-closing-tag", "refused", "Use when the block ends with </end>."),
+		probe("p09-self-closing", "refused", "Use when a <br/> appears."),
+		probe("p10-arrows", "accepted", "Use when mapping a -> b or x => y."),
+		probe("p11-heart", "accepted", "Use when you <3 it."),
+		probe("p12-shift", "refused", "Use when shifting x << 2 or y >> 1."),
+		probe("p13-entities", "accepted", "Use when text shows &lt;memory&gt; escaped."),
+		probe("p14-digit-tag", "refused", "Use when step <1> is next."),
+		probe("p15-two-words", "refused", "Use when <two words> appear."),
+		probe("p16-email", "refused", "Use when mailing <user@example.com>."),
+		probe("p17-html-comment", "refused", "Use when a <!-- note --> appears."),
+		probe("p18-empty-brackets", "accepted", "Use when <> appears."),
+		probe("p19-url", "refused", "Use when linking <https://example.com>."),
+		probe("p20-lt-letter", "accepted", "Use when a<b holds."),
+		{"name": "nested opener is refused (unmeasured, conservative)", "node": node("Use when a <<> appears."),
+			"why": "<[^>]+> and <[^<>]+> both fit the probe and differ only here; the broader one is encoded, so a plugin errs toward uploading"},
+		{"name": "the message quotes the leftmost span", "node": node("Use when <a> then <b>.")},
+		{"name": "the quoted span is escaped like %q", "node": node(`Use when <say "hi"> fires.`),
+			"why": "the span is author-controlled; the server quotes it with goQuote"},
+		{"name": "a printable non-ASCII span is quoted as is", "node": node("Use when a <café> opens.")},
+		{"name": "a non-printable code point in the span is escaped", "node": node("Use when a <a\u200bb> opens."),
+			"why": "U+200B is where Go %q (\\u200b) and a naive JSON.stringify diverge; the server must quote it the Go way"},
+		{"name": "markup is reported beside too-long", "node": node("Use when <memory> " + strings.Repeat("x", 1024)),
+			"why": "both are errors, so fixing one does not reveal the other on the next run"},
+	}
+}
+
+// headerCases are provenance-header inputs: the #1323 `rev=` edge values
+// (hadron-cli#724, merged as 9e7d2bd, is the first Go that reads one), plus the
+// separator cases they turned up. Each case edits the provenance
+// line of ONE Go-rendered file; genfix writes the edited file as `input` and
+// Go's ParseFile verdict beside it. A malformed `rev=` voids the WHOLE header
+// on both sides (#1339 / Eli, dev-team chat #1626), so a voided case reads
+// back with an empty source rather than a revision-less header.
+//
+// The separator cases are there because RE2's \s is [\t\n\f\r ] while
+// JavaScript's also takes \v and the Unicode spaces: an NBSP between two keys
+// is a separator to one reader and part of a value to the other. The first
+// generation of this section found the port on the JavaScript side of that
+// line, for the legacy header as much as the current one.
+func headerCases() []kase {
+	edit := func(name, old, repl, why string) kase {
+		c := kase{"name": name, "old": old, "new": repl}
+		if why != "" {
+			c["why"] = why
+		}
+		return c
+	}
+	const id = "id=node-1 "
+	const legacyOld = "hadron-skill id=node-1 source=hrn:node:a.com:mem:tasks:x hash="
+	return []kase{
+		edit("absent: a pre-#1323 header", id, id, "revision 0 in Go, null in TypeScript: both mean none"),
+		edit("rev=1, the minimum", id, id+"rev=1 ", ""),
+		edit("rev=7", id, id+"rev=7 ", ""),
+		edit("rev=2147483647, Node.revSeq's maximum", id, id+"rev=2147483647 ", ""),
+		edit("rev=2147483648 voids the header", id, id+"rev=2147483648 ", "one past the signed 32-bit column"),
+		edit("rev=99999999999 voids the header", id, id+"rev=99999999999 ", "eleven digits: Go refuses on length before parsing"),
+		edit("rev=0 voids the header", id, id+"rev=0 ", ""),
+		edit("rev=07 voids the header", id, id+"rev=07 ", "no leading zero: one spelling per revision"),
+		edit("rev=-1 voids the header", id, id+"rev=-1 ", ""),
+		edit("rev=+7 voids the header", id, id+"rev=+7 ", ""),
+		edit("rev=1.5 voids the header", id, id+"rev=1.5 ", ""),
+		edit("rev=7x voids the header", id, id+"rev=7x ", ""),
+		edit("a non-ASCII digit voids the header", id, id+"rev=\u0667 ", "Arabic-Indic seven: \\d must stay ASCII on both sides"),
+		edit("rev after hash: key order does not matter", " -->\n<!--", " rev=7 -->\n<!--", "anchored on the provenance line's end: the human line below it ends in ' -->' too"),
+		edit("a repeated rev: the last one counts (valid last)", id, id+"rev=0 rev=7 ", ""),
+		edit("a repeated rev: the last one counts (invalid last)", id, id+"rev=7 rev=0 ", ""),
+		edit("REV=7 is an unknown key, not a revision", id, id+"REV=7 ", "keys are case-sensitive"),
+		edit("an NBSP after the rev value", id, id+"rev=7\u00a0", "RE2 \\S takes the NBSP into the value; JS \\s takes it as a separator"),
+		edit("a vertical tab after the rev value", id, id+"rev=7\v", "RE2 \\s excludes \\v; JS \\s includes it"),
+		edit("an NBSP between two other keys", "source=", "\u00a0source=", "the same question without rev: it predates #1323"),
+		edit("a legacy header (control)", legacyOld, "Generated from hrn:node:a.com:mem:tasks:x -->\n<!-- hash=",
+			"the edit leaves a legacy line, then a comment neither reader treats as provenance"),
+		edit("a legacy header with an NBSP separator", legacyOld, "Generated from\u00a0hrn:node:a.com:mem:tasks:x -->\n<!-- hash=", ""),
+	}
+}
+
+// lintPerHost upserts authored cases into a section and fills each case's
+// findingsByHost from Go's LintFor over EVERY row of skilldoc.Hosts — never
+// skilldoc.Lint, the Claude-only wrapper, under which a codexSkill
+// declaration is not evaluated at all (PR #1343 review).
+func lintPerHost(doc map[string]json.RawMessage, section string, cases []kase) []kase {
+	var out []kase
+	b, _ := json.Marshal(upsert(decodeOrEmpty(doc, section), cases...))
+	if err := json.Unmarshal(b, &out); err != nil {
+		panic(err)
+	}
+	for _, c := range out {
+		n := c["node"].(map[string]any)
+		props, _ := n["properties"].(map[string]any)
+		node := skilldoc.Node{
+			URN: n["urn"].(string), Loc: n["loc"].(string), MemoryURN: n["memoryUrn"].(string),
+			IsRunnable: n["isRunnable"].(bool), Content: n["content"].(string), Properties: props,
+		}
+		byHost := map[string]any{}
+		for _, h := range skilldoc.Hosts {
+			findings := []any{}
+			for _, f := range skilldoc.LintFor(node, h) {
+				findings = append(findings, map[string]any{"rule": f.Rule, "severity": f.Severity, "message": f.Message})
+			}
+			byHost[h.Key] = findings
+		}
+		c["findingsByHost"] = byHost
+		delete(c, "findings") // the pre-review single-host shape
+	}
+	return out
 }
 
 // collisionFindings runs Go's LintCollisions over a case's nodes and writes
@@ -369,36 +505,41 @@ func main() {
 	// skilldoc.Lint, the Claude-only wrapper, under which a codexSkill
 	// declaration is not evaluated at all (PR #1343 review). Needs
 	// hadron-cli#712 or later for the rule to exist.
-	var lr []kase
-	rb, _ := json.Marshal(upsert(decodeOrEmpty(doc, "lintReserved"), reservedCases()...))
-	if err := json.Unmarshal(rb, &lr); err != nil {
-		panic(err)
-	}
-	// Findings PER HOST, from LintFor over every row of Go's host table. The
-	// first version called skilldoc.Lint, which is the Claude-only wrapper, so
-	// a codexSkill declaration was never evaluated by the reference at all and
-	// its "clean" verdict was an undeclared-node result — a parity control that
-	// could not fail (@codex / @copilot, PR #1343).
-	for _, c := range lr {
-		n := c["node"].(map[string]any)
-		props, _ := n["properties"].(map[string]any)
-		node := skilldoc.Node{
-			URN: n["urn"].(string), Loc: n["loc"].(string), MemoryURN: n["memoryUrn"].(string),
-			IsRunnable: n["isRunnable"].(bool), Content: n["content"].(string), Properties: props,
-		}
-		byHost := map[string]any{}
-		for _, h := range skilldoc.Hosts {
-			findings := []any{}
-			for _, f := range skilldoc.LintFor(node, h) {
-				findings = append(findings, map[string]any{"rule": f.Rule, "severity": f.Severity, "message": f.Message})
-			}
-			byHost[h.Key] = findings
-		}
-		c["findingsByHost"] = byHost
-		delete(c, "findings") // the pre-review single-host shape
-	}
+	lr := lintPerHost(doc, "lintReserved", reservedCases())
 	doc["lintReserved"], _ = json.Marshal(lr)
 	doc["lintReservedSourceCommit"], _ = json.Marshal(commit)
+
+	// ── lintMarkup ──────────────────────────────────────────────────────────
+	// #1341: Cowork's `<…>` description refusal, Claude only. Its own section
+	// and stamp, like lintReserved. Needs hadron-cli#722 (PR #730, merged as
+	// c9fa75a) or later for the rule to exist.
+	doc["lintMarkup"], _ = json.Marshal(lintPerHost(doc, "lintMarkup", markupCases()))
+	doc["lintMarkupSourceCommit"], _ = json.Marshal(commit)
+
+	// ── parseHeader ─────────────────────────────────────────────────────────
+	// #1323: Go's ParseFile over the headerCases edits. Its own section and
+	// stamp, like lintMarkup; needs hadron-cli#724 (merged as 9e7d2bd) or
+	// later, where File.Revision exists — an older commit does not compile.
+	base, err := skilldoc.Render("node-1", "skill", "hrn:node:a.com:mem:tasks:x", "Use when testing.", "body")
+	if err != nil {
+		panic(fmt.Sprintf("parseHeader base render: %v", err))
+	}
+	pr := upsert(decodeOrEmpty(doc, "parseHeader"), headerCases()...)
+	for _, c := range pr {
+		old, repl := str(c, "old"), str(c, "new")
+		if strings.Count(base, old) != 1 {
+			panic(fmt.Sprintf("parseHeader %s: %q is not unique in the base file", str(c, "name"), old))
+		}
+		input := strings.Replace(base, old, repl, 1)
+		f, err := skilldoc.ParseFile([]byte(input))
+		if err != nil {
+			panic(fmt.Sprintf("parseHeader %s: %v", str(c, "name"), err))
+		}
+		c["input"] = input
+		c["id"], c["source"], c["hash"], c["revision"] = f.ID, f.Source, f.Hash, f.Revision
+	}
+	doc["parseHeader"], _ = json.Marshal(pr)
+	doc["parseHeaderSourceCommit"], _ = json.Marshal(commit)
 
 	// The commit is an ARGUMENT, never a literal. Hardcoding it meant the next
 	// regeneration at a newer revision would still stamp the old one, and

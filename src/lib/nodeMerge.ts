@@ -121,7 +121,14 @@ export function mergeNodeFields(
     const v = combineText(target.abstract, source.abstract);
     if (v !== (target.abstract ?? null)) {
       if (v != null && v.length > ABSTRACT_MAX_LENGTH) {
-        throw new NodeAbstractTooLongError(v.length);
+        // #1117: report delta/headroom when the merge GROWS an existing
+        // abstract; adopting into an empty one (null or '' — combineText
+        // treats both as absent) is a full replacement, which has no
+        // truthful "current" to report (Copilot round 1 on PR #1371).
+        throw new NodeAbstractTooLongError(
+          v.length,
+          target.abstract ? { currentLength: target.abstract.length } : undefined,
+        );
       }
       changed.abstract = v;
       abstractChanged = true;

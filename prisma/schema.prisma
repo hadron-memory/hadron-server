@@ -1164,7 +1164,8 @@ model Node {
   ///                    for retrieval and rendering. NOT this field.
   ///   - `objectType` — the COLLECTION discriminator (#725): which domain object
   ///                    this is an instance of, schema-validated. NOT this field.
-  ///   - `role`       — what the node is FOR. No retrieval impact whatsoever.
+  ///   - `role`       — what the node is FOR. It does not affect default
+  ///                    retrieval/ranking, but callers may filter by role family.
   ///
   /// This is the axis the law corpus already named and the schema never had:
   /// `cor:urn:010:01` lists node TYPES and node ROLES as separate categories,

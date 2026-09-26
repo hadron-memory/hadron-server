@@ -106,6 +106,7 @@ describe('renderCanonicalJson', () => {
   "loc": "findings:flaky-ci",
   "name": "Flaky CI",
   "type": "task",
+  "objectType": "",
   "alias": "",
   "description": "One liner",
   "abstract": "A summary.",
@@ -115,6 +116,8 @@ describe('renderCanonicalJson', () => {
     "ci"
   ],
   "seq": null,
+  "role": null,
+  "isRunnable": null,
   "data": null,
   "properties": null,
   "content": "Body.",
@@ -167,7 +170,7 @@ describe('section selection (full: false)', () => {
   it('JSON METADATA only → only identity fields', () => {
     const json = JSON.parse(renderSectionedJson(RICH, sec('METADATA')));
     expect(Object.keys(json).sort()).toEqual(
-      ['alias', 'contentHash', 'description', 'id', 'loc', 'memory', 'name', 'seq', 'tags', 'type'].sort(),
+      ['alias', 'contentHash', 'description', 'id', 'isRunnable', 'loc', 'memory', 'name', 'objectType', 'role', 'seq', 'tags', 'type'].sort(),
     );
     expect(json).not.toHaveProperty('content');
     expect(json).not.toHaveProperty('edges');
@@ -199,5 +202,74 @@ describe('renderNodeExport section default', () => {
     const a = renderNodeExport(RICH, { format: 'JSON', full: true, sections: [] }).data;
     const b = renderCanonicalJson(RICH);
     expect(a).toBe(b);
+  });
+});
+
+// #1340 — the governed-kind signals (role, isRunnable) and the collection
+// discriminator (objectType) travel in the server-rendered file, keyed and placed
+// exactly as the git mirror (buildNodeFrontmatter) and the CLI's nodedoc codec
+// carry them (hadron-cli#717 governed_test.go, #725). Before this, a server
+// export silently lost a node's kind: re-importing it made a spec an info node.
+describe('#1340 — role, isRunnable and objectType', () => {
+  const kind = (over: Partial<ExportNode>): ExportNode => ({
+    id: 'n1', memoryUrn: 'acme.com:kb', loc: 'x', name: 'N', content: 'b', tags: [], edges: [], ...over,
+  });
+
+  it('MD: objectType right after type; role and runnable between seq and data', () => {
+    const md = renderCanonicalMarkdown(
+      kind({ nodeType: 'task', objectType: 'competitor', seq: 2, role: 'spec', isRunnable: true, data: { k: 'v' } }),
+    );
+    expect(md).toContain('\ntype: task\nobjectType: competitor\n');
+    expect(md).toContain('\nseq: 2\nrole: spec\nrunnable: true\ndata:\n');
+  });
+
+  it('MD: an explicit `runnable: false` is kept; absent signals are not written', () => {
+    expect(renderCanonicalMarkdown(kind({ isRunnable: false }))).toContain('\nrunnable: false\n');
+    const absent = renderCanonicalMarkdown(kind({}));
+    for (const key of ['role:', 'runnable:', 'objectType:']) expect(absent, key).not.toContain(key);
+  });
+
+  it.each([
+    ['ordinary', { role: null, isRunnable: null }],
+    ['task', { role: null, isRunnable: true }],
+    ['spec', { role: 'spec', isRunnable: null }],
+    ['review', { role: 'review', isRunnable: false }],
+    ['custom dotted role', { role: 'acme.playbook', isRunnable: true }],
+  ] as const)('JSON (%s): role and isRunnable after seq, null when unset, false kept', (_n, sig) => {
+    const out = renderCanonicalJson(kind({ ...sig }));
+    const json = JSON.parse(out);
+    expect(json.role).toBe(sig.role);
+    expect(json.isRunnable).toBe(sig.isRunnable);
+    const keys = Object.keys(json);
+    expect(keys.slice(keys.indexOf('seq'), keys.indexOf('seq') + 4)).toEqual(['seq', 'role', 'isRunnable', 'data']);
+  });
+
+  it('an objectType stored as "" is omitted from MD like NULL, and is "" in JSON (@jonas, #1778)', () => {
+    // The CLI's `objectType,omitempty` drops "", so `objectType: ""` in a file
+    // would be the one divergence from its codec.
+    const n = kind({ nodeType: 'task', objectType: '' });
+    expect(renderCanonicalMarkdown(n)).not.toContain('objectType');
+    expect(renderSectionedMarkdown(n, sec('METADATA'))).not.toContain('objectType');
+    expect(JSON.parse(renderCanonicalJson(n)).objectType).toBe('');
+  });
+
+  it('JSON: objectType right after type, "" when unset', () => {
+    const set = JSON.parse(renderCanonicalJson(kind({ nodeType: 'task', objectType: 'insight' })));
+    const keys = Object.keys(set);
+    expect(keys.slice(keys.indexOf('type'), keys.indexOf('type') + 3)).toEqual(['type', 'objectType', 'alias']);
+    expect(set.objectType).toBe('insight');
+    expect(JSON.parse(renderCanonicalJson(kind({}))).objectType).toBe('');
+  });
+
+  it('sectioned MD/JSON: the three are METADATA, so a METADATA export keeps them and CONTENT-only drops them', () => {
+    const n = kind({ objectType: 'insight', role: 'review', isRunnable: false });
+    const md = renderSectionedMarkdown(n, sec('METADATA'));
+    expect(md).toContain('\nobjectType: insight\n');
+    expect(md).toContain('\nrole: review\nrunnable: false\n');
+    expect(JSON.parse(renderSectionedJson(n, sec('METADATA')))).toMatchObject({
+      objectType: 'insight', role: 'review', isRunnable: false,
+    });
+    expect(Object.keys(JSON.parse(renderSectionedJson(n, sec('CONTENT'))))).toEqual(['content']);
+    expect(renderSectionedMarkdown(n, sec('CONTENT'))).toBe('b\n');
   });
 });

@@ -347,6 +347,47 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
 }
 
 /**
+ * A copy of the context with EVERY request memo removed (each `*Cache` key), so
+ * a gate asked on it reflects the database as it is now rather than replaying
+ * an answer memoized earlier in the request. Stripping by suffix keeps a memo
+ * added later from quietly re-staling the callers (#1360 review, round 4).
+ *
+ * Pass `db` — the interactive transaction's client — when the gate runs INSIDE
+ * a transaction. Asked on `ctx.db` it needs a second pool connection while the
+ * transaction holds one, so N concurrent writers queued on one row lock can
+ * hold every connection and starve the lock holder until the transaction
+ * timeout (#1360 review: 8 concurrent rule updates did exactly that).
+ */
+export function withoutRequestCaches(ctx: Context, db?: Prisma.TransactionClient): Context {
+  const fresh = Object.fromEntries(Object.entries(ctx).filter(([k]) => !k.endsWith('Cache'))) as Context;
+  return db ? { ...fresh, db: db as PrismaClient } : fresh;
+}
+
+/**
+ * {@link isMemoryReadableCached}, but ALWAYS re-asked, and the fresh answer
+ * replaces the request's memoized one. For a check that must reflect the state
+ * at a later point in the same request — a re-check inside a write's
+ * transaction — where the memoized answer from the pre-check would make it a
+ * no-op, and where later reads in the request must not reuse the stale
+ * decision either (#1360 review).
+ *
+ * The gate runs on a copy of the context with EVERY request memo removed (each
+ * `*Cache` key), not just `memoryReadCache`: `getAccessibleMemoryIds` consults
+ * nested ones too (`appDerivedMemoryIdCache` for App-derived access, App rows),
+ * and bypassing only the outer one re-used the inner answer (#1360 review,
+ * round 4). Stripping by suffix keeps a memo added later from quietly
+ * re-staling this path. Inside a transaction, pass its client as `tx` (see
+ * {@link withoutRequestCaches}).
+ */
+export function isMemoryReadableFresh(ctx: Context, memoryId: string, tx?: Prisma.TransactionClient): Promise<boolean> {
+  const uncached = withoutRequestCaches(ctx, tx);
+  const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
+  const pending = getAccessibleMemoryIds(uncached, memoryId).then((ids) => ids === null || ids.includes(memoryId));
+  cache.set(memoryId, pending);
+  return pending;
+}
+
+/**
  * Resolve a memory ref (ID or URN) to its id IFF the caller may read it; returns
  * null when the ref does not resolve OR the caller lacks read access — so a
  * ref-scoped surface answers with an empty page and discloses neither the
@@ -671,6 +712,53 @@ export async function requireAgentMemoryGrant(
       );
     }
   }
+}
+
+/**
+ * The NODE-addressed twin of {@link concealUnreadableDenial} (#1316): run a
+ * node-targeted mutation's existing authorization, and when it denies a caller
+ * who cannot read the node's memory, throw `missing()` — the surface's own
+ * missing-node error, since each spells that miss its own way (a
+ * `NODE_NOT_FOUND` GraphQLError, a bare `NodeNotFoundError`, …) and only an
+ * identical answer conceals anything.
+ *
+ * These surfaces resolve the node BEFORE authorizing, so without this a caller
+ * who cannot read the memory learned three things by probing: the memory
+ * exists, the node exists, and (by a missing loc answering differently) that
+ * the loc is free.
+ *
+ * The classifier is the node-content gate (`isMemoryReadableCached`), NOT the
+ * record gate: a caller who may open an app/system memory's RECORD but not its
+ * nodes must not learn which nodes exist in it — the same line `Query.node`
+ * draws. Ordinary denials only ({@link isAuthorizationDenial}); every other
+ * error and every success passes through, so no permitted caller is narrowed.
+ *
+ * `authorize` must perform authorization ONLY — no writes.
+ */
+export async function concealUnreadableNodeDenial(
+  ctx: Context,
+  memoryId: string,
+  missing: () => Error,
+  authorize: () => Promise<void>,
+): Promise<void> {
+  try {
+    await authorize();
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+    if (await isMemoryReadableCached(ctx, memoryId)) throw error;
+    throw missing();
+  }
+}
+
+/**
+ * The typed `NODE_NOT_FOUND` answer the node-addressed mutations give for a
+ * ref that resolves to nothing — shared so a concealed denial is byte-identical
+ * to it (#1316).
+ */
+export function nodeNotFoundError(ref: string): GraphQLError {
+  return new GraphQLError(`Node not found: "${ref}"`, {
+    extensions: { code: 'NODE_NOT_FOUND', ref },
+  });
 }
 
 /**
@@ -3094,6 +3182,8 @@ export interface UpdateNodeInput
   id?: string;
   memoryId?: string;
   loc?: string;
+  /** Optional positive Node.revision compare-and-swap precondition (#937). */
+  expectedRevision?: number | null;
   name?: string;
 }
 
