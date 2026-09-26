@@ -63,6 +63,9 @@ describe('connect-time resolution failures', () => {
     await expect(guardedEndpointFetch()('https://llm.example.test/v4/chat/completions')).rejects.toBeInstanceOf(AiEndpointForbiddenError);
     lookupMock.mockResolvedValue([{ address: '10.0.0.7', family: 4 }, { address: '169.254.169.254', family: 4 }]);
     await expect(guardedEndpointFetch()('https://llm.example.test/v4/chat/completions')).rejects.toBeInstanceOf(AiEndpointForbiddenError);
+    // AWS's IPv6 instance metadata sits inside the ULA block the opt-in admits.
+    lookupMock.mockResolvedValue([{ address: 'fd00:ec2::254', family: 6 }]);
+    await expect(guardedEndpointFetch()('https://llm.example.test/v4/chat/completions')).rejects.toBeInstanceOf(AiEndpointForbiddenError);
     vi.unstubAllEnvs();
   });
 });

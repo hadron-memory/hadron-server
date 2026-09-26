@@ -150,8 +150,29 @@ export function privateEndpointsAllowed(env: NodeJS.ProcessEnv = process.env): b
   return env.AI_ENDPOINT_ALLOW_PRIVATE_NETWORKS === 'true';
 }
 
-/** RFC 1918, IPv6 ULA (fc00::/7) and loopback, including IPv4-mapped forms. */
+/**
+ * Cloud metadata that sits INSIDE a private range, so the private-network
+ * exception must never admit it (#1380 review, Codex P1): AWS reserves
+ * fd00:ec2::/32 for its Nitro services, and fd00:ec2::254 is the IPv6
+ * instance-metadata endpoint. (The IPv4 one, 169.254.169.254, is link-local
+ * and never private.) Matched on the canonical form, so any spelling of an
+ * address in the block is caught.
+ */
+export function isCloudMetadataAddress(ip: string): boolean {
+  if (isIP(ip) !== 6) return false;
+  const canonical = new URL(`http://[${ip}]`).hostname.replace(/^\[|\]$/g, '');
+  return canonical.startsWith('fd00:ec2:');
+}
+
+/**
+ * RFC 1918, IPv6 ULA (fc00::/7) and loopback, including IPv4-mapped forms —
+ * minus cloud metadata inside those ranges. Loopback is included on purpose:
+ * the canonical self-hosted setup is a model server on the same host
+ * (Ollama on localhost:11434), and it is admitted ONLY under the operator's
+ * explicit opt-in, which the hosted platform never sets.
+ */
 export function isPrivateNetworkAddress(ip: string): boolean {
+  if (isCloudMetadataAddress(ip)) return false;
   const v4 = isIP(ip) === 4 ? ip : embeddedIpv4(ip);
   if (v4) {
     const [a, b] = v4.split('.').map(Number);
