@@ -40,8 +40,10 @@ import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { aiConfigOwnerOf, requireAiConfigOwnerAdmin } from '../../api/graphql/schema/resolvers.helpers.js';
 import { AiServiceConfigNotFoundError, validateProviderAndParams, type AiConfigOwnerType } from '../../lib/aiConfig.js';
 import {
+  defaultEndpoint,
   effectiveApiStyle,
   effectiveEndpoint,
+  explicitEndpoint,
   validateApiStyle,
   usesProcessCredential,
   validateEndpoint,
@@ -148,10 +150,62 @@ function secretsOf(rawKey: string | null): string[] {
 
 const MAX_ERROR_CHARS = 500;
 
-function scrub(message: string, secrets: string[]): string {
+/** Exported for tests. */
+export function scrub(message: string, secrets: string[]): string {
   let out = message;
-  for (const s of secrets) out = out.split(s).join('[redacted]');
+  // Longest first: when one secret is a prefix of another (a Bedrock key id
+  // and its secret, say), redacting the short one first would leave the long
+  // one's tail behind (#1385 review).
+  for (const s of [...new Set(secrets)].sort((a, b) => b.length - a.length)) out = out.split(s).join('[redacted]');
   return out.length > MAX_ERROR_CHARS ? `${out.slice(0, MAX_ERROR_CHARS)}…` : out;
+}
+
+/**
+ * The process credentials an SDK falls back to with no stored key (the
+ * variables @ai-sdk/openai, /anthropic and /amazon-bedrock read). A PLATFORM
+ * test sends one of them, so a provider that echoes its Authorization header
+ * must not hand it to the caller (#1385 review). Always included: a value
+ * the call never sent can't be echoed, so this costs nothing otherwise.
+ */
+function bedrockRegionOf(rawKey: string | null): string | null {
+  if (!rawKey) return null;
+  try {
+    const region = (JSON.parse(rawKey) as { region?: unknown }).region;
+    return typeof region === 'string' && region ? region : null;
+  } catch {
+    return null;
+  }
+}
+
+function processSecrets(env: NodeJS.ProcessEnv): string[] {
+  return ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_BEARER_TOKEN_BEDROCK']
+    .map((name) => env[name] ?? '')
+    .filter((v) => v.length > 0);
+}
+
+/**
+ * Where the probe actually went. With no explicit endpoint the SDK, not the
+ * catalog, picks the host: OpenAI and Anthropic honour OPENAI_BASE_URL /
+ * ANTHROPIC_BASE_URL, and Bedrock derives its host from the region. The
+ * catalog default would claim the official host answered when a proxy did
+ * (#1385 review).
+ */
+function probeTarget(config: { provider: string; endpoint?: string | null }, bedrockRegion: string | null, env: NodeJS.ProcessEnv): string | null {
+  const explicit = explicitEndpoint(config);
+  if (explicit) return explicit;
+  const trimmed = (v: string | undefined) => (v ? v.replace(/\/+$/, '') : null);
+  switch (config.provider) {
+    case 'openai':
+      return trimmed(env.OPENAI_BASE_URL) ?? defaultEndpoint('openai');
+    case 'anthropic':
+      return trimmed(env.ANTHROPIC_BASE_URL) ?? defaultEndpoint('anthropic');
+    case 'bedrock': {
+      const region = bedrockRegion ?? env.AWS_REGION ?? null;
+      return region ? `https://bedrock-runtime.${region}.amazonaws.com` : null;
+    }
+    default:
+      return effectiveEndpoint(config);
+  }
 }
 
 /**
@@ -243,7 +297,8 @@ export async function testAiServiceConfig(
   const base = {
     provider,
     model,
-    endpoint: effectiveEndpoint(tested),
+    // Where it would go; refined below once the key (a Bedrock region) is known.
+    endpoint: probeTarget(tested, null, process.env),
     apiStyle: effectiveApiStyle(tested),
     used,
   };
@@ -286,7 +341,7 @@ export async function testAiServiceConfig(
       };
     }
   }
-  const secrets = [...secretsOf(overrideKey), ...secretsOf(savedKey)];
+  const secrets = [...secretsOf(overrideKey), ...secretsOf(savedKey), ...processSecrets(process.env)];
   const resolved = {
     config: {
       ...row,
@@ -371,6 +426,7 @@ export async function testAiServiceConfig(
 
   return {
     ...base,
+    endpoint: probeTarget(tested, bedrockRegionOf(overrideKey ?? savedKey), process.env),
     ok: out != null,
     latencyMs,
     reply: out ? scrub(out.text, secrets).slice(0, 200) : null,

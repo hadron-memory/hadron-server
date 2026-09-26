@@ -22,6 +22,7 @@ import {
   admitTest,
   aiConfigTestLimiterSize,
   resetAiConfigTestLimiter,
+  scrub,
 } from './testAiServiceConfig.js';
 
 const SAVED_KEY = 'sk-saved-0123456789';
@@ -286,7 +287,9 @@ describe('testAiServiceConfig (#1378)', () => {
       const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
       const cfg = await mkConfig({ ...keyless, hadronServerId: host.id });
       const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }));
-      expect(r).toMatchObject({ ok: true, used: { key: 'PLATFORM' }, error: null });
+      // The endpoint reported is the one the SDK used (OPENAI_BASE_URL), not
+      // the catalog's api.openai.com.
+      expect(r).toMatchObject({ ok: true, endpoint: `${origin}/v1`, used: { key: 'PLATFORM' }, error: null });
       expect(captured.map((c) => [c.path, c.auth])).toEqual([['/v1/chat/completions', `Bearer ${AMBIENT}`]]);
       expect(JSON.stringify(r)).not.toContain(AMBIENT);
       const event = await db.usageEvent.findFirstOrThrow({ where: { type: 'ai-config-test' } });
@@ -302,11 +305,24 @@ describe('testAiServiceConfig (#1378)', () => {
       expect(captured.map((c) => c.auth)).toEqual([`Bearer ${AMBIENT}`]);
     });
 
+    it('a provider echoing the server credential back never hands it to the caller', async () => {
+      ambient();
+      vi.stubEnv('OPENAI_BASE_URL', `${origin}/echo-key/v1`);
+      const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+      const cfg = await mkConfig({ ...keyless, hadronServerId: host.id });
+      const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'] }));
+      expect(captured.map((c) => c.auth)).toEqual([`Bearer ${AMBIENT}`]);
+      expect(r).toMatchObject({ ok: false, used: { key: 'PLATFORM' }, error: { code: 'LLM_CALL_FAILED' } });
+      expect(r.error.message).toContain('[redacted]');
+      expect(JSON.stringify(r)).not.toContain(AMBIENT);
+    });
+
     it('an org config never tests on the platform credential: NO_API_KEY, no call', async () => {
       ambient();
       const cfg = await mkConfig({ ...keyless, organizationId: org.id });
       const r = await test(cfg.id, ctxFor(admin.id));
-      expect(r).toMatchObject({ ok: false, used: { key: 'NONE' }, error: { code: 'NO_API_KEY' } });
+      // No call, but the endpoint says where one would have gone.
+      expect(r).toMatchObject({ ok: false, endpoint: `${origin}/v1`, used: { key: 'NONE' }, error: { code: 'NO_API_KEY' } });
       expect(captured).toEqual([]);
     });
   });
@@ -331,6 +347,28 @@ describe('testAiServiceConfig (#1378)', () => {
       expect((await test(cfg.id, ctxFor(admin.id))).error.code).toBe('NO_API_KEY');
     }
     expect((await test(cfg.id, ctxFor(admin.id), { apiKey: OVERRIDE_KEY })).ok).toBe(true);
+  });
+
+  it('reports the regional host a Bedrock probe went to, from the key used (#1385 review)', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      urls.push(String(input instanceof Request ? input.url : input));
+      return new Response(JSON.stringify({ message: 'denied' }), { status: 403, headers: { 'content-type': 'application/json' } });
+    });
+    try {
+      const triple = JSON.stringify({ accessKeyId: 'AKIATEST', secretAccessKey: 'secret-test-value', region: 'eu-west-1' });
+      const cfg = await mkConfig({ organizationId: org.id, provider: 'bedrock', model: 'anthropic.claude-x', endpoint: null, apiKeyEncrypted: encryptToken(triple) });
+      const r = await test(cfg.id, ctxFor(admin.id));
+      expect(urls[0]).toMatch(/^https:\/\/bedrock-runtime\.eu-west-1\.amazonaws\.com\//);
+      expect(r.endpoint).toBe('https://bedrock-runtime.eu-west-1.amazonaws.com');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('scrubs the longest secret first, so a secret that prefixes another leaves no tail (#1385 review)', () => {
+    const out = scrub('id AKIA123 secret AKIA123-very-secret-tail', ['AKIA123', 'AKIA123-very-secret-tail']);
+    expect(out).toBe('id [redacted] secret [redacted]');
   });
 
   it('the limiter forgets stale caller/config pairs instead of growing forever', () => {

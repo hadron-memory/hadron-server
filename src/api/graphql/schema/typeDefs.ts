@@ -2930,7 +2930,7 @@ export const typeDefs = `#graphql
     ok: Boolean!
     provider: String!
     model: String!
-    "The endpoint the request actually went to."
+    "The endpoint the request actually went to: the explicit endpoint, else the host the SDK chose (OPENAI_BASE_URL / ANTHROPIC_BASE_URL when the server sets one, Bedrock's regional host), else the catalog default. Null when it can't be known (Bedrock with no region)."
     endpoint: String
     "The wire protocol the request actually used."
     apiStyle: AiApiStyle
