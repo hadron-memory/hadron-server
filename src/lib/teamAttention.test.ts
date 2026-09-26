@@ -388,6 +388,72 @@ describe('explicit switchover', () => {
     await expect(confirmTeamAttentionSwitchover(userCtx(), otherApp.id, preview.proof)).rejects.toMatchObject({ extensions: { code: 'INVALID_SWITCHOVER_PROOF' } });
   });
 
+  it('an App whose org is deleted after the apply entry check advances nothing (#1362 review)', async () => {
+    // The Worker attends ONLY a Channel in a memory the operator can read on
+    // its own (org visibility), so the target survives the App's removal: only
+    // the explicit App re-check can stop the apply.
+    await db.registerEntry.deleteMany({ where: { attendeeWorkerId: worker.id } });
+    const independentMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:independent-sw`,
+        name: 'independent-sw', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    const made = await ensureChannelWithRoot(db, {
+      memoryId: independentMemory.id, loc: 'chats:independent', name: 'independent', createdBy: user.id,
+    });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: made.channel.id, attendeeWorkerId: worker.id, role: 'WATCH' },
+    });
+    const enc = await getMemoryEncryptionInfo(db, independentMemory.id);
+    await appendChatMessage(
+      db,
+      { id: made.rootId, memoryId: independentMemory.id, loc: 'chats:independent' },
+      enc,
+      async ({ tx, seq, msgNum }) => tx.node.create({
+        data: {
+          id: generateId(), memoryId: independentMemory.id, loc: `chats:independent:messages:${msgNum}`,
+          name: msgNum, nodeType: 'chat-message', seq, content: 'backlog',
+        },
+      }),
+      { asChannel: true },
+    );
+    const preview = await previewTeamAttentionSwitchover(userCtx(), app.id);
+    // Hold apply between its entry check and its transaction: the window in
+    // which the entry check goes stale.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let reachedTx!: () => void;
+    const atTx = new Promise<void>((r) => (reachedTx = r));
+    const gatedDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction') {
+          return async (...args: unknown[]) => {
+            reachedTx();
+            await gate;
+            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const applying = confirmTeamAttentionSwitchover({ ...userCtx(), db: gatedDb } as Context, app.id, preview.proof).then(
+      () => 'applied',
+      (e: { extensions?: { code?: string } }) => e.extensions?.code ?? String(e),
+    );
+    await atTx;
+    // The App's org is soft-deleted in the window. Uninstall and revoked
+    // participation already drop the register rows inside the transaction (the
+    // scope check then refuses); an org soft-delete leaves the App, its
+    // memberships and its register rows intact, so only the explicit live-App
+    // re-check stops this apply.
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    release();
+    expect(await applying).toBe('SWITCHOVER_PROOF_STALE');
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: made.channel.id } })).toBeNull();
+  });
+
   it('rejects cursor or live-scope drift atomically', async () => {
     await post('backlog');
     const preview = await previewTeamAttentionSwitchover(userCtx(), app.id);

@@ -730,38 +730,53 @@ export async function confirmTeamAttentionSwitchover(
   }
   if (decoded.targets.length > MAX_TARGETS) fail('Invalid switchover proof.', 'INVALID_SWITCHOVER_PROOF');
 
-  await ctx.db.$transaction(
-    async (tx) => {
-      const txCtx = { ...ctx, db: tx as unknown as PrismaClient };
-      const current = await attentionTargets(txCtx, app);
-      const currentByIdentity = new Map(current.map((t) => [targetIdentity(t), t]));
-      const proofIdentities = new Set<string>();
-      for (const target of decoded.targets) {
-        if (
-          !target ||
-          typeof target.workerId !== 'string' ||
-          typeof target.channelId !== 'string' ||
-          typeof target.registerId !== 'string' ||
-          typeof target.mentionOnly !== 'boolean' ||
-          !Number.isInteger(target.from) || target.from < 0 ||
-          !Number.isInteger(target.through) || target.through < 0
-        ) fail('Invalid switchover proof.', 'INVALID_SWITCHOVER_PROOF');
-        const identity = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}:${target.from}`;
-        proofIdentities.add(identity);
-        const live = currentByIdentity.get(identity);
-        if (!live || live.head < target.through) {
-          fail('The Worker/register/read-state scope changed after preview; preview again.', 'SWITCHOVER_PROOF_STALE');
+  try {
+    await ctx.db.$transaction(
+      async (tx) => {
+        const txCtx = { ...ctx, db: tx as unknown as PrismaClient };
+        // Re-asked INSIDE the serializable transaction, on its own connection
+        // (#1362 review, Copilot): the entry check can go stale before these
+        // writes, and an App uninstalled or a participation revoked since then
+        // must not still advance cursors. A revocation racing these writes
+        // surfaces as a serialization abort, mapped to stale below.
+        if (!(await teamAttentionAvailable(txCtx, app.id))) {
+          fail('Access to this App changed after preview; preview again.', 'SWITCHOVER_PROOF_STALE');
         }
-      }
-      if (proofIdentities.size !== currentByIdentity.size || [...currentByIdentity.keys()].some((k) => !proofIdentities.has(k))) {
-        fail('The live Worker/register scope changed after preview; preview again.', 'SWITCHOVER_PROOF_STALE');
-      }
-      for (const target of decoded.targets) {
-        await advanceReadState(tx, { workerId: target.workerId }, target.channelId, target.through);
-      }
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-  );
+        const current = await attentionTargets(txCtx, app);
+        const currentByIdentity = new Map(current.map((t) => [targetIdentity(t), t]));
+        const proofIdentities = new Set<string>();
+        for (const target of decoded.targets) {
+          if (
+            !target ||
+            typeof target.workerId !== 'string' ||
+            typeof target.channelId !== 'string' ||
+            typeof target.registerId !== 'string' ||
+            typeof target.mentionOnly !== 'boolean' ||
+            !Number.isInteger(target.from) || target.from < 0 ||
+            !Number.isInteger(target.through) || target.through < 0
+          ) fail('Invalid switchover proof.', 'INVALID_SWITCHOVER_PROOF');
+          const identity = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}:${target.from}`;
+          proofIdentities.add(identity);
+          const live = currentByIdentity.get(identity);
+          if (!live || live.head < target.through) {
+            fail('The Worker/register/read-state scope changed after preview; preview again.', 'SWITCHOVER_PROOF_STALE');
+          }
+        }
+        if (proofIdentities.size !== currentByIdentity.size || [...currentByIdentity.keys()].some((k) => !proofIdentities.has(k))) {
+          fail('The live Worker/register scope changed after preview; preview again.', 'SWITCHOVER_PROOF_STALE');
+        }
+        for (const target of decoded.targets) {
+          await advanceReadState(tx, { workerId: target.workerId }, target.channelId, target.through);
+        }
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2034') {
+      fail('The Worker/register or access scope changed during apply; preview again.', 'SWITCHOVER_PROOF_STALE');
+    }
+    throw e;
+  }
   return {
     applied: true,
     workersAdvanced: new Set(decoded.targets.map((t) => t.workerId)).size,
