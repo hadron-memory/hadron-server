@@ -19,7 +19,7 @@
 
 import { isIP } from 'node:net';
 import { embeddedIpv4, isForbiddenAddress } from './webFetch.js';
-import { AiConfigValidationError, type AiProvider } from './aiConfig.js';
+import { AiConfigValidationError, type AiConfigOwnerType, type AiProvider } from './aiConfig.js';
 
 export interface AiProviderEndpoint {
   url: string;
@@ -79,11 +79,20 @@ export function explicitEndpoint(config: { provider?: string; endpoint?: string 
 const AMBIENT_CREDENTIAL_PROVIDERS: ReadonlySet<string> = new Set(['openai', 'anthropic', 'bedrock']);
 
 /**
- * Whether a config with NO stored key runs on the server's own credential:
- * only at a provider's default host, and only where that host issued it.
+ * Whether a config with NO stored key may run on the server's own credential:
+ * only the platform's own (HADRON_SERVER) config, only at a provider's
+ * default host, and only where that host issued the credential.
+ *
+ * Org, App and Agent configs always need their own key (Holger,
+ * 2026-09-26, hadron-server#1390): the platform credential is platform
+ * spend, and until billing can meter and charge it, a tenant config must
+ * not reach it.
  */
-export function usesProcessCredential(config: { provider: string; endpoint?: string | null }): boolean {
-  return !explicitEndpoint(config) && AMBIENT_CREDENTIAL_PROVIDERS.has(config.provider);
+export function usesProcessCredential(
+  config: { provider: string; endpoint?: string | null },
+  ownerType: AiConfigOwnerType,
+): boolean {
+  return ownerType === 'HADRON_SERVER' && !explicitEndpoint(config) && AMBIENT_CREDENTIAL_PROVIDERS.has(config.provider);
 }
 
 /** What a request for this config is sent to: its endpoint, else the default. */
