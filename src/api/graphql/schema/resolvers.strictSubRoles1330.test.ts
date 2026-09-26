@@ -11,6 +11,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { type Context } from './resolvers.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import { generateId } from '../../../lib/id.js';
+import { lockMemoryConfigExclusive, lockMemoryConfigShared } from '../../../lib/governedRole.js';
+import { resolvers } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -101,5 +103,53 @@ describe('#1330 — strictSubRoles at writeNodeCore', () => {
     await rules({ role: 'doc', strictSubRoles: true });
     await expect(create('t', { role: 'doc.task', isRunnable: true }, { ownsKind: 'task' })).resolves.toBeTruthy();
     await expect(create('p', { role: 'doc.system' }, { platformWrite: true })).resolves.toBeTruthy();
+  });
+
+  it('a first rule write in flight is waited for, even with no config row to lock yet (#1400 review)', async () => {
+    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // A rule write materializing this memory's FIRST config: it holds the
+    // exclusive config lock until it commits.
+    const ruleWrite = db.$transaction(
+      async (tx) => {
+        await lockMemoryConfigExclusive(tx, memoryId);
+        const config = await tx.memoryConfig.create({ data: { id: generateId(), memoryId } });
+        await tx.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'doc', strictSubRoles: true } });
+        await gate;
+      },
+      { timeout: 15_000 },
+    );
+    await pause(100);
+    const nodeWrite = create('race', { role: 'doc.unknown' }).then(() => null, (e: unknown) => e);
+    await pause(400);
+    release();
+    await ruleWrite;
+    const err = await nodeWrite;
+    expect((err as GraphQLError | null)?.extensions?.code).toBe('ROLE_NOT_DECLARED');
+    expect(await db.node.count({ where: { memoryId, loc: 'race' } })).toBe(0);
+  });
+
+  it('the real rule writers take the exclusive side: createNodeRoleRule waits while a node write holds the shared lock (#1400 review)', async () => {
+    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const nodeSide = db.$transaction(
+      async (tx) => {
+        await lockMemoryConfigShared(tx, memoryId);
+        await gate;
+      },
+      { timeout: 15_000 },
+    );
+    await pause(100);
+    let settled = false;
+    const created = (resolvers.Mutation as any)
+      .createNodeRoleRule({}, { memoryRef: memoryId, input: { role: 'doc', strictSubRoles: true } }, ctx())
+      .finally(() => (settled = true));
+    await pause(400);
+    expect(settled).toBe(false);
+    release();
+    await nodeSide;
+    await expect(created).resolves.toMatchObject({ rule: { role: 'doc', strictSubRoles: true } });
   });
 });

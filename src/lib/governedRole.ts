@@ -376,6 +376,26 @@ export type GovernedRefusal = 'produces' | 'removes' | 'edits';
 
 /** The typed refusal — `extensions.code: 'ROLE_GOVERNED'`, naming the door that can act. */
 /**
+ * #1330 / #1400 review — the per-memory lock between node writes that judge a
+ * role (SHARED, so they never block each other) and changes to that memory's
+ * rulebook (EXCLUSIVE). An advisory lock rather than a row lock because it
+ * must exist before the config row does: a node write reading "no rules" and a
+ * first rule write materializing the config have no row in common. Keyed on
+ * the memory, in the two-key form the dashboard lock uses, released at commit.
+ *
+ * ORDER: rule writes take it LAST, after their node and rule row locks (in
+ * `materializeConfig` / `touchConfig`); node writes take it after their own
+ * node locks. So no transaction waits on a row while holding this lock.
+ */
+export async function lockMemoryConfigShared(tx: Pick<Prisma.TransactionClient, '$executeRaw'>, memoryId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext('memory-config'), hashtext(${memoryId}))`;
+}
+
+export async function lockMemoryConfigExclusive(tx: Pick<Prisma.TransactionClient, '$executeRaw'>, memoryId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('memory-config'), hashtext(${memoryId}))`;
+}
+
+/**
  * #1330 — a write assigned a sub-role that a STRICT parent rule does not
  * declare (Holger's H1: `strictSubRoles` refuses undeclared sub-roles under
  * that parent; unrelated roles stay free).
@@ -402,9 +422,11 @@ export class RoleNotDeclaredError extends GraphQLError {
  * Exempt: a node that is runnable after the write, and a platform write, which
  * only server code can claim (a function argument, never client input).
  *
- * The config row is taken FOR SHARE first. Every rule write stamps that row
- * (`touchConfig`, an UPDATE) inside its own transaction, so a concurrent
- * strictness change serializes against this check rather than racing it.
+ * The memory's config lock is taken SHARED first (`lockMemoryConfigShared`).
+ * Every rule write takes it EXCLUSIVELY, including the one that first
+ * materializes the config, so a concurrent strictness change serializes
+ * against this check rather than racing it. That holds even when the memory
+ * has no config row yet, which a row lock could not cover (#1400 review).
  */
 export async function assertRoleDeclaredForWrite(
   tx: Prisma.TransactionClient,
@@ -415,7 +437,7 @@ export async function assertRoleDeclaredForWrite(
   const role = write.role;
   if (!role || role === (write.priorRole ?? null)) return;
   if (write.runnableAfter === true || opts.platformWrite === true) return;
-  await tx.$queryRaw`SELECT 1 FROM "memory_configs" WHERE "memory_id" = ${memoryId} FOR SHARE`;
+  await lockMemoryConfigShared(tx, memoryId);
   const resolution = await resolveMemoryNodeRoleRule(tx, memoryId, role);
   if (resolution.kind === 'UNDECLARED_UNDER_STRICT') throw new RoleNotDeclaredError(role, resolution.ancestor.role);
 }
