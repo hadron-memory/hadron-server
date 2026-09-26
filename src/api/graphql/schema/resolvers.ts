@@ -54,6 +54,7 @@ import { workerMutations, workerQueries, workerFieldResolvers } from './resolver
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
+import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { scopeMutations, scopeQueries, scopeFieldResolvers } from './resolvers.scope.js';
 import { channelMutations, channelQueries, channelFieldResolvers } from './resolvers.channel.js';
 import { registerMutations, registerQueries, registerFieldResolvers, readStateQueries, readStateMutations } from './resolvers.register.js';
@@ -79,6 +80,10 @@ export const resolvers = {
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent },
+  // Same for Memory: the config field joins the existing type block (#1325).
+  Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
+  MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
+  NodeRoleRule: memoryConfigFieldResolvers.NodeRoleRule,
   Query: {
     ...nodeQueries,
     ...skillQueries,
@@ -92,6 +97,7 @@ export const resolvers = {
     ...chatQueries,
     ...teamChatQueries,
     ...teamWorkQueries,
+    ...memoryConfigQueries,
     ...scopeQueries,
     ...channelQueries,
     ...registerQueries,
@@ -129,6 +135,7 @@ export const resolvers = {
     ...teamRoleMutations,
     ...teamChatMutations,
     ...teamWorkMutations,
+    ...memoryConfigMutations,
     ...scopeMutations,
     ...channelMutations,
     ...registerMutations,

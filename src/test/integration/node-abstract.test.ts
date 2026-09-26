@@ -21,6 +21,13 @@
  *   - The Node.abstract field is exposed on the returned object so a
  *     follow-up `node(loc)` query (or a portal read) sees it.
  *
+ *   - #1117: `searchReplaceInNodes` refusals report the surgical edit's
+ *     numbers — original length, delta, resulting length, headroom — in the
+ *     message and in `extensions` (`currentLength`, `available`), while the
+ *     create/full-replacement door keeps the bare message (no truthful
+ *     "current" exists there). Multi-node runs are all-or-nothing: a
+ *     cap-violating node refuses the whole batch before any write.
+ *
  *   - NOT tested here: search recall via `findNodes` over abstract
  *     content — US3 deferred to RAG follow-up per PR-196.
  *
@@ -160,6 +167,11 @@ describe('upsertNode — FR-008 length-cap rejection', () => {
     expect(err.extensions?.code).toBe('NodeAbstractTooLongError');
     expect(err.extensions?.length).toBe(2001);
     expect(err.extensions?.max).toBe(2000);
+    // #1117 compatibility: create/full-replacement has no truthful "current"
+    // abstract, so its message stays the bare form — no edit-context sentence.
+    expect(err.message).toContain('got 2001 chars');
+    expect(err.message).not.toContain('This edit takes');
+    expect(err.extensions?.currentLength).toBeUndefined();
   });
 
   it('rejects abstract > 2000 chars on update with the same typed error', async () => {
@@ -474,5 +486,95 @@ describe('spec 032 — SC-005 GraphQL exposure is read-only', () => {
     // The system-managed value should be computeContentHash('B'),
     // NOT the tampered value the caller tried to inject.
     expect(await persistedHash('sc5')).toBe(computeContentHash('B'));
+  });
+});
+
+// ───── #1117 — replace_text cap refusals report the edit's numbers ────────
+
+describe('searchReplaceInNodes — abstract-cap refusal headroom (#1117)', () => {
+  const NEEDLE = 'needle';
+
+  async function replaceAbstract(
+    locs: string[],
+    oldText: string,
+    newText: string,
+  ): Promise<unknown> {
+    const nodeIds = await Promise.all(
+      locs.map(async (loc) => {
+        const node = await db.node.findFirstOrThrow({
+          where: { loc, memoryId: fx.memory.id, deletedAt: null },
+          select: { id: true },
+        });
+        return node.id;
+      }),
+    );
+    return resolvers.Mutation.searchReplaceInNodes(
+      {},
+      {
+        input: { oldText, newText, nodeIds, fields: ['abstract'], dryRun: false },
+      },
+      fx.ctx,
+    );
+  }
+
+  it('an edit landing exactly at the 2000-char cap succeeds and persists', async () => {
+    // 994 'A's + 6-char needle = 1000; replacing the needle with 1006 'B's
+    // lands 994 + 1006 = 2000 exactly — at-cap is legal (only > cap refuses).
+    await upsertNode({ loc: 'sr1', name: 'sr1', abstract: 'A'.repeat(994) + NEEDLE });
+    await replaceAbstract(['sr1'], NEEDLE, 'B'.repeat(1006));
+    expect((await persistedAbstract('sr1'))?.length).toBe(2000);
+  });
+
+  it('an overflowing edit refuses with original length, delta, result and headroom — and no write', async () => {
+    // 1894 'A's + 6-char needle = 1900; replacing the needle with 206 'B's
+    // gives 2100: delta +200, headroom 100.
+    const original = 'A'.repeat(1894) + NEEDLE;
+    await upsertNode({ loc: 'sr2', name: 'sr2', abstract: original });
+    let caught: unknown;
+    try {
+      await replaceAbstract(['sr2'], NEEDLE, 'B'.repeat(206));
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    const err = caught as GraphQLError;
+    expect(err.extensions?.code).toBe('NodeAbstractTooLongError');
+    expect(err.message).toContain('got 2100 chars');
+    expect(err.message).toContain('This edit takes a 1900-character abstract to 2100 (+200); 100 characters were available');
+    expect(err.extensions).toMatchObject({
+      length: 2100,
+      max: 2000,
+      currentLength: 1900,
+      available: 100,
+      loc: 'sr2',
+    });
+    // The refusal happens in the planning pass, before any write.
+    expect(await persistedAbstract('sr2')).toBe(original);
+  });
+
+  it('a shrinking edit never trips the cap', async () => {
+    await upsertNode({ loc: 'sr3', name: 'sr3', abstract: 'A'.repeat(1894) + NEEDLE });
+    await replaceAbstract(['sr3'], NEEDLE, 'ok');
+    expect(await persistedAbstract('sr3')).toBe('A'.repeat(1894) + 'ok');
+  });
+
+  it('multi-node runs are all-or-nothing: one overflowing node refuses the whole batch, both unchanged', async () => {
+    const fitsOriginal = 'C'.repeat(994) + NEEDLE;
+    const overflowsOriginal = 'D'.repeat(1894) + NEEDLE;
+    await upsertNode({ loc: 'sr4', name: 'sr4', abstract: fitsOriginal });
+    await upsertNode({ loc: 'sr5', name: 'sr5', abstract: overflowsOriginal });
+    // sr4's edit would land exactly at cap; sr5's would overflow (1894 + 1006
+    // = 2900: delta +1000 against 100 headroom).
+    let caught: unknown;
+    try {
+      await replaceAbstract(['sr4', 'sr5'], NEEDLE, 'B'.repeat(1006));
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    expect((caught as GraphQLError).extensions?.code).toBe('NodeAbstractTooLongError');
+    expect((caught as GraphQLError).message).toContain('(node sr5 /');
+    expect(await persistedAbstract('sr4')).toBe(fitsOriginal);
+    expect(await persistedAbstract('sr5')).toBe(overflowsOriginal);
   });
 });
