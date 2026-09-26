@@ -172,7 +172,14 @@ export async function testAiServiceConfig(
   if (!row) throw new AiServiceConfigNotFoundError(id);
   const owner = aiConfigOwnerOf(row);
   // The same gate as updateAiServiceConfig: only the owner's admins test it.
-  await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+  // A config the caller can't manage reads exactly like a missing one, so the
+  // mutation is no oracle for which ids exist (#1385 review, Copilot).
+  try {
+    await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+  } catch (e) {
+    if (e instanceof Error && e.message === 'Forbidden') throw new AiServiceConfigNotFoundError(id);
+    throw e;
+  }
   // Impersonation is a read-only support view (#876), and a test spends.
   if (ctx.impersonation || !ctx.userId) throw new Error('Forbidden');
 
@@ -187,7 +194,9 @@ export async function testAiServiceConfig(
   // validated exactly as a write would validate them.
   const provider = override.provider ?? row.provider;
   const model = override.model ?? row.model;
-  validateProviderAndParams(provider, null);
+  // The RESULTING pair, as a save would judge it: a test that passes must be
+  // an edit that can be saved (#1385 review, Codex).
+  validateProviderAndParams(provider, row.params ?? null);
   const endpoint =
     override.endpoint === undefined ? row.endpoint : override.endpoint ? validateEndpoint(override.endpoint) : null;
   const apiStyle = override.apiStyle === undefined ? row.apiStyle : override.apiStyle;
@@ -200,8 +209,9 @@ export async function testAiServiceConfig(
   const keyCleared = override.apiKey !== undefined && !override.apiKey;
   const keySource: Source | 'NONE' = overrideKey ? 'OVERRIDE' : !keyCleared && row.apiKeyEncrypted ? 'SAVED' : 'NONE';
   const used: AiConfigTestResult['used'] = {
-    provider: override.provider ? 'OVERRIDE' : 'SAVED',
-    model: override.model ? 'OVERRIDE' : 'SAVED',
+    // Presence, not truthiness: an empty model is still what gets sent.
+    provider: override.provider != null ? 'OVERRIDE' : 'SAVED',
+    model: override.model != null ? 'OVERRIDE' : 'SAVED',
     endpoint: override.endpoint === undefined ? 'SAVED' : 'OVERRIDE',
     apiStyle: override.apiStyle === undefined ? 'SAVED' : 'OVERRIDE',
     key: keySource,
@@ -229,7 +239,9 @@ export async function testAiServiceConfig(
     };
   }
 
-  const savedKey = row.apiKeyEncrypted ? decryptToken(row.apiKeyEncrypted) : null;
+  // Decrypted only when it is the key being used: an override replaces it, and
+  // a stale ciphertext must not block testing a good new key (#1385 review).
+  const savedKey = keySource === 'SAVED' && row.apiKeyEncrypted ? decryptToken(row.apiKeyEncrypted) : null;
   const secrets = [...secretsOf(overrideKey), ...secretsOf(savedKey)];
   const resolved = {
     config: {

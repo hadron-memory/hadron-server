@@ -159,6 +159,28 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(r.error.message).not.toContain('zq9');
   });
 
+  it('an override is judged as the save would judge it: the resulting provider/params pair (#1385 review)', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, params: { reasoningEffort: 'extreme' } });
+    await expect(test(cfg.id, ctxFor(admin.id), { provider: 'openai' })).rejects.toMatchObject({
+      extensions: { code: 'UnknownAiProviderError' },
+    });
+    expect(captured).toEqual([]);
+  });
+
+  it('an empty model override is reported as an override, since it is what gets sent', async () => {
+    const cfg = await mkConfig({ organizationId: org.id });
+    const r = await test(cfg.id, ctxFor(admin.id), { model: '' });
+    expect(r.used.model).toBe('OVERRIDE');
+    expect(captured[0].body).toMatchObject({ model: '' });
+  });
+
+  it('an override key is tested even when the stored ciphertext no longer decrypts', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, apiKeyEncrypted: 'not-a-valid-ciphertext' });
+    const r = await test(cfg.id, ctxFor(admin.id), { apiKey: OVERRIDE_KEY });
+    expect(r).toMatchObject({ ok: true, used: { key: 'OVERRIDE' } });
+    expect(captured[0].auth).toBe(`Bearer ${OVERRIDE_KEY}`);
+  });
+
   it('provider error text is scrubbed of the key before it is returned', async () => {
     const cfg = await mkConfig({ organizationId: org.id, endpoint: `${origin}/echo-key/v4` });
     const r = await test(cfg.id, ctxFor(admin.id));
@@ -170,7 +192,8 @@ describe('testAiServiceConfig (#1378)', () => {
 
   it('only the owner\'s admins may test, and never under impersonation', async () => {
     const cfg = await mkConfig({ organizationId: org.id });
-    await expect(test(cfg.id, ctxFor(member.id))).rejects.toThrow();
+    // An unmanageable config reads exactly like a missing one: no id oracle.
+    await expect(test(cfg.id, ctxFor(member.id))).rejects.toMatchObject({ extensions: { code: 'AiServiceConfigNotFoundError' } });
     // A realistic support session into this org: the owner gate alone would
     // admit it (the target is an org ADMIN), so this pins the explicit refusal.
     const impersonating = ctxFor(admin.id, {
