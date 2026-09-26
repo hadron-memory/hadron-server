@@ -241,10 +241,12 @@ export interface AiConfigTestDeps {
  * Tokens reserved from the org's daily platform allowance BEFORE a
  * platform-funded probe, then settled to the real count. Reserving makes the
  * check and the spend one atomic step, so concurrent tests can't all pass the
- * check and overshoot (#1385 review). The probe is a fixed prompt with
- * maxTokens 16, so this bounds it with room to spare.
+ * check and overshoot (#1385 review). Sized to the probe's realistic bound,
+ * a one-line prompt plus maxTokens 16 (a dozen or so tokens in, at most 16
+ * out), so an operator's low stored limit stays testable (#1385 review). A
+ * provider counting more than this still records the excess in the window.
  */
-export const AI_CONFIG_TEST_TOKEN_RESERVE = 256;
+export const AI_CONFIG_TEST_TOKEN_RESERVE = 64;
 
 /** Long enough for a slow model's first token, short enough for a button. */
 export const AI_CONFIG_TEST_TIMEOUT_MS = 20_000;
@@ -432,7 +434,14 @@ export async function testAiServiceConfig(
   } catch (e) {
     error = {
       code: 'LLM_CALL_FAILED',
-      message: scrub(String((e as Error)?.message ?? e), secrets),
+      // A keyless platform Bedrock probe signs with the AWS default credential
+      // chain (an instance role, a profile, the metadata service), whose
+      // secrets are not in hand to redact. Provider text is withheld there
+      // rather than trusting a scrub that cannot see them (#1385 review).
+      message:
+        keySource === 'PLATFORM' && provider === 'bedrock'
+          ? "The provider call failed. Its text is withheld: this test ran on the server's AWS credential chain, whose secrets can't be redacted from it."
+          : scrub(String((e as Error)?.message ?? e), secrets),
       transient: e instanceof LlmInvocationError ? e.transient : false,
     };
   }

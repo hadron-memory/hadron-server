@@ -407,6 +407,39 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(counter.used).toBe(limit - AI_CONFIG_TEST_TOKEN_RESERVE - 10 + 13);
   });
 
+  it('a platform Bedrock probe on the AWS credential chain withholds provider text it cannot redact (#1385 review)', async () => {
+    vi.stubEnv('AWS_REGION', 'eu-west-1');
+    vi.stubEnv('AWS_ACCESS_KEY_ID', 'AKIACHAIN');
+    vi.stubEnv('AWS_SECRET_ACCESS_KEY', 'chain-secret');
+    // A provider error echoing material the scrub has no copy of (as an
+    // instance-role session token would be).
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ message: 'denied for token IQoJb3JpZ2luX2VjEChainOnly' }), { status: 403, headers: { 'content-type': 'application/json' } }),
+    );
+    try {
+      const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+      const cfg = await mkConfig({ hadronServerId: host.id, provider: 'bedrock', model: 'anthropic.claude-x', endpoint: null, apiKeyEncrypted: null, apiKeyPreview: null });
+      const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'] }));
+      expect(r).toMatchObject({ ok: false, used: { key: 'PLATFORM' }, error: { code: 'LLM_CALL_FAILED' } });
+      expect(r.error.message).toMatch(/withheld/);
+      expect(JSON.stringify(r)).not.toContain('IQoJb3JpZ2luX2VjEChainOnly');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a low stored allowance that fits the probe is still testable (#1385 review)', async () => {
+    const limit = AI_CONFIG_TEST_TOKEN_RESERVE + 10;
+    await db.quotaCounter.create({
+      data: { id: generateId(), scopeKind: 'org', scopeId: org.id, action: 'llm.tokens', window: 'day', used: 0, limit, resetAt: new Date(Date.now() + 86_400_000) },
+    });
+    expect(AI_CONFIG_TEST_TOKEN_RESERVE).toBeLessThanOrEqual(64);
+    const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+    const cfg = await mkConfig({ hadronServerId: host.id });
+    const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }));
+    expect(r.ok).toBe(true);
+  });
+
   it('a reservation is only released into the window it was taken from: a rollover mid-probe keeps the new day\'s usage (#1385 review)', async () => {
     const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
     const cfg = await mkConfig({ hadronServerId: host.id });
