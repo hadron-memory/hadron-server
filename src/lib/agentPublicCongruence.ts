@@ -194,7 +194,11 @@ export async function assertMemoryVisibilityChangeAllowed(
  * would hand a foreign tenant a veto over the publisher's own visibility
  * setting. (That is why this is not simply another clause in
  * `assertMemoryVisibilityChangeAllowed`, whose PUBLIC-agent rule is a genuine
- * refusal.) Same-tenant links are untouched — they never depended on PUBLIC.
+ * refusal.) Ordinary same-tenant links survive; they never depended on PUBLIC.
+ *
+ * A legacy writable link on a PUBLIC agent is also revoked, even when the
+ * post-transfer memory and agent share a tenant. New links cannot take that
+ * shape, but a transfer must restore the invariant for old rows.
  *
  * Soft-delete, not hard: the row is an audit record of a grant that once
  * existed, and `addMemoryToAgent` resurrects it if the memory becomes PUBLIC
@@ -239,17 +243,23 @@ export async function revokeLinksForeignToTenant(
       deletedAt: null,
       ...(writableOnly ? { role: 'read-write' } : {}),
     },
-    select: { id: true, agent: { select: { organizationId: true, ownerUserId: true } } },
+    select: { id: true, role: true, agent: { select: { organizationId: true, ownerUserId: true, visibility: true } } },
   });
-  const foreign = links.filter((l: { agent: { organizationId: string | null; ownerUserId: string | null } }) => {
+  const invalid = links.filter((l) => {
     const sameTenant =
       (l.agent.organizationId != null && l.agent.organizationId === memory.organizationId) ||
       (l.agent.ownerUserId != null && l.agent.ownerUserId === memory.ownerUserId);
-    return !sameTenant;
+    // A destination-tenant PUBLIC agent can carry a legacy writable link
+    // created before the attach gate. A PUBLIC memory transfer must not retain
+    // that link merely because the transfer makes the agent same-tenant.
+    const publicAgentWriter =
+      l.role === 'read-write' && l.agent.visibility === 'PUBLIC' &&
+      memory.class === 'knowledge' && !isExcludedFromCoveredSet(memory);
+    return !sameTenant || publicAgentWriter;
   });
-  if (foreign.length === 0) return 0;
+  if (invalid.length === 0) return 0;
   const result = await db.agentMemoryItem.updateMany({
-    where: { id: { in: foreign.map((f: { id: string }) => f.id) }, deletedAt: null },
+    where: { id: { in: invalid.map((f) => f.id) }, deletedAt: null },
     data: { deletedAt: new Date(), deletedBy: actor },
   });
   return result.count;

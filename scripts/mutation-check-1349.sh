@@ -121,9 +121,9 @@ run "10 PUBLIC-agent read-write guard removed" "$H" \
 run "11 agent-becomes-PUBLIC guard removed" "$A" \
   "  if (writable.length > 0) {" "  if (false) {"
 run "12 foreign-link revocation disabled" "$A" \
-  "  if (foreign.length === 0) return 0;" "  if (true) return 0;"
+  "  if (invalid.length === 0) return 0;" "  if (true) return 0;"
 run "13 revocation also drops same-tenant links" "$A" \
-  "    return !sameTenant;" "    return true;"
+  "    return !sameTenant || publicAgentWriter;" "    return true;"
 run "14 re-role actor stamp dropped" "$M" \
   "        data: { role: grantedRole, updatedBy: ctx.userId ?? ctx.clientId ?? null }," \
   "        data: { role: grantedRole },"
@@ -273,6 +273,10 @@ run "59 Agent.memoryItems bypasses the owner record gate" "$AT" \
 # #1357 round 11 (@copilot): legacy re-role must share the PUBLIC link gate.
 run "60 re-role bypasses PUBLIC knowledge congruence" "$H" \
   "  await assertLinkAllowedForPublicAgent(agent.visibility, memory);" ""
+# #1357 round 12 (@copilot): a destination PUBLIC agent's legacy writer
+# becomes same-tenant on transfer and must still be revoked.
+run "61 transfer retains a destination PUBLIC-agent writer" "$A" \
+  "    return !sameTenant || publicAgentWriter;" "    return !sameTenant;"
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

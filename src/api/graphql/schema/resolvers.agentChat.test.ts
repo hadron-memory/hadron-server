@@ -909,6 +909,53 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await db.appMember.create({ data: { appId: app.id, userId, role } });
   }
 
+  it('grounds a shared chat only in knowledge for its selected App', async () => {
+    const appY = await db.app.findFirstOrThrow({ where: { urn: `${orgA.urn}:research-app` } });
+    const appX = await db.app.create({
+      data: {
+        id: generateId(), name: 'other-app', urn: `${orgA.urn}:other-app`,
+        organizationId: orgA.id, appAgents: { create: { agentId: agent.id } },
+      },
+    });
+    await db.appMember.create({ data: { appId: appY.id, userId: adminUser.id, role: 'member' } });
+    await db.appMember.create({ data: { appId: appY.id, userId: otherUser.id, role: 'member' } });
+    const makeKnowledge = async (appId: string | null, slug: string, content: string) => {
+      const memory = await db.memory.create({
+        data: {
+          id: generateId(), name: slug, urn: `${orgA.urn}:${slug}`,
+          organizationId: orgA.id, class: 'knowledge', visibility: 'ORGANIZATION', appId,
+        } as never,
+      });
+      await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: slug, name: slug, content } });
+      await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agent.id, memoryId: memory.id, role: 'read' } });
+      return memory;
+    };
+    await makeKnowledge(appX.id, 'x-secret', 'X ONLY');
+    await makeKnowledge(appY.id, 'y-secret', 'Y ONLY');
+    await makeKnowledge(null, 'global-note', 'GLOBAL');
+    const owned = await db.memory.create({
+      data: {
+        id: generateId(), name: 'owner-note', urn: `${orgA.urn}:owner-note`,
+        ownerUserId: adminUser.id, class: 'knowledge', visibility: 'PUBLIC',
+      } as never,
+    });
+    await db.node.create({ data: { id: generateId(), memoryId: owned.id, loc: 'owner-note', name: 'owner-note', content: 'OWNER ONLY' } });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agent.id, memoryId: owned.id, role: 'read' } });
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'prompts:research:scope', memoryId: systemMemory.id } },
+      data: { content: '{{> x-secret}} | {{> y-secret}} | {{> global-note}} | {{> owner-note}}' },
+    });
+
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    expect(start.systemMessage).toBe(' | Y ONLY | GLOBAL | OWNER ONLY');
+    const sent = await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'hello' }, userCtx(otherUser.id),
+    );
+    expect(sent.systemMessage).toBe(' | Y ONLY | GLOBAL | ');
+  });
+
   it("creates a shared chat in an app-class memory, idempotent on a second call", async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const r1 = await resolvers.Mutation.startChat(

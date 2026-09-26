@@ -479,6 +479,30 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     expect(await readsContent(readerKey, 'pubmove')).not.toBeNull();
   });
 
+  it('transfer clears a legacy writable link on a destination PUBLIC agent', async () => {
+    const srcOrg = await db.organization.create({ data: { id: generateId(), name: 'legacy-src', urn: `legacy-src-${suffix}` } });
+    const dstOrg = await db.organization.create({ data: { id: generateId(), name: 'legacy-dst', urn: `legacy-dst-${suffix}` } });
+    const mover = await db.user.create({ data: { id: generateId(), handle: `legacy-mover-${suffix}`, githubUsername: `legacy-mover-${suffix}` } });
+    await db.orgMember.create({ data: { organizationId: srcOrg.id, userId: mover.id, role: 'ADMIN' } });
+    await db.orgMember.create({ data: { organizationId: dstOrg.id, userId: mover.id, role: 'ADMIN' } });
+    const moverKey = (await mintUserApiKey(db, { userId: mover.id, label: 'k', createdBy: mover.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+    const moving = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: srcOrg.id, urn: `${srcOrg.urn}:legacy-public`,
+        name: 'legacy-public', class: 'knowledge', visibility: 'PUBLIC',
+      } as never,
+    });
+    const { agentId } = await agentWithApp(dstOrg.id, 'legacy-public-dst');
+    await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
+    const link = await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId, memoryId: moving.id, role: 'read-write' },
+    });
+
+    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id visibility } }`, { id: moving.id, o: dstOrg.id });
+    expect(moved.errors, JSON.stringify(moved.errors)).toBeUndefined();
+    expect((await db.agentMemoryItem.findUniqueOrThrow({ where: { id: link.id } })).deletedAt).not.toBeNull();
+  });
+
   it('a refused publication does not mutate a system memory on the way out', async () => {
     // Combined `visibility: PUBLIC` + first `systemMemoryId`: the promotion
     // runs in its own transaction, so a congruence rejection that came only

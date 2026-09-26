@@ -32,6 +32,7 @@ import {
   validateChatScopeInvariants,
   findOrCreateAppClassMemory,
   chatScopeAccessFilter,
+  sharedChatKnowledgeMemoryIds,
   ChatScopeError,
 } from './chat-scope.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
@@ -199,6 +200,7 @@ export const chatMutations = {
       //   2. JWT user → find-or-create a per-user memory for (agent, ctx.userId)
       //   3. Legacy fallback → first writable memory attached to the agent
       let targetMemoryId: string | null = null;
+      let sharedAppId: string | null = null;
       if (chatScope === 'shared') {
         // Spec 017 FR-006 + research.md Q-R2: shared chats require a
         // JWT-user AppMember context. Two distinct rejection paths so
@@ -240,6 +242,7 @@ export const chatMutations = {
             "Cannot create a shared chat — you are not a member of any App that installs this Agent.",
           );
         }
+        sharedAppId = membership.app.id;
         // Idempotent: first shared chat under the (App, Agent) pair
         // provisions the app-class memory; subsequent calls reuse it.
         // Keyed per-agent (not per-app) so multi-Agent Apps — the model
@@ -388,14 +391,14 @@ export const chatMutations = {
                 {
                   scope: 'shared',
                   memoryId: targetMemoryId,
-                  appId: null, // not needed by allowedReadSet
+                  appId: sharedAppId,
                   authorUserId: ctx.userId ?? effectiveUserId,
                   agentId: resolvedAgentId,
                 },
                 {
-                  knowledgeMemoryIds: agent.memoryItems
-                    .filter((m) => m.memory.class === 'knowledge')
-                    .map((m) => m.memory.id),
+                  knowledgeMemoryIds: await sharedChatKnowledgeMemoryIds(
+                    ctx.db, resolvedAgentId, sharedAppId!, ctx.userId!,
+                  ),
                   systemMemoryId,
                   appClassMemoryId: targetMemoryId, // for shared, chat.memoryId IS the app-class memory
                 },
@@ -674,9 +677,9 @@ export const chatMutations = {
       const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
       if (!memory) throw new Error('Memory not found');
       let agent = null;
-      if (memory.userMemoryOfAgentId) {
+      if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
         agent = await ctx.db.agent.findUnique({
-          where: { id: memory.userMemoryOfAgentId },
+          where: { id: memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId! },
         });
       } else {
         const legacyAgents = await ctx.db.agent.findMany({
@@ -821,20 +824,19 @@ export const chatMutations = {
         const isShared = chatData.scope === 'shared';
         let access: Record<string, unknown>;
         if (isShared && agent) {
-          const knowledgeItems = await ctx.db.agentMemoryItem.findMany({
-            where: { agentId: agent.id, memory: { class: 'knowledge', deletedAt: null } },
-            select: { memoryId: true },
-          });
+          if (!memory.appId) throw new Error('Shared chat has no App');
           access = chatScopeAccessFilter(
             {
               scope: 'shared',
               memoryId: chatNode.memoryId,
-              appId: null,
+              appId: memory.appId,
               authorUserId: (chatData.userId as string) ?? '',
               agentId: agent.id,
             },
             {
-              knowledgeMemoryIds: knowledgeItems.map((k) => k.memoryId),
+              knowledgeMemoryIds: await sharedChatKnowledgeMemoryIds(
+                ctx.db, agent.id, memory.appId, senderUserId ?? '',
+              ),
               systemMemoryId,
               appClassMemoryId: chatNode.memoryId, // chat IS in the app-class memory
             },
@@ -1500,4 +1502,3 @@ export const chatMutations = {
     // ── App management (org ADMIN) ──────────────────────────────────
 
 };
-

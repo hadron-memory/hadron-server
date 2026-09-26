@@ -56,6 +56,29 @@ export interface ChatScopeAttachments {
 }
 
 /**
+ * AgentMemoryItem is global to the Agent, while a shared chat belongs to one
+ * App. Only this App's knowledge (plus App-agnostic knowledge) can ground its
+ * prompts. Strict-owner knowledge is available only to its owner.
+ */
+export async function sharedChatKnowledgeMemoryIds(
+  db: PrismaClient,
+  agentId: string,
+  appId: string,
+  callerUserId: string,
+): Promise<string[]> {
+  const items = await db.agentMemoryItem.findMany({
+    where: { agentId, deletedAt: null, memory: { class: 'knowledge', deletedAt: null } },
+    select: { memoryId: true, memory: { select: { appId: true, ownerUserId: true } } },
+  });
+  return items
+    .filter(({ memory }) =>
+      (memory.appId == null || memory.appId === appId) &&
+      (memory.ownerUserId == null || memory.ownerUserId === callerUserId),
+    )
+    .map(({ memoryId }) => memoryId);
+}
+
+/**
  * Display name for an App's shared app-class memory (#995).
  *
  * Both segments carry information when the App and the Agent are named
