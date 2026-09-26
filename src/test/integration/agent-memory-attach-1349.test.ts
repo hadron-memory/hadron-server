@@ -1522,3 +1522,35 @@ describe('#1357 round 7 — first-attach promotion and renames (@copilot, PR #13
     expect((await db.memory.findUniqueOrThrow({ where: { id: brain.id } })).name).toBe('New2 System');
   });
 });
+
+describe('#1357 round 8 — the same-App install check holds a lock (@copilot, PR #1357)', () => {
+  it('an uninstall cannot commit between the install check and the grant: it waits on the lock', async () => {
+    const { requireAgentMemoryGrant } = await import('../../api/graphql/schema/resolvers.helpers.js');
+    const { app } = await createDbAppWithKey(db, 'lock-app', attackerOrgId);
+    const memRow = await db.memory.create({
+      data: { id: generateId(), organizationId: attackerOrgId, appId: app.id, urn: `attacker-${suffix}:lock-know`, name: 'lk', class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+    });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: attackerOrgId, name: 'lock-agent', urn: `attacker-${suffix}:lock-agent` } as never });
+    await createDbAppAgent(db, app.id, agent.id);
+    let uninstall = '';
+    await db.$transaction(async (tx) => {
+      // The real gate, on the same-App path: it takes the install-row lock.
+      const role = await requireAgentMemoryGrant(
+        { db: tx, userId: attackerUserId, roles: [] } as never,
+        { id: agent.id, organizationId: attackerOrgId, ownerUserId: null, visibility: 'PERSONAL' },
+        { id: memRow.id, class: 'knowledge', visibility: 'ORGANIZATION', userId: null, ownerUserId: null, organizationId: attackerOrgId, appId: app.id, userMemoryOfAgentId: null },
+        'read',
+        'lock-ref',
+      );
+      expect(role).toBe('read');
+      // An uninstall on ANOTHER connection must block behind that lock.
+      uninstall = await db.$transaction(async (t2) => {
+        await t2.$executeRaw`SET LOCAL lock_timeout = '300ms'`;
+        await t2.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: agent.id } } });
+        return 'committed';
+      }).then(String, (e: Error) => e.message);
+    }, { timeout: 15_000 });
+    expect(uninstall).toMatch(/lock timeout|canceling statement/i);
+    expect(await db.appAgent.count({ where: { appId: app.id, agentId: agent.id } })).toBe(1);
+  });
+});

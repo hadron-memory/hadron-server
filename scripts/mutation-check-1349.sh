@@ -216,7 +216,7 @@ run "34 same-App branch removed" "$H" \
 run "35 same-App branch admits read-write" "$H" \
   "    (asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));" "    (await sameAppAttachAdmitted(ctx, agent.id, memory));"
 run "36 same-App install check removed (cross-App shortcut)" "$H" \
-  "  if (!installed) return false;" ""
+  "  if (installed.length === 0) return false;" ""
 run "37 same-App App gate removed" "$H" \
   "  try {
     await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
@@ -262,6 +262,8 @@ run "56 promotion names the memory from the pre-transaction snapshot" "$AG" \
   "              name: \`\${name ?? lockedAgent.name} System\`," "              name: \`\${name ?? agent.name} System\`,"
 run "57 syncs gated on the pre-read systemMemoryId" "$AG" \
   "      const committedSystemMemoryId = published?.systemMemoryId ?? agent.systemMemoryId;" "      const committedSystemMemoryId = agent.systemMemoryId;"
+run "58 same-App install check read without the lock" "$H" \
+  "    SELECT app_id FROM app_agents WHERE app_id = \${app.id} AND agent_id = \${agentId} FOR KEY SHARE" "    SELECT app_id FROM app_agents WHERE app_id = \${app.id} AND agent_id = \${agentId}"
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

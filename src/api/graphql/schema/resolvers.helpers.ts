@@ -644,11 +644,16 @@ async function sameAppAttachAdmitted(
     select: { id: true, organizationId: true, ownerUserId: true },
   });
   if (!app) return false;
-  const installed = await ctx.db.appAgent.findUnique({
-    where: { appId_agentId: { appId: app.id, agentId } },
-    select: { appId: true },
-  });
-  if (!installed) return false;
+  // FOR KEY SHARE, not a plain read (@copilot, PR #1357): uninstalling DELETES
+  // this join row without locking the agent or the memory, so a snapshot could
+  // pass here and the uninstall commit before the grant — leaving a latent row
+  // that re-activates if the agent is reinstalled. The lock makes that delete
+  // wait for this transaction instead. No deadlock: uninstall takes no memory
+  // or agent lock.
+  const installed = await ctx.db.$queryRaw<{ app_id: string }[]>`
+    SELECT app_id FROM app_agents WHERE app_id = ${app.id} AND agent_id = ${agentId} FOR KEY SHARE
+  `;
+  if (installed.length === 0) return false;
   try {
     await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
   } catch (error) {
