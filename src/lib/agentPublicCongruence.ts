@@ -29,8 +29,15 @@ type Db = PrismaClient | Prisma.TransactionClient;
 const badInput = (message: string) =>
   new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
 
-/** True when a memory is excluded from the covered set (never publicly readable). */
-function isExcludedFromCoveredSet(memory: { class: string; appId: string | null }): boolean {
+/**
+ * True when a memory is excluded from the covered set (never publicly readable).
+ *
+ * Exported since #1349: the agent-attachment gate needs the SAME notion of
+ * "genuinely public audience". A `visibility = 'PUBLIC'` column alone does not
+ * mean it — an app-scoped row is App-internal even when PUBLIC (#653), and a
+ * personal/private row is owner-only whatever the column says.
+ */
+export function isExcludedFromCoveredSet(memory: { class: string; appId: string | null }): boolean {
   return memory.class === 'personal' || memory.class === 'private' || memory.appId != null;
 }
 
@@ -66,11 +73,26 @@ export async function assertAgentPublicAllowed(db: Db, agentId: string): Promise
   // either side can move: an agent with read-write knowledge must not become
   // PUBLIC, just as a PUBLIC agent must not be given read-write knowledge.
   const writable = await db.agentMemoryItem.findMany({
-    // `memory.deletedAt: null` matches nonPublicLinkedMemories and every App
-    // access fold (@codex P2, PR #1357): an item pointing at a soft-deleted
-    // memory grants no capability, so counting it here would permanently
-    // refuse publication over a link that cannot confer anything.
-    where: { agentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
+    // Same predicate shape as nonPublicLinkedMemories, deliberately (@codex,
+    // PR #1357):
+    //  - `memory.deletedAt: null` — an item pointing at a soft-deleted memory
+    //    grants no capability, so counting it would refuse publication forever
+    //    over a link that cannot confer anything;
+    //  - the COVERED-SET exclusions — a personal/private or app-scoped item is
+    //    outside a PUBLIC agent's public surface by #653/`cor:acl:080:03`, so a
+    //    legitimate read-write app-scoped link must not block publication while
+    //    the sibling congruence checks are happily allowing it. Two guards
+    //    disagreeing about which links count is the drift, not the safety.
+    where: {
+      agentId,
+      deletedAt: null,
+      role: 'read-write',
+      memory: {
+        deletedAt: null,
+        class: { notIn: ['personal', 'private'] },
+        appId: null,
+      },
+    },
     select: { memory: { select: { name: true } } },
   });
   if (writable.length > 0) {

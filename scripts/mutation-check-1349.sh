@@ -32,8 +32,20 @@ s = open(p).read()
 assert old in s
 open(p, 'w').write(s.replace(old, new, 1))
 PY
-  out=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run "$SPEC" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^ *Tests ')
+  raw=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run "$SPEC" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+  out=$(echo "$raw" | grep -E '^ *Tests ')
   git checkout -q -- "$2"
+  # A run that produced NO `Tests` summary did not report on the mutant at all —
+  # vitest crashed, the DB was unreachable, a transform failed. Reporting that
+  # as SURVIVED makes an infrastructure failure indistinguishable from a real
+  # coverage gap, which is the second way this harness lied about its own
+  # numbers (@codex, PR #1357; the first was the stale-pattern skip).
+  if [ -z "$out" ]; then
+    echo "ERRORED   $1 — no test summary; the run did not report on this mutant"
+    echo "$raw" | tail -5 | sed 's/^/            /'
+    STALE=$((STALE+1))
+    return
+  fi
   if echo "$out" | grep -q failed; then echo "KILLED    $1 — $(echo "$out" | tr -s ' ')"
   else echo "SURVIVED  $1 — $(echo "$out" | tr -s ' ')"; fi
 }
@@ -51,12 +63,12 @@ run "2 re-role gate removed" "$M" \
 run "3 role validation disabled" "$H" \
   "  if (!(AGENT_MEMORY_ROLES as readonly string[]).includes(value)) {" "  if (false) {"
 run "4 content gate -> record gate" "$H" \
-  "  const canRead = await isMemoryReadableCached(self, memory.id);" "  const canRead = await canReadMemoryRecord(self, memory);"
+  "  const canRead = await holdsContentReadIndependently(ctx, memory.id);" \
+  "  const canRead = await canReadMemoryRecord(userPrincipalOnly(ctx), memory);"
 run "5 tenancy check dropped" "$H" \
   "  if (!sameTenant && !publicRead) {" "  if (false) {"
 run "6 PUBLIC allowed read-write cross-tenant" "$H" \
-  "  const publicRead = role === 'read' && memory.visibility === 'PUBLIC';" \
-  "  const publicRead = memory.visibility === 'PUBLIC';"
+  "  const publicRead = role === 'read' && genuinelyPublic;" "  const publicRead = genuinelyPublic;"
 run "7 write-capability check dropped" "$H" \
   "    try {
       await requireMemoryWriteAccess(self, memory.id);" "    try {
@@ -97,8 +109,11 @@ run "20 PUBLIC transfer keeps foreign writable links" "$A" \
   "  const writableOnly = memory.visibility === 'PUBLIC';" \
   "  const writableOnly = false; if (memory.visibility === 'PUBLIC') return 0;"
 run "21 publication counts deleted-memory links" "$A" \
-  "    where: { agentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } }," \
-  "    where: { agentId, deletedAt: null, role: 'read-write' },"
+  "        deletedAt: null,
+        class: { notIn: ['personal', 'private'] },
+        appId: null," \
+  "        class: { notIn: ['personal', 'private'] },
+        appId: null,"
 run "23 publication does not lock linked memories" "$AG" \
   "        for (const memoryId of lockedMemoryIds) {
           await tx.\$queryRaw\`SELECT id FROM memories WHERE id = \${memoryId} FOR UPDATE\`;
@@ -113,10 +128,10 @@ run "24 narrowing check not re-run under the lock (expected survivor)" "$M" \
 
 # 25 and 26 SURVIVE by design — see the UNPROVEN BY TEST notes at those lines.
 run "25 promotion back outside the deciding transaction (expected survivor)" "$AG" \
-  "        if (promoteSystemMemoryId) {
-          await tx.memory.update({" \
-  "        if (promoteSystemMemoryId) {
-          await ctx.db.memory.update({"
+  "          await tx.memory.update({
+            where: { id: promoteSystemMemoryId }," \
+  "          await ctx.db.memory.update({
+            where: { id: promoteSystemMemoryId },"
 run "26 post-lock link re-scan removed (expected survivor)" "$AG" \
   "          if (now.some((m: string) => !lockedMemoryIds.includes(m))) {
             throw new AgentLinkSetChangedError();
@@ -136,14 +151,36 @@ run "28 promotion target left out of the ordered lock set (expected survivor)" "
           lockedMemoryIds = [...lockedMemoryIds, promoteSystemMemoryId].sort();
         }" "        "
 
+# --- P1 round 6 (@codex on da0715e6): the five findings ---
+run "29 App-derived reach not excluded (laundering)" "$H" \
+  "  return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(" \
+  "  return getAccessibleMemoryIds(self, memoryId).then("
+run "30 PUBLIC column treated as a public audience" "$H" \
+  "    memory.visibility === 'PUBLIC' &&
+    !isExcludedFromCoveredSet(memory) &&
+    memory.ownerUserId == null;" "    memory.visibility === 'PUBLIC';"
+run "31 writable-link guard ignores covered-set exclusions" "$A" \
+  "        class: { notIn: ['personal', 'private'] },
+        appId: null," "        "
+run "32 locked systemMemoryId re-check removed" "$AG" \
+  "          if (lockedAgent.systemMemoryId && lockedAgent.systemMemoryId !== promoteSystemMemoryId) {" \
+  "          if (false) {"
+run "33 locked other-claimant re-check removed" "$AG" \
+  "          if (claimedElsewhere) {
+            throw new GraphQLError('This memory is already the system memory of another agent', {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }" "          void claimedElsewhere;"
+
 # A stale pattern is a FAILED run, not a skipped line. Counting only
 # KILLED/SURVIVED lines once let two stale mutants — the attach gate and the
 # re-role gate, the two that matter most — drop out of a reported total without
 # anything looking wrong (@codex P2, PR #1357).
 if [ "$STALE" -ne 0 ]; then
   echo
-  echo "FAILED: $STALE mutation(s) no longer match the implementation."
-  echo "Every reported count is therefore incomplete. Fix the patterns and re-run."
+  echo "FAILED: $STALE mutation(s) were STALE or ERRORED."
+  echo "Every reported count is therefore incomplete — a stale pattern was never"
+  echo "applied, and an errored run never reported. Fix and re-run."
   exit 1
 fi
 echo

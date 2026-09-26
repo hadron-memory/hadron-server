@@ -45,6 +45,8 @@ let attackerOrgId: string;
 let dualOrgId: string;
 let attackerUserId: string;
 let attacker2UserId: string;
+let dualUserId: string;
+let reader2UserId: string;
 let publicAgentId: string;
 
 async function gql(k: string, query: string, variables: Record<string, unknown>): Promise<Gql> {
@@ -110,6 +112,10 @@ beforeAll(async () => {
   key.attacker2 = await mint(attacker2.id);
   attackerUserId = attacker.id;
   attacker2UserId = attacker2.id;
+  dualUserId = dual.id;
+  const reader2 = await mkUser('reader2');
+  reader2UserId = reader2.id;
+  key.reader2 = await mint(reader2.id);
   key.dual = await mint(dual.id);
 
   const victimApp = await db.app.create({
@@ -656,6 +662,139 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
       // The invariant: a PUBLIC agent never holds a read-write item.
       if (agentRow.visibility === 'PUBLIC') {
         expect(link?.role, `iteration ${i}: PUBLIC agent holding read-write knowledge`).not.toBe('read-write');
+      }
+    }
+  });
+});
+
+describe("#1349 — the caller must hold it in their OWN right (@codex, PR #1357)", () => {
+  it('a memory readable only through another App cannot be laundered into a second App', async () => {
+    // The finding my own gate's comment got wrong: stripping ctx.appId does NOT
+    // strip App-derived reach, because getAccessibleMemoryIds' user branch
+    // folds in EVERY App the user can reach.
+    //
+    // SAME TENANT on purpose. Cross-tenant would be refused by the tenancy rule
+    // whatever the read gate said, and the test would pass without pinning
+    // anything — which is exactly how the first version of this case masked the
+    // bug it was written for.
+    const appB = await db.app.create({
+      data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:appB`, name: 'app B' } as never,
+    });
+    const bMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:bmem`,
+        name: 'bmem', class: 'knowledge', visibility: 'ORGANIZATION', appId: appB.id,
+      } as never,
+    });
+    const bNode = await db.node.create({ data: { id: generateId(), memoryId: bMem.id, loc: 'payroll', name: 'p', content: 'APP B SECRET' } });
+    mem.appShared = { id: bMem.id, urn: `hrn:mem:attacker-${suffix}:bmem`, nodeId: bNode.id };
+    const bAgent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'bagent', urn: `attacker-${suffix}:bagent` } as never,
+    });
+    await db.appAgent.create({ data: { appId: appB.id, agentId: bAgent.id } as never });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: bAgent.id, memoryId: bMem.id, role: 'read' } });
+    // `reader2` participates in App B — that App participation is the ONLY path
+    // by which they reach this memory: #653 keeps app-scoped rows out of every
+    // org-wide gate, so their org READER role gives them nothing here.
+    await db.appMember.create({ data: { appId: appB.id, userId: reader2UserId, role: 'member' } as never });
+    await db.orgMember.create({ data: { organizationId: attackerOrgId, userId: reader2UserId, role: 'ADMIN' } });
+
+    const { agentId, appKey } = await agentWithApp(attackerOrgId, 'launder');
+    const r = await gql(key.reader2!, ATTACH, { g: agentId, m: mem.appShared.urn, r: 'read' });
+    expect(r.errors, 'App-derived reach must not satisfy the attachment gate').toHaveLength(1);
+    expect(await db.agentMemoryItem.count({ where: { agentId } })).toBe(0);
+    expect(await readsContent(appKey, 'appShared')).toBeNull();
+  });
+
+  it('a PUBLIC column on a USER-OWNED memory is not a public audience', async () => {
+    // `visibility = PUBLIC` alone does not make a cross-tenant attach legal: a
+    // spec-047 user-owned row is owner-only whatever the column says.
+    //
+    // The OWNER is the caller here, deliberately. They can read it, so the read
+    // gate cannot be what refuses — only the audience rule can. An app-scoped
+    // PUBLIC row would have been masked by the read gate instead.
+    const owned = await db.memory.create({
+      data: {
+        id: generateId(), ownerUserId: attackerUserId, userId: null, organizationId: null,
+        urn: `attacker-${suffix}:ownedpublic`, name: 'ownedpublic',
+        class: 'knowledge', visibility: 'PUBLIC',
+      } as never,
+    });
+    await db.node.create({ data: { id: generateId(), memoryId: owned.id, loc: 'payroll', name: 'p', content: 'X' } });
+    // Precondition: the owner really can read it, so the refusal is about the
+    // audience and not about access.
+    const ownerRead = await gql(key.attacker!, `query($m: ID!) { memory(ref: $m) { id } }`, { m: owned.id });
+    expect(ownerRead.data?.memory, 'precondition: the owner can open it').not.toBeNull();
+
+    const { agentId } = await agentWithApp(attackerOrgId, 'ownedpublic-attach');
+    const r = await gql(key.attacker!, ATTACH, { g: agentId, m: owned.id, r: 'read' });
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors![0]!.extensions?.reason).toBe('CROSS_TENANT_ATTACH');
+    expect(await db.agentMemoryItem.count({ where: { agentId } })).toBe(0);
+  });
+
+  it('a PUBLIC read-write app-scoped link does not block publishing the agent', async () => {
+    // The mirror image, and a FALSE REFUSAL rather than a hole: the covered-set
+    // exclusions keep app-scoped links out of a PUBLIC agent's public surface,
+    // so the writable-link guard must not count one. The sibling congruence
+    // checks already allow the link; two guards disagreeing is the drift.
+    const ownApp = await db.app.create({
+      data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:ownapp`, name: 'own app' } as never,
+    });
+    const appScoped = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:ownappmem`,
+        name: 'ownappmem', class: 'knowledge', visibility: 'PUBLIC', appId: ownApp.id,
+      } as never,
+    });
+    const { agentId } = await agentWithApp(attackerOrgId, 'appscoped-rw');
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: appScoped.id, role: 'read-write' } });
+
+    const r = await gql(key.attacker!, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { id visibility } }`, { r: agentId });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(r.data!.updateAgent.visibility).toBe('PUBLIC');
+  });
+
+  it('two agents cannot concurrently claim the SAME memory as their system memory', async () => {
+    // The other half of the locked re-validation: not one agent racing itself
+    // over two memories, but two agents racing over one memory. Only the
+    // in-transaction other-claimant check stops both pointers landing.
+    for (let i = 0; i < 6; i++) {
+      const { agentId: a1 } = await agentWithApp(attackerOrgId, `claim-a-${i}`);
+      const { agentId: a2 } = await agentWithApp(attackerOrgId, `claim-b-${i}`);
+      const brain = await db.memory.create({
+        data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:shared-brain-${i}`, name: `sb-${i}`, class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+      });
+      await Promise.allSettled([
+        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: a1, m: brain.id }),
+        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: a2, m: brain.id }),
+      ]);
+      const claimants = await db.agent.count({ where: { id: { in: [a1, a2] }, systemMemoryId: brain.id } });
+      expect(claimants, `iteration ${i}: one memory claimed by two agents`).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('two concurrent first-attach promotions cannot both claim a system memory', async () => {
+    // The validations run before the lock as a cheap early refusal; the
+    // authoritative pass is inside the deciding transaction. Without it, two
+    // calls could each see systemMemoryId as null and both promote.
+    for (let i = 0; i < 6; i++) {
+      const { agentId } = await agentWithApp(attackerOrgId, `race-promote-${i}`);
+      const a = await db.memory.create({
+        data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:brainA-${i}`, name: `bA-${i}`, class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+      });
+      const b = await db.memory.create({
+        data: { id: generateId(), organizationId: attackerOrgId, urn: `attacker-${suffix}:brainB-${i}`, name: `bB-${i}`, class: 'knowledge', visibility: 'ORGANIZATION' } as never,
+      });
+      await Promise.allSettled([
+        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: agentId, m: a.id }),
+        gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: agentId, m: b.id }),
+      ]);
+      const promoted = await db.memory.findMany({ where: { id: { in: [a.id, b.id] }, class: 'system' }, select: { id: true } });
+      const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+      expect(promoted.length, `iteration ${i}: both targets promoted`).toBeLessThanOrEqual(1);
+      if (promoted.length === 1) {
+        expect(agentRow.systemMemoryId, `iteration ${i}: promoted a memory the agent does not point at`).toBe(promoted[0]!.id);
       }
     }
   });

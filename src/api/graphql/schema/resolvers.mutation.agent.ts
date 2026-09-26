@@ -448,6 +448,13 @@ export const agentMutations = {
             throw new Error('This memory is already the system memory of another agent');
           }
           promoteSystemMemoryId = incoming;
+          // These validations are re-run under the row locks in the deciding
+          // transaction (@codex, PR #1357). Reading them here first keeps the
+          // common refusal cheap and its message early; the authoritative pass
+          // is the locked one, because two concurrent first-attaches could each
+          // observe `systemMemoryId` as null — or each see no other claimant —
+          // and both promote, leaving two promoted memories or one memory
+          // claimed by two agents.
         }
       }
 
@@ -572,6 +579,37 @@ export const agentMutations = {
         // refused by a link that landed in that window still promotes the
         // memory, which is exactly the orphan #1364 was filed for.
         if (promoteSystemMemoryId) {
+          // AUTHORITATIVE re-validation, under the locks taken above (@codex,
+          // PR #1357). `lockedAgentRow` is this agent read inside the
+          // transaction; the target row is locked in the ordered set.
+          const lockedAgent = await tx.agent.findUniqueOrThrow({
+            where: { id },
+            select: { systemMemoryId: true, organizationId: true, ownerUserId: true },
+          });
+          if (lockedAgent.systemMemoryId && lockedAgent.systemMemoryId !== promoteSystemMemoryId) {
+            throw new GraphQLError(
+              "Cannot unset or change an agent's system memory. Delete the agent to replace it.",
+              { extensions: { code: 'BAD_USER_INPUT' } },
+            );
+          }
+          const lockedTarget = await tx.memory.findUniqueOrThrow({
+            where: { id: promoteSystemMemoryId },
+            select: { organizationId: true, ownerUserId: true, id: true },
+          });
+          assertSystemMemoryOwner(lockedAgent, {
+            organizationId: lockedTarget.organizationId,
+            ownerUserId: lockedTarget.ownerUserId,
+            id: lockedTarget.id,
+          });
+          const claimedElsewhere = await tx.agent.findFirst({
+            where: { systemMemoryId: promoteSystemMemoryId, deletedAt: null, id: { not: id } },
+            select: { id: true },
+          });
+          if (claimedElsewhere) {
+            throw new GraphQLError('This memory is already the system memory of another agent', {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }
           await tx.memory.update({
             where: { id: promoteSystemMemoryId },
             data: {

@@ -56,6 +56,7 @@ import {
   AgentNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
 import {
@@ -534,6 +535,25 @@ function userPrincipalOnly(ctx: Context): Context {
 }
 
 /**
+ * Does this caller hold CONTENT-READ on the memory **in their own right** —
+ * excluding anything they can only reach through an App (#1349)?
+ *
+ * Dropping `ctx.appId` is NOT enough, and the first version of this gate was
+ * wrong to claim it was (@codex, PR #1357). `getAccessibleMemoryIds`' user
+ * branch folds in `appDerivedMemoryIds`, which for a user principal enumerates
+ * EVERY App that user can reach — so a memory readable only through App B still
+ * passed, and attaching it to an agent in App A laundered B's grant into A's
+ * audience, which is precisely what this gate exists to stop. Stripping the
+ * active App made the reach broader, not narrower.
+ */
+function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
+  const self = userPrincipalOnly(ctx);
+  return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
+    (ids) => ids === null || ids.includes(memoryId),
+  );
+}
+
+/**
  * Gate an agent-memory ATTACHMENT on the capability it grants (#1349).
  *
  * `addMemoryToAgent` / `updateAgentMemoryRole` authorize the AGENT (its owner
@@ -583,7 +603,7 @@ export async function requireAgentMemoryGrant(
   ref: string,
 ): Promise<void> {
   const self = userPrincipalOnly(ctx);
-  const canRead = await isMemoryReadableCached(self, memory.id);
+  const canRead = await holdsContentReadIndependently(ctx, memory.id);
   // Existence-hiding first: every refusal below this line is addressed to
   // someone who already knows the memory exists.
   if (!canRead) throw new MemoryNotFoundError(ref);
@@ -591,10 +611,21 @@ export async function requireAgentMemoryGrant(
   const sameTenant =
     (agent.organizationId != null && agent.organizationId === memory.organizationId) ||
     (agent.ownerUserId != null && agent.ownerUserId === memory.ownerUserId);
-  const publicRead = role === 'read' && memory.visibility === 'PUBLIC';
+  // A PUBLIC *column* is not a public AUDIENCE (@codex, PR #1357). An
+  // app-scoped row is App-internal even when marked PUBLIC (#653), and a
+  // personal/private or spec-047 user-owned row is owner-only regardless — so
+  // the cross-tenant exception uses the SAME covered-set predicate
+  // `cor:acl:080:03` uses, not the raw column. Otherwise a platform admin, or
+  // the strict owner, could attach one to an agent in another organization and
+  // expose it through that agent's App map.
+  const genuinelyPublic =
+    memory.visibility === 'PUBLIC' &&
+    !isExcludedFromCoveredSet(memory) &&
+    memory.ownerUserId == null;
+  const publicRead = role === 'read' && genuinelyPublic;
   if (!sameTenant && !publicRead) {
     throw new GraphQLError(
-      memory.visibility === 'PUBLIC'
+      genuinelyPublic
         ? 'A PUBLIC memory from another tenant can only be attached read-only — its audience is a read audience.'
         : "This memory belongs to another tenant; attach it to an agent in its own tenant, or share it with the agent's tenant first.",
       { extensions: { code: 'FORBIDDEN', reason: 'CROSS_TENANT_ATTACH' } },
@@ -1434,6 +1465,13 @@ export async function getAccessibleMemoryIds(
   // memory). The canonical predicates are unchanged, just narrowed, so a
   // scoped check stays in lockstep with the full-set node gate by construction.
   onlyMemoryId?: string,
+  // #1349 — `excludeAppDerived` drops the App-participation fold from the USER
+  // branch, leaving only the paths a user holds in their own right: ownership,
+  // org membership, a share, a subscription, PUBLIC. Exactly one caller wants
+  // this — the agent-attachment gate, which must not let a grant held through
+  // one App be re-granted to another App's audience. Everywhere else the fold
+  // is correct and the default keeps it.
+  options?: { excludeAppDerived?: boolean },
 ): Promise<string[] | null> {
   const scope = onlyMemoryId ? { id: onlyMemoryId } : {};
   // App Key with an active session — hard-isolate to the session's memory
@@ -1521,6 +1559,10 @@ export async function getAccessibleMemoryIds(
     // is now proven constructible. #1101 is the real fix — the ATTACH gate
     // should refuse a strict-owner class; this is the read gate that must not
     // depend on it having done so.
+    // A principal whose ONLY reach is App-derived holds nothing in its own
+    // right, so an attachment gate asking "what does this caller hold?" gets
+    // the empty set rather than that App's fold (#1349).
+    if (options?.excludeAppDerived) return [];
     return appDerivedMemoryIds(ctx, onlyMemoryId);
   }
 
@@ -1625,7 +1667,7 @@ export async function getAccessibleMemoryIds(
     // common point-read (an org member reading their own org memory) at exactly
     // its previous query cost. The fold is several queries per App and this gate
     // runs on nearly every read surface, so the shortcut is worth stating.
-    if (!(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
+    if (!options?.excludeAppDerived && !(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
       for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
     }
     return [...accessibleIds];
