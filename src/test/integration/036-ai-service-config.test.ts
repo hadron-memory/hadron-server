@@ -937,3 +937,39 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     expect(await resolvers.Query.aiProviderEndpoints({}, { provider: 'toString' })).toEqual([]);
   });
 });
+
+describe('updateAiServiceConfig judges the provider/style pair on the locked row (#1380 review)', () => {
+  it('a concurrent provider switch between the read and the write refuses a style the new provider has no use for', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'oa', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      ctxFor(admin.id),
+    );
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => (locked = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // Another admin's update: holds the row, then switches the provider.
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${c.id} FOR UPDATE`;
+        locked();
+        await gate;
+        await tx.aiServiceConfig.update({ where: { id: c.id }, data: { provider: 'anthropic' } });
+      },
+      { timeout: 15_000 },
+    );
+    await holding; // the row is locked before our write starts
+    const write = resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, apiStyle: 'RESPONSES' }, ctxFor(admin.id)).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    // Whether the write is already waiting on the lock or has not reached it
+    // yet, it must judge the provider the holder commits.
+    await new Promise((r) => setTimeout(r, 200));
+    release();
+    await holder;
+    expect(((await write) as GraphQLError | null)?.extensions?.code).toBe('AiConfigValidationError');
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'anthropic', apiStyle: null });
+  });
+});
