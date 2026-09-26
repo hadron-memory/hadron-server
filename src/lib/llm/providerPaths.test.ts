@@ -81,10 +81,11 @@ function resolved(
   params: Record<string, unknown> | null = null,
   endpoint: string | null = null,
   apiStyle: string | null = null,
+  apiKeyEncrypted: string | null = encryptToken('test-key'),
 ) {
   return {
     ownerType: 'ORGANIZATION',
-    config: { provider, model: 'GLM-5.3', apiKeyEncrypted: encryptToken('test-key'), params, endpoint, apiStyle },
+    config: { provider, model: 'GLM-5.3', apiKeyEncrypted, params, endpoint, apiStyle },
   } as never;
 }
 
@@ -225,5 +226,17 @@ describe('#1373 — the generic openai-compatible provider (Holger, 2026-09-26)'
     );
     expect(out.text).toBe('ok');
     expect(captured.map((c) => c.path)).toEqual(['/vllm/v1/chat/completions']);
+  });
+});
+
+describe('#1389 review: the server credentials never reach a configured host', () => {
+  it.each(['openai', 'glm', 'anthropic'])('%s: an explicit endpoint with no stored key is refused, even with the env key set', async (provider) => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-SERVER-AMBIENT');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-SERVER-AMBIENT');
+    const err = await generateText(resolved(provider, null, `${origin}/v1`, null, null), { prompt: 'hi' }).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmInvocationError);
+    expect(String(err.message)).toMatch(/no stored key/);
+    expect((err as LlmInvocationError).transient).toBe(false);
+    expect(captured).toEqual([]);
   });
 });
