@@ -78,12 +78,15 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
   // whoever runs it (#1389 review, Codex P1). An explicit endpoint therefore
   // requires the config's own key, and so does a provider whose DEFAULT host
   // is not the credential's issuer: glm's is Z.ai, and the OpenAI SDK would
-  // send it the server's OPENAI_API_KEY (#1385 review).
-  if (!key && !usesProcessCredential(resolved.config)) {
+  // send it the server's OPENAI_API_KEY (#1385 review). And only the
+  // platform's own config may spend the platform credential at all (#1390).
+  if (!key && !usesProcessCredential(resolved.config, resolved.ownerType)) {
     throw new LlmInvocationError(
       endpoint
         ? `Provider "${provider}" has an explicit endpoint but no stored key; the server's own credentials are never sent to a configured host.`
-        : `Provider "${provider}" needs a stored key; the server's own credentials belong to other providers.`,
+        : resolved.ownerType !== 'HADRON_SERVER'
+          ? `This ${resolved.ownerType.toLowerCase()} AI config has no stored key; only the platform's own configs may use the server's credentials.`
+          : `Provider "${provider}" needs a stored key; the server's own credentials belong to other providers.`,
       provider,
       false,
     );

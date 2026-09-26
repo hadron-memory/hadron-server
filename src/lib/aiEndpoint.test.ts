@@ -150,9 +150,15 @@ describe('apiStyle (D3)', () => {
 });
 
 describe('usesProcessCredential: which keyless configs may run on the server credential (#1385 review)', () => {
-  it('only at a default host that issued it', () => {
-    for (const provider of ['openai', 'anthropic', 'bedrock']) expect(usesProcessCredential({ provider }), provider).toBe(true);
-    for (const provider of ['glm', 'openai-compatible', 'mystery']) expect(usesProcessCredential({ provider }), provider).toBe(false);
-    expect(usesProcessCredential({ provider: 'openai', endpoint: 'https://llm.example.com/v1' })).toBe(false);
+  it('only the platform config, only at a default host that issued it', () => {
+    for (const provider of ['openai', 'anthropic', 'bedrock']) expect(usesProcessCredential({ provider }, 'HADRON_SERVER'), provider).toBe(true);
+    for (const provider of ['glm', 'openai-compatible', 'mystery']) expect(usesProcessCredential({ provider }, 'HADRON_SERVER'), provider).toBe(false);
+    expect(usesProcessCredential({ provider: 'openai', endpoint: 'https://llm.example.com/v1' }, 'HADRON_SERVER')).toBe(false);
+  });
+
+  it('never a tenant config: org, App and Agent configs need their own key (#1390)', () => {
+    for (const owner of ['ORGANIZATION', 'APP', 'AGENT'] as const) {
+      expect(usesProcessCredential({ provider: 'openai' }, owner), owner).toBe(false);
+    }
   });
 });
