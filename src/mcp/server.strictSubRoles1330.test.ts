@@ -83,4 +83,3 @@ describe('#1330 — MCP writers enforce strictSubRoles', () => {
     expect(await db.node.findUniqueOrThrow({ where: { id: tomb.id } })).toMatchObject({ role: 'doc.guide' });
   });
 });
-
