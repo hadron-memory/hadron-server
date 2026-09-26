@@ -137,20 +137,20 @@ export async function applyMemoryConfigTemplate(
       await reassertManage(ctx, tx, memory.id, () => new MemoryNotFoundError(args.memoryRef));
       await reassertManageOwner(ctx, tx, live, notFoundTemplate);
 
-      const config = dryRun
-        ? await tx.memoryConfig.findUnique({ where: { memoryId: memory.id }, select: { id: true } })
-        : { id: await materializeConfig(tx, memory.id, actor) };
-      // The memory's existing rules for these roles, locked for the rest of
-      // the transaction so a concurrent edit cannot land between the decision
-      // and the write.
+      // Lock order, as every rule write takes it: referenced nodes (above),
+      // then the rules, then the config row (#1399 review). So the config is
+      // only READ here; it is created or stamped last, and only when a rule is
+      // actually written. An empty template, or one whose every role is
+      // skipped, materializes nothing, keeping the config lazy (#1325).
+      const found = await tx.memoryConfig.findUnique({ where: { memoryId: memory.id }, select: { id: true } });
       const roles = rules.map((r) => r.role);
       const existing = new Map<string, NodeRoleRule>();
-      if (config?.id && roles.length) {
+      if (found && roles.length) {
         await tx.$queryRaw`
           SELECT 1 FROM "node_role_rules"
-          WHERE "config_id" = ${config.id} AND "role" IN (${Prisma.join(roles)})
+          WHERE "config_id" = ${found.id} AND "role" IN (${Prisma.join(roles)})
           ORDER BY "id" FOR UPDATE`;
-        for (const r of await tx.nodeRoleRule.findMany({ where: { configId: config.id, role: { in: roles } } })) {
+        for (const r of await tx.nodeRoleRule.findMany({ where: { configId: found.id, role: { in: roles } } })) {
           existing.set(r.role, r);
         }
       }
@@ -164,58 +164,43 @@ export async function applyMemoryConfigTemplate(
         return lockAuthority;
       };
 
-      const entries: ApplyEntry[] = [];
+      // Decide every role first, then write.
+      const plan: Array<{ rule: MemoryConfigTemplateRule; outcome: ApplyOutcome; current: NodeRoleRule | null }> = [];
       for (const rule of rules) {
-        const current = existing.get(rule.role);
-        if (!current) {
-          entries.push({
-            role: rule.role,
-            outcome: 'APPLIED',
-            rule: dryRun
-              ? null
-              : await tx.nodeRoleRule.create({
-                  data: {
-                    id: generateId(),
-                    configId: config!.id,
-                    role: rule.role,
-                    ...copiedColumns(rule),
-                    sourceTemplateId: live.id,
-                    locked: live.required,
-                    createdBy: actor,
-                    updatedBy: actor,
-                  },
-                }),
+        const current = existing.get(rule.role) ?? null;
+        if (!current) plan.push({ rule, outcome: 'APPLIED', current });
+        else if (!live.required) plan.push({ rule, outcome: 'SKIPPED_CONFLICT', current });
+        else if (current.locked && !(await mayMoveLocks())) plan.push({ rule, outcome: 'SKIPPED_LOCKED', current });
+        else plan.push({ rule, outcome: 'REPLACED', current });
+      }
+      const writes = !dryRun && plan.some((p) => p.outcome === 'APPLIED' || p.outcome === 'REPLACED');
+      const configId = writes ? (found?.id ?? (await materializeConfig(tx, memory.id, actor))) : null;
+
+      const entries: ApplyEntry[] = [];
+      for (const { rule, outcome, current } of plan) {
+        let after: NodeRoleRule | null = current;
+        if (writes && outcome === 'APPLIED') {
+          after = await tx.nodeRoleRule.create({
+            data: {
+              id: generateId(),
+              configId: configId!,
+              role: rule.role,
+              ...copiedColumns(rule),
+              sourceTemplateId: live.id,
+              locked: live.required,
+              createdBy: actor,
+              updatedBy: actor,
+            },
           });
-          continue;
+        } else if (writes && outcome === 'REPLACED') {
+          after = await tx.nodeRoleRule.update({
+            where: { id: current!.id },
+            data: { ...copiedColumns(rule), sourceTemplateId: live.id, locked: true, updatedBy: actor, revision: { increment: 1 } },
+          });
         }
-        if (!live.required) {
-          entries.push({ role: rule.role, outcome: 'SKIPPED_CONFLICT', rule: current });
-          continue;
-        }
-        if (current.locked && !(await mayMoveLocks())) {
-          entries.push({ role: rule.role, outcome: 'SKIPPED_LOCKED', rule: current });
-          continue;
-        }
-        entries.push({
-          role: rule.role,
-          outcome: 'REPLACED',
-          rule: dryRun
-            ? current
-            : await tx.nodeRoleRule.update({
-                where: { id: current.id },
-                data: {
-                  ...copiedColumns(rule),
-                  sourceTemplateId: live.id,
-                  locked: true,
-                  updatedBy: actor,
-                  revision: { increment: 1 },
-                },
-              }),
-        });
+        entries.push({ role: rule.role, outcome, rule: after });
       }
-      if (!dryRun && entries.some((e) => e.outcome === 'APPLIED' || e.outcome === 'REPLACED')) {
-        await touchConfig(tx, config!.id, actor);
-      }
+      if (writes) await touchConfig(tx, configId!, actor);
       const result: ApplyResult = {
         memoryId: memory.id,
         template: { id: live.id, name: live.name, deleted: false },

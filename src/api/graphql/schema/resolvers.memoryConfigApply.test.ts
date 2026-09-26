@@ -138,6 +138,21 @@ describe('applyMemoryConfigTemplate (#1334 slice 1)', () => {
     expect((await rulesOf(mem.id))[0]).toMatchObject({ writers: 'ALL', locked: false, revision: 1 });
   });
 
+  it('an empty template, or one whose every role is skipped, writes nothing: the config stays lazy (#1399 review)', async () => {
+    const empty = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'empty' });
+    const r = await apply(as(orgAdmin), empty.id, mem.id);
+    expect(r.errors).toBeUndefined();
+    expect(r.data!.applyMemoryConfigTemplate.entries).toEqual([]);
+    expect(await db.memoryConfig.count({ where: { memoryId: mem.id } })).toBe(0);
+    // All-skipped: the existing config is not stamped.
+    await gql(as(orgAdmin), CREATE_RULE, { m: mem.id, i: { role: 'spec' } });
+    const before = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId: mem.id } });
+    const soft = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'soft', rules: [{ role: 'spec', writers: 'ADMIN' }] });
+    expect((await apply(as(orgAdmin), soft.id, mem.id)).data!.applyMemoryConfigTemplate.entries[0].outcome).toBe('SKIPPED_CONFLICT');
+    const after = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId: mem.id } });
+    expect(after.updatedAt).toEqual(before.updatedAt);
+  });
+
   it('expectedTemplateRevision: a template changed since the dry run is CONFLICT, and nothing is written', async () => {
     const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec' }] });
     await gql(as(orgAdmin), UPDATE_TPL, { r: t.id, i: { description: 'edited' } });
