@@ -420,6 +420,23 @@ describe('explicit switchover', () => {
 describe('MCP parity and discovery gate', () => {
   const auth = (): AuthContext => ({ userId: user.id, appId: app.id, roles: ['READER'], clientId: `user:${user.id}` });
 
+  it('a monitor read never advances the Worker cursor, even with the session bound to the transport (#1362 review)', async () => {
+    await post('first');
+    await post('second');
+    // The transport carries the Worker's own session: exactly the shape an
+    // ordinary read auto-advances under the pilot. The monitor's contract is
+    // that only an explicit acknowledge moves the cursor.
+    const bound = createTestableMcpServer({ ...auth(), sessionId });
+    const monitored = await bound.callToolText('hadron_team_chat_read', { monitor: true });
+    expect(monitored).toContain('second');
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+
+    // Control: an ordinary read on the same transport does advance it.
+    await bound.callToolText('hadron_team_chat_read', { sinceSeq: 0 });
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
+      .toMatchObject({ lastSeenSeq: 2 });
+  });
+
   it('advertises the capability only inside the operator+App pilot and delegates the compact query', async () => {
     const enabled = createTestableMcpServer(auth());
     expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention');

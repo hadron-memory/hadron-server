@@ -125,7 +125,7 @@ export async function renderAttentionSection(
         deletedAt: null,
         ...(accessible === null ? {} : { memoryId: { in: accessible } }),
       },
-      select: { id: true, name: true, loc: true, lastSeq: true, memoryId: true, memory: { select: { urn: true } } },
+      select: { id: true, name: true, loc: true, lastSeq: true, memoryId: true, memory: { select: { urn: true, isEncrypted: true } } },
       orderBy: [{ loc: 'asc' }, { id: 'asc' }],
     }),
     readStatesFor(db, attendee, channelIds),
@@ -142,6 +142,15 @@ export async function renderAttentionSection(
     const where = `${c.memory.urn}:${c.loc}`;
     if (c.lastSeq <= seen) {
       lines.push(`- ${c.name} (${where}): nothing new`);
+      continue;
+    }
+    if (row.mentionOnly && c.memory.isEncrypted) {
+      // An encrypted memory stores the whole message envelope as `{ __enc }`,
+      // so the `data.mentions` path below would match nothing and report
+      // "nothing new for you" — and the checkpoint would then advance past a
+      // mention (#1362 review, Codex P1). Mentions cannot be filtered here, so
+      // fail toward duplicate attention, never toward loss: report it as new.
+      lines.push(`- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq}; encrypted, so mentions were not filtered)`);
       continue;
     }
     if (row.mentionOnly) {
