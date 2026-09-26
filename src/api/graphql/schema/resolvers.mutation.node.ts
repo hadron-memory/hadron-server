@@ -2174,12 +2174,7 @@ export const nodeMutations = {
               });
               throw new GraphQLError(`${err.message} (node ${pt.loc} / ${pt.id})`, {
                 extensions: {
-                  code: err.name,
-                  length: err.length,
-                  max: err.max,
-                  ...(err.currentLength != null
-                    ? { currentLength: err.currentLength, available: err.max - err.currentLength }
-                    : {}),
+                  ...err.extensionFields(),
                   nodeId: pt.id,
                   loc: pt.loc,
                 },
@@ -3297,7 +3292,7 @@ export const nodeMutations = {
       } catch (e) {
         if (e instanceof NodeAbstractTooLongError) {
           throw new GraphQLError(e.message, {
-            extensions: { code: e.name, length: e.length, max: e.max },
+            extensions: e.extensionFields(),
           });
         }
         throw e;

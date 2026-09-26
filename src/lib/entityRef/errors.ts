@@ -220,6 +220,23 @@ export class NodeAbstractTooLongError extends Error {
     this.name = 'NodeAbstractTooLongError';
     this.currentLength = edit?.currentLength ?? null;
   }
+
+  /**
+   * Typed-error envelope for GraphQL adapters: the identity/length fields
+   * every refusal carries, plus `currentLength`/`available` when the throw
+   * site reported edit context — so every surface exposing this error
+   * offers the same machine-actionable shape (Copilot round 1 on PR #1371).
+   */
+  extensionFields(): Record<string, unknown> {
+    return {
+      code: this.name,
+      length: this.length,
+      max: this.max,
+      ...(this.currentLength != null
+        ? { currentLength: this.currentLength, available: this.max - this.currentLength }
+        : {}),
+    };
+  }
 }
 
 /**

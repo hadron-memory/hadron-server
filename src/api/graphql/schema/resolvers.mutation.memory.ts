@@ -330,9 +330,7 @@ export const memoryMutations = {
         if (e instanceof NodeAbstractTooLongError) {
           throw new GraphQLError(e.message, {
             extensions: {
-              code: e.name,
-              length: e.length,
-              max: e.max,
+              ...e.extensionFields(),
               loc: (e as NodeAbstractTooLongError & { loc?: string }).loc,
             },
           });
