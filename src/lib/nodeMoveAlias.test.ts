@@ -107,6 +107,22 @@ describe('node move URN aliases', () => {
     expect(await mcp.callToolText('hadron_get_nodes', {
       refs: [publishedBeforeMemoryRename],
     })).toContain('body of old');
+
+    // Another live memory may later claim the freed old memory URN. It is not
+    // a live NODE address until it has this loc, so the historical memory's
+    // alias must still lead to the moved node. Once the slot is occupied, the
+    // live node wins the full published address.
+    const replacement = await db.memory.create({ data: {
+      id: generateId(), organizationId: (await db.memory.findUniqueOrThrow({ where: { id: source.id } })).organizationId,
+      urn: oldMemoryUrn, name: 'replacement', class: 'knowledge', visibility: 'ORGANIZATION',
+    } });
+    expect(await resolveNodeRef(db, publishedBeforeMemoryRename)).toEqual({ id: root.id });
+    expect((await resolvers.Query.node(null, { ref: publishedBeforeMemoryRename }, graphCtx()))?.id)
+      .toBe(root.id);
+    expect(await mcp.callToolText('hadron_get_node', { urn: publishedBeforeMemoryRename }))
+      .toContain('body of old');
+    const occupant = await createNode(replacement.id, 'old');
+    expect(await resolveNodeRef(db, publishedBeforeMemoryRename)).toEqual({ id: occupant.id });
   });
 
   it('reads a moved legacy literal #data loc through MCP single and batch fallbacks', async () => {
@@ -122,6 +138,50 @@ describe('node move URN aliases', () => {
     expect(batch).toContain('body of legacy#data');
     expect(single).not.toContain('Fragment: data');
     expect(batch).not.toContain('Fragment: data');
+  });
+
+  it('serializes a move with a concurrent memory rename before recording the source key', async () => {
+    const root = await createNode(source.id, 'old');
+    const oldMemoryUrn = source.urn;
+    const newMemoryUrn = 'alias-a.example:renamed';
+    let signalLocked!: () => void;
+    const locked = new Promise<void>((resolve) => { signalLocked = resolve; });
+    let releaseRename!: () => void;
+    const holdRename = new Promise<void>((resolve) => { releaseRename = resolve; });
+    const rename = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${source.id} FOR UPDATE`;
+      await recordUrnRename(tx, {
+        entityType: 'MEMORY', entityId: source.id,
+        oldUrn: oldMemoryUrn, newUrn: newMemoryUrn,
+      });
+      await tx.memory.update({ where: { id: source.id }, data: { urn: newMemoryUrn } });
+      signalLocked();
+      await holdRename;
+    });
+    await locked;
+
+    const moving = resolvers.Mutation.moveNode(null, {
+      sourceRef: root.id, targetUrn: `hrn:node:${oldMemoryUrn}:new`,
+    }, graphCtx());
+    try {
+      // This is the source-URN SELECT in moveNodeSubtree waiting on the rename
+      // row lock. Without FOR UPDATE, the move would read the stale old URN and
+      // could commit an alias key that never named its post-rename address.
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR UPDATE%'
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+    } finally {
+      releaseRename();
+    }
+    await rename;
+    await moving;
+    expect(await resolveNodeRef(db, `hrn:node:${newMemoryUrn}:old`)).toEqual({ id: root.id });
+    expect(await resolveNodeRef(db, `hrn:node:${oldMemoryUrn}:old`)).toEqual({ id: root.id });
   });
 
   it('records cross-memory aliases and applies the target memory gate on GraphQL and MCP reads', async () => {

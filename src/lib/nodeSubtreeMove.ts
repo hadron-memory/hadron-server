@@ -388,14 +388,20 @@ export async function moveNodeSubtree(
   // in this SAME transaction as the two-phase rebase. The shared alias helper
   // normalizes and deduplicates repeat moves; the node-ref resolver applies
   // live-address precedence and current-target liveness on lookup.
-  const sourceMemoryUrn = (await tx.memory.findUniqueOrThrow({
-    where: { id: srcMemoryId }, select: { urn: true },
-  })).urn;
-  const targetMemoryUrn = crossMemory
-    ? (await tx.memory.findUniqueOrThrow({
-        where: { id: destMemoryId }, select: { urn: true },
-      })).urn
-    : sourceMemoryUrn;
+  // Memory rename takes this same row lock before it reads/replaces `urn`.
+  // Lock then read here too: a rename cannot publish a new source prefix
+  // between our alias-key read and the move's commit. Lock both memories in
+  // ID order so opposing cross-memory moves take these rows consistently.
+  const memoryUrns = new Map<string, string>();
+  for (const id of [...new Set([srcMemoryId, destMemoryId])].sort()) {
+    const [row] = await tx.$queryRaw<{ urn: string }[]>`
+      SELECT urn FROM memories WHERE id = ${id} FOR UPDATE
+    `;
+    if (!row) throw new Error(`Move memory ${id} disappeared while locking; retry.`);
+    memoryUrns.set(id, row.urn);
+  }
+  const sourceMemoryUrn = memoryUrns.get(srcMemoryId)!;
+  const targetMemoryUrn = memoryUrns.get(destMemoryId)!;
   const aliasKey = (memoryUrn: string, loc: string) =>
     safeNodeUrnV2(memoryUrn, loc).slice('hrn:node:'.length);
   for (const n of subtree) {
