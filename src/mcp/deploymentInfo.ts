@@ -95,7 +95,10 @@
 // 0.19.0: #1265 — register + ChannelReadState-backed unattended team-chat
 // monitoring on hadron_team_chat_read (`monitor`, server-bound checkpoints,
 // deliberate acknowledgement). Token: `team-chat-monitor`.
-export const HADRON_SERVER_VERSION = '0.19.0';
+// 0.20.0: #1353 — internal-pilot compact team attention, explicit own-worker
+// mark-read, and preview/proof/confirm switchover. Its capability token is
+// caller/App-gated by hadron_server_info rather than added to the static list.
+export const HADRON_SERVER_VERSION = '0.20.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

@@ -692,6 +692,67 @@ export const typeDefs = `#graphql
     updatedAt: DateTime!
   }
 
+  "#1353 — compact unread metadata for one Worker/Channel pair. No message body is returned."
+  type TeamAttentionChannel {
+    channel: ID!
+    name: String!
+    unread: Int!
+    unreadMentions: Int!
+    firstUnreadSeq: Int
+    lastSeq: Int!
+  }
+
+  "#1353 — one live Worker that has relevant unread attention after the supplied token."
+  type TeamAttentionWorker {
+    worker: ID!
+    name: String!
+    urn: String
+    live: Boolean!
+    channels: [TeamAttentionChannel!]!
+  }
+
+  type TeamAttentionResult {
+    "Opaque signed snapshot. Adopt it only after every listed nudge is accepted."
+    token: String!
+    workers: [TeamAttentionWorker!]!
+  }
+
+  type TeamAttentionSwitchoverChannel {
+    channel: ID!
+    name: String!
+    fromSeq: Int!
+    throughSeq: Int!
+    unread: Int!
+    unreadMentions: Int!
+  }
+
+  type TeamAttentionSwitchoverWorker {
+    worker: ID!
+    name: String!
+    urn: String
+    channels: [TeamAttentionSwitchoverChannel!]!
+  }
+
+  type TeamAttentionSwitchoverPreview {
+    "Short-lived proof binding the exact operator, App, Workers, registers, cursors and heads shown here."
+    proof: String!
+    expiresAt: DateTime!
+    workers: [TeamAttentionSwitchoverWorker!]!
+  }
+
+  type TeamAttentionSwitchoverResult {
+    applied: Boolean!
+    workersAdvanced: Int!
+    channelsAdvanced: Int!
+  }
+
+  "#1353 — the exact Worker/Channel cursor advanced by markOwnTeamChatRead."
+  type OwnTeamChatReadState {
+    workerId: ID!
+    channelId: ID!
+    lastSeenSeq: Int!
+  }
+
   "Spec 049 Phase 5 — what an Agent's install-created register row is made with (plan §3.5)."
   type RegisterDefaults {
     mentionOnly: Boolean!
@@ -6289,6 +6350,25 @@ export const typeDefs = `#graphql
     channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
 
     """
+    #1353 internal pilot: compact attention for this operator's LIVE Workers.
+    The signed token is a pure poll watermark and never changes read state.
+    Omit since for all current unread. since:"now" is refused: discarding a
+    backlog requires the separate preview + confirmed switchover.
+
+    A router must adopt the returned token only after EVERY listed nudge was
+    accepted. On any partial failure retain the prior token; retries can
+    duplicate a nudge but cannot silently lose one.
+    """
+    teamAttention(appRef: ID!, since: String): TeamAttentionResult!
+
+    """
+    Preview the explicit baseline switchover for the operator's current live
+    Workers. Read-only: inspect the exact cursors, heads and unread counts,
+    then pass proof to confirmTeamAttentionSwitchover within ten minutes.
+    """
+    teamAttentionSwitchoverPreview(appRef: ID!): TeamAttentionSwitchoverPreview!
+
+    """
     036-ai-service-config: resolve a config name for an execution context
     and return the DECRYPTED credentials (privileged; successor to
     agentAIConfig/appAIConfig).
@@ -8289,6 +8369,23 @@ export const typeDefs = `#graphql
     channelRef: the Channel's id or its address (\`Channel.chatRootUrn\`, #1171).
     """
     advanceChannelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!, seq: Int!): ChannelReadState!
+
+    """
+    #1353 internal pilot: explicitly advance the cursor owned by one exact,
+    caller-owned live Worker session on one readable registered Channel.
+    Shares the MCP mark-read gate; unlike advanceChannelReadState this door is
+    operator+App pilot-gated and session-pinned. Monotonic; a seq beyond the
+    captured Channel watermark is refused.
+    """
+    markOwnTeamChatRead(appRef: ID!, sessionRef: ID!, channelRef: ID!, seq: Int!): OwnTeamChatReadState!
+
+    """
+    Explicitly confirm a previously previewed #1353 switchover. The proof is
+    actor/App/scope-bound; any live-Worker, register or cursor drift rejects
+    the whole transaction. It advances only through the heads captured by the
+    preview, so messages arriving afterward remain unread.
+    """
+    confirmTeamAttentionSwitchover(appRef: ID!, proof: String!): TeamAttentionSwitchoverResult!
 
     # Chatbot revisions (org ADMIN)
     """

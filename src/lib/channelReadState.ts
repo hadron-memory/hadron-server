@@ -20,11 +20,11 @@
  * (mentions name Workers, never Agents — plan §4.4, proposed).
  */
 
-import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { generateId } from './id.js';
-import { mentionTokenOf } from './mentionToken.js';
+import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from './mentionToken.js';
 import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegister.js';
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
 
@@ -70,13 +70,31 @@ export async function readStatesFor(db: Db, attendee: RegisterAttendee, channelI
   return new Map(rows.map((r) => [r.channelId, r.lastSeenSeq]));
 }
 
-/** The mention tokens that address an attendee — its own, or every Worker cast from the Agent in the App. */
+/** The mention tokens that address an attendee — broadcasts plus its own Worker token(s). */
 export async function attendeeMentionTokens(db: Db, attendee: RegisterAttendee): Promise<string[]> {
   const workers =
     'workerId' in attendee
       ? await db.worker.findMany({ where: { id: attendee.workerId }, select: { name: true } })
       : await db.worker.findMany({ where: { agentId: attendee.agentId, appId: attendee.appId, retiredAt: null }, select: { name: true } });
-  return [...new Set(workers.map((w) => mentionTokenOf(w.name)).filter((t): t is string => !!t))];
+  return [...new Set([
+    ...BROADCAST_MENTION_TOKENS,
+    ...workers.map((w) => mentionTokenOf(w.name)).filter((t): t is string => !!t),
+  ])];
+}
+
+/**
+ * The Workers whose posts are the attendee's OWN, excluded from the
+ * MENTION count (#1362 review, Codex P2): with the broadcast tokens counted as
+ * mentions, a Worker's own post to the whole team would otherwise read as a
+ * mention of its own Agent. Retired Workers included: their posts are still
+ * the attendee's own. Unfiltered rows are decided from `lastSeq` alone by
+ * design (no message query) and still count own posts as new; that is the
+ * separate follow-up hadron-server#1388.
+ */
+async function attendeeWorkerIds(db: Db, attendee: RegisterAttendee): Promise<string[]> {
+  if ('workerId' in attendee) return [attendee.workerId];
+  const workers = await db.worker.findMany({ where: { agentId: attendee.agentId, appId: attendee.appId }, select: { id: true } });
+  return workers.map((w) => w.id);
 }
 
 export interface AttentionSection {
@@ -122,7 +140,7 @@ export async function renderAttentionSection(
         deletedAt: null,
         ...(accessible === null ? {} : { memoryId: { in: accessible } }),
       },
-      select: { id: true, name: true, loc: true, lastSeq: true, memoryId: true, memory: { select: { urn: true } } },
+      select: { id: true, name: true, loc: true, lastSeq: true, memoryId: true, memory: { select: { urn: true, isEncrypted: true } } },
       orderBy: [{ loc: 'asc' }, { id: 'asc' }],
     }),
     readStatesFor(db, attendee, channelIds),
@@ -130,6 +148,7 @@ export async function renderAttentionSection(
   if (channels.length === 0) return none;
   const mentionRows = snap.rows.filter((r) => r.mentionOnly);
   const tokens = mentionRows.length ? await attendeeMentionTokens(db, attendee) : [];
+  const ownWorkerIds = mentionRows.length ? await attendeeWorkerIds(db, attendee) : [];
   const captured = new Map<string, number>();
   const lines: string[] = [];
   for (const c of channels) {
@@ -141,20 +160,40 @@ export async function renderAttentionSection(
       lines.push(`- ${c.name} (${where}): nothing new`);
       continue;
     }
+    if (row.mentionOnly && c.memory.isEncrypted) {
+      // An encrypted memory stores the whole message envelope as `{ __enc }`,
+      // so the `data.mentions` path below would match nothing and report
+      // "nothing new for you" — and the checkpoint would then advance past a
+      // mention (#1362 review, Codex P1). Mentions cannot be filtered here, so
+      // fail toward duplicate attention, never toward loss: report it as new.
+      lines.push(`- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq}; encrypted, so mentions were not filtered)`);
+      continue;
+    }
     if (row.mentionOnly) {
       // Only new messages that name the attendee count — a small indexed
       // query over the (seen, lastSeq] window, content never injected.
+      // Counted in SQL, own posts excluded with a NULL-SAFE predicate: a
+      // message with no authorWorkerId must still count (a Prisma JSON-path
+      // NOT would read it as NULL and drop it), and nothing is materialized,
+      // however large the window (#1362 review;
+      // dev:findings:prisma-json-path-not-drops-rows-missing-the-key).
       const mentions = tokens.length
-        ? await db.node.count({
-            where: {
-              memoryId: c.memoryId,
-              loc: { startsWith: escapePrismaLikePattern(`${c.loc}:messages:`) },
-              nodeType: { in: MESSAGE_NODE_TYPES },
-              deletedAt: null,
-              seq: { gt: seen, lte: c.lastSeq },
-              OR: tokens.map((t) => ({ data: { path: ['mentions'], array_contains: [t] } })),
-            },
-          })
+        ? (
+            await db.$queryRaw<Array<{ n: number }>>`
+              SELECT count(*)::int AS n
+              FROM nodes node
+              WHERE node.memory_id = ${c.memoryId}
+                AND node.loc LIKE ${escapePrismaLikePattern(`${c.loc}:messages:`) + '%'} ESCAPE '\\'
+                AND node.node_type IN (${Prisma.join(MESSAGE_NODE_TYPES)})
+                AND node.deleted_at IS NULL
+                AND node.seq > ${seen}
+                AND node.seq <= ${c.lastSeq}
+                AND EXISTS (
+                  SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(tokens)}::jsonb) AS wanted(token)
+                  WHERE COALESCE(node.data->'mentions', '[]'::jsonb) ? wanted.token
+                )
+                AND NOT (COALESCE(node.data->>'authorWorkerId', '') = ANY(${ownWorkerIds}::text[]))`
+          )[0]?.n ?? 0
         : 0;
       lines.push(
         mentions > 0
