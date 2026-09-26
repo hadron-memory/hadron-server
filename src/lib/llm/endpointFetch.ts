@@ -1,8 +1,9 @@
 /**
- * #1373 — the connect-time guard for an AI config's EXPLICIT endpoint (its
- * `endpoint`, or the legacy `params.baseUrl`). Either is chosen by an org
- * admin, and the server then POSTs to it with the config's key as a bearer, so
- * it is a server-originated request to a caller-chosen destination and gets
+ * #1373 — the connect-time guard for an AI config's EXPLICIT `endpoint`.
+ * (The legacy `params.baseUrl` is not read at all since D2, so it never
+ * reaches this path.) The endpoint is chosen by an org admin, and the
+ * server then POSTs to it with the config's key as a bearer, so it is a
+ * server-originated request to a caller-chosen destination and gets
  * the egress posture of cor:api:130:02:
  *
  *   - every resolved address must be public (`isForbiddenAddress`), checked at

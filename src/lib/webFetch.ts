@@ -82,6 +82,7 @@ export function isForbiddenAddress(ip: string): boolean {
     if (lower === '::' || lower === '::1') return true; // unspecified + loopback
     if (/^f[cd]/.test(lower)) return true; // fc00::/7 ULA
     if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
+    if (/^fe[c-f]/.test(lower)) return true; // fec0::/10 site-local (deprecated, still routable on some hosts)
     if (/^ff/.test(lower)) return true; // multicast
     return false;
   }
