@@ -11,6 +11,7 @@ import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { formatGraphQLError } from '../formatError.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -212,7 +213,6 @@ describe('RULE_LOCKED (#1334 slice 1)', () => {
 });
 
 describe('apply under concurrency (#1399 review)', () => {
-  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
   /** Run `hold` in its own transaction, resolve once it holds its locks, commit on release(). */
   function holder(hold: (tx: any) => Promise<void>) {
     let held!: () => void;
@@ -232,7 +232,7 @@ describe('apply under concurrency (#1399 review)', () => {
     });
     await h.holding;
     const pending = apply(as(orgAdmin), t.id, mem.id);
-    await pause(300);
+    await waitForLockWaiters(db); // the apply is blocked on the holder's uncommitted rows
     await h.release();
     const r = await pending;
     expect(code(r)).toBe('CONFLICT');
@@ -249,12 +249,29 @@ describe('apply under concurrency (#1399 review)', () => {
     });
     await h.holding;
     const pending = apply(as(orgAdmin), t.id, mem.id);
-    await pause(300); // the apply is now queued behind the rule lock
+    await waitForLockWaiters(db); // the apply has passed its pre-checks and is queued behind the rule lock
     await db.orgMember.updateMany({ where: { organizationId: org.id, userId: orgAdmin }, data: { role: 'CONTRIBUTOR' } });
     await h.release();
     const r = await pending;
     expect(code(r)).toBe('MEMORY_NOT_FOUND');
     expect((await rulesOf(mem.id))[0]).toMatchObject({ writers: 'ALL', locked: false, revision: 1 });
+  });
+
+  it('authorization is re-asked after waiting on the CONFIG row too: a demotion while queued there refuses the apply', async () => {
+    await gql(as(orgAdmin), CREATE_RULE, { m: mem.id, i: { role: 'notes' } });
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec' }] });
+    const config = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId: mem.id } });
+    // A rule write for a DIFFERENT role, in flight: it holds the config row (touchConfig).
+    const h = holder(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "memory_configs" WHERE "id" = ${config.id} FOR UPDATE`;
+    });
+    await h.holding;
+    const pending = apply(as(orgAdmin), t.id, mem.id);
+    await waitForLockWaiters(db); // queued on the config row
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: orgAdmin }, data: { role: 'CONTRIBUTOR' } });
+    await h.release();
+    expect(code(await pending)).toBe('MEMORY_NOT_FOUND');
+    expect((await rulesOf(mem.id)).map((x) => x.role)).toEqual(['notes']);
   });
 });
 

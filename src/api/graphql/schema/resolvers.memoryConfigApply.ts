@@ -152,11 +152,7 @@ export async function applyMemoryConfigTemplate(
           existing.set(r.role, r);
         }
       }
-      // Both gates asked again AFTER the last lock that can wait (the rules,
-      // above): a membership revoked while this transaction queued behind
-      // another rule write must not still authorize it (#1399 review).
-      await reassertManage(ctx, tx, memory.id, () => new MemoryNotFoundError(args.memoryRef));
-      await reassertManageOwner(ctx, tx, live, notFoundTemplate);
+
       // Asked once, fresh, only when a required template meets a locked rule.
       let lockAuthority: boolean | null = null;
       const mayMoveLocks = async () => {
@@ -178,6 +174,14 @@ export async function applyMemoryConfigTemplate(
       }
       const writes = !dryRun && plan.some((p) => p.outcome === 'APPLIED' || p.outcome === 'REPLACED');
       const configId = writes ? (found?.id ?? (await materializeConfig(tx, memory.id, actor))) : null;
+      // The config row, locked now so that `touchConfig` below cannot wait:
+      // every lock that can block is taken before the gates are re-asked.
+      if (configId) await tx.$queryRaw`SELECT 1 FROM "memory_configs" WHERE "id" = ${configId} FOR UPDATE`;
+      // Both gates asked again AFTER the last lock that can wait (the rules,
+      // then the config): a membership revoked while this transaction queued
+      // behind another rule write must not still authorize it (#1399 review).
+      await reassertManage(ctx, tx, memory.id, () => new MemoryNotFoundError(args.memoryRef));
+      await reassertManageOwner(ctx, tx, live, notFoundTemplate);
 
       const entries: ApplyEntry[] = [];
       for (const { rule, outcome, current } of plan) {
