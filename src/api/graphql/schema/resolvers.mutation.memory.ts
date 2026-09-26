@@ -964,16 +964,12 @@ export const memoryMutations = {
         // the pre-update row it read tenancy from the organization the memory
         // had just left; skipped on a transfer, it left the source tenant's
         // Apps reading a memory that had moved away from them.
-        // UNPROVEN BY TEST, and kept anyway. Mutating this line away leaves the
-        // suite green: the narrowing/publication race test cannot reliably
-        // stage the one interleaving it covers — a publication committing
-        // between the pre-transaction check above and this row lock. Per
-        // `review:a-green-mutation-indicts-the-test` that green indicts the
-        // test, not the guard. Without it, a publication that lands in exactly
-        // that window leaves a PUBLIC agent referencing knowledge this call is
-        // about to make non-public (cor:acl:080:03). The same reasoning, and
-        // the same explicit note, as the system-memory URN re-check in
-        // resolvers.mutation.agent.ts.
+        // PINNED (harness #24): removing this re-check fails "a concurrent
+        // narrowing and agent publication cannot both win". An earlier note here
+        // called it unproven; later tests staged the interleaving — a
+        // publication committing between the pre-transaction check above and
+        // this row lock — which would otherwise leave a PUBLIC agent referencing
+        // knowledge this call makes non-public (cor:acl:080:03).
         if (visibility !== undefined) {
           await assertMemoryVisibilityChangeAllowed(tx, memory, visibility);
         }

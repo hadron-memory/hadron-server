@@ -570,14 +570,13 @@ export const agentMutations = {
         // after the congruence decision, so a refusal rolls it back with
         // everything else instead of leaving a mutated orphan.
         //
-        // UNPROVEN BY TEST, and kept. Moving this write back outside the
-        // transaction leaves the suite green, because reaching it needs the
-        // early fail-fast to PASS and this locked decision to REFUSE — i.e. a
-        // disqualifying link committing in between. 20 iterations of the paired
-        // race did not stage it. Per `review:a-green-mutation-indicts-the-test`
-        // that green indicts the test: without this placement, a publication
-        // refused by a link that landed in that window still promotes the
-        // memory, which is exactly the orphan #1364 was filed for.
+        // PINNED, though not by the case it exists for (harness #25): moving
+        // this write back outside the transaction fails the two concurrent
+        // system-memory claim tests (they time out on the lock). The #1364
+        // orphan itself — a publication refused by a link committing between
+        // the early fail-fast and this locked decision, yet still promoting the
+        // memory — has never been staged (20 paired-race iterations), so that
+        // specific interleaving remains argued, not measured.
         if (promoteSystemMemoryId) {
           // AUTHORITATIVE re-validation, under the locks taken above (@codex,
           // PR #1357). `lockedAgentRow` is this agent read inside the

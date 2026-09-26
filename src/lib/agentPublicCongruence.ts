@@ -122,15 +122,31 @@ export async function assertAgentPublicAllowed(db: Db, agentId: string): Promise
  */
 export async function assertMemoryVisibilityChangeAllowed(
   db: Db,
-  memory: { id: string; class: string; appId: string | null },
+  memory: {
+    id: string;
+    class: string;
+    appId: string | null;
+    organizationId: string | null;
+    ownerUserId: string | null;
+  },
   nextVisibility: string | null | undefined,
 ): Promise<void> {
   if (isExcludedFromCoveredSet(memory)) return; // not part of any public surface
   if (nextVisibility === 'PUBLIC') return; // still public — congruence preserved
+  // Only a PUBLIC agent in the memory's OWN tenant blocks the narrowing
+  // (@copilot, PR #1357). A FOREIGN one holds a link that only PUBLIC ever
+  // justified, which `revokeLinksForeignToTenant` removes in this same
+  // transaction — counting it here would refuse before that sweep runs,
+  // handing another tenant a veto over the owner's own visibility setting.
+  const sameTenant: Prisma.AgentWhereInput[] = [];
+  if (memory.organizationId != null) sameTenant.push({ organizationId: memory.organizationId });
+  if (memory.ownerUserId != null) sameTenant.push({ ownerUserId: memory.ownerUserId });
+  if (sameTenant.length === 0) return;
   const publicAgent = await db.agent.findFirst({
     where: {
       deletedAt: null,
       visibility: 'PUBLIC',
+      OR: sameTenant,
       memoryItems: { some: { memoryId: memory.id, deletedAt: null } },
     },
     select: { name: true },
@@ -174,7 +190,14 @@ export async function assertMemoryVisibilityChangeAllowed(
  */
 export async function revokeLinksForeignToTenant(
   db: Db,
-  memory: { id: string; organizationId: string | null; ownerUserId: string | null; visibility: string | null },
+  memory: {
+    id: string;
+    organizationId: string | null;
+    ownerUserId: string | null;
+    visibility: string | null;
+    class: string;
+    appId: string | null;
+  },
   actor: string | null,
 ): Promise<number> {
   // Takes the memory's state AFTER the write (@codex, PR #1357). Classifying
@@ -191,7 +214,13 @@ export async function revokeLinksForeignToTenant(
   // carrying a same-tenant read-write item and then TRANSFERRED to another
   // organization left that item live and writable from what is now a foreign
   // tenant, because this early return skipped the sweep entirely.
-  const writableOnly = memory.visibility === 'PUBLIC';
+  //
+  // "PUBLIC" here means a genuine public AUDIENCE — the same predicate the
+  // attach gate uses — not the raw column (@copilot, PR #1357). An App-scoped
+  // or user-owned row marked PUBLIC has no cross-tenant audience, so none of
+  // its foreign links (read ones included) was ever justified.
+  const writableOnly =
+    memory.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory) && memory.ownerUserId == null;
   const links = await db.agentMemoryItem.findMany({
     where: {
       memoryId: memory.id,

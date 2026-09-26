@@ -613,7 +613,8 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
  *  - **the caller is authorized for that App** by the gate `createMemoryInApp`
  *    uses to provision App knowledge (`requireOwnerOrOrgRole(app, 'ADMIN')`), so
  *    "appropriately authorized" means what it already means;
- *  - **knowledge / group only** — never a strict-owner class;
+ *  - **knowledge / group only**, and never a user-owned row — never a
+ *    strict-owner shape;
  *  - **`read` only**, mirroring provisioning, which links App knowledge `read`
  *    and leaves writes with the org admin. A same-App `read-write` still needs
  *    the caller's own write capability, unchanged.
@@ -625,10 +626,14 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
 async function sameAppAttachAdmitted(
   ctx: Context,
   agentId: string,
-  memory: { appId: string | null; class: string },
+  memory: { appId: string | null; class: string; ownerUserId: string | null },
 ): Promise<boolean> {
   if (memory.appId == null) return false;
   if (memory.class !== 'knowledge' && memory.class !== 'group') return false;
+  // A spec-047 USER-owned row is strictly owner-only (@copilot, PR #1357). Its
+  // owner already holds content read in their own right and never needs this
+  // branch; anyone else must not get it through an App admin role.
+  if (memory.ownerUserId != null) return false;
   const app = await ctx.db.app.findFirst({
     where: {
       id: memory.appId,

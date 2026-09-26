@@ -51,6 +51,7 @@ assert old in s
 open(p, 'w').write(s.replace(old, new, 1))
 PY
   raw=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run "$SPEC" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+  status=$?
   out=$(echo "$raw" | grep -E '^ *Tests ')
   git checkout -q -- "$2"
   # A run that produced NO `Tests` summary did not report on the mutant at all —
@@ -67,6 +68,13 @@ PY
   total=$(echo "$out" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
   if [ "$total" != "$BASELINE" ]; then
     echo "ERRORED   $1 — partial run: $total of $BASELINE tests reported ($(echo "$out" | tr -s ' '))"
+    STALE=$((STALE+1))
+    return
+  fi
+  # A nonzero exit with NO failed test is an operational failure, not a
+  # verdict on the mutant (@codex, PR #1357 round 2).
+  if [ "$status" -ne 0 ] && ! echo "$out" | grep -q failed; then
+    echo "ERRORED   $1 — vitest exited $status without a failed test ($(echo "$out" | tr -s ' '))"
     STALE=$((STALE+1))
     return
   fi
@@ -131,7 +139,8 @@ run "19 publication check back outside the lock" "$AG" \
           await assertAgentPublicAllowed(tx, id);
         }" "        "
 run "20 PUBLIC transfer keeps foreign writable links" "$A" \
-  "  const writableOnly = memory.visibility === 'PUBLIC';" \
+  "  const writableOnly =
+    memory.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory) && memory.ownerUserId == null;" \
   "  const writableOnly = false; if (memory.visibility === 'PUBLIC') return 0;"
 run "21 publication counts deleted-memory links" "$A" \
   "        deletedAt: null,
@@ -143,16 +152,16 @@ run "23 publication does not lock linked memories" "$AG" \
   "        for (const memoryId of lockedMemoryIds) {
           await tx.\$queryRaw\`SELECT id FROM memories WHERE id = \${memoryId} FOR UPDATE\`;
         }" "        "
-# 24 SURVIVES by design — see the UNPROVEN BY TEST note at that line. Kept in
-# the harness so the fact stays visible in every run rather than being quietly
-# dropped once someone notices it is green.
-run "24 narrowing check not re-run under the lock (expected survivor)" "$M" \
+# 24/25/28 were once expected survivors; later tests pin them (verified by hand,
+# PR #1357 round 2): each is killed by the concurrency test written for it, so
+# they are no longer allow-listed (@codex) — a regression must fail this script.
+run "24 narrowing check not re-run under the lock" "$M" \
   "        if (visibility !== undefined) {
           await assertMemoryVisibilityChangeAllowed(tx, memory, visibility);
         }" "        "
 
-# 25 and 26 SURVIVE by design — see the UNPROVEN BY TEST notes at those lines.
-run "25 promotion back outside the deciding transaction (expected survivor)" "$AG" \
+# 26 SURVIVES by design — see the UNPROVEN BY TEST note at that line.
+run "25 promotion back outside the deciding transaction" "$AG" \
   "          await tx.memory.update({
             where: { id: promoteSystemMemoryId }," \
   "          await ctx.db.memory.update({
@@ -168,10 +177,7 @@ run "27 syncs back before the deciding transaction" "$AG" \
         await ctx.db.memory.update({ where: { id: agent.systemMemoryId }, data: { name: \`\${name} System\` } }).catch(() => {});
       }
       const MAX_PUBLISH_ATTEMPTS = 3;"
-# 28 SURVIVES by design: a lock-order inversion shows up as a Postgres deadlock
-# abort under precise timing, not as a wrong result, so no assertion can catch
-# it. Kept because the inversion is real — see the lock-order note at that line.
-run "28 promotion target left out of the ordered lock set (expected survivor)" "$AG" \
+run "28 promotion target left out of the ordered lock set" "$AG" \
   "        if (promoteSystemMemoryId && !lockedMemoryIds.includes(promoteSystemMemoryId)) {
           lockedMemoryIds = [...lockedMemoryIds, promoteSystemMemoryId].sort();
         }" "        "
@@ -221,6 +227,12 @@ run "40 same-App admits a deleted App" "$H" \
       uninstalledAt: null," "      uninstalledAt: null,"
 run "41 same-App admits an App in a soft-deleted org" "$H" \
   "      OR: [{ organizationId: null }, { organization: { deletedAt: null } }]," ""
+run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
+  "      OR: sameTenant," ""
+run "43 sweep keys on the raw PUBLIC column" "$A" \
+  "    memory.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory) && memory.ownerUserId == null;" "    memory.visibility === 'PUBLIC';"
+run "44 same-App admits a user-owned row" "$H" \
+  "  if (memory.ownerUserId != null) return false;" ""
 
 # A stale pattern is a FAILED run, not a skipped line. Counting only
 # KILLED/SURVIVED lines once let two stale mutants — the attach gate and the

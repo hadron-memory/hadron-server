@@ -1069,3 +1069,73 @@ describe("#1357 — the same-App attach (Holger's ruling, 2026-09-26)", () => {
     expect(await db.agentMemoryItem.count({ where: { agentId: owned.id } })).toBe(0);
   });
 });
+
+describe('#1357 round 2 — revocation and the same-App branch (@copilot, PR #1357)', () => {
+  const NARROW = `mutation($id: ID!, $v: MemoryVisibility!) { updateMemory(id: $id, visibility: $v) { id visibility } }`;
+  const mkVictimMem = async (label: string, data: Record<string, unknown>) => {
+    const m = await db.memory.create({
+      data: { id: generateId(), organizationId: victimOrgId, urn: `victim-${suffix}:${label}`, name: label, class: 'knowledge', ...data } as never,
+    });
+    const n = await db.node.create({ data: { id: generateId(), memoryId: m.id, loc: 'payroll', name: 'p', content: `${label} SECRET` } });
+    mem[label] = { id: m.id, urn: `hrn:mem:victim-${suffix}:${label}`, nodeId: n.id };
+    return m;
+  };
+
+  it('a FOREIGN PUBLIC agent\'s read link cannot veto the owner\'s narrowing; it is revoked instead', async () => {
+    const pub = await mkVictimMem('vetopub', { visibility: 'PUBLIC' });
+    // Another tenant's PUBLIC agent holding the memory read-only — legitimate
+    // while the memory is PUBLIC.
+    const foreign = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'foreignpub', urn: `attacker-${suffix}:foreignpub`, visibility: 'PUBLIC' } as never,
+    });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: foreign.id, memoryId: pub.id, role: 'read' } });
+
+    const narrow = await gql(key.victim!, NARROW, { id: pub.id, v: 'ORGANIZATION' });
+    expect(narrow.errors, JSON.stringify(narrow.errors)).toBeUndefined();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: pub.id } })).visibility).toBe('ORGANIZATION');
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: foreign.id } })).deletedAt).not.toBeNull();
+  });
+
+  it('a SAME-tenant PUBLIC agent still blocks the narrowing (the genuine congruence rule)', async () => {
+    const pub = await mkVictimMem('ownpub', { visibility: 'PUBLIC' });
+    const own = await db.agent.create({
+      data: { id: generateId(), organizationId: victimOrgId, name: 'ownpubagent', urn: `victim-${suffix}:ownpubagent`, visibility: 'PUBLIC' } as never,
+    });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: own.id, memoryId: pub.id, role: 'read' } });
+    const narrow = await gql(key.victim!, NARROW, { id: pub.id, v: 'ORGANIZATION' });
+    expect(narrow.errors?.[0]?.message ?? '').toMatch(/knowledge of the PUBLIC agent/);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: pub.id } })).visibility).toBe('PUBLIC');
+  });
+
+  it('an App-scoped PUBLIC memory has no public audience: the sweep revokes even its foreign READ links', async () => {
+    const vapp = await db.app.findFirstOrThrow({ where: { organizationId: victimOrgId, urn: { endsWith: ':vapp' } } });
+    const scopedPub = await mkVictimMem('scopedpub', { visibility: 'PUBLIC', appId: vapp.id });
+    const { agentId, appKey } = await agentWithApp(attackerOrgId, 'scopedpub-foreign');
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: scopedPub.id, role: 'read' } });
+    // Any visibility write runs the sweep; here it keeps the memory PUBLIC.
+    const touch = await gql(key.victim!, NARROW, { id: scopedPub.id, v: 'PUBLIC' });
+    expect(touch.errors, JSON.stringify(touch.errors)).toBeUndefined();
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } })).deletedAt).not.toBeNull();
+    expect(await readsContent(appKey, 'scopedpub')).toBeNull();
+  });
+
+  it('same-App never admits a USER-owned row, even for the App\'s admin', async () => {
+    // Masking, stated: tenancy would also refuse (the row has no organization),
+    // so this pins the branch by its ANSWER — MEMORY_NOT_FOUND from the read
+    // gate rather than CROSS_TENANT_ATTACH from tenancy.
+    const { app: appZ } = await createDbAppWithKey(db, 'same-app-userowned', attackerOrgId);
+    const owned = await db.memory.create({
+      data: {
+        id: generateId(), ownerUserId: reader2UserId, appId: appZ.id, urn: `attacker-${suffix}:userowned`,
+        name: 'userowned', class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'uoagent', urn: `attacker-${suffix}:uoagent` } as never,
+    });
+    await createDbAppAgent(db, appZ.id, agent.id);
+    const r = await gql(key.attacker!, ATTACH, { g: agent.id, m: `hrn:mem:attacker-${suffix}:userowned`, r: 'read' });
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.agentMemoryItem.count({ where: { memoryId: owned.id } })).toBe(0);
+  });
+});
