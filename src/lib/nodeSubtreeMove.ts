@@ -388,14 +388,17 @@ export async function moveNodeSubtree(
   // in this SAME transaction as the two-phase rebase. The shared alias helper
   // normalizes and deduplicates repeat moves; the node-ref resolver applies
   // live-address precedence and current-target liveness on lookup.
-  // Memory rename takes this same row lock before it reads/replaces `urn`.
+  // Memory rename takes FOR UPDATE before it reads/replaces `urn`.
   // Lock then read here too: a rename cannot publish a new source prefix
   // between our alias-key read and the move's commit. Lock both memories in
   // ID order so opposing cross-memory moves take these rows consistently.
+  // NO KEY UPDATE still conflicts with rename's FOR UPDATE, while allowing
+  // other connections' FK KEY SHARE checks on this memory during the move
+  // (findings:memory-row-for-update-deadlocks-node-inserts).
   const memoryUrns = new Map<string, string>();
   for (const id of [...new Set([srcMemoryId, destMemoryId])].sort()) {
     const [row] = await tx.$queryRaw<{ urn: string }[]>`
-      SELECT urn FROM memories WHERE id = ${id} FOR UPDATE
+      SELECT urn FROM memories WHERE id = ${id} FOR NO KEY UPDATE
     `;
     if (!row) throw new Error(`Move memory ${id} disappeared while locking; retry.`);
     memoryUrns.set(id, row.urn);

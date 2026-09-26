@@ -165,13 +165,13 @@ describe('node move URN aliases', () => {
     }, graphCtx());
     try {
       // This is the source-URN SELECT in moveNodeSubtree waiting on the rename
-      // row lock. Without FOR UPDATE, the move would read the stale old URN and
+      // row lock. Without NO KEY UPDATE, the move would read the stale old URN and
       // could commit an alias key that never named its post-rename address.
       await vi.waitFor(async () => {
         const waiting = await db.$queryRaw<Array<{ pid: number }>>`
           SELECT pid FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR UPDATE%'
+            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR NO KEY UPDATE%'
         `;
         expect(waiting.length).toBeGreaterThan(0);
       }, { timeout: 5_000, interval: 25 });
