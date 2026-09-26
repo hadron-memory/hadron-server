@@ -939,6 +939,10 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     expect(await code(resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai-compatible', model: 'x', apiKey: 'k' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
     expect(await code(resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'openai-compatible', aiModel: 'x', aiApiKey: 'k' } as never, ctxFor(admin.id)))).toBe('AiConfigValidationError');
     expect(await db.aiServiceConfig.count({ where: { provider: 'openai-compatible', endpoint: null } })).toBe(0);
+    // A key is required too: with none stored, an SDK would reach for the
+    // server's own credential and send it to this host (#1389 review).
+    expect(await code(mk({ provider: 'openai-compatible', model: 'm', name: 'keyless', endpoint: 'https://api.together.xyz/v1', apiKey: undefined }))).toBe('AiConfigValidationError');
+    expect(await code(resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, apiKey: '' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
     // params.toolCalling is type-checked.
     expect(await code(mk({ provider: 'openai-compatible', model: 'm', name: 'badtools', endpoint: 'https://api.together.xyz/v1', params: { toolCalling: 'yes' } }))).toBe('UnknownAiProviderError');
   });

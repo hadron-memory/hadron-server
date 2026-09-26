@@ -113,6 +113,17 @@ const ENDPOINT_REQUIRED = new Set(['openai-compatible']);
  * Refuse a resulting (provider, endpoint) pair that could never make a call:
  * an `openai-compatible` config has no default host to fall back to.
  */
+export function requireKeyFor(provider: string, hasKey: boolean): void {
+  // With no stored key an SDK reaches for the PROCESS's credentials; a
+  // custom host must never get those (#1389 review, Codex P1). A keyless local
+  // server (Ollama) accepts any placeholder bearer.
+  if (ENDPOINT_REQUIRED.has(provider) && !hasKey) {
+    throw new AiConfigValidationError(
+      `Provider '${provider}' needs an API key (any placeholder for a host that does not check one).`,
+    );
+  }
+}
+
 export function requireEndpointFor(provider: string, endpoint: string | null | undefined): void {
   if (ENDPOINT_REQUIRED.has(provider) && !endpoint) {
     throw new AiConfigValidationError(`Provider '${provider}' needs an endpoint: the base URL of the compatible host.`);

@@ -60,7 +60,7 @@ import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
 import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
-import { requireEndpointFor } from '../../../lib/aiEndpoint.js';
+import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -264,6 +264,18 @@ export const appMutations = {
       if (orgRef !== undefined && orgRef !== null && orgRef.trim() === '') {
         throw new GraphQLError('orgRef must be a non-empty organization ID or URN — omit it entirely to create a personal App.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
+      // The legacy AI arguments are validated BEFORE any write (#1389 review):
+      // refusing them after the App, its memory and its Channel exist would
+      // leave a half-made App behind and a URN a retry collides with.
+      if (aiProvider && aiModel) {
+        try {
+          validateProviderAndParams(aiProvider, null);
+          // The legacy args carry no endpoint (#1373): openai-compatible needs one.
+          requireEndpointFor(aiProvider, null);
+        } catch (e) {
+          rethrowAiConfigTyped(e);
+        }
+      }
       let resolvedOrgId: string | null = null;
       let ownerUserId: string | null = null;
       let namespace: string;
@@ -430,13 +442,7 @@ export const appMutations = {
       // become the App's 'default' registry config (deploy-time override
       // that wins over the Agent's default in the resolution walk).
       if (aiProvider && aiModel) {
-        try {
-          validateProviderAndParams(aiProvider, null);
-          // The legacy args carry no endpoint (#1373): openai-compatible needs one.
-          requireEndpointFor(aiProvider, null);
-        } catch (e) {
-          rethrowAiConfigTyped(e);
-        }
+        // Validated before the App was created (top of this resolver).
         await ctx.db.aiServiceConfig.create({
           data: {
             appId: createdApp.id,
@@ -686,6 +692,7 @@ export const appMutations = {
             // (same provider) — a provider change clears it below (#1373).
             try {
               requireEndpointFor(provider, existing && existing.provider === provider ? existing.endpoint : null);
+              requireKeyFor(provider, aiApiKey === undefined ? !!existing?.apiKeyEncrypted : !!aiApiKey);
             } catch (e) {
               rethrowAiConfigTyped(e);
             }

@@ -255,6 +255,19 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
     expect(agentConfig.provider).toBe('openai');
     expect(agentConfig.model).toBe('gpt-4o');
   });
+
+  it('an unusable legacy AI provider is refused BEFORE the App exists (#1389 review)', async () => {
+    const agent = await resolvers.Mutation.createAgent({}, { orgId: beaOrg.id, name: 'Compat', visibility: 'PUBLIC' }, adminCtx(bea.id));
+    const before = await db.app.count();
+    const err = await resolvers.Mutation.createApp(
+      {},
+      { orgRef: orgX.id, agentRef: agent.id, name: 'Compat @ Org X', aiProvider: 'openai-compatible', aiModel: 'm', aiApiKey: 'k' },
+      adminCtx(mike.id),
+    ).catch((e: unknown) => e);
+    expect((err as { extensions?: { code?: string } }).extensions?.code).toBe('AiConfigValidationError');
+    // Nothing half-made: no App row, so a retry cannot collide with a reserved URN.
+    expect(await db.app.count()).toBe(before);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

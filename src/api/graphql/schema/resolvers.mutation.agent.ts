@@ -1,6 +1,6 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
-import { refuseLegacyBaseUrl, requireEndpointFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
+import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
   assertSystemMemoryOwner,
@@ -965,6 +965,7 @@ export const agentMutations = {
         refuseLegacyBaseUrl(args.params);
         const endpoint = args.endpoint ? validateEndpoint(args.endpoint) : null;
         requireEndpointFor(args.provider, endpoint);
+        requireKeyFor(args.provider, !!args.apiKey);
         validateApiStyle(args.provider, args.apiStyle);
         // No upsert: a P2002 from the partial unique (owner, name) index is
         // the duplicate-name typed error, not a retry (upsert is not
@@ -1033,6 +1034,7 @@ export const agentMutations = {
         const apiStyle = args.apiStyle === undefined ? existing.apiStyle : args.apiStyle;
         validateApiStyle(provider, apiStyle);
         requireEndpointFor(provider, endpoint === undefined ? existing.endpoint : endpoint);
+        requireKeyFor(provider, args.apiKey === undefined ? !!existing.apiKeyEncrypted : !!args.apiKey);
         const config = await ctx.db.aiServiceConfig.update({
           where: { id: existing.id },
           data: {
