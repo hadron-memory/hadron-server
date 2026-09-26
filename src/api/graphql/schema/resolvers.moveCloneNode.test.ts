@@ -488,6 +488,29 @@ describe('cloneNode (#564)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).role).toBe('spec.rule');
   });
 
+  it('refuses a clone into a loc holding a soft-deleted governed node (resurrection merge)', async () => {
+    // The clone's carried signals are EXPLICIT (null-normalized by
+    // carryGovernedSignals), not omitted — which is exactly the input shape
+    // that could differ from an ordinary create in the #1203 resurrection
+    // merge. An ungoverned source over a governed tombstone must refuse on
+    // the tombstone's role, and the tombstone must stay a tombstone.
+    // (Andi's non-blocking coverage suggestion from the #1382 comparison;
+    // the generic-create route is pinned in governedRole1201.test.ts.)
+    const source = await createDbNode(db, { loc: 'live', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role: 'weather', isRunnable: false } });
+    const dead = await createDbNode(db, { loc: 'grave', memoryId: memA.id, content: 'gone' });
+    await db.node.update({ where: { id: dead.id }, data: { role: 'review', deletedAt: new Date() } });
+
+    await expect(
+      M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('grave') }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+
+    const row = await db.node.findUniqueOrThrow({ where: { id: dead.id } });
+    expect(row.deletedAt).not.toBeNull();
+    expect(row.role).toBe('review');
+    expect(row.content).toBe('gone');
+  });
+
   it('clones fields to a NEW node (fresh id), leaving the source intact', async () => {
     const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'hello' });
     const clone = await M.cloneNode(null, { sourceRef: alpha.id, targetUrn: urnA('alpha-copy') }, asUser());
