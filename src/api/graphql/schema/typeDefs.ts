@@ -2878,6 +2878,67 @@ export const typeDefs = `#graphql
     RESPONSES
   }
 
+  "#1378: where a tested value came from."
+  enum AiConfigTestValueSource {
+    SAVED
+    OVERRIDE
+  }
+
+  "#1378: which key a test used; NONE when there was none to use."
+  enum AiConfigTestKeySource {
+    SAVED
+    OVERRIDE
+    NONE
+  }
+
+  """
+  #1378: values to test INSTEAD of the saved ones — e.g. an edited form before
+  it is saved. Never stored. Each is validated exactly as a write would be.
+  """
+  input AiServiceConfigTestOverride {
+    provider: String
+    model: String
+    "Omitted = the saved endpoint; null or empty = the provider default."
+    endpoint: String
+    "Omitted = the saved style; null = the provider default."
+    apiStyle: AiApiStyle
+    "A key to test with instead of the stored one. Never stored, never echoed."
+    apiKey: String
+  }
+
+  "#1378: per field, whether the test used the saved value or the override."
+  type AiServiceConfigTestUsed {
+    provider: AiConfigTestValueSource!
+    model: AiConfigTestValueSource!
+    endpoint: AiConfigTestValueSource!
+    apiStyle: AiConfigTestValueSource!
+    key: AiConfigTestKeySource!
+  }
+
+  type AiServiceConfigTestError {
+    "NO_API_KEY | LLM_CALL_FAILED"
+    code: String!
+    "Provider error text, scrubbed of the key and truncated."
+    message: String!
+    transient: Boolean!
+  }
+
+  "#1378: one test call, made through the same client and endpoint a run uses."
+  type AiServiceConfigTestResult {
+    ok: Boolean!
+    provider: String!
+    model: String!
+    "The endpoint the request actually went to."
+    endpoint: String
+    "The wire protocol the request actually used."
+    apiStyle: AiApiStyle
+    used: AiServiceConfigTestUsed!
+    latencyMs: Int!
+    "The model's reply, truncated."
+    reply: String
+    error: AiServiceConfigTestError
+  }
+
   "#1373: one known endpoint for a provider, from the server's single suggestion list."
   type AiProviderEndpoint {
     url: String!
@@ -8132,6 +8193,16 @@ export const typeDefs = `#graphql
       apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
+
+    """
+    #1378: test a SAVED config by id with one small real call, through the same
+    client, endpoint and egress guard a run uses; the stored key never leaves
+    the server. The override argument tests edited values without saving them. Auth: as
+    updateAiServiceConfig; refused under impersonation. Every test is metered
+    (usage type ai-config-test); platform-key tests count against the org's
+    daily token quota. Rate-limited per caller and config (RATE_LIMITED).
+    """
+    testAiServiceConfig(id: ID!, override: AiServiceConfigTestOverride): AiServiceConfigTestResult!
 
     """
     036-ai-service-config: delete a named AI config (hard delete; the

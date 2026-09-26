@@ -1,6 +1,7 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
+import { testAiServiceConfig, type AiConfigTestOverride } from '../../../controller/operations/testAiServiceConfig.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
   assertSystemMemoryOwner,
@@ -1035,6 +1036,18 @@ export const agentMutations = {
           // args.name is set; trim to match the canonical stored form.
           rethrowAiConfigTyped(new DuplicateAiServiceConfigNameError((args.name ?? '').trim()));
         }
+        rethrowAiConfigTyped(e);
+      }
+    },
+
+    testAiServiceConfig: async (
+      _: unknown,
+      { id, override }: { id: string; override?: AiConfigTestOverride | null },
+      ctx: Context,
+    ) => {
+      try {
+        return await testAiServiceConfig(ctx, id, override ?? {});
+      } catch (e) {
         rethrowAiConfigTyped(e);
       }
     },
